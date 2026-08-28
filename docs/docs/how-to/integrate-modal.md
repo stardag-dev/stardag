@@ -1177,6 +1177,30 @@ code object by value. They work — but a lambda that _calls_ a `def` from
 the same file drags the same broken reference along with it, so importing
 from a real module is the habit worth keeping.
 
+### The same failure from the other direction: stardag's own version
+
+Cloudpickle stores **stardag's** callables by reference too, so the image's
+stardag has to be at least as new as the stardag doing the pickling. If it
+is older, the app deploys cleanly and every container dies at hydration on
+a stardag module — `No module named 'stardag.integration.modal._builder'`,
+say — instead of one of yours.
+
+`with_stardag_on_image` handles this for you: it ships your **local working
+tree** when stardag is installed editable or is a dev build, and installs
+the pinned release otherwise. Two things can still get it wrong, and both
+warn:
+
+- `STARDAG_MODAL_LOCAL_STARDAG_SOURCE=no` while you are working in a
+  stardag checkout. The version it then pins comes from the install
+  metadata, and an **editable install's version is frozen at install
+  time** — a checkout installed at `0.17.0` reports `0.17.0` however far
+  its source has moved on.
+- An explicit `with_stardag_on_image(image, version=...)` older than the
+  stardag you are deploying with.
+
+If you hit this after upgrading a stardag checkout, reinstalling it
+(`uv sync`) refreshes the recorded version.
+
 ## Container setup: code that runs in every container
 
 Some setup is a property of the _container_, not of a build or a task:

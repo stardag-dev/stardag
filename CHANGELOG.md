@@ -20,6 +20,34 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   still logs at ERROR when _both_ stages fail — with the failed-import
   annotation that makes it actionable.
 
+- **`with_stardag_on_image` no longer pins a Modal image to a stale PyPI
+  release when stardag is installed editable.** The choice between "ship
+  the local working tree" and "install the pinned release" was inferred
+  from `stardag.__version__` — but that is
+  `importlib.metadata.version("stardag")`, and an **editable install's
+  metadata version is a snapshot taken when the install ran**. hatch-vcs
+  computes it from the git tag reachable at that moment and nothing
+  recomputes it as the working tree moves on, so a checkout installed at
+  v0.17.0 keeps reporting `0.17.0` while its source is v0.20.x. That string
+  carries no `dev` and no `+`, so it read as a plain released version and
+  the image was pinned to a real PyPI release **older than the code being
+  serialized into it**.
+
+  The result is the failure shape v0.20.1's placement guardrail was built
+  for, from a different cause: the app deploys cleanly and then every
+  container dies at hydration with `ModuleNotFoundError` for a stardag
+  module the deploying process could see and the container cannot —
+  observed as `No module named 'stardag.integration.modal._builder'`,
+  before any of the app's own code runs.
+
+  `local_stardag_source="auto"` now asks the installer whether this is a
+  working tree (an editable install, a bare `sys.path` entry, or a dev
+  version) instead of guessing from the version string. The two routes that
+  can still pin a version older than the running source — an explicit
+  `local_stardag_source="no"` from a working tree, and an explicit
+  `version=` older than the running one — warn rather than refuse, since
+  both are something the caller asked for.
+
 ## [0.20.1] — 2026-08-28
 
 ### SDK

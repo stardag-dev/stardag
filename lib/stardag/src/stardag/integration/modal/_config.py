@@ -1,3 +1,6 @@
+import json
+import logging
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Literal
 
@@ -8,12 +11,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 import stardag as sd
 from stardag.utils.resource_provider import resource_provider
 
+logger = logging.getLogger(__name__)
+
 
 class ModalConfig(BaseSettings):
     """Configuration of the modal integration."""
 
     volume_mounts: dict[str, str] = {}  # path -> volume name
 
+    # Where a Modal image gets stardag from: the local working tree, or
+    # PyPI. ``auto`` ships the working tree when stardag is running from
+    # one (an editable install, or a dev build) and installs the pinned
+    # release otherwise. See :func:`with_stardag_on_image` for why the
+    # choice matters more than it looks.
     local_stardag_source: Literal["yes", "no", "auto"] = "auto"
 
     model_config = SettingsConfigDict(
@@ -30,34 +40,121 @@ class ModalConfig(BaseSettings):
 modal_config_provider = resource_provider(ModalConfig, ModalConfig)
 
 
+def _running_from_editable_install() -> bool:
+    """Whether the imported ``stardag`` is an editable (or bare source) install.
+
+    This is the question ``local_stardag_source="auto"`` actually wants
+    answered — "am I running stardag from a working tree?" — and it is
+    answerable directly, from the installer's own record.
+
+    It used to be inferred from the version string instead, which is wrong
+    for exactly this case: ``stardag.__version__`` is
+    ``importlib.metadata.version("stardag")``, and an editable install's
+    metadata version is a **snapshot taken when the install ran**. hatch-vcs
+    computes it from the git tag reachable at that moment and nothing
+    recomputes it as the working tree moves on, so a checkout installed at
+    v0.17.0 keeps reporting ``0.17.0`` while its source is v0.20.x. That
+    string carries no ``dev`` and no ``+``, so it read as a plain released
+    version — and the image was pinned to a **real PyPI release that
+    predates the source being pickled into it**. See
+    :func:`with_stardag_on_image` for what that does.
+
+    ``PackageNotFoundError`` means stardag is importable but not installed
+    at all (a bare ``sys.path`` entry), which is a working tree by any other
+    name and wants the same treatment.
+    """
+    try:
+        direct_url = distribution("stardag").read_text("direct_url.json")
+    except PackageNotFoundError:
+        return True
+    if not direct_url:
+        return False
+    try:
+        return bool(json.loads(direct_url).get("dir_info", {}).get("editable"))
+    except (ValueError, AttributeError):
+        # Malformed record: not evidence of an editable install.
+        return False
+
+
 def with_stardag_on_image(
     image: modal.Image,
     version: str | None = None,
 ) -> modal.Image:
-    """Install the latest version of stardag from PyPI into the given Modal image.
+    """Make stardag available in the given Modal image.
+
+    Two ways, chosen by ``ModalConfig.local_stardag_source``
+    (``STARDAG_MODAL_LOCAL_STARDAG_SOURCE``):
+
+    - **From PyPI**, pinned to the running version. The default for an
+      ordinary installed stardag.
+    - **From the local working tree**, via ``add_local_python_source``, plus
+      stardag's own dependencies from its ``pyproject.toml``. The default
+      when stardag is installed editable or is a dev build — i.e. when you
+      are developing stardag itself.
+
+    Getting that choice wrong is not a slow path, it is a broken deploy.
+    ``StardagApp.finalize`` registers ``serialized=True`` functions, and
+    cloudpickle writes stardag's own callables out as *references* to their
+    defining modules. If the image's stardag is older than the source that
+    did the pickling, the app deploys cleanly and then every container dies
+    at hydration with ``ModuleNotFoundError`` for a module the deploying
+    process could see and the container cannot — before any of the app's own
+    code runs. Which is why ``auto`` asks the installer whether this is a
+    working tree (see :func:`_running_from_editable_install`) rather than
+    guessing from a version string that an editable install freezes at
+    install time.
 
     Args:
         image: The Modal image to install stardag into.
-        version: The version of stardag to install. If None, installs the latest
-            version.
+        version: Pin the PyPI install to this version instead of the running
+            one. Ignored when the local source is used. Pinning a version
+            **older than the running source** reintroduces the failure above,
+            so it is warned about.
     Returns:
         The updated Modal image.
     """
-    version = version or sd.__version__
-    # if on a dev version: "0.1.1.dev3+g389c509a7"
-    is_dev_version = "dev" in version or "+" in version
-    # if we are on a dev version, install from local source
+    running_version = sd.__version__
+    pinned_version = version or running_version
+    # A dev build's version says so: "0.1.1.dev3+g389c509a7".
+    is_dev_version = "dev" in running_version or "+" in running_version
     local_stardag_source = modal_config_provider.get().local_stardag_source
 
-    use_local_stardag_source = (
-        is_dev_version and local_stardag_source != "no"
-    ) or local_stardag_source == "yes"
+    from_working_tree = is_dev_version or _running_from_editable_install()
+    use_local_stardag_source = local_stardag_source == "yes" or (
+        local_stardag_source == "auto" and from_working_tree
+    )
 
     if use_local_stardag_source:
         sd_deps = _get_stardag_deps_for_image(include_dev_deps=False)
         return image.pip_install(*sd_deps).add_local_python_source("stardag")
-    else:
-        return image.pip_install(f"stardag[modal]=={version}")
+
+    # Pinning to PyPI. Say so when the pin cannot be trusted to match the
+    # source about to be pickled into this image — a warning rather than a
+    # refusal, because both routes here are something the caller asked for
+    # explicitly, and the pinned release may well be the right one.
+    if from_working_tree:
+        logger.warning(
+            "Installing stardag==%s from PyPI into a Modal image while "
+            "running stardag from a working tree. The version is read from "
+            "the install metadata, which an editable install freezes at "
+            "install time — so it may be older than the code being "
+            "serialized into this app's functions, in which case the app "
+            "deploys cleanly and every container then fails to hydrate. "
+            "Set STARDAG_MODAL_LOCAL_STARDAG_SOURCE=yes to ship the working "
+            "tree instead, or reinstall stardag to refresh its version.",
+            pinned_version,
+        )
+    elif pinned_version != running_version:
+        logger.warning(
+            "Installing stardag==%s from PyPI into a Modal image while "
+            "running %s. Functions registered by StardagApp are serialized "
+            "and reference stardag's own modules by name, so a pinned "
+            "version older than the running one can leave every container "
+            "unable to hydrate.",
+            pinned_version,
+            running_version,
+        )
+    return image.pip_install(f"stardag[modal]=={pinned_version}")
 
 
 def _get_stardag_deps_for_image(include_dev_deps: bool = False) -> list[str]:

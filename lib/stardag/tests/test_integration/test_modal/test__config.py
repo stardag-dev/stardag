@@ -1,5 +1,7 @@
 """Tests for stardag.integration.modal._config module."""
 
+import logging
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +15,7 @@ except ImportError:
 from stardag.integration.modal._config import (
     ModalConfig,
     _get_stardag_deps_for_image,
+    _running_from_editable_install,
     get_package_deps,
     modal_config_provider,
     with_stardag_on_image,
@@ -241,10 +244,74 @@ class TestGetStardagDepsForImage:
         assert deps == []
 
 
+@pytest.fixture
+def not_editable():
+    """Pretend the running stardag is an ordinary (non-editable) install.
+
+    The test suite itself runs from an editable checkout, so without this
+    every ``with_stardag_on_image`` case would take the local-source
+    branch — which is the whole point of the check, and not what most of
+    these tests are about.
+    """
+    with patch(
+        "stardag.integration.modal._config._running_from_editable_install",
+        return_value=False,
+    ):
+        yield
+
+
+class TestRunningFromEditableInstall:
+    """Whether stardag is running from a working tree.
+
+    The answer decides whether a Modal image gets stardag from PyPI or from
+    the local source, and getting it wrong deploys an app whose containers
+    all die at hydration — see ``with_stardag_on_image``.
+    """
+
+    def _with_direct_url(self, direct_url: str | None):
+        dist = MagicMock()
+        dist.read_text.return_value = direct_url
+        return patch(
+            "stardag.integration.modal._config.distribution", return_value=dist
+        )
+
+    def test_editable_install_is_a_working_tree(self) -> None:
+        with self._with_direct_url(
+            '{"url": "file:///repo/lib/stardag", "dir_info": {"editable": true}}'
+        ):
+            assert _running_from_editable_install() is True
+
+    def test_ordinary_wheel_install_is_not(self) -> None:
+        """No ``direct_url.json`` at all: installed from an index."""
+        with self._with_direct_url(None):
+            assert _running_from_editable_install() is False
+
+    def test_non_editable_local_install_is_not(self) -> None:
+        """``pip install .`` records a direct URL but is a real snapshot of
+        the source, not a live view of it."""
+        with self._with_direct_url(
+            '{"url": "file:///repo/lib/stardag", "dir_info": {}}'
+        ):
+            assert _running_from_editable_install() is False
+
+    def test_not_installed_at_all_is_a_working_tree(self) -> None:
+        """Importable off a bare ``sys.path`` entry — a working tree by any
+        other name, and it has no version metadata to trust either."""
+        with patch(
+            "stardag.integration.modal._config.distribution",
+            side_effect=PackageNotFoundError("stardag"),
+        ):
+            assert _running_from_editable_install() is True
+
+    def test_malformed_record_is_not_evidence(self) -> None:
+        with self._with_direct_url("not json at all"):
+            assert _running_from_editable_install() is False
+
+
 class TestWithStardagOnImage:
     """Tests for with_stardag_on_image function."""
 
-    def test_uses_pypi_for_release_version(self) -> None:
+    def test_uses_pypi_for_release_version(self, not_editable) -> None:
         """Test it installs from PyPI for release versions."""
         mock_image = MagicMock(spec=modal.Image)
         mock_image.pip_install.return_value = mock_image
@@ -257,15 +324,120 @@ class TestWithStardagOnImage:
         mock_image.pip_install.assert_called_once_with("stardag[modal]==1.0.0")
         assert result == mock_image
 
-    def test_uses_pypi_with_explicit_version(self) -> None:
+    def test_uses_pypi_with_explicit_version(self, not_editable) -> None:
         """Test it uses explicit version when provided."""
         mock_image = MagicMock(spec=modal.Image)
         mock_image.pip_install.return_value = mock_image
 
-        result = with_stardag_on_image(mock_image, version="2.0.0")
+        with patch("stardag.integration.modal._config.sd") as mock_sd:
+            mock_sd.__version__ = "2.0.0"
+
+            result = with_stardag_on_image(mock_image, version="2.0.0")
 
         mock_image.pip_install.assert_called_once_with("stardag[modal]==2.0.0")
         assert result == mock_image
+
+    def test_editable_install_uses_local_source_despite_a_release_version(
+        self,
+    ) -> None:
+        """The regression this exists for.
+
+        An editable install's metadata version is a snapshot taken when the
+        install ran, so a checkout installed at 0.17.0 keeps reporting
+        ``0.17.0`` while its source moves on. That string looks like a plain
+        release, so the image used to be pinned to a **real PyPI release
+        older than the code being serialized into it** — the app deployed
+        cleanly and every container then died at hydration with
+        ``ModuleNotFoundError`` for a stardag module the deploying process
+        could see and the container could not.
+        """
+        mock_image = MagicMock(spec=modal.Image)
+        mock_image.pip_install.return_value = mock_image
+        mock_image.add_local_python_source.return_value = mock_image
+
+        with (
+            patch("stardag.integration.modal._config.sd") as mock_sd,
+            patch(
+                "stardag.integration.modal._config._running_from_editable_install",
+                return_value=True,
+            ),
+            patch.object(
+                modal_config_provider,
+                "get",
+                return_value=ModalConfig(local_stardag_source="auto"),
+            ),
+            patch(
+                "stardag.integration.modal._config._get_stardag_deps_for_image",
+                return_value=["pydantic>=2.0"],
+            ),
+        ):
+            mock_sd.__version__ = "0.17.0"  # stale metadata, looks released
+
+            result = with_stardag_on_image(mock_image)
+
+        mock_image.add_local_python_source.assert_called_once_with("stardag")
+        mock_image.pip_install.assert_called_once_with("pydantic>=2.0")
+        assert result == mock_image
+
+    def test_pypi_from_a_working_tree_warns(self, caplog) -> None:
+        """``local_stardag_source="no"`` from an editable checkout is the
+        one route left to the broken deploy. It is the caller's explicit
+        choice, so it is honoured — and said out loud."""
+        mock_image = MagicMock(spec=modal.Image)
+        mock_image.pip_install.return_value = mock_image
+
+        with (
+            patch("stardag.integration.modal._config.sd") as mock_sd,
+            patch(
+                "stardag.integration.modal._config._running_from_editable_install",
+                return_value=True,
+            ),
+            patch.object(
+                modal_config_provider,
+                "get",
+                return_value=ModalConfig(local_stardag_source="no"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            mock_sd.__version__ = "0.17.0"
+
+            with_stardag_on_image(mock_image)
+
+        mock_image.pip_install.assert_called_once_with("stardag[modal]==0.17.0")
+        assert "freezes at install time" in caplog.text
+
+    def test_pinning_an_older_version_than_the_running_one_warns(
+        self, not_editable, caplog
+    ) -> None:
+        """Same failure, reached explicitly: the pinned release predates the
+        source doing the pickling."""
+        mock_image = MagicMock(spec=modal.Image)
+        mock_image.pip_install.return_value = mock_image
+
+        with (
+            patch("stardag.integration.modal._config.sd") as mock_sd,
+            caplog.at_level(logging.WARNING),
+        ):
+            mock_sd.__version__ = "0.20.1"
+
+            with_stardag_on_image(mock_image, version="0.17.0")
+
+        mock_image.pip_install.assert_called_once_with("stardag[modal]==0.17.0")
+        assert "unable to hydrate" in caplog.text
+
+    def test_matching_pin_is_quiet(self, not_editable, caplog) -> None:
+        mock_image = MagicMock(spec=modal.Image)
+        mock_image.pip_install.return_value = mock_image
+
+        with (
+            patch("stardag.integration.modal._config.sd") as mock_sd,
+            caplog.at_level(logging.WARNING),
+        ):
+            mock_sd.__version__ = "0.20.1"
+
+            with_stardag_on_image(mock_image, version="0.20.1")
+
+        assert caplog.text == ""
 
     def test_uses_local_source_for_dev_version(self) -> None:
         """Test it uses local source for dev versions (containing 'dev')."""
