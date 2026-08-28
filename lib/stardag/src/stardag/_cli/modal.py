@@ -37,6 +37,7 @@ from stardag._cli.credentials import (
 from stardag.config.cache import get_cached_slugs
 from stardag.config.loader import clear_config_cache, get_config
 from stardag.integration.modal import FinalizeResult, StardagApp
+from stardag.integration.modal._container_setup import _loading_deploy_entrypoint
 
 # Check if modal is available
 try:
@@ -405,7 +406,14 @@ def _import_file_or_module(file_or_module: str, use_module_mode: bool) -> object
 
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        # The name is derived from the file name, so it is importable here
+        # (this directory is on sys.path, two lines up) and almost never
+        # importable in a container. Tell the app that, so a callable
+        # *defined* in this file is refused where it is written rather
+        # than failing to unpickle in every container of the deployed app
+        # — see _validate_serialized_callable.
+        with _loading_deploy_entrypoint(module_name):
+            spec.loader.exec_module(module)
 
     return module
 

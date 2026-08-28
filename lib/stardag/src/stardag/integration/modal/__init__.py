@@ -69,7 +69,10 @@ from stardag.integration.modal._builder import (
     PrefectBuilder,
 )
 from stardag.integration.modal._config import get_package_deps, with_stardag_on_image
-from stardag.integration.modal._container_setup import ContainerSetup
+from stardag.integration.modal._container_setup import (
+    ContainerSetup,
+    SerializedCallablePlacementError,
+)
 from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.integration.modal._profile import get_profile_env_vars, get_profile_secret
 from stardag.integration.modal._protocols import BuildFunction, RunFunction
@@ -95,6 +98,7 @@ __all__ = [
     "BuildTriggerResult",
     "ContainerSetup",
     "ReactiveDiscovery",
+    "SerializedCallablePlacementError",
     "RunFunction",
     "StardagApp",
     "Builder",

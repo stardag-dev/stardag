@@ -1,6 +1,10 @@
 """Tests for StardagApp build_function and run_function customization."""
 
 import contextlib
+import importlib.util
+import io
+import pickletools
+import sys
 import threading
 import time
 import typing
@@ -25,11 +29,13 @@ from stardag.integration.modal import (
     FunctionSettings,
     RunFunction,
     Runner,
+    SerializedCallablePlacementError,
     StardagApp,
 )
 from stardag.integration.modal._builder import _default_build
 from stardag.integration.modal import _container_setup as _container_setup_module
 from stardag.integration.modal._container_setup import (
+    _loading_deploy_entrypoint,
     _reset_container_setup_for_testing,
 )
 from stardag.integration.modal._runner import _default_run
@@ -3059,3 +3065,253 @@ class TestUnreachableWorkerWarning:
             _finalize_capturing_functions(app)
 
         assert "worker_selector" not in caplog.text
+
+
+ENTRY_POINT_SOURCE = '''\
+"""Stands in for a deploy entry point — a conventional modal/app.py."""
+
+import functools
+
+
+def pick_worker(task):
+    return "default"
+
+
+def setup():
+    return None
+
+
+pick_worker_partial = functools.partial(pick_worker)
+
+pick_worker_lambda = lambda task: "default"  # noqa: E731
+
+
+def _make_closure():
+    def pick(task):
+        return "default"
+
+    return pick
+
+
+pick_worker_closure = _make_closure()
+
+
+class Selector:
+    def __call__(self, task):
+        return "default"
+
+
+selector_instance = Selector()
+'''
+
+
+@pytest.fixture
+def entry_point(tmp_path):
+    """A module loaded exactly the way ``stardag modal deploy`` loads one.
+
+    ``_import_file_or_module`` names the module after the file, puts its
+    directory on ``sys.path`` and registers it in ``sys.modules`` — so
+    "app" is a perfectly resolvable module *in this process*, and that is
+    the whole trap. The fixture reproduces that, and the surrounding
+    ``_loading_deploy_entrypoint`` scope, without shelling out to Modal.
+    """
+    path = tmp_path / "app.py"
+    path.write_text(ENTRY_POINT_SOURCE)
+    spec = importlib.util.spec_from_file_location("app", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get("app")
+    sys.modules["app"] = module
+    sys.path.insert(0, str(tmp_path))
+    try:
+        with _loading_deploy_entrypoint("app"):
+            spec.loader.exec_module(module)
+            yield module
+    finally:
+        sys.path.remove(str(tmp_path))
+        if previous is None:
+            sys.modules.pop("app", None)
+        else:
+            sys.modules["app"] = previous
+
+
+class TestSerializedCallablePlacement:
+    """Callables an app hands ``StardagApp`` must be importable in a container.
+
+    All five are cloudpickled into the ``serialized=True`` functions
+    ``finalize()`` registers, and cloudpickle stores a module-level
+    callable as a reference to its defining module. One defined in the
+    deploy entry point therefore deploys cleanly and then cannot be
+    hydrated anywhere — the failure lands minutes later, in whichever
+    functions happen to carry it.
+    """
+
+    @staticmethod
+    def _app(**kwargs) -> StardagApp:
+        return StardagApp(
+            "test-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+            task_modules=[],
+            **kwargs,
+        )
+
+    # -- the failure this exists to prevent ---------------------------------
+
+    def test_entry_point_def_pickles_by_reference_to_a_module_no_container_has(
+        self, entry_point
+    ):
+        """The bug itself, pinned at the layer where it happens.
+
+        Modal serializes with its vendored cloudpickle, so this asserts
+        against the very pickler a deploy uses: a module-level def in the
+        entry point comes out as a bare ``app.pick_worker`` reference, and
+        unpickling it anywhere else means importing ``app``.
+        """
+        from modal._vendor import cloudpickle
+
+        buffer = io.BytesIO()
+        cloudpickle.CloudPickler(buffer, protocol=4).dump(entry_point.pick_worker)
+
+        globals_referenced = [
+            argument
+            for opcode, argument, _ in pickletools.genops(buffer.getvalue())
+            if opcode.name in ("SHORT_BINUNICODE", "BINUNICODE")
+        ]
+        assert globals_referenced == ["app", "pick_worker"]
+
+    def test_the_module_resolves_locally_which_is_why_find_spec_cannot_catch_it(
+        self, entry_point
+    ):
+        """Why the CLI has to *tell* the app the name it loaded.
+
+        The deploying process can import ``app`` — it is in
+        ``sys.modules`` and its directory is on ``sys.path``. Nothing
+        about the name looks synthetic from here; only the container
+        knows it is not real.
+        """
+        assert importlib.util.find_spec("app") is not None
+
+    # -- the guardrail ------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "parameter",
+        [
+            "build_function",
+            "run_function",
+            "container_setup",
+            "worker_selector",
+            "limit_key_selector",
+        ],
+    )
+    def test_rejects_a_def_from_the_entry_point_for_every_parameter(
+        self, entry_point, parameter
+    ):
+        """All five are serialized the same way, so all five are checked."""
+        callable_ = (
+            entry_point.setup
+            if parameter == "container_setup"
+            else (entry_point.pick_worker)
+        )
+
+        with pytest.raises(SerializedCallablePlacementError) as excinfo:
+            self._app(**{parameter: callable_})
+
+        message = str(excinfo.value)
+        assert parameter in message
+        assert "add_local_python_source" in message
+
+    def test_the_error_names_the_callable_the_module_and_the_symptom(self, entry_point):
+        """An author reading this should not have to infer any of it: what
+        was rejected, the module name that will not exist, and the
+        ``ModuleNotFoundError`` they would otherwise have gone looking
+        for."""
+        with pytest.raises(SerializedCallablePlacementError) as excinfo:
+            self._app(worker_selector=entry_point.pick_worker)
+
+        message = str(excinfo.value)
+        assert "pick_worker" in message
+        assert "'app'" in message
+        assert "No module named 'app'" in message
+
+    def test_rejects_an_instance_of_a_class_defined_in_the_entry_point(
+        self, entry_point
+    ):
+        """A ``Builder``/``Runner`` subclass is the documented way to
+        customise a build, and it fails identically: the instance pickles
+        as a reconstruction of its class, and the class is the reference.
+        """
+        with pytest.raises(SerializedCallablePlacementError, match="Selector"):
+            self._app(worker_selector=entry_point.selector_instance)
+
+    def test_rejects_a_partial_wrapping_an_entry_point_def(self, entry_point):
+        """``functools.partial`` is what an app is pointed at for binding
+        configuration to a hook, and it is transparent to the trap: the
+        partial pickles by value but carries the reference to its func.
+        """
+        with pytest.raises(SerializedCallablePlacementError, match="pick_worker"):
+            self._app(worker_selector=entry_point.pick_worker_partial)
+
+    # -- what must keep working --------------------------------------------
+
+    def test_accepts_a_lambda_defined_in_the_entry_point(self, entry_point):
+        """cloudpickle cannot look a lambda up by name, so it writes the
+        code object out by value — no import needed in the container.
+        Rejecting these would break apps that work today.
+        """
+        self._app(worker_selector=entry_point.pick_worker_lambda)
+
+    def test_accepts_a_closure_defined_in_the_entry_point(self, entry_point):
+        """Same reason as the lambda: ``pick`` is not reachable under its
+        own qualname, so it is serialized by value."""
+        self._app(worker_selector=entry_point.pick_worker_closure)
+
+    def test_accepts_a_callable_imported_into_the_entry_point(self, entry_point):
+        """The fix the error asks for. Defined in a real, importable
+        module and merely *referenced* from the entry point."""
+        self._app(worker_selector=_importable_worker_selector)
+
+    def test_accepts_a_module_level_def_outside_a_deploy(self):
+        """Constructing an app in ordinary code — a test, a notebook, a
+        library — is untouched: nothing is loading an entry point, and the
+        module resolves."""
+        assert _container_setup_module._deploy_entrypoint_module is None
+
+        self._app(worker_selector=_importable_worker_selector)
+
+    def test_accepts_the_defaults(self, entry_point):
+        """The default build/run functions are stardag's own, and stardag
+        is in the image by construction."""
+        app = self._app()
+
+        assert app._build_function is _default_build
+        assert app._run_function is _default_run
+
+    def test_accepts_a_main_module_callable(self, entry_point, monkeypatch):
+        """``__main__`` is the one unimportable module cloudpickle already
+        handles: it refuses to reference it and falls back to pickling by
+        value. Rejecting it would be wrong, and would fire on every app
+        run as a script."""
+        monkeypatch.setattr(
+            _importable_worker_selector, "__module__", "__main__", raising=False
+        )
+
+        self._app(worker_selector=_importable_worker_selector)
+
+    def test_entry_point_name_is_restored_after_loading(self, tmp_path):
+        """Nested scopes restore rather than clear: a process deploying
+        two apps must not carry the first entry point's name into the
+        second."""
+        assert _container_setup_module._deploy_entrypoint_module is None
+
+        with _loading_deploy_entrypoint("first"):
+            with _loading_deploy_entrypoint("second"):
+                assert _container_setup_module._deploy_entrypoint_module == "second"
+            assert _container_setup_module._deploy_entrypoint_module == "first"
+
+        assert _container_setup_module._deploy_entrypoint_module is None
+
+
+def _importable_worker_selector(task) -> str:
+    """A selector living in a module a container really could import."""
+    return "default"

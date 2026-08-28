@@ -1114,6 +1114,69 @@ app = sd_modal.StardagApp(
 )
 ```
 
+## Where to define what you pass to `StardagApp`
+
+Every callable a `StardagApp` is handed — `container_setup`,
+`worker_selector`, `limit_key_selector`, `build_function` and
+`run_function` — must be defined in a **module the container can import**.
+That means one of your own package's modules, added to the image with
+`add_local_python_source(...)`, and _imported_ into the file you deploy.
+
+**Not** the deploy entry point itself. This is the one placement rule you
+cannot infer from your own code, so it is worth stating plainly:
+
+```{.python notest}
+# my_app/routing.py — importable, and in the image
+def worker_selector(task):
+    return "gpu" if task.get_name() == "TrainModel" else "default"
+
+
+# my_app/app.py — the file you pass to `stardag modal deploy`
+from my_app.routing import worker_selector  # ✅ imported, not defined here
+
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    worker_selector=worker_selector,
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={
+        "default": sd_modal.FunctionSettings(image=image),
+        "gpu": sd_modal.FunctionSettings(image=gpu_image),
+    },
+)
+```
+
+**Why.** `StardagApp` registers its Modal functions with `serialized=True`,
+so a container receives a pickled closure rather than importing the module
+your app was declared in. Cloudpickle stores a module-level callable — or
+the _class_ of a callable instance, such as a `Builder` or `Runner`
+subclass — as a **reference to its defining module**, and the container
+resolves that reference by importing the module by name.
+
+`stardag modal deploy path/to/app.py` loads that file under a module name
+taken from the file name, so a `def` written in `app.py` pickles as
+`app.<name>`. `app` exists only in the process that ran the deploy. In a
+container the hydration fails before any of your code runs:
+
+```
+ModuleNotFoundError: No module named 'app'
+modal.exception.DeserializationError: Deserialization failed because the
+'app' module is not available in the remote environment.
+```
+
+Nothing at deploy time looks wrong — the deploy succeeds and prints the
+full function list — and the damage is partial: `build` and `worker_*`
+often survive, because their closures reach your package's modules anyway,
+while the scheduled reactive functions do not. Stardag therefore refuses
+the callable at `StardagApp(...)` with a
+`SerializedCallablePlacementError` naming the callable, the module and the
+fix, rather than letting it deploy.
+
+Lambdas and closures written in the entry point are exempt, and are not
+rejected: cloudpickle cannot look them up by name, so it serialises the
+code object by value. They work — but a lambda that _calls_ a `def` from
+the same file drags the same broken reference along with it, so importing
+from a real module is the habit worth keeping.
+
 ## Container setup: code that runs in every container
 
 Some setup is a property of the _container_, not of a build or a task:
@@ -1124,7 +1187,7 @@ validating that the environment is what you think it is. Pass it as
 reactive `tick`, `bootstrap` and `tick_watchdog`.
 
 ```{.python notest}
-# my_app/setup.py — an importable module, not the deploy script (see below)
+# my_app/setup.py — an importable module, not the deploy script (see above)
 def container_setup() -> None:
     configure_logging()
     write_credentials()
@@ -1174,14 +1237,13 @@ and then never again for the rest of that container's inputs.
 
 ### Details worth knowing
 
-- **Define it in an importable module.** Like `worker_selector` and your
-  build/run functions, the hook is captured by the serialized Modal
-  functions and pickled _by reference_ (via its class, if you pass a
-  callable instance rather than a plain function), so its defining module must be
-  importable in the container — part of the source you add via
-  `add_local_python_source(...)`, not a loose deploy script. That is also
-  what makes any module-level code in the hook's own module run in every
-  container of the app.
+- **Define it in an importable module**, not in the file you deploy — see
+  [Where to define what you pass to
+  `StardagApp`](#where-to-define-what-you-pass-to-stardagapp), which
+  applies identically to `worker_selector` and your build/run functions.
+  Importing the hook from your own package is also what makes any
+  module-level code in the hook's module run in every container of the
+  app.
 - **Once per container, not once per input.** A worker serves many tasks
   and a tick container may be reused; stardag holds the guard so you do
   not have to write one.

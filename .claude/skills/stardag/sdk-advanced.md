@@ -346,6 +346,17 @@ or `Runner` in it). It complements rather than replaces `Builder.setup(tasks)`
 Define it in a module importable inside the container — it is pickled by
 reference, like `worker_selector`.
 
+**Placement rule for all five callables** (`container_setup`,
+`worker_selector`, `limit_key_selector`, `build_function`, `run_function`):
+define them in an importable module of your own package and _import_ them
+into the file you deploy. They are cloudpickled into the `serialized=True`
+functions, and cloudpickle stores a module-level callable (or the class of
+a callable instance) as a reference to its defining module. `stardag modal
+deploy path/to/app.py` loads that file under the module name `app`, so a
+`def` written there pickles as `app.<name>`, deploys cleanly, and then
+fails in every container with `ModuleNotFoundError: No module named 'app'`.
+`StardagApp(...)` raises `SerializedCallablePlacementError` for this.
+
 Worker executions are **detached** Modal function calls by default: they
 survive orchestrator restarts (resumed builds re-attach instead of
 re-executing), are explicitly cancellable, and workers self-report their

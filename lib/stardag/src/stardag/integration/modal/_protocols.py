@@ -46,6 +46,11 @@ class BuildFunction(typing.Protocol):
     ``build`` container only; for setup every container of the app needs —
     workers and the reactive functions included — pass
     ``StardagApp(container_setup=...)``.
+
+    That import is also why the module has to be one the container *has*:
+    define a custom build function in your own package and import it into
+    the file you deploy, never directly in that file (see
+    ``StardagApp(container_setup=...)`` for the rule and the error).
     """
 
     def __call__(
@@ -77,7 +82,9 @@ class RunFunction(typing.Protocol):
     defined will execute inside every ``worker_*`` container before the
     function is called, by the same mechanism as ``BuildFunction`` above —
     use it for worker-specific setup. For setup every container of the app
-    needs, pass ``StardagApp(container_setup=...)``.
+    needs, pass ``StardagApp(container_setup=...)``. The same placement
+    rule applies: define it in an importable module of your own package,
+    not in the file you deploy.
 
     Args (of ``__call__``):
         task: The task instance to execute.
