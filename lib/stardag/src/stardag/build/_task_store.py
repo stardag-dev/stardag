@@ -86,12 +86,20 @@ class BuildTaskStore:
             self.save_task(task)
 
     def load_task(self, task_id: UUID | str) -> BaseTask | None:
-        """Load a task by id; None if not persisted (logged as error)."""
+        """Load a task by id; None if not persisted.
+
+        A miss is *not* an error. The store is a fallback (see the module
+        docs): declaring ``task_modules`` opts a build into pickle elision,
+        so every covered task misses here by design and is rehydrated from
+        registry data by ``stardag.build._reactive._load_task``. Only that
+        caller — which knows whether the second stage also failed — is in a
+        position to log the failure, and it does.
+        """
         target = self._target(f"tasks/{task_id}.pkl")
         if not target.exists():
-            logger.error(
-                f"Task {task_id} of build {self.build_id} not found in the "
-                f"build task store — cannot (re)schedule it."
+            logger.debug(
+                f"Task {task_id} of build {self.build_id} is not in the "
+                f"build task store (expected when pickles are elided)."
             )
             return None
         with target.open("rb") as handle:
