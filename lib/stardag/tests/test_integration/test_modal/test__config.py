@@ -303,9 +303,22 @@ class TestRunningFromEditableInstall:
         ):
             assert _running_from_editable_install() is True
 
-    def test_malformed_record_is_not_evidence(self) -> None:
+    def test_unreadable_record_is_not_evidence(self) -> None:
         with self._with_direct_url("not json at all"):
             assert _running_from_editable_install() is False
+
+    def test_a_readable_but_odd_editable_value_is_read_leniently(self) -> None:
+        """PEP 610 says `editable` is a boolean and every installer writes
+        one, so this is hypothetical — but the two ways of being wrong are
+        not symmetric, and the lenient one is the one that fails loudly.
+
+        Guessing "editable" wrongly ships the working tree, and a missing
+        dependency then breaks the first import. Guessing "released"
+        wrongly pins a version nothing checked — the silent
+        deploy-clean-then-die failure this whole change is about.
+        """
+        with self._with_direct_url('{"dir_info": {"editable": "yes"}}'):
+            assert _running_from_editable_install() is True
 
 
 class TestWithStardagOnImage:
@@ -454,7 +467,29 @@ class TestWithStardagOnImage:
             with_stardag_on_image(mock_image, version="0.17.0")
 
         mock_image.pip_install.assert_called_once_with("stardag[modal]==0.17.0")
-        assert "unable to hydrate" in caplog.text
+        assert "the *older* of the two" in caplog.text
+
+    def test_a_newer_pin_warns_but_names_the_harmless_direction(
+        self, not_editable, caplog
+    ) -> None:
+        """Pinning *newer* than the running SDK cannot cause the hydration
+        failure — the image would have more modules, not fewer. Ordering
+        two versions properly needs PEP 440 and `packaging` is not a
+        stardag dependency, so the warning still fires on any difference
+        and the message carries the direction instead."""
+        mock_image = MagicMock(spec=modal.Image)
+        mock_image.pip_install.return_value = mock_image
+
+        with (
+            patch("stardag.integration.modal._config.sd") as mock_sd,
+            caplog.at_level(logging.WARNING),
+        ):
+            mock_sd.__version__ = "0.17.0"
+
+            with_stardag_on_image(mock_image, version="0.20.1")
+
+        mock_image.pip_install.assert_called_once_with("stardag[modal]==0.20.1")
+        assert "Pinning a newer version does not cause that" in caplog.text
 
     def test_matching_pin_is_quiet(self, not_editable, caplog) -> None:
         mock_image = MagicMock(spec=modal.Image)

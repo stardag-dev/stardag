@@ -71,10 +71,21 @@ def _running_from_editable_install() -> bool:
     if not direct_url:
         return False
     try:
-        return bool(json.loads(direct_url).get("dir_info", {}).get("editable"))
+        editable = json.loads(direct_url).get("dir_info", {}).get("editable")
     except (ValueError, AttributeError):
-        # Malformed record: not evidence of an editable install.
+        # Unreadable record: nothing to go on, so not evidence of an
+        # editable install.
         return False
+    # PEP 610 says this is a boolean and every installer writes one. A value
+    # that is not — a string, a number, some future spelling — is read
+    # leniently: anything truthy counts as editable. The two mistakes are
+    # not symmetric. Guessing "editable" wrongly ships the working tree into
+    # the image, and if that image then lacks a dependency the container
+    # fails on its first import, loudly and immediately. Guessing "released"
+    # wrongly pins a version nothing has checked, which is the
+    # deploy-clean-then-die-at-hydration failure this function exists to
+    # prevent.
+    return bool(editable)
 
 
 def with_stardag_on_image(
@@ -165,12 +176,18 @@ def with_stardag_on_image(
             pinned_version,
         )
     elif pinned_version != running_version:
+        # Fires on any difference, not only an older pin: ordering two
+        # versions properly needs PEP 440, and `packaging` is not a stardag
+        # dependency — taking one on to refine the trigger of a warning is a
+        # poor trade. The message names the dangerous direction instead, so
+        # a newer pin reads as the note it is rather than as an alarm.
         logger.warning(
             "Installing stardag==%s from PyPI into a Modal image while "
             "running %s. Functions registered by StardagApp are serialized "
-            "and reference stardag's own modules by name, so a pinned "
-            "version older than the running one can leave every container "
-            "unable to hydrate.",
+            "and reference stardag's own modules by name, so if the pinned "
+            "version is the *older* of the two, every container can fail to "
+            "hydrate on a module it does not have. Pinning a newer version "
+            "does not cause that.",
             pinned_version,
             running_version,
         )
