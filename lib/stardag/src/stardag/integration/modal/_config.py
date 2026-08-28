@@ -109,12 +109,15 @@ def with_stardag_on_image(
         image: The Modal image to install stardag into.
         version: Pin the PyPI install to this version instead of the running
             one. Ignored when the local source is used. Pinning a version
-            **older than the running source** reintroduces the failure above,
-            so it is warned about.
+            **older than the source doing the pickling** reintroduces the
+            failure above, so it is warned about — and warned about
+            differently from a working tree, where there is no trustworthy
+            running version to compare the pin against at all.
     Returns:
         The updated Modal image.
     """
     running_version = sd.__version__
+    explicitly_pinned = bool(version)
     pinned_version = version or running_version
     # A dev build's version says so: "0.1.1.dev3+g389c509a7".
     is_dev_version = "dev" in running_version or "+" in running_version
@@ -133,10 +136,23 @@ def with_stardag_on_image(
     # source about to be pickled into this image — a warning rather than a
     # refusal, because both routes here are something the caller asked for
     # explicitly, and the pinned release may well be the right one.
-    if from_working_tree:
+    if from_working_tree and explicitly_pinned:
+        logger.warning(
+            "Pinning stardag==%s from PyPI into a Modal image while running "
+            "stardag from a working tree. There is no version to check that "
+            "pin against — an editable install's recorded version is frozen "
+            "at install time, so the tree's real version is unknown — and if "
+            "the pin is older than the code being serialized into this app's "
+            "functions, the app deploys cleanly and every container then "
+            "fails to hydrate. Drop the `version=` argument and set "
+            "STARDAG_MODAL_LOCAL_STARDAG_SOURCE=yes to ship the working tree "
+            "instead.",
+            pinned_version,
+        )
+    elif from_working_tree:
         logger.warning(
             "Installing stardag==%s from PyPI into a Modal image while "
-            "running stardag from a working tree. The version is read from "
+            "running stardag from a working tree. That version is read from "
             "the install metadata, which an editable install freezes at "
             "install time — so it may be older than the code being "
             "serialized into this app's functions, in which case the app "

@@ -404,7 +404,38 @@ class TestWithStardagOnImage:
             with_stardag_on_image(mock_image)
 
         mock_image.pip_install.assert_called_once_with("stardag[modal]==0.17.0")
-        assert "freezes at install time" in caplog.text
+        assert "read from the install metadata" in caplog.text
+        assert "uv sync --reinstall-package stardag" in caplog.text
+
+    def test_explicit_pin_from_a_working_tree_warns_about_the_pin(self, caplog) -> None:
+        """Same route, but the version came from the caller, not from the
+        install metadata — so the metadata explanation would be the wrong
+        one to give. What is true here is that there is nothing to check the
+        pin against: a working tree's real version is unknown."""
+        mock_image = MagicMock(spec=modal.Image)
+        mock_image.pip_install.return_value = mock_image
+
+        with (
+            patch("stardag.integration.modal._config.sd") as mock_sd,
+            patch(
+                "stardag.integration.modal._config._running_from_editable_install",
+                return_value=True,
+            ),
+            patch.object(
+                modal_config_provider,
+                "get",
+                return_value=ModalConfig(local_stardag_source="no"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            mock_sd.__version__ = "0.17.0"
+
+            with_stardag_on_image(mock_image, version="0.19.0")
+
+        mock_image.pip_install.assert_called_once_with("stardag[modal]==0.19.0")
+        assert "no version to check that pin against" in caplog.text
+        # Not the metadata story: the pinned version did not come from there.
+        assert "read from the install metadata" not in caplog.text
 
     def test_pinning_an_older_version_than_the_running_one_warns(
         self, not_editable, caplog
