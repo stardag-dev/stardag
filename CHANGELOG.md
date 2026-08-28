@@ -6,6 +6,20 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **The reactive scheduler no longer logs an ERROR for a task-store miss it
+  recovers from.** `BuildTaskStore.load_task` logged
+  `... not found in the build task store — cannot (re)schedule it` on every
+  miss, but its only caller rehydrates the task from registry data and
+  succeeds. Declaring `task_modules` _is_ the opt-in to pickle elision, so on
+  the recommended configuration every lookup misses by design: a healthy
+  seven-task build emitted seven errors claiming its tasks could not be
+  scheduled, immediately after which all seven were. The miss is now DEBUG.
+  A store entry that is not a `BaseTask` remains an ERROR, and `_load_task`
+  still logs at ERROR when _both_ stages fail — with the failed-import
+  annotation that makes it actionable.
+
 ## [0.20.1] — 2026-08-28
 
 ### SDK
