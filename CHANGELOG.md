@@ -6,6 +6,42 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.20.1] — 2026-08-28
+
+### SDK
+
+- **`StardagApp(...)` now refuses a callable no container could unpickle.**
+  Everything an app passes — `container_setup`, `worker_selector`,
+  `limit_key_selector`, `build_function`, `run_function` — is cloudpickled
+  into the `serialized=True` functions `finalize()` registers, and
+  cloudpickle stores a module-level callable (or the class of a callable
+  instance) as a _reference_ to its defining module.
+  `stardag modal deploy path/to/app.py` loads the entry point under a module
+  name taken from the file name, so a `def` written in `app.py` pickles as
+  `app.<name>` — a module that exists only in the deploying process. The app
+  deployed cleanly and then every function carrying that callable died at
+  hydration with `ModuleNotFoundError: No module named 'app'`, before
+  reaching any of the app's own code. The damage was partial and delayed:
+  `build` and `worker_*` often survived, because their closures reach the
+  app's package modules anyway, while the scheduled reactive functions did
+  not — so an app could look healthy with its scheduler dead.
+
+  This is now a `SerializedCallablePlacementError` at `StardagApp(...)`,
+  naming the callable, the module and the fix. It raises rather than warns:
+  unlike the `task_modules` coverage warning there is no degraded-but-working
+  path on the other side of it.
+
+  Lambdas, closures and anything defined in `__main__` are **not** rejected —
+  cloudpickle writes those out by value, so they need no import in the
+  container and work today. A `functools.partial` or a bound method is
+  itself by value but carries a reference to what it wraps, so the check
+  looks through both.
+
+  Docs: the placement rule was stated only on `ContainerSetup`, which read as
+  though it were specific to the hook. It now covers all five parameters, and
+  the Modal how-to gained a section stating the deploy CLI's import naming
+  explicitly — the part no app author can infer from their own code.
+
 ## [0.20.0] — 2026-08-14
 
 ### SDK

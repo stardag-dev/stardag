@@ -42,6 +42,7 @@ from stardag.integration.modal._container_setup import (
     ContainerSetup,
     _run_container_setup,
     _validate_container_setup,
+    _validate_serialized_callable,
 )
 from stardag.integration.modal._logging import _setup_logging
 from stardag.integration.modal._metadata import (
@@ -274,6 +275,13 @@ class StardagApp:
                 property of the ``build`` container only; for setup that
                 must run in *every* container the app deploys, pass
                 ``container_setup``.
+
+                Being reached by import is also why **it must not be
+                defined in the file you deploy**: the CLI loads that file
+                under a module name taken from its name (``app.py`` ->
+                ``app``), which exists only in the deploying process. See
+                ``container_setup`` for the whole rule; it is checked here
+                and raises.
             run_function: Callable registered as the Modal worker functions.
                 Must match the ``RunFunction`` protocol:
                 ``(task) -> None``.
@@ -285,7 +293,9 @@ class StardagApp:
                 its class's) inside every ``worker_*`` container — use that,
                 or ``Runner.setup()``, for worker-specific setup such as
                 GPU init or library preloading, and ``container_setup``
-                for setup every container needs.
+                for setup every container needs. The same placement rule
+                applies: define it in an importable module, not in the
+                file you deploy.
             container_setup: Called once per container, at the top of
                 **every** function this app registers — ``build``, each
                 ``worker_*``, and the reactive ``tick``, ``bootstrap`` and
@@ -347,12 +357,31 @@ class StardagApp:
                 non-root logger will still see stardag add a root
                 ``StreamHandler``.
 
-                Like ``worker_selector`` and the callables above, this is
-                captured by the serialized Modal functions, so **define it
-                in a module that is importable inside the container**
-                (source added via ``add_local_python_source(...)``, not a
-                loose deploy script). That is also what makes module-level
-                code in the hook's own module run in every container.
+                **Define it in a module that is importable inside the
+                container** — source added via
+                ``add_local_python_source(...)`` — and import it into the
+                file you deploy. This applies identically to
+                ``worker_selector``, ``limit_key_selector`` and the two
+                callables above: all five are captured by the serialized
+                Modal functions, and cloudpickle stores a module-level
+                callable (or the class of a callable instance) as a
+                *reference* to its defining module, which the container
+                resolves by importing it.
+
+                Defining one in the deploy entry point is the way this
+                goes wrong, and it is not inferable from the app's own
+                code: ``stardag modal deploy path/to/app.py`` loads that
+                file under a module name taken from the file name, so a
+                ``def`` written there pickles as ``app.<name>`` and no
+                container has a module called ``app``. The deploy
+                succeeds and the affected functions then die at hydration
+                with ``ModuleNotFoundError``. Passing such a callable
+                raises :class:`SerializedCallablePlacementError` here
+                instead.
+
+                Importing the hook from your own package is also what
+                makes module-level code in the hook's own module run in
+                every container.
             builder_settings: Settings for the "build" function. Each
                 function's settings are independent — nothing is propagated
                 between them, except ``stardag_api_key_secret`` (below) and
@@ -366,6 +395,11 @@ class StardagApp:
                 about it. Passing a selector explicitly, even one that
                 always returns ``"default"``, is how to say that is
                 intended.
+
+                Carried into the serialized ``build`` and ``tick``
+                functions, so it obeys the placement rule under
+                ``container_setup``: define it in an importable module of
+                your own package, not in the file you deploy.
             tick_settings: Settings for the reactive-scheduling ``tick`` /
                 ``tick_watchdog`` functions. Defaults to ``builder_settings``
                 when not given.
@@ -424,6 +458,11 @@ class StardagApp:
                 concurrency-limit keys it runs under in reactive scheduling
                 (deployed-app configuration applied by every tick). Default:
                 no limits.
+
+                Carried into the serialized ``tick`` function, so it obeys
+                the placement rule under ``container_setup``: define it in
+                an importable module of your own package, not in the file
+                you deploy.
             task_modules: Modules whose import registers the task classes
                 this app may schedule. **Only reactive scheduling needs
                 this**: a scheduler tick reconstructs tasks from registry
@@ -524,6 +563,23 @@ class StardagApp:
         if container_setup is not None:
             _validate_container_setup(container_setup)
         self.container_setup = container_setup
+        # All five callables share one failure mode that nothing later
+        # catches: cloudpickle stores a module-level callable as a
+        # reference to its defining module, so one defined in the deploy
+        # entry point deploys cleanly and then cannot be hydrated in any
+        # container. Checked here, together, rather than per parameter —
+        # the constraint is a property of being serialized into the
+        # deployed functions, which is exactly what these five have in
+        # common.
+        for parameter, value in (
+            ("build_function", build_function),
+            ("run_function", run_function),
+            ("container_setup", container_setup),
+            ("worker_selector", worker_selector),
+            ("limit_key_selector", limit_key_selector),
+        ):
+            if value is not None:
+                _validate_serialized_callable(parameter, value)
         self._builder_settings = builder_settings
         self._worker_settings = worker_settings
         # Reactive scheduling: the "tick" function's settings (defaults to
