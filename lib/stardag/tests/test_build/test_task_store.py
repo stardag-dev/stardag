@@ -64,7 +64,13 @@ def test_load_missing_task_does_not_log_an_error(
     # recommended configuration. DEBUG is still expected and asserted: the
     # miss stays traceable for anyone debugging a rehydration failure.
     store = BuildTaskStore(uuid4())
-    with caplog.at_level(logging.DEBUG, logger="stardag.build._task_store"):
+    logger_name = "stardag.build._task_store"
+    with caplog.at_level(logging.DEBUG, logger=logger_name):
         assert store.load_task(uuid4()) is None
-    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    assert any(r.levelno == logging.DEBUG for r in caplog.records)
+    # Scoped to the store's own logger: `at_level` raises the level for that
+    # logger only, but `caplog.records` captures whatever any logger emits,
+    # so an unrelated WARNING from the target factory would otherwise fail a
+    # test that is not about it.
+    records = [r for r in caplog.records if r.name == logger_name]
+    assert [r for r in records if r.levelno >= logging.WARNING] == []
+    assert any(r.levelno == logging.DEBUG for r in records)
