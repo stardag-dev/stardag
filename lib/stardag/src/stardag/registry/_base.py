@@ -224,13 +224,16 @@ class BuildNotifyResult(StardagBaseModel):
     """Outcome of ``build_notify`` — the wake-up set, and who can serve it.
 
     ``scheduler_live`` is what makes a wake-up *conditional*: it reports
-    whether the build's scheduler lease was held at the moment the flag was
-    set, so a worker can skip spawning a tick that would only find the
-    lease held and exit. Answering it in the notify response rather than
-    from a separate query is deliberate — the answer is then evaluated
-    strictly *after* the set, which is the check-after-set half of the
-    handshake that keeps the wake-up from being lost (see
-    ``stardag.build._reactive._hand_off_if_needed`` for the other half).
+    whether the build's scheduler lease was held when the server produced
+    this response — which is at some point *after* the flag was set, not
+    atomically with it. That ordering is the whole guarantee, and it is
+    enough: a "yes" means the lease was still held after the flag was
+    already durable, so its holder cannot exit without seeing the flag (it
+    re-reads once more after releasing — see
+    ``stardag.build._reactive._hand_off_if_needed``). A "no" means nobody
+    held it, so the caller must spawn. Answering in the notify response
+    rather than from a separate query is what pins the read to that side of
+    the write; a separate query invites the opposite ordering.
 
     ``None`` means the server did not say (it predates the field), and is
     **not** "no scheduler": a caller must fall back to spawning

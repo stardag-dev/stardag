@@ -83,9 +83,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 ### Registry API
 
 - `POST /builds/{id}/notify` reports `scheduler_live` — whether a reactive
-  scheduler held the build's lease at the moment the wake-up flag was set.
-  Read after the commit, so the answer describes a world in which the flag
-  is already set; that ordering is what makes skipping the tick spawn safe.
+  scheduler held the build's lease when the response was produced. The read
+  happens after the flag is committed rather than atomically with it, and
+  that ordering is the whole guarantee: a `true` means the lease was still
+  held once the flag was already durable, so its holder cannot exit without
+  seeing it. That is what makes skipping the tick spawn safe.
 
 ## [0.20.1] — 2026-08-28
 

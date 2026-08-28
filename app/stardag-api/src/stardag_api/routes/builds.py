@@ -1520,14 +1520,16 @@ async def notify_build(
     the flag before computing the frontier and re-checks it while lingering,
     so a notify landing mid-tick is never lost.
 
-    The response reports whether a scheduler was live when the flag landed
+    The response reports whether a scheduler holds the build's lease
     (``scheduler_live``), which lets the caller skip spawning a tick that
     would only find the lease held. **The read happens after the commit**,
-    on purpose: the answer must describe a world in which the flag is
-    already set, or a scheduler could exit between the read and the write
-    with the caller having been told not to spawn. The SDK's tick closes
-    the other end of the same window by re-reading the flag once more after
-    it releases the lease.
+    on purpose — and after, rather than atomically with, is the entire
+    requirement: a ``True`` then means the lease was still held once the
+    flag was already durable, so its holder cannot exit without seeing it.
+    Reading before the write would invert that and let a scheduler exit
+    between the two with the caller having been told not to spawn. The
+    SDK's tick closes the other end of the same window by re-reading the
+    flag once more after it releases the lease.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     build = await _get_build_checked(build_id, db, auth)
