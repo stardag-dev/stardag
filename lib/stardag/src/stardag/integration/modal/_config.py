@@ -52,12 +52,13 @@ def _running_from_editable_install() -> bool:
     ``importlib.metadata.version("stardag")``, and an editable install's
     metadata version is a **snapshot taken when the install ran**. hatch-vcs
     computes it from the git tag reachable at that moment and nothing
-    recomputes it as the working tree moves on, so a checkout installed at
-    v0.17.0 keeps reporting ``0.17.0`` while its source is v0.20.x. That
-    string carries no ``dev`` and no ``+``, so it read as a plain released
-    version — and the image was pinned to a **real PyPI release that
-    predates the source being pickled into it**. See
-    :func:`with_stardag_on_image` for what that does.
+    recomputes it as the working tree moves on — not even a plain
+    ``uv sync``, which sees the editable install already present and leaves
+    its metadata alone. So a checkout installed at v0.17.0 keeps reporting
+    ``0.17.0`` while its source is v0.20.x. That string carries no ``dev``
+    and no ``+``, so it read as a plain released version — and the image was
+    pinned to a **real PyPI release that predates the source being pickled
+    into it**. See :func:`with_stardag_on_image` for what that does.
 
     ``PackageNotFoundError`` means stardag is importable but not installed
     at all (a bare ``sys.path`` entry), which is a working tree by any other
@@ -141,7 +142,10 @@ def with_stardag_on_image(
             "serialized into this app's functions, in which case the app "
             "deploys cleanly and every container then fails to hydrate. "
             "Set STARDAG_MODAL_LOCAL_STARDAG_SOURCE=yes to ship the working "
-            "tree instead, or reinstall stardag to refresh its version.",
+            "tree instead, or refresh the recorded version (a plain "
+            "`uv sync` will not: the install is already there, so nothing "
+            "rebuilds its metadata — use "
+            "`uv sync --reinstall-package stardag`).",
             pinned_version,
         )
     elif pinned_version != running_version:

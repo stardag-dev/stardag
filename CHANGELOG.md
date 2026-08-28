@@ -48,6 +48,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `version=` older than the running one — warn rather than refuse, since
   both are something the caller asked for.
 
+  Note that a plain `uv sync` does not refresh a stale editable version:
+  the install is already present, so nothing rebuilds its metadata.
+  `uv sync --reinstall-package stardag` does.
+
 ## [0.20.1] — 2026-08-28
 
 ### SDK

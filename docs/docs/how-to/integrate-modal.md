@@ -1198,8 +1198,13 @@ warn:
 - An explicit `with_stardag_on_image(image, version=...)` older than the
   stardag you are deploying with.
 
-If you hit this after upgrading a stardag checkout, reinstalling it
-(`uv sync`) refreshes the recorded version.
+If you hit this in a stardag checkout, note that a plain `uv sync` will
+**not** refresh the recorded version — the editable install is already
+present, so nothing rebuilds its metadata. Force it:
+
+```bash
+uv sync --reinstall-package stardag
+```
 
 ## Container setup: code that runs in every container
 
