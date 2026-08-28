@@ -23,7 +23,7 @@ from stardag.integration.modal._metadata import (
     STARDAG_BUILD_ID_ENV,
 )
 from stardag.integration.modal._runner import Runner, _WorkerLifecycleReporter
-from stardag.registry import NoOpRegistry, registry_provider
+from stardag.registry import BuildNotifyResult, NoOpRegistry, registry_provider
 from stardag.testing.modal._tasks import SyncDynamicRangeSumTask, make_range
 
 WORKER_CALL_ID = "fc-worker-call-1"
@@ -275,6 +275,23 @@ class TestReactiveWorkerBehavior:
         monkeypatch.setattr(modal.Function, "from_name", staticmethod(from_name))
         return captured
 
+    def _notify_returning(
+        self,
+        registry,
+        result,
+        notified: list[UUID] | None = None,
+    ) -> None:
+        """Point the registry's ``build_notify`` at a canned answer."""
+
+        def build_notify(build_id: UUID):
+            if notified is not None:
+                notified.append(build_id)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        registry.build_notify = build_notify  # type: ignore[method-assign]
+
     def test_complete_notifies_and_spawns_tick(
         self,
         recording_registry,
@@ -284,7 +301,11 @@ class TestReactiveWorkerBehavior:
     ):
         build_id = uuid4()
         notified: list[UUID] = []
-        recording_registry.build_notify = notified.append  # type: ignore[method-assign]
+        self._notify_returning(
+            recording_registry,
+            BuildNotifyResult(build_id=build_id, scheduler_live=False),
+            notified,
+        )
 
         Runner()(make_range(limit=3), env_overrides=self._reactive_env(build_id))
 
@@ -293,6 +314,63 @@ class TestReactiveWorkerBehavior:
             "app_name": "wake-app",
             "name": "tick",
         }
+        assert tick_spawn_stub["spawn_kwargs"] == {"build_id": str(build_id)}
+
+    def test_live_scheduler_sets_the_flag_without_spawning(
+        self,
+        recording_registry,
+        fake_call_id,
+        tick_spawn_stub,
+        default_in_memory_fs_target,
+    ):
+        """The saving this exists for: a scheduler already holds the lease,
+        so it will see the flag, and a tick spawned here would only pay a
+        container start to discover the lease is held.
+
+        Safe because the flag is set *before* the answer is evaluated, and
+        the scheduler re-reads it on the way out (the tick's exit
+        handshake) — see ``_wake_scheduler``."""
+        build_id = uuid4()
+        notified: list[UUID] = []
+        self._notify_returning(
+            recording_registry,
+            BuildNotifyResult(build_id=build_id, scheduler_live=True),
+            notified,
+        )
+
+        Runner()(make_range(limit=3), env_overrides=self._reactive_env(build_id))
+
+        assert notified == [build_id], "the flag must still be set"
+        assert tick_spawn_stub == {}, "no tick spawned while a scheduler is live"
+
+    @pytest.mark.parametrize(
+        "notify_result",
+        [
+            # A registry predating the field (the model default), a backend
+            # that still returns None from the old signature, and a notify
+            # that failed outright. All three mean "unknown".
+            BuildNotifyResult(),
+            None,
+            ConnectionError("registry down"),
+        ],
+        ids=["field-absent", "returns-none", "notify-failed"],
+    )
+    def test_unknown_scheduler_state_spawns_as_before(
+        self,
+        recording_registry,
+        fake_call_id,
+        tick_spawn_stub,
+        default_in_memory_fs_target,
+        notify_result,
+    ):
+        """Never skip on an answer we did not get: a redundant tick costs a
+        container, a skipped one costs the build its progress until the
+        watchdog."""
+        build_id = uuid4()
+        self._notify_returning(recording_registry, notify_result)
+
+        Runner()(make_range(limit=3), env_overrides=self._reactive_env(build_id))
+
         assert tick_spawn_stub["spawn_kwargs"] == {"build_id": str(build_id)}
 
     def test_failure_also_wakes_scheduler(

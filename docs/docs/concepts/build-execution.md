@@ -126,14 +126,37 @@ tick(build_id):
     tasks marked skipped / cancelled; wait rather than fail when the
     only thing missing is a task another build is executing)
     linger briefly on the wake-up flag; exit when quiet
+  on the way out: re-read the flag once before releasing the lease
+    (set → keep the lease and re-act) and once after (set → spawn a
+    successor tick)
 ```
 
 Ticks are triggered by the build's bootstrap (below), by workers finishing
-tasks (flag-then-spawn, so wake-ups are never lost), and by an optional
-periodic watchdog that also picks up externally-cancelled builds and
-silently-lost workers. While a DAG churns, one lingering tick behaves like
-a tight scheduling loop; when only long-running tasks remain in flight,
-**nothing runs but your tasks**.
+tasks, and by an optional periodic watchdog that also picks up
+externally-cancelled builds and silently-lost workers. While a DAG churns,
+one lingering tick behaves like a tight scheduling loop; when only
+long-running tasks remain in flight, **nothing runs but your tasks**.
+
+### Wake-ups: one tick, not one per completion
+
+A worker's wake-up is two steps — set the build's flag, then make sure
+somebody looks at it. The registry answers the flag-set by saying whether a
+scheduler currently holds the build's lease, and a worker that hears "yes"
+**skips the spawn**: the tick already running will see the flag on its next
+poll. On a build of short tasks that is the difference between one working
+tick and one container start per completion, each of which would arrive
+after the resident scheduler had already done the work.
+
+Skipping is only safe because the scheduler cannot exit past a flag it has
+not seen — which is what the two re-reads on the way out are for. A wake-up
+that lands while a tick is shutting down either finds the lease already
+released, and spawns its own tick, or finds it held, in which case that
+tick has not yet done its post-release re-read and will hand off to a
+successor. Both may happen; one wins the lease and the other no-ops.
+
+Nothing here depends on the registry supporting it. An older registry does
+not report the lease state, so every wake-up spawns a tick exactly as
+before — more containers, same correctness.
 
 ### Bootstrap: the one thing that happens before the first tick
 

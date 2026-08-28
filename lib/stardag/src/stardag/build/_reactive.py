@@ -10,6 +10,10 @@ reactive scheduling runs short-lived, idempotent **ticks**:
    registry → act on it (spawn pending/suspended tasks detached, probe
    running refs, self-heal completions, handle terminal states) → linger
    briefly polling the wake-up flag → exit when quiet.
+3. On the way out, re-read the flag once before releasing the lease and
+   once after — the **exit handshake**, which is what makes it safe for a
+   worker to skip spawning a tick while a scheduler is live. See
+   :func:`_run_tick_body_aio`.
 
 Acting on a frontier is **bounded-concurrent**, not serial: a wide layer
 is thousands of independent registry round-trips and executor spawns, and
@@ -23,9 +27,14 @@ so it re-evaluates immediately on a fresh frontier rather than lingering.
 
 Workers self-report their lifecycle (see the Modal ``Runner``) and wake the
 scheduler when they finish, so no process needs to stay alive while
-long-running tasks execute. A periodic watchdog tick covers lost wake-ups
-(worker died silently) and externally-triggered state changes (e.g. build
-cancelled from the UI).
+long-running tasks execute. A wake-up is "set the flag, then make sure
+somebody looks at it", and the second half is skipped when the registry
+answers the flag-set with ``scheduler_live`` — a tick already holds the
+lease and will see it. On a build of short tasks that is the difference
+between one working tick and one per completion, each paying a container
+start to discover it has nothing to do. A periodic watchdog tick covers
+lost wake-ups (worker died silently) and externally-triggered state
+changes (e.g. build cancelled from the UI).
 
 The tick is executor-agnostic: it only needs a :class:`TaskExecutorABC`
 with detached support. Requirements and current limitations:
@@ -701,6 +710,20 @@ class TickConfig:
     # stays in the frontier — a slot-holder's completion wakes the
     # scheduler (cross-build slot releases are covered by the watchdog).
     limit_key_selector: "Callable[[BaseTask], Sequence[str]] | None" = None
+    # How to spawn a successor tick for this build — the post-release half
+    # of the exit handshake (see ``_hand_off_if_needed``). Deployed-app
+    # configuration for the same reason ``limit_key_selector`` is: it is a
+    # callable, and "how do I start a tick" is knowledge only the executor
+    # integration has — ``run_tick_aio`` is deliberately executor-agnostic.
+    #
+    # ``None`` disables the hand-off, and is correct for any caller whose
+    # wake-ups spawn a tick unconditionally: there is then no window to
+    # close, because a wake-up that lands during the release always
+    # produces its own tick. The two go together — an integration that
+    # makes its wake-ups conditional on ``scheduler_live`` MUST also
+    # provide this, or the wake-up that lands in the release window is
+    # served by nobody until the watchdog.
+    spawn_successor_tick: "Callable[[UUID], None] | None" = None
     # Report each tick's :class:`TickSummary` to the registry, so "why is
     # this build not progressing?" is answerable without reading logs
     # across many short-lived tick containers. Strictly best-effort: a
@@ -807,6 +830,16 @@ class TickSummary:
     # build's to run). Only ever a task in this build's plan — the attempt
     # budget the reset is bounded by does not exist for anything else.
     in_build_blockers_reset: int = 0
+    # --- exit handshake (see ``_hand_off_if_needed``) ---
+    # Times the linger deadline expired with the wake-up flag set, so the
+    # tick kept the lease and re-acted instead of exiting. The fast half of
+    # the handshake: no successor container was needed.
+    linger_extended: int = 0
+    # Successor ticks spawned because the flag was set in the window
+    # between this tick's last look and its release of the lease. Rare by
+    # construction; a non-zero value is the handshake doing exactly the job
+    # it exists for, not a problem.
+    successor_spawned: int = 0
 
 
 # Outcomes worth persisting. ``not_reactive`` is excluded by definition:
@@ -834,6 +867,71 @@ def _bounded(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+
+
+# Outcomes that end a tick with nothing left for anyone to serve, so the
+# exit handshake's post-release re-read is skipped (see
+# :func:`_hand_off_if_needed`). ``terminal`` means the build is finished —
+# a wake-up arriving after it changes nothing a tick could act on — and
+# ``not_reactive`` means this build is not tick-driven at all. Every other
+# outcome that got as far as holding the lease (``lingered_out``, and the
+# crash path, which is still ``lingered_out`` here because ``run_tick_aio``
+# relabels it afterwards) may have left a wake-up unserved.
+_NO_HANDOFF_OUTCOMES = frozenset({"terminal", "not_reactive"})
+
+
+async def _hand_off_if_needed(
+    build_id: UUID,
+    *,
+    registry: RegistryABC,
+    config: TickConfig,
+    summary: TickSummary,
+) -> None:
+    """Post-release half of the exit handshake — see ``_run_tick_body_aio``.
+
+    Called once the scheduler lease is **released**, on every exit that may
+    have left a wake-up unserved. Re-reads the wake-up flag and, if it is
+    set, spawns a successor tick.
+
+    A no-op without ``TickConfig.spawn_successor_tick``, and deliberately
+    so: an integration whose wake-ups always spawn a tick has no window to
+    close, and paying a frontier fetch at the end of every tick to discover
+    that would be pure cost. Skipping the read entirely (rather than
+    reading and then finding nothing to do with the answer) is the point.
+
+    Best-effort, like ``_report_tick_summary``: this runs in a ``finally``
+    that may be unwinding an exception, so anything it raises would replace
+    the error the caller is about to see with an unrelated one. A failed
+    hand-off degrades to today's behaviour — the flag stays set, and the
+    next completion or the watchdog picks it up.
+    """
+    spawn = config.spawn_successor_tick
+    if spawn is None:
+        return
+    try:
+        flag = await registry.build_get_frontier_aio(build_id)
+        if not flag.needs_tick:
+            return
+        # Sync call in async code, on purpose: spawning is what every
+        # executor integration offers, this is the last thing the tick does
+        # (the lease is released, its renewal task cancelled, nothing else
+        # is in flight), and requiring an async spawner would exclude the
+        # integrations that only have a blocking one.
+        spawn(build_id)
+        summary.successor_spawned += 1
+        logger.info(
+            "Build %s was notified while this tick released the scheduler "
+            "lease; handed off to a successor tick.",
+            build_id,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to hand off the scheduler for build %s (ignored — the "
+            "wake-up flag stays set for the next completion or the "
+            "watchdog): %s",
+            build_id,
+            e,
+        )
 
 
 # Set once per process when the registry answers the tick-summary route
@@ -959,136 +1057,214 @@ async def _run_tick_body_aio(
     config: TickConfig,
     summary: TickSummary,
 ) -> None:
-    """The tick proper — see :func:`run_tick_aio`. Mutates ``summary``."""
+    """The tick proper — see :func:`run_tick_aio`. Mutates ``summary``.
+
+    **The exit handshake.** A wake-up is two steps — set the build's
+    wake-up flag, then make sure somebody looks at it — and a caller may
+    skip the second step when the registry reports a scheduler already
+    live (``BuildNotifyResult.scheduler_live``). That skip is sound only
+    if a live scheduler is *guaranteed* to observe a flag set before it
+    releases the lease, and "poll until the deadline, then unwind" does not
+    guarantee it: nothing re-reads the flag between the final poll and the
+    release, so a flag set in that window would be served by nobody.
+
+    The window is closed from both sides:
+
+    * at deadline expiry, **before** giving up the lease, the flag is
+      re-read; if it is set the tick keeps the lease and re-acts
+      (``summary.linger_extended``);
+    * **after** the lease is released, the flag is re-read once more and a
+      successor tick spawned if it is set (``summary.successor_spawned``,
+      see :func:`_hand_off_if_needed`).
+
+    Releasing *before* the second read is what makes it airtight, and it
+    needs no new server state. A wake-up landing while this tick unwinds
+    either finds the lease already released — and spawns its own tick — or
+    finds it held, in which case this tick has not yet done its
+    post-release read and will find the flag. Both ticks happening is
+    possible and harmless: one wins the lease, the other no-ops.
+
+    The pre-release re-read is the optimisation (one fewer cold start);
+    the post-release hand-off is the correctness guarantee. Only the
+    second is load-bearing, which is why the first may be skipped when
+    extending the linger would not make sense (see the linger loop).
+    """
     # Scheduler lease: the lock() handle auto-renews the TTL while the tick
     # lingers, and releases on exit. The manager should be configured with
     # lock_wait_timeout_seconds=None so a held lease means immediate no-op
     # (the wake-up that spawned this tick was flagged before the spawn, so
-    # the lease holder's linger re-check covers it).
+    # the holder's re-checks — the linger poll, then the exit handshake
+    # above — cover it).
     lease = lock_manager.lock(scheduler_lock_name(build_id))
-    async with lease:  # type: ignore[attr-defined]
-        if not lease.result.acquired:
-            logger.info(f"Scheduler lease for build {build_id} held; tick no-op.")
-            summary.outcome = "lease_held"
-            return
+    acquired = False
+    try:
+        async with lease:  # type: ignore[attr-defined]
+            if not lease.result.acquired:
+                logger.info(f"Scheduler lease for build {build_id} held; tick no-op.")
+                summary.outcome = "lease_held"
+                return
 
-        # Expose the ambient build id (the executor forwards it to
-        # self-reporting workers, exactly like the resident engine does).
-        build_id_token = current_build_id_var.set(build_id)
-        try:
-            loop = asyncio.get_event_loop()
-            deadline = loop.time() + config.linger_seconds
-            while True:
-                summary.iterations += 1
-                try:
-                    await registry.build_clear_notify_aio(build_id)
-                    frontier = await registry.build_get_frontier_aio(build_id)
-                except NotFoundError as e:
-                    # Only a genuine missing-route 404 (server predating the
-                    # frontier/notify endpoints) becomes the clear "server
-                    # too old" error; a resource-level 404 (e.g. the build
-                    # was deleted) is a real not-found and must propagate.
-                    if not is_missing_route_error(e):
-                        raise
-                    raise RuntimeError(
-                        "The registry server does not support reactive "
-                        "scheduling (frontier/notify endpoints missing). "
-                        "Upgrade stardag-api to a version matching this SDK."
-                    ) from e
+            acquired = True
 
-                if frontier.reactive_app_name is None:
-                    # Not a reactively-scheduled build (e.g. a resident-
-                    # orchestrator build, or the metadata was never set) —
-                    # never schedule on top of it. The Modal tick wrapper
-                    # short-circuits this before acquiring the lease; the
-                    # check here is the backstop for direct callers. The
-                    # marker never flips back to None mid-build, so it is
-                    # safe to re-evaluate each iteration.
-                    summary.outcome = "not_reactive"
-                    return
-
-                acted, denied_this_round, awaiting_backend = await _act_on_frontier(
-                    frontier,
-                    build_id=build_id,
-                    registry=registry,
-                    task_executor=task_executor,
-                    task_store=task_store,
-                    config=config,
-                    summary=summary,
-                )
-                terminal = await _handle_terminal(
-                    frontier,
-                    build_id=build_id,
-                    registry=registry,
-                    task_executor=task_executor,
-                    task_store=task_store,
-                    config=config,
-                    summary=summary,
-                    denied_this_round=denied_this_round,
-                )
-                if terminal is not None:
-                    summary.outcome = "terminal"
-                    summary.terminal_status = terminal
-                    return
-                if acted:
-                    # The tick's own actions (spawns recorded as started,
-                    # self-healed completions, recorded failures) changed the
-                    # scheduling state — re-evaluate immediately on a fresh
-                    # frontier instead of waiting for an external wake-up
-                    # (terminal detection above ran on the pre-action
-                    # snapshot).
-                    #
-                    # This is also what makes the per-tick spawn cap a
-                    # throttle rather than a stall: a pass that truncated at
-                    # the cap necessarily spawned (or failed to spawn, or
-                    # was denied) every task it did attempt, so either it
-                    # acted — and lands here, taking the next batch off a
-                    # fresh frontier without waiting for anything — or every
-                    # attempt was denied by a concurrency limit, in which
-                    # case lingering for a slot to free up is precisely the
-                    # right thing to do and re-acting immediately would be a
-                    # hot loop against the registry.
-                    deadline = loop.time() + config.linger_seconds
-                    continue
-
-                # Linger: poll the wake-up flag until deadline.
-                #
-                # Two ways out. ``needs_tick`` is the ordinary one: some
-                # worker reported something.
-                #
-                # The other is an interrupted task whose execution still
-                # probes as live. That one is NOT waiting for an event —
-                # nothing will ever emit one, because the worker that would
-                # have reported is dead and an interrupted task produces
-                # nothing further. Waiting on the flag for it stalls the
-                # build until the watchdog, which is off by default.
-                #
-                # So those refs are re-probed directly, and only they: this
-                # deliberately does not re-enter the pass. Re-acting on
-                # every poll would re-attempt the claim of every
-                # limit-denied task at the poll interval, which is exactly
-                # the hot loop the ``acted`` branch above declines to
-                # create. The pass resumes only once a ref stops being
-                # live, which is the single fact being waited on.
-                #
-                # Residual, and honest: a ref that stays live past
-                # ``linger_seconds`` still lingers out with nothing
-                # scheduled to follow up. For a genuine backend retry that
-                # is fine — the restarted worker's own events re-tick the
-                # build. It is the unwinding race this closes.
+            # Expose the ambient build id (the executor forwards it to
+            # self-reporting workers, exactly like the resident engine does).
+            build_id_token = current_build_id_var.set(build_id)
+            try:
+                loop = asyncio.get_event_loop()
+                deadline = loop.time() + config.linger_seconds
                 while True:
-                    if loop.time() >= deadline:
+                    summary.iterations += 1
+                    try:
+                        await registry.build_clear_notify_aio(build_id)
+                        frontier = await registry.build_get_frontier_aio(build_id)
+                    except NotFoundError as e:
+                        # Only a genuine missing-route 404 (server predating the
+                        # frontier/notify endpoints) becomes the clear "server
+                        # too old" error; a resource-level 404 (e.g. the build
+                        # was deleted) is a real not-found and must propagate.
+                        if not is_missing_route_error(e):
+                            raise
+                        raise RuntimeError(
+                            "The registry server does not support reactive "
+                            "scheduling (frontier/notify endpoints missing). "
+                            "Upgrade stardag-api to a version matching this SDK."
+                        ) from e
+
+                    if frontier.reactive_app_name is None:
+                        # Not a reactively-scheduled build (e.g. a resident-
+                        # orchestrator build, or the metadata was never set) —
+                        # never schedule on top of it. The Modal tick wrapper
+                        # short-circuits this before acquiring the lease; the
+                        # check here is the backstop for direct callers. The
+                        # marker never flips back to None mid-build, so it is
+                        # safe to re-evaluate each iteration.
+                        summary.outcome = "not_reactive"
                         return
-                    await asyncio.sleep(config.poll_interval_seconds)
-                    if awaiting_backend and await _any_ref_settled(
-                        awaiting_backend, task_executor
-                    ):
-                        break  # a ref resolved — re-act and pick it up
-                    flag = await registry.build_get_frontier_aio(build_id)
-                    if flag.needs_tick:
-                        break  # outer loop clears the flag and re-acts
-        finally:
-            current_build_id_var.reset(build_id_token)
+
+                    acted, denied_this_round, awaiting_backend = await _act_on_frontier(
+                        frontier,
+                        build_id=build_id,
+                        registry=registry,
+                        task_executor=task_executor,
+                        task_store=task_store,
+                        config=config,
+                        summary=summary,
+                    )
+                    terminal = await _handle_terminal(
+                        frontier,
+                        build_id=build_id,
+                        registry=registry,
+                        task_executor=task_executor,
+                        task_store=task_store,
+                        config=config,
+                        summary=summary,
+                        denied_this_round=denied_this_round,
+                    )
+                    if terminal is not None:
+                        summary.outcome = "terminal"
+                        summary.terminal_status = terminal
+                        return
+                    if acted:
+                        # The tick's own actions (spawns recorded as started,
+                        # self-healed completions, recorded failures) changed the
+                        # scheduling state — re-evaluate immediately on a fresh
+                        # frontier instead of waiting for an external wake-up
+                        # (terminal detection above ran on the pre-action
+                        # snapshot).
+                        #
+                        # This is also what makes the per-tick spawn cap a
+                        # throttle rather than a stall: a pass that truncated at
+                        # the cap necessarily spawned (or failed to spawn, or
+                        # was denied) every task it did attempt, so either it
+                        # acted — and lands here, taking the next batch off a
+                        # fresh frontier without waiting for anything — or every
+                        # attempt was denied by a concurrency limit, in which
+                        # case lingering for a slot to free up is precisely the
+                        # right thing to do and re-acting immediately would be a
+                        # hot loop against the registry.
+                        deadline = loop.time() + config.linger_seconds
+                        continue
+
+                    # Linger: poll the wake-up flag until deadline.
+                    #
+                    # Two ways out. ``needs_tick`` is the ordinary one: some
+                    # worker reported something.
+                    #
+                    # The other is an interrupted task whose execution still
+                    # probes as live. That one is NOT waiting for an event —
+                    # nothing will ever emit one, because the worker that would
+                    # have reported is dead and an interrupted task produces
+                    # nothing further. Waiting on the flag for it stalls the
+                    # build until the watchdog, which is off by default.
+                    #
+                    # So those refs are re-probed directly, and only they: this
+                    # deliberately does not re-enter the pass. Re-acting on
+                    # every poll would re-attempt the claim of every
+                    # limit-denied task at the poll interval, which is exactly
+                    # the hot loop the ``acted`` branch above declines to
+                    # create. The pass resumes only once a ref stops being
+                    # live, which is the single fact being waited on.
+                    #
+                    # Residual, and honest: a ref that stays live past
+                    # ``linger_seconds`` still lingers out with nothing
+                    # scheduled to follow up. For a genuine backend retry that
+                    # is fine — the restarted worker's own events re-tick the
+                    # build. It is the unwinding race this closes.
+                    while True:
+                        if loop.time() >= deadline:
+                            # Exit handshake, pre-release half (see the
+                            # docstring): the flag may have been set since
+                            # the last poll, and a worker that saw the
+                            # lease held will not have spawned for it.
+                            #
+                            # Skipped when lingering is disabled
+                            # (``linger_seconds <= 0`` — the watchdog
+                            # sweep, which runs one pass per build across
+                            # many builds in one container). Extending a
+                            # zero-length linger re-arms an already-expired
+                            # deadline, so a build being notified steadily
+                            # would spin here without ever sleeping and
+                            # starve the rest of the sweep. Nothing is
+                            # lost: the post-release hand-off is the
+                            # guarantee, and handing a sweep's wake-up to a
+                            # dedicated tick is what should happen anyway.
+                            if config.linger_seconds <= 0:
+                                return
+                            flag = await registry.build_get_frontier_aio(build_id)
+                            if not flag.needs_tick:
+                                return
+                            summary.linger_extended += 1
+                            # Re-arm before re-acting: a pass that finds
+                            # nothing actionable does not reset the deadline
+                            # (only ``acted`` does), so without this the
+                            # tick would come straight back to an expired
+                            # deadline and re-read the flag with no sleep in
+                            # between.
+                            deadline = loop.time() + config.linger_seconds
+                            break  # outer loop clears the flag and re-acts
+                        await asyncio.sleep(config.poll_interval_seconds)
+                        if awaiting_backend and await _any_ref_settled(
+                            awaiting_backend, task_executor
+                        ):
+                            break  # a ref resolved — re-act and pick it up
+                        flag = await registry.build_get_frontier_aio(build_id)
+                        if flag.needs_tick:
+                            break  # outer loop clears the flag and re-acts
+            finally:
+                current_build_id_var.reset(build_id_token)
+    finally:
+        # Post-release half of the exit handshake (see this
+        # function's docstring). In a `finally` so it covers the
+        # crashing tick too: a tick that dies after clearing the flag
+        # has taken responsibility for a wake-up it never served, and
+        # `scheduler_live` told the worker not to spawn for it. Not
+        # a hot loop — the successor clears the flag before it can do
+        # the same, so the chain stops unless real notifies keep
+        # arriving.
+        if acquired and summary.outcome not in _NO_HANDOFF_OUTCOMES:
+            await _hand_off_if_needed(
+                build_id, registry=registry, config=config, summary=summary
+            )
     return  # unreachable: the loop above always returns
 
 

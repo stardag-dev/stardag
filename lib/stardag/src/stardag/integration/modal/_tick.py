@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import logging
 import typing
 from uuid import UUID
@@ -105,11 +106,24 @@ def _tick_function_timeout_seconds(
     return float(timeout) if timeout is not None else None
 
 
+def _spawn_tick(app_name: str, build_id: UUID) -> None:
+    """Spawn the deployed ``tick`` function of ``app_name`` for a build.
+
+    The one way this integration starts a tick, shared by the scheduler's
+    exit hand-off and the foreign-app forward below — both of which mean
+    exactly "somebody has to look at this build, and it is not me".
+    """
+    modal.Function.from_name(app_name=app_name, name="tick").spawn(
+        build_id=str(build_id)
+    )
+
+
 def _build_tick_config(
     stored_tick_kwargs: dict[str, typing.Any] | None,
     tick_kwargs: dict[str, typing.Any] | None,
     limit_key_selector: LimitKeySelector | None,
     tick_timeout_seconds: float | None = None,
+    spawn_successor_tick: typing.Callable[[UUID], None] | None = None,
 ) -> TickConfig:
     """Assemble a TickConfig for one tick invocation.
 
@@ -137,6 +151,7 @@ def _build_tick_config(
     config_kwargs.setdefault("tick_timeout_seconds", tick_timeout_seconds)
     return TickConfig(
         limit_key_selector=limit_key_selector,
+        spawn_successor_tick=spawn_successor_tick,
         **config_kwargs,
     )
 
@@ -280,9 +295,7 @@ def _run_tick(
     if owner_app != app_name:
         forwarded = False
         try:
-            modal.Function.from_name(app_name=owner_app, name="tick").spawn(
-                build_id=build_id
-            )
+            _spawn_tick(owner_app, build_uuid)
             forwarded = True
         except Exception as e:
             # Owner app deleted/renamed: the build is orphaned —
@@ -312,6 +325,12 @@ def _run_tick(
         tick_kwargs,
         deployment.limit_key_selector,
         tick_timeout_seconds=deployment.tick_timeout_seconds,
+        # The exit hand-off. Paired with the worker's conditional wake-up
+        # (see ``_WorkerLifecycleReporter._wake_scheduler``): the worker
+        # stops spawning while a scheduler is live, and this is what
+        # guarantees the scheduler cannot exit past a wake-up it never
+        # served. Neither half is correct without the other.
+        spawn_successor_tick=functools.partial(_spawn_tick, app_name),
     )
 
     # Register the app's task classes in THIS container before the
