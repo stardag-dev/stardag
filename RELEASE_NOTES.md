@@ -6,6 +6,92 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.20.1 — A callable your containers cannot import is now refused at deploy
+
+Nearly additive. The one behaviour change: `StardagApp(...)` raises
+`SerializedCallablePlacementError` for a callable defined in the file you
+deploy. Such an app deployed cleanly before, and then failed in its
+containers — so nothing that worked stops working.
+
+**If you define `container_setup`, `worker_selector`, `limit_key_selector`,
+a custom `build_function` or a custom `run_function` directly in the file you
+pass to `stardag modal deploy`, move it into an importable module.** That
+app is already broken; this release tells you so at the point you write it
+instead of minutes later, in a container, in a function you were not
+watching.
+
+```python
+# my_app/routing.py — a module in your package, added to the image with
+# add_local_python_source(...)
+def worker_selector(task):
+    return "gpu" if task.get_name() == "TrainModel" else "default"
+
+
+# my_app/app.py — the file you deploy
+from my_app.routing import worker_selector  # imported, not defined here
+
+app = StardagApp(
+    "my-app",
+    worker_selector=worker_selector,
+    builder_settings=FunctionSettings(image=image),
+    worker_settings={"default": FunctionSettings(image=image)},
+)
+```
+
+### What went wrong
+
+`finalize()` registers every function with `serialized=True`, so a container
+receives a pickled closure rather than importing the module your app was
+declared in. Cloudpickle stores a module-level callable — or the _class_ of
+a callable instance, such as a `Builder` or `Runner` subclass — as a
+reference to its defining module, and the container resolves that reference
+by importing the module by name.
+
+`stardag modal deploy path/to/app.py` loads that file under a module name
+taken from the file name. A `def` written in `app.py` therefore pickles as
+`app.<name>`, and `app` is a name that exists only in the process that ran
+the deploy:
+
+```
+ModuleNotFoundError: No module named 'app'
+modal.exception.DeserializationError: Deserialization failed because the
+'app' module is not available in the remote environment.
+```
+
+Three things made this hard to catch. Every deploy-time signal is green —
+the deploy succeeds and prints the full function list, and the `StardagApp`
+object really is correctly wired in the deploying process. The damage is
+partial: `build` and `worker_*` usually survive, because their closures
+reach your package's modules anyway, while the scheduled reactive functions
+do not — so an app can look healthy with its scheduler dead. And the rule is
+a property of the deploy CLI, not of your app: nothing in your own code says
+"this file will be imported under the name `app`".
+
+### What is not rejected
+
+Lambdas and closures written in the entry point, and anything defined in
+`__main__`, are left alone. Cloudpickle cannot look those up by name, so it
+serialises the code object by value and no import is needed in the container.
+They work today and continue to. A `functools.partial` or a bound method is
+itself written by value but carries a reference to what it wraps, so the
+check looks through both.
+
+The check is best-effort in the same way the existing `container_setup` arity
+check is: a callable it cannot introspect is let through rather than refused
+on a guess.
+
+### Docs
+
+The placement rule was previously stated in exactly one place — the
+`ContainerSetup` docstring — which read as though it were specific to that
+hook, when all five callables carry it identically. It now appears on every
+one of them, and the Modal how-to gains a section, [Where to define what you
+pass to
+`StardagApp`](https://stardag-dev.github.io/stardag/how-to/integrate-modal/#where-to-define-what-you-pass-to-stardagapp),
+that states the deploy CLI's import naming explicitly.
+
+---
+
 ## v0.20.0 — Container setup you can actually rely on, in every Modal container
 
 Additive. Nothing to migrate: an app that does not pass `container_setup`

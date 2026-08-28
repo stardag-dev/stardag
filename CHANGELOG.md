@@ -6,6 +6,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.20.1] — 2026-08-28
+
 ### SDK
 
 - **`StardagApp(...)` now refuses a callable no container could unpickle.**
