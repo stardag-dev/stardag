@@ -589,8 +589,12 @@ async def discover_and_register_aio(
 
     for chunk_start in range(0, len(post_order), _chunk_size):
         chunk = post_order[chunk_start : chunk_start + _chunk_size]
+        # The kwarg is passed only when there is something to pass, so a
+        # registry whose bulk registration predates it is untouched unless
+        # a selector is actually configured.
+        keys = _limit_keys_for(chunk, limit_key_selector)
         infos = await registry.task_register_bulk_aio(
-            build_id, chunk, limit_keys=_limit_keys_for(chunk, limit_key_selector)
+            build_id, chunk, **({"limit_keys": keys} if keys is not None else {})
         )
         if not retry_failed:
             continue

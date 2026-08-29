@@ -1079,34 +1079,32 @@ class StardagApp:
         # (or one `modal run`) away on an app that runs no cron, which is
         # the answer to "then how do I recover a stalled build?" when the
         # watchdog is left off.
-        if True:
+        def _modal_tick_watchdog() -> None:
+            _run_container_setup(container_setup)
+            _setup_logging()
+            # The watchdog runs on the same settings as `tick`, so its
+            # container has the same timeout — which it then splits
+            # across the builds it sweeps (see _run_watchdog_sweep).
+            # Scoped to this app's own reactive builds, and handed the
+            # container's own timeout to split across them — see
+            # _run_watchdog_sweep for both.
+            _run_watchdog_sweep(
+                registry_provider.get(),
+                _modal_tick,
+                tick_timeout_seconds=tick_deployment.tick_timeout_seconds,
+                reactive_app_name=app_name,
+            )
 
-            def _modal_tick_watchdog() -> None:
-                _run_container_setup(container_setup)
-                _setup_logging()
-                # The watchdog runs on the same settings as `tick`, so its
-                # container has the same timeout — which it then splits
-                # across the builds it sweeps (see _run_watchdog_sweep).
-                # Scoped to this app's own reactive builds, and handed the
-                # container's own timeout to split across them — see
-                # _run_watchdog_sweep for both.
-                _run_watchdog_sweep(
-                    registry_provider.get(),
-                    _modal_tick,
-                    tick_timeout_seconds=tick_deployment.tick_timeout_seconds,
-                    reactive_app_name=app_name,
-                )
-
-            register(
-                "tick_watchdog",
-                tick_settings,
-                **(
-                    {"schedule": modal.Period(minutes=self.watchdog_period_minutes)}
-                    if self.watchdog_period_minutes is not None
-                    else {}
-                ),
-            )(_modal_tick_watchdog)
-            function_names.append("tick_watchdog")
+        register(
+            "tick_watchdog",
+            tick_settings,
+            **(
+                {"schedule": modal.Period(minutes=self.watchdog_period_minutes)}
+                if self.watchdog_period_minutes is not None
+                else {}
+            ),
+        )(_modal_tick_watchdog)
+        function_names.append("tick_watchdog")
 
         self._is_finalized = True
 
