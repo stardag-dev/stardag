@@ -6,6 +6,92 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.21.0 — One scheduler tick per build, not one per finished task
+
+Additive for anyone using the Modal integration as documented. The
+behaviour change is that a finishing worker now **skips spawning a
+scheduler tick when the registry says one is already live** — fewer
+containers, same scheduling.
+
+**Upgrade the registry (stardag-api) too, or you get the old behaviour.**
+The "is a scheduler live?" answer comes from the server. An older registry
+does not send it, the SDK reads that as "unknown", and every wake-up spawns
+a tick exactly as before — correct, just not cheaper. Nothing breaks either
+way, and the two can be upgraded in any order.
+
+### What it fixes
+
+On a build whose tasks are short relative to a tick container's startup,
+every completion used to spawn a tick that did nothing. The resident
+scheduler's own linger loop did all the work; each spawned tick started
+after it, found the lease held or the build already terminal, and exited.
+
+Measured end-to-end on a 7-task build, before and after, same DAG and same
+registry:
+
+|                  | before                        | after                         |
+| ---------------- | ----------------------------- | ----------------------------- |
+| Tick invocations | **8**                         | **1**                         |
+| Doing the work   | 1 (`iterations=7, spawned=7`) | 1 (`iterations=7, spawned=7`) |
+| Doing nothing    | **7**                         | **0**                         |
+
+### The correctness fix underneath it
+
+Skipping the spawn is only safe if a live scheduler cannot exit past a
+wake-up it has not seen — and the old exit path could. Nothing re-read the
+wake-up flag between the linger loop's final poll and the release of the
+scheduler lease, so a flag set in that window was served by nobody until
+the next completion or the watchdog. With the last task in flight there may
+be no next completion.
+
+A tick now re-reads the flag once **before** releasing the lease (set →
+keep the lease and re-act) and once **after** (set → spawn a successor
+tick). This closes the release window; it is not crash recovery — a tick
+that clears the flag and then dies still leaves that wake-up to the next
+completion or the watchdog, as before.
+
+Two new `TickSummary` counters, `linger_extended` and `successor_spawned`,
+report each half. Both are normally zero: the window they cover is rare by
+construction.
+
+### Migration
+
+Nothing to change. Two notes if you have written against the internals:
+
+- **`RegistryABC.build_notify` now returns `BuildNotifyResult`** instead of
+  `None`. A custom backend that overrides it and returns `None` keeps
+  working — that reads as "scheduler state unknown", which spawns.
+- **A custom tick runner** (anything calling `run_tick_aio` directly rather
+  than through the Modal integration) should pass
+  `TickConfig.spawn_successor_tick` if its workers can skip spawning. The
+  two halves belong together: the worker decides on what the registry says,
+  while handing off on the way out belongs to whoever holds the lease. It
+  warns once per process if the lease is taken without one.
+
+### Also in this release
+
+- **`with_stardag_on_image` no longer pins a Modal image to a stale PyPI
+  release when stardag is installed editable.** The choice between shipping
+  the working tree and installing the pinned release was inferred from the
+  version string, but an editable install's recorded version is frozen at
+  install time — a checkout installed at v0.17.0 keeps reporting `0.17.0`
+  while its source moves on. The image was then pinned to a real release
+  older than the code being serialized into it, and every container died at
+  hydration with `ModuleNotFoundError` for a stardag module. It now asks the
+  installer whether this is a working tree.
+
+  If you deploy from a stardag checkout and see this, note that a plain
+  `uv sync` does not refresh the recorded version — `uv sync
+--reinstall-package stardag` does.
+
+- **The reactive scheduler no longer logs an ERROR for a task-store miss it
+  recovers from.** Declaring `task_modules` _is_ the opt-in to pickle
+  elision, so on the recommended configuration every lookup missed by
+  design and a healthy build emitted one error per task. The miss is now
+  DEBUG.
+
+---
+
 ## v0.20.1 — A callable your containers cannot import is now refused at deploy
 
 Nearly additive. The one behaviour change: `StardagApp(...)` raises

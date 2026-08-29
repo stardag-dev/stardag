@@ -6,6 +6,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-08-29
+
 ### SDK
 
 - **The reactive scheduler no longer logs an ERROR for a task-store miss it
