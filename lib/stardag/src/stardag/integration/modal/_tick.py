@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import functools
 import logging
 import typing
 from uuid import UUID
@@ -31,6 +30,7 @@ from stardag.build import (
     run_tick_aio,
 )
 from stardag.build._base import GlobalLockConfig
+from stardag.build._wakeups import SpawnTick
 from stardag.build._task_modules import (
     import_task_modules,
     set_declared_task_module_patterns,
@@ -106,12 +106,13 @@ def _tick_function_timeout_seconds(
     return float(timeout) if timeout is not None else None
 
 
-def _spawn_tick(app_name: str, build_id: UUID) -> None:
+def _spawn_tick(build_id: UUID, app_name: str) -> None:
     """Spawn the deployed ``tick`` function of ``app_name`` for a build.
 
     The one way this integration starts a tick, shared by the scheduler's
-    exit hand-off and the foreign-app forward below — both of which mean
-    exactly "somebody has to look at this build, and it is not me".
+    exit hand-off, the cross-build drain and the foreign-app forward below
+    — all of which mean exactly "somebody has to look at this build, and it
+    is not me". The signature is :data:`stardag.build._wakeups.SpawnTick`.
     """
     modal.Function.from_name(app_name=app_name, name="tick").spawn(
         build_id=str(build_id)
@@ -123,7 +124,7 @@ def _build_tick_config(
     tick_kwargs: dict[str, typing.Any] | None,
     limit_key_selector: LimitKeySelector | None,
     tick_timeout_seconds: float | None = None,
-    spawn_successor_tick: typing.Callable[[UUID], None] | None = None,
+    spawn_tick: SpawnTick | None = None,
 ) -> TickConfig:
     """Assemble a TickConfig for one tick invocation.
 
@@ -151,7 +152,7 @@ def _build_tick_config(
     config_kwargs.setdefault("tick_timeout_seconds", tick_timeout_seconds)
     return TickConfig(
         limit_key_selector=limit_key_selector,
-        spawn_successor_tick=spawn_successor_tick,
+        spawn_tick=spawn_tick,
         **config_kwargs,
     )
 
@@ -295,7 +296,7 @@ def _run_tick(
     if owner_app != app_name:
         forwarded = False
         try:
-            _spawn_tick(owner_app, build_uuid)
+            _spawn_tick(build_uuid, owner_app)
             forwarded = True
         except Exception as e:
             # Owner app deleted/renamed: the build is orphaned —
@@ -325,12 +326,14 @@ def _run_tick(
         tick_kwargs,
         deployment.limit_key_selector,
         tick_timeout_seconds=deployment.tick_timeout_seconds,
-        # The exit hand-off. Paired with the worker's conditional wake-up
-        # (see ``_WorkerLifecycleReporter._wake_scheduler``): the worker
-        # stops spawning while a scheduler is live, and this is what
-        # guarantees the scheduler cannot exit past a wake-up it never
-        # served. Neither half is correct without the other.
-        spawn_successor_tick=functools.partial(_spawn_tick, app_name),
+        # How this tick starts another. Two uses: the exit hand-off —
+        # paired with the worker's conditional wake-up (see
+        # ``_WorkerLifecycleReporter._wake_scheduler``), the worker stops
+        # spawning while a scheduler is live and this is what guarantees
+        # the scheduler cannot exit past a wake-up it never served — and the
+        # cross-build drain, which spawns ticks for the flagged builds the
+        # registry hands out (see ``stardag.build._wakeups``).
+        spawn_tick=_spawn_tick,
     )
 
     # Register the app's task classes in THIS container before the

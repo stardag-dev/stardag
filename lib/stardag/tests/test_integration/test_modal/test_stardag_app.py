@@ -2052,15 +2052,20 @@ class TestFinalizeRegistersTick:
         return app, registered
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
-    def test_tick_registered_watchdog_off_by_default(self, mock_volumes):
+    def test_watchdog_deployed_but_unscheduled_by_default(self, mock_volumes):
+        """The sweep is always deployed — so a full sweep is one click away
+        on an app that runs no cron — but without a period it carries no
+        schedule and costs nothing while idle."""
         mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
         app, registered = self._capture_app()
 
         result = app.finalize()
 
         assert "tick" in registered
-        assert "tick_watchdog" not in registered
+        assert "tick_watchdog" in registered
+        assert registered["tick_watchdog"].get("schedule") is None
         assert "tick" in result.functions
+        assert "tick_watchdog" in result.functions
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
     def test_watchdog_registered_with_period(self, mock_volumes):
@@ -2273,11 +2278,12 @@ class TestTickAppOwnership:
             tick(str(build_id))
 
         config = captured_config["config"]
-        assert config.spawn_successor_tick is not None
+        assert config.spawn_tick is not None
 
-        # And it spawns THIS app's tick for the build it is handed.
+        # And it spawns the tick of whichever app it is told — its own for
+        # the exit hand-off, a neighbour's for a cross-build wake-up.
         successor_build_id = uuid4()
-        config.spawn_successor_tick(successor_build_id)
+        config.spawn_tick(successor_build_id, "app-owner")
         assert modal_function_stub["from_name"] == {
             "app_name": "app-owner",
             "name": "tick",

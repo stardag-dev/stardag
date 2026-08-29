@@ -7,7 +7,7 @@ import logging
 import time
 from collections.abc import Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 from urllib.parse import quote
 from uuid import UUID
 
@@ -40,6 +40,7 @@ from stardag.registry._base import (
     BuildInfo,
     BuildListPage,
     BuildNotifyResult,
+    WakeCandidate,
     BuildSummary,
     BulkCancelResult,
     RegisteredTaskInfo,
@@ -616,7 +617,11 @@ class APIRegistry(RegistryABC):
         )
 
     def task_register_bulk(
-        self, build_id: UUID, tasks: Sequence["BaseTask"]
+        self,
+        build_id: UUID,
+        tasks: Sequence["BaseTask"],
+        *,
+        limit_keys: Mapping[UUID, Sequence[str]] | None = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Bulk-register tasks via the ``/tasks/bulk`` endpoint.
 
@@ -647,7 +652,11 @@ class APIRegistry(RegistryABC):
             response = self._request(
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
-                json={"tasks": [_get_task_data_for_registration(t) for t in tasks]},
+                json={
+                    "tasks": [
+                        _get_task_data_for_registration(t, limit_keys) for t in tasks
+                    ]
+                },
                 params={**self._get_params(), "id_only": "true"},
                 operation=f"Bulk-register {len(tasks)} tasks",
             )
@@ -1532,6 +1541,47 @@ class APIRegistry(RegistryABC):
         except Exception:  # pragma: no cover - defensive
             return BuildNotifyResult(build_id=build_id)
 
+    def build_wake_candidates(self, limit: int = 20) -> list[WakeCandidate]:
+        """Hand out flagged reactive builds with no live scheduler."""
+        response = self._request(
+            "POST",
+            f"{self.api_url}/api/v1/builds/wake-candidates",
+            params={**self._get_params(), "limit": str(limit)},
+            operation="Fetch wake candidates",
+        )
+        return self._parse_wake_candidates(response)
+
+    async def build_wake_candidates_aio(self, limit: int = 20) -> list[WakeCandidate]:
+        """Async version - hand out flagged reactive builds with no live scheduler."""
+        response = await self._arequest(
+            "POST",
+            f"{self.api_url}/api/v1/builds/wake-candidates",
+            params={**self._get_params(), "limit": str(limit)},
+            operation="Fetch wake candidates",
+        )
+        return self._parse_wake_candidates(response)
+
+    @staticmethod
+    def _parse_wake_candidates(response: Any) -> list[WakeCandidate]:
+        """Parse a wake-candidates response, tolerating anything unexpected.
+
+        Same stance as ``_parse_notify_response``: the answer is a list of
+        builds to help, and a malformed one must degrade to "nobody", not
+        to a failed scheduler pass. Entries that fail validation are
+        dropped individually so one bad row cannot hide the rest.
+        """
+        try:
+            rows = response.json().get("builds") or []
+        except Exception:  # pragma: no cover - defensive
+            return []
+        candidates: list[WakeCandidate] = []
+        for row in rows:
+            try:
+                candidates.append(WakeCandidate.model_validate(row))
+            except Exception:
+                logger.debug("Ignoring malformed wake candidate: %r", row)
+        return candidates
+
     def build_clear_notify(self, build_id: UUID) -> None:
         """Clear the build's scheduler wake-up flag."""
         self._request(
@@ -1686,7 +1736,11 @@ class APIRegistry(RegistryABC):
         )
 
     async def task_register_bulk_aio(
-        self, build_id: UUID, tasks: Sequence["BaseTask"]
+        self,
+        build_id: UUID,
+        tasks: Sequence["BaseTask"],
+        *,
+        limit_keys: Mapping[UUID, Sequence[str]] | None = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Async bulk-register via ``/tasks/bulk`` (one HTTP call instead of N).
 
@@ -1715,7 +1769,11 @@ class APIRegistry(RegistryABC):
             response = await self._arequest(
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
-                json={"tasks": [_get_task_data_for_registration(t) for t in tasks]},
+                json={
+                    "tasks": [
+                        _get_task_data_for_registration(t, limit_keys) for t in tasks
+                    ]
+                },
                 params={**self._get_params(), "id_only": "true"},
                 operation=f"Bulk-register {len(tasks)} tasks",
             )
@@ -2040,8 +2098,16 @@ class APIRegistry(RegistryABC):
         return TaskMetadata.model_validate(data)
 
 
-def _get_task_data_for_registration(task: "BaseTask") -> dict:
-    """Helper to serialize task data for registration API call."""
+def _get_task_data_for_registration(
+    task: "BaseTask", limit_keys: Mapping[UUID, Sequence[str]] | None = None
+) -> dict:
+    """Helper to serialize task data for registration API call.
+
+    ``limit_keys`` maps task ids to the named concurrency-limit keys the
+    task runs under; when the task has an entry it is sent, so the registry
+    records the keys at plan time. An absent entry sends nothing, which
+    leaves any recorded keys alone.
+    """
     # Avoid circular import:
     from stardag._core.base_task import flatten_task_struct  # noqa: F401
 
@@ -2064,6 +2130,11 @@ def _get_task_data_for_registration(task: "BaseTask") -> dict:
         "task_data": task.model_dump(mode="json"),
         "version": task.version,
         "output_uri": output_uri,
+        **(
+            {"limit_keys": list(limit_keys[task.id])}
+            if limit_keys is not None and task.id in limit_keys
+            else {}
+        ),
         "dependency_task_ids": [
             str(dep.id) for dep in flatten_task_struct(task.requires())
         ],

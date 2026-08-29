@@ -55,7 +55,8 @@ from stardag.build._concurrency import (
     ConcurrencyLimiter,
     build_concurrency_limiter,
 )
-from stardag.registry import RegistryABC, registry_provider
+from stardag.build._wakeups import drain_wake_candidates
+from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
 
@@ -573,6 +574,7 @@ async def build_aio(
     if registry is None:
         registry = registry_provider.get()
     logger.info(f"Using registry: {type(registry).__name__}")
+    is_noop_registry = type(registry) is NoOpRegistry
 
     if task_executor is None:
         task_executor = HybridConcurrentTaskExecutor()
@@ -1813,6 +1815,15 @@ async def build_aio(
 
         await task_executor.setup()
 
+        # Cross-build wake-ups from a resident build: the registry flags the
+        # reactive builds this build's completions unblock, and spawning
+        # their ticks needs an executor that can reach a deployed ``tick``
+        # — a hybrid run. Decided once; a NoOpRegistry has nobody to hand
+        # out and a purely local executor nobody to spawn with.
+        drain_neighbours = (
+            not is_noop_registry and task_executor.can_spawn_scheduler_ticks()
+        )
+
         # Main build loop using as_completed pattern
         while True:
             # Check if all roots complete
@@ -1883,6 +1894,15 @@ async def build_aio(
                         traceback="".join(tb_module.format_exception(e)),
                     )
                 await process_result(task, result)
+
+            # The results just processed may have unblocked *reactive* builds
+            # sharing these tasks; the registry has flagged them, and this
+            # engine spawns their ticks when its executor reaches a deployed
+            # app (a hybrid run). See stardag.build._wakeups.
+            if drain_neighbours:
+                await drain_wake_candidates(
+                    registry, task_executor.spawn_scheduler_tick, build_id=build_id
+                )
 
             # Stop scheduling once any task has flagged FAIL_FAST escalation.
             # Sibling completions in this same `done` batch were already

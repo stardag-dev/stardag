@@ -93,7 +93,7 @@ class RecordingRegistry(NoOpRegistry):
         await super().task_register_aio(build_id, task)
 
     async def task_register_bulk_aio(
-        self, build_id: UUID, tasks
+        self, build_id: UUID, tasks, *, limit_keys=None
     ) -> list[RegisteredTaskInfo] | None:
         for t in tasks:
             self._record("task_register_aio", t.id, bulk=True)

@@ -520,6 +520,20 @@ class ModalTaskExecutor(TaskExecutorABC):
             return DetachedExecutionStatus.FAILED
         return DetachedExecutionStatus.SUCCEEDED
 
+    def can_spawn_scheduler_ticks(self) -> bool:
+        return True
+
+    def spawn_scheduler_tick(self, build_id: UUID, app_name: str) -> None:
+        """Spawn the deployed ``tick`` of ``app_name`` for ``build_id``.
+
+        What lets a resident build with Modal workers (a hybrid run) wake the
+        reactive builds its completions unblocked — the same call a tick
+        makes for its neighbours.
+        """
+        modal.Function.from_name(app_name=app_name, name="tick").spawn(
+            build_id=str(build_id)
+        )
+
     async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
         """Cancel a spawned function call by its recorded id."""
         if executor != MODAL_EXECUTOR_NAME:

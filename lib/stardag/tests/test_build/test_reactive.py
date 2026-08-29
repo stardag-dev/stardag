@@ -299,7 +299,7 @@ class FakeReactiveRegistry(NoOpRegistry):
 
     # --- registry surface used by the tick ---
 
-    async def task_register_bulk_aio(self, build_id, tasks):
+    async def task_register_bulk_aio(self, build_id, tasks, *, limit_keys=None):
         infos = []
         for task in tasks:
             tid = str(task.id)
@@ -4760,9 +4760,13 @@ class TestExitHandshake:
     unwind" shape does not guarantee. See ``_run_tick_body_aio``.
     """
 
-    def _spawner(self) -> tuple[list[UUID], typing.Callable[[UUID], None]]:
+    def _spawner(self) -> tuple[list[UUID], typing.Callable[[UUID, str], None]]:
         spawned: list[UUID] = []
-        return spawned, spawned.append
+
+        def spawn(build_id: UUID, app_name: str) -> None:
+            spawned.append(build_id)
+
+        return spawned, spawn
 
     async def test_flag_set_during_release_spawns_a_successor(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -4793,7 +4797,7 @@ class TestExitHandshake:
             task_executor=executor,
             lock_manager=locks,
             task_store=store,
-            config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
 
         assert summary.outcome == "lingered_out"
@@ -4848,7 +4852,7 @@ class TestExitHandshake:
                 FAST_TICK,
                 linger_seconds=0.02,
                 poll_interval_seconds=0.05,
-                spawn_successor_tick=spawn,
+                spawn_tick=spawn,
             ),
         )
 
@@ -4879,7 +4883,7 @@ class TestExitHandshake:
             task_executor=executor,
             lock_manager=locks,
             task_store=store,
-            config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
 
         assert summary.outcome == "lingered_out"
@@ -4904,7 +4908,7 @@ class TestExitHandshake:
             task_executor=executor,
             lock_manager=locks,
             task_store=store,
-            config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
 
         assert summary.outcome == "terminal"
@@ -4931,7 +4935,7 @@ class TestExitHandshake:
             task_executor=executor,
             lock_manager=locks,
             task_store=store,
-            config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
 
         assert summary.outcome == "lease_held"
@@ -4988,7 +4992,7 @@ class TestExitHandshake:
                 task_executor=executor,
                 lock_manager=locks,
                 task_store=store,
-                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+                config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
             )
 
         assert spawned == [build_id]
@@ -5025,7 +5029,7 @@ class TestExitHandshake:
                 task_executor=executor,
                 lock_manager=locks,
                 task_store=store,
-                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+                config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
             )
 
         assert spawned == [], (
@@ -5064,7 +5068,7 @@ class TestExitHandshake:
                 task_executor=executor,
                 lock_manager=locks,
                 task_store=store,
-                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+                config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
             )
 
         assert registry.needs_tick is False
@@ -5122,7 +5126,7 @@ class TestExitHandshake:
                 task_executor=executor,
                 lock_manager=locks,
                 task_store=store,
-                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+                config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
             )
 
         assert "cannot hand off on the way out" not in caplog.text
@@ -5145,7 +5149,7 @@ class TestExitHandshake:
 
         registry.build_clear_notify_aio = clear_then_die  # type: ignore[method-assign]
 
-        def explode(_: UUID) -> None:
+        def explode(_: UUID, __: str) -> None:
             raise ConnectionError("modal is down")
 
         with pytest.raises(RuntimeError, match="the real failure"):
@@ -5155,13 +5159,13 @@ class TestExitHandshake:
                 task_executor=executor,
                 lock_manager=locks,
                 task_store=store,
-                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=explode),
+                config=dataclasses.replace(FAST_TICK, spawn_tick=explode),
             )
 
     async def test_without_a_spawner_nothing_is_read_or_spawned(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """``spawn_successor_tick=None`` (the default, and every caller
+        """``spawn_tick=None`` (the default, and every caller
         whose wake-ups spawn unconditionally) must not pay a frontier fetch
         to discover it has nowhere to hand off to."""
         (root,) = _chain("no-spawner-root")
@@ -5239,7 +5243,7 @@ class TestExitHandshake:
             config=TickConfig(
                 linger_seconds=0,
                 poll_interval_seconds=0.01,
-                spawn_successor_tick=spawn,
+                spawn_tick=spawn,
             ),
         )
 

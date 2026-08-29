@@ -30,6 +30,7 @@ from stardag.build._task_modules import (
     plan_pickle_elision,
     uncovered_task_classes,
 )
+from stardag.integration.modal._limit_keys import deployed_limit_key_selector
 from stardag.integration.modal._logging import _setup_logging
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
@@ -440,8 +441,17 @@ class _WorkerLifecycleReporter:
             )
 
     def _register_dynamic_deps(self, task_struct: TaskStruct) -> None:
+        # Dynamic deps are registered with their concurrency-limit keys
+        # too, so a slot release can wake the build queued on them exactly
+        # as it does for tasks the bootstrap registered. The selector is
+        # the deployed app's, published by the worker wrapper.
         result = asyncio.run(
-            discover_and_register_aio(self.registry, self.build_id, task_struct)
+            discover_and_register_aio(
+                self.registry,
+                self.build_id,
+                task_struct,
+                limit_key_selector=deployed_limit_key_selector(),
+            )
         )
         store = BuildTaskStore(self.build_id)
         # The trigger's pre-flight structurally cannot see dynamically

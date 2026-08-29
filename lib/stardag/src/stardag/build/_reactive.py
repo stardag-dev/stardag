@@ -136,6 +136,7 @@ from stardag.build._base import (
 )
 from stardag.build._task_modules import import_failure_note
 from stardag.build._task_store import BuildTaskStore
+from stardag.build._wakeups import SpawnTick, drain_wake_candidates
 from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.registry import (
     BuildFrontier,
@@ -432,6 +433,27 @@ class DiscoveryResult:
 _RETRYABLE_STATUSES = ("failed", "cancelled", "skipped", "suspended", "interrupted")
 
 
+def _limit_keys_for(
+    tasks: Sequence[BaseTask],
+    selector: "Callable[[BaseTask], Sequence[str]] | None",
+) -> "dict[UUID, Sequence[str]] | None":
+    """Per-task limit keys for a registration chunk, or None without a selector."""
+    if selector is None:
+        return None
+    keys: dict[UUID, Sequence[str]] = {}
+    for task in tasks:
+        try:
+            keys[task.id] = list(selector(task))
+        except Exception:
+            logger.warning(
+                f"limit_key_selector raised for task {task.id}; registering it "
+                "with no concurrency-limit keys.",
+                exc_info=True,
+            )
+            keys[task.id] = []
+    return keys
+
+
 async def discover_and_register_aio(
     registry: RegistryABC,
     build_id: UUID,
@@ -439,6 +461,7 @@ async def discover_and_register_aio(
     retry_failed: bool = False,
     _chunk_size: int = 50,
     max_concurrent_discover: int = _DEFAULT_MAX_CONCURRENT_DISCOVER,
+    limit_key_selector: "Callable[[BaseTask], Sequence[str]] | None" = None,
 ) -> DiscoveryResult:
     """Walk ``tasks``' dependency trees, register everything, return state.
 
@@ -477,6 +500,15 @@ async def discover_and_register_aio(
     calls that are independent of each other — the retry resets and the
     completion marks — are run concurrently, and both preserve their
     result order.
+
+    ``limit_key_selector`` — the deployed app's mapping from a task to the
+    named concurrency-limit keys it runs under — is applied to every
+    registered task and the keys sent with the registration. That is what
+    lets the registry wake the builds queued on a key when a slot frees:
+    the relation it needs is "which pending tasks want this key", and keys
+    are a property of the task, so plan time is when it can learn them. A
+    selector that raises for a task is treated as "no keys" for that task,
+    since a diagnostic must not fail a registration.
 
     With ``retry_failed=True``, incomplete tasks whose registry status is
     failed/cancelled/skipped/suspended (from a previous build) are reset to
@@ -557,7 +589,9 @@ async def discover_and_register_aio(
 
     for chunk_start in range(0, len(post_order), _chunk_size):
         chunk = post_order[chunk_start : chunk_start + _chunk_size]
-        infos = await registry.task_register_bulk_aio(build_id, chunk)
+        infos = await registry.task_register_bulk_aio(
+            build_id, chunk, limit_keys=_limit_keys_for(chunk, limit_key_selector)
+        )
         if not retry_failed:
             continue
         # Resets are independent of each other (each addresses one task
@@ -710,20 +744,23 @@ class TickConfig:
     # stays in the frontier — a slot-holder's completion wakes the
     # scheduler (cross-build slot releases are covered by the watchdog).
     limit_key_selector: "Callable[[BaseTask], Sequence[str]] | None" = None
-    # How to spawn a successor tick for this build — the post-release half
-    # of the exit handshake (see ``_hand_off_if_needed``). Deployed-app
-    # configuration for the same reason ``limit_key_selector`` is: it is a
-    # callable, and "how do I start a tick" is knowledge only the executor
-    # integration has — ``run_tick_aio`` is deliberately executor-agnostic.
+    # How to spawn a scheduler tick for a build on a deployed app. Used for
+    # two things that mean the same — "somebody has to look at this build,
+    # and it is not me": the post-release half of the exit handshake (see
+    # ``_hand_off_if_needed``), and the cross-build drain that spawns ticks
+    # for flagged builds nobody is serving (see ``_drain_wake_candidates``).
+    # Deployed-app configuration for the same reason ``limit_key_selector``
+    # is: it is a callable, and "how do I start a tick" is knowledge only
+    # the executor integration has — ``run_tick_aio`` is deliberately
+    # executor-agnostic.
     #
-    # ``None`` disables the hand-off, and is correct for any caller whose
-    # wake-ups spawn a tick unconditionally: there is then no window to
-    # close, because a wake-up that lands during the release always
-    # produces its own tick. The two go together — an integration that
-    # makes its wake-ups conditional on ``scheduler_live`` MUST also
-    # provide this, or the wake-up that lands in the release window is
-    # served by nobody until the watchdog.
-    spawn_successor_tick: "Callable[[UUID], None] | None" = None
+    # ``None`` disables both. That is correct for a caller whose wake-ups
+    # spawn a tick unconditionally and that has no neighbours to wake — a
+    # test harness, say. The two halves of the conditional wake-up go
+    # together: an integration that makes its wake-ups conditional on
+    # ``scheduler_live`` MUST provide this, or a wake-up that lands in the
+    # release window is served by nobody until the watchdog.
+    spawn_tick: "SpawnTick | None" = None
     # Report each tick's :class:`TickSummary` to the registry, so "why is
     # this build not progressing?" is answerable without reading logs
     # across many short-lived tick containers. Strictly best-effort: a
@@ -840,6 +877,12 @@ class TickSummary:
     # construction; a non-zero value is the handshake doing exactly the job
     # it exists for, not a problem.
     successor_spawned: int = 0
+    # --- cross-build wake-ups (see ``_drain_wake_candidates``) ---
+    # Ticks this tick spawned for *other* builds: flagged by the registry
+    # (a task they hold changed status, or a slot they were queued on
+    # freed) with no scheduler of their own live. Each is one neighbour
+    # this tick's pass, or its exit, unblocked.
+    neighbour_ticks_spawned: int = 0
 
 
 # Outcomes worth persisting. ``not_reactive`` is excluded by definition:
@@ -893,7 +936,7 @@ async def _hand_off_if_needed(
     have left a wake-up unserved. Re-reads the wake-up flag and, if it is
     set, spawns a successor tick.
 
-    A no-op without ``TickConfig.spawn_successor_tick``, and deliberately
+    A no-op without ``TickConfig.spawn_tick``, and deliberately
     so: an integration whose wake-ups always spawn a tick has no window to
     close, and paying a frontier fetch at the end of every tick to discover
     that would be pure cost. Skipping the read entirely (rather than
@@ -905,19 +948,25 @@ async def _hand_off_if_needed(
     hand-off degrades to today's behaviour — the flag stays set, and the
     next completion or the watchdog picks it up.
     """
-    spawn = config.spawn_successor_tick
+    spawn = config.spawn_tick
     if spawn is None:
         return
     try:
         flag = await registry.build_get_frontier_aio(build_id)
         if not flag.needs_tick:
             return
+        if flag.reactive_app_name is None:
+            # Cannot happen for a build this tick just drove — the marker
+            # never flips back — but the spawner needs an app to reach, and
+            # guessing one would be worse than leaving the flag for the
+            # next completion or the watchdog.
+            return
         # Sync call in async code, on purpose: spawning is what every
         # executor integration offers, this is the last thing the tick does
         # (the lease is released, its renewal task cancelled, nothing else
         # is in flight), and requiring an async spawner would exclude the
         # integrations that only have a blocking one.
-        spawn(build_id)
+        spawn(build_id, flag.reactive_app_name)
         summary.successor_spawned += 1
         logger.info(
             "Build %s was notified while this tick released the scheduler "
@@ -932,6 +981,38 @@ async def _hand_off_if_needed(
             build_id,
             e,
         )
+
+
+async def _drain_wake_candidates(
+    build_id: UUID,
+    *,
+    registry: RegistryABC,
+    config: TickConfig,
+    summary: TickSummary,
+) -> None:
+    """Spawn ticks for the other builds the registry says need one.
+
+    The cross-build half of a wake-up. The registry flags every reactive
+    build whose frontier a status change may have touched — a task it holds
+    changed status, a concurrency slot it was queued on freed, it was
+    cancelled from the UI — but it has no executor. This tick has one, and
+    is already here, so it asks for the flagged builds nobody is serving
+    and spawns one tick each. The server hands each build out once per
+    window, so N ticks draining at once still cost one container per
+    flagged build: the storm that made every-writer-spawns unworkable
+    cannot happen here by construction.
+
+    Called after every pass that acted (the pass is what may have flagged a
+    neighbour) and on every exit path (a finishing build's last act is
+    often what unblocks its neighbours, and the exit is the last chance to
+    say so). Not called when the lease was held — the tick that holds it
+    drains on its own passes. Best-effort, see :mod:`stardag.build._wakeups`.
+    """
+    if config.spawn_tick is None:
+        return
+    summary.neighbour_ticks_spawned += await drain_wake_candidates(
+        registry, config.spawn_tick, build_id=build_id
+    )
 
 
 # Set once per process the first time a tick takes the scheduler lease
@@ -949,7 +1030,7 @@ def _warn_if_no_successor_spawner(config: TickConfig) -> None:
     places, and nothing connects them: a worker skips its tick spawn
     because the *registry* reports a scheduler live, while the ability to
     hand off at the end belongs to whoever *holds the lease*. A tick
-    running without ``TickConfig.spawn_successor_tick`` therefore disables
+    running without ``TickConfig.spawn_tick`` therefore disables
     the post-release read entirely — for every worker of that build, on the
     strength of a decision it never sees.
 
@@ -964,12 +1045,12 @@ def _warn_if_no_successor_spawner(config: TickConfig) -> None:
     nothing to be told.
     """
     global _warned_missing_successor_spawner
-    if config.spawn_successor_tick is not None or _warned_missing_successor_spawner:
+    if config.spawn_tick is not None or _warned_missing_successor_spawner:
         return
     _warned_missing_successor_spawner = True
     logger.warning(
-        "Scheduler tick running without TickConfig.spawn_successor_tick, so "
-        "it cannot hand off on the way out. If this deployment's workers "
+        "Scheduler tick running without TickConfig.spawn_tick, so it cannot "
+        "hand off on the way out or wake other builds. If this deployment's workers "
         "skip their tick spawn when the registry reports a live scheduler "
         "(BuildNotifyResult.scheduler_live), a wake-up arriving as this tick "
         "releases the lease is served by nobody until the next completion or "
@@ -1057,7 +1138,7 @@ async def run_tick_aio(
     observable.
 
     **If your workers can skip spawning a tick**, pass
-    ``TickConfig.spawn_successor_tick``. The two halves of that
+    ``TickConfig.spawn_tick``. The two halves of that
     optimisation live apart: a worker skips because the registry reports a
     scheduler live, while handing off at the end is the lease holder's job.
     A tick without a spawner disables the hand-off for every worker of that
@@ -1250,6 +1331,12 @@ async def _run_tick_body_aio(
                         # right thing to do and re-acting immediately would be a
                         # hot loop against the registry.
                         deadline = loop.time() + config.linger_seconds
+                        # This pass may have flagged a neighbour (a shared
+                        # task changed status, a slot freed); wake it now
+                        # rather than at exit, which may be minutes away.
+                        await _drain_wake_candidates(
+                            build_id, registry=registry, config=config, summary=summary
+                        )
                         continue
 
                     # Linger: poll the wake-up flag until deadline.
@@ -1356,6 +1443,14 @@ async def _run_tick_body_aio(
             and summary.outcome not in _NO_HANDOFF_OUTCOMES
         ):
             await _hand_off_if_needed(
+                build_id, registry=registry, config=config, summary=summary
+            )
+        # Cross-build drain on the way out, whatever the outcome — terminal
+        # included, since a finishing build's last completion is often
+        # exactly what unblocked a neighbour. A tick that never held the
+        # lease skips it: the holder drains on its own passes.
+        if acquired and summary.outcome != "not_reactive":
+            await _drain_wake_candidates(
                 build_id, registry=registry, config=config, summary=summary
             )
     return  # unreachable: the loop above always returns
