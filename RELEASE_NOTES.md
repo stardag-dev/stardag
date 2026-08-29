@@ -70,44 +70,6 @@ Nothing to change. Two notes if you have written against the internals:
   while handing off on the way out belongs to whoever holds the lease. It
   warns once per process if the lease is taken without one.
 
-### A build no longer waits on news it will never hear
-
-Separate bug, same area, found while verifying the above. Reactive builds
-run only while one of their ticks does, and a worker notifies the build it
-belongs to. So when build A finished a task build B was blocked on,
-**nothing told B** — it waited for the watchdog, which is off by default,
-or for one of its own tasks to finish, of which a blocked build may have
-none.
-
-Finishing a task now flags every other live build holding it, and the
-worker that finished it spawns their ticks. A build owned by a **different
-app** is reached too. Again the registry has to be new enough: an older one
-reports nothing to wake, and those builds wait for the watchdog as before.
-
-**One cross-build wait is still not pushed:** a named concurrency-limit
-slot released by another build. The builds queued on a key are not the
-builds holding the task that occupies it, and the registry does not yet
-know which keys a _pending_ task wants. That wait still ends at the
-watchdog.
-
-### The watchdog is no longer recommended by default
-
-`watchdog_period_minutes` has always defaulted to off, but the docs,
-examples and a trigger-time warning all pushed towards `=5`. The sweep runs
-on its schedule whether or not anything is building, and that steady
-polling is enough to keep a scale-to-zero registry database awake — a bill
-that never shows up as Modal usage.
-
-It also matters less than it did, for both reasons above: the exit
-handshake closes the lost-wake-up window, and cross-build waits on a shared
-task are now pushed. What is left is a silently dead worker, a build
-cancelled in the UI, and a concurrency-limit slot freed by another build —
-the last being the one clear reason to turn it on.
-
-**`build_trigger(reactive=True)` no longer warns** when no watchdog is
-configured. It fired on the recommended configuration, which is how people
-learn to ignore warnings.
-
 ### Also in this release
 
 - **`with_stardag_on_image` no longer pins a Modal image to a stale PyPI
