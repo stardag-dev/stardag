@@ -71,7 +71,7 @@ def scheduler_lock_name(build_id: UUID) -> str:
 # schedulable. COMPLETED unblocks its downstreams anywhere; the other three
 # release the execution claim, which is what a build waiting on a live
 # blocker is waiting for.
-_CLAIM_RELEASING_STATUSES = frozenset(
+CLAIM_RELEASING_STATUSES = frozenset(
     {
         TaskStatus.COMPLETED,
         TaskStatus.FAILED,
@@ -152,22 +152,48 @@ async def builds_awaiting_a_tick_with(
         .distinct()
         .scalar_subquery()
     )
-    rows = (
-        await db.execute(
-            select(Build).where(
-                Build.id.in_(neighbours),
-                Build.environment_id == environment_id,
-                Build.latest_status == BuildStatus.RUNNING,
-                Build.reactive_app_name.is_not(None),
-                Build.needs_tick_at.is_not(None),
+    candidates = list(
+        (
+            await db.execute(
+                select(Build).where(
+                    Build.id.in_(neighbours),
+                    Build.environment_id == environment_id,
+                    Build.latest_status == BuildStatus.RUNNING,
+                    # Non-empty, not merely non-null: the app name is what a
+                    # caller reaches for the deployed tick, and a blank one
+                    # names nothing. Filtering here rather than papering over
+                    # it at the response boundary keeps "listed" and
+                    # "spawnable" the same set.
+                    Build.reactive_app_name.is_not(None),
+                    Build.reactive_app_name != "",
+                    Build.needs_tick_at.is_not(None),
+                )
             )
         )
-    ).scalars()
-    live = []
-    for build in rows:
-        if not await is_scheduler_live(db, environment_id, build.id):
-            live.append(build)
-    return live
+        .scalars()
+        .all()
+    )
+    if not candidates:
+        return []
+
+    # One query for every candidate's lease rather than one each: this sits
+    # on the notify path, which every finishing task walks, and a per-build
+    # query would make its latency grow with the number of neighbours.
+    lock_names = {scheduler_lock_name(b.id): b.id for b in candidates}
+    held = set(
+        (
+            await db.execute(
+                select(DistributedLock.name).where(
+                    DistributedLock.name.in_(lock_names),
+                    DistributedLock.environment_id == environment_id,
+                    DistributedLock.expires_at > _utc_now(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [b for b in candidates if scheduler_lock_name(b.id) not in held]
 
 
 async def is_scheduler_live(

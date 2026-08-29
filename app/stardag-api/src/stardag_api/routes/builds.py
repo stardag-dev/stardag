@@ -93,7 +93,7 @@ from stardag_api.services.build_cleanup import (
 )
 from stardag_api.services.claims import claim_is_live, live_claim_filter
 from stardag_api.services.lock import (
-    _CLAIM_RELEASING_STATUSES,
+    CLAIM_RELEASING_STATUSES,
     builds_awaiting_a_tick_with,
     is_scheduler_live,
     wake_other_builds_holding,
@@ -621,7 +621,7 @@ async def _create_task_event(
     # nobody to tell it, since a worker only ever notifies its own build.
     # In the same transaction as the event, so a flag is never set for a
     # status change that then rolls back.
-    if db_task.latest_status in _CLAIM_RELEASING_STATUSES:
+    if db_task.latest_status in CLAIM_RELEASING_STATUSES:
         await wake_other_builds_holding(
             db,
             db_task.id,
@@ -1557,14 +1557,15 @@ async def notify_build(
     # Other builds this caller can finish a wake-up for. Reported here
     # because notify is already the "something changed" round-trip, and
     # because the caller is the half of this that can spawn.
+    # The query already excludes a null or empty app name; the walrus is
+    # what tells the type checker so, and keeps "listed" and "spawnable"
+    # the same set if that filter is ever loosened.
     wake_builds = [
-        BuildToWake(
-            build_id=other.id,
-            reactive_app_name=other.reactive_app_name or "",
-        )
+        BuildToWake(build_id=other.id, reactive_app_name=app)
         for other in await builds_awaiting_a_tick_with(
             db, build_id, environment_id=auth.environment_id
         )
+        if (app := other.reactive_app_name)
     ]
     return BuildNotifyResponse(
         build_id=build_id,
