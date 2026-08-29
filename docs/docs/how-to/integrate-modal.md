@@ -736,15 +736,14 @@ A task denied by a limit stays pending and is retried when a slot frees
 (immediately for same-build releases; within the watchdog period for
 releases in other builds).
 
-Limits are the clearest case for turning the **watchdog** on
-(`watchdog_period_minutes=…`, off by default — see
+Limits make the **watchdog** load-bearing (`watchdog_period_minutes=…`,
+off by default — see
 [Reactive scheduling](#reactive-scheduling-no-resident-build-function-experimental)):
-a slot freed in _another_ build
-has nothing to notify this one, and the watchdog is also the escape hatch
-that fails a task stuck RUNNING without an execution ref once its
+a slot freed in _another_ build has nothing to notify this one, so the
+watchdog period is how long a denied task waits. It is also the escape
+hatch that fails a task stuck RUNNING without an execution ref once its
 **execution claim lapses** (see below), which would otherwise hold its
-slots indefinitely. Weigh that against how long a stalled slot actually
-costs you.
+slots indefinitely.
 Also note that limit-key tags recorded at a
 task's start persist until its next start _with_ keys — a later build
 re-running the same task id without tags briefly counts under the old
