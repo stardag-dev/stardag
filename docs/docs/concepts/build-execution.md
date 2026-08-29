@@ -406,9 +406,11 @@ two cases from the frontier's list of blocking upstreams this build does
 not own:
 
 - **A RUNNING blocker whose execution claim is still live** — the build
-  waits, exactly as it waits for a busy concurrency-limit slot. The
-  blocker's completion wakes this scheduler, and the watchdog covers a lost
-  wake-up.
+  waits, exactly as it waits for a busy concurrency-limit slot. Note that
+  **nothing pushes the blocker's completion to this build**: a build only
+  ever wakes itself, so this wait is ended by the watchdog, by a task of
+  this build's own finishing, or by a tick you spawn. Cross-build waiting
+  is the case for enabling `watchdog_period_minutes`.
 - **A RUNNING blocker whose execution claim has lapsed** — the build fails.
   Not "presumed abandoned": the claim's expiry has passed, so the registry
   no longer honours it, has stopped counting it against concurrency limits,
