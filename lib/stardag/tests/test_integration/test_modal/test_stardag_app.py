@@ -2,6 +2,7 @@
 
 import contextlib
 import importlib.util
+import logging
 import io
 import pickletools
 import sys
@@ -785,6 +786,42 @@ class TestStardagAppReactiveTrigger:
             "test-reactive-app",
             builder_settings=FunctionSettings(image=_make_image()),
             worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+
+    def test_no_watchdog_is_not_worth_warning_about(
+        self, modal_function_stub, default_in_memory_fs_target, caplog
+    ):
+        """``watchdog_period_minutes=None`` is the default *and* the
+        recommendation, so triggering without one must be silent.
+
+        This used to warn on every reactive trigger, urging
+        ``watchdog_period_minutes=5``. A warning that fires on the
+        recommended configuration is how people learn to ignore warnings,
+        and the sweep it was urging is a standing cost — it polls on its
+        schedule whether or not anything is building, which is enough to
+        keep a scale-to-zero registry database awake. Guidance now lives on
+        the parameter's docstring; this pins the silence.
+        """
+        from uuid import uuid4 as _uuid4
+
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        assert app.watchdog_period_minutes is None
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = _uuid4()
+
+        with caplog.at_level(logging.WARNING, logger="stardag.integration.modal"):
+            _trigger_reactive(
+                app,
+                SyncOnlyTask(name="no-watchdog-root"),
+                stub=modal_function_stub,
+                registry=registry,
+                run_bootstrap=False,
+            )
+
+        assert "watchdog" not in caplog.text.lower(), (
+            f"reactive trigger warned about the absent watchdog again: {caplog.text}"
         )
 
     def test_trigger_spawns_bootstrap_with_the_roots_by_value(
