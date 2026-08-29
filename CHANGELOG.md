@@ -8,6 +8,22 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **The Modal watchdog is no longer recommended by default.**
+  `watchdog_period_minutes` has always defaulted to off, but the docs,
+  examples and a trigger-time warning all pushed towards `=5`. The sweep
+  runs on its schedule whether or not anything is building, and that steady
+  polling is enough to keep a scale-to-zero registry database awake — a
+  bill that never shows up as Modal usage. It also matters less than it
+  did: the reactive exit handshake closes the lost-wake-up window the
+  watchdog was mostly guarding.
+
+  The guidance is now "leave it off, and turn it on when leaving a build
+  stalled for even a few minutes is unacceptable — then pick the period
+  from how long that is". Named concurrency limits remain the clearest
+  reason to enable it, since a slot freed in another build has nothing to
+  notify this one. **`build_trigger(reactive=True)` no longer warns** when
+  no watchdog is configured: it fired on the recommended configuration.
+
 - **The reactive scheduler no longer logs an ERROR for a task-store miss it
   recovers from.** `BuildTaskStore.load_task` logged
   `... not found in the build task store — cannot (re)schedule it` on every

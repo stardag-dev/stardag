@@ -450,10 +450,23 @@ class StardagApp:
                 (see that argument). Discovery there runs against whatever
                 the triggering process is already configured with.
             watchdog_period_minutes: If set, register a scheduled watchdog
-                that periodically re-ticks running reactive builds (the
-                safety net for lost wake-ups, UI-cancelled builds, and stale
-                concurrency-limit slots). Strongly recommended when using
-                ``build_trigger(reactive=True)``. Default: no watchdog.
+                that periodically re-ticks running reactive builds — a
+                safety net for the rare cases nothing else reports: a
+                silently dead worker, a build cancelled in the UI, a
+                concurrency slot freed by another build.
+
+                Default (``None``, no watchdog) is the right choice for
+                most apps. The sweep runs on a schedule whether or not
+                anything is building, and its steady polling is enough to
+                keep a scale-to-zero registry database awake — a cost that
+                does not show up as Modal usage. When a build does stall,
+                one tick unblocks it, and a tick can be spawned at any time
+                (re-trigger the build id, or invoke the app's deployed
+                ``tick`` function directly).
+
+                Set it when leaving a build stalled for even a few minutes
+                is unacceptable, and pick the period from how long that is
+                — not from a default.
             limit_key_selector: Maps a task to the named registry
                 concurrency-limit keys it runs under in reactive scheduling
                 (deployed-app configuration applied by every tick). Default:
@@ -1241,15 +1254,6 @@ class StardagApp:
             )
 
         if reactive:
-            if self.watchdog_period_minutes is None:
-                logger.warning(
-                    "Reactive build triggered on an app without a watchdog "
-                    "(watchdog_period_minutes is not set): a lost wake-up "
-                    "(e.g. a silently dead worker, or a tick killed while "
-                    "holding the scheduler lease) can stall the build until "
-                    "it is manually re-triggered. Strongly recommended: "
-                    "StardagApp(watchdog_period_minutes=5)."
-                )
             return self._trigger_reactive(
                 task_list,
                 build_id=build_id,
