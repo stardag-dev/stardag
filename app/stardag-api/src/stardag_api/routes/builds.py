@@ -79,6 +79,8 @@ from stardag_api.schemas import (
     TaskArtifactResponse,
     TaskResponse,
     TaskWithStatusResponse,
+    WakeCandidate,
+    WakeCandidatesResponse,
 )
 from stardag_api.services import generate_build_slug
 from stardag_api.services.build_cleanup import (
@@ -92,6 +94,13 @@ from stardag_api.services.build_cleanup import (
 )
 from stardag_api.services.claims import claim_is_live, live_claim_filter
 from stardag_api.services.lock import is_scheduler_live
+from stardag_api.services.wakeups import (
+    MAX_WAKE_CANDIDATES,
+    flag_after_task_transition,
+    flag_build,
+    mark_tick_requested,
+    select_wake_candidates,
+)
 from stardag_api.services.status import (
     apply_event_to_build,
     apply_event_to_task,
@@ -584,7 +593,16 @@ async def _create_task_event(
     # Flush so event.id and event.created_at are populated before we feed the
     # event into apply_event_to_task. The whole bundle commits atomically.
     await db.flush()
+    previous_status = db_task.latest_status
     apply_event_to_task(db_task, event)
+    # Cross-build wake-up (see services.wakeups): a status change is news
+    # for every *other* live reactive build holding this task, which has
+    # nobody else to tell it. In the event's own transaction, so a flag is
+    # never set for a change that then rolls back — and transition-gated,
+    # so an event landing on an already-completed task flags nobody.
+    await flag_after_task_transition(
+        db, db_task, previous_status=previous_status, build_id=build_id
+    )
     if limit_keys is not None:
         # Replace the task's limit-key rows (only when explicitly provided —
         # a later ref-recording re-start without keys must not clear them).
@@ -1145,6 +1163,48 @@ async def _require_admin_for_user_auth(db: AsyncSession, auth: SdkAuth) -> None:
     )
 
 
+@router.post("/wake-candidates", response_model=WakeCandidatesResponse)
+async def wake_candidates(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    limit: Annotated[int, Query(ge=1, le=MAX_WAKE_CANDIDATES)] = MAX_WAKE_CANDIDATES,
+):
+    """Hand out the reactive builds that need a scheduler tick and have none.
+
+    The spawn half of a cross-build wake-up. The server flags builds whose
+    frontier may have changed (see ``services.wakeups``) but cannot spawn;
+    a caller that can — a scheduler tick, a resident engine with a Modal
+    executor — asks here and spawns one tick per returned build, on that
+    build's own ``reactive_app_name``.
+
+    Each build is handed out at most once per
+    ``services.wakeups.WAKE_HANDOUT_WINDOW``: the rows returned are
+    stamped ``tick_requested_at`` in the same transaction, so concurrent
+    callers get disjoint answers and a flagged build costs one container,
+    however many schedulers are running in the environment. A build whose
+    handed-out spawn never happened is offered again once the window has
+    passed.
+
+    Empty is the normal answer. It is also the answer on a registry that
+    predates this route (a missing-route 404 on the SDK side), where the
+    watchdog remains the only carrier of cross-build wake-ups.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    chosen = await select_wake_candidates(
+        db, environment_id=auth.environment_id, limit=limit
+    )
+    await db.commit()
+    return WakeCandidatesResponse(
+        builds=[
+            WakeCandidate(build_id=b.id, reactive_app_name=app)
+            for b in chosen
+            # Non-empty by the query's filter; the walrus tells the type
+            # checker so and keeps "listed" and "spawnable" the same set.
+            if (app := b.reactive_app_name)
+        ]
+    )
+
+
 @router.get("/{build_id}", response_model=BuildResponse)
 async def get_build(
     build_id: UUID,
@@ -1361,6 +1421,10 @@ async def cancel_build(
     )
     await _record_build_event(db, build, event)
     await _touch_build_last_active(db, build_id)
+    # A cancelled reactive build still has executions only a tick can stop.
+    # Flag it, so the next scheduler pass anywhere in the environment picks
+    # it up instead of leaving it to the watchdog.
+    await flag_build(db, build)
     # One transaction: the build and the claims it held go terminal together,
     # so a failure here cannot leave a cancelled build still holding claims.
     await db.commit()
@@ -1536,6 +1600,12 @@ async def notify_build(
     build.needs_tick_at = utc_now()
     await db.commit()
     scheduler_live = await is_scheduler_live(db, auth.environment_id, build_id)
+    if not scheduler_live:
+        # The caller is about to spawn. Recording that keeps a concurrent
+        # ``POST /builds/wake-candidates`` from handing this build to a
+        # second spawner inside the same window (see services.wakeups).
+        await mark_tick_requested(db, build)
+        await db.commit()
     return BuildNotifyResponse(
         build_id=build_id, needs_tick=True, scheduler_live=scheduler_live
     )
@@ -1739,7 +1809,11 @@ async def skip_blocked_tasks(
             )
             db.add(event)
             await db.flush()
+            previous_status = task.latest_status
             apply_event_to_task(task, event)
+            await flag_after_task_transition(
+                db, task, previous_status=previous_status, build_id=build_id
+            )
         await db.commit()
         for _ in blocked_tasks:
             record_entity_created(auth.workspace_id, "events")
@@ -2764,6 +2838,38 @@ async def register_tasks_bulk(
                 created_at=now + timedelta(microseconds=i),
             )
         )
+    # Plan-time concurrency-limit keys (STA-14). Recorded here so the
+    # server knows which *pending* tasks want a key — the relation a slot
+    # release needs to wake the builds queued on it, and one it can learn
+    # nowhere else (keys come from a deployed-app callable). Rows for a
+    # task without a live claim are inert for occupancy: every reader
+    # joins them to ``live_claim_filter()``. Replace semantics, per task,
+    # only when the caller supplied keys; a RUNNING task keeps the keys it
+    # was started under, since those are what it currently occupies.
+    keyed = [
+        t
+        for t in tasks_in
+        if t.limit_keys is not None
+        and db_task_by_task_id[t.task_id].latest_status != TaskStatus.RUNNING
+    ]
+    if keyed:
+        keyed_pks = [pk_by_task_id[t.task_id] for t in keyed]
+        await db.execute(
+            delete(TaskLimitKey).where(TaskLimitKey.task_pk.in_(keyed_pks))
+        )
+        key_rows = [
+            {"id": generate_uuid7(), "task_pk": pk_by_task_id[t.task_id], "key": key}
+            for t in keyed
+            for key in dict.fromkeys(t.limit_keys or [])
+        ]
+        if key_rows:
+            key_insert = (
+                sqlite_insert(TaskLimitKey)
+                if db.bind is not None and db.bind.dialect.name == "sqlite"
+                else pg_insert(TaskLimitKey)
+            )
+            await db.execute(key_insert.values(key_rows).on_conflict_do_nothing())
+
     if events:
         db.add_all(events)
         # Apply event semantics in Python on the in-memory ORM rows —

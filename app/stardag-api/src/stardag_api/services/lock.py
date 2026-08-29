@@ -390,8 +390,13 @@ async def release_lock_with_completion(
         # Lazy import to avoid circular dependency between services.lock and
         # services.status.
         from stardag_api.services.status import apply_event_to_task
+        from stardag_api.services.wakeups import flag_after_task_transition
 
+        previous_status = task_row.latest_status
         apply_event_to_task(task_row, completion_event)
+        await flag_after_task_transition(
+            db, task_row, previous_status=previous_status, build_id=build_id
+        )
 
     # Release the lock
     owner_id_str = str(owner_id)

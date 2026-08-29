@@ -141,6 +141,18 @@ class Build(Base, TimestampMixin):
         nullable=True,
     )
 
+    # When a caller was last told to spawn a tick for this build — by
+    # ``POST /builds/wake-candidates`` handing it out, or by
+    # ``POST /builds/{id}/notify`` reporting no live scheduler to a worker
+    # that will spawn. A flagged build is handed out at most once per
+    # ``services.wakeups.WAKE_HANDOUT_WINDOW``, which is what turns N
+    # concurrent askers into one container rather than N. Not a liveness
+    # signal and not cleared: it simply ages out.
+    tick_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     # Reactive-scheduling owner: the name of the app whose scheduler ticks
     # drive this build, set by PUT /builds/{id}/reactive-meta. NULL means
     # the build is NOT reactively scheduled — its presence

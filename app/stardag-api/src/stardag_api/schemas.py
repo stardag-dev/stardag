@@ -205,6 +205,15 @@ class TaskCreate(BaseModel):
     version: str | None = None
     output_uri: str | None = None  # Path to task output (if FileSystemTarget)
     dependency_task_ids: list[str] = []  # task_ids of upstream dependencies
+    # The named concurrency-limit keys this task runs under, as the
+    # registering app's ``limit_key_selector`` computes them. Recorded at
+    # registration so the server knows which *pending* tasks want a key —
+    # the relation a slot release needs in order to wake the builds queued
+    # on it. ``None`` (the default, and what older SDKs send) leaves any
+    # recorded keys alone; ``[]`` records that the task wants none.
+    # Occupancy still counts only RUNNING tasks under a live claim, so a
+    # pending task's rows never inflate a limit.
+    limit_keys: list[str] | None = None
 
 
 class TaskBulkCreate(BaseModel):
@@ -507,7 +516,9 @@ class SetReactiveMetaRequest(BaseModel):
     them. ``app_name`` (the owner/marker) is always set.
     """
 
-    app_name: str
+    # Non-empty: this is what a caller reaches the deployed tick with, and
+    # a blank name would mark the build reactive while naming nothing.
+    app_name: str = Field(min_length=1)
     tick_kwargs: dict | None = None
 
 
@@ -656,6 +667,26 @@ class SkipBlockedResponse(BaseModel):
 
     build_id: UUID
     skipped_task_ids: list[str]
+
+
+class WakeCandidate(BaseModel):
+    """A build the caller should spawn a scheduler tick for.
+
+    The hand-over between the two halves of a cross-build wake-up: the
+    server flags builds (it sees every write), the caller spawns (it has
+    the executor). Carries the app name because that is what a caller needs
+    to reach the right deployed ``tick`` function — the build may belong to
+    a different app than the caller.
+    """
+
+    build_id: UUID
+    reactive_app_name: str
+
+
+class WakeCandidatesResponse(BaseModel):
+    """Response of ``POST /builds/wake-candidates``."""
+
+    builds: list[WakeCandidate]
 
 
 class BuildNotifyResponse(BaseModel):
