@@ -6,6 +6,101 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.22.0 — A finished task wakes every build waiting on it
+
+Additive for anyone using the Modal integration as documented. Reactive
+builds that share tasks or concurrency limits with other builds no longer
+depend on the watchdog to hear about each other; the watchdog function is
+deployed on every app, unscheduled unless you ask.
+
+**Upgrade the registry (stardag-api) and the SDK together to get the new
+behaviour.** Either alone is safe and simply keeps the old one — see
+Compatibility below.
+
+### What it fixes
+
+A reactive build has no process of its own: it moves only while a
+scheduler tick runs for it, and a tick runs only because something spawned
+one. Until now the only thing that did was the build's **own** Modal
+worker finishing a task. Every other change that could unblock a build
+reached it by luck or by the watchdog — which is off by default:
+
+- another build's worker or tick finishing, failing, cancelling or
+  retrying a task this build was waiting on;
+- a resident build (`sd.build` on a laptop or in the `build` function)
+  finishing a shared task;
+- an operator retrying or cancelling a task in the UI or CLI;
+- a named concurrency-limit slot freed by another build;
+- the build itself being cancelled in the UI, while its workers ran on.
+
+### How it works now
+
+A wake-up is two halves, done by two parties. **The registry flags:**
+every change to a task's status, on every path that writes one, flags
+every other live reactive build holding that task — and, when the task
+leaves `RUNNING`, the builds queued on its concurrency-limit keys.
+Cancelling a build flags the build. **The scheduler spawns:** every tick,
+after each pass that acted and on its way out, asks the registry for the
+flagged builds nobody is serving (`POST /builds/wake-candidates`) and
+spawns one tick each, on that build's own app. A resident build with Modal
+workers does the same after each result.
+
+The registry hands each build out once per ~2-minute window, so twenty
+schedulers asking at once produce one tick per flagged build, not twenty.
+There is no "which builds share a task with the caller" in the question —
+the flag already encodes relevance — so every tick is a bounded
+mini-watchdog for its environment, for free. The full model is on the new
+[Orchestration on Modal](https://docs.stardag.com/concepts/modal-orchestration/)
+page.
+
+What still needs the watchdog (or a manual tick): a change made while
+**nothing** on the deployment is ticking by something without a Modal
+client — the UI, a laptop-only build — and a worker that died without
+reporting, whose claim expires with nothing to notice. `tick_watchdog` is
+now deployed on every app so that sweep is one click away; set
+`watchdog_period_minutes` only if you want it on a timer.
+
+### Compatibility
+
+Both skew directions degrade to the previous behaviour, never to a broken
+one:
+
+- **Old SDK against the new registry.** The registry flags builds; nobody
+  drains them, so cross-build waits end at the watchdog as before. `notify`
+  returns the same fields it did. Registrations without `limit_keys` leave
+  any recorded keys alone.
+- **New SDK against an old registry.** `wake-candidates` answers with a
+  missing-route 404; the SDK disables the drain for the process, logs at
+  DEBUG, and the watchdog covers it as before. The bulk-registration
+  payload's `limit_keys` is ignored by an older server.
+- **Migration:** one nullable column, `builds.tick_requested_at`
+  (`97ce4e3cbf32`). No backfill, no downtime.
+
+### Migration
+
+Nothing to change for documented usage. Two notes for the internals:
+
+- **`TickConfig.spawn_successor_tick(build_id)` is now
+  `TickConfig.spawn_tick(build_id, app_name)`.** One callable serves the
+  exit hand-off and the cross-build drain. Only code driving
+  `run_tick_aio` by hand is affected; the Modal integration supplies it.
+- **`TaskExecutorABC` gains `can_spawn_scheduler_ticks()` /
+  `spawn_scheduler_tick()`** (defaults: `False` / raise). Implement them on
+  a custom executor that can reach a deployed `tick` if you want resident
+  builds using it to wake reactive neighbours.
+- **`build_trigger(reactive=True)` no longer warns** when no watchdog
+  period is configured.
+
+### Docs
+
+`concepts/build-execution.md` is rewritten top-down and covers only what
+holds for any executor; the Modal model — detached execution, resident vs
+reactive, wake-ups, the watchdog — is on the new
+`concepts/modal-orchestration.md`; the Modal how-to's reactive section is
+consolidated around configuration.
+
+---
+
 ## v0.21.0 — One scheduler tick per build, not one per finished task
 
 Additive for anyone using the Modal integration as documented. The
