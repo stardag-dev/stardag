@@ -811,7 +811,7 @@ class TestStardagAppReactiveTrigger:
         registry = MagicMock(spec=RegistryABC)
         registry.build_start.return_value = _uuid4()
 
-        with caplog.at_level(logging.WARNING, logger="stardag.integration.modal"):
+        with caplog.at_level(logging.WARNING, logger="stardag.integration.modal._app"):
             _trigger_reactive(
                 app,
                 SyncOnlyTask(name="no-watchdog-root"),
