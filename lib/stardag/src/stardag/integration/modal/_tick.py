@@ -20,9 +20,7 @@ import logging
 import typing
 from uuid import UUID
 
-import modal
 
-from stardag import BaseTask
 from stardag.build import (
     BuildTaskStore,
     FailMode,
@@ -38,15 +36,14 @@ from stardag.build._task_modules import (
 from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.integration.modal._logging import _setup_logging
+from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.integration.modal._selector import WorkerSelector
+from stardag.integration.modal._spawn import spawn_tick
 from stardag.integration.modal._settings import FunctionSettings
 from stardag.registry._base import NoOpRegistry, registry_provider
 from stardag.registry._lock import RegistryGlobalConcurrencyLockManager
 
 logger = logging.getLogger(__name__)
-
-LimitKeySelector = typing.Callable[[BaseTask], typing.Sequence[str]]
-"""Maps a task to the named registry concurrency-limit keys it runs under."""
 
 
 # --- Per-build tick configuration ---
@@ -106,17 +103,8 @@ def _tick_function_timeout_seconds(
     return float(timeout) if timeout is not None else None
 
 
-def _spawn_tick(build_id: UUID, app_name: str) -> None:
-    """Spawn the deployed ``tick`` function of ``app_name`` for a build.
-
-    The one way this integration starts a tick, shared by the scheduler's
-    exit hand-off, the cross-build drain and the foreign-app forward below
-    — all of which mean exactly "somebody has to look at this build, and it
-    is not me". The signature is :data:`stardag.build._wakeups.SpawnTick`.
-    """
-    modal.Function.from_name(app_name=app_name, name="tick").spawn(
-        build_id=str(build_id)
-    )
+# The one way this integration starts a tick; see ``_spawn``.
+_spawn_tick = spawn_tick
 
 
 def _build_tick_config(

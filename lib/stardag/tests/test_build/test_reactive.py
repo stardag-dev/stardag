@@ -567,7 +567,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         for tid, events in self.task_events.items():
             self.round_start[tid] = len(events)
 
-    async def build_notify_aio(self, build_id) -> BuildNotifyResult:
+    async def build_notify_aio(self, build_id, *, can_spawn=True) -> BuildNotifyResult:
         self.needs_tick = True
         return BuildNotifyResult(build_id=build_id, scheduler_live=True)
 

@@ -889,7 +889,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of build_skip_blocked."""
         return self.build_skip_blocked(build_id)
 
-    def build_notify(self, build_id: UUID) -> "BuildNotifyResult":
+    def build_notify(
+        self, build_id: UUID, *, can_spawn: bool = True
+    ) -> "BuildNotifyResult":
         """Set the build's scheduler wake-up flag (reactive scheduling).
 
         Returns what the server knew *after* the set — in particular
@@ -903,9 +905,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         return BuildNotifyResult(build_id=build_id)
 
-    async def build_notify_aio(self, build_id: UUID) -> "BuildNotifyResult":
+    async def build_notify_aio(
+        self, build_id: UUID, *, can_spawn: bool = True
+    ) -> "BuildNotifyResult":
         """Async version of build_notify."""
-        return self.build_notify(build_id)
+        return self.build_notify(build_id, can_spawn=can_spawn)
 
     def build_clear_notify(self, build_id: UUID) -> None:
         """Clear the build's scheduler wake-up flag. Default: no-op."""

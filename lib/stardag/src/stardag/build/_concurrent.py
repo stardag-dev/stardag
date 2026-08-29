@@ -58,6 +58,11 @@ from stardag.build._concurrency import (
 from stardag.build._wakeups import drain_wake_candidates
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
+
+# Minimum spacing between a resident build's cross-build drains (see
+# ``drain_neighbours_now`` in ``build_aio``).
+_RESIDENT_DRAIN_INTERVAL_SECONDS = 5.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -1823,6 +1828,26 @@ async def build_aio(
         drain_neighbours = (
             not is_noop_registry and task_executor.can_spawn_scheduler_ticks()
         )
+        # Throttled: a hybrid build of many short tasks processes a results
+        # batch every few milliseconds, and one registry round-trip per
+        # batch would double its request rate for a question whose answer
+        # changes on the order of seconds. The final drain after the loop
+        # is unconditional, so nothing flagged by the last completions is
+        # left for the watchdog.
+        drain_loop = asyncio.get_event_loop()
+        last_drain = float("-inf")
+
+        async def drain_neighbours_now(*, force: bool = False) -> None:
+            nonlocal last_drain
+            if not drain_neighbours:
+                return
+            now = drain_loop.time()
+            if not force and now - last_drain < _RESIDENT_DRAIN_INTERVAL_SECONDS:
+                return
+            last_drain = now
+            await drain_wake_candidates(
+                registry, task_executor.spawn_scheduler_tick, build_id=build_id
+            )
 
         # Main build loop using as_completed pattern
         while True:
@@ -1899,10 +1924,7 @@ async def build_aio(
             # sharing these tasks; the registry has flagged them, and this
             # engine spawns their ticks when its executor reaches a deployed
             # app (a hybrid run). See stardag.build._wakeups.
-            if drain_neighbours:
-                await drain_wake_candidates(
-                    registry, task_executor.spawn_scheduler_tick, build_id=build_id
-                )
+            await drain_neighbours_now()
 
             # Stop scheduling once any task has flagged FAIL_FAST escalation.
             # Sibling completions in this same `done` batch were already
@@ -1949,6 +1971,7 @@ async def build_aio(
         if fail_fast_triggered and fail_mode == FailMode.FAIL_FAST:
             await cancel_pending_in_flight()
         await emit_skips_for_blocked_tasks()
+        await drain_neighbours_now(force=True)
 
         # FAIL_FAST: re-enter the outer except so build_fail_aio fires.
         if error is not None and fail_mode == FailMode.FAIL_FAST:

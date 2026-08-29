@@ -207,6 +207,48 @@ async def test_cancelling_a_reactive_build_flags_it(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_reactive_build_is_handed_out(client: AsyncClient):
+    """The flag a cancel sets is only useful if a drainer can be handed the
+    build: its executions are still running and only a tick stops them."""
+    a = await _build(client)
+    await client.post(f"/api/v1/builds/{a}/cancel")
+    assert [c["build_id"] for c in await _candidates(client)] == [a]
+
+
+@pytest.mark.asyncio
+async def test_evicting_a_slot_holder_flags_the_builds_queued_on_the_key(
+    client: AsyncClient,
+):
+    """The eviction route writes RUNNING→FAILED on its own path; same hook."""
+    response = await client.put(
+        "/api/v1/concurrency-limits/gpu", json={"max_concurrent": 1}
+    )
+    assert response.status_code == 200, response.text
+    a, b = await _build(client), await _build(client, "app-b")
+    await _register(client, a, "holder", limit_keys=["gpu"])
+    await _register(client, b, "waiter", limit_keys=["gpu"])
+    await _start(client, a, "holder", limit_key=["gpu"])
+    await _clear(client, a, b)
+    response = await client.post("/api/v1/concurrency-limits/gpu/holders/holder/evict")
+    assert response.status_code == 200, response.text
+    assert await _needs_tick(client, b) is True
+
+
+@pytest.mark.asyncio
+async def test_notify_from_a_caller_that_cannot_spawn_does_not_mark_the_build(
+    client: AsyncClient,
+):
+    """A notifier with no app to reach a tick must not block the drainers
+    that can, for a whole window."""
+    a = await _build(client)
+    notify = (
+        await client.post(f"/api/v1/builds/{a}/notify", params={"can_spawn": "false"})
+    ).json()
+    assert notify["scheduler_live"] is False
+    assert [c["build_id"] for c in await _candidates(client)] == [a]
+
+
+@pytest.mark.asyncio
 async def test_cancelling_a_resident_build_does_not_flag_it(client: AsyncClient):
     a = await _build(client, app=None)
     await client.post(f"/api/v1/builds/{a}/cancel")

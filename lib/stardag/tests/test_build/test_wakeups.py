@@ -20,7 +20,7 @@ from stardag.build import build_aio, discover_and_register_aio, run_tick_aio
 from stardag.build import _wakeups as wakeups_module
 from stardag.build._base import TaskExecutorABC
 from stardag.build._wakeups import drain_wake_candidates
-from stardag.exceptions import NotFoundError
+from stardag.exceptions import APIError, NotFoundError
 from stardag.registry import WakeCandidate
 from stardag.target._in_memory import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
@@ -109,7 +109,7 @@ class TestDrainWakeCandidates:
         registry.candidates = [a, b]
         spawned, spawn = _spawner()
 
-        assert await drain_wake_candidates(registry, spawn) == 2
+        assert await drain_wake_candidates(registry, spawn) == [a.build_id, b.build_id]
         assert spawned == [(a.build_id, "app-a"), (b.build_id, "app-b")]
 
     async def test_one_failing_spawn_does_not_stop_the_rest(self):
@@ -123,7 +123,7 @@ class TestDrainWakeCandidates:
                 raise RuntimeError("app deleted")
             spawn(build_id, app_name)
 
-        assert await drain_wake_candidates(registry, flaky) == 1
+        assert await drain_wake_candidates(registry, flaky) == [b.build_id]
         assert spawned == [(b.build_id, "app-b")]
 
     async def test_a_missing_route_disables_the_drain_for_the_process(self):
@@ -133,18 +133,27 @@ class TestDrainWakeCandidates:
         registry.candidates_error = NotFoundError("Not Found", detail="Not Found")
         spawned, spawn = _spawner()
 
-        assert await drain_wake_candidates(registry, spawn) == 0
+        assert await drain_wake_candidates(registry, spawn) == []
         assert wakeups_module._wake_candidates_route_missing is True
         registry.candidates_error = None
         registry.candidates = [_candidate()]
-        assert await drain_wake_candidates(registry, spawn) == 0
+        assert await drain_wake_candidates(registry, spawn) == []
         assert registry.candidate_calls == 1
+
+    async def test_a_405_also_means_the_route_is_missing(self):
+        """The route sits under /builds, so a server that has
+        GET /builds/{build_id} and not this route answers 405, not 404."""
+        registry = WakingRegistry(root_task_ids=[])
+        registry.candidates_error = APIError("Method Not Allowed", status_code=405)
+        spawned, spawn = _spawner()
+        assert await drain_wake_candidates(registry, spawn) == []
+        assert wakeups_module._wake_candidates_route_missing is True
 
     async def test_a_registry_error_is_swallowed(self):
         registry = WakingRegistry(root_task_ids=[])
         registry.candidates_error = RuntimeError("503")
         spawned, spawn = _spawner()
-        assert await drain_wake_candidates(registry, spawn) == 0
+        assert await drain_wake_candidates(registry, spawn) == []
         assert wakeups_module._wake_candidates_route_missing is False
 
 
@@ -272,6 +281,44 @@ class TestTickDrainsNeighbours:
 
         assert registry.candidate_calls == 0
 
+    async def test_own_build_handed_out_by_the_drain_replaces_the_hand_off(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A wake-up that landed while this tick held the lease makes the
+        tick's own build a candidate once the lease is released. The drain
+        runs first and spawns it — counted as the successor it is — and the
+        hand-off must then NOT spawn a second one."""
+        (root,) = _chain("drained-own-root")
+        registry, locks, executor, store = _tick_setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id), status="running", executor="fake", executor_ref="r"
+        )
+        registry.reactive_app_name = "my-app"
+        build_id = uuid4()
+        locks_impl = typing.cast(typing.Any, locks)
+
+        def on_release() -> None:
+            registry.needs_tick = True
+            registry.candidates = [
+                WakeCandidate(build_id=build_id, reactive_app_name="my-app")
+            ]
+
+        locks_impl.on_release = on_release
+        spawned, spawn = _spawner()
+
+        summary = await run_tick_aio(
+            build_id,
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
+        )
+
+        assert spawned == [(build_id, "my-app")]
+        assert summary.successor_spawned == 1
+        assert summary.neighbour_ticks_spawned == 0
+
     async def test_hand_off_spawns_on_the_builds_own_app(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
@@ -331,19 +378,22 @@ class TestDiscoveryRegistersLimitKeys:
         await discover_and_register_aio(registry, uuid4(), (root,))
         assert registry.bulk_limit_keys == [None]
 
-    async def test_a_raising_selector_registers_no_keys_for_that_task(
+    async def test_a_raising_selector_fails_discovery(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
+        """One error policy: the tick's spawn path calls the selector
+        unguarded, so plan time does not hide what it would raise later."""
         (root,) = _chain("raising-root")
         registry = WakingRegistry(root_task_ids=[str(root.id)], auto_complete=False)
 
         def selector(task: BaseTask) -> list[str]:
             raise ValueError("no")
 
-        await discover_and_register_aio(
-            registry, uuid4(), (root,), limit_key_selector=selector
-        )
-        assert registry.bulk_limit_keys == [{root.id: []}]
+        with pytest.raises(ValueError):
+            await discover_and_register_aio(
+                registry, uuid4(), (root,), limit_key_selector=selector
+            )
+        assert registry.bulk_limit_keys == []
 
 
 # --- the resident engine -----------------------------------------------------

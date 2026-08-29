@@ -66,13 +66,26 @@ WAKE_HANDOUT_WINDOW = timedelta(seconds=120)
 MAX_WAKE_CANDIDATES = 20
 
 
-def _live_reactive_build_filters(environment_id: UUID) -> list:
+def _reactive_build_filters(environment_id: UUID, statuses: tuple) -> list:
     return [
         Build.environment_id == environment_id,
-        Build.latest_status == BuildStatus.RUNNING,
+        Build.latest_status.in_(statuses),
         Build.reactive_app_name.is_not(None),
         Build.reactive_app_name != "",
     ]
+
+
+def _live_reactive_build_filters(environment_id: UUID) -> list:
+    """Reactive builds a task transition is news for: the RUNNING ones."""
+    return _reactive_build_filters(environment_id, (BuildStatus.RUNNING,))
+
+
+# Statuses a flagged build may be handed out in. RUNNING is the ordinary
+# case. CANCELLED is the build-level cancel (UI, CLI, reaper): the build is
+# terminal in the registry but its detached executions are still running,
+# and only a tick can stop them — so a cancelled build needs exactly one
+# more tick, which is what its flag asks for.
+_CANDIDATE_STATUSES = (BuildStatus.RUNNING, BuildStatus.CANCELLED)
 
 
 async def _flag_builds(
@@ -218,7 +231,8 @@ async def select_wake_candidates(
 ) -> list[Build]:
     """Hand out the flagged builds nobody is serving. No commit.
 
-    A build qualifies when it is RUNNING, reactively scheduled, has a
+    A build qualifies when it is RUNNING (or CANCELLED with the flag its
+    cancel set — see ``_CANDIDATE_STATUSES``), reactively scheduled, has a
     pending wake-up (``needs_tick_at``), holds no live scheduler lease, and
     was not handed out within :data:`WAKE_HANDOUT_WINDOW`. Every build
     returned is stamped ``tick_requested_at = now`` in the same transaction,
@@ -240,7 +254,7 @@ async def select_wake_candidates(
             await db.execute(
                 select(Build)
                 .where(
-                    *_live_reactive_build_filters(environment_id),
+                    *_reactive_build_filters(environment_id, _CANDIDATE_STATUSES),
                     Build.needs_tick_at.is_not(None),
                     (Build.tick_requested_at.is_(None))
                     | (Build.tick_requested_at < handout_before),

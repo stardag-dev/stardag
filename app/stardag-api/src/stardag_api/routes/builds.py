@@ -492,6 +492,38 @@ async def _get_build_and_task(
     return build, db_task
 
 
+async def _replace_limit_keys(
+    db: AsyncSession, keys_by_task_pk: Mapping[UUID, Sequence[str]]
+) -> None:
+    """Make each task's ``TaskLimitKey`` rows exactly the keys given.
+
+    Shared by the start path (keys the task is started under) and plan-time
+    registration (keys a pending task will want). ON CONFLICT DO NOTHING:
+    two concurrent starts for the same task can both pass the delete and
+    race the inserts (only reachable when the scheduler lease is bypassed
+    or via manual API use) — a duplicate key is then a benign no-op instead
+    of a 500.
+    """
+    if not keys_by_task_pk:
+        return
+    await db.execute(
+        delete(TaskLimitKey).where(TaskLimitKey.task_pk.in_(list(keys_by_task_pk)))
+    )
+    rows = [
+        {"id": generate_uuid7(), "task_pk": task_pk, "key": key}
+        for task_pk, keys in keys_by_task_pk.items()
+        for key in dict.fromkeys(keys)
+    ]
+    if not rows:
+        return
+    insert_stmt = (
+        sqlite_insert(TaskLimitKey)
+        if db.bind is not None and db.bind.dialect.name == "sqlite"
+        else pg_insert(TaskLimitKey)
+    )
+    await db.execute(insert_stmt.values(rows).on_conflict_do_nothing())
+
+
 async def _create_task_event(
     build_id: UUID,
     task_id: str,
@@ -606,28 +638,7 @@ async def _create_task_event(
     if limit_keys is not None:
         # Replace the task's limit-key rows (only when explicitly provided —
         # a later ref-recording re-start without keys must not clear them).
-        # ON CONFLICT DO NOTHING: two concurrent starts for the same task can
-        # both pass the delete and race the inserts (only reachable when the
-        # scheduler lease is bypassed or via manual API use) — a duplicate
-        # key is then a benign no-op instead of a 500.
-        await db.execute(delete(TaskLimitKey).where(TaskLimitKey.task_pk == db_task.id))
-        insert_stmt = (
-            sqlite_insert(TaskLimitKey)
-            if db.bind is not None and db.bind.dialect.name == "sqlite"
-            else pg_insert(TaskLimitKey)
-        )
-        await db.execute(
-            insert_stmt.values(
-                [
-                    {
-                        "id": generate_uuid7(),
-                        "task_pk": db_task.id,
-                        "key": key,
-                    }
-                    for key in dict.fromkeys(limit_keys)
-                ]
-            ).on_conflict_do_nothing()
-        )
+        await _replace_limit_keys(db, {db_task.id: limit_keys})
     await db.commit()
 
     record_entity_created(auth.workspace_id, "events")
@@ -1576,6 +1587,18 @@ async def notify_build(
     build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    can_spawn: Annotated[
+        bool,
+        Query(
+            description=(
+                "Whether the caller can spawn a scheduler tick itself. The "
+                "default assumes it can, and marks the build as handed out so "
+                "no concurrent wake-candidates call spawns a second tick. A "
+                "caller that cannot (no deployed app to reach) says so here, "
+                "so the build stays available to drainers that can."
+            ),
+        ),
+    ] = True,
 ):
     """Set the build's scheduler wake-up flag (``needs_tick_at``).
 
@@ -1606,10 +1629,11 @@ async def notify_build(
     # below says a scheduler is live — so the caller will *not* spawn —
     # the stamp is put back, and the build is exactly as it was.
     previous_stamp = build.tick_requested_at
-    await mark_tick_requested(db, build, now=now)
+    if can_spawn:
+        await mark_tick_requested(db, build, now=now)
     await db.commit()
     scheduler_live = await is_scheduler_live(db, auth.environment_id, build_id)
-    if scheduler_live:
+    if scheduler_live and can_spawn:
         build.tick_requested_at = previous_stamp
         await db.commit()
     return BuildNotifyResponse(
@@ -2852,29 +2876,15 @@ async def register_tasks_bulk(
     # joins them to ``live_claim_filter()``. Replace semantics, per task,
     # only when the caller supplied keys; a RUNNING task keeps the keys it
     # was started under, since those are what it currently occupies.
-    keyed = [
-        t
-        for t in tasks_in
-        if t.limit_keys is not None
-        and db_task_by_task_id[t.task_id].latest_status != TaskStatus.RUNNING
-    ]
-    if keyed:
-        keyed_pks = [pk_by_task_id[t.task_id] for t in keyed]
-        await db.execute(
-            delete(TaskLimitKey).where(TaskLimitKey.task_pk.in_(keyed_pks))
-        )
-        key_rows = [
-            {"id": generate_uuid7(), "task_pk": pk_by_task_id[t.task_id], "key": key}
-            for t in keyed
-            for key in dict.fromkeys(t.limit_keys or [])
-        ]
-        if key_rows:
-            key_insert = (
-                sqlite_insert(TaskLimitKey)
-                if db.bind is not None and db.bind.dialect.name == "sqlite"
-                else pg_insert(TaskLimitKey)
-            )
-            await db.execute(key_insert.values(key_rows).on_conflict_do_nothing())
+    await _replace_limit_keys(
+        db,
+        {
+            pk_by_task_id[t.task_id]: t.limit_keys or []
+            for t in tasks_in
+            if t.limit_keys is not None
+            and db_task_by_task_id[t.task_id].latest_status != TaskStatus.RUNNING
+        },
+    )
 
     if events:
         db.add_all(events)

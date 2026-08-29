@@ -437,21 +437,15 @@ def _limit_keys_for(
     tasks: Sequence[BaseTask],
     selector: "Callable[[BaseTask], Sequence[str]] | None",
 ) -> "dict[UUID, Sequence[str]] | None":
-    """Per-task limit keys for a registration chunk, or None without a selector."""
+    """Per-task limit keys for a registration chunk, or None without a selector.
+
+    A selector that raises propagates: the tick's spawn path calls the same
+    selector unguarded, so hiding the error here would only move it from
+    the bootstrap — where it fails the build loudly, once — to a later pass.
+    """
     if selector is None:
         return None
-    keys: dict[UUID, Sequence[str]] = {}
-    for task in tasks:
-        try:
-            keys[task.id] = list(selector(task))
-        except Exception:
-            logger.warning(
-                f"limit_key_selector raised for task {task.id}; registering it "
-                "with no concurrency-limit keys.",
-                exc_info=True,
-            )
-            keys[task.id] = []
-    return keys
+    return {task.id: list(selector(task)) for task in tasks}
 
 
 async def discover_and_register_aio(
@@ -507,8 +501,7 @@ async def discover_and_register_aio(
     lets the registry wake the builds queued on a key when a slot frees:
     the relation it needs is "which pending tasks want this key", and keys
     are a property of the task, so plan time is when it can learn them. A
-    selector that raises for a task is treated as "no keys" for that task,
-    since a diagnostic must not fail a registration.
+    selector that raises propagates, as it does on the tick's spawn path.
 
     With ``retry_failed=True``, incomplete tasks whose registry status is
     failed/cancelled/skipped/suspended (from a previous build) are reset to
@@ -993,7 +986,7 @@ async def _drain_wake_candidates(
     registry: RegistryABC,
     config: TickConfig,
     summary: TickSummary,
-) -> None:
+) -> list[UUID]:
     """Spawn ticks for the other builds the registry says need one.
 
     The cross-build half of a wake-up. The registry flags every reactive
@@ -1013,10 +1006,18 @@ async def _drain_wake_candidates(
     drains on its own passes. Best-effort, see :mod:`stardag.build._wakeups`.
     """
     if config.spawn_tick is None:
-        return
-    summary.neighbour_ticks_spawned += await drain_wake_candidates(
+        return []
+    spawned = await drain_wake_candidates(
         registry, config.spawn_tick, build_id=build_id
     )
+    # The tick's own build can be handed out on the exit path (flagged while
+    # this tick held the lease, lease now released): that is a successor,
+    # not a neighbour, and is counted as the hand-off it replaces.
+    own = build_id in spawned
+    summary.neighbour_ticks_spawned += len(spawned) - (1 if own else 0)
+    if own:
+        summary.successor_spawned += 1
+    return spawned
 
 
 # Set once per process the first time a tick takes the scheduler lease
@@ -1441,20 +1442,31 @@ async def _run_tick_body_aio(
         # the next completion or the watchdog. In that state the registry is
         # refusing writes and the build is not progressing regardless, which
         # makes it much the cheaper of the two failures.
-        if (
-            acquired
-            and cleared_a_wakeup
-            and summary.outcome not in _NO_HANDOFF_OUTCOMES
-        ):
-            await _hand_off_if_needed(
-                build_id, registry=registry, config=config, summary=summary
-            )
         # Cross-build drain on the way out, whatever the outcome — terminal
         # included, since a finishing build's last completion is often
         # exactly what unblocked a neighbour. A tick that never held the
         # lease skips it: the holder drains on its own passes.
+        #
+        # BEFORE the hand-off, on purpose. With the lease released, this
+        # tick's own build is a candidate if a wake-up landed while it held
+        # the lease (the notifier saw a live scheduler and did not spawn), so
+        # the drain may hand it out and spawn its successor — stamped
+        # server-side, so no other drainer doubles it. The hand-off below
+        # then only covers what the drain could not: a registry without the
+        # route, or a hand-out refused because the build was stamped within
+        # the window by a notifier that will spawn anyway.
+        drained: list[UUID] = []
         if acquired and summary.outcome != "not_reactive":
-            await _drain_wake_candidates(
+            drained = await _drain_wake_candidates(
+                build_id, registry=registry, config=config, summary=summary
+            )
+        if (
+            acquired
+            and cleared_a_wakeup
+            and build_id not in drained
+            and summary.outcome not in _NO_HANDOFF_OUTCOMES
+        ):
+            await _hand_off_if_needed(
                 build_id, registry=registry, config=config, summary=summary
             )
     return  # unreachable: the loop above always returns

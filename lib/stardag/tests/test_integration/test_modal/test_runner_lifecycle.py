@@ -284,7 +284,7 @@ class TestReactiveWorkerBehavior:
     ) -> None:
         """Point the registry's ``build_notify`` at a canned answer."""
 
-        def build_notify(build_id: UUID):
+        def build_notify(build_id: UUID, *, can_spawn: bool = True):
             if notified is not None:
                 notified.append(build_id)
             if isinstance(result, Exception):

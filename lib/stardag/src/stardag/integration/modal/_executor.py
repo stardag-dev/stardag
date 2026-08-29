@@ -42,6 +42,7 @@ from stardag.integration.modal._metadata import (
     _get_modal_function_id_aio,
     _get_modal_workspace_aio,
 )
+from stardag.integration.modal._spawn import spawn_tick
 from stardag.integration.modal._selector import (
     WorkerSelector,
     _normalize_worker_selection,
@@ -530,9 +531,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         reactive builds its completions unblocked — the same call a tick
         makes for its neighbours.
         """
-        modal.Function.from_name(app_name=app_name, name="tick").spawn(
-            build_id=str(build_id)
-        )
+        spawn_tick(build_id, app_name)
 
     async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
         """Cancel a spawned function call by its recorded id."""

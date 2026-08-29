@@ -17,11 +17,12 @@ quietly.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import typing
 from uuid import UUID
 
-from stardag.exceptions import NotFoundError, is_missing_route_error
+from stardag.exceptions import APIError, NotFoundError, is_missing_route_error
 from stardag.registry import RegistryABC
 
 logger = logging.getLogger(__name__)
@@ -43,15 +44,30 @@ at this build, and it is not me".
 _wake_candidates_route_missing = False
 
 
+def _route_unsupported(error: Exception) -> bool:
+    """Whether ``error`` says the registry predates the wake-candidates route.
+
+    Two shapes, because the route sits under ``/builds``: a server with no
+    such path answers the missing-route 404, but a server that has
+    ``GET /builds/{build_id}`` and not this route matches the path to that
+    parameter and answers **405**. Both mean the same thing here.
+    """
+    if isinstance(error, NotFoundError):
+        return is_missing_route_error(error)
+    return isinstance(error, APIError) and error.status_code == 405
+
+
 async def drain_wake_candidates(
     registry: RegistryABC,
     spawn: SpawnTick,
     *,
     build_id: UUID | None = None,
-) -> int:
+) -> list[UUID]:
     """Spawn a tick for every flagged, unserved build the registry hands out.
 
-    Returns how many were spawned. Best-effort throughout, and that is a
+    Returns the ids of the builds spawned for — the caller's own build can be
+    among them, which the tick's exit path needs to know so it does not hand
+    off to a successor it has just spawned. Best-effort throughout, and that is a
     contract rather than a shortcut: this runs on the hot path of every
     scheduler pass and on the exit path of every tick, so nothing it can
     raise is worth propagating — a failed drain degrades to the previous
@@ -67,11 +83,11 @@ async def drain_wake_candidates(
     """
     global _wake_candidates_route_missing
     if _wake_candidates_route_missing:
-        return 0
+        return []
     try:
         candidates = await registry.build_wake_candidates_aio()
-    except NotFoundError as e:
-        if is_missing_route_error(e):
+    except Exception as e:
+        if _route_unsupported(e):
             _wake_candidates_route_missing = True
             logger.debug(
                 "Registry API does not support wake candidates; cross-build "
@@ -80,15 +96,17 @@ async def drain_wake_candidates(
             )
         else:
             logger.warning("Wake candidates not fetched (ignored): %s", e)
-        return 0
-    except Exception as e:
-        logger.warning("Wake candidates not fetched (ignored): %s", e)
-        return 0
+        return []
 
-    spawned = 0
+    spawned: list[UUID] = []
     for candidate in candidates:
         try:
-            spawn(candidate.build_id, candidate.reactive_app_name)
+            # Spawning is a blocking backend call (a Modal RPC, with a
+            # hydration on a cold client); off the event loop, so a slow
+            # spawn does not stall the scheduler's own I/O.
+            await asyncio.to_thread(
+                spawn, candidate.build_id, candidate.reactive_app_name
+            )
         except Exception as e:
             logger.warning(
                 "Could not spawn a scheduler tick for build %s on app %r "
@@ -99,7 +117,7 @@ async def drain_wake_candidates(
                 e,
             )
             continue
-        spawned += 1
+        spawned.append(candidate.build_id)
         logger.info(
             "Build %s is flagged with no scheduler live; spawned its tick on app %r%s.",
             candidate.build_id,

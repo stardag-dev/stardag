@@ -1504,25 +1504,41 @@ class APIRegistry(RegistryABC):
         )
         return list(response.json().get("skipped_task_ids", []))
 
-    def build_notify(self, build_id: UUID) -> BuildNotifyResult:
-        """Set the build's scheduler wake-up flag."""
+    def build_notify(
+        self, build_id: UUID, *, can_spawn: bool = True
+    ) -> BuildNotifyResult:
+        """Set the build's scheduler wake-up flag.
+
+        ``can_spawn=False`` tells the server this caller cannot spawn a
+        tick, so it must not mark the build as handed out on the caller's
+        behalf (see ``POST /builds/{id}/notify``). Sent only when False, so
+        an older server sees the request it always saw.
+        """
         response = self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/notify",
-            params=self._get_params(),
+            params=self._notify_params(can_spawn),
             operation=f"Notify build {build_id}",
         )
         return self._parse_notify_response(build_id, response)
 
-    async def build_notify_aio(self, build_id: UUID) -> BuildNotifyResult:
+    async def build_notify_aio(
+        self, build_id: UUID, *, can_spawn: bool = True
+    ) -> BuildNotifyResult:
         """Async version - set the build's scheduler wake-up flag."""
         response = await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/notify",
-            params=self._get_params(),
+            params=self._notify_params(can_spawn),
             operation=f"Notify build {build_id}",
         )
         return self._parse_notify_response(build_id, response)
+
+    def _notify_params(self, can_spawn: bool) -> dict[str, str]:
+        params = self._get_params()
+        if not can_spawn:
+            params = {**params, "can_spawn": "false"}
+        return params
 
     @staticmethod
     def _parse_notify_response(build_id: UUID, response: Any) -> BuildNotifyResult:

@@ -49,6 +49,7 @@ from stardag_api.schemas import (
 )
 from stardag_api.services.claims import live_claim_filter
 from stardag_api.services.status import apply_event_to_task, get_attempt_counts_in_build
+from stardag_api.services.wakeups import flag_after_task_transition
 
 router = APIRouter(prefix="/concurrency-limits", tags=["concurrency-limits"])
 
@@ -374,7 +375,17 @@ async def evict_concurrency_limit_holder(
     )
     db.add(event)
     await db.flush()
+    previous_status = db_task.latest_status
     apply_event_to_task(db_task, event)
+    # The eviction released a claim and its slots: flag the other builds
+    # holding the task and the builds queued on the key — the same hook
+    # every status-writing path runs (see services.wakeups).
+    await flag_after_task_transition(
+        db,
+        db_task,
+        previous_status=previous_status,
+        build_id=db_task.latest_status_build_id,
+    )
     # Wake the owning build's scheduler in the same transaction: a
     # reactive build should observe the eviction on the next tick, not
     # only at the next watchdog sweep (or never, with the watchdog off).
