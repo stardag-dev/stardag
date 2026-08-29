@@ -522,6 +522,10 @@ class _WorkerLifecycleReporter:
         # — means "unknown", and unknown spawns. The asymmetry decides it:
         # a redundant tick costs one container, a wrongly skipped one costs
         # the build its progress until the watchdog.
+        # Neighbours first, and unconditionally: whether *this* build has a
+        # live scheduler says nothing about theirs, so the skip below must
+        # not take them with it.
+        self._wake_neighbours(notified)
         if getattr(notified, "scheduler_live", None) is True:
             logger.debug(
                 "Build %s already has a live scheduler; wake-up flag set, "
@@ -543,6 +547,47 @@ class _WorkerLifecycleReporter:
             )
 
         self._guard(_spawn_tick, "tick-spawn")
+
+    def _wake_neighbours(self, notified: typing.Any) -> None:
+        """Spawn ticks for other builds this one's news unblocked.
+
+        A build only ever wakes itself: this worker notifies the build it
+        belongs to, and nothing tells the build next door that the task it
+        was blocked on just finished. The registry knows who those are —
+        it holds the plans — but it has no executor and never spawns. So it
+        names them and we do it, which is the only place in the system that
+        can.
+
+        Each entry carries its own ``reactive_app_name`` and is spawned
+        against it, so a neighbour deployed as a *different* app is reached
+        too. That costs nothing extra here — it is the same call the
+        foreign-app forward already makes — and running several apps
+        against one workspace is supported to exactly that extent. A
+        neighbour in a different Modal *environment* is not reached; the
+        lookup would need one, and nothing carries it.
+
+        Best-effort per build: an app that has been deleted or renamed must
+        not take down the report of a task that genuinely finished. Each
+        failure is logged and the rest still go.
+        """
+        for other in getattr(notified, "wake_builds", None) or []:
+            other_app = getattr(other, "reactive_app_name", None)
+            other_build = getattr(other, "build_id", None)
+            if not other_app or other_build is None:
+                continue
+
+            def _spawn(app: str = other_app, build: typing.Any = other_build) -> None:
+                modal.Function.from_name(app_name=app, name="tick").spawn(
+                    build_id=str(build)
+                )
+
+            logger.info(
+                "Build %s is waiting on work this task unblocked; spawning "
+                "its tick on app %s.",
+                other_build,
+                other_app,
+            )
+            self._guard(_spawn, f"neighbour-tick-spawn({other_build})")
 
 
 class Runner(RunFunction):

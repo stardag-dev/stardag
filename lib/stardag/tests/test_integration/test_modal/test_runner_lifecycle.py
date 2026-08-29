@@ -24,7 +24,12 @@ from stardag.integration.modal._metadata import (
     STARDAG_BUILD_ID_ENV,
 )
 from stardag.integration.modal._runner import Runner, _WorkerLifecycleReporter
-from stardag.registry import BuildNotifyResult, NoOpRegistry, registry_provider
+from stardag.registry import (
+    BuildNotifyResult,
+    BuildToWake,
+    NoOpRegistry,
+    registry_provider,
+)
 from stardag.testing.modal._tasks import SyncDynamicRangeSumTask, make_range
 
 WORKER_CALL_ID = "fc-worker-call-1"
@@ -343,6 +348,136 @@ class TestReactiveWorkerBehavior:
 
         assert notified == [build_id], "the flag must still be set"
         assert tick_spawn_stub == {}, "no tick spawned while a scheduler is live"
+
+    def test_wakes_neighbouring_builds_including_on_another_app(
+        self,
+        recording_registry,
+        fake_call_id,
+        monkeypatch,
+        default_in_memory_fs_target,
+    ):
+        """The other half of a cross-build wake-up.
+
+        A build only ever wakes itself, so a neighbour blocked on the task
+        this worker just finished has nothing to tell it. The registry names
+        those builds; only a worker can spawn. Each is spawned against its
+        *own* app, so a neighbour deployed separately is reached too.
+        """
+        import modal as _modal
+
+        spawns: list[dict] = []
+
+        class _Stub:
+            def __init__(self, app_name):
+                self._app_name = app_name
+
+            def spawn(self, **kwargs):
+                spawns.append({"app_name": self._app_name, **kwargs})
+
+        monkeypatch.setattr(
+            _modal.Function,
+            "from_name",
+            staticmethod(lambda **kw: _Stub(kw["app_name"])),
+        )
+
+        build_id = uuid4()
+        neighbour_same_app, neighbour_other_app = uuid4(), uuid4()
+        self._notify_returning(
+            recording_registry,
+            BuildNotifyResult(
+                build_id=build_id,
+                scheduler_live=False,
+                wake_builds=[
+                    BuildToWake(
+                        build_id=neighbour_same_app, reactive_app_name="wake-app"
+                    ),
+                    BuildToWake(
+                        build_id=neighbour_other_app, reactive_app_name="other-app"
+                    ),
+                ],
+            ),
+        )
+
+        Runner()(make_range(limit=3), env_overrides=self._reactive_env(build_id))
+
+        assert spawns == [
+            {"app_name": "wake-app", "build_id": str(neighbour_same_app)},
+            {"app_name": "other-app", "build_id": str(neighbour_other_app)},
+            {"app_name": "wake-app", "build_id": str(build_id)},
+        ]
+
+    def test_neighbours_are_woken_even_when_this_build_skips_its_own_spawn(
+        self,
+        recording_registry,
+        fake_call_id,
+        tick_spawn_stub,
+        default_in_memory_fs_target,
+    ):
+        """`scheduler_live` is about *this* build. A neighbour's need is
+        independent of it, so the skip must not take them with it."""
+        build_id, neighbour = uuid4(), uuid4()
+        self._notify_returning(
+            recording_registry,
+            BuildNotifyResult(
+                build_id=build_id,
+                scheduler_live=True,
+                wake_builds=[
+                    BuildToWake(build_id=neighbour, reactive_app_name="other-app")
+                ],
+            ),
+        )
+
+        Runner()(make_range(limit=3), env_overrides=self._reactive_env(build_id))
+
+        # The neighbour was spawned; this build's own tick was not.
+        assert tick_spawn_stub["from_name"] == {
+            "app_name": "other-app",
+            "name": "tick",
+        }
+        assert tick_spawn_stub["spawn_kwargs"] == {"build_id": str(neighbour)}
+
+    def test_a_dead_neighbour_app_does_not_break_the_report(
+        self,
+        recording_registry,
+        fake_call_id,
+        monkeypatch,
+        default_in_memory_fs_target,
+    ):
+        """An app deleted or renamed must not take down the report of a task
+        that genuinely finished, nor stop the other neighbours."""
+        import modal as _modal
+
+        reached: list[str] = []
+
+        def _from_name(**kw):
+            reached.append(kw["app_name"])
+            if kw["app_name"] == "gone-app":
+                raise RuntimeError("app not found")
+
+            class _Stub:
+                def spawn(self, **kwargs):
+                    pass
+
+            return _Stub()
+
+        monkeypatch.setattr(_modal.Function, "from_name", staticmethod(_from_name))
+
+        build_id = uuid4()
+        self._notify_returning(
+            recording_registry,
+            BuildNotifyResult(
+                build_id=build_id,
+                scheduler_live=False,
+                wake_builds=[
+                    BuildToWake(build_id=uuid4(), reactive_app_name="gone-app"),
+                    BuildToWake(build_id=uuid4(), reactive_app_name="live-app"),
+                ],
+            ),
+        )
+
+        Runner()(make_range(limit=3), env_overrides=self._reactive_env(build_id))
+
+        assert reached == ["gone-app", "live-app", "wake-app"]
 
     @pytest.mark.parametrize(
         "notify_result",

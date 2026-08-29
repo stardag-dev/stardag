@@ -220,6 +220,20 @@ class BuildFrontier(StardagBaseModel):
     reactive_tick_kwargs: dict[str, Any] | None = None
 
 
+class BuildToWake(StardagBaseModel):
+    """A build the notifying caller should spawn a scheduler tick for.
+
+    Cross-build coordination takes both halves. The server knows who holds
+    which task, so it flags the neighbour; only the caller has an executor,
+    so it spawns. This is the handover, and it carries ``reactive_app_name``
+    because that is what a caller needs to reach the right deployed tick —
+    the neighbour may belong to a different app than the caller does.
+    """
+
+    build_id: UUID
+    reactive_app_name: str
+
+
 class BuildNotifyResult(StardagBaseModel):
     """Outcome of ``build_notify`` — the wake-up set, and who can serve it.
 
@@ -243,6 +257,13 @@ class BuildNotifyResult(StardagBaseModel):
     build_id: UUID | None = None
     needs_tick: bool = True
     scheduler_live: bool | None = None
+    # Other live reactive builds that share a task with this one and are
+    # waiting for a tick nobody will spawn. A build only ever wakes itself,
+    # so a neighbour blocked on a task this build just finished has nothing
+    # to tell it — the caller spawning for them is what closes that. Empty
+    # on servers predating the field, which is the old behaviour: those
+    # builds then wait for the watchdog.
+    wake_builds: list[BuildToWake] = []
 
 
 class BuildInfo(StardagBaseModel):

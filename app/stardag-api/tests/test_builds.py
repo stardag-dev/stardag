@@ -3563,3 +3563,91 @@ async def test_denied_claim_consumes_no_limit_slot(client: AsyncClient):
     )
     assert response.status_code == 409
     assert response.json()["detail"]["error_code"] == "concurrency_limit_reached"
+
+
+@pytest.mark.asyncio
+async def test_completing_a_shared_task_wakes_the_other_build(client: AsyncClient):
+    """A task finishing in one build must flag every other build holding it.
+
+    A reactive build only runs while one of its ticks does, and a tick is
+    spawned by something that noticed a change. A worker notifies its own
+    build; nothing notices on behalf of the neighbour that was blocked on
+    the task it just finished. See STA-12.
+    """
+    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    for build_id in (build_a, build_b):
+        response = await client.put(
+            f"/api/v1/builds/{build_id}/reactive-meta",
+            json={"app_name": "app-a"},
+        )
+        assert response.status_code == 200, response.text
+
+    shared = "cross-build-shared"
+    for build_id in (build_a, build_b):
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks",
+            json={
+                "task_id": shared,
+                "task_name": "SharedTask",
+                "task_namespace": "",
+                "task_data": {},
+            },
+        )
+
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks/{shared}/start",
+        params={"executor": "test", "executor_ref": "ref-1"},
+    )
+    # Observe the transition A causes, not a flag some earlier call left.
+    await client.delete(f"/api/v1/builds/{build_b}/notify")
+
+    await client.post(f"/api/v1/builds/{build_a}/tasks/{shared}/complete")
+
+    frontier = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
+    assert frontier["needs_tick"] is True, (
+        "the shared task completed in another build and B was never flagged: "
+        "nothing will spawn a tick for it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_notify_names_the_other_builds_to_wake(client: AsyncClient):
+    """Flagging B is half of it — something still has to spawn B's tick.
+
+    The server cannot; it has no executor. The caller can, and already does
+    for its own build, so the answer has to name the builds and the app each
+    belongs to.
+    """
+    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    for build_id, app in ((build_a, "app-a"), (build_b, "app-b")):
+        response = await client.put(
+            f"/api/v1/builds/{build_id}/reactive-meta",
+            json={"app_name": app},
+        )
+        assert response.status_code == 200, response.text
+
+    shared = "cross-build-shared-notify"
+    for build_id in (build_a, build_b):
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks",
+            json={
+                "task_id": shared,
+                "task_name": "SharedTask",
+                "task_namespace": "",
+                "task_data": {},
+            },
+        )
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks/{shared}/start",
+        params={"executor": "test", "executor_ref": "ref-1"},
+    )
+    await client.post(f"/api/v1/builds/{build_a}/tasks/{shared}/complete")
+
+    notify = (await client.post(f"/api/v1/builds/{build_a}/notify")).json()
+
+    wake = notify.get("wake_builds")
+    assert wake is not None, "notify does not report other builds to wake"
+    assert [w["build_id"] for w in wake] == [build_b]
+    assert wake[0]["reactive_app_name"] == "app-b"

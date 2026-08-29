@@ -4,6 +4,7 @@ These tests verify complete workflows across API, SDK, and UI components.
 """
 
 import typing
+import uuid
 from pathlib import Path
 
 import httpx
@@ -826,3 +827,197 @@ class TestSDKBuildWorkflow:
         # (start->left, start->right, left->merge, right->merge)
         assert len(graph["nodes"]) == 4
         assert len(graph["edges"]) == 4
+
+
+class TestCrossBuildWakeUp:
+    """Two builds sharing a task: finishing it must wake the one still waiting.
+
+    Reactive builds have no resident scheduler — a build runs only while one
+    of its ticks does, and a tick is spawned by something that noticed a
+    change. A worker notifies its *own* build, so when build A finishes a
+    task that build B is blocked on, nothing tells B. See STA-12.
+
+    Written against the API rather than through Modal on purpose: the whole
+    question is what the server records and what it tells the caller, and
+    that is answerable without an executor.
+    """
+
+    @staticmethod
+    def _api_key(client: httpx.Client, workspace_id: str, environment_id: str) -> str:
+        response = client.post(
+            f"/api/v1/ui/workspaces/{workspace_id}"
+            f"/environments/{environment_id}/api-keys",
+            json={"name": "Cross-build wake-up"},
+        )
+        assert response.status_code == 201
+        return response.json()["key"]
+
+    @staticmethod
+    def _reactive_build(api: str, key: str, app_name: str) -> str:
+        """A build that looks like one a reactive trigger made.
+
+        ``reactive_app_name`` is the marker: a build without it is not
+        tick-driven, so waking it would mean nothing.
+        """
+        headers = {"X-API-Key": key}
+        response = httpx.post(
+            f"{api}/api/v1/builds", headers=headers, json={}, timeout=30.0
+        )
+        assert response.status_code == 201
+        build_id = response.json()["id"]
+        response = httpx.put(
+            f"{api}/api/v1/builds/{build_id}/reactive-meta",
+            headers=headers,
+            json={"app_name": app_name},
+            timeout=30.0,
+        )
+        assert response.status_code == 200, response.text
+        return build_id
+
+    @staticmethod
+    def _register(api: str, key: str, build_id: str, task_id: str, name: str) -> None:
+        response = httpx.post(
+            f"{api}/api/v1/builds/{build_id}/tasks",
+            headers={"X-API-Key": key},
+            json={
+                "task_id": task_id,
+                "task_name": name,
+                "task_namespace": "integration_tests.cross_build",
+                "task_data": {},
+            },
+            timeout=30.0,
+        )
+        assert response.status_code == 201, response.text
+
+    def test_completing_a_shared_task_wakes_the_other_build(
+        self,
+        internal_authenticated_client: httpx.Client,
+        docker_services: ServiceEndpoints,
+        test_workspace_id: str,
+        test_environment_id: str,
+    ) -> None:
+        """The bug, stated as the behaviour we want.
+
+        Build A runs the shared task; build B has a downstream waiting on it.
+        When A completes it, B has work to do and no way to find out.
+        """
+        api = docker_services.api
+        key = self._api_key(
+            internal_authenticated_client, test_workspace_id, test_environment_id
+        )
+        headers = {"X-API-Key": key}
+
+        shared = f"shared-{uuid.uuid4().hex[:12]}"
+        downstream = f"downstream-{uuid.uuid4().hex[:12]}"
+
+        build_a = self._reactive_build(api, key, "app-a")
+        build_b = self._reactive_build(api, key, "app-a")
+
+        # The shared task belongs to both builds; B also has the task that
+        # is actually blocked on it.
+        self._register(api, key, build_a, shared, "SharedTask")
+        self._register(api, key, build_b, shared, "SharedTask")
+        self._register(api, key, build_b, downstream, "DownstreamTask")
+        response = httpx.post(
+            f"{api}/api/v1/builds/{build_b}/tasks/{downstream}/dependencies",
+            headers=headers,
+            json={"upstream_task_ids": [shared]},
+            timeout=30.0,
+        )
+        assert response.status_code in (200, 201), response.text
+
+        # A starts the shared task, so B is now genuinely waiting on it.
+        response = httpx.post(
+            f"{api}/api/v1/builds/{build_a}/tasks/{shared}/start",
+            headers=headers,
+            params={"executor": "test", "executor_ref": "ref-1"},
+            timeout=30.0,
+        )
+        assert response.status_code in (200, 201), response.text
+
+        # Clear B's flag: whatever tick left it, we want to observe the
+        # transition caused by A, not a leftover.
+        httpx.delete(
+            f"{api}/api/v1/builds/{build_b}/notify", headers=headers, timeout=30.0
+        )
+        frontier = httpx.get(
+            f"{api}/api/v1/builds/{build_b}/frontier", headers=headers, timeout=30.0
+        ).json()
+        assert frontier["needs_tick"] is False
+        assert not frontier["actionable"], "B should have nothing runnable yet"
+
+        # A's worker finishes the shared task and wakes its own build, which
+        # is all a worker knows how to do.
+        response = httpx.post(
+            f"{api}/api/v1/builds/{build_a}/tasks/{shared}/complete",
+            headers=headers,
+            timeout=30.0,
+        )
+        assert response.status_code in (200, 201), response.text
+        notify = httpx.post(
+            f"{api}/api/v1/builds/{build_a}/notify", headers=headers, timeout=30.0
+        )
+        assert notify.status_code == 200
+
+        # B can now run its downstream task...
+        frontier = httpx.get(
+            f"{api}/api/v1/builds/{build_b}/frontier", headers=headers, timeout=30.0
+        ).json()
+        assert [t["task_id"] for t in frontier["actionable"]] == [downstream]
+
+        # ...but nothing has told B so. Without this, B waits for the
+        # watchdog — which is off by default — or for one of its own tasks
+        # to finish, and it has none running.
+        assert frontier["needs_tick"] is True, (
+            "build B has runnable work because another build finished a "
+            "shared task, and its wake-up flag was never set: nothing will "
+            "spawn a tick for it"
+        )
+
+    def test_notify_tells_the_caller_which_builds_to_wake(
+        self,
+        internal_authenticated_client: httpx.Client,
+        docker_services: ServiceEndpoints,
+        test_workspace_id: str,
+        test_environment_id: str,
+    ) -> None:
+        """Setting B's flag is not enough — something must spawn B's tick.
+
+        The server cannot: it has no executor. The caller can, and already
+        does for its own build, so the wake-up answer has to name the builds
+        and the app each one belongs to.
+        """
+        api = docker_services.api
+        key = self._api_key(
+            internal_authenticated_client, test_workspace_id, test_environment_id
+        )
+        headers = {"X-API-Key": key}
+
+        shared = f"shared-{uuid.uuid4().hex[:12]}"
+        build_a = self._reactive_build(api, key, "app-a")
+        build_b = self._reactive_build(api, key, "app-b")
+        self._register(api, key, build_a, shared, "SharedTask")
+        self._register(api, key, build_b, shared, "SharedTask")
+
+        httpx.post(
+            f"{api}/api/v1/builds/{build_a}/tasks/{shared}/start",
+            headers=headers,
+            params={"executor": "test", "executor_ref": "ref-1"},
+            timeout=30.0,
+        )
+        httpx.post(
+            f"{api}/api/v1/builds/{build_a}/tasks/{shared}/complete",
+            headers=headers,
+            timeout=30.0,
+        )
+
+        notify = httpx.post(
+            f"{api}/api/v1/builds/{build_a}/notify", headers=headers, timeout=30.0
+        ).json()
+
+        wake = notify.get("wake_builds")
+        assert wake is not None, "notify does not report other builds to wake"
+        assert [w["build_id"] for w in wake] == [build_b]
+        # B is on a different app here: whoever spawns needs to know which
+        # app's tick function to reach for.
+        assert wake[0]["reactive_app_name"] == "app-b"

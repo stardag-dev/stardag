@@ -13,7 +13,16 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import DistributedLock, Environment, Event, EventType, Task
+from stardag_api.models import (
+    Build,
+    BuildStatus,
+    DistributedLock,
+    Environment,
+    Event,
+    EventType,
+    Task,
+    TaskStatus,
+)
 
 
 class LockAcquisitionStatus(StrEnum):
@@ -55,6 +64,110 @@ SCHEDULER_LOCK_PREFIX = "__scheduler__:"
 def scheduler_lock_name(build_id: UUID) -> str:
     """Lease name for a build's scheduler single-flight lock."""
     return f"{SCHEDULER_LOCK_PREFIX}{build_id}"
+
+
+# Task statuses that free a task up for somebody else — the transitions
+# after which a *different* build holding the same task may have become
+# schedulable. COMPLETED unblocks its downstreams anywhere; the other three
+# release the execution claim, which is what a build waiting on a live
+# blocker is waiting for.
+_CLAIM_RELEASING_STATUSES = frozenset(
+    {
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+        TaskStatus.SKIPPED,
+    }
+)
+
+
+async def wake_other_builds_holding(
+    db: AsyncSession,
+    task_pk: UUID,
+    *,
+    environment_id: UUID,
+    exclude_build_id: UUID,
+) -> None:
+    """Flag every other live reactive build that holds ``task_pk``.
+
+    A reactive build only runs while one of its ticks does, and a worker
+    notifies the build it belongs to — its own. So when this build finishes
+    a task a neighbour was blocked on, nothing tells the neighbour, and it
+    waits for the watchdog (off by default) or for one of its own tasks to
+    finish, of which it may have none. This is the missing half.
+
+    Membership is the event log, which is what the frontier uses too: a
+    build holds a task if it has ever recorded an event for it. Scoped to
+    RUNNING builds carrying a ``reactive_app_name`` — a resident build
+    needs no flag, and a finished one has nothing to do with it.
+
+    Setting the flag is only half of a wake-up; something still has to
+    spawn a tick. That is what the notify response's ``wake_builds`` is
+    for — the server has no executor and never spawns.
+    """
+    holders = (
+        select(Event.build_id)
+        .where(Event.task_id == task_pk, Event.build_id != exclude_build_id)
+        .distinct()
+        .scalar_subquery()
+    )
+    await db.execute(
+        update(Build)
+        .where(
+            Build.id.in_(holders),
+            Build.environment_id == environment_id,
+            Build.latest_status == BuildStatus.RUNNING,
+            Build.reactive_app_name.is_not(None),
+        )
+        .values(needs_tick_at=_utc_now())
+    )
+
+
+async def builds_awaiting_a_tick_with(
+    db: AsyncSession,
+    build_id: UUID,
+    *,
+    environment_id: UUID,
+) -> list[Build]:
+    """Other live reactive builds that share a task with ``build_id``, have a
+    pending wake-up, and have no scheduler of their own to serve it.
+
+    The list a caller needs in order to finish a cross-build wake-up: it can
+    spawn, the server cannot. Filtered by "no live scheduler" for the same
+    reason a worker skips its own spawn when one is live — a tick that would
+    only find the lease held is a container spent on nothing.
+
+    Sharing a task with the caller is what keeps this bounded and relevant:
+    it is the relation that made the caller's news matter to them.
+    """
+    mine = (
+        select(Event.task_id)
+        .where(Event.build_id == build_id, Event.task_id.is_not(None))
+        .distinct()
+        .scalar_subquery()
+    )
+    neighbours = (
+        select(Event.build_id)
+        .where(Event.task_id.in_(mine), Event.build_id != build_id)
+        .distinct()
+        .scalar_subquery()
+    )
+    rows = (
+        await db.execute(
+            select(Build).where(
+                Build.id.in_(neighbours),
+                Build.environment_id == environment_id,
+                Build.latest_status == BuildStatus.RUNNING,
+                Build.reactive_app_name.is_not(None),
+                Build.needs_tick_at.is_not(None),
+            )
+        )
+    ).scalars()
+    live = []
+    for build in rows:
+        if not await is_scheduler_live(db, environment_id, build.id):
+            live.append(build)
+    return live
 
 
 async def is_scheduler_live(

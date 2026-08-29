@@ -58,6 +58,7 @@ from stardag_api.schemas import (
     BuildFrontierResponse,
     BuildListResponse,
     BuildNotifyResponse,
+    BuildToWake,
     BuildResponse,
     BulkCancelBuildsRequest,
     BulkCancelBuildsResponse,
@@ -91,7 +92,12 @@ from stardag_api.services.build_cleanup import (
     select_cancellable_builds,
 )
 from stardag_api.services.claims import claim_is_live, live_claim_filter
-from stardag_api.services.lock import is_scheduler_live
+from stardag_api.services.lock import (
+    _CLAIM_RELEASING_STATUSES,
+    builds_awaiting_a_tick_with,
+    is_scheduler_live,
+    wake_other_builds_holding,
+)
 from stardag_api.services.status import (
     apply_event_to_build,
     apply_event_to_task,
@@ -609,6 +615,18 @@ async def _create_task_event(
                     for key in dict.fromkeys(limit_keys)
                 ]
             ).on_conflict_do_nothing()
+        )
+    # Cross-build wake-up. A task reaching a claim-releasing status is news
+    # for every *other* build holding it — the neighbour blocked on it has
+    # nobody to tell it, since a worker only ever notifies its own build.
+    # In the same transaction as the event, so a flag is never set for a
+    # status change that then rolls back.
+    if db_task.latest_status in _CLAIM_RELEASING_STATUSES:
+        await wake_other_builds_holding(
+            db,
+            db_task.id,
+            environment_id=auth.environment_id,
+            exclude_build_id=build_id,
         )
     await db.commit()
 
@@ -1536,8 +1554,23 @@ async def notify_build(
     build.needs_tick_at = utc_now()
     await db.commit()
     scheduler_live = await is_scheduler_live(db, auth.environment_id, build_id)
+    # Other builds this caller can finish a wake-up for. Reported here
+    # because notify is already the "something changed" round-trip, and
+    # because the caller is the half of this that can spawn.
+    wake_builds = [
+        BuildToWake(
+            build_id=other.id,
+            reactive_app_name=other.reactive_app_name or "",
+        )
+        for other in await builds_awaiting_a_tick_with(
+            db, build_id, environment_id=auth.environment_id
+        )
+    ]
     return BuildNotifyResponse(
-        build_id=build_id, needs_tick=True, scheduler_live=scheduler_live
+        build_id=build_id,
+        needs_tick=True,
+        scheduler_live=scheduler_live,
+        wake_builds=wake_builds,
     )
 
 

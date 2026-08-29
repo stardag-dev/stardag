@@ -658,11 +658,32 @@ class SkipBlockedResponse(BaseModel):
     skipped_task_ids: list[str]
 
 
+class BuildToWake(BaseModel):
+    """A build the notifying caller should spawn a tick for.
+
+    Cross-build coordination needs both halves: the server flags the build
+    (it knows who holds which task), and the caller spawns (it has the
+    executor; the server has none and never pushes). This is the handover
+    between them, which is why it carries the app name — that is what a
+    caller needs to reach the right deployed tick function.
+    """
+
+    build_id: UUID
+    reactive_app_name: str
+
+
 class BuildNotifyResponse(BaseModel):
     """Response of the build notify (scheduler wake-up flag) endpoints."""
 
     build_id: UUID
     needs_tick: bool
+    # Other live reactive builds that share a task with this one, have a
+    # pending wake-up, and have no scheduler of their own to serve it. A
+    # build only ever wakes itself, so without this a neighbour blocked on a
+    # task this build just finished waits for the watchdog — which is off by
+    # default — or for one of its own tasks to finish, of which it may have
+    # none. Empty on the DELETE route and on servers predating the field.
+    wake_builds: list[BuildToWake] = []
     # Whether a reactive scheduler held the build's scheduler lease when
     # this response was produced — read *after* the flag is committed, not
     # atomically with it. Reported on POST (the "set" call) so a worker can
