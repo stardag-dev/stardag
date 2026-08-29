@@ -4937,24 +4937,47 @@ class TestExitHandshake:
         assert summary.outcome == "lease_held"
         assert spawned == []
 
-    async def test_crashing_tick_hands_off(
+    async def test_crashing_tick_hands_off_a_wakeup_that_lands_as_it_dies(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """A tick that dies mid-pass cleared the flag and then served
-        nothing — and the worker that set it was told a scheduler was
-        live. The hand-off is in a ``finally`` for exactly this."""
+        """A wake-up landing while a *crashing* tick unwinds is in the same
+        release window as one landing while a healthy tick exits, and the
+        worker that set it skipped its spawn either way. The hand-off is in
+        a ``finally`` for exactly that — so an exception cannot bypass the
+        release-window check.
+
+        Note what is being asserted: the tick completes a pass (clearing
+        the flag) and dies on the *second*, with a new notify arriving as it
+        goes. It is that new wake-up which is handed off — not the one the
+        first pass had already cleared and taken responsibility for. See
+        ``test_a_crash_before_the_first_clear_hands_nothing_on``.
+        """
         (root,) = _chain("crash-handoff-root")
         registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="other-backend",
+            executor_ref="job-1",
+        )
 
         boom = RuntimeError("tick died mid-pass")
         real_clear = registry.build_clear_notify_aio
+        clears: list[int] = []
 
-        async def clear_then_die(bid):
+        async def clear_then_die_on_the_second_pass(bid):
+            clears.append(1)
+            if len(clears) >= 2:
+                # A worker reports as this tick dies.
+                registry.needs_tick = True
+                raise boom
             await real_clear(bid)
-            registry.needs_tick = True  # a worker reports while we unwind
-            raise boom
+            # Provokes that second pass: the linger poll sees the flag.
+            registry.needs_tick = True
 
-        registry.build_clear_notify_aio = clear_then_die  # type: ignore[method-assign]
+        registry.build_clear_notify_aio = (  # type: ignore[method-assign]
+            clear_then_die_on_the_second_pass
+        )
 
         spawned, spawn = self._spawner()
         build_id = uuid4()
@@ -4969,6 +4992,140 @@ class TestExitHandshake:
             )
 
         assert spawned == [build_id]
+
+    async def test_a_crash_before_the_first_clear_hands_nothing_on(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The cascade guard, and the reason it exists.
+
+        Clearing the flag is the first thing every pass does. If that call
+        is what keeps failing — a rate-limited or 5xx ``DELETE /notify``
+        while the frontier ``GET`` stays healthy — then a tick that handed
+        off on the way out would be replaced by a successor that fails
+        identically, with the flag still set because the clear never
+        happened: one cold container after another, forever.
+
+        A tick that never cleared anything has taken responsibility for
+        nothing, so it hands nothing on.
+        """
+        (root,) = _chain("cascade-guard-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.needs_tick = True  # and it stays set: the clear never lands
+
+        async def clear_always_fails(bid):
+            raise ConnectionError("registry refused the clear")
+
+        registry.build_clear_notify_aio = clear_always_fails  # type: ignore[method-assign]
+
+        spawned, spawn = self._spawner()
+        with pytest.raises(ConnectionError, match="refused the clear"):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            )
+
+        assert spawned == [], (
+            "handed off after failing to clear the flag: the successor would "
+            "fail the same way, and the chain would never end"
+        )
+
+    async def test_a_tick_that_clears_then_crashes_is_not_crash_recovery(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The honest limit of the handshake, asserted so nobody documents
+        it as more than it is.
+
+        A tick that clears the flag and then dies leaves the flag false, so
+        the hand-off has nothing to see and the wake-up it had taken
+        responsibility for waits for the next completion or the watchdog.
+        Unchanged from before the handshake existed — it closes the release
+        window, it does not resurrect a crashed tick's own wake-up.
+        """
+        (root,) = _chain("crash-after-clear-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.needs_tick = True
+        real_clear = registry.build_clear_notify_aio
+
+        async def clear_then_die(bid):
+            await real_clear(bid)  # the flag is now false
+            raise RuntimeError("died with the wake-up already claimed")
+
+        registry.build_clear_notify_aio = clear_then_die  # type: ignore[method-assign]
+
+        spawned, spawn = self._spawner()
+        with pytest.raises(RuntimeError, match="already claimed"):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            )
+
+        assert registry.needs_tick is False
+        assert spawned == []
+
+    async def test_holding_the_lease_without_a_spawner_warns_once(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget], caplog
+    ):
+        """Nothing connects the worker's skip to the holder's ability to
+        hand off: the worker decides on what the *registry* says, while the
+        hand-off belongs to whoever holds the lease. Driving ``run_tick_aio``
+        by hand with a default config is where the pairing comes apart, so
+        it says so — once per process, since it is a property of how the
+        process was configured."""
+        (root,) = _chain("no-spawner-warning-root")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+
+        reactive_module._warned_missing_successor_spawner = False
+        with caplog.at_level(logging.WARNING, logger=reactive_module.__name__):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=FAST_TICK,
+            )
+            first = caplog.text.count("cannot hand off on the way out")
+
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=FAST_TICK,
+            )
+            second = caplog.text.count("cannot hand off on the way out")
+
+        assert first == 1
+        assert second == 1, "warned more than once per process"
+
+    async def test_a_configured_spawner_warns_about_nothing(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget], caplog
+    ):
+        (root,) = _chain("spawner-no-warning-root")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+        _, spawn = self._spawner()
+
+        reactive_module._warned_missing_successor_spawner = False
+        with caplog.at_level(logging.WARNING, logger=reactive_module.__name__):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            )
+
+        assert "cannot hand off on the way out" not in caplog.text
 
     async def test_hand_off_failure_does_not_mask_the_tick(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]

@@ -74,7 +74,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   re-reads the flag once **before** releasing the lease (set → keep the
   lease and re-act) and once **after** (set → spawn a successor tick), and
   reports both on its `TickSummary` as `linger_extended` and
-  `successor_spawned`.
+  `successor_spawned`. This closes the release window; it is not crash
+  recovery — a tick that clears the flag and then dies still leaves that
+  wake-up to the next completion or the watchdog, as before.
 
   `RegistryABC.build_notify` returns a `BuildNotifyResult` rather than
   `None`. A custom registry backend that overrides it and returns `None` is

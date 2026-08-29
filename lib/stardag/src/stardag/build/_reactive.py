@@ -934,6 +934,50 @@ async def _hand_off_if_needed(
         )
 
 
+# Set once per process the first time a tick takes the scheduler lease
+# without a way to hand off (see :func:`_warn_if_no_successor_spawner`).
+# Process-global for the same reason ``_tick_summary_route_missing`` is: the
+# condition is a property of how this process was configured, not of one
+# build, so saying it once is saying it.
+_warned_missing_successor_spawner = False
+
+
+def _warn_if_no_successor_spawner(config: TickConfig) -> None:
+    """Say something when this tick holds the lease and cannot hand off.
+
+    The two halves of the conditional wake-up are enforced in different
+    places, and nothing connects them: a worker skips its tick spawn
+    because the *registry* reports a scheduler live, while the ability to
+    hand off at the end belongs to whoever *holds the lease*. A tick
+    running without ``TickConfig.spawn_successor_tick`` therefore disables
+    the post-release read entirely — for every worker of that build, on the
+    strength of a decision it never sees.
+
+    In-tree that cannot happen: the Modal integration is the only thing
+    that runs ticks and it always supplies the spawner. What this catches
+    is the public entry point being driven by hand — ``run_tick_aio`` with
+    a default ``TickConfig``, to poke at a build — which holds a real lease
+    against real workers.
+
+    Once per process, and not an error: an integration whose wake-ups
+    always spawn unconditionally is correct without a spawner, and has
+    nothing to be told.
+    """
+    global _warned_missing_successor_spawner
+    if config.spawn_successor_tick is not None or _warned_missing_successor_spawner:
+        return
+    _warned_missing_successor_spawner = True
+    logger.warning(
+        "Scheduler tick running without TickConfig.spawn_successor_tick, so "
+        "it cannot hand off on the way out. If this deployment's workers "
+        "skip their tick spawn when the registry reports a live scheduler "
+        "(BuildNotifyResult.scheduler_live), a wake-up arriving as this tick "
+        "releases the lease is served by nobody until the next completion or "
+        "the watchdog. Harmless if the wake-ups always spawn a tick "
+        "regardless. Reported once per process."
+    )
+
+
 # Set once per process when the registry answers the tick-summary route
 # with a missing-route 404, so an SDK pointed at an older server stops
 # paying for a doomed request on every tick. Process-global rather than
@@ -1012,6 +1056,15 @@ async def run_tick_aio(
     return, which is how a return added later would silently stop being
     observable.
 
+    **If your workers can skip spawning a tick**, pass
+    ``TickConfig.spawn_successor_tick``. The two halves of that
+    optimisation live apart: a worker skips because the registry reports a
+    scheduler live, while handing off at the end is the lease holder's job.
+    A tick without a spawner disables the hand-off for every worker of that
+    build, so driving this by hand against a live reactive build — the
+    "manual" case above — is the one place the pairing can silently come
+    apart. It warns once per process when it does.
+
     A tick that *raises* is reported too, as ``outcome="error"`` carrying
     the exception's type and (bounded) message: a crashed tick is the most
     informative answer a "why did this build stall?" query can get, and
@@ -1084,6 +1137,14 @@ async def _run_tick_body_aio(
     post-release read and will find the flag. Both ticks happening is
     possible and harmless: one wins the lease, the other no-ops.
 
+    **What it does not do.** This closes the release window; it is not
+    crash recovery. A tick that clears the flag and then dies leaves the
+    flag false, so the hand-off has nothing to see and the wake-up that
+    tick had taken responsibility for waits for the next completion or the
+    watchdog — exactly as it did before any of this existed. The
+    ``finally`` is there so that an *exception* cannot skip the
+    release-window check, not to resurrect the crashed tick's own wake-up.
+
     The pre-release re-read is the optimisation (one fewer cold start);
     the post-release hand-off is the correctness guarantee. Only the
     second is load-bearing, which is why the first may be skipped when
@@ -1097,6 +1158,10 @@ async def _run_tick_body_aio(
     # above — cover it).
     lease = lock_manager.lock(scheduler_lock_name(build_id))
     acquired = False
+    # Whether this tick ever cleared the wake-up flag — i.e. whether it took
+    # responsibility for a wake-up at all. Gates the hand-off; see the
+    # ``finally`` below for why that matters.
+    cleared_a_wakeup = False
     try:
         async with lease:  # type: ignore[attr-defined]
             if not lease.result.acquired:
@@ -1105,6 +1170,7 @@ async def _run_tick_body_aio(
                 return
 
             acquired = True
+            _warn_if_no_successor_spawner(config)
 
             # Expose the ambient build id (the executor forwards it to
             # self-reporting workers, exactly like the resident engine does).
@@ -1116,6 +1182,7 @@ async def _run_tick_body_aio(
                     summary.iterations += 1
                     try:
                         await registry.build_clear_notify_aio(build_id)
+                        cleared_a_wakeup = True
                         frontier = await registry.build_get_frontier_aio(build_id)
                     except NotFoundError as e:
                         # Only a genuine missing-route 404 (server predating the
@@ -1253,15 +1320,41 @@ async def _run_tick_body_aio(
             finally:
                 current_build_id_var.reset(build_id_token)
     finally:
-        # Post-release half of the exit handshake (see this
-        # function's docstring). In a `finally` so it covers the
-        # crashing tick too: a tick that dies after clearing the flag
-        # has taken responsibility for a wake-up it never served, and
-        # `scheduler_live` told the worker not to spawn for it. Not
-        # a hot loop — the successor clears the flag before it can do
-        # the same, so the chain stops unless real notifies keep
-        # arriving.
-        if acquired and summary.outcome not in _NO_HANDOFF_OUTCOMES:
+        # Post-release half of the exit handshake (see this function's
+        # docstring). In a ``finally`` so that an exception cannot bypass
+        # it: a wake-up landing while a *crashing* tick unwinds is in the
+        # same release window as one landing while a healthy tick exits,
+        # and the worker that set it skipped its spawn either way.
+        #
+        # It is NOT crash recovery, and does not pretend to be. A tick that
+        # cleared the flag and then died leaves it false, so nothing is
+        # spawned and the wake-up it had taken responsibility for waits for
+        # the next completion or the watchdog. That is unchanged from before
+        # this handshake existed.
+        #
+        # ``cleared_a_wakeup`` is what stops the hand-off from turning a
+        # repeatable failure into an unbounded chain of containers. The
+        # first thing each pass does is clear the flag; if that call itself
+        # keeps failing — a rate-limited or 5xx ``DELETE /notify`` while the
+        # frontier ``GET`` stays healthy — then every tick would raise with
+        # the flag still set, hand off, and be replaced by a successor that
+        # fails identically, one cold container after another, forever. The
+        # earlier reasoning here ("the successor clears the flag before it
+        # can do the same") assumed the clear succeeds, which is exactly
+        # what is broken in that state.
+        #
+        # So a tick that never cleared anything hands nothing on: it took no
+        # responsibility, and its successor could only repeat its failure.
+        # The cost is one narrow case — a worker skipped its spawn and this
+        # tick died before its first clear — where the wake-up now waits for
+        # the next completion or the watchdog. In that state the registry is
+        # refusing writes and the build is not progressing regardless, which
+        # makes it much the cheaper of the two failures.
+        if (
+            acquired
+            and cleared_a_wakeup
+            and summary.outcome not in _NO_HANDOFF_OUTCOMES
+        ):
             await _hand_off_if_needed(
                 build_id, registry=registry, config=config, summary=summary
             )
