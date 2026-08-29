@@ -434,8 +434,8 @@ orchestrator at all**. The trigger mints the build, registers the root
 tasks and spawns one deployed function — `bootstrap` — with those roots
 passed by value; everything else is driven by short-lived scheduler
 _ticks_, spawned by the bootstrap, when a worker finishes a task and no
-scheduler is already live to notice, and (recommended) by a periodic
-watchdog. Between ticks, nothing runs except your tasks: a multi-day build
+scheduler is already live to notice, and — if you turn it on — by a
+periodic watchdog. Between ticks, nothing runs except your tasks: a multi-day build
 with a few long-running tasks costs no orchestrator container time, and
 there is no orchestrator process whose crash could affect the build.
 
@@ -463,9 +463,6 @@ app = sd_modal.StardagApp(
     "stardag-poc",
     builder_settings=sd_modal.FunctionSettings(image=image),
     worker_settings={"default": sd_modal.FunctionSettings(image=image)},
-    # Recommended with reactive mode: periodically re-check running builds
-    # (covers lost wake-ups and builds cancelled from the UI).
-    watchdog_period_minutes=5,
 )
 
 # After deploy:
@@ -518,7 +515,6 @@ app = sd_modal.StardagApp(
     tick_settings=sd_modal.FunctionSettings(image=image, timeout=300),
     # Discovery of a very wide DAG gets its own budget.
     bootstrap_settings=sd_modal.FunctionSettings(image=image, timeout=1800),
-    watchdog_period_minutes=5,
 )
 ```
 
@@ -554,16 +550,29 @@ Two operational notes:
   Declaring [`task_modules`](#declaring-your-task-modules-recommended) is
   what makes "still importable" true by construction — and lets stardag
   skip the pickle in the first place.
-- **The watchdog sweep runs one quick scheduling pass per running build
-  that this app owns** (it skips the linger), so its per-period cost is
-  one short function invocation plus a frontier query per such build.
-  The sweep asks the registry only for RUNNING builds whose reactive
-  owner is this app, so unrelated builds in the environment — resident
-  builds, and builds left RUNNING by an orchestrator that died without
-  emitting a terminal event — cost nothing and cannot crowd out the
-  sweep's per-period cap. A build owned by an app deployed _without_
-  `watchdog_period_minutes` therefore has no watchdog covering it, even
-  if another app in the environment has one.
+- **The watchdog is off by default, and that is usually right.** It only
+  catches what nothing else reports — a silently dead worker, a build
+  cancelled in the UI, a concurrency slot freed by another build — and a
+  stalled build is unblocked by a single tick, which you can spawn at any
+  time by re-triggering the build id. Turn it on
+  (`watchdog_period_minutes=…`) when leaving a build stalled for even a few
+  minutes is unacceptable, and pick the period from how long that is.
+
+  The reason not to leave it on "just in case" is that the sweep runs on
+  its schedule whether or not anything is building, and its steady polling
+  is enough to keep a scale-to-zero registry database awake — a bill that
+  does not show up as Modal usage.
+
+  Each sweep runs one quick scheduling pass per running build that this app
+  owns (it skips the linger), so its per-period cost is one short function
+  invocation plus a frontier query per such build. The sweep asks the
+  registry only for RUNNING builds whose reactive owner is this app, so
+  unrelated builds in the environment — resident builds, and builds left
+  RUNNING by an orchestrator that died without emitting a terminal event —
+  cost nothing and cannot crowd out the sweep's per-period cap. A build
+  owned by an app deployed _without_ `watchdog_period_minutes` has no
+  watchdog covering it, even if another app in the environment has one.
+
 - **Define the callables you pass to `StardagApp` in an importable
   module.** `worker_selector`, `limit_key_selector`, and any custom
   build/run functions are captured by the serialized Modal functions
@@ -616,7 +625,6 @@ app = sd_modal.StardagApp(
     "stardag-poc",
     builder_settings=sd_modal.FunctionSettings(image=image),
     worker_settings={"default": sd_modal.FunctionSettings(image=image)},
-    watchdog_period_minutes=5,
     # Modules whose import registers the task classes this app may
     # schedule. Default: the root package of the module defining the app.
     # Pass [] to opt out (resident builds never need this).
@@ -720,7 +728,6 @@ app = sd_modal.StardagApp(
     "stardag-poc",
     builder_settings=sd_modal.FunctionSettings(image=image),
     worker_settings={"default": sd_modal.FunctionSettings(image=image)},
-    watchdog_period_minutes=5,
     limit_key_selector=lambda task: ["gpu"] if needs_gpu(task) else [],
 )
 ```
@@ -729,12 +736,15 @@ A task denied by a limit stays pending and is retried when a slot frees
 (immediately for same-build releases; within the watchdog period for
 releases in other builds).
 
-When limits are enforced, **the watchdog is strongly recommended**
-(`watchdog_period_minutes=5`): a slot is freed by the holder reaching a
-terminal status, and the watchdog is the safety net that keeps statuses
-honest when wake-ups are lost — including the escape hatch that fails a
-task stuck RUNNING without an execution ref once its **execution claim
-lapses** (see below), which would otherwise hold its slots indefinitely.
+Limits are the clearest case for turning the **watchdog** on
+(`watchdog_period_minutes=…`, off by default — see
+[Reactive scheduling](#reactive-scheduling-no-resident-build-function-experimental)):
+a slot freed in _another_ build
+has nothing to notify this one, and the watchdog is also the escape hatch
+that fails a task stuck RUNNING without an execution ref once its
+**execution claim lapses** (see below), which would otherwise hold its
+slots indefinitely. Weigh that against how long a stalled slot actually
+costs you.
 Also note that limit-key tags recorded at a
 task's start persist until its next start _with_ keys — a later build
 re-running the same task id without tags briefly counts under the old
@@ -1058,7 +1068,6 @@ app = sd_modal.StardagApp(
         "default": sd_modal.FunctionSettings(image=image, timeout=3600)
     },
     tick_settings=sd_modal.FunctionSettings(image=image, timeout=600),
-    watchdog_period_minutes=5,
 )
 ```
 
@@ -1238,7 +1247,6 @@ app = sd_modal.StardagApp(
     container_setup=container_setup,
     builder_settings=sd_modal.FunctionSettings(image=image),
     worker_settings={"default": sd_modal.FunctionSettings(image=image)},
-    watchdog_period_minutes=5,
 )
 ```
 

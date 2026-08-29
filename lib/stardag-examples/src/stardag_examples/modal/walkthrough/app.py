@@ -12,9 +12,11 @@ full (new) feature set:
   name. Configured on the app (not per trigger) so reactive scheduler
   ticks apply the same routing.
 - ``watchdog_period_minutes``: a scheduled function that periodically
-  re-ticks running reactive builds — the safety net for lost wake-ups,
-  builds cancelled from the UI, and stale concurrency-limit slots.
-  Strongly recommended whenever reactive mode or named limits are used.
+  re-ticks running reactive builds. **Off by default**, and enabled here
+  for the reason that justifies it: this app uses named limits, and a slot
+  freed in another build has nothing to notify this one. Leaving it on
+  without such a reason costs a scheduled sweep forever — see the Modal
+  how-to.
 - ``limit_key_selector``: tags every ``ProcessShard`` task with the
   ``SHARD_LIMIT_KEY`` named concurrency limit. The cap itself lives in
   the registry, per environment — see ``configure_limits.py``. Like the
@@ -85,8 +87,8 @@ app = sd_modal.StardagApp(
         "long": sd_modal.FunctionSettings(image=image, cpu=1, timeout=1800),
     },
     worker_selector=worker_selector,
-    # Reactive-mode safety net: periodically re-check running builds
-    # (lost wake-ups, UI cancellations, stale limit slots).
+    # Off by default; on here because this app uses named limits and a
+    # slot freed in another build has nothing to notify this one.
     watchdog_period_minutes=5,
     limit_key_selector=limit_key_selector,
 )
