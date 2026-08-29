@@ -69,10 +69,12 @@ one:
   drains them, so cross-build waits end at the watchdog as before. `notify`
   returns the same fields it did. Registrations without `limit_keys` leave
   any recorded keys alone.
-- **New SDK against an old registry.** `wake-candidates` answers with a
-  missing-route 404; the SDK disables the drain for the process, logs at
-  DEBUG, and the watchdog covers it as before. The bulk-registration
-  payload's `limit_keys` is ignored by an older server.
+- **New SDK against an old registry.** `wake-candidates` is refused (a 405
+  — the path partial-matches `GET /builds/{build_id}` — or a missing-route
+  404); the SDK disables the drain for the process, logs once at DEBUG,
+  and the watchdog covers it as before. The bulk-registration payload's
+  `limit_keys` is ignored by an older server, and `notify?can_spawn=false`
+  is an unknown query parameter it ignores too.
 - **Migration:** one nullable column, `builds.tick_requested_at`
   (`97ce4e3cbf32`). No backfill, no downtime.
 
