@@ -83,8 +83,8 @@ Nothing to change. Two notes if you have written against the internals:
   installer whether this is a working tree.
 
   If you deploy from a stardag checkout and see this, note that a plain
-  `uv sync` does not refresh the recorded version — `uv sync
---reinstall-package stardag` does.
+  `uv sync` does not refresh the recorded version;
+  `uv sync --reinstall-package stardag` does.
 
 - **The reactive scheduler no longer logs an ERROR for a task-store miss it
   recovers from.** Declaring `task_modules` _is_ the opt-in to pickle
