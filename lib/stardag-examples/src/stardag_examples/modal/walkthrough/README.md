@@ -30,8 +30,9 @@ Report
   build function resumes the same registry build.
 - **two workers + `worker_selector`** — `LongScan` runs on a `long` worker
   with a higher timeout.
-- **`watchdog_period_minutes=5`** — scheduled safety-net ticks for
-  reactive builds (lost wake-ups, UI cancellations, stale limit slots).
+- **No `watchdog_period_minutes`** — the `tick_watchdog` sweep is
+  deployed regardless and can be run by hand; a timer is only needed when
+  a stall of a few minutes is unacceptable.
 - **`limit_key_selector`** — tags every `ProcessShard` with the
   `walkthrough-shards` named limit. The cap itself is configured in the
   registry (next section).

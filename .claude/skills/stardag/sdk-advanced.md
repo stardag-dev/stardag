@@ -321,7 +321,7 @@ app = StardagApp(
     "my-app",
     builder_settings=FunctionSettings(image=image),
     worker_settings={"default": FunctionSettings(image=image)},
-    watchdog_period_minutes=5,          # recommended with reactive mode
+    # watchdog_period_minutes=5,        # optional timer; sweep deployed anyway
     limit_key_selector=lambda t: [],    # named concurrency-limit keys per task
     container_setup=my_container_setup, # runs once in EVERY container
 )
