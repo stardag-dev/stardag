@@ -52,6 +52,45 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   the install is already present, so nothing rebuilds its metadata.
   `uv sync --reinstall-package stardag` does.
 
+- **A worker no longer spawns a scheduler tick when one is already
+  running.** Every task completion used to spawn a tick unconditionally. On
+  a build whose tasks are short relative to a tick container's startup,
+  none of those ticks scheduled anything — the resident scheduler's own
+  linger loop did all the work, and each spawned tick started only after it
+  had finished, took the lease or found the build terminal, and exited. A
+  measured seven-task build paid seven cold starts for zero scheduling.
+  `build_notify` now reports whether a scheduler holds the build's lease
+  (`BuildNotifyResult.scheduler_live`) and the worker skips the spawn when
+  it does — one working tick instead of N+1. An older registry does not
+  report it, and every wake-up then spawns a tick exactly as before.
+
+- **The scheduler tick's exit path no longer has a lost-wakeup window.**
+  Nothing re-read the wake-up flag between the linger loop's final poll and
+  the release of the scheduler lease, so a flag set in that window was
+  served by nobody — it stayed set until the next completion or the
+  watchdog (off by default), and with the last task in flight there may be
+  no next completion. Harmless while every wake-up spawned its own tick;
+  the load-bearing prerequisite for skipping that spawn. The tick now
+  re-reads the flag once **before** releasing the lease (set → keep the
+  lease and re-act) and once **after** (set → spawn a successor tick), and
+  reports both on its `TickSummary` as `linger_extended` and
+  `successor_spawned`. This closes the release window; it is not crash
+  recovery — a tick that clears the flag and then dies still leaves that
+  wake-up to the next completion or the watchdog, as before.
+
+  `RegistryABC.build_notify` returns a `BuildNotifyResult` rather than
+  `None`. A custom registry backend that overrides it and returns `None` is
+  read as "scheduler state unknown", which keeps today's behaviour.
+
+### Registry API
+
+- `POST /builds/{id}/notify` reports `scheduler_live` — whether a reactive
+  scheduler held the build's lease when the response was produced. The read
+  happens after the flag is committed rather than atomically with it, and
+  that ordering is the whole guarantee: a `true` means the lease was still
+  held once the flag was already durable, so its holder cannot exit without
+  seeing it. That is what makes skipping the tick spawn safe.
+
 ## [0.20.1] — 2026-08-28
 
 ### SDK

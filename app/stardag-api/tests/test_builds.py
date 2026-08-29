@@ -1,8 +1,14 @@
 """Tests for build management endpoints."""
 
+import uuid
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from stardag_api.models import DistributedLock
 from tests.conftest import DEFAULT_ENVIRONMENT_ID_STR
 
 
@@ -1660,6 +1666,101 @@ async def test_notify_build_set_and_clear(client: AsyncClient):
 
     response = await client.get(f"/api/v1/builds/{build_id}/frontier")
     assert response.json()["needs_tick"] is False
+
+
+@pytest.mark.asyncio
+async def test_notify_reports_no_live_scheduler_by_default(client: AsyncClient):
+    """With no tick holding the lease, the caller must spawn one — which is
+    what ``scheduler_live=False`` tells it."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    response = await client.post(f"/api/v1/builds/{build_id}/notify")
+
+    assert response.status_code == 200
+    assert response.json()["scheduler_live"] is False
+
+
+@pytest.mark.asyncio
+async def test_notify_reports_a_live_scheduler(client: AsyncClient):
+    """A tick holds the build's scheduler lease, so it will see the flag
+    this call just set and the caller can skip the spawn."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    # The lease the SDK's tick takes — see stardag.build._reactive
+    # .scheduler_lock_name, mirrored server-side in services.lock.
+    await client.post(
+        f"/api/v1/locks/__scheduler__:{build_id}/acquire",
+        json={
+            "owner_id": str(uuid.uuid4()),
+            "ttl_seconds": 60,
+            "check_task_completion": False,
+        },
+    )
+
+    response = await client.post(f"/api/v1/builds/{build_id}/notify")
+
+    assert response.status_code == 200
+    assert response.json()["needs_tick"] is True
+    assert response.json()["scheduler_live"] is True
+
+
+@pytest.mark.asyncio
+async def test_notify_ignores_an_expired_scheduler_lease(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """A tick whose container died leaves its row behind until the TTL
+    lapses. Reading that as a live scheduler would suppress wake-ups for
+    exactly the build that most needs them."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    lock_name = f"__scheduler__:{build_id}"
+    await client.post(
+        f"/api/v1/locks/{lock_name}/acquire",
+        json={
+            "owner_id": str(uuid.uuid4()),
+            "ttl_seconds": 60,
+            "check_task_completion": False,
+        },
+    )
+    await async_session.execute(
+        update(DistributedLock)
+        .where(DistributedLock.name == lock_name)
+        .values(expires_at=datetime.now(timezone.utc) - timedelta(seconds=10))
+    )
+    await async_session.commit()
+
+    response = await client.post(f"/api/v1/builds/{build_id}/notify")
+
+    assert response.json()["scheduler_live"] is False
+
+
+@pytest.mark.asyncio
+async def test_notify_ignores_another_builds_scheduler(client: AsyncClient):
+    """The lease is per build; a scheduler live on a neighbour says nothing
+    about this one."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    other_build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/locks/__scheduler__:{other_build_id}/acquire",
+        json={
+            "owner_id": str(uuid.uuid4()),
+            "ttl_seconds": 60,
+            "check_task_completion": False,
+        },
+    )
+
+    response = await client.post(f"/api/v1/builds/{build_id}/notify")
+
+    assert response.json()["scheduler_live"] is False
+
+
+@pytest.mark.asyncio
+async def test_clear_notify_does_not_report_a_scheduler(client: AsyncClient):
+    """The caller clearing the flag *is* the scheduler, so the answer would
+    be its own reflection — reported as unknown rather than computed."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    response = await client.delete(f"/api/v1/builds/{build_id}/notify")
+
+    assert response.json()["scheduler_live"] is None
 
 
 @pytest.mark.asyncio

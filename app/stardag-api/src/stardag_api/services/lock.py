@@ -40,6 +40,49 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Name of the lease a reactive scheduler tick single-flights a build on.
+#
+# **Must match ``stardag.build._reactive.SCHEDULER_LOCK_PREFIX`` in the SDK**,
+# which is where the lease is actually taken; the server only ever reads it,
+# to answer "is a scheduler live?" on the notify route. Duplicated rather
+# than imported because stardag-api does not depend on the SDK package. If
+# the SDK ever renames it, an old server reports ``scheduler_live=False`` for
+# every build — degrading to unconditional tick spawns, i.e. the behaviour
+# from before this existed, rather than to lost wake-ups.
+SCHEDULER_LOCK_PREFIX = "__scheduler__:"
+
+
+def scheduler_lock_name(build_id: UUID) -> str:
+    """Lease name for a build's scheduler single-flight lock."""
+    return f"{SCHEDULER_LOCK_PREFIX}{build_id}"
+
+
+async def is_scheduler_live(
+    db: AsyncSession,
+    environment_id: UUID,
+    build_id: UUID,
+) -> bool:
+    """Whether a reactive scheduler currently holds ``build_id``'s lease.
+
+    Expiry is part of the question, not a detail: a tick whose container
+    died leaves its row behind until the TTL lapses, and treating that as a
+    live scheduler would suppress wake-ups for exactly the build that most
+    needs them. So the row only counts while ``expires_at`` is in the
+    future — the same rule ``acquire_lock`` applies when it decides a lease
+    is free to take.
+    """
+    result = await db.execute(
+        select(DistributedLock.name)
+        .where(
+            DistributedLock.name == scheduler_lock_name(build_id),
+            DistributedLock.environment_id == environment_id,
+            DistributedLock.expires_at > _utc_now(),
+        )
+        .limit(1)
+    )
+    return result.first() is not None
+
+
 async def check_task_completed_in_registry(
     db: AsyncSession,
     environment_id: UUID,

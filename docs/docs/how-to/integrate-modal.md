@@ -433,11 +433,19 @@ With `build_trigger(..., reactive=True)` the build runs with **no resident
 orchestrator at all**. The trigger mints the build, registers the root
 tasks and spawns one deployed function — `bootstrap` — with those roots
 passed by value; everything else is driven by short-lived scheduler
-_ticks_, spawned by the bootstrap, whenever a worker finishes a task, and
-(recommended) by a periodic watchdog. Between ticks, nothing runs except
-your tasks: a multi-day build with a few long-running tasks costs no
-orchestrator container time, and there is no orchestrator process whose
-crash could affect the build.
+_ticks_, spawned by the bootstrap, when a worker finishes a task and no
+scheduler is already live to notice, and (recommended) by a periodic
+watchdog. Between ticks, nothing runs except your tasks: a multi-day build
+with a few long-running tasks costs no orchestrator container time, and
+there is no orchestrator process whose crash could affect the build.
+
+A finishing worker always sets the build's wake-up flag; it spawns a tick
+only when the registry tells it no scheduler holds the build's lease. On a
+build whose tasks are short relative to a container start, that is one
+working tick rather than one cold start per completion — see
+[wake-ups](../concepts/build-execution.md#wake-ups-one-tick-not-one-per-completion)
+for why skipping is safe. A registry that predates this reports nothing,
+and every wake-up spawns a tick as before.
 
 **Triggering is fast and does no target I/O.** Discovering a DAG means one
 target existence check per task, and the trigger performs none of them:

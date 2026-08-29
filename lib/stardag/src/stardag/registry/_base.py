@@ -220,6 +220,31 @@ class BuildFrontier(StardagBaseModel):
     reactive_tick_kwargs: dict[str, Any] | None = None
 
 
+class BuildNotifyResult(StardagBaseModel):
+    """Outcome of ``build_notify`` — the wake-up set, and who can serve it.
+
+    ``scheduler_live`` is what makes a wake-up *conditional*: it reports
+    whether the build's scheduler lease was held when the server produced
+    this response — which is at some point *after* the flag was set, not
+    atomically with it. That ordering is the whole guarantee, and it is
+    enough: a "yes" means the lease was still held after the flag was
+    already durable, so its holder cannot exit without seeing the flag (it
+    re-reads once more after releasing — see
+    ``stardag.build._reactive._hand_off_if_needed``). A "no" means nobody
+    held it, so the caller must spawn. Answering in the notify response
+    rather than from a separate query is what pins the read to that side of
+    the write; a separate query invites the opposite ordering.
+
+    ``None`` means the server did not say (it predates the field), and is
+    **not** "no scheduler": a caller must fall back to spawning
+    unconditionally, which is what every SDK did before this existed.
+    """
+
+    build_id: UUID | None = None
+    needs_tick: bool = True
+    scheduler_live: bool | None = None
+
+
 class BuildInfo(StardagBaseModel):
     """Slim build record from ``build_get`` (``GET /builds/{id}``).
 
@@ -839,16 +864,23 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of build_skip_blocked."""
         return self.build_skip_blocked(build_id)
 
-    def build_notify(self, build_id: UUID) -> None:
+    def build_notify(self, build_id: UUID) -> "BuildNotifyResult":
         """Set the build's scheduler wake-up flag (reactive scheduling).
 
-        Default: no-op (backends without reactive-scheduling support).
-        """
-        pass
+        Returns what the server knew *after* the set — in particular
+        whether a scheduler is live (see :class:`BuildNotifyResult`), which
+        is what lets a caller skip spawning a tick that would only find the
+        scheduler lease held and exit.
 
-    async def build_notify_aio(self, build_id: UUID) -> None:
+        Default: no-op, reporting an unknown scheduler state so callers
+        keep spawning unconditionally (backends without reactive-scheduling
+        support).
+        """
+        return BuildNotifyResult(build_id=build_id)
+
+    async def build_notify_aio(self, build_id: UUID) -> "BuildNotifyResult":
         """Async version of build_notify."""
-        self.build_notify(build_id)
+        return self.build_notify(build_id)
 
     def build_clear_notify(self, build_id: UUID) -> None:
         """Clear the build's scheduler wake-up flag. Default: no-op."""

@@ -663,6 +663,26 @@ class BuildNotifyResponse(BaseModel):
 
     build_id: UUID
     needs_tick: bool
+    # Whether a reactive scheduler held the build's scheduler lease when
+    # this response was produced — read *after* the flag is committed, not
+    # atomically with it. Reported on POST (the "set" call) so a worker can
+    # skip spawning a tick that would only find the lease held and exit —
+    # on a build of short tasks that is one working tick instead of one
+    # container start per completion.
+    #
+    # After-the-write is the entire guarantee, and no snapshot atomic with
+    # the write is needed: a `true` says the lease was still held once the
+    # flag was already durable, so its holder cannot exit without seeing it
+    # (the SDK tick re-reads once more after releasing the lease). Doing the
+    # read here rather than letting the caller issue a separate lock query
+    # is what pins it to that side of the write; a separate query invites
+    # the opposite ordering.
+    #
+    # None on DELETE (the clearing caller *is* the scheduler, so it has no
+    # use for the answer), and read by the SDK as "unknown" — which it also
+    # is on any server predating this field, and which falls back to
+    # spawning unconditionally.
+    scheduler_live: bool | None = None
 
 
 class TaskBulkIdOnlyResponse(BaseModel):

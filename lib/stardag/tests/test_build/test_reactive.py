@@ -9,6 +9,7 @@ instantly (simulating worker-side lifecycle reporting + wake-up).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import typing
@@ -48,6 +49,7 @@ from stardag.build._reactive import (
 from stardag.exceptions import NotFoundError
 from stardag.registry import (
     BuildFrontier,
+    BuildNotifyResult,
     FrontierExternalBlocker,
     FrontierTaskRef,
     NoOpRegistry,
@@ -565,8 +567,9 @@ class FakeReactiveRegistry(NoOpRegistry):
         for tid, events in self.task_events.items():
             self.round_start[tid] = len(events)
 
-    async def build_notify_aio(self, build_id):
+    async def build_notify_aio(self, build_id) -> BuildNotifyResult:
         self.needs_tick = True
+        return BuildNotifyResult(build_id=build_id, scheduler_live=True)
 
     async def build_clear_notify_aio(self, build_id):
         self.needs_tick = False
@@ -677,7 +680,11 @@ class FakeReactiveRegistry(NoOpRegistry):
 
 
 class FakeLease:
-    def __init__(self, acquired: bool):
+    def __init__(
+        self,
+        acquired: bool,
+        on_release: typing.Callable[[], None] | None = None,
+    ):
         self.result = LockAcquisitionResult(
             status=(
                 LockAcquisitionStatus.ACQUIRED
@@ -686,6 +693,7 @@ class FakeLease:
             ),
             acquired=acquired,
         )
+        self._on_release = on_release
 
     def mark_completed(self) -> None:
         pass
@@ -694,17 +702,27 @@ class FakeLease:
         return self
 
     async def __aexit__(self, *args):
+        # The release, which is exactly where the exit handshake's window
+        # is: ``on_release`` lets a test act at that instant (see
+        # ``TestExitHandshake``).
+        if self._on_release is not None and self.result.acquired:
+            self._on_release()
         return False
 
 
 class FakeLockManager:
-    def __init__(self, acquired: bool = True):
+    def __init__(
+        self,
+        acquired: bool = True,
+        on_release: typing.Callable[[], None] | None = None,
+    ):
         self.acquired = acquired
+        self.on_release = on_release
         self.lock_names: list[str] = []
 
     def lock(self, task_id: str) -> FakeLease:
         self.lock_names.append(task_id)
-        return FakeLease(self.acquired)
+        return FakeLease(self.acquired, self.on_release)
 
     async def acquire(self, task_id: str) -> LockAcquisitionResult:
         raise NotImplementedError
@@ -797,10 +815,15 @@ def _chain(*names: str) -> list[BaseTask]:
     return tasks
 
 
-def _lock_manager(acquired: bool = True) -> "GlobalConcurrencyLockManager":
+def _lock_manager(
+    acquired: bool = True,
+    on_release: typing.Callable[[], None] | None = None,
+) -> "GlobalConcurrencyLockManager":
     # The fakes satisfy the runtime contract; cast for the type checker
     # (LockHandle is structurally stricter than the tests need).
-    return typing.cast("GlobalConcurrencyLockManager", FakeLockManager(acquired))
+    return typing.cast(
+        "GlobalConcurrencyLockManager", FakeLockManager(acquired, on_release)
+    )
 
 
 def _setup(
@@ -809,6 +832,7 @@ def _setup(
     auto_complete: bool = True,
     lease_acquired: bool = True,
     executor: FakeTickExecutor | None = None,
+    on_release: typing.Callable[[], None] | None = None,
 ) -> tuple[
     FakeReactiveRegistry,
     "GlobalConcurrencyLockManager",
@@ -828,7 +852,7 @@ def _setup(
     store.save_tasks(tasks)
     return (
         registry,
-        _lock_manager(lease_acquired),
+        _lock_manager(lease_acquired, on_release),
         executor or FakeTickExecutor(),
         store,
     )
@@ -4724,3 +4748,502 @@ class TestInterruptedTasks:
         ``retry_failed`` picks up a task abandoned mid-interruption. Leave
         it out and that task is unschedulable forever."""
         assert "interrupted" in _RETRYABLE_STATUSES
+
+
+class TestExitHandshake:
+    """The two re-reads that make a *conditional* wake-up safe.
+
+    A worker may skip spawning a tick when the registry reports a
+    scheduler live (``BuildNotifyResult.scheduler_live``). That is only
+    sound if a live scheduler cannot exit past a flag set before it
+    released the lease — which the plain "poll until the deadline, then
+    unwind" shape does not guarantee. See ``_run_tick_body_aio``.
+    """
+
+    def _spawner(self) -> tuple[list[UUID], typing.Callable[[UUID], None]]:
+        spawned: list[UUID] = []
+        return spawned, spawned.append
+
+    async def test_flag_set_during_release_spawns_a_successor(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The window this whole handshake exists for: the flag lands after
+        the tick's last look but before the lease is gone, and the worker
+        that set it saw the lease held and did not spawn. Nobody would
+        schedule."""
+        (root,) = _chain("handoff-root")
+        executor = FakeTickExecutor(
+            statuses={"fc-live": DetachedExecutionStatus.RUNNING}
+        )
+        registry, locks, executor, store = _setup(
+            [root], auto_complete=False, executor=executor
+        )
+        registry.add_task(
+            str(root.id), status="running", executor="fake", executor_ref="fc-live"
+        )
+        # The worker's notify lands exactly as the lease is released.
+        locks_impl = typing.cast(typing.Any, locks)
+        locks_impl.on_release = lambda: setattr(registry, "needs_tick", True)
+
+        spawned, spawn = self._spawner()
+        build_id = uuid4()
+        summary = await run_tick_aio(
+            build_id,
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+        )
+
+        assert summary.outcome == "lingered_out"
+        assert summary.successor_spawned == 1
+        assert spawned == [build_id]
+        # The flag is still set, so the successor has something to clear.
+        assert registry.needs_tick is True
+
+    async def test_flag_set_before_release_extends_the_linger(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The fast half: the flag arrives between the last poll and the
+        deadline, so the tick still holds the lease and simply keeps it —
+        no successor container, no cold start."""
+        (root,) = _chain("extend-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="other-backend",
+            executor_ref="job-1",
+        )
+
+        # Land the wake-up in the gap deterministically. With one poll per
+        # linger (poll interval > linger), the reads are: 1 the pass's own
+        # frontier, 2 the single linger poll, 3 the pre-release re-check.
+        # Setting the flag right after read 2 puts it exactly between the
+        # last poll and the deadline — the gap the re-check exists for.
+        reads: list[int] = []
+        real_frontier = registry.build_get_frontier_aio
+
+        async def frontier_then_notify(bid):
+            frontier = await real_frontier(bid)
+            reads.append(1)
+            if len(reads) == 2:
+                # Complete the target too, so the extended pass reaches a
+                # terminal state instead of lingering out a second time.
+                root.run()
+                registry.needs_tick = True
+            return frontier
+
+        registry.build_get_frontier_aio = frontier_then_notify  # type: ignore[method-assign]
+
+        spawned, spawn = self._spawner()
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=dataclasses.replace(
+                FAST_TICK,
+                linger_seconds=0.02,
+                poll_interval_seconds=0.05,
+                spawn_successor_tick=spawn,
+            ),
+        )
+
+        # It re-acted under its own lease and finished the build there.
+        assert summary.outcome == "terminal"
+        assert summary.terminal_status == "completed"
+        assert summary.linger_extended >= 1
+        assert spawned == [], "kept the lease, so no successor was needed"
+
+    async def test_quiet_exit_spawns_nothing(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The overwhelmingly common exit: nothing was notified, so neither
+        half of the handshake fires."""
+        (root,) = _chain("quiet-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="other-backend",
+            executor_ref="job-1",
+        )
+
+        spawned, spawn = self._spawner()
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+        )
+
+        assert summary.outcome == "lingered_out"
+        assert summary.linger_extended == 0
+        assert summary.successor_spawned == 0
+        assert spawned == []
+
+    async def test_terminal_exit_does_not_hand_off(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A finished build has nothing a successor could act on, so the
+        post-release read is skipped even with the flag set."""
+        (root,) = _chain("terminal-handoff-root")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+        locks_impl = typing.cast(typing.Any, locks)
+        locks_impl.on_release = lambda: setattr(registry, "needs_tick", True)
+
+        spawned, spawn = self._spawner()
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+        )
+
+        assert summary.outcome == "terminal"
+        assert summary.terminal_status == "completed"
+        assert registry.needs_tick is True  # a late worker report
+        assert spawned == [], "a finished build needs no successor tick"
+
+    async def test_lease_held_tick_does_not_hand_off(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A tick that never held the lease has no window to close — the
+        holder does. Handing off from here would spawn a tick per wake-up
+        again, which is the cost this removes."""
+        (root,) = _chain("held-handoff-root")
+        registry, locks, executor, store = _setup(
+            [root], auto_complete=False, lease_acquired=False
+        )
+        registry.needs_tick = True
+
+        spawned, spawn = self._spawner()
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+        )
+
+        assert summary.outcome == "lease_held"
+        assert spawned == []
+
+    async def test_crashing_tick_hands_off_a_wakeup_that_lands_as_it_dies(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A wake-up landing while a *crashing* tick unwinds is in the same
+        release window as one landing while a healthy tick exits, and the
+        worker that set it skipped its spawn either way. The hand-off is in
+        a ``finally`` for exactly that — so an exception cannot bypass the
+        release-window check.
+
+        Note what is being asserted: the tick completes a pass (clearing
+        the flag) and dies on the *second*, with a new notify arriving as it
+        goes. It is that new wake-up which is handed off — not the one the
+        first pass had already cleared and taken responsibility for. See
+        ``test_a_crash_before_the_first_clear_hands_nothing_on``.
+        """
+        (root,) = _chain("crash-handoff-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="other-backend",
+            executor_ref="job-1",
+        )
+
+        boom = RuntimeError("tick died mid-pass")
+        real_clear = registry.build_clear_notify_aio
+        clears: list[int] = []
+
+        async def clear_then_die_on_the_second_pass(bid):
+            clears.append(1)
+            if len(clears) >= 2:
+                # A worker reports as this tick dies.
+                registry.needs_tick = True
+                raise boom
+            await real_clear(bid)
+            # Provokes that second pass: the linger poll sees the flag.
+            registry.needs_tick = True
+
+        registry.build_clear_notify_aio = (  # type: ignore[method-assign]
+            clear_then_die_on_the_second_pass
+        )
+
+        spawned, spawn = self._spawner()
+        build_id = uuid4()
+        with pytest.raises(RuntimeError, match="tick died mid-pass"):
+            await run_tick_aio(
+                build_id,
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            )
+
+        assert spawned == [build_id]
+
+    async def test_a_crash_before_the_first_clear_hands_nothing_on(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The cascade guard, and the reason it exists.
+
+        Clearing the flag is the first thing every pass does. If that call
+        is what keeps failing — a rate-limited or 5xx ``DELETE /notify``
+        while the frontier ``GET`` stays healthy — then a tick that handed
+        off on the way out would be replaced by a successor that fails
+        identically, with the flag still set because the clear never
+        happened: one cold container after another, forever.
+
+        A tick that never cleared anything has taken responsibility for
+        nothing, so it hands nothing on.
+        """
+        (root,) = _chain("cascade-guard-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.needs_tick = True  # and it stays set: the clear never lands
+
+        async def clear_always_fails(bid):
+            raise ConnectionError("registry refused the clear")
+
+        registry.build_clear_notify_aio = clear_always_fails  # type: ignore[method-assign]
+
+        spawned, spawn = self._spawner()
+        with pytest.raises(ConnectionError, match="refused the clear"):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            )
+
+        assert spawned == [], (
+            "handed off after failing to clear the flag: the successor would "
+            "fail the same way, and the chain would never end"
+        )
+
+    async def test_a_tick_that_clears_then_crashes_is_not_crash_recovery(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The honest limit of the handshake, asserted so nobody documents
+        it as more than it is.
+
+        A tick that clears the flag and then dies leaves the flag false, so
+        the hand-off has nothing to see and the wake-up it had taken
+        responsibility for waits for the next completion or the watchdog.
+        Unchanged from before the handshake existed — it closes the release
+        window, it does not resurrect a crashed tick's own wake-up.
+        """
+        (root,) = _chain("crash-after-clear-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.needs_tick = True
+        real_clear = registry.build_clear_notify_aio
+
+        async def clear_then_die(bid):
+            await real_clear(bid)  # the flag is now false
+            raise RuntimeError("died with the wake-up already claimed")
+
+        registry.build_clear_notify_aio = clear_then_die  # type: ignore[method-assign]
+
+        spawned, spawn = self._spawner()
+        with pytest.raises(RuntimeError, match="already claimed"):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            )
+
+        assert registry.needs_tick is False
+        assert spawned == []
+
+    async def test_holding_the_lease_without_a_spawner_warns_once(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget], caplog
+    ):
+        """Nothing connects the worker's skip to the holder's ability to
+        hand off: the worker decides on what the *registry* says, while the
+        hand-off belongs to whoever holds the lease. Driving ``run_tick_aio``
+        by hand with a default config is where the pairing comes apart, so
+        it says so — once per process, since it is a property of how the
+        process was configured."""
+        (root,) = _chain("no-spawner-warning-root")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+
+        reactive_module._warned_missing_successor_spawner = False
+        with caplog.at_level(logging.WARNING, logger=reactive_module.__name__):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=FAST_TICK,
+            )
+            first = caplog.text.count("cannot hand off on the way out")
+
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=FAST_TICK,
+            )
+            second = caplog.text.count("cannot hand off on the way out")
+
+        assert first == 1
+        assert second == 1, "warned more than once per process"
+
+    async def test_a_configured_spawner_warns_about_nothing(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget], caplog
+    ):
+        (root,) = _chain("spawner-no-warning-root")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+        _, spawn = self._spawner()
+
+        reactive_module._warned_missing_successor_spawner = False
+        with caplog.at_level(logging.WARNING, logger=reactive_module.__name__):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=spawn),
+            )
+
+        assert "cannot hand off on the way out" not in caplog.text
+
+    async def test_hand_off_failure_does_not_mask_the_tick(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Best-effort means best-effort: the hand-off runs while an
+        exception is unwinding, so anything it raises would replace the
+        error the caller is about to see."""
+        (root,) = _chain("handoff-boom-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+
+        real_clear = registry.build_clear_notify_aio
+
+        async def clear_then_die(bid):
+            await real_clear(bid)
+            registry.needs_tick = True
+            raise RuntimeError("the real failure")
+
+        registry.build_clear_notify_aio = clear_then_die  # type: ignore[method-assign]
+
+        def explode(_: UUID) -> None:
+            raise ConnectionError("modal is down")
+
+        with pytest.raises(RuntimeError, match="the real failure"):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=dataclasses.replace(FAST_TICK, spawn_successor_tick=explode),
+            )
+
+    async def test_without_a_spawner_nothing_is_read_or_spawned(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """``spawn_successor_tick=None`` (the default, and every caller
+        whose wake-ups spawn unconditionally) must not pay a frontier fetch
+        to discover it has nowhere to hand off to."""
+        (root,) = _chain("no-spawner-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="other-backend",
+            executor_ref="job-1",
+        )
+        trace: list[str] = []
+        real_frontier = registry.build_get_frontier_aio
+
+        async def traced_frontier(bid):
+            trace.append("frontier")
+            return await real_frontier(bid)
+
+        registry.build_get_frontier_aio = traced_frontier  # type: ignore[method-assign]
+        locks_impl = typing.cast(typing.Any, locks)
+
+        def on_release() -> None:
+            trace.append("release")
+            registry.needs_tick = True
+
+        locks_impl.on_release = on_release
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.outcome == "lingered_out"
+        assert summary.successor_spawned == 0
+        assert trace[-1] == "release", (
+            "read the frontier after releasing the lease with no successor "
+            f"spawner configured: {trace}"
+        )
+
+    async def test_zero_linger_skips_the_pre_release_recheck(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """``linger_seconds=0`` is the watchdog sweep: one pass per build,
+        many builds in one container. Extending a zero-length linger re-arms
+        an already-expired deadline, so a steadily-notified build would spin
+        without ever sleeping. The hand-off covers it instead."""
+        (root,) = _chain("sweep-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="other-backend",
+            executor_ref="job-1",
+        )
+        registry.needs_tick = True  # set again the instant the pass clears it
+        real_clear = registry.build_clear_notify_aio
+
+        async def clear_then_notify(bid):
+            await real_clear(bid)
+            registry.needs_tick = True
+
+        registry.build_clear_notify_aio = clear_then_notify  # type: ignore[method-assign]
+
+        spawned, spawn = self._spawner()
+        build_id = uuid4()
+        summary = await run_tick_aio(
+            build_id,
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0,
+                poll_interval_seconds=0.01,
+                spawn_successor_tick=spawn,
+            ),
+        )
+
+        assert summary.outcome == "lingered_out"
+        assert summary.iterations == 1, "the sweep's one-pass promise"
+        assert summary.linger_extended == 0
+        assert spawned == [build_id]

@@ -91,6 +91,7 @@ from stardag_api.services.build_cleanup import (
     select_cancellable_builds,
 )
 from stardag_api.services.claims import claim_is_live, live_claim_filter
+from stardag_api.services.lock import is_scheduler_live
 from stardag_api.services.status import (
     apply_event_to_build,
     apply_event_to_task,
@@ -1518,12 +1519,26 @@ async def notify_build(
     changes the build's scheduling state). A reactive scheduler tick clears
     the flag before computing the frontier and re-checks it while lingering,
     so a notify landing mid-tick is never lost.
+
+    The response reports whether a scheduler holds the build's lease
+    (``scheduler_live``), which lets the caller skip spawning a tick that
+    would only find the lease held. **The read happens after the commit**,
+    on purpose — and after, rather than atomically with, is the entire
+    requirement: a ``True`` then means the lease was still held once the
+    flag was already durable, so its holder cannot exit without seeing it.
+    Reading before the write would invert that and let a scheduler exit
+    between the two with the caller having been told not to spawn. The
+    SDK's tick closes the other end of the same window by re-reading the
+    flag once more after it releases the lease.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     build = await _get_build_checked(build_id, db, auth)
     build.needs_tick_at = utc_now()
     await db.commit()
-    return BuildNotifyResponse(build_id=build_id, needs_tick=True)
+    scheduler_live = await is_scheduler_live(db, auth.environment_id, build_id)
+    return BuildNotifyResponse(
+        build_id=build_id, needs_tick=True, scheduler_live=scheduler_live
+    )
 
 
 @router.delete("/{build_id}/notify", response_model=BuildNotifyResponse)

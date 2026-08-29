@@ -39,6 +39,7 @@ from stardag.registry._base import (
     BuildFrontier,
     BuildInfo,
     BuildListPage,
+    BuildNotifyResult,
     BuildSummary,
     BulkCancelResult,
     RegisteredTaskInfo,
@@ -1494,23 +1495,42 @@ class APIRegistry(RegistryABC):
         )
         return list(response.json().get("skipped_task_ids", []))
 
-    def build_notify(self, build_id: UUID) -> None:
+    def build_notify(self, build_id: UUID) -> BuildNotifyResult:
         """Set the build's scheduler wake-up flag."""
-        self._request(
+        response = self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/notify",
             params=self._get_params(),
             operation=f"Notify build {build_id}",
         )
+        return self._parse_notify_response(build_id, response)
 
-    async def build_notify_aio(self, build_id: UUID) -> None:
+    async def build_notify_aio(self, build_id: UUID) -> BuildNotifyResult:
         """Async version - set the build's scheduler wake-up flag."""
-        await self._arequest(
+        response = await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/notify",
             params=self._get_params(),
             operation=f"Notify build {build_id}",
         )
+        return self._parse_notify_response(build_id, response)
+
+    @staticmethod
+    def _parse_notify_response(build_id: UUID, response: Any) -> BuildNotifyResult:
+        """Parse a notify response, tolerating anything unexpected.
+
+        A wake-up must not fail because the *answer* to it was malformed:
+        the flag is already set by the time this runs, and the only thing
+        the body adds is an optimisation hint. A server predating
+        ``scheduler_live`` — or one that answered with something
+        unparseable — therefore yields ``scheduler_live=None``, which
+        callers read as "unknown" and handle by spawning as they always
+        did.
+        """
+        try:
+            return BuildNotifyResult.model_validate(response.json())
+        except Exception:  # pragma: no cover - defensive
+            return BuildNotifyResult(build_id=build_id)
 
     def build_clear_notify(self, build_id: UUID) -> None:
         """Clear the build's scheduler wake-up flag."""

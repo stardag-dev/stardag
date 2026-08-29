@@ -49,6 +49,8 @@ from stardag.exceptions import ResumableInterruption
 from stardag.registry._base import NoOpRegistry, registry_provider
 from stardag.utils.env import temp_env_vars
 
+_T = typing.TypeVar("_T")
+
 # Modal's own "this input was cancelled" BaseException, imported so that a
 # client that predates or renames it degrades to "we cannot recognise a
 # cancellation" instead of failing every worker import.
@@ -327,12 +329,22 @@ class _WorkerLifecycleReporter:
         )
 
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
+        self._guard_value(fn, what)
+
+    def _guard_value(self, fn: typing.Callable[[], _T], what: str) -> "_T | None":
+        """``_guard`` for a call whose *answer* the caller wants.
+
+        ``None`` on failure, which every caller must already handle as
+        "the registry did not say" — a lifecycle report that raised tells
+        us nothing about the state it was reporting on.
+        """
         try:
-            fn()
+            return fn()
         except Exception:
             logger.exception(
                 f"Worker lifecycle report ({what}) failed for task {self.task.id}"
             )
+            return None
 
     def started(self) -> None:
         def _do() -> None:
@@ -473,15 +485,50 @@ class _WorkerLifecycleReporter:
         )
 
     def _wake_scheduler(self) -> None:
-        """Reactive wake-up: flag the build dirty, then spawn a tick.
+        """Reactive wake-up: flag the build dirty, then spawn a tick — unless
+        a scheduler is already live to see the flag.
 
-        Order matters: the flag is set *before* the spawn, so if the tick
-        finds the scheduler lease held, the holder's linger re-check is
-        guaranteed to observe the wake-up.
+        Order matters: the flag is set *before* anything else, so the
+        answer that decides whether to spawn is evaluated strictly after
+        the set. Combined with the tick's exit handshake (see
+        ``stardag.build._reactive._run_tick_body_aio``) that makes the skip
+        safe: a scheduler still holding the lease has not yet done its
+        post-release re-read, so it cannot exit past this flag.
+
+        Why skip at all: on a build whose tasks are short relative to a
+        tick container's startup, every completion used to spawn a tick
+        that started *after* the resident scheduler had already done the
+        work, took the lease or found the build terminal, and exited
+        having scheduled nothing. Seven tasks, seven cold starts, no work.
+
+        ``scheduler_live`` unknown — an older registry, a custom backend, a
+        notify that failed outright — always spawns. That is the behaviour
+        this had before the flag existed, and it is the safe direction:
+        a redundant tick costs a container, a skipped one costs the build
+        its progress until the watchdog.
         """
         if not self.reactive:
             return
-        self._guard(lambda: self.registry.build_notify(self.build_id), "notify")
+        notified = self._guard_value(
+            lambda: self.registry.build_notify(self.build_id), "notify"
+        )
+        # ``getattr``, not attribute access: ``RegistryABC.build_notify``
+        # used to return None, and a third-party backend overriding it
+        # still may.
+        #
+        # ``is True``, not truthiness: only an explicit yes suppresses the
+        # spawn. A backend that answers with something else — a string, a
+        # dict's raw value, anything a truthiness test would happily accept
+        # — means "unknown", and unknown spawns. The asymmetry decides it:
+        # a redundant tick costs one container, a wrongly skipped one costs
+        # the build its progress until the watchdog.
+        if getattr(notified, "scheduler_live", None) is True:
+            logger.debug(
+                "Build %s already has a live scheduler; wake-up flag set, "
+                "no tick spawned.",
+                self.build_id,
+            )
+            return
         app_name = self.app_name
         if app_name is None:
             logger.warning(

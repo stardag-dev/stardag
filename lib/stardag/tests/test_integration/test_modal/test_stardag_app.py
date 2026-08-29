@@ -2240,6 +2240,51 @@ class TestTickAppOwnership:
         )
         return registry
 
+    def test_tick_is_given_a_successor_spawner_for_its_own_app(
+        self, default_in_memory_fs_target, modal_function_stub
+    ):
+        """The deployed tick carries the other half of the conditional
+        wake-up: a worker skips spawning while a scheduler is live, so the
+        scheduler must be able to hand off to a successor when a wake-up
+        lands as it releases the lease. Without this the skip loses that
+        wake-up until the watchdog."""
+        from uuid import uuid4
+
+        from stardag.build import TickSummary
+
+        tick = self._capture_tick("app-owner")
+        build_id = uuid4()
+        registry = self._registry_with_reactive_app(build_id, "app-owner")
+
+        captured_config: dict = {}
+
+        async def stub_tick_aio(build_uuid, **kwargs):
+            captured_config["config"] = kwargs["config"]
+            return TickSummary(outcome="lingered_out")
+
+        with (
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
+            patch(
+                "stardag.integration.modal._tick.RegistryGlobalConcurrencyLockManager"
+            ),
+        ):
+            rp.get.return_value = registry
+            tick(str(build_id))
+
+        config = captured_config["config"]
+        assert config.spawn_successor_tick is not None
+
+        # And it spawns THIS app's tick for the build it is handed.
+        successor_build_id = uuid4()
+        config.spawn_successor_tick(successor_build_id)
+        assert modal_function_stub["from_name"] == {
+            "app_name": "app-owner",
+            "name": "tick",
+        }
+        assert modal_function_stub["op"] == "spawn"
+        assert modal_function_stub["kwargs"] == {"build_id": str(successor_build_id)}
+
     def test_foreign_app_tick_forwards_to_owner(
         self, default_in_memory_fs_target, modal_function_stub
     ):
