@@ -9,6 +9,7 @@ stays silent otherwise (no build id, NoOp registry, or opt-out).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -352,8 +353,15 @@ class TestReactiveWorkerBehavior:
             BuildNotifyResult(),
             None,
             ConnectionError("registry down"),
+            # A custom backend answering with its own object, whose
+            # `scheduler_live` is not a bool. Truthiness would read this as
+            # "a scheduler is live" and skip the spawn; only an explicit
+            # True may do that, because the mistakes are not symmetric — a
+            # redundant tick costs a container, a skipped one costs the
+            # build its progress until the watchdog.
+            SimpleNamespace(scheduler_live="unknown"),
         ],
-        ids=["field-absent", "returns-none", "notify-failed"],
+        ids=["field-absent", "returns-none", "notify-failed", "truthy-non-bool"],
     )
     def test_unknown_scheduler_state_spawns_as_before(
         self,

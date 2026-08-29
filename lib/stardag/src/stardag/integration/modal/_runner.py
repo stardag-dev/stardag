@@ -515,7 +515,14 @@ class _WorkerLifecycleReporter:
         # ``getattr``, not attribute access: ``RegistryABC.build_notify``
         # used to return None, and a third-party backend overriding it
         # still may.
-        if getattr(notified, "scheduler_live", None):
+        #
+        # ``is True``, not truthiness: only an explicit yes suppresses the
+        # spawn. A backend that answers with something else — a string, a
+        # dict's raw value, anything a truthiness test would happily accept
+        # — means "unknown", and unknown spawns. The asymmetry decides it:
+        # a redundant tick costs one container, a wrongly skipped one costs
+        # the build its progress until the watchdog.
+        if getattr(notified, "scheduler_live", None) is True:
             logger.debug(
                 "Build %s already has a live scheduler; wake-up flag set, "
                 "no tick spawned.",
