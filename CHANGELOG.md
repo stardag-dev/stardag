@@ -8,20 +8,42 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **A task finishing now wakes every build that holds it, not just its
+  own.** Reactive builds run only while one of their ticks does, and a
+  worker notifies the build it belongs to — so when build A finished a task
+  build B was blocked on, nothing told B. It waited for the watchdog (off
+  by default) or for one of its own tasks to finish, of which a blocked
+  build may have none.
+
+  The registry now flags every other live reactive build holding a task
+  when it reaches a claim-releasing status, and `POST /builds/{id}/notify`
+  returns those builds as `wake_builds` so the caller can spawn their
+  ticks — the server has no executor and never pushes. Each is spawned
+  against its own `reactive_app_name`, so a build owned by a **different
+  app** is reached too. An older registry sends no `wake_builds`, which
+  reads as empty: the previous behaviour, where those builds wait for the
+  watchdog.
+
+  **Not covered: named concurrency-limit slots.** The builds queued on a
+  limit key are not the builds holding the task that occupies it, and the
+  registry does not yet know which keys a _pending_ task wants. A slot
+  freed in another build still waits for the watchdog.
+
 - **The Modal watchdog is no longer recommended by default.**
   `watchdog_period_minutes` has always defaulted to off, but the docs,
   examples and a trigger-time warning all pushed towards `=5`. The sweep
   runs on its schedule whether or not anything is building, and that steady
   polling is enough to keep a scale-to-zero registry database awake — a
   bill that never shows up as Modal usage. It also matters less than it
-  did: the reactive exit handshake closes the lost-wake-up window the
-  watchdog was mostly guarding.
+  did: the reactive exit handshake closes the lost-wake-up window it was
+  mostly guarding, and cross-build waits on a shared task are now pushed
+  (above). What is left is a silently dead worker, a build cancelled in the
+  UI, and a concurrency-limit slot freed by another build.
 
   The guidance is now "leave it off, and turn it on when leaving a build
   stalled for even a few minutes is unacceptable — then pick the period
-  from how long that is". Named concurrency limits remain the clearest
-  reason to enable it, since a slot freed in another build has nothing to
-  notify this one. **`build_trigger(reactive=True)` no longer warns** when
+  from how long that is". Named concurrency limits are now the one clear
+  reason to enable it. **`build_trigger(reactive=True)` no longer warns** when
   no watchdog is configured: it fired on the recommended configuration.
 
 - **The reactive scheduler no longer logs an ERROR for a task-store miss it
@@ -100,6 +122,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Registry API
 
+- `POST /builds/{id}/notify` reports `wake_builds` — other live reactive
+  builds that share a task with this one and are waiting for a tick nobody
+  will spawn, each with its `reactive_app_name`. A task reaching a
+  claim-releasing status flags them, in the same transaction as the event.
 - `POST /builds/{id}/notify` reports `scheduler_live` — whether a reactive
   scheduler held the build's lease when the response was produced. The read
   happens after the flag is committed rather than atomically with it, and

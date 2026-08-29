@@ -406,11 +406,14 @@ two cases from the frontier's list of blocking upstreams this build does
 not own:
 
 - **A RUNNING blocker whose execution claim is still live** — the build
-  waits, exactly as it waits for a busy concurrency-limit slot. Note that
-  **nothing pushes the blocker's completion to this build**: a build only
-  ever wakes itself, so this wait is ended by the watchdog, by a task of
-  this build's own finishing, or by a tick you spawn. Cross-build waiting
-  is the case for enabling `watchdog_period_minutes`.
+  waits, and **the blocker's completion ends the wait**: finishing a task
+  flags every other build holding it, and the worker that finished it
+  spawns their ticks. That reaches a build owned by a different app too.
+
+  A busy **concurrency-limit slot** is the one wait that is not pushed: the
+  builds queued on a key are not the builds holding the task that occupies
+  it, and a slot freed elsewhere still waits for the watchdog.
+
 - **A RUNNING blocker whose execution claim has lapsed** — the build fails.
   Not "presumed abandoned": the claim's expiry has passed, so the registry
   no longer honours it, has stopped counting it against concurrency limits,

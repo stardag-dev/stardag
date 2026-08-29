@@ -550,13 +550,18 @@ Two operational notes:
   Declaring [`task_modules`](#declaring-your-task-modules-recommended) is
   what makes "still importable" true by construction — and lets stardag
   skip the pickle in the first place.
-- **The watchdog is off by default, and that is usually right.** It only
-  catches what nothing else reports — a silently dead worker, a build
-  cancelled in the UI, a concurrency slot freed by another build — and a
-  stalled build is unblocked by a single tick, which you can spawn at any
-  time by re-triggering the build id. Turn it on
-  (`watchdog_period_minutes=…`) when leaving a build stalled for even a few
-  minutes is unacceptable, and pick the period from how long that is.
+- **The watchdog is off by default, and that is usually right.** It
+  catches what nothing else reports: a silently dead worker, a build
+  cancelled in the UI, and a **named concurrency-limit slot** released by
+  another build. Sharing _tasks_ across builds does not need it — finishing
+  a task wakes every build holding it, whichever app they belong to — but
+  the builds queued on a limit key are not the builds holding the task that
+  occupies it, so that wait is still ended by the watchdog, and its period
+  is your worst-case stall there. Otherwise a stalled build is unblocked by
+  a single tick, which you can spawn at any time by re-triggering the build
+  id. Turn it on (`watchdog_period_minutes=…`) when leaving a build stalled
+  for even a few minutes is unacceptable, and pick the period from how long
+  that is.
 
   The reason not to leave it on "just in case" is that the sweep runs on
   its schedule whether or not anything is building, and its steady polling
@@ -736,11 +741,13 @@ A task denied by a limit stays pending and is retried when a slot frees
 (immediately for same-build releases; within the watchdog period for
 releases in other builds).
 
-Limits make the **watchdog** load-bearing (`watchdog_period_minutes=…`,
-off by default — see
+Limits are what makes the **watchdog** load-bearing
+(`watchdog_period_minutes=…`, off by default — see
 [Reactive scheduling](#reactive-scheduling-no-resident-build-function-experimental)):
 a slot freed in _another_ build has nothing to notify this one, so the
-watchdog period is how long a denied task waits. It is also the escape
+watchdog period is how long a denied task waits. Note this is the one
+cross-build wait that is not pushed — a shared _task_ finishing does wake
+the builds holding it, but the builds queued on a key are a different set. It is also the escape
 hatch that fails a task stuck RUNNING without an execution ref once its
 **execution claim lapses** (see below), which would otherwise hold its
 slots indefinitely.
