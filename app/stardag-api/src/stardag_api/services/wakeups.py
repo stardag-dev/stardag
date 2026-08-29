@@ -200,9 +200,11 @@ async def mark_tick_requested(
 ) -> None:
     """Record that a caller is about to spawn a tick for ``build``.
 
-    Used by ``POST /builds/{id}/notify`` when it reports no live scheduler:
-    the notifying worker will spawn, so a concurrent wake-candidates call
-    must not hand the same build to somebody else.
+    Used by ``POST /builds/{id}/notify``, in the same transaction as the
+    flag it sets: the notifying worker will spawn unless a scheduler is
+    live, so a concurrent wake-candidates call must never see the build
+    flagged and unstamped. The route restores the previous stamp when the
+    lease read says a scheduler is live after all.
     """
     build.tick_requested_at = now or utc_now()
 

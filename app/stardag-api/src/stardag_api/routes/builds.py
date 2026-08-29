@@ -1597,14 +1597,20 @@ async def notify_build(
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     build = await _get_build_checked(build_id, db, auth)
-    build.needs_tick_at = utc_now()
+    now = utc_now()
+    build.needs_tick_at = now
+    # Stamp the hand-out mark in the SAME transaction as the flag, on the
+    # assumption that the caller will spawn: a concurrent
+    # ``POST /builds/wake-candidates`` must never see this build flagged
+    # and unstamped, or it hands it to a second spawner. If the lease read
+    # below says a scheduler is live — so the caller will *not* spawn —
+    # the stamp is put back, and the build is exactly as it was.
+    previous_stamp = build.tick_requested_at
+    await mark_tick_requested(db, build, now=now)
     await db.commit()
     scheduler_live = await is_scheduler_live(db, auth.environment_id, build_id)
-    if not scheduler_live:
-        # The caller is about to spawn. Recording that keeps a concurrent
-        # ``POST /builds/wake-candidates`` from handing this build to a
-        # second spawner inside the same window (see services.wakeups).
-        await mark_tick_requested(db, build)
+    if scheduler_live:
+        build.tick_requested_at = previous_stamp
         await db.commit()
     return BuildNotifyResponse(
         build_id=build_id, needs_tick=True, scheduler_live=scheduler_live
