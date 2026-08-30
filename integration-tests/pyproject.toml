@@ -45,11 +45,12 @@ addopts = [
 markers = [
     "browser: marks tests that require a browser (deselect with '-m \"not browser\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "registry_live: hits a registry deployed onto Modal for the run (gated by STARDAG_REGISTRY_LIVE_TESTS; lives under tests_registry_live/, outside testpaths)",
 ]
 timeout = 120
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "tests_registry_live"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
 

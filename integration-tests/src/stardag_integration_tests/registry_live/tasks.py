@@ -18,7 +18,22 @@ import stardag as sd
 
 
 @sd.task(name="Range")
-def get_range(limit: int) -> list[int]:
+def get_range(limit: int, salt: str) -> list[int]:
+    """The chain's leaf, and the only place a run's identity enters it.
+
+    ``salt`` does nothing to the result and everything to the *task id*.
+    Task ids are derived from parameters, so a fresh salt makes this task
+    and every task downstream of it new -- which is what stops a rerun
+    finding the previous run's outputs already on the target root, calling
+    every task complete, and passing having scheduled nothing.
+
+    It is a parameter of the leaf rather than of each task so that the
+    number of tasks in the plan is the same on every run, in a fresh
+    environment or a reused one. Scenarios assert on how many tasks were
+    spawned, and an assertion that depends on what a previous run happened
+    to leave behind is not an assertion.
+    """
+    del salt
     return list(range(limit))
 
 
@@ -46,29 +61,3 @@ def slow(values: sd.Depends[list[int]], seconds: int) -> list[int]:
 
     time.sleep(seconds)
     return values
-
-
-@sd.task(name="SleepAndReport")
-def sleep_and_report(seconds: int, salt: str) -> dict[str, str]:
-    """Sleeps, then records which worker ran it.
-
-    The sleep has to outlast the spawning tick's linger, or the tick is
-    still around when the task finishes and the completion is observed
-    rather than *reported* -- which is the self-heal path, not the reactive
-    one, and it passes for the wrong reason.
-
-    ``salt`` gives every run distinct task ids. Without it the second run
-    finds the first run's outputs already on the target root, every task is
-    complete before it starts, and the scenario passes having scheduled
-    nothing at all.
-    """
-    import os
-    import time
-
-    time.sleep(seconds)
-    return {
-        "salt": salt,
-        # Identifies the container, so a scenario can tell "the worker
-        # reported this" from "a tick noticed it later".
-        "modal_task_id": os.environ.get("MODAL_TASK_ID", ""),
-    }

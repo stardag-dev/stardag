@@ -22,6 +22,8 @@ inside the container in the first place.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +53,11 @@ class Deployment:
     modal_environment: str
     workspace_slug: str
     environment_slug: str
+    workspace_id: str
+    environment_id: str
+    # The harness's own key, so the scenarios authenticate exactly the way
+    # the workers do. See `_mint_api_key`.
+    api_key: str
     boot_id: str
 
     def current_boot_id(self) -> str:
@@ -104,6 +111,21 @@ def deploy_registry(
             "also holds live deployments."
         )
 
+    # Before anything else: retire whatever is already deployed under this
+    # name. Redeploying does not retire the previous deployment's warm
+    # containers, and here that is not the usual mild version of the
+    # problem. Two things live in that container -- the branch's code and
+    # the entire database -- so a survivor serves the *previous* push's API
+    # against the previous push's data, complete with the bootstrap admin
+    # password from that run, which no longer matches the one generated
+    # here. The visible symptom is a baffling "Invalid email or password";
+    # the invisible one, if the passwords ever did match, is a green run
+    # that tested the previous commit.
+    #
+    # CI reuses `ci-pr-<n>` across pushes to the same PR, so this is the
+    # normal case there, not an edge.
+    _stop_existing_app(app_name, modal_environment)
+
     private_key, public_key = generate_jwt_keypair()
     app, _functions = build_registry_app(
         repo_root,
@@ -132,6 +154,120 @@ def deploy_registry(
 
     wait_for_health(url, timeout=health_timeout)
     return url
+
+
+def _mint_api_key(
+    api_url: str, session_token: str, *, workspace_name: str, environment_slug: str
+) -> tuple[str, str, str]:
+    """Mint an API key for the harness. Returns (key, workspace_id, env_id).
+
+    A second key alongside the one connect pushed to Modal, and deliberately
+    so. Connect's key goes into a Modal secret and is never handed back in
+    plaintext -- correct for a credential meant for containers, useless for
+    a caller that needs to authenticate here.
+
+    The alternative was to let the SDK authenticate from the profile connect
+    wrote, which uses a browser-login JWT resolved through a token cache
+    keyed on (registry, workspace, user) and refreshed on expiry. That works
+    for a person at a terminal and is the wrong shape for a harness: it adds
+    a cache, a clock and a refresh path between a scenario and its registry,
+    each able to fail in a way that reads as a scheduling bug. An API key
+    has none of those parts -- and it is the credential the workers use, so
+    the two halves of every scenario now authenticate identically.
+    """
+    with httpx.Client(timeout=60.0, base_url=f"{api_url.rstrip('/')}/api/v1") as client:
+        session_headers = {"authorization": f"Bearer {session_token}"}
+
+        me = client.get("/ui/me", headers=session_headers)
+        me.raise_for_status()
+        workspaces = me.json().get("workspaces", [])
+        workspace = _pick(
+            workspaces, workspace_name, what=f"workspace {workspace_name!r}"
+        )
+        workspace_id = workspace["id"]
+
+        exchanged = client.post(
+            "/auth/exchange",
+            headers=session_headers,
+            json={"workspace_id": workspace_id},
+        )
+        exchanged.raise_for_status()
+        access_headers = {"authorization": f"Bearer {exchanged.json()['access_token']}"}
+
+        environments = client.get(
+            f"/ui/workspaces/{workspace_id}/environments", headers=access_headers
+        )
+        environments.raise_for_status()
+        environment = _pick(
+            environments.json(),
+            environment_slug,
+            what=f"environment {environment_slug!r}",
+        )
+        environment_id = environment["id"]
+
+        created = client.post(
+            f"/ui/workspaces/{workspace_id}/environments/{environment_id}/api-keys",
+            headers=access_headers,
+            json={"name": "registry-live-harness"},
+        )
+        created.raise_for_status()
+        key = created.json()["key"]
+
+        # Use it once, here, against the environment it was minted for.
+        # A key that does not work is a harness failure, and it is worth
+        # discovering at the line that created it rather than three layers
+        # later where it reads as a scheduling problem.
+        check = client.get(
+            "/builds",
+            headers={"X-API-Key": key},
+            params={"environment_id": environment_id, "limit": 1},
+        )
+        if check.status_code != 200:
+            raise RuntimeError(
+                f"The API key just minted for workspace {workspace_id} / "
+                f"environment {environment_id} does not authenticate: "
+                f"{check.status_code} {check.text[:200]!r} "
+                f"(key prefix {key[:12]!r})"
+            )
+        return key, workspace_id, environment_id
+
+
+def _pick(items: list[dict], wanted: str, *, what: str) -> dict:
+    """The item whose slug or name is ``wanted``; the only one if unique."""
+    for item in items:
+        if wanted in (item.get("slug"), item.get("name")):
+            return item
+    if len(items) == 1:
+        return items[0]
+    raise RuntimeError(
+        f"Could not find {what} in {[i.get('slug') or i.get('name') for i in items]}"
+    )
+
+
+def _stop_existing_app(app_name: str, modal_environment: str) -> None:
+    """Stop an app of this name in this environment, if one is deployed.
+
+    Stopping rather than leaving it to be overwritten, because the
+    container is the database (see the caller). It also keeps a reused
+    environment from accumulating always-on containers: every deployment
+    here pins ``min_containers=1``, so an abandoned one goes on costing
+    until its scaledown window expires.
+    """
+    result = subprocess.run(
+        ["modal", "app", "stop", app_name, "-e", modal_environment, "--yes"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        print(f"[harness] stopped the previous {app_name!r} deployment")
+        return
+    # Nothing deployed under that name is the common case and not a
+    # failure. Anything else is worth seeing, but not worth aborting on:
+    # the deploy that follows will fail loudly enough if this mattered.
+    print(
+        f"[harness] no previous {app_name!r} to stop "
+        f"({(result.stderr or result.stdout).strip()[:200]})"
+    )
 
 
 def wait_for_health(api_url: str, timeout: float = 300.0) -> None:
@@ -194,6 +330,9 @@ def connect(
     profile to point at a deployment that is about to be deleted.
     """
     from stardag._cli._selfhost_connect import login_local, run_connect
+    from stardag.config.loader import clear_config_cache
+    from stardag.registry import registry_provider
+    from stardag.target._factory import target_factory_provider
 
     if not execution_modal_env:
         raise ValueError(
@@ -220,6 +359,45 @@ def connect(
         overwrite_api_key_secret=True,
     )
 
+    api_key, workspace_id, environment_id = _mint_api_key(
+        api_url,
+        session_token,
+        workspace_name=workspace_name,
+        environment_slug=environment_slug,
+    )
+    # Configure the SDK *entirely from the environment*, which bypasses
+    # profile resolution and every config file.
+    #
+    # This is not belt and braces, it is the only thing that works. Moving
+    # HOME is not enough: `find_project_config` walks the working
+    # directory's parents looking for `.stardag/config.toml`, and a
+    # checkout under the developer's home directory finds their real one
+    # several levels up -- whose default profile, on a machine that has one,
+    # points at the *production* registry. Env vars take precedence over
+    # both the project file and the home file, so setting them is what
+    # makes the deployment this session just built the registry it talks
+    # to.
+    #
+    # The guard asserts the resulting URL as well, because this happening
+    # silently is the difference between a scenario and an accident.
+    os.environ["STARDAG_API_URL"] = api_url
+    os.environ["STARDAG_WORKSPACE_ID"] = workspace_id
+    os.environ["STARDAG_ENVIRONMENT_ID"] = environment_id
+    os.environ["STARDAG_API_KEY"] = api_key
+    # A profile named in the ambient config would otherwise still be
+    # consulted for anything the overrides above do not cover.
+    os.environ.pop("STARDAG_PROFILE", None)
+
+    # The SDK config is read once and cached per process, and this process
+    # started with no profile at all (HOME was moved before any of this).
+    # Without dropping both caches, everything downstream -- the guard, the
+    # scenarios, the trigger -- keeps using the registry resolved from the
+    # config as it was *before* connect wrote a profile, which is to say no
+    # credentials and a 401 on the first authenticated call.
+    clear_config_cache()
+    registry_provider.clear()
+    target_factory_provider.clear()
+
     if outcome.modal_secret_name is None:
         raise RuntimeError(
             "connect did not push the stardag-api-key Modal secret, so the "
@@ -233,5 +411,8 @@ def connect(
         modal_environment=execution_modal_env,
         workspace_slug=outcome.workspace_slug,
         environment_slug=outcome.environment_slug,
+        workspace_id=workspace_id,
+        environment_id=environment_id,
+        api_key=api_key,
         boot_id=read_boot_id(api_url),
     )

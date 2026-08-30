@@ -8,15 +8,19 @@ A tier that can pass while testing nothing is worse than no tier, because
 it is read as coverage.
 
 So the guard asserts the two things a green run has to mean, and asserts
-them before any scenario runs:
+them at module import, before any scenario runs:
 
 - the resolved registry is a real ``APIRegistry``, not any ``NoOp`` flavour;
 - that registry answers an authenticated request over the network.
 
-``require`` mode makes those failures rather than skips. It is the CI
-default here, unlike ``STARDAG_MODAL_LIVE_TESTS``, whose ``auto`` default
-exists so that a laptop without credentials is not a red build: this tier is
-never reached by accident, since it lives outside the default ``testpaths``.
+**On or off, with no ``auto`` in between**, unlike ``STARDAG_MODAL_LIVE_TESTS``.
+That switch has three states because it can cheaply ask "are there
+credentials?" and skip politely when there are not. Here there is no such
+question: the registry does not exist until this tier deploys one, so
+"detect and decide" would mean building the deployment in order to find out
+whether to build it. Enabled means every problem is a failure; unset means
+the modules skip -- as does living outside the default ``testpaths``, so a
+bare ``pytest`` never reaches this tier either way.
 
 The Modal half of the gating is not reimplemented here.
 ``stardag.testing.modal.live_modal_guard`` already owns it -- credentials,
@@ -40,55 +44,48 @@ Refuse = Callable[[str], NoReturn]
 ENV_ENABLED = "STARDAG_REGISTRY_LIVE_TESTS"
 ENV_API_URL = "STARDAG_REGISTRY_LIVE_API_URL"
 
-_TRUE = ("1", "true", "require")
-_FALSE = ("0", "false", "skip")
+_TRUE = ("1", "true", "yes", "require")
 
 
-def _mode() -> str:
-    """``require`` | ``skip`` | ``auto`` -- what to do without a deployment.
+def is_enabled() -> bool:
+    """Whether this tier should run at all.
 
-    Unset means ``auto``: skip quietly when there is nothing deployed to
-    talk to. CI sets ``1``, which turns every such skip into a failure.
+    Read by the session hook that deploys as well as by the guard below, so
+    the decision to spend Modal compute is made in exactly one place.
     """
-    raw = os.environ.get(ENV_ENABLED, "auto").strip().lower()
-    if raw in _TRUE:
-        return "require"
-    if raw in _FALSE:
-        return "skip"
-    return "auto"
+    return os.environ.get(ENV_ENABLED, "").strip().lower() in _TRUE
 
 
 def registry_live_guard() -> str:
     """Assert a real, reachable registry is configured. Returns its URL.
 
     Called at module import in every scenario module, so a misconfiguration
-    surfaces as a collection error rather than as a scenario that ran
-    against nothing.
+    is a collection error rather than a scenario that ran against nothing.
     """
     import pytest
 
-    mode = _mode()
-    if mode == "skip":
+    if not is_enabled():
         pytest.skip(
-            f"{ENV_ENABLED} is off",
+            f"{ENV_ENABLED} is not set. This tier deploys a registry and a "
+            "DAG app onto Modal, so it never runs by default.",
             allow_module_level=True,
         )
 
     def refuse(message: str) -> NoReturn:
-        if mode == "require":
-            pytest.fail(message)
-        pytest.skip(message, allow_module_level=True)
+        pytest.fail(message)
 
     api_url = os.environ.get(ENV_API_URL, "").strip()
     if not api_url:
         refuse(
-            f"{ENV_API_URL} is not set: there is no deployed registry to test "
-            "against. The session fixture deploys one; this tier cannot fall "
-            "back to a local or in-process registry, because a registry a "
-            "Modal container cannot reach is the one thing it does not cover."
+            f"{ENV_API_URL} is not set, so no registry was deployed for this "
+            "session -- the failure will be in the session-start hook above. "
+            "This tier cannot fall back to a local or in-process registry: a "
+            "registry a Modal container cannot reach is the one thing it "
+            "exists to cover."
         )
 
     registry = _assert_registry_is_real(refuse)
+    _assert_registry_points_at(registry, api_url, refuse)
     _assert_registry_answers(registry, api_url, refuse)
     return api_url
 
@@ -120,6 +117,36 @@ def _assert_registry_is_real(refuse: Refuse) -> "APIRegistry":
             "cannot stand in."
         )
     return registry
+
+
+def _assert_registry_points_at(
+    registry: "APIRegistry", api_url: str, refuse: Refuse
+) -> None:
+    """It must be *this session's* registry, not merely some registry.
+
+    Added after the check below caught the SDK resolved to the production
+    registry on a developer machine. The type check above passes happily in
+    that case -- production is a perfectly real ``APIRegistry`` -- and the
+    round-trip check would too, given valid credentials. What stops it is
+    asserting the URL.
+
+    Worth stating plainly, because it is the sharp edge of this whole tier:
+    these scenarios trigger builds, race claims and cancel things. Pointed
+    at a registry someone depends on, they are not a test.
+    """
+    expected = api_url.rstrip("/")
+    actual = (registry.api_url or "").rstrip("/")
+    if actual != expected:
+        refuse(
+            f"The configured registry points at {actual!r}, not at the "
+            f"deployment created for this session ({expected!r}). These "
+            "scenarios trigger builds and race claims; they must never run "
+            "against a registry that outlives the session. Configure the SDK "
+            "from STARDAG_API_URL / STARDAG_WORKSPACE_ID / "
+            "STARDAG_ENVIRONMENT_ID / STARDAG_API_KEY -- note that moving "
+            "HOME is not sufficient, because config discovery also walks the "
+            "working directory's parents."
+        )
 
 
 def _assert_registry_answers(
@@ -154,9 +181,18 @@ def _assert_registry_answers(
         refuse(f"The deployed registry at {api_url} is unreachable: {error!r}")
 
     if response.status_code != 200:
+        # Name the credential and the scope, because "401" on its own sends
+        # people looking at the deployment when the answer is almost always
+        # which key was resolved, or which environment it was minted for.
+        env_key = os.environ.get("STARDAG_API_KEY", "")
         refuse(
             f"An authenticated request to the deployed registry at {api_url} "
             f"returned {response.status_code}: {response.text[:200]!r}. The "
             "deployment is up, but this tier's credentials do not work "
-            "against it."
+            "against it.\n"
+            f"  registry.api_url        = {registry.api_url}\n"
+            f"  registry.environment_id = {registry.environment_id}\n"
+            f"  auth                    = {type(registry._auth).__name__}\n"
+            f"  STARDAG_API_KEY prefix  = {env_key[:12]!r} "
+            f"(len {len(env_key)})"
         )
