@@ -91,9 +91,7 @@ def test_a_shared_task_runs_once_across_two_builds(deployment) -> None:
     # The whole point. Four distinct tasks exist across the two plans, and
     # four spawns happened in total: the shared pair ran once, not once per
     # build. Five would mean the claim did not hold.
-    spawned = sum(
-        s.get("spawned", 0) for s in (*summaries_a, *summaries_b)
-    )
+    spawned = sum(s.get("spawned", 0) for s in (*summaries_a, *summaries_b))
     assert spawned == DISTINCT_TASKS, (
         f"{spawned} spawns for {DISTINCT_TASKS} distinct tasks. More than "
         "one spawn of the shared task means two builds executed it "
