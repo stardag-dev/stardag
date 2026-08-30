@@ -107,6 +107,29 @@ def _tick_function_timeout_seconds(
 _spawn_tick = spawn_tick
 
 
+# What the watchdog asks each build's tick for: one pass, no linger.
+#
+# A wake-up means "something changed for this build", and the tick it spawns
+# should linger — while a DAG churns, each action resets the deadline and one
+# resident scheduler drives level after level without a cold start per level.
+#
+# A sweep means the opposite: nobody told us anything, we are looking in case
+# something was missed. Its population is builds where, by construction,
+# nothing is known to have happened — a lost wake-up, an abandoned RUNNING
+# build, a laptop-only build, an event nobody wrote. Lingering there spends a
+# container for two minutes per period on the builds least likely to have
+# anything to do, which is the wrong way round for a safety net.
+#
+# So the sweep keeps the ``linger_seconds=0`` the inline version used, but
+# now for a reason of its own rather than to survive sharing one container.
+_SWEEP_TICK_KWARGS = {"linger_seconds": 0}
+
+
+def _spawn_sweep_tick(build_id: UUID, app_name: str) -> None:
+    """Spawn a watchdog tick: one pass over this build, then exit."""
+    _spawn_tick(build_id, app_name, tick_kwargs=dict(_SWEEP_TICK_KWARGS))
+
+
 def _build_tick_config(
     stored_tick_kwargs: dict[str, typing.Any] | None,
     tick_kwargs: dict[str, typing.Any] | None,
@@ -379,11 +402,17 @@ def _run_watchdog_sweep(
 
     The sweep *dispatches*; it does not schedule. It lists the builds, spawns
     one ``tick`` each on this app, and returns — in seconds, however many
-    builds there are. Each build then gets its own container, its own full
-    timeout and its normal persisted linger, exactly as if a worker had woken
-    it. A spawn that duplicates a tick already running is not free — a
-    container starts either way — but it is cheap and self-limiting: the
-    second tick finds the scheduler lease held and exits without acting.
+    builds there are. Each build then gets its own container and its own full
+    timeout, rather than a share of the sweep's.
+
+    What it does **not** get is a linger: the sweep asks for one pass (see
+    ``_SWEEP_TICK_KWARGS``). A wake-up's tick lingers because something
+    happened and more is likely to; a sweep's should not, because its
+    population is builds where nothing is known to have happened at all.
+
+    A spawn that duplicates a tick already running is not free — a container
+    starts either way — but it is cheap and self-limiting: the second tick
+    finds the scheduler lease held and exits without acting.
 
     It used to run the tick body for every build sequentially inside the
     *sweep's* single container, which made three things a function of how
@@ -391,8 +420,7 @@ def _run_watchdog_sweep(
     cap (that one container's timeout was divided across the sweep), the
     latency for the last build in the list (it waited behind all the
     others), and whether the sweep finished at all. Dispatching removes all
-    three, and with them the ``linger_seconds=0`` and share-of-timeout
-    overrides the inline form needed to survive itself.
+    three, and with them the share-of-timeout override.
 
     ``reactive_app_name`` scopes the listing to this app's own reactive
     builds, and is now also *where each tick is spawned*. Without scoping,
@@ -419,7 +447,7 @@ def _run_watchdog_sweep(
     if type(registry) is NoOpRegistry:
         logger.warning("Tick watchdog: no registry configured; nothing to do.")
         return
-    spawn = spawn or _spawn_tick
+    spawn = spawn or _spawn_sweep_tick
     running_builds = registry.build_list_running(
         limit=sweep_limit, reactive_app_name=reactive_app_name
     )

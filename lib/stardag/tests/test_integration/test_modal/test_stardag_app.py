@@ -2527,11 +2527,17 @@ class TestWatchdogSweep:
         ``spawn = spawn or _spawn_tick`` — the line that decides what really
         happens — unexercised. This calls the sweep with no spawner at all.
 
-        It also pins the two things that would silently break: the build id
-        goes out as a ``UUID`` (``build_list_running`` returns UUIDs and
+        It also pins the three things that would silently break: the build
+        id goes out as a ``UUID`` (``build_list_running`` returns UUIDs and
         ``spawn_tick`` does its own ``str()``, so an over-eager ``str()``
-        here would double-encode), and the app name is the spawn *target*
-        rather than only the listing scope.
+        here would double-encode); the app name is the spawn *target* rather
+        than only the listing scope; and the sweep asks for **no linger**.
+
+        That last one is the whole cost model. Without it each swept build
+        holds a container for its own ``linger_seconds`` — 120 s by default
+        — every watchdog period, and it spends that on the builds least
+        likely to have anything to do, since a sweep's population is builds
+        where nothing is known to have happened.
         """
         from stardag.integration.modal._tick import _run_watchdog_sweep
 
@@ -2541,9 +2547,23 @@ class TestWatchdogSweep:
             _run_watchdog_sweep(self._registry(build_ids), "an-app")
 
         assert spawn.call_args_list == [
-            call(build_ids[0], "an-app"),
-            call(build_ids[1], "an-app"),
+            call(build_ids[0], "an-app", tick_kwargs={"linger_seconds": 0}),
+            call(build_ids[1], "an-app", tick_kwargs={"linger_seconds": 0}),
         ]
+
+    def test_a_wake_up_spawn_carries_no_overrides(self):
+        """The other side of the same coin: everything that is *not* the
+        sweep must leave the build's stored config alone.
+
+        A wake-up means something changed and more is likely to, so its tick
+        should linger — reconfiguring somebody else's scheduler by accident
+        is what the default-``None`` argument exists to prevent.
+        """
+        import inspect
+
+        from stardag.integration.modal._spawn import spawn_tick
+
+        assert inspect.signature(spawn_tick).parameters["tick_kwargs"].default is None
 
     def test_sweep_survives_individual_spawn_failures(self):
         from stardag.integration.modal._tick import _run_watchdog_sweep

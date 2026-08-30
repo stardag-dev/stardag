@@ -164,29 +164,30 @@ two are what the watchdog is for.
 `tick_watchdog` is deployed on every app. It lists the running reactive
 builds the app owns, **spawns one `tick` for each, and returns** — so a
 sweep takes seconds whether the app is running one build or fifty, and
-each build gets a container of its own, with its full timeout and its
-normal linger, rather than a share of the sweep's. A spawn for a build
-that already has a tick still starts a container, but that tick finds the
-scheduler lease held and exits without acting.
+each build gets a container of its own with its full timeout, rather than a
+share of the sweep's.
+
+Those ticks do **one pass and exit**: a sweep is a safety net, not a
+wake-up. A wake-up's tick lingers because something just happened and more
+is likely to; a sweep looks at builds where nothing is known to have
+happened, so lingering there would spend a container on the builds least
+likely to have anything to do. A spawn for a build that already has a tick
+still starts a container, but that tick finds the scheduler lease held and
+exits without acting.
 
 With `watchdog_period_minutes` set it runs on that period; without it, it
 runs when you invoke it — from the Modal UI or `modal run` — which is the
 one-click recovery for a stalled build.
 
-The default is off, and that is usually right. The reason is now more than
-registry traffic: a standing sweep polls the registry whether or not
-anything is building, enough to keep a scale-to-zero database awake, and
-each tick it spawns lingers for that build's `linger_seconds` (120 s by
-default). For a build that is churning that is useful: workers skip
-spawning while its lease is live, so the lingering tick is the one serving
-their wake-ups. For a build that is idle, or RUNNING but abandoned, it is a
-container doing nothing.
+The default is off, and that is usually right: a standing sweep polls the
+registry whether or not anything is building, enough to keep a
+scale-to-zero database awake. Turn it on when leaving a build stalled for
+even a few minutes is unacceptable, and pick the period from how long that
+is — it is the recovery time for the two cases above, nothing else.
 
-So turn it on when leaving a build stalled for even a few minutes is
-unacceptable, pick the period from how long that is — it is the recovery
-time for the two cases above, nothing else — and read it together with
-`linger_seconds`: a 5-minute period against the default 2-minute linger
-keeps a container up roughly 40% of the time per running build.
+The sweep itself is cheap in proportion to the environment: one pass per
+running build, per period, each in a container that exits as soon as it has
+looked.
 
 ### App ownership
 

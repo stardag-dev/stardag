@@ -46,16 +46,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   scheduler lease held and exits without acting. The `linger_seconds=0` and
   share-of-timeout overrides the inline form needed are gone with it.
 
-  **This costs more container time than the inline sweep did**, and the
-  trade is worth understanding before turning the watchdog on: a spawned
-  tick uses the build's own `linger_seconds` (120 s by default), so a
-  RUNNING build with nothing schedulable now occupies a tick container for
-  that long each period, where the old sweep gave it one frontier pass.
-  For a build that is actually churning the linger is useful — workers skip
-  spawning while its lease is live, and that tick serves their wake-ups. For
-  idle or abandoned RUNNING builds it is pure overhead, so pick
-  `watchdog_period_minutes` with `linger_seconds` in mind, and clean up
-  builds that are RUNNING but abandoned.
+  A swept build's tick still does **one pass and exits**: `spawn_tick` grew
+  an optional `tick_kwargs`, and the sweep uses it to ask for
+  `linger_seconds=0`. The inline version forced that to survive sharing one
+  container; it is kept for a better reason. A wake-up's tick lingers
+  because something just happened and more is likely to, whereas a sweep
+  looks at builds where nothing is known to have happened — lingering there
+  would hold a container for two minutes per period on exactly the builds
+  least likely to have anything to do.
 
 ## [0.21.0] — 2026-08-29
 

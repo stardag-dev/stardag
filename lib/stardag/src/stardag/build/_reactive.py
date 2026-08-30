@@ -1382,12 +1382,14 @@ async def _run_tick_body_aio(
                             # deadline, so a build being notified steadily
                             # would spin here without ever sleeping.
                             #
-                            # The watchdog sweep used to be the caller that
-                            # made this load-bearing — it ran one pass per
-                            # build across many builds in one container, so
-                            # a spinning build starved the rest of the
-                            # sweep. It spawns now, and this is reachable
-                            # only when a caller asks for it explicitly.
+                            # The watchdog sweep is still the caller that
+                            # makes this load-bearing, for a changed reason:
+                            # it used to run one pass per build across many
+                            # builds in one container, so a spinning build
+                            # starved the rest of the sweep. It spawns now,
+                            # and asks each tick for one pass — so the spin
+                            # would cost that build's container instead of
+                            # the sweep, which is better and still wrong.
                             # Nothing is lost either way: the post-release
                             # hand-off is the guarantee, and handing the
                             # wake-up to a dedicated tick is what should
