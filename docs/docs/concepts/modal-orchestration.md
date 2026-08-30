@@ -170,10 +170,11 @@ share of the sweep's.
 Those ticks do **one pass and exit**: a sweep is a safety net, not a
 wake-up. A wake-up's tick lingers because something just happened and more
 is likely to; a sweep looks at builds where nothing is known to have
-happened, so lingering there would spend a container on the builds least
-likely to have anything to do. A spawn for a build that already has a tick
-still starts a container, but that tick finds the scheduler lease held and
-exits without acting.
+happened. Lingering there would keep the tick function warm for the linger's
+duration every period — a couple of stale `RUNNING` builds would be enough,
+however few they are — for builds least likely to have anything to do. A
+spawn for a build that already has a tick still starts a container, but that
+tick finds the scheduler lease held and exits without acting.
 
 With `watchdog_period_minutes` set it runs on that period; without it, it
 runs when you invoke it — from the Modal UI or `modal run` — which is the

@@ -51,9 +51,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `linger_seconds=0`. The inline version forced that to survive sharing one
   container; it is kept for a better reason. A wake-up's tick lingers
   because something just happened and more is likely to, whereas a sweep
-  looks at builds where nothing is known to have happened — lingering there
-  would hold a container for two minutes per period on exactly the builds
-  least likely to have anything to do.
+  looks at builds where nothing is known to have happened. Lingering there
+  would hold container time every period on exactly the builds least likely
+  to have anything to do — and since a container lives as long as its
+  longest live input, a couple of stale `RUNNING` builds would be enough to
+  keep the tick function warm, however few they are.
 
 ## [0.21.0] — 2026-08-29
 

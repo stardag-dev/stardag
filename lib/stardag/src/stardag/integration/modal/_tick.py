@@ -116,12 +116,21 @@ _spawn_tick = spawn_tick
 # A sweep means the opposite: nobody told us anything, we are looking in case
 # something was missed. Its population is builds where, by construction,
 # nothing is known to have happened — a lost wake-up, an abandoned RUNNING
-# build, a laptop-only build, an event nobody wrote. Lingering there spends a
-# container for two minutes per period on the builds least likely to have
-# anything to do, which is the wrong way round for a safety net.
+# build, a laptop-only build, an event nobody wrote. Lingering there spends
+# container time on the builds least likely to have anything to do, which is
+# the wrong way round for a safety net.
+#
+# The sharper reason, and the one that will outlive per-tick containers: a
+# container's lifetime is the **maximum** over its live inputs, not the sum.
+# One lingering tick holds the whole container open, so a couple of stale
+# RUNNING builds swept on a 5-minute period, each lingering the default
+# 120 s, keep the tick function warm ~40 % of the time — for nothing, and
+# regardless of how few they are. ``container_idle_timeout`` never gets a
+# chance to fire. Packing ticks onto shared containers does not fix that; it
+# makes one abandoned build everybody's problem.
 #
 # So the sweep keeps the ``linger_seconds=0`` the inline version used, but
-# now for a reason of its own rather than to survive sharing one container.
+# now for reasons of its own rather than to survive sharing one container.
 _SWEEP_TICK_KWARGS = {"linger_seconds": 0}
 
 
