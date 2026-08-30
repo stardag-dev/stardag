@@ -4776,8 +4776,8 @@ class TestLingerPollCost:
 
     The poll asks one question — "has anything changed?" — every few
     seconds, per lingering build. It used to ask it by fetching the whole
-    frontier: five queries including two window-function aggregates over the
-    event log, of which it read a single boolean.
+    frontier: seven statements, one of them a window-function aggregate over
+    the event log, of which it read a single boolean.
     """
 
     async def test_linger_poll_reads_the_flag_not_the_frontier(

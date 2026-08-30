@@ -591,6 +591,8 @@ async def test_bulk_registration_flags_nobody(client: AsyncClient):
 
     assert await _needs_tick(client, a) is False
     assert await _needs_tick(client, b) is False
+
+
 # --- GET /builds/{id}/notify: the linger poll's one-row read (STA-18) ----
 
 

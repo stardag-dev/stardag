@@ -956,6 +956,13 @@ async def _hand_off_if_needed(
         # common case is an unset flag, which now costs one row instead of
         # a frontier. Deliberately not the slim ``build_get`` — this path
         # asks nothing of a backend that the pre-STA-18 code did not.
+        #
+        # The trade is honest rather than free. When the flag *is* set —
+        # the case this exists for — it is two round trips where it used to
+        # be one; and against a backend on the ABC default, or a server old
+        # enough to have latched the fallback, the flag read *is* a
+        # frontier fetch, so it is two frontier reads. This runs once per
+        # tick, on the way out, so the poll's saving dominates either way.
         info = await registry.build_get_frontier_aio(build_id)
         if info.reactive_app_name is None:
             # Cannot happen for a build this tick just drove — the marker

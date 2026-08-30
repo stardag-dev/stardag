@@ -91,8 +91,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   linger poll, its pre-release re-check and its exit hand-off all use it. The
   frontier is fetched only when there is something to act on. Against a
   server without the route the poll falls back to the frontier read it did
-  before — latched once per process, since re-probing on every poll is the
-  cost the endpoint removes. The default implementation on `RegistryABC`
+  before, and an unparseable answer reads as _unset_ rather than set —
+  fabricating a change would spin the tick without releasing its lease.
+  Latched once per process, since re-probing on every poll is the cost the
+  endpoint removes. The default implementation on `RegistryABC`
   delegates to the frontier, so a custom backend needs no changes to keep
   working, and can override for the cheap read.
 
@@ -101,9 +103,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - **`GET /builds/{build_id}/notify`** reads a build's scheduler wake-up flag
   from its own row, with nothing derived. The reactive tick's linger poll
   asks one question every few seconds per lingering build — "has anything
-  changed?" — and used to ask it by fetching the whole frontier: five
-  queries including two window-function aggregates over the event log, of
-  which it read a single boolean.
+  changed?" — and used to ask it by fetching the whole frontier: seven
+  statements, one of them a window-function aggregate over the event log,
+  of which it read a single boolean.
 
 ### Deployment
 

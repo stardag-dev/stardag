@@ -1636,9 +1636,9 @@ async def read_build_notify(
     """Read the build's scheduler wake-up flag. One row, nothing derived.
 
     A lingering tick asks one question every few seconds — "has anything
-    changed?" — and used to ask it by fetching the whole frontier: five
-    queries including two window-function aggregates over the event log, of
-    which it read a single boolean. This is that boolean.
+    changed?" — and used to ask it by fetching the whole frontier: seven
+    statements, one of them a window-function aggregate over the event log,
+    of which it read a single boolean. This is that boolean.
 
     ``scheduler_live`` is deliberately not answered here, and its absence is
     not a version signal. The caller is the tick that *holds* the lease, so

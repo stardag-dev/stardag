@@ -7,6 +7,7 @@ import json
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 
 from stardag._version import __version__
@@ -18,6 +19,7 @@ from stardag.exceptions import (
 )
 from stardag.registry._api_registry import (
     _GZIP_REQUEST_THRESHOLD_BYTES,
+    APIRegistry,
     _maybe_gzip_json_body,
 )
 from stardag.registry._http_client import SDK_VERSION_HEADER
@@ -1231,23 +1233,87 @@ class TestNotifyReadFallback:
     """
 
     def _registry(self, handler):
-        import asyncio
+        """Swap the *transport*, not the whole client.
 
-        import httpx
-
-        from stardag.registry._api_registry import APIRegistry
-
+        Default headers (auth, SDK version, User-Agent) are configured on
+        the client the SDK builds, so replacing it would leave these tests
+        asserting against a client the SDK never constructs — the reason
+        ``_CapturingRegistry`` gives for the same choice.
+        """
         registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        registry._async_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler),
-            auth=registry._auth,
-        )
-        registry._async_client_loop = asyncio.get_running_loop()
+        registry.async_client._transport = httpx.MockTransport(handler)
         return registry
 
-    async def test_405_falls_back_to_the_frontier_and_latches(self, monkeypatch):
-        import httpx
+    async def test_the_flag_round_trips_from_the_route(self, monkeypatch):
+        """The happy path, which nothing else covers — and the reason it
+        matters is the latch below: a wrong path or verb yields FastAPI's
+        404, which is indistinguishable from an old server, so a typo would
+        silently read the frontier for the life of the process with every
+        test still green. So assert the method and the path, not just the
+        answer.
+        """
+        from stardag.registry import _api_registry
 
+        monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
+        seen: list[tuple[str, str]] = []
+        answer = {"needs_tick": False}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.method, request.url.path))
+            return httpx.Response(200, json=answer)
+
+        registry = self._registry(handler)
+        build_id = uuid4()
+
+        assert (await registry.build_get_notify_aio(build_id)).needs_tick is False
+        answer["needs_tick"] = True
+        assert (await registry.build_get_notify_aio(build_id)).needs_tick is True
+
+        assert seen == [
+            ("GET", f"/api/v1/builds/{build_id}/notify"),
+            ("GET", f"/api/v1/builds/{build_id}/notify"),
+        ]
+
+    async def test_an_unparseable_answer_reads_as_unset(self, monkeypatch):
+        """Unparseable must mean "no", and this is not a nicety.
+
+        A fabricated "yes" makes the linger loop clear the flag, re-read the
+        frontier, be told yes again, and never exit — while holding and
+        renewing the build's scheduler lease, so nothing else can drive that
+        build for the life of the container. Note the trigger is wider than
+        corruption: every field of ``BuildNotifyResult`` has a default, so a
+        bare ``{}`` validates cleanly to the model default.
+        """
+        from stardag.registry import _api_registry
+
+        monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
+
+        for body in ({}, {"needsTick": True}, {"needs_tick": "yes-ish"}):
+            registry = self._registry(
+                lambda request, b=body: httpx.Response(200, json=b)
+            )
+            result = await registry.build_get_notify_aio(uuid4())
+            assert result.needs_tick is False, body
+
+    async def test_a_missing_build_propagates_and_does_not_latch(self, monkeypatch):
+        """The discrimination the latch turns on: a *resource* 404 is a real
+        error, a *route* 404 is version skew. Getting this wrong would
+        disable the cheap read for the whole process on the first request
+        for a deleted build."""
+        from stardag.exceptions import NotFoundError
+        from stardag.registry import _api_registry
+
+        monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
+
+        registry = self._registry(
+            lambda request: httpx.Response(404, json={"detail": "Build not found"})
+        )
+
+        with pytest.raises(NotFoundError):
+            await registry.build_get_notify_aio(uuid4())
+        assert _api_registry._notify_read_route_missing is False
+
+    async def test_405_falls_back_to_the_frontier_and_latches(self, monkeypatch):
         from stardag.registry import _api_registry
 
         monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
@@ -1284,9 +1350,6 @@ class TestNotifyReadFallback:
         that does not exist, is a real failure and must propagate — silently
         degrading to the frontier would hide it for the life of the process.
         """
-        import httpx
-        import pytest
-
         from stardag.exceptions import APIError
         from stardag.registry import _api_registry
 

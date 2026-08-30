@@ -1590,6 +1590,49 @@ class APIRegistry(RegistryABC):
         except Exception:  # pragma: no cover - defensive
             return BuildNotifyResult(build_id=build_id)
 
+    @staticmethod
+    def _parse_notify_read(build_id: UUID, response: Any) -> BuildNotifyResult:
+        """Parse a *read* of the flag. Unparseable means "no", not "yes".
+
+        Deliberately not :meth:`_parse_notify_response`, whose tolerance
+        defaults ``needs_tick`` to True. That is right for the setter — the
+        flag really was just set, so the answer only refines an
+        optimisation hint — and exactly wrong here, where nothing was set
+        and a fabricated "yes" is a claim that something changed.
+
+        The cost of getting this backwards is not a wasted pass. The linger
+        loop would clear the flag, re-read the frontier, poll, be told
+        "yes" again, and never exit — while holding the build's scheduler
+        lease and renewing it, so nothing else can drive that build for the
+        life of the container. A silent, non-terminating spin, where the
+        pre-endpoint code would have failed loudly on the frontier's
+        required fields.
+
+        Note the trigger is wider than "corrupt": every field of
+        ``BuildNotifyResult`` has a default, so ``{}`` — or a response whose
+        shape drifts — validates cleanly to the model default. Hence an
+        explicit False rather than relying on one.
+        """
+        try:
+            payload = response.json()
+            value = payload["needs_tick"]
+            if not isinstance(value, bool):
+                # Not coerced. ``bool("no")`` is True, and every other read
+                # of a wake-up answer in this codebase insists on a real
+                # bool for the same reason: a truthiness test turns any
+                # unexpected shape into the answer that spins the tick.
+                raise TypeError(f"needs_tick is {type(value).__name__}, not bool")
+            return BuildNotifyResult(build_id=build_id, needs_tick=value)
+        except Exception:
+            logger.warning(
+                "Unparseable wake-up flag for build %s; treating it as unset. "
+                "The build is still reached by its next wake-up or the "
+                "watchdog — claiming a change nobody made would spin this "
+                "tick without ever releasing the scheduler lease.",
+                build_id,
+            )
+            return BuildNotifyResult(build_id=build_id, needs_tick=False)
+
     def build_wake_candidates(self, limit: int = 20) -> list[WakeCandidate]:
         """Hand out flagged reactive builds with no live scheduler."""
         response = self._request(
@@ -1659,7 +1702,7 @@ class APIRegistry(RegistryABC):
             return self._notify_from_frontier(
                 build_id, self.build_get_frontier(build_id)
             )
-        return self._parse_notify_response(build_id, response)
+        return self._parse_notify_read(build_id, response)
 
     async def build_get_notify_aio(self, build_id: UUID) -> BuildNotifyResult:
         """Async version - read the build's scheduler wake-up flag."""
@@ -1680,10 +1723,19 @@ class APIRegistry(RegistryABC):
             return self._notify_from_frontier(
                 build_id, await self.build_get_frontier_aio(build_id)
             )
-        return self._parse_notify_response(build_id, response)
+        return self._parse_notify_read(build_id, response)
 
     @staticmethod
-    def _notify_from_frontier(build_id: UUID, frontier: Any) -> BuildNotifyResult:
+    def _notify_from_frontier(
+        build_id: UUID, frontier: BuildFrontier
+    ) -> BuildNotifyResult:
+        """The flag as the fallback reads it: off the frontier, as before.
+
+        Typed rather than ``Any`` so a rename of ``BuildFrontier.needs_tick``
+        is a type error here. This path only runs against a server without
+        the route, which is the one nothing exercises in practice — so the
+        static check is the only check it gets.
+        """
         return BuildNotifyResult(build_id=build_id, needs_tick=frontier.needs_tick)
 
     def build_clear_notify(self, build_id: UUID) -> None:
