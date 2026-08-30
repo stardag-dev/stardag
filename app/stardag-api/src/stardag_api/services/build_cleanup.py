@@ -31,8 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import Build, BuildStatus, Event, EventType, Task, TaskStatus
 from stardag_api.models.base import as_utc, utc_now
-from stardag_api.services.status import apply_event_to_build, apply_event_to_task
-from stardag_api.services.wakeups import flag_after_task_transition, flag_build
+from stardag_api.services.status import apply_event_to_build, transition_task
+from stardag_api.services.wakeups import flag_build
 
 logger = logging.getLogger(__name__)
 
@@ -260,18 +260,10 @@ async def cascade_cancel_build_tasks(
             event_type=EventType.TASK_CANCELLED,
             event_metadata=event_metadata,
         )
-        db.add(event)
-        # Flush per event so event.id / created_at exist before
-        # apply_event_to_task reads them (same pattern as skip-blocked).
-        await db.flush()
-        previous_status = task.latest_status
-        apply_event_to_task(task, event)
         # A released claim is news for every other build holding the task
-        # (and for the builds queued on its concurrency-limit keys) — the
-        # same hook every other status-writing path runs.
-        await flag_after_task_transition(
-            db, task, previous_status=previous_status, build_id=build_id
-        )
+        # (and for the builds queued on its concurrency-limit keys); the
+        # transition runs that hook.
+        await transition_task(db, task, event, build_id=build_id)
     return list(tasks)
 
 

@@ -147,8 +147,8 @@ async def flag_after_task_transition(
 ) -> None:
     """Flag the other builds a task's status change is news for.
 
-    Call after ``apply_event_to_task``, in the same transaction, from every
-    path that can change ``latest_status``. A no-op when the status did not
+    Called by ``services.status.transition_task``, in the same transaction,
+    which is the one path that changes ``latest_status``. A no-op when the status did not
     change: an event landing on an already-completed task (COMPLETED is
     sticky) changes nothing for anyone.
 

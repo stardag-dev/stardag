@@ -131,7 +131,7 @@ class Task(Base, TimestampMixin):
     # Denormalised "latest global status" columns.
     #
     # These are maintained in-transaction whenever a task event is created
-    # (see services.status.apply_event_to_task and routes/builds.py event
+    # (see services.status.transition_task and routes/builds.py event
     # handlers). They mirror the semantics of get_all_task_global_statuses:
     # COMPLETED is sticky, RUNNING/FAILED/CANCELLED win over PENDING, etc.
     #

@@ -96,14 +96,13 @@ from stardag_api.services.claims import claim_is_live, live_claim_filter
 from stardag_api.services.lock import is_scheduler_live
 from stardag_api.services.wakeups import (
     MAX_WAKE_CANDIDATES,
-    flag_after_task_transition,
     flag_build,
     mark_tick_requested,
     select_wake_candidates,
 )
 from stardag_api.services.status import (
     apply_event_to_build,
-    apply_event_to_task,
+    transition_task,
     get_all_task_global_statuses,
     get_attempt_counts_in_build,
     get_interrupt_counts_in_build,
@@ -462,7 +461,7 @@ async def _get_build_and_task(
     by anything that does a read-modify-write on the denormalised
     ``Task.latest_*`` columns — without it two concurrent writers can each
     read PENDING, apply different events, and the last-committer wins
-    regardless of the priority logic in ``apply_event_to_task`` (e.g. a
+    regardless of the priority logic in ``_apply_event_to_task`` (e.g. a
     concurrent TASK_STARTED could clobber a TASK_COMPLETED). The lock is
     released on transaction commit, so request duration governs hold time.
     On SQLite the FOR UPDATE clause is silently dropped — fine, since the
@@ -556,7 +555,7 @@ async def _create_task_event(
         )
     )
 
-    # Lock the task row so apply_event_to_task can safely do a
+    # Lock the task row so the transition can safely do a
     # read-modify-write on the denormalised latest_* columns. Without the
     # lock, two concurrent event-creators racing on the same task could
     # both observe PENDING, apply different events (e.g. STARTED in one,
@@ -621,20 +620,7 @@ async def _create_task_event(
         error_message=error_message,
         event_metadata=event_metadata,
     )
-    db.add(event)
-    # Flush so event.id and event.created_at are populated before we feed the
-    # event into apply_event_to_task. The whole bundle commits atomically.
-    await db.flush()
-    previous_status = db_task.latest_status
-    apply_event_to_task(db_task, event)
-    # Cross-build wake-up (see services.wakeups): a status change is news
-    # for every *other* live reactive build holding this task, which has
-    # nobody else to tell it. In the event's own transaction, so a flag is
-    # never set for a change that then rolls back — and transition-gated,
-    # so an event landing on an already-completed task flags nobody.
-    await flag_after_task_transition(
-        db, db_task, previous_status=previous_status, build_id=build_id
-    )
+    await transition_task(db, db_task, event, build_id=build_id)
     if limit_keys is not None:
         # Replace the task's limit-key rows (only when explicitly provided —
         # a later ref-recording re-start without keys must not clear them).
@@ -1837,13 +1823,7 @@ async def skip_blocked_tasks(
                 event_type=EventType.TASK_SKIPPED,
                 event_metadata=metadata,
             )
-            db.add(event)
-            await db.flush()
-            previous_status = task.latest_status
-            apply_event_to_task(task, event)
-            await flag_after_task_transition(
-                db, task, previous_status=previous_status, build_id=build_id
-            )
+            await transition_task(db, task, event, build_id=build_id)
         await db.commit()
         for _ in blocked_tasks:
             record_entity_created(auth.workspace_id, "events")
@@ -2453,7 +2433,7 @@ async def register_task(
         )
 
     # Check if task already exists in environment. Lock for update so the
-    # phantom-upgrade path (mutating an existing row) and the apply_event_to_task
+    # phantom-upgrade path (mutating an existing row) and the transition
     # call below don't race with a concurrent event-creator on the same task.
     # New rows go through pg_insert ON CONFLICT in the dependency reconcile
     # loop and are race-safe via the unique constraint, so the lock is only
@@ -2515,9 +2495,7 @@ async def register_task(
         if task_already_existed
         else EventType.TASK_PENDING,
     )
-    db.add(event)
-    await db.flush()
-    apply_event_to_task(db_task, event)
+    await transition_task(db, db_task, event, build_id=build_id)
 
     await _close_plan_over_dependencies(db, build_id=build_id, task_pks=[db_task.id])
 
@@ -2695,7 +2673,7 @@ async def register_tasks_bulk(
     # concurrent bulk calls hitting overlapping cached tasks acquire
     # locks in the same order and can't deadlock on each other. We only
     # need FOR UPDATE on rows we'll mutate (phantom upgrades) or on rows
-    # whose denormalised ``latest_*`` columns ``apply_event_to_task``
+    # whose denormalised ``latest_*`` columns the transition
     # touches — i.e., existing rows. Brand-new rows are inserted
     # without a competing writer, no lock needed.
     if existing_tasks:
@@ -2725,7 +2703,7 @@ async def register_tasks_bulk(
                 # Phantom upgrade: real task data overrides the
                 # ``tid[:12]`` placeholder. Note that we deliberately do
                 # *not* reset latest_status_at / latest_status_event_id
-                # here — the apply_event_to_task(TASK_PENDING) call
+                # here — the transition_task(TASK_PENDING) call
                 # below refreshes them via the
                 # ``latest_status == PENDING`` branch in
                 # services/status.py:101. If that branch ever gains a
@@ -2887,14 +2865,18 @@ async def register_tasks_bulk(
     )
 
     if events:
-        db.add_all(events)
-        # Apply event semantics in Python on the in-memory ORM rows —
-        # ``apply_event_to_task`` reads only fields we set above
-        # (event_type, created_at, id, build_id, error_message,
-        # event_metadata) and mutates the Task ORM in-place. No DB
-        # round-trip needed.
+        # ``flush=False``: every event above carries an explicit ``id`` and
+        # ``created_at``, which is all the apply reads, so a 500-task plan
+        # stays one round trip. Registration events are status-neutral, so
+        # the transition hooks run and cost nothing.
         for t, ev in zip(tasks_in, events):
-            apply_event_to_task(db_task_by_task_id[t.task_id], ev)
+            await transition_task(
+                db,
+                db_task_by_task_id[t.task_id],
+                ev,
+                build_id=build_id,
+                flush=False,
+            )
 
     await _close_plan_over_dependencies(
         db,
@@ -3065,7 +3047,7 @@ async def start_task(
             extra_metadata["limit_keys"] = limit_keys
         if claim_ttl_seconds is not None:
             # Carried on the event, not passed alongside it: the expiry is
-            # derived in apply_event_to_task from the event that granted it,
+            # derived in _apply_event_to_task from the event that granted it,
             # so what the caller asked for stays auditable and a replay of
             # the stream reproduces the same expiry.
             extra_metadata["claim_ttl_seconds"] = claim_ttl_seconds

@@ -66,7 +66,7 @@ async def _replayed(client: AsyncClient, build_id: str, task_id: str) -> dict:
     events rather than read off the denormalised columns.
 
     Worth reading separately: the two derivations live in different
-    functions (``apply_event_to_task`` and the per-build replay beside it)
+    functions (``_apply_event_to_task`` and the per-build replay beside it)
     and a new event type has to be taught to both. A test that only ever
     reads one of them cannot tell that it was.
     """

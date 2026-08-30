@@ -9,9 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import Build, BuildStatus, Event, EventType, Task, TaskStatus
 from stardag_api.services.claims import claim_expires_at
+from stardag_api.services.wakeups import flag_after_task_transition
 
 # Statuses TASK_RETRIED resets to PENDING. Shared by the denormalised path
-# (apply_event_to_task) and the two per-build event replays below, which
+# (_apply_event_to_task) and the two per-build event replays below, which
 # must agree — they answer the same question for different readers.
 #
 # SUSPENDED is in the set because it is a dead end otherwise: a task
@@ -344,7 +345,58 @@ async def get_interrupt_counts_in_build(
     return {task_id: count for task_id, count in rows}
 
 
-def apply_event_to_task(task: Task, event: Event) -> None:
+async def transition_task(
+    db: AsyncSession,
+    task: Task,
+    event: Event,
+    *,
+    build_id: UUID,
+    flush: bool = True,
+) -> None:
+    """Record ``event`` and let it move ``task``'s denormalised status.
+
+    **The one way a task's ``latest_status`` changes.** Five paths used to
+    do this by hand — the event routes, skip-blocked, cascade cancel, the
+    lock's completion release, and bulk registration — each pairing
+    :func:`_apply_event_to_task` with the post-transition hooks itself. Two
+    of them were missed when the cross-build wake-up hook was added, so
+    skip-blocked and the lock release flagged nobody; the fix was to find
+    every path again. This function exists so there is only one to find.
+
+    Runs, in order: the event is registered and (unless the caller has
+    already stamped its ``id`` and ``created_at`` — see ``flush``) flushed
+    so those are populated, the previous status is captured, the event is
+    applied, and every post-transition hook runs. The hooks are part of the
+    caller's transaction by construction, which is what makes a flag
+    impossible to set for a change that then rolls back.
+
+    Args:
+        build_id: the build whose event this is — the one build a
+            same-transaction wake-up flag must *not* be set on, since it
+            is the one that already knows.
+        flush: False for a caller that builds its events with explicit
+            ``id`` and ``created_at`` and flushes once at the end (bulk
+            registration does this, to keep a 500-task plan to one round
+            trip). Everything else wants the default.
+    """
+    db.add(event)
+    if flush:
+        # So event.id and event.created_at exist before the apply reads
+        # them. The whole bundle still commits atomically.
+        await db.flush()
+    previous_status = task.latest_status
+    _apply_event_to_task(task, event)
+    # Cross-build wake-up (see services.wakeups): a status change is news
+    # for every *other* live reactive build holding this task, which has
+    # nobody else to tell it. Transition-gated inside the hook, so an event
+    # landing on an already-completed task — or a registration event, which
+    # is status-neutral by design — flags nobody and costs no query.
+    await flag_after_task_transition(
+        db, task, previous_status=previous_status, build_id=build_id
+    )
+
+
+def _apply_event_to_task(task: Task, event: Event) -> None:
     """Mutate a Task's denormalised latest_* columns to reflect a new event.
 
     This implements the same priority logic as the historical
@@ -565,7 +617,7 @@ _USER_TRIGGERABLE_BUILD_EVENTS = (
 def apply_event_to_build(build: Build, event: Event) -> None:
     """Mutate a Build's denormalised ``latest_*`` columns for a new event.
 
-    The build-level counterpart of :func:`apply_event_to_task`, and the sole
+    The build-level counterpart of :func:`_apply_event_to_task`, and the sole
     definition of what a build's status is. It implements the same rules the
     historical ``get_build_status`` event replay did, applied incrementally:
 
@@ -575,7 +627,7 @@ def apply_event_to_build(build: Build, event: Event) -> None:
         ``latest_completed_at`` so the UI stops showing a stale "completed
         at" from the terminal it superseded.
 
-        Note this differs from ``apply_event_to_task``, where a start only
+        Note this differs from ``_apply_event_to_task``, where a start only
         fills ``latest_started_at`` if it is unset. A build emits exactly one
         BUILD_STARTED (at creation), so the two rules can only diverge on a
         hand-inserted event stream — and there, matching what the replay this
@@ -736,7 +788,7 @@ async def get_task_status_in_build(
             error_message = event.error_message
         elif event.event_type == EventType.TASK_INTERRUPTED:
             # Not an ending, so completed_at is deliberately untouched —
-            # mirrors apply_event_to_task, including the unconditional
+            # mirrors _apply_event_to_task, including the unconditional
             # error_message write (a stale one would explain this
             # interruption with an earlier failure's text).
             status = TaskStatus.INTERRUPTED
@@ -814,7 +866,7 @@ async def get_all_task_statuses_in_build(
             error_message = event.error_message
         elif event.event_type == EventType.TASK_INTERRUPTED:
             # Not an ending, so completed_at is deliberately untouched —
-            # mirrors apply_event_to_task, including the unconditional
+            # mirrors _apply_event_to_task, including the unconditional
             # error_message write (a stale one would explain this
             # interruption with an earlier failure's text).
             status = TaskStatus.INTERRUPTED
@@ -837,7 +889,7 @@ async def get_task_global_status(
     """Get task status considering events from ALL builds.
 
     Reads the denormalised ``latest_*`` columns on tasks (maintained
-    in-transaction by ``apply_event_to_task`` whenever a task event is
+    in-transaction by ``transition_task`` whenever a task event is
     created). Falls back to PENDING for tasks that don't exist.
 
     Returns:
