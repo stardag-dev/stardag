@@ -114,8 +114,17 @@ Gating (see `stardag.testing.modal.live_modal_guard`):
   to run the tier — `auto` would let a missing credential skip everything and
   still exit 0.
 - `STARDAG_MODAL_TEST_PROFILE`: if set, live tests are skipped unless the
-  active Modal profile matches. Recommended to always set this locally, so
-  live tests can never run against a shared/production workspace by accident.
+  active Modal profile matches. Convenient locally, where credentials come
+  from a `~/.modal.toml` profile and the name therefore means something.
+- `STARDAG_MODAL_TEST_WORKSPACE`: if set, the workspace the credentials
+  **actually belong to** must match — resolved from the token itself. Prefer
+  this wherever credentials come from the environment rather than a profile,
+  CI most obviously. `MODAL_PROFILE` selects a section of `~/.modal.toml`, but
+  `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` take precedence over that file and are
+  not bound to the profile name, so a profile name asserts nothing there.
+
+Set one of the two whenever you run the live tier, so it can never reach a
+shared or production-adjacent workspace by accident.
 
 The ordinary test envs exclude the tier twice over — `-m "not modal_live"`
 plus `STARDAG_MODAL_LIVE_TESTS=0`. Both are needed: marker deselection happens
@@ -124,8 +133,9 @@ makes a Modal API call per module before deciding to skip.
 
 ##### In CI
 
-`.github/workflows/modal-live.yml` runs the tier against a dedicated
-`stardag-ci` Modal workspace. It is **not** part of the normal CI run and is
+`.github/workflows/modal-live.yml` runs the tier against the `andhus` Modal
+workspace, asserted via `STARDAG_MODAL_TEST_WORKSPACE`. It is **not** part of
+the normal CI run and is
 not a required check — it needs credentials, which GitHub does not give to
 pull requests from forks.
 

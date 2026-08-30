@@ -5,8 +5,8 @@ name: Modal Live Tests
 # id, and the platform semantics that detached execution depends on.
 #
 # It is not part of `ci.yml` because it costs real compute and needs
-# credentials, so it runs only when asked: nightly, on manual dispatch, or on a
-# pull request that a maintainer has labelled `modal-live`.
+# credentials, so it runs only when asked: weekly, on manual dispatch, or on a
+# pull request that touches the tier's paths or carries the `modal-live` label.
 #
 # Scope, stated plainly so this file is not mistaken for more than it is: the
 # workers here report to a NoOp registry. This tier covers Modal *execution*,
@@ -132,12 +132,13 @@ jobs:
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      # Required, and not merely cosmetic: `live_modal_guard` compares the
-      # active profile against STARDAG_MODAL_TEST_PROFILE, and modal.config
-      # resolves the active profile as `MODAL_PROFILE or "default"`. Without
-      # this line every run fails the guard in require mode.
-      MODAL_PROFILE: stardag-ci
-      STARDAG_MODAL_TEST_PROFILE: stardag-ci
+      # The workspace the CI credentials belong to. Asserted against the
+      # workspace resolved from the token itself, rather than against a
+      # profile name -- `MODAL_PROFILE` selects a section of a `.modal.toml`,
+      # but `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` take precedence over that
+      # file and are not bound to the name, so a profile name asserts nothing
+      # here.
+      STARDAG_MODAL_TEST_WORKSPACE: andhus
       # Require mode: fail rather than skip when credentials are missing or the
       # profile does not match, so a misconfigured job cannot pass vacuously.
       STARDAG_MODAL_LIVE_TESTS: "1"
@@ -220,7 +221,6 @@ jobs:
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      MODAL_PROFILE: stardag-ci
     steps:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -257,7 +257,6 @@ jobs:
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      MODAL_PROFILE: stardag-ci
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Install uv
@@ -265,6 +264,13 @@ jobs:
       - name: Delete environments whose PR is closed or whose run has finished
         run: |
           set -euo pipefail
+          # Two filters, both required, and the only names ever passed to
+          # `environment delete`: the jq select below and the case arms. No
+          # other environment in the workspace is reachable from here.
+          #
+          # An indeterminate lookup keeps the environment rather than deleting
+          # it. "I could not tell, therefore delete" is the wrong default for
+          # an irreversible operation; the next sweep will settle it.
           uvx modal environment list --json \
             | jq -r '.[].name
                      | select(startswith("ci-pr-") or startswith("ci-manual-"))' \
@@ -273,8 +279,10 @@ jobs:
                   ci-pr-*)
                     n="${name#ci-pr-}"
                     state=$(gh pr view "$n" --repo "$GITHUB_REPOSITORY" \
-                              --json state -q .state 2>/dev/null || echo MISSING)
-                    if [ "$state" != "OPEN" ]; then
+                              --json state -q .state 2>/dev/null || echo LOOKUP_FAILED)
+                    if [ "$state" = "LOOKUP_FAILED" ]; then
+                      echo "Could not determine the state of PR #$n -- keeping $name"
+                    elif [ "$state" != "OPEN" ]; then
                       echo "PR #$n is $state -- deleting $name"
                       uvx modal environment delete "$name" --yes
                     fi
@@ -282,8 +290,10 @@ jobs:
                   ci-manual-*)
                     id="${name#ci-manual-}"
                     status=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" \
-                               --json status -q .status 2>/dev/null || echo missing)
-                    if [ "$status" != "in_progress" ] && [ "$status" != "queued" ]; then
+                               --json status -q .status 2>/dev/null || echo LOOKUP_FAILED)
+                    if [ "$status" = "LOOKUP_FAILED" ]; then
+                      echo "Could not determine the state of run $id -- keeping $name"
+                    elif [ "$status" != "in_progress" ] && [ "$status" != "queued" ]; then
                       echo "Run $id is $status -- deleting $name"
                       uvx modal environment delete "$name" --yes
                     fi
