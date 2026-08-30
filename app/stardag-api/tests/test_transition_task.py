@@ -1,12 +1,12 @@
 """``transition_task`` is the only way a task's ``latest_status`` moves.
 
-Five paths used to pair ``_apply_event_to_task`` with the post-transition
-hooks by hand — the event routes, skip-blocked, cascade cancel, the lock's
-completion release, and registration. When the cross-build wake-up hook was
-added, two of them were missed, so skip-blocked and the lock release flagged
+Every path that records a task event used to pair ``_apply_event_to_task``
+with the post-transition hooks by hand. When the cross-build wake-up hook
+was added, two were missed, so skip-blocked and the lock release flagged
 nobody. ``tests/test_wakeups.py`` is the behavioural regression net for
 that; this module guards the structure that makes the next hook a one-line
-change instead of a search.
+change instead of a search — deliberately without naming a count, since the
+whole point is that new callers may appear.
 """
 
 from __future__ import annotations

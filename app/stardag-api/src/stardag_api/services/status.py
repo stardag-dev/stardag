@@ -355,13 +355,14 @@ async def transition_task(
 ) -> None:
     """Record ``event`` and let it move ``task``'s denormalised status.
 
-    **The one way a task's ``latest_status`` changes.** Five paths used to
-    do this by hand — the event routes, skip-blocked, cascade cancel, the
-    lock's completion release, and bulk registration — each pairing
-    :func:`_apply_event_to_task` with the post-transition hooks itself. Two
-    of them were missed when the cross-build wake-up hook was added, so
-    skip-blocked and the lock release flagged nobody; the fix was to find
-    every path again. This function exists so there is only one to find.
+    **The one way a task's ``latest_status`` changes.** Every path that
+    records a task event used to do this by hand — the event routes,
+    skip-blocked, cascade cancel, the lock's completion release, and both
+    registration paths — each pairing :func:`_apply_event_to_task` with the
+    post-transition hooks itself. Two were missed when the cross-build
+    wake-up hook was added, so skip-blocked and the lock release flagged
+    nobody; the fix was to go and find them all again. This function exists
+    so there is only one to find, however many callers it grows.
 
     Runs, in order: the event is registered and (unless the caller has
     already stamped its ``id`` and ``created_at`` — see ``flush``) flushed
