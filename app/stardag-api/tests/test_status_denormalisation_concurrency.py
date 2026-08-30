@@ -12,7 +12,7 @@ Two complementary test groups:
    With a plain SELECT the second commit clobbers the first
    (last-writer-wins). With ``SELECT ... FOR UPDATE`` the second SELECT
    blocks until the first commits, so it observes the updated row and the
-   priority logic in ``apply_event_to_task`` keeps COMPLETED sticky. These
+   priority logic in ``_apply_event_to_task`` keeps COMPLETED sticky. These
    tests document why the lock is necessary by producing the broken
    outcome on demand.
 
@@ -49,7 +49,7 @@ from stardag_api.routes.builds import (
     fail_build,
     resume_build,
 )
-from stardag_api.services.status import apply_event_to_build, apply_event_to_task
+from stardag_api.services.status import apply_event_to_build, _apply_event_to_task
 from tests.conftest import (
     DEFAULT_ENVIRONMENT_ID,
     DEFAULT_WORKSPACE_ID,
@@ -250,7 +250,7 @@ async def _force_overlapping_selects(
             )
             s_a.add(ev_a)
             await s_a.flush()
-            apply_event_to_task(t_a, ev_a)
+            _apply_event_to_task(t_a, ev_a)
             await s_a.commit()
 
             r_b = await s_b.execute(stmt_b)
@@ -264,7 +264,7 @@ async def _force_overlapping_selects(
             )
             s_b.add(ev_b)
             await s_b.flush()
-            apply_event_to_task(t_b, ev_b)
+            _apply_event_to_task(t_b, ev_b)
             await s_b.commit()
         else:
             # No locks — gather the SELECTs to force overlap, then apply
@@ -293,8 +293,8 @@ async def _force_overlapping_selects(
             s_b.add(ev_b)
             await s_a.flush()
             await s_b.flush()
-            apply_event_to_task(t_a, ev_a)
-            apply_event_to_task(t_b, ev_b)
+            _apply_event_to_task(t_a, ev_a)
+            _apply_event_to_task(t_b, ev_b)
             # A applies COMPLETED, B applies STARTED. Commit B last so
             # STARTED clobbers COMPLETED — the bug we're fixing.
             await s_a.commit()
@@ -328,7 +328,7 @@ async def test_with_lock_completed_stays_sticky(
     pg_engine: AsyncEngine,
 ) -> None:
     """With ``SELECT ... FOR UPDATE`` the second writer observes the first
-    writer's COMPLETED state, and ``apply_event_to_task`` no-ops on the
+    writer's COMPLETED state, and ``_apply_event_to_task`` no-ops on the
     later TASK_STARTED. The denormalised column ends COMPLETED — matching
     the historical event-scan semantics."""
     task_pk, build_id = await _seed_task_and_build(pg_engine, "race-locked")

@@ -525,3 +525,69 @@ async def test_reactive_meta_rejects_an_empty_app_name(client: AsyncClient):
         f"/api/v1/builds/{build_id}/reactive-meta", json={"app_name": ""}
     )
     assert response.status_code == 422
+
+
+# --- registration flags nobody (STA-16) ---------------------------------
+#
+# The one behaviour change in routing every path through ``transition_task``:
+# the two registration paths now run the wake-up hook, which they did not
+# before. It is a no-op only because TASK_PENDING and TASK_REFERENCED are
+# status-neutral, and nothing else in this file can catch a regression —
+# every helper that registers calls ``_clear`` afterwards, wiping exactly
+# the flag a spurious registration wake-up would set.
+
+
+async def test_registering_a_new_task_flags_nobody(client: AsyncClient):
+    a, b = await _shared(client)
+    await _clear(client, a, b)
+
+    await _register(client, a, "brand-new")
+
+    assert await _needs_tick(client, a) is False
+    assert await _needs_tick(client, b) is False
+
+
+async def test_re_referencing_a_running_task_flags_nobody(client: AsyncClient):
+    """The case most likely to break: build B registers a task that is
+    already RUNNING under build A. The event is TASK_REFERENCED, and if it
+    ever stopped being status-neutral this would flag A for a change that
+    did not happen."""
+    a, b = await _shared(client)
+    await _start(client, a, "shared")
+    await _clear(client, a, b)
+
+    await _register(client, b, "shared")
+
+    assert await _needs_tick(client, a) is False
+    assert await _needs_tick(client, b) is False
+
+
+async def test_bulk_registration_flags_nobody(client: AsyncClient):
+    """Also the performance guard the bulk loop rests on.
+
+    The hook returns at its first line for every task, so a 500-task plan
+    issues no wake-up queries at all. If TASK_PENDING/TASK_REFERENCED ever
+    stopped being status-neutral, that loop would turn into two queries per
+    task against ``builds``, inside a transaction already holding
+    ``FOR UPDATE`` on every task row.
+    """
+    a, b = await _shared(client)
+    await _clear(client, a, b)
+
+    payload = {
+        "tasks": [
+            {
+                "task_id": f"bulk-{i}",
+                "task_name": "T",
+                "task_namespace": "",
+                "task_data": {},
+                "dependency_task_ids": [],
+            }
+            for i in range(25)
+        ]
+    }
+    response = await client.post(f"/api/v1/builds/{a}/tasks/bulk", json=payload)
+    assert response.status_code in (200, 201), response.text
+
+    assert await _needs_tick(client, a) is False
+    assert await _needs_tick(client, b) is False

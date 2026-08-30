@@ -1,7 +1,7 @@
 """Tests for the denormalised Task.latest_* columns.
 
 Verifies that:
-- apply_event_to_task encodes the same priority logic as the historical
+- _apply_event_to_task encodes the same priority logic as the historical
   event-scan helper.
 - Lifecycle endpoints (start/complete/fail/cancel/etc.) keep latest_* in
   sync with what an event scan would have computed.
@@ -19,14 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stardag_api.models import Event, EventType, Task, TaskStatus
 from stardag_api.models.base import generate_uuid7
 from stardag_api.services.status import (
-    apply_event_to_task,
+    _apply_event_to_task,
     get_all_task_global_statuses,
 )
 from tests.conftest import DEFAULT_ENVIRONMENT_ID
 
 
 # ---------------------------------------------------------------------------
-# apply_event_to_task — priority + ordering
+# _apply_event_to_task — priority + ordering
 # ---------------------------------------------------------------------------
 
 
@@ -66,53 +66,53 @@ def _event(
 class TestApplyEventToTask:
     def test_pending_to_running_on_start(self) -> None:
         task = _new_task()
-        apply_event_to_task(task, _event(EventType.TASK_STARTED))
+        _apply_event_to_task(task, _event(EventType.TASK_STARTED))
         assert task.latest_status == TaskStatus.RUNNING
         assert task.latest_started_at is not None
 
     def test_running_to_completed(self) -> None:
         task = _new_task()
-        apply_event_to_task(task, _event(EventType.TASK_STARTED))
-        apply_event_to_task(task, _event(EventType.TASK_COMPLETED))
+        _apply_event_to_task(task, _event(EventType.TASK_STARTED))
+        _apply_event_to_task(task, _event(EventType.TASK_COMPLETED))
         assert task.latest_status == TaskStatus.COMPLETED
         assert task.latest_completed_at is not None
 
     def test_completed_is_sticky(self) -> None:
         task = _new_task()
-        apply_event_to_task(task, _event(EventType.TASK_COMPLETED))
-        apply_event_to_task(task, _event(EventType.TASK_FAILED))
-        apply_event_to_task(task, _event(EventType.TASK_STARTED))
+        _apply_event_to_task(task, _event(EventType.TASK_COMPLETED))
+        _apply_event_to_task(task, _event(EventType.TASK_FAILED))
+        _apply_event_to_task(task, _event(EventType.TASK_STARTED))
         assert task.latest_status == TaskStatus.COMPLETED
 
     def test_failed_then_started_goes_back_to_running(self) -> None:
         # Matches the historical retry semantic: RUNNING wins over FAILED.
         task = _new_task()
-        apply_event_to_task(task, _event(EventType.TASK_FAILED, error_message="boom"))
+        _apply_event_to_task(task, _event(EventType.TASK_FAILED, error_message="boom"))
         assert task.latest_status == TaskStatus.FAILED
-        apply_event_to_task(task, _event(EventType.TASK_STARTED))
+        _apply_event_to_task(task, _event(EventType.TASK_STARTED))
         assert task.latest_status == TaskStatus.RUNNING
 
     def test_pending_to_waiting_for_lock(self) -> None:
         task = _new_task()
-        apply_event_to_task(task, _event(EventType.TASK_WAITING_FOR_LOCK))
+        _apply_event_to_task(task, _event(EventType.TASK_WAITING_FOR_LOCK))
         assert task.latest_status == TaskStatus.PENDING
         assert task.latest_waiting_for_lock is True
 
     def test_waiting_for_lock_does_not_set_when_running(self) -> None:
         task = _new_task()
-        apply_event_to_task(task, _event(EventType.TASK_STARTED))
-        apply_event_to_task(task, _event(EventType.TASK_WAITING_FOR_LOCK))
+        _apply_event_to_task(task, _event(EventType.TASK_STARTED))
+        _apply_event_to_task(task, _event(EventType.TASK_WAITING_FOR_LOCK))
         assert task.latest_waiting_for_lock is False
 
     def test_referenced_is_status_neutral(self) -> None:
         task = _new_task()
-        apply_event_to_task(task, _event(EventType.TASK_STARTED))
-        apply_event_to_task(task, _event(EventType.TASK_REFERENCED))
+        _apply_event_to_task(task, _event(EventType.TASK_STARTED))
+        _apply_event_to_task(task, _event(EventType.TASK_REFERENCED))
         assert task.latest_status == TaskStatus.RUNNING
 
     def test_commit_hash_propagates(self) -> None:
         task = _new_task()
-        apply_event_to_task(
+        _apply_event_to_task(
             task,
             _event(EventType.TASK_STARTED, metadata={"commit_hash": "abc123"}),
         )

@@ -383,20 +383,11 @@ async def release_lock_with_completion(
             task_id=task_row.id,
             event_type=EventType.TASK_COMPLETED,
         )
-        db.add(completion_event)
-        # Flush so completion_event.id and created_at are populated before
-        # we feed it into the apply helper.
-        await db.flush()
         # Lazy import to avoid circular dependency between services.lock and
         # services.status.
-        from stardag_api.services.status import apply_event_to_task
-        from stardag_api.services.wakeups import flag_after_task_transition
+        from stardag_api.services.status import transition_task
 
-        previous_status = task_row.latest_status
-        apply_event_to_task(task_row, completion_event)
-        await flag_after_task_transition(
-            db, task_row, previous_status=previous_status, build_id=build_id
-        )
+        await transition_task(db, task_row, completion_event)
 
     # Release the lock
     owner_id_str = str(owner_id)
