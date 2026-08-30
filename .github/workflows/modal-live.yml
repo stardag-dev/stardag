@@ -21,11 +21,23 @@ on:
   pull_request:
     types: [labeled, synchronize, reopened, closed]
 
+# Least privilege by default; the sweeper widens it for the two read-only
+# lookups it needs.
+permissions:
+  contents: read
+
 concurrency:
   # One live run per Modal environment at a time. This is what makes the
   # tier's fixed object names (`stardag-testing`, `stardag-testing-app`,
   # `stardag-testing-probe`, ...) safe without salting them per run: two runs
   # sharing an environment would redeploy the same app under each other.
+  #
+  # Note the environment is per *PR*, not per run: reruns and later pushes on
+  # the same PR reuse `ci-pr-<n>` and inherit whatever the previous run left in
+  # it. That is deliberate and safe -- task ids, outputs and probe keys are all
+  # salted per run, so the inherited state is inert -- and it keeps the volume
+  # warm across a PR's iterations. Serialisation is what makes it safe; without
+  # the group below, two runs would race the same app name.
   group: >-
     modal-live-${{ github.event_name == 'pull_request'
       && format('pr-{0}', github.event.pull_request.number)
@@ -141,6 +153,7 @@ jobs:
   cleanup-closed-pr:
     name: Delete the closed PR's Modal environment
     runs-on: ubuntu-latest
+    permissions: {}
     if: >-
       github.event_name == 'pull_request' &&
       github.event.action == 'closed' &&
@@ -170,6 +183,11 @@ jobs:
   sweep-stale-environments:
     name: Sweep stale Modal environments
     runs-on: ubuntu-latest
+    # `gh pr view` needs pull-requests, `gh run view` needs actions.
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
     needs: modal-live
     # `always()` is load-bearing: with `needs`, a failed or cancelled
     # modal-live would otherwise skip the sweeper -- and a red suite is exactly
