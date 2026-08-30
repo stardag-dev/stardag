@@ -283,6 +283,34 @@ Before tagging, make sure `CHANGELOG.md` has an entry covering the
 release's Registry API / UI / Deployment changes (move them out of
 `[Unreleased]`) — the GitHub release links to it.
 
+### When to cut one
+
+**After each significant change to the Registry API or the UI**, not in
+batches. The image is the only route those changes have to a self-hosted
+deployment: the hosted service builds from a commit, so it always runs the
+newest API, but a self-hoster runs whatever the last `server-v*` tag built.
+An unreleased API change therefore reaches nobody outside the hosted
+deployment.
+
+Letting releases lag has a specific failure mode, and it is silent. Version
+skew degrades gracefully by design — an older registry answers nothing to an
+endpoint it does not have, and the SDK falls back — so a self-hoster on a
+stale image sees no error. They see a feature they upgraded the SDK for
+quietly not working. `server-v0.1.2` sat for 18 days that way, through six
+SDK releases (v0.19.0 → v0.22.0) — including the cross-build wake-up
+endpoints v0.22.0's headline feature is built on.
+
+"Significant" means anything a user could notice: new or changed endpoints, a
+schema migration, a UI change, a dependency swap on the auth or security
+path. A pure refactor with no external surface can wait for the next one.
+Bump the minor when the HTTP surface grows or there is a migration, the patch
+for fixes and dependency floors.
+
+Bump `DEFAULT_SERVER_VERSION` in the same PR — the pin is what a fresh
+`stardag self-host up` gets. Self-hosters who would rather track releases as
+they land deploy with `--server-version latest`; see
+[Updating to a new version](docs/docs/how-to/self-host-modal.md#updating-to-a-new-version).
+
 ### Dropping support for older SDKs
 
 The hosted service always runs the latest API, so the compatibility case
