@@ -98,6 +98,22 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   delegates to the frontier, so a custom backend needs no changes to keep
   working, and can override for the cheap read.
 
+- **The tick no longer uses the global concurrency lock at all.**
+  `run_tick_aio` **drops its `lock_manager` parameter** — the lease was its
+  only use — and takes the lease through the registry instead, renewing it
+  in the background while it lingers and stopping (`TickSummary.outcome ==
+"lease_lost"`) if a renewal reports it was taken over. `RegistryABC` gains
+  `build_acquire_scheduler_lease_aio` / `build_renew_scheduler_lease_aio` /
+  `build_release_scheduler_lease_aio`, defaulting to granting, and the
+  duplicated `SCHEDULER_LOCK_PREFIX` is gone from both sides.
+
+  Against a server without the routes the tick runs unleased and says so
+  once: duplicate ticks become possible (idempotent, and task starts stay
+  arbitrated by the execution claim). That server also reports
+  `scheduler_live=False` to every worker, because it reads a lock table this
+  SDK no longer writes — so wake-ups spawn unconditionally too, which is the
+  pre-lease behaviour end to end rather than a half-broken one.
+
 ### Registry API
 
 - **`GET /builds/{build_id}/notify`** reads a build's scheduler wake-up flag
@@ -106,6 +122,18 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   changed?" — and used to ask it by fetching the whole frontier: seven
   statements, one of them a window-function aggregate over the event log,
   of which it read a single boolean.
+
+- **The reactive scheduler's lease lives on the build row.** New
+  `POST`/`PUT`/`DELETE /builds/{build_id}/scheduler-lease` acquire, renew and
+  release a build's single-flight lease, recorded as
+  `builds.scheduler_lease_until` / `scheduler_lease_owner` (migration, no
+  backfill — a lease is transient). It used to ride on the deprecated global
+  concurrency lock, so both readers had to assemble a lock name from a build
+  id and query `distributed_locks`: `select_wake_candidates` is now one query
+  instead of two, and "is a scheduler live?" is a column comparison. Renew
+  and release are owner-checked, so a tick whose lease lapsed and was taken
+  over cannot extend or clear its successor's. The global lock is untouched
+  for its remaining use (executions without probeable liveness).
 
 ### Deployment
 

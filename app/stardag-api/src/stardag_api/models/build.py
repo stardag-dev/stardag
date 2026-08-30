@@ -153,6 +153,34 @@ class Build(Base, TimestampMixin):
         nullable=True,
     )
 
+    # The reactive scheduler's single-flight lease on this build: at most
+    # one tick drives a build at a time. Held while a tick runs (renewed
+    # while it lingers), cleared on exit, and honoured only until
+    # ``scheduler_lease_until`` — a tick whose container died leaves the
+    # column set, and treating that as a live scheduler would suppress
+    # wake-ups for exactly the build that most needs them.
+    #
+    # On the build row rather than in ``distributed_locks`` because every
+    # reader wants it alongside the build: ``is_scheduler_live`` and
+    # ``select_wake_candidates`` were both a second table and a lock name
+    # assembled from a build id, and the name prefix had to be kept
+    # byte-identical in the SDK and the API by comment alone.
+    #
+    # Transient by nature, so the migration backfills nothing: a lease that
+    # existed across the deploy is simply not seen, which costs at most one
+    # duplicate tick (idempotent, and arbitrated per task by the claim).
+    scheduler_lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Who holds it. Renew and release are owner-checked, so a tick cannot
+    # renew or drop a lease that was taken over after its own lapsed.
+    scheduler_lease_owner: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
     # Reactive-scheduling owner: the name of the app whose scheduler ticks
     # drive this build, set by PUT /builds/{id}/reactive-meta. NULL means
     # the build is NOT reactively scheduled — its presence

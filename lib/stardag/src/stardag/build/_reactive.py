@@ -113,13 +113,14 @@ never masks an exception, and tolerates a server without the endpoint.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import typing
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 from typing import Callable, Coroutine, Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from stardag import (
     BaseTask,
@@ -130,7 +131,6 @@ from stardag import (
 from stardag.build._base import (
     DetachedExecutionStatus,
     FailMode,
-    GlobalConcurrencyLockManager,
     TaskExecutorABC,
     current_build_id_var,
 )
@@ -146,8 +146,6 @@ from stardag.registry import (
 )
 
 logger = logging.getLogger(__name__)
-
-SCHEDULER_LOCK_PREFIX = "__scheduler__:"
 
 # Statuses considered "in flight" for terminal detection.
 _RUNNING_STATUSES = ("running",)
@@ -307,9 +305,105 @@ def claim_ttl_seconds(task: BaseTask, task_executor: TaskExecutorABC) -> int | N
     return max(_MIN_CLAIM_TTL_SECONDS, min(_MAX_CLAIM_TTL_SECONDS, ttl))
 
 
-def scheduler_lock_name(build_id: UUID) -> str:
-    """Lease name for a build's scheduler single-flight lock."""
-    return f"{SCHEDULER_LOCK_PREFIX}{build_id}"
+# The scheduler lease's TTL, and how often it is renewed while a tick
+# lingers. The TTL is what a dead tick costs: nothing releases a lease for
+# a container that vanished, so the build waits it out before another tick
+# can take over. Renewing at a third of it means two consecutive renewals
+# can fail — a registry blip — before the lease is at risk.
+_LEASE_TTL_SECONDS = 300
+_LEASE_RENEW_INTERVAL_SECONDS = _LEASE_TTL_SECONDS / 3
+
+
+class SchedulerLease:
+    """The build's single-flight lease, held for the life of one tick.
+
+    Replaces the lease that used to ride on the global concurrency lock —
+    the one live use of a deprecated subsystem, which meant every reader
+    assembled a lock name from a build id and queried a second table to
+    answer "does this build have a scheduler?".
+
+    Renews itself in the background while the tick lingers, and stops
+    driving if a renewal says the lease was taken over: that only happens
+    after it already lapsed, at which point a successor tick may be acting
+    on the same build, and continuing would be the double-scheduling the
+    lease exists to prevent.
+    """
+
+    def __init__(self, registry: RegistryABC, build_id: UUID) -> None:
+        self._registry = registry
+        self._build_id = build_id
+        # Per-tick identity, not per-process: two ticks for one build in one
+        # container (the old inline watchdog sweep did this) must not be
+        # able to renew or release each other's lease.
+        self._owner_id = uuid4().hex
+        self.acquired = False
+        self._renewal: asyncio.Task | None = None
+        self._lost = asyncio.Event()
+
+    @property
+    def lost(self) -> bool:
+        """Whether a renewal found the lease taken over."""
+        return self._lost.is_set()
+
+    async def __aenter__(self) -> "SchedulerLease":
+        result = await self._registry.build_acquire_scheduler_lease_aio(
+            self._build_id, owner_id=self._owner_id, ttl_seconds=_LEASE_TTL_SECONDS
+        )
+        self.acquired = result.held
+        if self.acquired:
+            self._renewal = asyncio.create_task(self._renew_forever())
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        if self._renewal is not None:
+            self._renewal.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._renewal
+            self._renewal = None
+        if not self.acquired:
+            return
+        try:
+            await self._registry.build_release_scheduler_lease_aio(
+                self._build_id, owner_id=self._owner_id
+            )
+        except Exception as e:
+            # Best-effort: an unreleased lease lapses on its own, so the
+            # cost is one TTL of delay before another tick may drive the
+            # build — never a lost wake-up.
+            logger.warning(
+                "Could not release the scheduler lease for build %s "
+                "(ignored; it expires on its own): %s",
+                self._build_id,
+                e,
+            )
+
+    async def _renew_forever(self) -> None:
+        while True:
+            await asyncio.sleep(_LEASE_RENEW_INTERVAL_SECONDS)
+            try:
+                result = await self._registry.build_renew_scheduler_lease_aio(
+                    self._build_id,
+                    owner_id=self._owner_id,
+                    ttl_seconds=_LEASE_TTL_SECONDS,
+                )
+            except Exception as e:
+                # A blip is not a loss: the lease is still good for most of
+                # its TTL, and the next renewal is due well inside it.
+                logger.warning(
+                    "Could not renew the scheduler lease for build %s (will retry): %s",
+                    self._build_id,
+                    e,
+                )
+                continue
+            if not result.held:
+                logger.warning(
+                    "Lost the scheduler lease for build %s: it lapsed and was "
+                    "taken over. Stopping this tick rather than driving a "
+                    "build a successor is already driving.",
+                    self._build_id,
+                )
+                self._lost.set()
+                return
 
 
 # =============================================================================
@@ -787,7 +881,8 @@ class TickSummary:
     with ``dataclasses.asdict`` and reported to the registry.
     """
 
-    # "not_reactive" | "lease_held" | "terminal" | "lingered_out" | "error"
+    # "not_reactive" | "lease_held" | "lease_lost" | "terminal" |
+    # "lingered_out" | "error"
     outcome: str
     terminal_status: str | None = None
     # Set only for outcome == "error": the exception that ended the tick.
@@ -1136,7 +1231,6 @@ async def run_tick_aio(
     *,
     registry: RegistryABC,
     task_executor: TaskExecutorABC,
-    lock_manager: GlobalConcurrencyLockManager,
     task_store: BuildTaskStore | None = None,
     config: TickConfig | None = None,
 ) -> TickSummary:
@@ -1180,7 +1274,6 @@ async def run_tick_aio(
             build_id,
             registry=registry,
             task_executor=task_executor,
-            lock_manager=lock_manager,
             task_store=task_store,
             config=config,
             summary=summary,
@@ -1203,7 +1296,6 @@ async def _run_tick_body_aio(
     *,
     registry: RegistryABC,
     task_executor: TaskExecutorABC,
-    lock_manager: GlobalConcurrencyLockManager,
     task_store: BuildTaskStore,
     config: TickConfig,
     summary: TickSummary,
@@ -1248,21 +1340,19 @@ async def _run_tick_body_aio(
     second is load-bearing, which is why the first may be skipped when
     extending the linger would not make sense (see the linger loop).
     """
-    # Scheduler lease: the lock() handle auto-renews the TTL while the tick
-    # lingers, and releases on exit. The manager should be configured with
-    # lock_wait_timeout_seconds=None so a held lease means immediate no-op
-    # (the wake-up that spawned this tick was flagged before the spawn, so
-    # the holder's re-checks — the linger poll, then the exit handshake
-    # above — cover it).
-    lease = lock_manager.lock(scheduler_lock_name(build_id))
+    # Scheduler lease: renews itself while the tick lingers and releases on
+    # exit. A held lease means immediate no-op — the wake-up that spawned
+    # this tick was flagged before the spawn, so the holder's re-checks (the
+    # linger poll, then the exit handshake above) cover it.
+    lease = SchedulerLease(registry, build_id)
     acquired = False
     # Whether this tick ever cleared the wake-up flag — i.e. whether it took
     # responsibility for a wake-up at all. Gates the hand-off; see the
     # ``finally`` below for why that matters.
     cleared_a_wakeup = False
     try:
-        async with lease:  # type: ignore[attr-defined]
-            if not lease.result.acquired:
+        async with lease:
+            if not lease.acquired:
                 logger.info(f"Scheduler lease for build {build_id} held; tick no-op.")
                 summary.outcome = "lease_held"
                 return
@@ -1277,6 +1367,9 @@ async def _run_tick_body_aio(
                 loop = asyncio.get_event_loop()
                 deadline = loop.time() + config.linger_seconds
                 while True:
+                    if lease.lost:
+                        summary.outcome = "lease_lost"
+                        return
                     summary.iterations += 1
                     try:
                         await registry.build_clear_notify_aio(build_id)
@@ -1421,6 +1514,12 @@ async def _run_tick_body_aio(
                             deadline = loop.time() + config.linger_seconds
                             break  # outer loop clears the flag and re-acts
                         await asyncio.sleep(config.poll_interval_seconds)
+                        if lease.lost:
+                            # A successor already holds this build. Acting
+                            # now is the double-scheduling the lease exists
+                            # to prevent, and the successor has the flag.
+                            summary.outcome = "lease_lost"
+                            return
                         if awaiting_backend and await _any_ref_settled(
                             awaiting_backend, task_executor
                         ):

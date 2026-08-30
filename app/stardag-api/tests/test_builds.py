@@ -8,7 +8,7 @@ from httpx import AsyncClient
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import DistributedLock
+from stardag_api.models import Build
 from tests.conftest import DEFAULT_ENVIRONMENT_ID_STR
 
 
@@ -1685,15 +1685,10 @@ async def test_notify_reports_a_live_scheduler(client: AsyncClient):
     """A tick holds the build's scheduler lease, so it will see the flag
     this call just set and the caller can skip the spawn."""
     build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
-    # The lease the SDK's tick takes — see stardag.build._reactive
-    # .scheduler_lock_name, mirrored server-side in services.lock.
+    # The lease the SDK's tick takes, now a column on the build row.
     await client.post(
-        f"/api/v1/locks/__scheduler__:{build_id}/acquire",
-        json={
-            "owner_id": str(uuid.uuid4()),
-            "ttl_seconds": 60,
-            "check_task_completion": False,
-        },
+        f"/api/v1/builds/{build_id}/scheduler-lease",
+        params={"owner_id": str(uuid.uuid4()), "ttl_seconds": 60},
     )
 
     response = await client.post(f"/api/v1/builds/{build_id}/notify")
@@ -1711,19 +1706,16 @@ async def test_notify_ignores_an_expired_scheduler_lease(
     lapses. Reading that as a live scheduler would suppress wake-ups for
     exactly the build that most needs them."""
     build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
-    lock_name = f"__scheduler__:{build_id}"
     await client.post(
-        f"/api/v1/locks/{lock_name}/acquire",
-        json={
-            "owner_id": str(uuid.uuid4()),
-            "ttl_seconds": 60,
-            "check_task_completion": False,
-        },
+        f"/api/v1/builds/{build_id}/scheduler-lease",
+        params={"owner_id": str(uuid.uuid4()), "ttl_seconds": 60},
     )
     await async_session.execute(
-        update(DistributedLock)
-        .where(DistributedLock.name == lock_name)
-        .values(expires_at=datetime.now(timezone.utc) - timedelta(seconds=10))
+        update(Build)
+        .where(Build.id == uuid.UUID(build_id))
+        .values(
+            scheduler_lease_until=datetime.now(timezone.utc) - timedelta(seconds=10)
+        )
     )
     await async_session.commit()
 
@@ -1739,12 +1731,8 @@ async def test_notify_ignores_another_builds_scheduler(client: AsyncClient):
     build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
     other_build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
     await client.post(
-        f"/api/v1/locks/__scheduler__:{other_build_id}/acquire",
-        json={
-            "owner_id": str(uuid.uuid4()),
-            "ttl_seconds": 60,
-            "check_task_completion": False,
-        },
+        f"/api/v1/builds/{other_build_id}/scheduler-lease",
+        params={"owner_id": str(uuid.uuid4()), "ttl_seconds": 60},
     )
 
     response = await client.post(f"/api/v1/builds/{build_id}/notify")

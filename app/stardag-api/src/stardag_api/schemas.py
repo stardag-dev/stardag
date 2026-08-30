@@ -689,6 +689,24 @@ class WakeCandidatesResponse(BaseModel):
     builds: list[WakeCandidate]
 
 
+class SchedulerLeaseResponse(BaseModel):
+    """Outcome of an acquire/renew/release on a build's scheduler lease.
+
+    ``held`` is what the caller acts on: for acquire it means "you may
+    drive this build", for renew and release "you still held it". A renew
+    that answers False is a tick telling itself it lost the build to a
+    takeover after its own lease lapsed.
+    """
+
+    build_id: UUID
+    held: bool
+    # When the lease this call left in place stops being believable. Set
+    # whenever ``held`` is true; on a denied acquire it is the *current
+    # holder's* expiry, which tells the caller how long the build is
+    # spoken for without needing a second read.
+    expires_at: datetime | None = None
+
+
 class BuildNotifyResponse(BaseModel):
     """Response of the build notify (scheduler wake-up flag) endpoints."""
 
