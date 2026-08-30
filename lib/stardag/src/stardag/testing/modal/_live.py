@@ -52,26 +52,42 @@ def _active_modal_workspace() -> str | None:
     Resolved from the token via Modal's own workspace lookup, deliberately
     *not* from ``STARDAG_MODAL_WORKSPACE`` — an env var a caller can set to
     any value is no use as a guard. Returns None when it cannot be
-    determined (no credentials, no network, an API surface change), which
-    the caller treats as a failed assertion rather than a pass.
+    determined (no credentials, no network, a running event loop, an API
+    surface change), which the caller treats as a failed assertion rather
+    than a pass.
 
-    Cached: the guard runs once per live module, and this is a network
-    round trip.
+    **Only a successful resolution is cached.** The guard runs once per
+    live module — seven times over the tier — so caching the happy path is
+    worth a round trip. Caching a *failure* would be actively wrong: a
+    None is always read as a mismatch, so one transient error would fail
+    every remaining module for the rest of the process, and re-running the
+    lookup costs nothing that matters when the alternative is a wrong
+    answer.
     """
     global _workspace_cache
     if _workspace_cache is not _WORKSPACE_UNRESOLVED:
         return typing.cast("str | None", _workspace_cache)
 
-    workspace: str | None
-    try:
-        import asyncio
+    import asyncio
 
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass  # no loop: `asyncio.run` below is available
+    else:
+        # Called from inside a running loop, where `asyncio.run` raises.
+        # Not a resolution attempt, so nothing to cache.
+        return None
+
+    try:
         from stardag.integration.modal._metadata import _lookup_modal_workspace_aio
 
         workspace = asyncio.run(_lookup_modal_workspace_aio())
     except Exception:
-        workspace = None
-    _workspace_cache = workspace
+        return None
+
+    if workspace is not None:
+        _workspace_cache = workspace
     return workspace
 
 

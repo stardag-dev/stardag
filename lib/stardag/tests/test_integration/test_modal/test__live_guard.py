@@ -138,6 +138,65 @@ class TestOrdering:
         assert volume_spy == [], "the wrong workspace was written to"
 
 
+class TestWorkspaceCaching:
+    """Only a successful resolution is cached.
+
+    A None is always read as a mismatch, so caching one would turn a single
+    transient failure — or one call from inside a running event loop — into a
+    failure for every remaining live module in the process.
+    """
+
+    def _patch_lookup(self, monkeypatch, results):
+        """Feed `_lookup_modal_workspace_aio` a sequence of outcomes."""
+        calls = {"n": 0}
+
+        async def _lookup():
+            i = calls["n"]
+            calls["n"] += 1
+            outcome = results[min(i, len(results) - 1)]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        import stardag.integration.modal._metadata as meta
+
+        monkeypatch.setattr(meta, "_lookup_modal_workspace_aio", _lookup)
+        return calls
+
+    def test_a_failed_lookup_does_not_poison_later_calls(self, monkeypatch):
+        calls = self._patch_lookup(
+            monkeypatch, [ConnectionError("transient"), "the-workspace"]
+        )
+
+        assert _live._active_modal_workspace() is None
+        assert _live._active_modal_workspace() == "the-workspace"
+        assert calls["n"] == 2, "the failure was cached instead of retried"
+
+    def test_a_successful_lookup_is_cached(self, monkeypatch):
+        calls = self._patch_lookup(monkeypatch, ["the-workspace"])
+
+        assert _live._active_modal_workspace() == "the-workspace"
+        assert _live._active_modal_workspace() == "the-workspace"
+        assert calls["n"] == 1, "the happy path should cost one round trip"
+
+    def test_a_running_event_loop_yields_none_without_caching(self, monkeypatch):
+        """`asyncio.run` raises inside a running loop. That is not a
+        resolution attempt, so it must not be recorded as one."""
+        import asyncio
+
+        calls = self._patch_lookup(monkeypatch, ["the-workspace"])
+
+        async def _in_a_loop():
+            return _live._active_modal_workspace()
+
+        assert asyncio.run(_in_a_loop()) is None
+        assert calls["n"] == 0, "no lookup should be attempted inside a loop"
+
+        # Outside the loop it resolves normally — the earlier None stuck
+        # nothing to the cache.
+        assert _live._active_modal_workspace() == "the-workspace"
+
+
 class TestDisabled:
     """``STARDAG_MODAL_LIVE_TESTS=0`` short-circuits before any network call."""
 
