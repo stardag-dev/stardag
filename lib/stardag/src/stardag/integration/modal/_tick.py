@@ -378,17 +378,18 @@ def _run_watchdog_sweep(
     one ``tick`` each on this app, and returns — in seconds, however many
     builds there are. Each build then gets its own container, its own full
     timeout and its normal persisted linger, exactly as if a worker had woken
-    it; the scheduler lease collapses a spawn that duplicates a tick already
-    running.
+    it. A spawn that duplicates a tick already running is not free — a
+    container starts either way — but it is cheap and self-limiting: the
+    second tick finds the scheduler lease held and exits without acting.
 
-    It used to run the tick body for every build sequentially in this one
-    container, which made three things a function of how many builds the
-    environment happened to be running: each build's spawn cap (the
-    container's timeout was divided by the number of builds), the latency for
-    the last build in the list (it waited behind all the others), and whether
-    the sweep finished at all. Dispatching removes all three, and with them
-    the ``linger_seconds=0`` and share-of-timeout overrides the inline form
-    needed to survive itself.
+    It used to run the tick body for every build sequentially inside the
+    *sweep's* single container, which made three things a function of how
+    many builds the environment happened to be running: each build's spawn
+    cap (that one container's timeout was divided across the sweep), the
+    latency for the last build in the list (it waited behind all the
+    others), and whether the sweep finished at all. Dispatching removes all
+    three, and with them the ``linger_seconds=0`` and share-of-timeout
+    overrides the inline form needed to survive itself.
 
     ``reactive_app_name`` scopes the listing to this app's own reactive
     builds, and is now also *where each tick is spawned*. Without scoping,

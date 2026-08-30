@@ -166,7 +166,8 @@ builds the app owns, **spawns one `tick` for each, and returns** — so a
 sweep takes seconds whether the app is running one build or fifty, and
 each build gets a container of its own, with its full timeout and its
 normal linger, rather than a share of the sweep's. A spawn for a build
-that already has a tick costs nothing: the scheduler lease collapses it.
+that already has a tick still starts a container, but that tick finds the
+scheduler lease held and exits without acting.
 
 With `watchdog_period_minutes` set it runs on that period; without it, it
 runs when you invoke it — from the Modal UI or `modal run` — which is the

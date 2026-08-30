@@ -2494,10 +2494,10 @@ class TestReactiveRetrigger:
 class TestWatchdogSweep:
     """The sweep dispatches: one spawned tick per build, then it returns.
 
-    It used to run every build's tick body sequentially in its own container,
-    which is why it had to force ``linger_seconds=0`` and hand each build a
-    fraction of the container's timeout. Both overrides are gone with the
-    inline run.
+    It used to run every build's tick body sequentially inside the *sweep's*
+    single container, which is why it had to force ``linger_seconds=0`` and
+    hand each build a fraction of that container's timeout. Both overrides
+    are gone with the inline run.
     """
 
     @staticmethod
