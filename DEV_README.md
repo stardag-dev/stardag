@@ -129,15 +129,32 @@ makes a Modal API call per module before deciding to skip.
 not a required check — it needs credentials, which GitHub does not give to
 pull requests from forks.
 
-| When                                                             | Modal environment    |
-| ---------------------------------------------------------------- | -------------------- |
-| A pull request labelled `modal-live`, from a branch on this repo | `ci-pr-<number>`     |
-| Manual `workflow_dispatch`                                       | `ci-manual-<run-id>` |
-| The schedule                                                     | `ci-main`            |
+| When                                                                                                              | Modal environment    |
+| ----------------------------------------------------------------------------------------------------------------- | -------------------- |
+| A pull request from a branch on this repo, that either touches the tier's paths or carries the `modal-live` label | `ci-pr-<number>`     |
+| Manual `workflow_dispatch`                                                                                        | `ci-manual-<run-id>` |
+| The weekly schedule                                                                                               | `ci-main`            |
 
-**Label a PR `modal-live` if it touches `integration/modal/`, the build engine,
-or anything the deployed worker image is built from.** Nothing enforces this,
-so it is a habit rather than a gate.
+**You do not normally need to do anything.** A pull request touching any of
+these runs the tier automatically:
+
+- `lib/stardag/src/stardag/integration/modal/`
+- `lib/stardag/src/stardag/build/`
+- `lib/stardag/src/stardag/testing/modal/`
+- `lib/stardag/tests/test_integration/test_modal/`
+- `lib/stardag/pyproject.toml` (the dependency list baked into the worker image)
+- `tox.ini`, `.github/workflows/modal-live.yml` (the harness itself)
+
+**The `modal-live` label is the manual override**, for a change that touches
+none of those and still warrants a live run — a dependency bump, a `selfhost`
+change, a hunch. The `Decide whether to run` job logs which rule applied and
+why, so a surprising skip is one click to explain.
+
+The schedule is weekly rather than nightly, and it is not there to catch
+regressions in merged code — the automatic trigger does that. It is there for
+the one signal no commit produces: drift underneath us. `test_live_semantics.py`
+pins Modal _platform_ behaviour, and rebuilt images re-resolve dependencies;
+both change with time rather than with commits.
 
 Each run gets its own Modal environment, and deleting that environment removes
 the apps, volumes and dicts inside it — so the tier can leave its fixed-name
