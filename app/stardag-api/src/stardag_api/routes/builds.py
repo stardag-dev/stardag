@@ -424,6 +424,10 @@ async def _get_build_for_update(
     A build is always locked *before* any task rows it cascades to, so this
     and ``_create_task_event`` acquire in one consistent order.
 
+    The scheduler-lease routes take it for the same reason: acquire, renew
+    and release are each a read-modify-write on the lease columns, and two
+    ticks racing to take one build's lease have to serialize somewhere.
+
     Read-only paths (``GET /builds``, ``/{id}``, the frontier) deliberately
     don't take it — they just read the columns.
     """
@@ -1574,31 +1578,13 @@ async def _get_build_checked(build_id: UUID, db: AsyncSession, auth: SdkAuth) ->
     return build
 
 
-async def _get_build_for_lease(
-    build_id: UUID, db: AsyncSession, auth: SdkAuth
-) -> Build:
-    """Fetch a build with its row locked, for a lease read-modify-write.
-
-    ``FOR UPDATE``, not the plain get: two ticks racing to acquire one
-    build's lease have to serialize somewhere, and — exactly as with the
-    execution claim on a task row — the row itself is where. Without it
-    both could read "free" and both write themselves in.
-    """
-    build = (
-        await db.execute(select(Build).where(Build.id == build_id).with_for_update())
-    ).scalar_one_or_none()
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-    if build.environment_id != auth.environment_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this environment"
-        )
-    return build
-
-
 _LeaseOwner = Annotated[
     str,
     Query(
+        # ``min_length`` is not cosmetic: the whole "a lapsed tick cannot
+        # clear its successor's lease" property rests on this string, and
+        # two callers both sending "" would hold each other's lease.
+        min_length=1,
         max_length=64,
         description=(
             "Identity of the scheduler asking. Renew and release are "
@@ -1642,9 +1628,9 @@ async def acquire_build_scheduler_lease(
     and across containers there is nothing to release it with.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    build = await _get_build_for_lease(build_id, db, auth)
-    acquired, expires_at = await acquire_scheduler_lease(
-        db, build, owner_id=owner_id, ttl_seconds=ttl_seconds
+    build = await _get_build_for_update(build_id, db, auth)
+    acquired, expires_at = acquire_scheduler_lease(
+        build, owner_id=owner_id, ttl_seconds=ttl_seconds
     )
     await db.commit()
     return SchedulerLeaseResponse(
@@ -1667,9 +1653,9 @@ async def renew_build_scheduler_lease(
     out, and the honest answer is to stop driving.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    build = await _get_build_for_lease(build_id, db, auth)
-    expires_at = await renew_scheduler_lease(
-        db, build, owner_id=owner_id, ttl_seconds=ttl_seconds
+    build = await _get_build_for_update(build_id, db, auth)
+    expires_at = renew_scheduler_lease(
+        build, owner_id=owner_id, ttl_seconds=ttl_seconds
     )
     await db.commit()
     return SchedulerLeaseResponse(
@@ -1691,8 +1677,8 @@ async def release_build_scheduler_lease(
     to clear its successor's lease.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    build = await _get_build_for_lease(build_id, db, auth)
-    released = await release_scheduler_lease(db, build, owner_id=owner_id)
+    build = await _get_build_for_update(build_id, db, auth)
+    released = release_scheduler_lease(build, owner_id=owner_id)
     await db.commit()
     return SchedulerLeaseResponse(build_id=build_id, held=released)
 

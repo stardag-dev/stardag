@@ -95,7 +95,16 @@ class FakeReactiveRegistry(NoOpRegistry):
         # Scheduler lease state (see build_acquire_scheduler_lease_aio).
         self.lease_acquired = True
         self.lease_owner: str | None = None
-        self.lease_renewable = True
+        # Our own lease expired between renewals, with nobody having taken
+        # it: renew refuses, re-acquire succeeds. The SDK heals and carries
+        # on.
+        self.lease_lapsed = False
+        # A successor holds the lease: renew refuses and so does the
+        # re-acquire, so the tick must stop. Applies from the *second*
+        # acquire onwards, since the tick has to get the lease before it
+        # can lose it.
+        self.lease_stolen = False
+        self._lease_acquires = 0
         self.lease_on_release: typing.Callable[[], None] | None = None
         self.build_status = "running"
         self.build_error_message: str | None = None
@@ -595,15 +604,31 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def build_acquire_scheduler_lease_aio(
         self, build_id, *, owner_id, ttl_seconds
     ):
+        # A lapsed lease is re-acquirable — that takeover *is* the healing
+        # mechanism, and it is what the SDK falls back on when a renewal is
+        # refused. A *stolen* one is not: somebody else holds it.
+        self._lease_acquires += 1
+        if self.lease_stolen and self._lease_acquires > 1:
+            return SchedulerLeaseResult(build_id=build_id, held=False)
+        self.lease_lapsed = False
         self.lease_owner = owner_id if self.lease_acquired else self.lease_owner
         return SchedulerLeaseResult(build_id=build_id, held=self.lease_acquired)
 
     async def build_renew_scheduler_lease_aio(self, build_id, *, owner_id, ttl_seconds):
-        # A renewal fails when the lease lapsed and somebody took it over.
-        # ``lease_renewable`` models that directly: setting ``lease_owner``
-        # would not, because the acquire above writes the caller's own id.
-        held = self.lease_renewable and self.lease_owner == owner_id
-        return SchedulerLeaseResult(build_id=build_id, held=held)
+        # The server refuses a renewal for two different reasons, and the
+        # SDK responds to them differently, so both are modelled.
+        #
+        # ``lease_lapsed``: our own lease expired between renewals and
+        # nobody took it, so the owner column still says us. The SDK
+        # re-acquires and carries on.
+        #
+        # ``lease_stolen``: somebody else holds it, so the re-acquire fails
+        # too and the tick must stop.
+        if self.lease_lapsed or self.lease_stolen:
+            return SchedulerLeaseResult(build_id=build_id, held=False)
+        return SchedulerLeaseResult(
+            build_id=build_id, held=self.lease_owner == owner_id
+        )
 
     async def build_release_scheduler_lease_aio(self, build_id, *, owner_id):
         held = self.lease_owner == owner_id
@@ -4728,12 +4753,11 @@ class TestSchedulerLease:
             executor="other-backend",
             executor_ref="job-1",
         )
-        # Simulate the takeover: the renewal finds a different owner. The
-        # renewal interval is ~100 s in production — a lease is only taken
-        # over after it has already lapsed, so noticing late is fine there
-        # — which is far longer than this test lingers.
+        # A successor took it over, so both the renewal and the re-acquire
+        # behind it are refused. The renewal interval is 20 s in production,
+        # far longer than this test lingers.
         monkeypatch.setattr(reactive_module, "_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
-        registry.lease_renewable = False
+        registry.lease_stolen = True
 
         summary = await run_tick_aio(
             uuid4(),
@@ -4746,6 +4770,43 @@ class TestSchedulerLease:
         )
 
         assert summary.outcome == "lease_lost"
+
+    async def test_a_lapsed_lease_is_re_taken_rather_than_abandoning_the_build(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        monkeypatch,
+    ):
+        """A refused renewal usually means our own lease expired between
+        renewals — not that anything took it over, since nothing is normally
+        competing for the build. Stopping there would abandon a build nobody
+        else is driving, which is worse than the double-scheduling the check
+        guards against. So the tick re-acquires and carries on, and only a
+        re-acquire that *also* fails is a real loss.
+        """
+        (root,) = _chain("lease-lapse-root")
+        registry, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="other-backend",
+            executor_ref="job-1",
+        )
+        monkeypatch.setattr(reactive_module, "_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+        registry.lease_lapsed = True
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=dataclasses.replace(
+                FAST_TICK, linger_seconds=0.15, poll_interval_seconds=0.01
+            ),
+        )
+
+        assert summary.outcome == "lingered_out", (
+            "a lease that merely lapsed must be re-taken, not treated as lost"
+        )
 
     async def test_the_lease_is_released_on_the_way_out(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]

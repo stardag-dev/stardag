@@ -237,8 +237,7 @@ def live_lease_filter(now: datetime | None = None) -> ColumnElement[bool]:
     return Build.scheduler_lease_until > (now or utc_now())
 
 
-async def acquire_scheduler_lease(
-    db: AsyncSession,
+def acquire_scheduler_lease(
     build: Build,
     *,
     owner_id: str,
@@ -247,9 +246,10 @@ async def acquire_scheduler_lease(
 ) -> tuple[bool, datetime | None]:
     """Take the build's scheduler lease if it is free or has lapsed.
 
-    Returns ``(acquired, expires_at)``. The caller must have loaded
-    ``build`` FOR UPDATE: two ticks racing for one build have to serialize
-    somewhere, and the build row is where.
+    Returns ``(acquired, expires_at)``. Pure over the ORM instance — the
+    caller owns the transaction, and must have loaded ``build`` FOR UPDATE:
+    two ticks racing for one build have to serialize somewhere, and the
+    build row is where.
 
     A lapsed lease denies nothing — this acquire takes it over, replacing
     the dead holder's owner and expiry together. That takeover *is* the
@@ -266,8 +266,7 @@ async def acquire_scheduler_lease(
     return True, build.scheduler_lease_until
 
 
-async def renew_scheduler_lease(
-    db: AsyncSession,
+def renew_scheduler_lease(
     build: Build,
     *,
     owner_id: str,
@@ -288,8 +287,7 @@ async def renew_scheduler_lease(
     return build.scheduler_lease_until
 
 
-async def release_scheduler_lease(
-    db: AsyncSession,
+def release_scheduler_lease(
     build: Build,
     *,
     owner_id: str,

@@ -700,10 +700,11 @@ class SchedulerLeaseResponse(BaseModel):
 
     build_id: UUID
     held: bool
-    # When the lease this call left in place stops being believable. Set
-    # whenever ``held`` is true; on a denied acquire it is the *current
-    # holder's* expiry, which tells the caller how long the build is
-    # spoken for without needing a second read.
+    # When the lease this call left in place stops being believable. Set by
+    # acquire and renew; on a denied acquire it is the *current holder's*
+    # expiry, which tells the caller how long the build is spoken for
+    # without needing a second read. None on release, which leaves no lease
+    # in place, and on a denied renew, where the caller no longer holds one.
     expires_at: datetime | None = None
 
 

@@ -1362,3 +1362,104 @@ class TestNotifyReadFallback:
         with pytest.raises(APIError):
             await registry.build_get_notify_aio(uuid4())
         assert _api_registry._notify_read_route_missing is False
+
+
+class TestSchedulerLeaseCalls:
+    """`_lease_call` — the least-tested and most-reasoned-about path.
+
+    Its version-skew latch disables single-flighting for the registry that
+    latched it, so what can and cannot latch it is the whole question.
+    """
+
+    def _registry(self, handler):
+        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
+        registry.async_client._transport = httpx.MockTransport(handler)
+        return registry
+
+    async def test_acquire_renew_release_round_trip(self):
+        seen: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.method, request.url.path))
+            return httpx.Response(
+                200, json={"held": True, "expires_at": "2026-01-01T00:00:00Z"}
+            )
+
+        r = self._registry(handler)
+        bid = uuid4()
+        assert (
+            await r.build_acquire_scheduler_lease_aio(bid, owner_id="t", ttl_seconds=60)
+        ).held is True
+        assert (
+            await r.build_renew_scheduler_lease_aio(bid, owner_id="t", ttl_seconds=60)
+        ).held is True
+        assert (await r.build_release_scheduler_lease_aio(bid, owner_id="t")).held
+
+        path = f"/api/v1/builds/{bid}/scheduler-lease"
+        assert seen == [("POST", path), ("PUT", path), ("DELETE", path)]
+
+    async def test_a_denied_acquire_is_reported_not_raised(self):
+        r = self._registry(lambda request: httpx.Response(200, json={"held": False}))
+        result = await r.build_acquire_scheduler_lease_aio(
+            uuid4(), owner_id="t", ttl_seconds=60
+        )
+        assert result.held is False
+
+    async def test_405_latches_and_then_grants(self):
+        """An older server has no lease routes. Granting is the honest
+        fallback — duplicate ticks are idempotent, and task starts stay
+        arbitrated by the execution claim — but it must be latched, since a
+        tick asks on acquire, on every renew, and on release."""
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request.method)
+            return httpx.Response(405, json={"detail": "Method Not Allowed"})
+
+        r = self._registry(handler)
+        for _ in range(3):
+            assert (
+                await r.build_acquire_scheduler_lease_aio(
+                    uuid4(), owner_id="t", ttl_seconds=60
+                )
+            ).held is True
+        assert len(requests) == 1, f"re-probed instead of latching: {requests}"
+
+    async def test_a_missing_build_propagates_and_does_not_latch(self):
+        """The discrimination the latch turns on. A *resource* 404 is a real
+        error; latching on it would disable single-flighting for this
+        registry for good, on the first request for a deleted build."""
+        r = self._registry(
+            lambda request: httpx.Response(404, json={"detail": "Build not found"})
+        )
+        with pytest.raises(NotFoundError):
+            await r.build_acquire_scheduler_lease_aio(
+                uuid4(), owner_id="t", ttl_seconds=60
+            )
+        assert r._scheduler_lease_route_missing is False
+
+    async def test_a_server_error_propagates_and_does_not_latch(self):
+        r = self._registry(lambda request: httpx.Response(500, json={"detail": "boom"}))
+        with pytest.raises(APIError):
+            await r.build_acquire_scheduler_lease_aio(
+                uuid4(), owner_id="t", ttl_seconds=60
+            )
+        assert r._scheduler_lease_route_missing is False
+
+    async def test_the_latch_is_per_registry_not_per_process(self):
+        """Two registries in one process may point at different servers."""
+        old = self._registry(
+            lambda request: httpx.Response(405, json={"detail": "Method Not Allowed"})
+        )
+        new = self._registry(lambda request: httpx.Response(200, json={"held": False}))
+
+        await old.build_acquire_scheduler_lease_aio(
+            uuid4(), owner_id="t", ttl_seconds=60
+        )
+        assert old._scheduler_lease_route_missing is True
+
+        result = await new.build_acquire_scheduler_lease_aio(
+            uuid4(), owner_id="t", ttl_seconds=60
+        )
+        assert new._scheduler_lease_route_missing is False
+        assert result.held is False, "the other registry's latch leaked"

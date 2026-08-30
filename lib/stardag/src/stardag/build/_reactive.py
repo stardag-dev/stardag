@@ -113,7 +113,6 @@ never masks an exception, and tolerates a server without the endpoint.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import typing
 from dataclasses import asdict, dataclass, field
@@ -306,11 +305,21 @@ def claim_ttl_seconds(task: BaseTask, task_executor: TaskExecutorABC) -> int | N
 
 
 # The scheduler lease's TTL, and how often it is renewed while a tick
-# lingers. The TTL is what a dead tick costs: nothing releases a lease for
-# a container that vanished, so the build waits it out before another tick
-# can take over. Renewing at a third of it means two consecutive renewals
-# can fail — a registry blip — before the lease is at risk.
-_LEASE_TTL_SECONDS = 300
+# lingers.
+#
+# The TTL is the **dead-tick recovery window**, and that is what sizes it:
+# nothing releases the lease of a container that vanished, so until it
+# lapses the build is invisible to drainers *and* ``notify`` answers
+# ``scheduler_live=True``, so workers skip their spawn too. A preempted tick
+# therefore stalls its build for up to one TTL, with the watchdog off by
+# default. 60 s is what the lock-table lease this replaces used, and there
+# was no reason to lengthen it.
+#
+# Renewing at a third rather than the old half means two consecutive
+# renewals can fail before the lease is at risk — and a third failure is
+# survivable too, because a refused renewal re-acquires (see
+# ``SchedulerLease._renew_once``).
+_LEASE_TTL_SECONDS = 60
 _LEASE_RENEW_INTERVAL_SECONDS = _LEASE_TTL_SECONDS / 3
 
 
@@ -323,27 +332,43 @@ class SchedulerLease:
     answer "does this build have a scheduler?".
 
     Renews itself in the background while the tick lingers, and stops
-    driving if a renewal says the lease was taken over: that only happens
-    after it already lapsed, at which point a successor tick may be acting
-    on the same build, and continuing would be the double-scheduling the
-    lease exists to prevent.
+    driving if it can no longer show that it holds the lease: continuing
+    past that point is the double-scheduling the lease exists to prevent.
+
+    "Can no longer show" is deliberately broader than "the server said no".
+    A renewal that *raises* proves nothing, and a lease has an expiry
+    whether or not anyone is reachable to confirm it — so the deadline is
+    tracked client-side and consulted directly. Without that, a registry
+    outage spanning the whole TTL would leave a tick driving a build whose
+    lease had lapsed server-side and could already have been taken over,
+    with nothing having returned an answer to notice.
     """
 
     def __init__(self, registry: RegistryABC, build_id: UUID) -> None:
         self._registry = registry
         self._build_id = build_id
         # Per-tick identity, not per-process: two ticks for one build in one
-        # container (the old inline watchdog sweep did this) must not be
-        # able to renew or release each other's lease.
+        # container must not be able to renew or release each other's lease.
         self._owner_id = uuid4().hex
         self.acquired = False
         self._renewal: asyncio.Task | None = None
-        self._lost = asyncio.Event()
+        self._lost = False
+        # Monotonic, because this is a duration from a local acquire, not a
+        # point in the server's calendar — a clock skew between the two
+        # must not be able to extend it.
+        self._expires_at: float | None = None
 
     @property
     def lost(self) -> bool:
-        """Whether a renewal found the lease taken over."""
-        return self._lost.is_set()
+        """Whether this tick can still show that it holds the lease."""
+        if self._lost:
+            return True
+        if self._expires_at is None:
+            return False
+        return asyncio.get_event_loop().time() >= self._expires_at
+
+    def _arm(self) -> None:
+        self._expires_at = asyncio.get_event_loop().time() + _LEASE_TTL_SECONDS
 
     async def __aenter__(self) -> "SchedulerLease":
         result = await self._registry.build_acquire_scheduler_lease_aio(
@@ -351,15 +376,24 @@ class SchedulerLease:
         )
         self.acquired = result.held
         if self.acquired:
+            self._arm()
             self._renewal = asyncio.create_task(self._renew_forever())
         return self
 
     async def __aexit__(self, *exc: object) -> None:
         if self._renewal is not None:
-            self._renewal.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._renewal
-            self._renewal = None
+            renewal, self._renewal = self._renewal, None
+            renewal.cancel()
+            try:
+                await renewal
+            except asyncio.CancelledError:
+                # Only swallow the *child's* cancellation. If this task is
+                # itself being cancelled, the error we just caught may be
+                # ours, and suppressing it would strand the caller's
+                # cancellation — ``run_tick_aio`` is public, so a caller
+                # wrapping it in ``wait_for`` or a TaskGroup hits this.
+                if not renewal.cancelled():
+                    raise
         if not self.acquired:
             return
         try:
@@ -377,32 +411,61 @@ class SchedulerLease:
                 e,
             )
 
+    async def _renew_once(self) -> bool:
+        """Extend the lease, re-acquiring if it lapsed. False = really lost.
+
+        A refused renewal has two causes and they are not the same event.
+        Usually nothing else is competing for the build, and the refusal
+        just means our own lease expired while we were between renewals —
+        healed by taking it again, which is the same re-acquire the server
+        performs for any lapsed lease. Only if that *also* fails is somebody
+        else driving the build, and only then must this tick stop.
+        """
+        result = await self._registry.build_renew_scheduler_lease_aio(
+            self._build_id, owner_id=self._owner_id, ttl_seconds=_LEASE_TTL_SECONDS
+        )
+        if result.held:
+            self._arm()
+            return True
+        retaken = await self._registry.build_acquire_scheduler_lease_aio(
+            self._build_id, owner_id=self._owner_id, ttl_seconds=_LEASE_TTL_SECONDS
+        )
+        if retaken.held:
+            self._arm()
+            logger.info(
+                "Scheduler lease for build %s had lapsed and was re-taken; "
+                "nothing else was driving it.",
+                self._build_id,
+            )
+            return True
+        return False
+
     async def _renew_forever(self) -> None:
         while True:
             await asyncio.sleep(_LEASE_RENEW_INTERVAL_SECONDS)
             try:
-                result = await self._registry.build_renew_scheduler_lease_aio(
-                    self._build_id,
-                    owner_id=self._owner_id,
-                    ttl_seconds=_LEASE_TTL_SECONDS,
-                )
+                held = await self._renew_once()
             except Exception as e:
-                # A blip is not a loss: the lease is still good for most of
-                # its TTL, and the next renewal is due well inside it.
+                # A blip is not a loss — but it is not proof of the
+                # opposite either, so nothing is re-armed here. If the
+                # registry stays unreachable past the TTL, ``lost`` turns
+                # true on the clock alone and the tick stops.
                 logger.warning(
-                    "Could not renew the scheduler lease for build %s (will retry): %s",
+                    "Could not renew the scheduler lease for build %s "
+                    "(will retry; the lease expires on its own if this "
+                    "keeps failing): %s",
                     self._build_id,
                     e,
                 )
                 continue
-            if not result.held:
+            if not held:
                 logger.warning(
-                    "Lost the scheduler lease for build %s: it lapsed and was "
-                    "taken over. Stopping this tick rather than driving a "
-                    "build a successor is already driving.",
+                    "Lost the scheduler lease for build %s to another tick. "
+                    "Stopping rather than driving a build a successor is "
+                    "already driving.",
                     self._build_id,
                 )
-                self._lost.set()
+                self._lost = True
                 return
 
 

@@ -91,13 +91,6 @@ def _latch_notify_read_missing(error: Exception) -> bool:
     return unsupported
 
 
-# Latched once per process when the registry has no scheduler-lease route.
-# Latched rather than re-probed because a tick asks on acquire, on every
-# renew while it lingers, and on release — a doomed request each time would
-# be the whole cost of the feature, paid by the deployments that do not
-# have it.
-_scheduler_lease_route_missing = False
-
 # Retry configuration for transient errors (connection issues, timeouts, etc.)
 # Retries on: TimeoutException, NetworkError (includes ReadError), RemoteProtocolError
 _RETRY_CONFIG = Retry(
@@ -234,6 +227,18 @@ class APIRegistry(RegistryABC):
                 "Set STARDAG_API_URL or configure a profile with a registry."
             )
         self.api_url = resolved_url.rstrip("/")
+
+        # Latched when this registry answers a scheduler-lease call with a
+        # missing-route error. Latched rather than re-probed because a tick
+        # asks on acquire, on every renew while it lingers, and on release,
+        # so a doomed request each time would be the whole cost of the
+        # feature for deployments that do not have it.
+        #
+        # Per instance, not per process: two registries in one process may
+        # point at different servers, and a global would let one of them
+        # decide the other has no lease routes. It also keeps the flag out
+        # of test isolation.
+        self._scheduler_lease_route_missing = False
 
         # Timeout: explicit > config
         self.timeout = (
@@ -1783,8 +1788,7 @@ class APIRegistry(RegistryABC):
     async def _lease_call(
         self, method: str, build_id: UUID, params: dict[str, Any]
     ) -> SchedulerLeaseResult:
-        global _scheduler_lease_route_missing
-        if _scheduler_lease_route_missing:
+        if self._scheduler_lease_route_missing:
             return SchedulerLeaseResult(build_id=build_id, held=True)
         try:
             response = await self._arequest(
@@ -1805,7 +1809,7 @@ class APIRegistry(RegistryABC):
             )
             if not unsupported:
                 raise
-            _scheduler_lease_route_missing = True
+            self._scheduler_lease_route_missing = True
             logger.warning(
                 "Registry API has no scheduler-lease route; reactive ticks "
                 "run without a single-flight lease in this process. Duplicate "

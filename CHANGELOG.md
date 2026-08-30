@@ -114,6 +114,20 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   SDK no longer writes — so wake-ups spawn unconditionally too, which is the
   pre-lease behaviour end to end rather than a half-broken one.
 
+  **The other direction is the one a real deployment takes**, since the API
+  upgrades before the Modal apps that bake in their SDK: a new server does
+  not read the legacy lock an old tick takes, so it reports
+  `scheduler_live=False` for every completion and every worker spawns a tick
+  that immediately no-ops. Correct, but it costs containers until each app
+  is redeployed — worth doing promptly rather than leaving.
+
+  The lease TTL is 60 s, unchanged from the lock-table lease it replaces,
+  and it is the dead-tick recovery window: until it lapses, the build is
+  hidden from drainers _and_ workers skip their spawn. Renewal moved from
+  half the TTL to a third, so two consecutive renewal failures are
+  survivable — and a third is too, because a refused renewal re-acquires
+  rather than abandoning a build nothing else is driving.
+
 ### Registry API
 
 - **`GET /builds/{build_id}/notify`** reads a build's scheduler wake-up flag
