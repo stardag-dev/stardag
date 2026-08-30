@@ -1298,10 +1298,13 @@ class RegistryABC(metaclass=abc.ABCMeta):
         retries). ``limit_keys`` compose atomically (a denied claim
         consumes no slots).
 
-        ``claim`` is keyword-only and last, deliberately: inserted anywhere
-        earlier it would swallow a positional ``claim_ttl_seconds`` — any
-        truthy int reads as "claim", and the TTL silently becomes None,
-        which is exactly the unexpiring claim this API works to prevent.
+        ``claim`` is **keyword-only**, and that is what makes it safe: no
+        positional argument can reach it, at any position. Had it been
+        ordinary and placed before ``claim_ttl_seconds``, a positional TTL
+        would have bound to it — any truthy int reads as "claim" — and the
+        TTL would silently become None, which is exactly the unexpiring
+        claim this API works to prevent. Its position at the end is then
+        only tidiness; the ``*`` is the guarantee.
 
         ``claim=False`` acquires the limit slots without arbitrating: the
         start is recorded even against a live claim, and the only denial

@@ -108,3 +108,7 @@ class TestApiRegistryStartFlags:
             "an unclaiming start is the plain start it was before"
         )
         assert request.url.params.get("enforce_limits") == "true"
+        # The other param this path could start emitting. The limiter passes
+        # no TTL, and a default appearing here would silently re-stamp the
+        # claim expiry of a task its own build already claimed.
+        assert "claim_ttl_seconds" not in request.url.params

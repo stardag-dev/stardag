@@ -378,7 +378,7 @@ class _WorkerLifecycleReporter:
                 self.registry.task_upload_artifacts(self.build_id, self.task, artifacts)
 
         self._guard(_artifacts, "artifacts")
-        self._wake_scheduler()
+        self._guard(self._wake_scheduler, "wake")
 
     def suspended(self, task_struct: TaskStruct | None = None) -> None:
         if self.reactive and task_struct is not None:
@@ -393,7 +393,7 @@ class _WorkerLifecycleReporter:
             lambda: self.registry.task_suspend(self.build_id, self.task),
             "suspend",
         )
-        self._wake_scheduler()
+        self._guard(self._wake_scheduler, "wake")
 
     def failed(self, exception: BaseException) -> None:
         self._guard(
@@ -402,7 +402,7 @@ class _WorkerLifecycleReporter:
             ),
             "fail",
         )
-        self._wake_scheduler()
+        self._guard(self._wake_scheduler, "wake")
 
     def interrupted(self, reason: str) -> None:
         """Report that the platform ended this execution — not a failure.

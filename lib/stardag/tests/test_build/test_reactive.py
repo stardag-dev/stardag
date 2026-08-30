@@ -400,7 +400,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         # all-or-nothing acquisition. A helper on this double, not a
         # registry method — the API has one start endpoint, and the SDK now
         # has one method reaching it.
-        self.calls.append(("start_with_limits", str(task.id)))
+        self.calls.append(("acquire_limits", str(task.id)))
         for key in limit_keys or []:
             cap = self.limits.get(key)
             if cap is None:
@@ -2002,7 +2002,10 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
         from stardag.registry import StartClaimResult
 
         tid = str(task.id)
-        if tid in self.claim_race_once:
+        # Gated on ``claim`` like the server and the other doubles: an
+        # unclaiming acquire cannot be denied ``already_running``, so a
+        # double that raced it regardless could not emulate the limiter.
+        if claim and tid in self.claim_race_once:
             # "Another build" won this task just before us and its instant
             # worker completed it (completion wakes our scheduler).
             self.claim_race_once.discard(tid)
@@ -2023,6 +2026,7 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
             executor_metadata=executor_metadata,
             limit_keys=limit_keys,
             claim_ttl_seconds=claim_ttl_seconds,
+            claim=claim,
         )
 
 

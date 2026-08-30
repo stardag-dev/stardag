@@ -8,7 +8,8 @@ and with reactive builds, **across processes and machines**. This fills
 the seam ``_concurrency.py`` reserved for a "global, server-driven
 limiter".
 
-Semantics (mirroring the reactive tick's acquisition):
+Semantics (the reactive tick's acquisition, minus the claim — see the
+first bullet, which is the one difference and is load-bearing):
 
 - A slot is acquired by an *enforced task start*
   (``task_start_claim_aio(limit_keys=..., claim=False)``): the server
@@ -211,18 +212,36 @@ class RegistryConcurrencyLimiter:
                 error_backoff = self.poll_interval_seconds  # healthy again
                 delay = self.poll_interval_seconds
                 # ``limit`` is the only denial an unclaiming start can get
-                # (the server gates both others on ``claim``), so name the
-                # reason rather than assume it: anything else here is
-                # version skew or a regression, and a log line asserting
-                # "concurrency limits" would hide it. Retrying regardless is
-                # still the safe direction — a denial we do not understand
-                # is not grounds to fail the task, and ``max_wait_seconds``
-                # bounds the wait either way.
-                logger.debug(
-                    f"Task {task.id} start denied ({result.denied_reason}) "
-                    f"on keys {result.denied_keys or limit_keys}; "
-                    f"retrying in {delay:.1f}s"
-                )
+                # (the server gates both others on ``claim``). Anything else
+                # is version skew or a regression — and it must not be
+                # invisible, because ``max_wait_seconds`` defaults to None:
+                # a backend that accepts ``claim`` and arbitrates anyway
+                # denies this acquire from the build's own claim and the
+                # task waits **forever**. Naming the reason at DEBUG would
+                # have hidden that as thoroughly as asserting the wrong one.
+                #
+                # Retrying regardless is still the safe direction: a denial
+                # we do not understand is not grounds to fail the task.
+                if result.denied_reason != "limit":
+                    logger.warning(
+                        f"Task {task.id} start denied "
+                        f"({result.denied_reason}) by an unclaiming acquire, "
+                        "which should only ever be denied by concurrency "
+                        "limits. This is version skew or a bug; the task "
+                        "will keep retrying"
+                        + (
+                            " and will not time out, because max_wait_seconds is unset"
+                            if self.max_wait_seconds is None
+                            else f" for up to {self.max_wait_seconds:.0f}s"
+                        )
+                        + "."
+                    )
+                else:
+                    logger.debug(
+                        f"Task {task.id} denied by concurrency limits "
+                        f"{result.denied_keys or limit_keys}; "
+                        f"retrying in {delay:.1f}s"
+                    )
             # Jitter so N waiters don't re-take the server's limit rows
             # (FOR UPDATE) in lockstep.
             delay += random.uniform(0, delay * 0.25)
