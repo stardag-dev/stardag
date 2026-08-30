@@ -124,7 +124,7 @@ def deploy_registry(
     #
     # CI reuses `ci-pr-<n>` across pushes to the same PR, so this is the
     # normal case there, not an edge.
-    _stop_existing_app(app_name, modal_environment)
+    stop_existing_app(app_name, modal_environment)
 
     private_key, public_key = generate_jwt_keypair()
     app, _functions = build_registry_app(
@@ -244,14 +244,26 @@ def _pick(items: list[dict], wanted: str, *, what: str) -> dict:
     )
 
 
-def _stop_existing_app(app_name: str, modal_environment: str) -> None:
+def stop_existing_app(app_name: str, modal_environment: str) -> None:
     """Stop an app of this name in this environment, if one is deployed.
 
-    Stopping rather than leaving it to be overwritten, because the
-    container is the database (see the caller). It also keeps a reused
-    environment from accumulating always-on containers: every deployment
-    here pins ``min_containers=1``, so an abandoned one goes on costing
-    until its scaledown window expires.
+    Both apps this tier deploys need this, for two different reasons that
+    happen to have the same fix.
+
+    The registry, because its container *is* the database: a survivor
+    serves the previous run's data and code (see the caller).
+
+    The DAG app, because its containers hold the ``stardag-api-key`` Modal
+    secret as it was when they started, and the connect flow **rotates**
+    that key -- it revokes the old one. A warm worker or tick container
+    from an earlier run therefore authenticates with a revoked credential
+    and gets a 401 from the registry mid-build. Observed exactly that: a
+    build whose tick lost its wake-up to an unauthorised request and sat
+    RUNNING until the scenario timed out.
+
+    Stopping also keeps a reused environment from accumulating always-on
+    containers: the registry pins ``min_containers=1``, so an abandoned
+    deployment goes on costing until its scaledown window expires.
     """
     result = subprocess.run(
         ["modal", "app", "stop", app_name, "-e", modal_environment, "--yes"],

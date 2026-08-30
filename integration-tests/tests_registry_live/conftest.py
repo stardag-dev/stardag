@@ -39,6 +39,7 @@ from stardag_integration_tests.registry_live._harness import (
     Deployment,
     connect,
     deploy_registry,
+    stop_existing_app,
 )
 
 ENV_MODAL_ENVIRONMENT = "MODAL_ENVIRONMENT"
@@ -157,6 +158,18 @@ def _deploy_dag_app(repo_root: Path, modal_environment: str) -> None:
     construction rather than by coincidence -- a mismatch kills the
     container with a bare SIGSEGV and leaves a build that looks empty.
     """
+    # Import here rather than at module scope: it constructs the StardagApp
+    # and the image spec, which is work the session should not do when the
+    # tier is disabled.
+    from stardag_integration_tests.registry_live.dag_app import APP_NAME
+
+    # Retire warm containers from a previous run first. They carry the
+    # `stardag-api-key` secret as it was when they started, and connect has
+    # just *rotated* that key -- so a survivor authenticates with a revoked
+    # credential and takes a 401 from the registry partway through a build.
+    # See `stop_existing_app`.
+    stop_existing_app(APP_NAME, modal_environment)
+
     stardag_cli = Path(sys.executable).with_name("stardag")
     if not stardag_cli.exists():
         raise RuntimeError(

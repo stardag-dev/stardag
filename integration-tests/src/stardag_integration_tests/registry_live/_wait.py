@@ -28,6 +28,27 @@ def tick_summaries(build_id: UUID, limit: int = 50) -> list[dict[str, Any]]:
     return [record.summary for record in reversed(records)]
 
 
+def find_task(task_id: str, *, task_name: str):
+    """The registry's row for one task, by its stardag task id.
+
+    ``task_list`` filters by name, not by id, so the name narrows the page
+    and the id picks the row out of it. Worth the round trip because the
+    row carries ``latest_status_build_id`` -- the answer to "which build
+    holds, or held, this task's execution claim", which no tick summary
+    can give.
+    """
+    from stardag.registry import registry_provider
+
+    page = registry_provider.get().task_list(page_size=100, task_name=task_name)
+    for task in page.tasks:
+        if task.task_id == task_id:
+            return task
+    raise AssertionError(
+        f"No {task_name!r} task with id {task_id!r} in the registry "
+        f"(saw {[t.task_id for t in page.tasks]})."
+    )
+
+
 def describe(build_id: UUID) -> str:
     """A one-block account of a build, for putting in an assertion message."""
     from stardag.registry import registry_provider
