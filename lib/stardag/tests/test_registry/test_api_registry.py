@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import gzip
 import json
-from uuid import UUID
+from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -1218,3 +1219,83 @@ class TestSDKVersionUnsupported:
         with pytest.raises(SDKVersionUnsupportedError) as excinfo:
             cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
         assert "nginx: client SDK too old for this gateway" in str(excinfo.value)
+
+
+class TestNotifyReadFallback:
+    """``GET /builds/{id}/notify`` against a server that does not have it.
+
+    The path exists on such a server for POST and DELETE, so the miss comes
+    back as **405**, not the missing-route 404 — and the fallback has to be
+    latched, because this runs on the linger poll of every lingering build
+    and a doomed request per poll is the cost the endpoint removes.
+    """
+
+    def _registry(self, handler):
+        import asyncio
+
+        import httpx
+
+        from stardag.registry._api_registry import APIRegistry
+
+        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
+        registry._async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            auth=registry._auth,
+        )
+        registry._async_client_loop = asyncio.get_running_loop()
+        return registry
+
+    async def test_405_falls_back_to_the_frontier_and_latches(self, monkeypatch):
+        import httpx
+
+        from stardag.registry import _api_registry
+
+        monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
+
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested.append(f"{request.method} {request.url.path}")
+            return httpx.Response(405, json={"detail": "Method Not Allowed"})
+
+        registry = self._registry(handler)
+        frontier_calls: list[UUID] = []
+
+        async def fake_frontier(build_id):
+            frontier_calls.append(build_id)
+            return SimpleNamespace(needs_tick=True)
+
+        registry.build_get_frontier_aio = fake_frontier  # type: ignore[method-assign]
+
+        build_id = uuid4()
+        first = await registry.build_get_notify_aio(build_id)
+        second = await registry.build_get_notify_aio(build_id)
+
+        assert first.needs_tick is True
+        assert second.needs_tick is True
+        assert frontier_calls == [build_id, build_id], "both answered by the frontier"
+        assert len(requested) == 1, (
+            "the missing route must be latched, not re-probed on every poll: "
+            f"{requested}"
+        )
+
+    async def test_a_real_error_is_not_swallowed(self, monkeypatch):
+        """Only a missing *route* falls back. A 500, or a 404 for a build
+        that does not exist, is a real failure and must propagate — silently
+        degrading to the frontier would hide it for the life of the process.
+        """
+        import httpx
+        import pytest
+
+        from stardag.exceptions import APIError
+        from stardag.registry import _api_registry
+
+        monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
+
+        registry = self._registry(
+            lambda request: httpx.Response(500, json={"detail": "boom"})
+        )
+
+        with pytest.raises(APIError):
+            await registry.build_get_notify_aio(uuid4())
+        assert _api_registry._notify_read_route_missing is False

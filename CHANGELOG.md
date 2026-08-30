@@ -86,6 +86,25 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `--server-version` take the bare `X.Y.Z`; `server-v` prefixes the git tag
   only.
 
+- **The linger poll no longer reads the frontier.**
+  `RegistryABC.build_get_notify[_aio]` reads the wake-up flag, and the tick's
+  linger poll, its pre-release re-check and its exit hand-off all use it. The
+  frontier is fetched only when there is something to act on. Against a
+  server without the route the poll falls back to the frontier read it did
+  before — latched once per process, since re-probing on every poll is the
+  cost the endpoint removes. The default implementation on `RegistryABC`
+  delegates to the frontier, so a custom backend needs no changes to keep
+  working, and can override for the cheap read.
+
+### Registry API
+
+- **`GET /builds/{build_id}/notify`** reads a build's scheduler wake-up flag
+  from its own row, with nothing derived. The reactive tick's linger poll
+  asks one question every few seconds per lingering build — "has anything
+  changed?" — and used to ask it by fetching the whole frontier: five
+  queries including two window-function aggregates over the event log, of
+  which it read a single boolean.
+
 ### Deployment
 
 - **Server image `0.2.0`**, the first server release since `0.1.2`

@@ -949,10 +949,15 @@ async def _hand_off_if_needed(
     if spawn is None:
         return
     try:
-        flag = await registry.build_get_frontier_aio(build_id)
+        flag = await registry.build_get_notify_aio(build_id)
         if not flag.needs_tick:
             return
-        if flag.reactive_app_name is None:
+        # The frontier read stays here, but only past the flag check: the
+        # common case is an unset flag, which now costs one row instead of
+        # a frontier. Deliberately not the slim ``build_get`` — this path
+        # asks nothing of a backend that the pre-STA-18 code did not.
+        info = await registry.build_get_frontier_aio(build_id)
+        if info.reactive_app_name is None:
             # Cannot happen for a build this tick just drove — the marker
             # never flips back — but the spawner needs an app to reach, and
             # guessing one would be worse than leaving the flag for the
@@ -963,7 +968,7 @@ async def _hand_off_if_needed(
         # (the lease is released, its renewal task cancelled, nothing else
         # is in flight), and requiring an async spawner would exclude the
         # integrations that only have a blocking one.
-        spawn(build_id, flag.reactive_app_name)
+        spawn(build_id, info.reactive_app_name)
         summary.successor_spawned += 1
         logger.info(
             "Build %s was notified while this tick released the scheduler "
@@ -1396,7 +1401,7 @@ async def _run_tick_body_aio(
                             # happen anyway.
                             if config.linger_seconds <= 0:
                                 return
-                            flag = await registry.build_get_frontier_aio(build_id)
+                            flag = await registry.build_get_notify_aio(build_id)
                             if not flag.needs_tick:
                                 return
                             summary.linger_extended += 1
@@ -1413,7 +1418,7 @@ async def _run_tick_body_aio(
                             awaiting_backend, task_executor
                         ):
                             break  # a ref resolved — re-act and pick it up
-                        flag = await registry.build_get_frontier_aio(build_id)
+                        flag = await registry.build_get_notify_aio(build_id)
                         if flag.needs_tick:
                             break  # outer loop clears the flag and re-acts
             finally:

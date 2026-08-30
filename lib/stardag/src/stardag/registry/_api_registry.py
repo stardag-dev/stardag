@@ -57,6 +57,39 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+# Latched once per process when the registry answers ``GET
+# /builds/{id}/notify`` with a missing-route error: an older server, where
+# the linger poll goes back to reading the flag off the frontier. Latched
+# rather than re-probed because the poll runs every few seconds for every
+# lingering build, and a doomed request per poll is the exact cost the
+# endpoint was added to remove. (Same shape as ``_wakeups``' route latch.)
+_notify_read_route_missing = False
+
+
+def _latch_notify_read_missing(error: Exception) -> bool:
+    """Whether ``error`` says the server predates ``GET .../notify``.
+
+    Two shapes, because the path itself exists on such a server for POST and
+    DELETE: a router with no GET on it answers **405**, while a server
+    predating the notify endpoints entirely answers the missing-route 404.
+    """
+    global _notify_read_route_missing
+    unsupported = (
+        is_missing_route_error(error)
+        if isinstance(error, NotFoundError)
+        else isinstance(error, APIError) and error.status_code == 405
+    )
+    if unsupported:
+        _notify_read_route_missing = True
+        logger.debug(
+            "Registry API has no GET /builds/{id}/notify; the linger poll "
+            "reads the wake-up flag off the frontier in this process. "
+            "Upgrade stardag-api to make that poll one row."
+        )
+    return unsupported
+
+
 # Retry configuration for transient errors (connection issues, timeouts, etc.)
 # Retries on: TimeoutException, NetworkError (includes ReadError), RemoteProtocolError
 _RETRY_CONFIG = Retry(
@@ -1597,6 +1630,61 @@ class APIRegistry(RegistryABC):
             except Exception:
                 logger.debug("Ignoring malformed wake candidate: %r", row)
         return candidates
+
+    def build_get_notify(self, build_id: UUID) -> BuildNotifyResult:
+        """Read the wake-up flag (``GET /builds/{id}/notify``). One row.
+
+        Falls back to the frontier read against a server that predates the
+        route, which is what this poll used to do. The fallback is latched
+        per process: the route sits under ``/builds/{build_id}/notify``,
+        which such a server *does* serve for POST and DELETE, so the miss
+        comes back as a 405 rather than a 404 — and re-paying for it on
+        every poll of every lingering build is precisely the cost this
+        endpoint exists to remove.
+        """
+        if _notify_read_route_missing:
+            return self._notify_from_frontier(
+                build_id, self.build_get_frontier(build_id)
+            )
+        try:
+            response = self._request(
+                "GET",
+                f"{self.api_url}/api/v1/builds/{build_id}/notify",
+                params=self._get_params(),
+                operation=f"Read notify flag for build {build_id}",
+            )
+        except Exception as e:
+            if not _latch_notify_read_missing(e):
+                raise
+            return self._notify_from_frontier(
+                build_id, self.build_get_frontier(build_id)
+            )
+        return self._parse_notify_response(build_id, response)
+
+    async def build_get_notify_aio(self, build_id: UUID) -> BuildNotifyResult:
+        """Async version - read the build's scheduler wake-up flag."""
+        if _notify_read_route_missing:
+            return self._notify_from_frontier(
+                build_id, await self.build_get_frontier_aio(build_id)
+            )
+        try:
+            response = await self._arequest(
+                "GET",
+                f"{self.api_url}/api/v1/builds/{build_id}/notify",
+                params=self._get_params(),
+                operation=f"Read notify flag for build {build_id}",
+            )
+        except Exception as e:
+            if not _latch_notify_read_missing(e):
+                raise
+            return self._notify_from_frontier(
+                build_id, await self.build_get_frontier_aio(build_id)
+            )
+        return self._parse_notify_response(build_id, response)
+
+    @staticmethod
+    def _notify_from_frontier(build_id: UUID, frontier: Any) -> BuildNotifyResult:
+        return BuildNotifyResult(build_id=build_id, needs_tick=frontier.needs_tick)
 
     def build_clear_notify(self, build_id: UUID) -> None:
         """Clear the build's scheduler wake-up flag."""
