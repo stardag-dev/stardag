@@ -83,9 +83,13 @@ class SharedClaimRegistry(NoOpRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        *,
+        claim=True,
     ) -> StartClaimResult:
         tid = str(task.id)
-        if self.statuses.get(tid) == "running":
+        # Gated on ``claim``, like the server: an unclaiming start acquires
+        # limit slots only and is denied by neither state.
+        if claim and self.statuses.get(tid) == "running":
             stored_executor, stored_ref = self.refs.get(tid, (None, None))
             return StartClaimResult(
                 started=False,
@@ -93,7 +97,7 @@ class SharedClaimRegistry(NoOpRegistry):
                 executor=stored_executor,
                 executor_ref=stored_ref,
             )
-        if self.statuses.get(tid) == "completed":
+        if claim and self.statuses.get(tid) == "completed":
             return StartClaimResult(started=False, denied_reason="already_completed")
         self.statuses[tid] = "running"
         return StartClaimResult(started=True)

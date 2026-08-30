@@ -350,14 +350,19 @@ class FakeReactiveRegistry(NoOpRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        *,
+        claim=True,
     ):
-        """Real claim arbitration, mirroring the API's claim-on-start."""
+        """Real claim arbitration, mirroring the API's claim-on-start.
+
+        ``claim=False`` acquires the limit slots only — the same orthogonal
+        flags the API's one ``/start`` endpoint carries."""
         from stardag.registry import StartClaimResult
 
         tid = str(task.id)
         self.calls.append(("start_claim", tid))
         self.claim_limit_keys[tid] = list(limit_keys or [])
-        if self.statuses.get(tid) == "running":
+        if claim and self.statuses.get(tid) == "running":
             executor_name, ref = self.refs.get(tid, (None, None))
             return StartClaimResult(
                 started=False,
@@ -365,9 +370,9 @@ class FakeReactiveRegistry(NoOpRegistry):
                 executor=executor_name,
                 executor_ref=ref,
             )
-        if self.statuses.get(tid) == "completed":
+        if claim and self.statuses.get(tid) == "completed":
             return StartClaimResult(started=False, denied_reason="already_completed")
-        started = await self.task_start_with_limits_aio(
+        started = await self._acquire_limits(
             build_id,
             task,
             executor=executor,
@@ -380,7 +385,7 @@ class FakeReactiveRegistry(NoOpRegistry):
             return StartClaimResult(started=False, denied_reason="limit")
         return StartClaimResult(started=True)
 
-    async def task_start_with_limits_aio(
+    async def _acquire_limits(
         self,
         build_id,
         task,
@@ -390,9 +395,12 @@ class FakeReactiveRegistry(NoOpRegistry):
         limit_keys=None,
         claim_ttl_seconds=None,
     ):
-        # Mirrors the API's semantics: count running holders per key against
-        # configured caps (self.limits); all-or-nothing acquisition.
-        self.calls.append(("start_with_limits", str(task.id)))
+        # The limits half of a start, mirroring the API's semantics: count
+        # running holders per key against configured caps (self.limits);
+        # all-or-nothing acquisition. A helper on this double, not a
+        # registry method — the API has one start endpoint, and the SDK now
+        # has one method reaching it.
+        self.calls.append(("acquire_limits", str(task.id)))
         for key in limit_keys or []:
             cap = self.limits.get(key)
             if cap is None:
@@ -1916,7 +1924,7 @@ class TestAcquiringStartExecutorMetadata:
             super().__init__(**kwargs)
             self.acquire_metadata: dict[str, dict | None] = {}
 
-        async def task_start_with_limits_aio(
+        async def _acquire_limits(
             self,
             build_id,
             task,
@@ -1927,7 +1935,7 @@ class TestAcquiringStartExecutorMetadata:
             claim_ttl_seconds=None,
         ):
             self.acquire_metadata[str(task.id)] = executor_metadata
-            return await super().task_start_with_limits_aio(
+            return await super()._acquire_limits(
                 build_id,
                 task,
                 executor=executor,
@@ -1988,11 +1996,16 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        *,
+        claim=True,
     ):
         from stardag.registry import StartClaimResult
 
         tid = str(task.id)
-        if tid in self.claim_race_once:
+        # Gated on ``claim`` like the server and the other doubles: an
+        # unclaiming acquire cannot be denied ``already_running``, so a
+        # double that raced it regardless could not emulate the limiter.
+        if claim and tid in self.claim_race_once:
             # "Another build" won this task just before us and its instant
             # worker completed it (completion wakes our scheduler).
             self.claim_race_once.discard(tid)
@@ -2013,6 +2026,7 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
             executor_metadata=executor_metadata,
             limit_keys=limit_keys,
             claim_ttl_seconds=claim_ttl_seconds,
+            claim=claim,
         )
 
 

@@ -8,13 +8,18 @@ and with reactive builds, **across processes and machines**. This fills
 the seam ``_concurrency.py`` reserved for a "global, server-driven
 limiter".
 
-Semantics (mirroring the reactive tick's acquisition):
+Semantics (the reactive tick's acquisition, minus the claim — see the
+first bullet, which is the one difference and is load-bearing):
 
 - A slot is acquired by an *enforced task start*
-  (``task_start_with_limits_aio``): the server atomically counts RUNNING
-  holders per key against the environment caps and records TASK_STARTED
-  on success (the engine's own later start-with-executor-refs is a
-  tolerated duplicate).
+  (``task_start_claim_aio(limit_keys=..., claim=False)``): the server
+  atomically counts RUNNING holders per key against the environment caps
+  and records TASK_STARTED on success (the engine's own later
+  start-with-executor-refs is a tolerated duplicate). ``claim=False`` is
+  load-bearing, not a default taken by accident: the engine claims the
+  task *before* it enters ``slot()`` (see ``_concurrent.py``), so a
+  claiming acquire would be denied ``already_running`` by its own build
+  and poll until ``max_wait_seconds``.
 - The slot is released by the task leaving RUNNING status — the engine's
   completed/failed/cancelled events, or TASK_SUSPENDED while a task waits
   on its dynamic deps (parity with ``LocalConcurrencyLimiter``, which
@@ -184,8 +189,8 @@ class RegistryConcurrencyLimiter:
                 # the task is already RUNNING with a ref in another build it
                 # transiently clears latest_executor_ref until the engine's
                 # ref-recording start lands (churn-only; see module docs).
-                started = await self.registry.task_start_with_limits_aio(
-                    build_id, task, limit_keys=limit_keys
+                result = await self.registry.task_start_claim_aio(
+                    build_id, task, limit_keys=limit_keys, claim=False
                 )
             except Exception as e:
                 # A registry blip must not cascade into task/build failures
@@ -202,14 +207,41 @@ class RegistryConcurrencyLimiter:
                     f"{delay:.1f}s): {e}"
                 )
             else:
-                if started:
+                if result.started:
                     return
                 error_backoff = self.poll_interval_seconds  # healthy again
                 delay = self.poll_interval_seconds
-                logger.debug(
-                    f"Task {task.id} denied by concurrency limits "
-                    f"{limit_keys}; retrying in {delay:.1f}s"
-                )
+                # ``limit`` is the only denial an unclaiming start can get
+                # (the server gates both others on ``claim``). Anything else
+                # is version skew or a regression — and it must not be
+                # invisible, because ``max_wait_seconds`` defaults to None:
+                # a backend that accepts ``claim`` and arbitrates anyway
+                # denies this acquire from the build's own claim and the
+                # task waits **forever**. Naming the reason at DEBUG would
+                # have hidden that as thoroughly as asserting the wrong one.
+                #
+                # Retrying regardless is still the safe direction: a denial
+                # we do not understand is not grounds to fail the task.
+                if result.denied_reason != "limit":
+                    logger.warning(
+                        f"Task {task.id} start denied "
+                        f"({result.denied_reason}) by an unclaiming acquire, "
+                        "which should only ever be denied by concurrency "
+                        "limits. This is version skew or a bug; the task "
+                        "will keep retrying"
+                        + (
+                            " and will not time out, because max_wait_seconds is unset"
+                            if self.max_wait_seconds is None
+                            else f" for up to {self.max_wait_seconds:.0f}s"
+                        )
+                        + "."
+                    )
+                else:
+                    logger.debug(
+                        f"Task {task.id} denied by concurrency limits "
+                        f"{result.denied_keys or limit_keys}; "
+                        f"retrying in {delay:.1f}s"
+                    )
             # Jitter so N waiters don't re-take the server's limit rows
             # (FOR UPDATE) in lockstep.
             delay += random.uniform(0, delay * 0.25)

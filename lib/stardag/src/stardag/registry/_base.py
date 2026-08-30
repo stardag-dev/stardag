@@ -1284,8 +1284,10 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
         claim_ttl_seconds: int | None = None,
+        *,
+        claim: bool = True,
     ) -> StartClaimResult:
-        """Mark a task started under an atomic per-task execution claim.
+        """Mark a task started, arbitrating an execution claim and limit slots.
 
         The claim guarantees at most one concurrent RUNNING execution per
         task (environment-wide, across builds): a start racing an existing
@@ -1295,6 +1297,23 @@ class RegistryABC(metaclass=abc.ABCMeta):
         ALREADY_COMPLETED: verify the target with eventual-consistency
         retries). ``limit_keys`` compose atomically (a denied claim
         consumes no slots).
+
+        ``claim`` is **keyword-only**, and that is what makes it safe: no
+        positional argument can reach it, at any position. Had it been
+        ordinary and placed before ``claim_ttl_seconds``, a positional TTL
+        would have bound to it — any truthy int reads as "claim" — and the
+        TTL would silently become None, which is exactly the unexpiring
+        claim this API works to prevent. Its position at the end is then
+        only tidiness; the ``*`` is the guarantee.
+
+        ``claim=False`` acquires the limit slots without arbitrating: the
+        start is recorded even against a live claim, and the only denial
+        left is ``limit``. That is not a weaker claim, it is the absence of
+        one, and exactly one caller wants it — a limiter acquiring slots
+        for a task its *own* build has already claimed (see
+        ``stardag.build._registry_limiter``), which a claiming start would
+        deny as ``already_running``. Everything that arbitrates leaves it
+        alone.
 
         ``claim_ttl_seconds`` bounds how long the granted claim is honoured
         (surfaced to every reader as
@@ -1322,35 +1341,6 @@ class RegistryABC(metaclass=abc.ABCMeta):
             "APIRegistry), or subclass NoOpRegistry to opt out of "
             "arbitration."
         )
-
-    async def task_start_with_limits_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        executor: str | None = None,
-        executor_ref: str | None = None,
-        executor_metadata: dict[str, Any] | None = None,
-        limit_keys: Sequence[str] | None = None,
-    ) -> bool:
-        """Mark a task started under named concurrency limits (atomic acquire).
-
-        Returns False when a limit key is at capacity — the task was NOT
-        started and no event was recorded; the caller should retry later
-        (in reactive scheduling: leave the task in the frontier; a
-        slot-holder's completion wakes the scheduler).
-
-        Default implementation performs no limit enforcement: it delegates
-        to :meth:`task_start_aio` and returns True. Backends with
-        server-side limit support (the API registry) override this.
-        """
-        await self.task_start_aio(
-            build_id,
-            task,
-            executor=executor,
-            executor_ref=executor_ref,
-            executor_metadata=executor_metadata,
-        )
-        return True
 
     async def task_start_aio(
         self,
@@ -1460,6 +1450,8 @@ class NoOpRegistry(RegistryABC):
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
         claim_ttl_seconds: int | None = None,
+        *,
+        claim: bool = True,
     ) -> StartClaimResult:
         """Always grant: there is nothing to arbitrate against.
 

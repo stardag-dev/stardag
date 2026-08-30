@@ -378,7 +378,7 @@ class _WorkerLifecycleReporter:
                 self.registry.task_upload_artifacts(self.build_id, self.task, artifacts)
 
         self._guard(_artifacts, "artifacts")
-        self._wake_scheduler()
+        self._guard(self._wake_scheduler, "wake")
 
     def suspended(self, task_struct: TaskStruct | None = None) -> None:
         if self.reactive and task_struct is not None:
@@ -393,7 +393,7 @@ class _WorkerLifecycleReporter:
             lambda: self.registry.task_suspend(self.build_id, self.task),
             "suspend",
         )
-        self._wake_scheduler()
+        self._guard(self._wake_scheduler, "wake")
 
     def failed(self, exception: BaseException) -> None:
         self._guard(
@@ -402,7 +402,7 @@ class _WorkerLifecycleReporter:
             ),
             "fail",
         )
-        self._wake_scheduler()
+        self._guard(self._wake_scheduler, "wake")
 
     def interrupted(self, reason: str) -> None:
         """Report that the platform ended this execution — not a failure.
@@ -512,8 +512,8 @@ class _WorkerLifecycleReporter:
         work, took the lease or found the build terminal, and exited
         having scheduled nothing. Seven tasks, seven cold starts, no work.
 
-        ``scheduler_live`` unknown — an older registry, a custom backend, a
-        notify that failed outright — always spawns. That is the behaviour
+        ``scheduler_live`` unknown — an older registry that does not answer
+        it, or a notify that failed outright — always spawns. That is the behaviour
         this had before the flag existed, and it is the safe direction:
         a redundant tick costs a container, a skipped one costs the build
         its progress until the watchdog.
@@ -531,17 +531,14 @@ class _WorkerLifecycleReporter:
             ),
             "notify",
         )
-        # ``getattr``, not attribute access: ``RegistryABC.build_notify``
-        # used to return None, and a third-party backend overriding it
-        # still may.
-        #
-        # ``is True``, not truthiness: only an explicit yes suppresses the
-        # spawn. A backend that answers with something else — a string, a
-        # dict's raw value, anything a truthiness test would happily accept
-        # — means "unknown", and unknown spawns. The asymmetry decides it:
-        # a redundant tick costs one container, a wrongly skipped one costs
+        # ``is True``, not truthiness, and still load-bearing: the field is
+        # ``bool | None``, and an older server that does not answer it at
+        # all leaves it None. Only an explicit yes suppresses the spawn;
+        # None — like the ``notified is None`` of a notify that raised —
+        # means "unknown", and unknown spawns. The asymmetry decides it: a
+        # redundant tick costs one container, a wrongly skipped one costs
         # the build its progress until the watchdog.
-        if getattr(notified, "scheduler_live", None) is True:
+        if notified is not None and notified.scheduler_live is True:
             logger.debug(
                 "Build %s already has a live scheduler; wake-up flag set, "
                 "no tick spawned.",

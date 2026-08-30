@@ -17,7 +17,7 @@ from stardag.build import (
     build_aio,
 )
 from stardag.build._base import current_build_id_var
-from stardag.registry import NoOpRegistry
+from stardag.registry import NoOpRegistry, StartClaimResult
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
@@ -37,7 +37,7 @@ class CountingLimitRegistry(NoOpRegistry):
         # Exceptions to raise on upcoming acquire attempts (fifo).
         self.pending_errors: list[Exception] = []
 
-    async def task_start_with_limits_aio(
+    async def task_start_claim_aio(
         self,
         build_id,
         task,
@@ -46,7 +46,13 @@ class CountingLimitRegistry(NoOpRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
-    ) -> bool:
+        *,
+        claim=True,
+    ) -> StartClaimResult:
+        # The limiter acquires slots for a task its own build has already
+        # claimed, so it must not claim again; assert that here rather than
+        # let a regression pass silently against a permissive double.
+        assert claim is False, "the limiter must acquire without claiming"
         self.acquire_attempts += 1
         if self.pending_errors:
             raise self.pending_errors.pop(0)
@@ -60,7 +66,9 @@ class CountingLimitRegistry(NoOpRegistry):
                 if key in keys and tid != str(task.id)
             )
             if active >= cap:
-                return False
+                return StartClaimResult(
+                    started=False, denied_reason="limit", denied_keys=[key]
+                )
         self.running_keys[str(task.id)] = set(limit_keys or [])
         self.acquires_by_task[str(task.id)] = (
             self.acquires_by_task.get(str(task.id), 0) + 1
@@ -70,7 +78,7 @@ class CountingLimitRegistry(NoOpRegistry):
             self.max_active_by_key[key] = max(
                 self.max_active_by_key.get(key, 0), active
             )
-        return True
+        return StartClaimResult(started=True)
 
     # Slot freed on ANY transition out of RUNNING (mirrors the server:
     # slot = RUNNING status + key rows).
