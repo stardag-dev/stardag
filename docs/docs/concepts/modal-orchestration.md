@@ -173,9 +173,9 @@ With `watchdog_period_minutes` set it runs on that period; without it, it
 runs when you invoke it — from the Modal UI or `modal run` — which is the
 one-click recovery for a stalled build.
 
-The default is off, and that is usually right, and the reason is now more
-than registry traffic. A standing sweep polls the registry whether or not
-anything is building, enough to keep a scale-to-zero database awake — and
+The default is off, and that is usually right. The reason is now more than
+registry traffic: a standing sweep polls the registry whether or not
+anything is building, enough to keep a scale-to-zero database awake, and
 each tick it spawns lingers for that build's `linger_seconds` (120 s by
 default). For a build that is churning that is useful: workers skip
 spawning while its lease is live, so the lingering tick is the one serving
