@@ -45,8 +45,9 @@ class CountingLimitRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         limit_keys=None,
-        claim=True,
         claim_ttl_seconds=None,
+        *,
+        claim=True,
     ) -> StartClaimResult:
         # The limiter acquires slots for a task its own build has already
         # claimed, so it must not claim again; assert that here rather than

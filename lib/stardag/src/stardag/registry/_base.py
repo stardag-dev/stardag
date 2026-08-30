@@ -1283,8 +1283,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
-        claim: bool = True,
         claim_ttl_seconds: int | None = None,
+        *,
+        claim: bool = True,
     ) -> StartClaimResult:
         """Mark a task started, arbitrating an execution claim and limit slots.
 
@@ -1296,6 +1297,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
         ALREADY_COMPLETED: verify the target with eventual-consistency
         retries). ``limit_keys`` compose atomically (a denied claim
         consumes no slots).
+
+        ``claim`` is keyword-only and last, deliberately: inserted anywhere
+        earlier it would swallow a positional ``claim_ttl_seconds`` — any
+        truthy int reads as "claim", and the TTL silently becomes None,
+        which is exactly the unexpiring claim this API works to prevent.
 
         ``claim=False`` acquires the limit slots without arbitrating: the
         start is recorded even against a live claim, and the only denial
@@ -1440,8 +1446,9 @@ class NoOpRegistry(RegistryABC):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
-        claim: bool = True,
         claim_ttl_seconds: int | None = None,
+        *,
+        claim: bool = True,
     ) -> StartClaimResult:
         """Always grant: there is nothing to arbitrate against.
 

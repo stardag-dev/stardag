@@ -71,13 +71,18 @@ class ClaimRegistry(RecordingRegistry):
         executor_ref=None,
         executor_metadata=None,
         limit_keys=None,
-        claim=True,
         claim_ttl_seconds=None,
+        *,
+        claim=True,
     ) -> StartClaimResult:
         tid = str(task.id)
         self._record("task_start_claim_aio", task.id)
         status = self.statuses.get(tid)
-        if status == "running":
+        # Both denials are the *claim's*, and the server gates them on it
+        # (routes/builds.py). A double that denied regardless could not
+        # emulate the limiter's unclaiming acquire, which starts a task its
+        # own build has already claimed.
+        if claim and status == "running":
             stored_executor, stored_ref = self.refs.get(tid, (None, None))
             return StartClaimResult(
                 started=False,
@@ -86,7 +91,7 @@ class ClaimRegistry(RecordingRegistry):
                 executor_ref=stored_ref,
                 latest_status_expires_at=self.expires_at.get(tid),
             )
-        if status == "completed":
+        if claim and status == "completed":
             return StartClaimResult(started=False, denied_reason="already_completed")
         self.statuses[tid] = "running"
         self.refs[tid] = (executor, executor_ref)

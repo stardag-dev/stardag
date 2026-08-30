@@ -349,8 +349,9 @@ class FakeReactiveRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         limit_keys=None,
-        claim=True,
         claim_ttl_seconds=None,
+        *,
+        claim=True,
     ):
         """Real claim arbitration, mirroring the API's claim-on-start.
 
@@ -1994,8 +1995,9 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
         executor_ref=None,
         executor_metadata=None,
         limit_keys=None,
-        claim=True,
         claim_ttl_seconds=None,
+        *,
+        claim=True,
     ):
         from stardag.registry import StartClaimResult
 

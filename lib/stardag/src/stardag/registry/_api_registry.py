@@ -1814,8 +1814,9 @@ class APIRegistry(RegistryABC):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
-        claim: bool = True,
         claim_ttl_seconds: int | None = None,
+        *,
+        claim: bool = True,
     ) -> StartClaimResult:
         """Arbitrated start against the API's one ``/start`` endpoint.
 
