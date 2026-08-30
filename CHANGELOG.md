@@ -57,7 +57,30 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   longest live input, a couple of stale `RUNNING` builds would be enough to
   keep the tick function warm, however few they are.
 
-## [0.21.0] — 2026-08-29
+- Default prebuilt server image bumped to `server-v0.2.0`
+  (`DEFAULT_SERVER_VERSION = "0.2.0"`) — the server version this SDK release
+  is tested against.
+
+### Deployment
+
+- **Server image `0.2.0`**, the first server release since `0.1.2`
+  (2026-08-12). It carries the Registry API and UI changes recorded under
+  0.19.0 — apart from the SQL-injection fix, which shipped in `0.1.2` itself
+  — plus those under 0.21.0 and 0.22.0: `INTERRUPTED` as a first-class task
+  status and `POST /builds/{id}/tasks/{task_id}/interrupt`,
+  `POST /builds/{id}/notify` reporting `scheduler_live`,
+  `POST /builds/wake-candidates`, and the `builds.tick_requested_at`
+  migration (`97ce4e3cbf32`). It also carries the `python-jose` → `PyJWT`
+  swap for token auth and raised security floors on the API's transitive
+  dependencies and the UI's build tooling. Minor rather than patch: the HTTP
+  surface grew and there is a schema migration. Self-hosters upgrade with
+  `stardag self-host upgrade`.
+
+  A self-hosted `0.1.2` predates `wake-candidates`, so an SDK on the v0.22.0
+  line talking to it degrades to the previous behaviour — cross-build
+  wake-ups arrive only via the watchdog — rather than failing.
+
+## [0.22.0] — 2026-08-30
 
 ### SDK
 
@@ -118,6 +141,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - The reaper's idleness signal no longer counts `needs_tick_at`: the flag
   is written by other builds' transitions now, and was redundant with the
   event stream before.
+
+## [0.21.0] — 2026-08-29
+
+### SDK
 
 - **The reactive scheduler no longer logs an ERROR for a task-store miss it
   recovers from.** `BuildTaskStore.load_task` logged

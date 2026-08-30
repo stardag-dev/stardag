@@ -62,7 +62,7 @@ DEFAULT_SERVER_MODAL_ENV = "stardag-host"
 SERVER_IMAGE_REPO = "ghcr.io/stardag-dev/stardag-server"
 # The server release this SDK version is tested against. Bumped at SDK
 # release time; override per deployment with --server-version.
-DEFAULT_SERVER_VERSION = "0.1.2"
+DEFAULT_SERVER_VERSION = "0.2.0"
 
 # Minimum client interpreter for from-source image builds (stardag-api's
 # requires-python; the image gets the client's version via add_python).
