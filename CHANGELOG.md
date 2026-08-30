@@ -57,9 +57,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   longest live input, a couple of stale `RUNNING` builds would be enough to
   keep the tick function warm, however few they are.
 
-- Default prebuilt server image bumped to `server-v0.2.0`
-  (`DEFAULT_SERVER_VERSION = "0.2.0"`) — the server version this SDK release
-  is tested against.
+- Default prebuilt server image bumped to `0.2.0`
+  (`DEFAULT_SERVER_VERSION = "0.2.0"`, from the `server-v0.2.0` release) —
+  the server version this SDK release is tested against. The image tag and
+  `--server-version` take the bare `X.Y.Z`; `server-v` prefixes the git tag
+  only.
 
 ### Deployment
 
