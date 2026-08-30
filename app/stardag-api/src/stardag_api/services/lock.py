@@ -387,7 +387,7 @@ async def release_lock_with_completion(
         # services.status.
         from stardag_api.services.status import transition_task
 
-        await transition_task(db, task_row, completion_event, build_id=build_id)
+        await transition_task(db, task_row, completion_event)
 
     # Release the lock
     owner_id_str = str(owner_id)

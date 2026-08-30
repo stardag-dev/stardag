@@ -377,7 +377,7 @@ async def evict_concurrency_limit_holder(
     )
     # The eviction releases a claim and its slots, so the transition flags
     # the other builds holding the task and the builds queued on the key.
-    await transition_task(db, db_task, event, build_id=db_task.latest_status_build_id)
+    await transition_task(db, db_task, event)
     # Wake the owning build's scheduler in the same transaction: a
     # reactive build should observe the eviction on the next tick, not
     # only at the next watchdog sweep (or never, with the watchdog off).

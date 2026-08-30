@@ -263,7 +263,7 @@ async def cascade_cancel_build_tasks(
         # A released claim is news for every other build holding the task
         # (and for the builds queued on its concurrency-limit keys); the
         # transition runs that hook.
-        await transition_task(db, task, event, build_id=build_id)
+        await transition_task(db, task, event)
     return list(tasks)
 
 

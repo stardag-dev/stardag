@@ -24,7 +24,33 @@ def _python_files() -> list[pathlib.Path]:
     return sorted(p for p in SRC.rglob("*.py") if p != _OWNER)
 
 
-def test_nothing_outside_status_applies_an_event_to_a_task():
+def _called_name(node: ast.Call) -> str | None:
+    """The bare name a call resolves to, however it was reached.
+
+    Both ``flag(...)`` and ``wakeups.flag(...)`` have to count. Matching only
+    ``ast.Name`` misses the module-qualified form — and
+    ``from stardag_api.services import wakeups`` is the more natural of the
+    two import styles, so the guard would have been blind to the likelier
+    spelling.
+    """
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _imported_names(node: ast.ImportFrom) -> list[str]:
+    """The names an ``import ... from`` binds, ignoring any ``as`` rename.
+
+    The rename is the point: ``import flag_after_task_transition as flag``
+    would otherwise slip past a check that only looks at the local binding.
+    """
+    return [alias.name for alias in node.names]
+
+
+def test_nothing_outside_status_applies_an_event_to_a_task() -> None:
     """No route or service may call ``_apply_event_to_task`` itself.
 
     Calling it directly is exactly the bug this guards: it moves the status
@@ -36,20 +62,11 @@ def test_nothing_outside_status_applies_an_event_to_a_task():
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
-                func = node.func
-                name = (
-                    func.id
-                    if isinstance(func, ast.Name)
-                    else func.attr
-                    if isinstance(func, ast.Attribute)
-                    else None
-                )
-                if name == "_apply_event_to_task":
+                if _called_name(node) == "_apply_event_to_task":
                     offenders.append(f"{path.relative_to(SRC)}:{node.lineno}")
             elif isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    if alias.name == "_apply_event_to_task":
-                        offenders.append(f"{path.relative_to(SRC)}:{node.lineno}")
+                if "_apply_event_to_task" in _imported_names(node):
+                    offenders.append(f"{path.relative_to(SRC)}:{node.lineno}")
 
     assert not offenders, (
         "these call or import _apply_event_to_task directly, bypassing the "
@@ -58,7 +75,7 @@ def test_nothing_outside_status_applies_an_event_to_a_task():
     )
 
 
-def test_the_wake_up_hook_has_exactly_one_call_site():
+def test_the_wake_up_hook_has_exactly_one_call_site() -> None:
     """``flag_after_task_transition`` is called from ``transition_task``.
 
     A second call site means a path that transitions a task without going
@@ -71,8 +88,7 @@ def test_the_wake_up_hook_has_exactly_one_call_site():
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "flag_after_task_transition"
+                and _called_name(node) == "flag_after_task_transition"
             ):
                 call_sites.append(f"{path.relative_to(SRC)}:{node.lineno}")
 

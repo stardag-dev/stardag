@@ -141,7 +141,7 @@ slot rows.
   under a live lock, orphaned locks after deletes.
 - **Sticky `COMPLETED` composes for free.** Because completion and claim
   share a column, "completed beats running" is one comparison in
-  `apply_event_to_task`, not a cross-entity rule.
+  `_apply_event_to_task`, not a cross-entity rule.
 - **Every reader is one indexed column.** The frontier query, the
   concurrency-limit count, the UI and the task explorer all read
   `latest_status` directly. A lease table adds a join to each — including a

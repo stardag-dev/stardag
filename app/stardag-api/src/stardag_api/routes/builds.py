@@ -620,7 +620,7 @@ async def _create_task_event(
         error_message=error_message,
         event_metadata=event_metadata,
     )
-    await transition_task(db, db_task, event, build_id=build_id)
+    await transition_task(db, db_task, event)
     if limit_keys is not None:
         # Replace the task's limit-key rows (only when explicitly provided —
         # a later ref-recording re-start without keys must not clear them).
@@ -1823,7 +1823,7 @@ async def skip_blocked_tasks(
                 event_type=EventType.TASK_SKIPPED,
                 event_metadata=metadata,
             )
-            await transition_task(db, task, event, build_id=build_id)
+            await transition_task(db, task, event)
         await db.commit()
         for _ in blocked_tasks:
             record_entity_created(auth.workspace_id, "events")
@@ -2222,6 +2222,17 @@ async def _close_plan_over_dependencies(
             if upstream.id in seen:
                 continue
             seen.add(upstream.id)
+            # The one task event not recorded through ``transition_task``,
+            # and the exemption is worth stating rather than leaving to be
+            # rediscovered: TASK_REFERENCED is purely informational — it
+            # moves no ``latest_*`` — so there is no transition here for a
+            # post-transition hook to run on. Admitting an upstream into a
+            # plan says nothing about its status.
+            #
+            # What the guard test enforces is therefore the narrower
+            # invariant "nothing outside services/status.py applies an
+            # event", not "every task event goes through transition_task".
+            # If this ever emits a status-bearing event, it must move.
             db.add(
                 Event(
                     build_id=build_id,
@@ -2495,7 +2506,7 @@ async def register_task(
         if task_already_existed
         else EventType.TASK_PENDING,
     )
-    await transition_task(db, db_task, event, build_id=build_id)
+    await transition_task(db, db_task, event)
 
     await _close_plan_over_dependencies(db, build_id=build_id, task_pks=[db_task.id])
 
@@ -2701,14 +2712,21 @@ async def register_tasks_bulk(
             db_task = existing_tasks[t.task_id]
             if db_task.is_phantom:
                 # Phantom upgrade: real task data overrides the
-                # ``tid[:12]`` placeholder. Note that we deliberately do
-                # *not* reset latest_status_at / latest_status_event_id
-                # here — the transition_task(TASK_PENDING) call
-                # below refreshes them via the
-                # ``latest_status == PENDING`` branch in
-                # services/status.py:101. If that branch ever gains a
-                # phantom-upgrade short-circuit, this needs an explicit
-                # reset.
+                # ``tid[:12]`` placeholder. ``latest_status_at`` and
+                # ``latest_status_event_id`` are deliberately left alone,
+                # and they stay NULL: a phantom row is in
+                # ``existing_tasks``, so the event below is
+                # TASK_REFERENCED, which ``_apply_event_to_task`` treats as
+                # purely informational and which writes no ``latest_*`` at
+                # all.
+                #
+                # (This comment used to claim a TASK_PENDING apply
+                # refreshed them. It does not — the event is never
+                # TASK_PENDING for a row that already exists — so nothing
+                # was refreshing anything. Recorded because the wrong
+                # version reads as a reason *not* to add an explicit reset,
+                # and the right version says only that nothing needs one
+                # today.)
                 db_task.task_namespace = t.task_namespace
                 db_task.task_name = t.task_name
                 db_task.task_data = t.task_data
@@ -2865,18 +2883,14 @@ async def register_tasks_bulk(
     )
 
     if events:
-        # ``flush=False``: every event above carries an explicit ``id`` and
-        # ``created_at``, which is all the apply reads, so a 500-task plan
-        # stays one round trip. Registration events are status-neutral, so
-        # the transition hooks run and cost nothing.
+        # Every event above carries an explicit ``id`` and ``created_at``,
+        # which is all the apply reads, so ``transition_task`` skips the
+        # flush of its own accord and a 500-task plan stays one round trip.
+        # Registration events are status-neutral, so the transition hooks
+        # run and cost nothing — pinned by
+        # ``test_bulk_registration_flags_nobody``.
         for t, ev in zip(tasks_in, events):
-            await transition_task(
-                db,
-                db_task_by_task_id[t.task_id],
-                ev,
-                build_id=build_id,
-                flush=False,
-            )
+            await transition_task(db, db_task_by_task_id[t.task_id], ev)
 
     await _close_plan_over_dependencies(
         db,

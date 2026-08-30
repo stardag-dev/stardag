@@ -349,9 +349,6 @@ async def transition_task(
     db: AsyncSession,
     task: Task,
     event: Event,
-    *,
-    build_id: UUID,
-    flush: bool = True,
 ) -> None:
     """Record ``event`` and let it move ``task``'s denormalised status.
 
@@ -364,26 +361,30 @@ async def transition_task(
     nobody; the fix was to go and find them all again. This function exists
     so there is only one to find, however many callers it grows.
 
-    Runs, in order: the event is registered and (unless the caller has
-    already stamped its ``id`` and ``created_at`` — see ``flush``) flushed
-    so those are populated, the previous status is captured, the event is
-    applied, and every post-transition hook runs. The hooks are part of the
-    caller's transaction by construction, which is what makes a flag
-    impossible to set for a change that then rolls back.
+    Runs, in order: the event is registered, flushed if it needs to be, the
+    previous status is captured, the event is applied, and every
+    post-transition hook runs. The hooks are part of the caller's
+    transaction by construction, which is what makes a flag impossible to
+    set for a change that then rolls back.
 
-    Args:
-        build_id: the build whose event this is — the one build a
-            same-transaction wake-up flag must *not* be set on, since it
-            is the one that already knows.
-        flush: False for a caller that builds its events with explicit
-            ``id`` and ``created_at`` and flushes once at the end (bulk
-            registration does this, to keep a 500-task plan to one round
-            trip). Everything else wants the default.
+    ``event.build_id`` is the build whose event this is — the one build a
+    same-transaction wake-up flag must *not* be set on, since it is the one
+    that already knows.
     """
     db.add(event)
-    if flush:
-        # So event.id and event.created_at exist before the apply reads
-        # them. The whole bundle still commits atomically.
+    if event.id is None or event.created_at is None:
+        # The apply reads both, and they are Python-side column defaults,
+        # so an unstamped event needs a flush to have them. Derived rather
+        # than passed: this used to be a ``flush: bool`` argument, and a
+        # caller that got it wrong would have written a status alongside a
+        # NULL ``latest_status_at`` and event id — nullable columns, so it
+        # would commit silently and leave the denormalised row disagreeing
+        # with the event stream. That is the exact class of quiet bug this
+        # function exists to end, so it is not reintroduced as a keyword.
+        #
+        # Bulk registration stamps both itself, to keep a 500-task plan to
+        # one round trip; it therefore skips the flush without having to
+        # say so.
         await db.flush()
     previous_status = task.latest_status
     _apply_event_to_task(task, event)
@@ -393,7 +394,7 @@ async def transition_task(
     # landing on an already-completed task — or a registration event, which
     # is status-neutral by design — flags nobody and costs no query.
     await flag_after_task_transition(
-        db, task, previous_status=previous_status, build_id=build_id
+        db, task, previous_status=previous_status, build_id=event.build_id
     )
 
 
