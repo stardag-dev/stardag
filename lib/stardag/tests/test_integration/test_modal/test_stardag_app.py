@@ -16,7 +16,7 @@ try:
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 from uuid import uuid4
 
 import stardag as _sd
@@ -2520,21 +2520,29 @@ class TestWatchdogSweep:
 
         assert spawned == [(build_ids[0], "an-app"), (build_ids[1], "an-app")]
 
-    def test_sweep_passes_no_tick_overrides(self):
-        """Each spawned tick runs on its own persisted config — its normal
-        linger and the whole container timeout — because it gets a container
-        to itself. The sweep has nothing to say about how a build ticks.
+    def test_the_default_spawner_is_the_deployed_tick(self):
+        """The one path production actually takes.
 
-        The spawn signature is the guarantee: ``SpawnTick`` takes a build id
-        and an app name, and there is nowhere to put an override.
+        Every other test here injects ``spawn=``, which leaves
+        ``spawn = spawn or _spawn_tick`` — the line that decides what really
+        happens — unexercised. This calls the sweep with no spawner at all.
+
+        It also pins the two things that would silently break: the build id
+        goes out as a ``UUID`` (``build_list_running`` returns UUIDs and
+        ``spawn_tick`` does its own ``str()``, so an over-eager ``str()``
+        here would double-encode), and the app name is the spawn *target*
+        rather than only the listing scope.
         """
-        import inspect
+        from stardag.integration.modal._tick import _run_watchdog_sweep
 
-        from stardag.integration.modal._spawn import spawn_tick
+        build_ids = [uuid4(), uuid4()]
 
-        assert list(inspect.signature(spawn_tick).parameters) == [
-            "build_id",
-            "app_name",
+        with patch("stardag.integration.modal._tick._spawn_tick") as spawn:
+            _run_watchdog_sweep(self._registry(build_ids), "an-app")
+
+        assert spawn.call_args_list == [
+            call(build_ids[0], "an-app"),
+            call(build_ids[1], "an-app"),
         ]
 
     def test_sweep_survives_individual_spawn_failures(self):
@@ -2969,14 +2977,19 @@ class TestContainerSetup:
 
         assert order == ["container_setup", "body"]
 
-    def test_watchdog_does_not_run_a_tick_body_in_process(self):
-        """The sweep spawns; it no longer calls the tick wrapper in-process.
+    def test_watchdog_hands_the_sweep_an_app_name_not_a_callable(self):
+        """What the watchdog wrapper passes, and what it no longer passes.
 
-        That call used to re-enter the container-setup guard, whose plain
-        ``threading.Lock`` would have *hung* the container rather than failed
-        it, so the re-entry needed pinning. Dispatching removes the hazard at
-        the source: the watchdog hands the sweep an app name, not a callable,
-        and there is no longer a tick body in this container to re-enter.
+        The sweep used to be handed the tick wrapper and call it in-process
+        for each build, which is why a re-entrancy test guarded this pair.
+        (That re-entry was in fact harmless — the outer
+        ``_run_container_setup`` had already completed and released its lock
+        before the sweep ran, so the inner call short-circuited on the
+        already-run check rather than blocking. The hazard was hypothetical,
+        and it is now absent rather than merely unreached.)
+
+        What is worth pinning is the call shape: an app name, no kwargs, and
+        no tick body in this container.
         """
         calls = []
         app = self._app(lambda: calls.append("setup"))

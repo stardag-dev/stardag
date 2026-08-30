@@ -39,12 +39,23 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   body sequentially inside the sweep's own container. Three things stop being
   a function of how many builds the environment happens to be running: each
   build's spawn cap (that one container's timeout was divided across the
-  sweep), the latency for the last build in the list, and whether the sweep
-  finished at all. Each build now gets a container of its own, its full
-  timeout and its normal linger; a duplicate spawn still starts a container,
-  but that tick finds the scheduler lease held and exits without acting. The
-  `linger_seconds=0` and share-of-timeout overrides the inline form needed
-  are gone with it.
+  sweep), whether the sweep finished at all, and — to within a spawn RPC
+  rather than a whole tick — how long the last build in the list waits. Each
+  build now gets a container of its own, its full timeout and its normal
+  linger; a duplicate spawn still starts a container, but that tick finds the
+  scheduler lease held and exits without acting. The `linger_seconds=0` and
+  share-of-timeout overrides the inline form needed are gone with it.
+
+  **This costs more container time than the inline sweep did**, and the
+  trade is worth understanding before turning the watchdog on: a spawned
+  tick uses the build's own `linger_seconds` (120 s by default), so a
+  RUNNING build with nothing schedulable now occupies a tick container for
+  that long each period, where the old sweep gave it one frontier pass.
+  For a build that is actually churning the linger is useful — workers skip
+  spawning while its lease is live, and that tick serves their wake-ups. For
+  idle or abandoned RUNNING builds it is pure overhead, so pick
+  `watchdog_period_minutes` with `linger_seconds` in mind, and clean up
+  builds that are RUNNING but abandoned.
 
 ## [0.21.0] — 2026-08-29
 

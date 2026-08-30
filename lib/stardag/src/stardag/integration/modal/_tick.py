@@ -125,9 +125,11 @@ def _build_tick_config(
     ``tick_timeout_seconds`` is the deployed ``tick`` function's own Modal
     ``timeout`` — how long this container may live, which is what the
     per-pass spawn cap is derived from. It is applied as a *default* rather
-    than an override so a caller that runs several ticks in one container
-    can pass its own share of the budget (the watchdog sweep does), and it
-    is deliberately absent from ``_TICK_KWARGS_ALLOWED``: persisting it in
+    than an override so an explicit ``tick_kwargs`` (a test, or a manual
+    invocation) still wins; the watchdog sweep used to be the caller that
+    needed this, passing each build its share of one container's budget,
+    and no longer runs ticks in-process at all. It is deliberately absent
+    from ``_TICK_KWARGS_ALLOWED``: persisting it in
     a build's stored tick config would freeze a deploy-time fact into
     per-build state and go stale on the next redeploy.
     """
@@ -228,8 +230,9 @@ def _run_tick(
     """One scheduler pass over a reactive build's frontier.
 
     The body of the deployed ``tick`` function (see
-    :meth:`StardagApp.finalize`), and also what the watchdog sweep invokes
-    in-process for each build it adopts. Returns a JSON-able outcome: the
+    :meth:`StardagApp.finalize`), and the only place a tick body runs — the
+    watchdog sweep spawns this function rather than calling it. Returns a
+    JSON-able outcome: the
     ``run_tick_aio`` summary, or a short ``{"outcome": ...}`` record for
     the two cases that stop before the scheduler lease is even acquired —
     a build that is not reactively scheduled, and one owned by another app.
@@ -404,6 +407,14 @@ def _run_watchdog_sweep(
     provide. That was accidental and competed for the same limit; an app's own
     watchdog is the supported mechanism, and ``build_trigger`` already warns
     when a reactive build is triggered on an app without one.
+
+    Scoping is server-side, so a server predating the filter ignores it and
+    answers with RUNNING builds of every kind. That degraded case got more
+    expensive with dispatch, not less: a build this app cannot advance used
+    to cost an in-process no-op and now costs a container start that exits
+    on ``not_reactive`` or ``foreign_app``. It is bounded by ``sweep_limit``
+    and by the watchdog period, and the remedy is the same as it was —
+    upgrade the registry, or clean up abandoned RUNNING builds.
     """
     if type(registry) is NoOpRegistry:
         logger.warning("Tick watchdog: no registry configured; nothing to do.")
