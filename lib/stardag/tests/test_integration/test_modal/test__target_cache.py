@@ -1,8 +1,8 @@
 """Round-trip tests for the optional disk-cache wrapper around
 ``ModalVolumeRemoteFileSystem``.
 
-These tests hit the **real** Modal API and create/delete files on a
-pre-existing ``stardag-testing`` volume in whichever
+These tests hit the **real** Modal API and create/delete files on the
+shared ``stardag-testing`` volume in whichever
 ``(workspace, environment)`` is currently active for your local Modal
 credentials. They run locally (no ``modal.Function``) — caching only
 applies to the API-based ``RemoteFileTarget`` path used outside Modal.
@@ -14,17 +14,11 @@ Pure configuration wiring is covered (without Modal auth) by
     profile/environment is selected before running — e.g. a personal/dev
     workspace, *not* a shared or production-adjacent one. Check with
     ``modal profile current`` and switch with
-    ``modal profile activate <profile>`` if needed. The ``stardag-testing``
-    volume must already exist in the active workspace/environment; these
-    tests deliberately do **not** auto-create it (test discovery should
-    not mutate external state). Create it once with
-    ``modal volume create stardag-testing`` if you intend to run these
-    tests locally.
-
-TODO: harden the setup so these tests can run in CI — pin to a dedicated
-test workspace/environment via ``MODAL_PROFILE`` / ``MODAL_ENVIRONMENT``,
-provision credentials as a CI secret, and gate on those being set
-instead of skipping silently on missing auth/volume.
+    ``modal profile activate <profile>`` if needed. Setting
+    ``STARDAG_MODAL_TEST_PROFILE`` turns that convention into an enforced
+    guard. The ``stardag-testing`` volume is created if missing by
+    :func:`~stardag.testing.modal.live_modal_guard`, which doubles as the
+    credential check, so no manual volume setup is needed.
 """
 
 import asyncio
