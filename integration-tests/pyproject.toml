@@ -10,8 +10,11 @@ dependencies = [
     "pytest-timeout>=2.3",
     "httpx>=0.27",
     "python-dotenv>=1.0",
-    # Include stardag SDK with CLI and API extras for testing
-    "stardag[cli,api]",
+    # The stardag SDK. `selfhost` is for the registry-live tier under
+    # tests_registry_live/: it carries both modal and cryptography, and it
+    # makes the connect flow importable, so the harness reuses that rather
+    # than reimplementing the post-deploy wiring.
+    "stardag[selfhost]",
 ]
 
 [project.optional-dependencies]
