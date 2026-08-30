@@ -100,13 +100,75 @@ STARDAG_MODAL_TEST_PROFILE=<your-dev-profile> \
   uv run pytest tests/test_integration/test_modal -m modal_live
 ```
 
+Or through tox, which is what CI runs and which defaults to require mode:
+
+```bash
+STARDAG_MODAL_TEST_PROFILE=<your-dev-profile> tox -e stardag-modal-live
+```
+
 Gating (see `stardag.testing.modal.live_modal_guard`):
 
 - `STARDAG_MODAL_LIVE_TESTS`: `auto` (default: run if authenticated, else
-  skip), `1` (require: fail instead of skip — for CI), `0` (always skip).
+  skip), `1` (require: fail instead of skip), `0` (always skip). The
+  `stardag-modal-live` tox env sets `1`, because invoking it _is_ the request
+  to run the tier — `auto` would let a missing credential skip everything and
+  still exit 0.
 - `STARDAG_MODAL_TEST_PROFILE`: if set, live tests are skipped unless the
   active Modal profile matches. Recommended to always set this locally, so
   live tests can never run against a shared/production workspace by accident.
+
+The ordinary test envs exclude the tier twice over — `-m "not modal_live"`
+plus `STARDAG_MODAL_LIVE_TESTS=0`. Both are needed: marker deselection happens
+_after_ module import, so without the environment variable the guard still
+makes a Modal API call per module before deciding to skip.
+
+##### In CI
+
+`.github/workflows/modal-live.yml` runs the tier against a dedicated
+`stardag-ci` Modal workspace. It is **not** part of the normal CI run and is
+not a required check — it needs credentials, which GitHub does not give to
+pull requests from forks.
+
+| When                                                                                                              | Modal environment    |
+| ----------------------------------------------------------------------------------------------------------------- | -------------------- |
+| A pull request from a branch on this repo, that either touches the tier's paths or carries the `modal-live` label | `ci-pr-<number>`     |
+| Manual `workflow_dispatch`                                                                                        | `ci-manual-<run-id>` |
+| The weekly schedule                                                                                               | `ci-main`            |
+
+**You do not normally need to do anything.** A pull request touching any of
+these runs the tier automatically:
+
+- `lib/stardag/src/stardag/integration/modal/`
+- `lib/stardag/src/stardag/build/`
+- `lib/stardag/src/stardag/testing/modal/`
+- `lib/stardag/tests/test_integration/test_modal/`
+- `lib/stardag/pyproject.toml` (the dependency list baked into the worker image)
+- `tox.ini`, `.github/workflows/modal-live.yml` (the harness itself)
+
+**The `modal-live` label is the manual override**, for a change that touches
+none of those and still warrants a live run — a dependency bump, a `selfhost`
+change, a hunch. The `Decide whether to run` job logs which rule applied and
+why, so a surprising skip is one click to explain.
+
+The schedule is weekly rather than nightly, and it is not there to catch
+regressions in merged code — the automatic trigger does that. It is there for
+the one signal no commit produces: drift underneath us. `test_live_semantics.py`
+pins Modal _platform_ behaviour, and rebuilt images re-resolve dependencies;
+both change with time rather than with commits.
+
+Each run gets its own Modal environment, and deleting that environment removes
+the apps, volumes and dicts inside it — so the tier can leave its fixed-name
+objects (`stardag-testing`, `stardag-testing-app`, ...) exactly where they are
+without concurrent runs colliding. A concurrency group serialises runs sharing
+an environment name, which is what makes those fixed names safe.
+
+**What the tier does and does not cover.** It exercises Modal _execution_:
+real containers, detached spawn and re-attach, retries, cancellation, timeout
+semantics. It does _not_ exercise registry interaction — the registries in
+these tests are `NoOpRegistry` subclasses, so claim arbitration and reactive
+wake-ups are simulated in-process rather than checked against the real API.
+Registry behaviour is covered separately by `app/stardag-api`'s own suite
+against Postgres.
 
 ### Linting & Formatting
 

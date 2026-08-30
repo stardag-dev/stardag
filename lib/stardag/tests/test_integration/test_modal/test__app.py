@@ -94,6 +94,13 @@ stardag_app = StardagApp(
     worker_settings={
         "default": FunctionSettings(image=TEST_IMAGE, secrets=[TARGET_ROOTS_SECRET])
     },
+    # No registry to authenticate to: every live module drives this app with a
+    # NoOpRegistry or an in-process/file-backed stub, so the containers never
+    # call one. Leaving the default would make the whole live tier depend on a
+    # `stardag-api-key` Modal secret existing in whichever environment it runs
+    # in — an undeclared prerequisite that a developer workspace happens to
+    # satisfy and a fresh one does not.
+    stardag_api_key_secret=None,
 )
 
 finalize_result = stardag_app.finalize()
@@ -234,6 +241,7 @@ class TestUserVolumesOverride:
                     volumes={custom_path: user_volume},
                 )
             },
+            stardag_api_key_secret=None,  # see module-level app
         )
 
         result = app.finalize()
@@ -262,6 +270,7 @@ class TestUserVolumesOverride:
             "test-auto-add-app",
             builder_settings=FunctionSettings(image=TEST_IMAGE),
             worker_settings={"default": FunctionSettings(image=TEST_IMAGE)},
+            stardag_api_key_secret=None,  # see module-level app
         )
 
         result = app.finalize()

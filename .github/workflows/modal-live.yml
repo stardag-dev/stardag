@@ -1,0 +1,292 @@
+name: Modal Live Tests
+
+# The `modal_live` test tier: stardag's engine driving a *real* Modal
+# workspace -- spawning detached workers, re-attaching to them by function call
+# id, and the platform semantics that detached execution depends on.
+#
+# It is not part of `ci.yml` because it costs real compute and needs
+# credentials, so it runs only when asked: nightly, on manual dispatch, or on a
+# pull request that a maintainer has labelled `modal-live`.
+#
+# Scope, stated plainly so this file is not mistaken for more than it is: the
+# workers here report to a NoOp registry. This tier covers Modal *execution*,
+# not registry interaction, and not the hosting of a deployed registry.
+
+on:
+  schedule:
+    # Weekly, Monday 03:17 UTC. Off the hour so it does not queue behind
+    # everyone else's midnight cron.
+    #
+    # The schedule exists for one signal that no PR-triggered run produces:
+    # drift *underneath* us. `test_live_semantics.py` pins Modal platform
+    # behaviour ("so a Modal-side change is caught here rather than in
+    # production builds"), and image rebuilds re-resolve dependencies. Both
+    # change with time, not with commits. Weekly rather than nightly because
+    # that is the rate those actually change, and a scheduled run that goes
+    # red on platform latency and nobody reads is worse than no schedule.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+  pull_request:
+    types: [opened, labeled, synchronize, reopened, closed]
+
+# Least privilege by default; the sweeper widens it for the two read-only
+# lookups it needs.
+permissions:
+  contents: read
+
+concurrency:
+  # One live run per Modal environment at a time. This is what makes the
+  # tier's fixed object names (`stardag-testing`, `stardag-testing-app`,
+  # `stardag-testing-probe`, ...) safe without salting them per run: two runs
+  # sharing an environment would redeploy the same app under each other.
+  #
+  # Note the environment is per *PR*, not per run: reruns and later pushes on
+  # the same PR reuse `ci-pr-<n>` and inherit whatever the previous run left in
+  # it. That is deliberate and safe -- task ids, outputs and probe keys are all
+  # salted per run, so the inherited state is inert -- and it keeps the volume
+  # warm across a PR's iterations. Serialisation is what makes it safe; without
+  # the group below, two runs would race the same app name.
+  group: >-
+    modal-live-${{ github.event_name == 'pull_request'
+      && format('pr-{0}', github.event.pull_request.number)
+      || (github.event_name == 'workflow_dispatch'
+          && format('manual-{0}', github.run_id) || 'main') }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Whether to run, in one place with a readable log line saying why.
+  #
+  # Two ways in, and the path check is the important one: a label means
+  # remembering to apply it, which is the failure this whole tier exists to fix.
+  # The label stays as the manual override for a change that touches none of
+  # these paths but still warrants a live run -- a dependency bump, a selfhost
+  # change -- so it cannot be a `paths:` filter on the trigger. GitHub applies
+  # `paths:` to *every* activity type, which would silently swallow the label
+  # event too, and the closed-PR cleanup with it.
+  decide:
+    name: Decide whether to run
+    runs-on: ubuntu-latest
+    if: github.event.action != 'closed'
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR: ${{ github.event.pull_request.number }}
+          LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'modal-live') }}
+        run: |
+          set -euo pipefail
+
+          decision() {
+            echo "run=$1" >> "$GITHUB_OUTPUT"
+            echo "$2"
+            exit 0
+          }
+
+          [ "$EVENT" = "pull_request" ] || decision true "$EVENT -- running."
+
+          # Fork PRs receive no secrets, so this could only fail in require
+          # mode. Skipping is the honest outcome, not a green tick.
+          [ "$HEAD_REPO" = "$REPO" ] || decision false \
+            "PR is from a fork ($HEAD_REPO); GitHub withholds the Modal credentials."
+
+          [ "$LABELLED" = "true" ] && decision true "Labelled modal-live -- running."
+
+          # Everything the live tier actually exercises, plus the harness
+          # itself and the dependency list baked into the worker image.
+          changed=$(gh pr diff "$PR" --repo "$REPO" --name-only)
+          if printf '%s\n' "$changed" | grep -qE \
+               '^(lib/stardag/src/stardag/(integration/modal|build|testing/modal)/|lib/stardag/tests/test_integration/test_modal/|lib/stardag/pyproject\.toml$|tox\.ini$|\.github/workflows/modal-live\.yml$)'; then
+            echo "Changed files touching the live tier:"
+            printf '%s\n' "$changed" | grep -E \
+              '^(lib/stardag/src/stardag/(integration/modal|build|testing/modal)/|lib/stardag/tests/test_integration/test_modal/|lib/stardag/pyproject\.toml$|tox\.ini$|\.github/workflows/modal-live\.yml$)' \
+              | sed 's/^/  /'
+            decision true "Running."
+          fi
+
+          decision false \
+            "No label and nothing changed under the live tier's paths. Add the 'modal-live' label to force a run."
+
+  modal-live:
+    name: Live Modal tier
+    runs-on: ubuntu-latest
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
+    timeout-minutes: 25 # the suite measures ~6 minutes; this is slack, not a budget
+    # The same-repo restriction lives in `decide` above. It is the contributor
+    # check: a branch only exists here if the pusher has write access, and
+    # unlike an author allow-list it stays correct as the collaborator set
+    # changes.
+    #
+    # `pull_request_target` would let fork PRs run with the token in scope.
+    # That is the exfiltration path this design exists to avoid; do not "fix"
+    # the fork case that way.
+    environment: modal-live-ci
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      # Required, and not merely cosmetic: `live_modal_guard` compares the
+      # active profile against STARDAG_MODAL_TEST_PROFILE, and modal.config
+      # resolves the active profile as `MODAL_PROFILE or "default"`. Without
+      # this line every run fails the guard in require mode.
+      MODAL_PROFILE: stardag-ci
+      STARDAG_MODAL_TEST_PROFILE: stardag-ci
+      # Require mode: fail rather than skip when credentials are missing or the
+      # profile does not match, so a misconfigured job cannot pass vacuously.
+      STARDAG_MODAL_LIVE_TESTS: "1"
+      # Build the worker image from *this checkout*, not from the last PyPI
+      # release. The `auto` default infers it from the install being editable,
+      # which is true under `uv sync` -- but a silent fallback would test the
+      # released stardag inside the container while the branch's code sits
+      # unexercised, and the job would still be green.
+      STARDAG_MODAL_LOCAL_STARDAG_SOURCE: "yes"
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # For a labelled PR, test the PR's own head. (Safe here precisely
+          # because the `if` above restricts this to same-repo branches.)
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Resolve the Modal environment for this run
+        id: env
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request)     name="ci-pr-${{ github.event.pull_request.number }}"; ephemeral=true ;;
+            workflow_dispatch) name="ci-manual-${{ github.run_id }}";               ephemeral=true ;;
+            *)                name="ci-main";                                       ephemeral=false ;;
+          esac
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "ephemeral=$ephemeral" >> "$GITHUB_OUTPUT"
+          echo "MODAL_ENVIRONMENT=$name" >> "$GITHUB_ENV"
+          echo "Modal environment: $name (ephemeral=$ephemeral)"
+
+      - name: Create the Modal environment
+        run: |
+          set -euo pipefail
+          name="${{ steps.env.outputs.name }}"
+          if uvx modal environment list --json | jq -e --arg n "$name" \
+               'any(.[]; .name == $n)' > /dev/null; then
+            echo "Environment '$name' already exists, reusing it."
+          else
+            uvx modal environment create "$name"
+          fi
+
+      - name: Install tox
+        run: pip install tox
+
+      - name: Run the live Modal tier
+        run: tox -e stardag-modal-live
+
+      # Ephemeral environments take everything the tier leaves behind with them
+      # -- deployed apps, the `stardag-testing` volume, the probe's dict -- in
+      # one call. `ci-main` is kept, so the nightly path has no churn.
+      #
+      # `cancel-in-progress` means this step is sometimes skipped, so leaks are
+      # expected rather than exceptional; the sweeper job below is the backstop.
+      - name: Delete the Modal environment
+        if: always() && steps.env.outputs.ephemeral == 'true'
+        run: uvx modal environment delete "${{ steps.env.outputs.name }}" --yes
+
+  # --- Cleanup backstops -----------------------------------------------------
+
+  # A closed PR's environment goes immediately, rather than waiting for the
+  # nightly sweep. Runs for any closed PR whose environment might exist; a
+  # delete of a name that was never created is a no-op we tolerate rather than
+  # guard, since the alternative is a leaked environment.
+  cleanup-closed-pr:
+    name: Delete the closed PR's Modal environment
+    runs-on: ubuntu-latest
+    permissions: {}
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    environment: modal-live-ci
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_PROFILE: stardag-ci
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Delete ci-pr-${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          name="ci-pr-${{ github.event.pull_request.number }}"
+          if uvx modal environment list --json | jq -e --arg n "$name" \
+               'any(.[]; .name == $n)' > /dev/null; then
+            uvx modal environment delete "$name" --yes
+          else
+            echo "No environment '$name' to delete."
+          fi
+
+  # The backstop for the runs whose own teardown never executed -- a cancelled
+  # run, a hard job failure. Keyed on GitHub state rather than age, because
+  # `modal environment list` reports no creation time.
+  sweep-stale-environments:
+    name: Sweep stale Modal environments
+    runs-on: ubuntu-latest
+    # `gh pr view` needs pull-requests, `gh run view` needs actions.
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    needs: modal-live
+    # `always()` is load-bearing: with `needs`, a failed or cancelled
+    # modal-live would otherwise skip the sweeper -- and a red suite is exactly
+    # when leaked environments accumulate.
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    environment: modal-live-ci
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_PROFILE: stardag-ci
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Delete environments whose PR is closed or whose run has finished
+        run: |
+          set -euo pipefail
+          uvx modal environment list --json \
+            | jq -r '.[].name
+                     | select(startswith("ci-pr-") or startswith("ci-manual-"))' \
+            | while read -r name; do
+                case "$name" in
+                  ci-pr-*)
+                    n="${name#ci-pr-}"
+                    state=$(gh pr view "$n" --repo "$GITHUB_REPOSITORY" \
+                              --json state -q .state 2>/dev/null || echo MISSING)
+                    if [ "$state" != "OPEN" ]; then
+                      echo "PR #$n is $state -- deleting $name"
+                      uvx modal environment delete "$name" --yes
+                    fi
+                    ;;
+                  ci-manual-*)
+                    id="${name#ci-manual-}"
+                    status=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" \
+                               --json status -q .status 2>/dev/null || echo missing)
+                    if [ "$status" != "in_progress" ] && [ "$status" != "queued" ]; then
+                      echo "Run $id is $status -- deleting $name"
+                      uvx modal environment delete "$name" --yes
+                    fi
+                    ;;
+                esac
+              done

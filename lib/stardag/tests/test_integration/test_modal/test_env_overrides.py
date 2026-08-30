@@ -230,6 +230,13 @@ class TestFinalizeWrapperBackwardCompat:
             worker_settings={
                 "default": FunctionSettings(image=modal.Image.debian_slim())
             },
+            # Keeps this unit test hermetic. Without it, finalize() asks Modal
+            # whether a `stardag-api-key` secret exists, so the test's outcome
+            # depends on the developer's ambient Modal profile: it passes with
+            # no credentials (the check is best-effort and skips) and with a
+            # profile whose environment happens to hold that secret, and fails
+            # with any other authenticated profile.
+            stardag_api_key_secret=None,
         )
 
         registered: dict = {}
