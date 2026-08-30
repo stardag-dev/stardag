@@ -33,6 +33,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   returns nothing at all — but the tolerance for a third-party backend
   answering with some other shape is gone, matching the v0.18.0 decision
   that custom-backend compatibility was never real.
+- **The watchdog sweep spawns instead of running ticks inline.**
+  `tick_watchdog` now lists the running reactive builds the app owns, spawns
+  one `tick` per build and returns, rather than running each build's tick
+  body sequentially in its own container. Three things stop being a function
+  of how many builds the environment happens to be running: each build's
+  spawn cap (the container timeout was divided across the sweep), the latency
+  for the last build in the list, and whether the sweep finished at all. Each
+  build now gets a full container, its full timeout and its normal linger;
+  duplicate spawns are collapsed by the scheduler lease. The
+  `linger_seconds=0` and share-of-timeout overrides the inline form needed
+  are gone with it.
 
 ## [0.21.0] — 2026-08-29
 

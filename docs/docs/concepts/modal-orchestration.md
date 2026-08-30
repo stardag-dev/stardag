@@ -161,11 +161,16 @@ two are what the watchdog is for.
 
 ### The watchdog
 
-`tick_watchdog` is deployed on every app: one scheduling pass over every
-running reactive build the app owns. With `watchdog_period_minutes` set it
-also runs on that period; without it, it runs when you invoke it — from
-the Modal UI or `modal run` — which is the one-click recovery for a
-stalled build.
+`tick_watchdog` is deployed on every app. It lists the running reactive
+builds the app owns, **spawns one `tick` for each, and returns** — so a
+sweep takes seconds whether the app is running one build or fifty, and
+each build gets a container of its own, with its full timeout and its
+normal linger, rather than a share of the sweep's. A spawn for a build
+that already has a tick costs nothing: the scheduler lease collapses it.
+
+With `watchdog_period_minutes` set it runs on that period; without it, it
+runs when you invoke it — from the Modal UI or `modal run` — which is the
+one-click recovery for a stalled build.
 
 The default is off, and that is usually right. A standing sweep polls the
 registry whether or not anything is building, enough to keep a

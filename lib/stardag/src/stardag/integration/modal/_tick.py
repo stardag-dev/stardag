@@ -368,84 +368,71 @@ def _run_tick(
 
 def _run_watchdog_sweep(
     registry: typing.Any,
-    tick: typing.Callable[..., typing.Any],
+    reactive_app_name: str,
     sweep_limit: int = 100,
-    tick_timeout_seconds: float | None = None,
-    reactive_app_name: str | None = None,
+    spawn: SpawnTick | None = None,
 ) -> None:
-    """One watchdog pass: tick every running build this app owns.
+    """One watchdog pass: spawn a tick for every running build this app owns.
+
+    The sweep *dispatches*; it does not schedule. It lists the builds, spawns
+    one ``tick`` each on this app, and returns — in seconds, however many
+    builds there are. Each build then gets its own container, its own full
+    timeout and its normal persisted linger, exactly as if a worker had woken
+    it; the scheduler lease collapses a spawn that duplicates a tick already
+    running.
+
+    It used to run the tick body for every build sequentially in this one
+    container, which made three things a function of how many builds the
+    environment happened to be running: each build's spawn cap (the
+    container's timeout was divided by the number of builds), the latency for
+    the last build in the list (it waited behind all the others), and whether
+    the sweep finished at all. Dispatching removes all three, and with them
+    the ``linger_seconds=0`` and share-of-timeout overrides the inline form
+    needed to survive itself.
 
     ``reactive_app_name`` scopes the listing to this app's own reactive
-    builds. Without it, ``sweep_limit`` is spent on whatever RUNNING builds
-    happen to be most recently active in the environment — including builds
-    no tick of this app can advance (resident builds, and builds whose
-    orchestrator died without emitting a terminal event, which stay RUNNING
-    forever). Once those exceed the limit the safety net stops reaching
-    genuine reactive builds entirely, and silently.
+    builds, and is now also *where each tick is spawned*. Without scoping,
+    ``sweep_limit`` would be spent on whatever RUNNING builds happen to be
+    most recently active in the environment — including builds no tick of
+    this app can advance (resident builds, and builds whose orchestrator died
+    without emitting a terminal event, which stay RUNNING forever). Once
+    those exceed the limit the safety net stops reaching genuine reactive
+    builds entirely, and silently.
 
     The trade-off is losing the incidental cross-app coverage a sweep used to
     provide. That was accidental and competed for the same limit; an app's own
     watchdog is the supported mechanism, and ``build_trigger`` already warns
     when a reactive build is triggered on an app without one.
-
-    ``linger_seconds=0`` (one frontier pass per build) is essential: the
-    sweep runs ticks sequentially in one function call — persisted linger
-    settings (default 120 s) would blow through the function timeout after
-    a couple of builds and starve the rest of the safety-net tick.
-
-    The same "one container, many builds" property applies to the per-pass
-    spawn cap, which is derived from how long the container may live: every
-    build in the sweep would otherwise size its fan-out as though it had
-    the whole container to itself, and the first wide build would spend the
-    entire timeout while the rest of the sweep never ran. Each build is
-    therefore handed its **share** of the budget. Truncating here is
-    cheap and self-correcting — the watchdog is a safety net, builds are
-    normally driven by their own ticks, and a truncated pass re-acts on a
-    fresh frontier immediately.
     """
     if type(registry) is NoOpRegistry:
         logger.warning("Tick watchdog: no registry configured; nothing to do.")
         return
-    # Scoping is server-side now that `build_list_running` is expressed in
-    # terms of `build_list`, so every RegistryABC gets it and the signature
-    # shim this used to need went with it. `scoped` still exists because
-    # the truncation remedy below differs by it.
-    scoped = reactive_app_name is not None
+    spawn = spawn or _spawn_tick
     running_builds = registry.build_list_running(
         limit=sweep_limit, reactive_app_name=reactive_app_name
     )
-    scope = (
-        f"reactive builds owned by {reactive_app_name!r}"
-        if scoped
-        else "running builds"
-    )
     if len(running_builds) >= sweep_limit:
-        # The remedy follows `scoped`, not whether a name was *asked* for:
-        # a scoping request the registry cannot honour still yields a
-        # listing capped by RUNNING builds of every kind, and "run fewer
-        # reactive builds per app" would then be advice about the wrong
-        # population.
-        remedy = (
-            "Cancel or clean up builds that are RUNNING but abandoned, or "
-            "reduce the number of concurrent reactive builds for this app."
-            if scoped
-            else "This listing was not scoped to a reactive app, so the cap "
-            "was consumed by RUNNING builds of every kind — most likely "
-            "abandoned ones. Clean those up (`stardag builds cleanup`); an "
-            "upgraded registry would also scope this listing."
-        )
         logger.warning(
-            f"Tick watchdog: {sweep_limit}+ {scope}; only the {sweep_limit} "
-            "most recently active are swept, so a less-recently-active build "
-            f"may not be ticked this period. {remedy}"
+            f"Tick watchdog: {sweep_limit}+ reactive builds owned by "
+            f"{reactive_app_name!r}; only the {sweep_limit} most recently "
+            "active are swept, so a less-recently-active build may not be "
+            "ticked this period. Cancel or clean up builds that are RUNNING "
+            "but abandoned, or reduce the number of concurrent reactive "
+            "builds for this app."
         )
-    sweep_kwargs: dict[str, typing.Any] = {"linger_seconds": 0}
-    if tick_timeout_seconds is not None and running_builds:
-        sweep_kwargs["tick_timeout_seconds"] = tick_timeout_seconds / len(
-            running_builds
-        )
+    spawned = 0
     for running_build_id in running_builds:
         try:
-            tick(str(running_build_id), tick_kwargs=dict(sweep_kwargs))
+            spawn(running_build_id, reactive_app_name)
         except Exception:
-            logger.exception(f"Watchdog tick failed for build {running_build_id}")
+            # One unspawnable build must not cost the rest of the sweep.
+            logger.exception(
+                f"Watchdog could not spawn a tick for build {running_build_id}"
+            )
+            continue
+        spawned += 1
+    logger.info(
+        f"Tick watchdog: spawned {spawned} tick(s) for the "
+        f"{len(running_builds)} running build(s) owned by "
+        f"{reactive_app_name!r}."
+    )
