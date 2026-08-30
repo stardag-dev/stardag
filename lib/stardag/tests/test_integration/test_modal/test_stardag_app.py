@@ -16,7 +16,7 @@ try:
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 from uuid import uuid4
 
 import stardag as _sd
@@ -2492,92 +2492,111 @@ class TestReactiveRetrigger:
 
 
 class TestWatchdogSweep:
-    def test_sweep_ticks_each_running_build_without_linger(self):
+    """The sweep dispatches: one spawned tick per build, then it returns.
+
+    It used to run every build's tick body sequentially inside the *sweep's*
+    single container, which is why it had to force ``linger_seconds=0`` and
+    hand each build a fraction of that container's timeout. Both overrides
+    are gone with the inline run.
+    """
+
+    @staticmethod
+    def _registry(build_ids: list) -> MagicMock:
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_list_running.return_value = build_ids
+        return registry
+
+    def test_sweep_spawns_one_tick_per_running_build(self):
         from stardag.integration.modal._tick import _run_watchdog_sweep
 
         build_ids = [uuid4(), uuid4()]
-        registry = MagicMock(spec=RegistryABC)
-        registry.build_list_running.return_value = build_ids
-        ticked: list = []
-
-        def tick(build_id, tick_kwargs=None):
-            ticked.append((build_id, tick_kwargs))
-
-        _run_watchdog_sweep(registry, tick)
-
-        assert ticked == [
-            (str(build_ids[0]), {"linger_seconds": 0}),
-            (str(build_ids[1]), {"linger_seconds": 0}),
-        ]
-
-    def test_sweep_splits_the_container_budget_across_builds(self):
-        """The sweep runs every build's tick sequentially in ONE container,
-        so each build gets a share of its wall clock — otherwise the first
-        wide build would size its fan-out as though it owned the whole
-        timeout and the rest of the sweep would never run."""
-        from stardag.integration.modal._tick import _run_watchdog_sweep
-
-        build_ids = [uuid4(), uuid4(), uuid4(), uuid4()]
-        registry = MagicMock(spec=RegistryABC)
-        registry.build_list_running.return_value = build_ids
-        ticked: list = []
-
-        def tick(build_id, tick_kwargs=None):
-            ticked.append(tick_kwargs)
-
-        _run_watchdog_sweep(registry, tick, tick_timeout_seconds=600.0)
-
-        assert ticked == [{"linger_seconds": 0, "tick_timeout_seconds": 150.0}] * len(
-            build_ids
-        )
-
-    def test_sweep_omits_the_budget_when_the_timeout_is_unknown(self):
-        """No declared tick timeout — nothing to split, and the spawn cap
-        falls to its next rung rather than being handed a made-up number."""
-        from stardag.integration.modal._tick import _run_watchdog_sweep
-
-        registry = MagicMock(spec=RegistryABC)
-        registry.build_list_running.return_value = [uuid4()]
-        ticked: list = []
+        spawned: list = []
 
         _run_watchdog_sweep(
-            registry, lambda build_id, tick_kwargs=None: ticked.append(tick_kwargs)
+            self._registry(build_ids),
+            "an-app",
+            spawn=lambda build_id, app_name: spawned.append((build_id, app_name)),
         )
 
-        assert ticked == [{"linger_seconds": 0}]
+        assert spawned == [(build_ids[0], "an-app"), (build_ids[1], "an-app")]
 
-    def test_sweep_survives_individual_tick_failures(self):
+    def test_the_default_spawner_is_the_deployed_tick(self):
+        """The one path production actually takes.
+
+        Every other test here injects ``spawn=``, which leaves
+        ``spawn = spawn or _spawn_tick`` — the line that decides what really
+        happens — unexercised. This calls the sweep with no spawner at all.
+
+        It also pins the three things that would silently break: the build
+        id goes out as a ``UUID`` (``build_list_running`` returns UUIDs and
+        ``spawn_tick`` does its own ``str()``, so an over-eager ``str()``
+        here would double-encode); the app name is the spawn *target* rather
+        than only the listing scope; and the sweep asks for **no linger**.
+
+        That last one is the whole cost model. Without it each swept build
+        holds a container for its own ``linger_seconds`` — 120 s by default
+        — every watchdog period, and it spends that on the builds least
+        likely to have anything to do, since a sweep's population is builds
+        where nothing is known to have happened.
+        """
         from stardag.integration.modal._tick import _run_watchdog_sweep
 
         build_ids = [uuid4(), uuid4()]
-        registry = MagicMock(spec=RegistryABC)
-        registry.build_list_running.return_value = build_ids
-        ticked: list = []
 
-        def tick(build_id, tick_kwargs=None):
-            if build_id == str(build_ids[0]):
+        with patch("stardag.integration.modal._tick._spawn_tick") as spawn:
+            _run_watchdog_sweep(self._registry(build_ids), "an-app")
+
+        assert spawn.call_args_list == [
+            call(build_ids[0], "an-app", tick_kwargs={"linger_seconds": 0}),
+            call(build_ids[1], "an-app", tick_kwargs={"linger_seconds": 0}),
+        ]
+
+    def test_a_wake_up_spawn_carries_no_overrides(self):
+        """The other side of the same coin: everything that is *not* the
+        sweep must leave the build's stored config alone.
+
+        A wake-up means something changed and more is likely to, so its tick
+        should linger — reconfiguring somebody else's scheduler by accident
+        is what the default-``None`` argument exists to prevent.
+        """
+        import inspect
+
+        from stardag.integration.modal._spawn import spawn_tick
+
+        assert inspect.signature(spawn_tick).parameters["tick_kwargs"].default is None
+
+    def test_sweep_survives_individual_spawn_failures(self):
+        from stardag.integration.modal._tick import _run_watchdog_sweep
+
+        build_ids = [uuid4(), uuid4()]
+        spawned: list = []
+
+        def spawn(build_id, app_name):
+            if build_id == build_ids[0]:
                 raise RuntimeError("boom")
-            ticked.append(build_id)
+            spawned.append(build_id)
 
-        _run_watchdog_sweep(registry, tick)
+        _run_watchdog_sweep(self._registry(build_ids), "an-app", spawn=spawn)
 
-        assert ticked == [str(build_ids[1])]  # second build still swept
+        assert spawned == [build_ids[1]]  # second build still reached
 
     def test_sweep_noop_without_registry(self):
         from stardag.integration.modal._tick import _run_watchdog_sweep
 
-        _run_watchdog_sweep(NoOpRegistry(), lambda *a, **k: 1 / 0)  # no raise
+        def _never(build_id, app_name) -> None:
+            raise AssertionError("nothing to sweep without a registry")
+
+        _run_watchdog_sweep(NoOpRegistry(), "an-app", spawn=_never)  # no raise
 
     def test_sweep_scopes_listing_to_this_apps_reactive_builds(self):
-        """The listing — not the tick — is where irrelevant builds must be
-        dropped: a tick on a non-reactive build is a whole (wasted) function
-        invocation, and unrelated builds otherwise consume the sweep limit."""
+        """The listing is where irrelevant builds must be dropped: a tick on
+        a non-reactive build is a whole (wasted) container, and unrelated
+        builds otherwise consume the sweep limit."""
         from stardag.integration.modal._tick import _run_watchdog_sweep
 
-        registry = MagicMock(spec=RegistryABC)
-        registry.build_list_running.return_value = []
+        registry = self._registry([])
 
-        _run_watchdog_sweep(registry, lambda *a, **k: None, reactive_app_name="an-app")
+        _run_watchdog_sweep(registry, "an-app", spawn=lambda *a, **k: None)
 
         registry.build_list_running.assert_called_once_with(
             limit=100, reactive_app_name="an-app"
@@ -2588,15 +2607,12 @@ class TestWatchdogSweep:
 
         from stardag.integration.modal._tick import _run_watchdog_sweep
 
-        registry = MagicMock(spec=RegistryABC)
-        registry.build_list_running.return_value = [uuid4(), uuid4()]
-
         with caplog.at_level(logging.WARNING):
             _run_watchdog_sweep(
-                registry,
-                lambda *a, **k: None,
+                self._registry([uuid4(), uuid4()]),
+                "an-app",
                 sweep_limit=2,
-                reactive_app_name="an-app",
+                spawn=lambda *a, **k: None,
             )
 
         # "2+ reactive builds owned by X", not "2+ running builds": the
@@ -2981,15 +2997,19 @@ class TestContainerSetup:
 
         assert order == ["container_setup", "body"]
 
-    def test_watchdog_reentering_tick_does_not_rerun_or_deadlock(self):
-        """The watchdog sweep calls the tick wrapper in-process.
+    def test_watchdog_hands_the_sweep_an_app_name_not_a_callable(self):
+        """What the watchdog wrapper passes, and what it no longer passes.
 
-        The guard's lock is a plain ``threading.Lock``, so a path that
-        re-entered it while holding it would deadlock the container rather
-        than fail it. The outer call has already released the lock and
-        recorded the hook by then, so the inner call short-circuits — pin
-        that, because a future change here fails silently until a watchdog
-        container hangs.
+        The sweep used to be handed the tick wrapper and call it in-process
+        for each build, which is why a re-entrancy test guarded this pair.
+        (That re-entry was in fact harmless — the outer
+        ``_run_container_setup`` had already completed and released its lock
+        before the sweep ran, so the inner call short-circuited on the
+        already-run check rather than blocking. The hazard was hypothetical,
+        and it is now absent rather than merely unreached.)
+
+        What is worth pinning is the call shape: an app name, no kwargs, and
+        no tick body in this container.
         """
         calls = []
         app = self._app(lambda: calls.append("setup"))
@@ -3003,13 +3023,16 @@ class TestContainerSetup:
                 patch("stardag.integration.modal._app._run_watchdog_sweep")
             )
             stack.enter_context(registry_provider.override(NoOpRegistry()))
-            tick.return_value = {}
-            # Mimic the real sweep: invoke the tick wrapper it was handed.
-            sweep.side_effect = lambda registry, tick_fn, **kw: tick_fn("bid", None)
             registered["tick_watchdog"]()
 
         assert calls == ["setup"]
-        assert tick.call_count == 1
+        assert tick.call_count == 0, (
+            "the watchdog container must not run a tick body — one sweep "
+            "spawns N ticks and returns"
+        )
+        args, kwargs = sweep.call_args
+        assert args[1] == app.name, "the app name is the scope AND the target"
+        assert not kwargs
 
     def test_concurrent_inputs_run_the_hook_exactly_once(self):
         """``allow_concurrent_inputs`` serves inputs on threads.

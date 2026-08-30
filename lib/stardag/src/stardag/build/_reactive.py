@@ -1377,16 +1377,23 @@ async def _run_tick_body_aio(
                             # lease held will not have spawned for it.
                             #
                             # Skipped when lingering is disabled
-                            # (``linger_seconds <= 0`` — the watchdog
-                            # sweep, which runs one pass per build across
-                            # many builds in one container). Extending a
+                            # (``linger_seconds <= 0``): extending a
                             # zero-length linger re-arms an already-expired
                             # deadline, so a build being notified steadily
-                            # would spin here without ever sleeping and
-                            # starve the rest of the sweep. Nothing is
-                            # lost: the post-release hand-off is the
-                            # guarantee, and handing a sweep's wake-up to a
-                            # dedicated tick is what should happen anyway.
+                            # would spin here without ever sleeping.
+                            #
+                            # The watchdog sweep is still the caller that
+                            # makes this load-bearing, for a changed reason:
+                            # it used to run one pass per build across many
+                            # builds in one container, so a spinning build
+                            # starved the rest of the sweep. It spawns now,
+                            # and asks each tick for one pass — so the spin
+                            # would cost that build's container instead of
+                            # the sweep, which is better and still wrong.
+                            # Nothing is lost either way: the post-release
+                            # hand-off is the guarantee, and handing the
+                            # wake-up to a dedicated tick is what should
+                            # happen anyway.
                             if config.linger_seconds <= 0:
                                 return
                             flag = await registry.build_get_frontier_aio(build_id)

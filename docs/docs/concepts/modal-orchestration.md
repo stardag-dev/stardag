@@ -161,17 +161,34 @@ two are what the watchdog is for.
 
 ### The watchdog
 
-`tick_watchdog` is deployed on every app: one scheduling pass over every
-running reactive build the app owns. With `watchdog_period_minutes` set it
-also runs on that period; without it, it runs when you invoke it — from
-the Modal UI or `modal run` — which is the one-click recovery for a
-stalled build.
+`tick_watchdog` is deployed on every app. It lists the running reactive
+builds the app owns, **spawns one `tick` for each, and returns** — so a
+sweep takes seconds whether the app is running one build or fifty, and
+each build gets a container of its own with its full timeout, rather than a
+share of the sweep's.
 
-The default is off, and that is usually right. A standing sweep polls the
+Those ticks do **one pass and exit**: a sweep is a safety net, not a
+wake-up. A wake-up's tick lingers because something just happened and more
+is likely to; a sweep looks at builds where nothing is known to have
+happened. Lingering there would keep the tick function warm for the linger's
+duration every period — a couple of stale `RUNNING` builds would be enough,
+however few they are — for builds least likely to have anything to do. A
+spawn for a build that already has a tick still starts a container, but that
+tick finds the scheduler lease held and exits without acting.
+
+With `watchdog_period_minutes` set it runs on that period; without it, it
+runs when you invoke it — from the Modal UI or `modal run` — which is the
+one-click recovery for a stalled build.
+
+The default is off, and that is usually right: a standing sweep polls the
 registry whether or not anything is building, enough to keep a
 scale-to-zero database awake. Turn it on when leaving a build stalled for
 even a few minutes is unacceptable, and pick the period from how long that
 is — it is the recovery time for the two cases above, nothing else.
+
+The sweep itself is cheap in proportion to the environment: one pass per
+running build, per period, each in a container that exits as soon as it has
+looked.
 
 ### App ownership
 
