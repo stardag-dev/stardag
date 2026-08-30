@@ -30,6 +30,7 @@ from stardag.build._task_modules import (
     plan_pickle_elision,
     uncovered_task_classes,
 )
+from stardag.integration.modal._limit_keys import deployed_limit_key_selector
 from stardag.integration.modal._logging import _setup_logging
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
@@ -45,6 +46,7 @@ from stardag.integration.modal._metadata import (
     STARDAG_REACTIVE_ENV,
 )
 from stardag.integration.modal._protocols import RunFunction
+from stardag.integration.modal._spawn import spawn_tick
 from stardag.exceptions import ResumableInterruption
 from stardag.registry._base import NoOpRegistry, registry_provider
 from stardag.utils.env import temp_env_vars
@@ -440,8 +442,17 @@ class _WorkerLifecycleReporter:
             )
 
     def _register_dynamic_deps(self, task_struct: TaskStruct) -> None:
+        # Dynamic deps are registered with their concurrency-limit keys
+        # too, so a slot release can wake the build queued on them exactly
+        # as it does for tasks the bootstrap registered. The selector is
+        # the deployed app's, published by the worker wrapper.
         result = asyncio.run(
-            discover_and_register_aio(self.registry, self.build_id, task_struct)
+            discover_and_register_aio(
+                self.registry,
+                self.build_id,
+                task_struct,
+                limit_key_selector=deployed_limit_key_selector(),
+            )
         )
         store = BuildTaskStore(self.build_id)
         # The trigger's pre-flight structurally cannot see dynamically
@@ -509,8 +520,16 @@ class _WorkerLifecycleReporter:
         """
         if not self.reactive:
             return
+        app_name = self.app_name
+        # Tell the registry whether this caller can spawn at all: it stamps
+        # the build as handed out on the assumption that the notifier will,
+        # and a notifier that cannot (no app name to reach a tick with) must
+        # not block the drainers that can for a whole window.
         notified = self._guard_value(
-            lambda: self.registry.build_notify(self.build_id), "notify"
+            lambda: self.registry.build_notify(
+                self.build_id, can_spawn=app_name is not None
+            ),
+            "notify",
         )
         # ``getattr``, not attribute access: ``RegistryABC.build_notify``
         # used to return None, and a third-party backend overriding it
@@ -529,7 +548,6 @@ class _WorkerLifecycleReporter:
                 self.build_id,
             )
             return
-        app_name = self.app_name
         if app_name is None:
             logger.warning(
                 "Reactive build without an app name — cannot spawn a "
@@ -537,12 +555,7 @@ class _WorkerLifecycleReporter:
             )
             return
 
-        def _spawn_tick() -> None:
-            modal.Function.from_name(app_name=app_name, name="tick").spawn(
-                build_id=str(self.build_id)
-            )
-
-        self._guard(_spawn_tick, "tick-spawn")
+        self._guard(lambda: spawn_tick(self.build_id, app_name), "tick-spawn")
 
 
 class Runner(RunFunction):

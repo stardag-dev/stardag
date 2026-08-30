@@ -26,12 +26,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import Build, BuildStatus, Event, EventType, Task, TaskStatus
 from stardag_api.models.base import as_utc, utc_now
 from stardag_api.services.status import apply_event_to_build, apply_event_to_task
+from stardag_api.services.wakeups import flag_after_task_transition, flag_build
 
 logger = logging.getLogger(__name__)
 
@@ -87,21 +88,22 @@ def last_event_at_subquery() -> ColumnElement[datetime]:
 def last_activity_at(build: Build, last_event_at: datetime | None) -> datetime | None:
     """The build's idleness signal: the newest of every liveness input.
 
-    Three inputs, because each catches something the others miss:
+    Two inputs, because each catches something the other misses:
 
     - ``last_event_at`` — the event stream, i.e. real work (see above).
     - ``build.last_active_at`` — lifecycle transitions, plus the one
       mutation that writes no event at all (appending roots).
-    - ``build.needs_tick_at`` — a pending scheduler wake-up. Set by
-      ``POST /builds/{id}/notify`` (a worker reporting it finished
-      something) and cleared by the tick that consumes it; while it is set,
-      somebody is waiting for a scheduler that hasn't run yet, which is the
-      opposite of abandoned.
+
+    ``needs_tick_at`` is deliberately **not** an input. It used to be, on
+    the reasoning that a pending wake-up means somebody is waiting for a
+    scheduler; but the worker report that sets it also writes an event,
+    which ``last_event_at`` already sees — and now that other builds' task
+    transitions flag a build too, the flag says nothing about *this*
+    build's own activity. A dead build sharing a task with a busy one
+    would never be reaped if it counted.
     """
     candidates = [
-        as_utc(ts)
-        for ts in (last_event_at, build.last_active_at, build.needs_tick_at)
-        if ts is not None
+        as_utc(ts) for ts in (last_event_at, build.last_active_at) if ts is not None
     ]
     return max(candidates) if candidates else None
 
@@ -130,7 +132,6 @@ def idle_filters(idle_before: datetime) -> list[ColumnElement[bool]]:
     return [
         Build.last_active_at < idle_before,
         last_event_at < idle_before,
-        or_(Build.needs_tick_at.is_(None), Build.needs_tick_at < idle_before),
     ]
 
 
@@ -263,7 +264,14 @@ async def cascade_cancel_build_tasks(
         # Flush per event so event.id / created_at exist before
         # apply_event_to_task reads them (same pattern as skip-blocked).
         await db.flush()
+        previous_status = task.latest_status
         apply_event_to_task(task, event)
+        # A released claim is news for every other build holding the task
+        # (and for the builds queued on its concurrency-limit keys) — the
+        # same hook every other status-writing path runs.
+        await flag_after_task_transition(
+            db, task, previous_status=previous_status, build_id=build_id
+        )
     return list(tasks)
 
 
@@ -326,6 +334,9 @@ async def cancel_builds(
         # its status just changed, and it can no longer be re-selected
         # (its latest_status is no longer RUNNING).
         locked.last_active_at = now
+        # A cancelled reactive build still has executions only a tick can
+        # stop; flag it so the next scheduler pass in the environment does.
+        await flag_build(db, locked, now=now)
         results.append(
             CancelledBuild(
                 build=build,

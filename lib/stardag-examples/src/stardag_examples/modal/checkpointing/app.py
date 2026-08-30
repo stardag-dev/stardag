@@ -41,7 +41,7 @@ app = sd_modal.StardagApp(
     # Nothing to configure for the interruption behaviour: the task asks
     # to be resumed by raising sd.ResumableInterruption, and the scheduler
     # obliges up to TickConfig.max_interruptions (default 20).
-    # Reactive scheduling is what resumes the task, and the watchdog is the
-    # backstop if a wake-up is ever lost.
-    watchdog_period_minutes=5,
+    # Reactive scheduling is what resumes the task. The watchdog stays off:
+    # the interrupted worker reports before it dies and wakes the scheduler
+    # directly, so nothing here depends on a timer.
 )

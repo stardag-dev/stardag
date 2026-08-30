@@ -464,23 +464,28 @@ async def test_build_with_recent_task_activity_is_not_reaped(
 
 
 @pytest.mark.asyncio
-async def test_reaper_respects_a_pending_scheduler_wakeup(
+async def test_reaper_ignores_a_pending_scheduler_wakeup(
     client: AsyncClient, async_session
 ):
-    """needs_tick_at means a worker reported progress and the scheduler
-    hasn't run yet — the opposite of abandoned."""
+    """A wake-up flag is not evidence that *this* build is alive.
+
+    It used to be: a worker's ``notify`` set it, and a worker reporting is
+    activity. But the worker's report also writes an event, which the
+    idleness signal already sees — and now that other builds' task
+    transitions flag a build too, the flag can be refreshed indefinitely by
+    a busy neighbour while this build is long dead. A flag alone must
+    therefore not keep a build out of the reaper.
+    """
     build_id = await _new_build(client)
     await _backdate(async_session, build_id, age=timedelta(days=2))
-    await client.post(f"/api/v1/builds/{build_id}/notify")
+    # Flag only — no event lands, exactly what a third-party flag does.
+    build = await async_session.get(Build, UUID(build_id))
+    build.needs_tick_at = datetime.now(timezone.utc)
+    await async_session.commit()
 
     body = (await client.post(BULK_CANCEL, json={"idle_for_seconds": 3600})).json()
-    assert body["build_count"] == 0
-    assert await _status(client, build_id) == "running"
-
-    # Once the tick consumes the wake-up, the build is idle again.
-    await client.delete(f"/api/v1/builds/{build_id}/notify")
-    body = (await client.post(BULK_CANCEL, json={"idle_for_seconds": 3600})).json()
-    assert [r["build_id"] for r in body["builds"]] == [build_id]
+    assert body["build_count"] == 1
+    assert await _status(client, build_id) == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -864,17 +869,22 @@ async def test_list_builds_idle_filter_ignores_builds_with_recent_task_activity(
 
 
 @pytest.mark.asyncio
-async def test_list_builds_idle_filter_respects_pending_scheduler_wakeup(
+async def test_list_builds_idle_filter_ignores_a_pending_scheduler_wakeup(
     client: AsyncClient, async_session
 ):
+    """Same rule as the reaper: a wake-up flag is not this build's activity
+    (other builds' transitions set it too), so a flagged-but-silent build is
+    idle and listed as such."""
     build_id = await _new_build(client)
     await _backdate(async_session, build_id, age=timedelta(days=2))
-    await client.post(f"/api/v1/builds/{build_id}/notify")
+    build = await async_session.get(Build, UUID(build_id))
+    build.needs_tick_at = datetime.now(timezone.utc)
+    await async_session.commit()
 
     body = (
         await client.get("/api/v1/builds", params={"idle_for_seconds": 3600})
     ).json()
-    assert body["total"] == 0
+    assert body["total"] == 1
 
 
 @pytest.mark.asyncio

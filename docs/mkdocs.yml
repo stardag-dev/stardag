@@ -157,6 +157,7 @@ nav:
       - AsyncIO: concepts/asyncio.md
       - Validation: concepts/validation.md
       - Build & Execution: concepts/build-execution.md
+      - Orchestration on Modal: concepts/modal-orchestration.md
   - How-To Guides:
       - how-to/index.md
       - ML Pipeline Example: how-to/ml-pipeline-example.md

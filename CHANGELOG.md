@@ -10,6 +10,64 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **A status change reaches every build it concerns.** A reactive build
+  used to be woken only by its own Modal workers; a shared task finished,
+  failed, cancelled or retried by another build's worker or tick, by a
+  resident build, or by an operator in the UI or CLI — and a concurrency
+  slot freed by another build — reached it only through the watchdog,
+  which is off by default. The registry now flags every live reactive
+  build holding a task whenever that task's status changes (and the
+  builds queued on a key when a slot frees, and a build itself when it is
+  cancelled), and every scheduler pass — a tick after acting and on exit,
+  a resident build with Modal workers after each result — asks the
+  registry for the flagged builds nobody is serving and spawns one tick
+  each. The registry hands each build out once per window, so N schedulers
+  asking at once produce one tick per flagged build, not N. `TickSummary`
+  gains `neighbour_ticks_spawned`. Both halves degrade to the previous
+  behaviour across version skew: an older registry answers nothing, an
+  older SDK never asks.
+- **Concurrency-limit keys are registered at plan time.**
+  `discover_and_register_aio(limit_key_selector=...)` sends each task's
+  keys with its registration (the bootstrap passes the app's selector; the
+  worker wrapper publishes it for dynamically yielded dependencies), so the
+  registry knows which pending tasks want a key and can wake the builds
+  queued on it when a slot frees. Plan-time rows never count towards
+  occupancy — only a `RUNNING` task under a live claim does.
+- **`tick_watchdog` is deployed on every app**, scheduled only when
+  `watchdog_period_minutes` is set, so a full sweep is one click away on an
+  app that runs no cron. `build_trigger(reactive=True)` no longer warns
+  when no period is configured. `TaskExecutorABC` gains
+  `can_spawn_scheduler_ticks` / `spawn_scheduler_tick`; the Modal executor
+  implements them and a `RoutedTaskExecutor` delegates.
+- **`TickConfig.spawn_successor_tick(build_id)` is now
+  `TickConfig.spawn_tick(build_id, app_name)`.** One callable serves the
+  exit hand-off and the cross-build drain. Only callers driving
+  `run_tick_aio` by hand are affected; the Modal integration supplies it.
+- **Docs:** `concepts/build-execution.md` is rewritten top-down and
+  executor-agnostic; the Modal-specific model (detached execution,
+  resident vs reactive, wake-ups, the watchdog) moves to a new
+  `concepts/modal-orchestration.md`, and the Modal how-to's reactive
+  section is consolidated around configuration.
+
+### Registry API
+
+- `POST /builds/wake-candidates` — hands out RUNNING reactive builds that
+  are flagged, hold no live scheduler lease and were not handed out within
+  the last window, stamping `builds.tick_requested_at` (new column,
+  migration `97ce4e3cbf32`) in the same transaction. `POST
+/builds/{id}/notify` stamps it too when it reports no live scheduler.
+- Every path that changes a task's status — the event routes,
+  `skip-blocked`, `cancel?cascade=true`, bulk cancel and the reaper, the
+  lock release-with-completion — flags the other live reactive builds
+  holding the task, transition-gated. A build cancel flags the build.
+- `POST /builds/{id}/tasks/bulk` accepts an optional `limit_keys` per task
+  and records them; `null` leaves recorded keys alone, and a `RUNNING`
+  task keeps the keys it was started under.
+- `PUT /builds/{id}/reactive-meta` rejects an empty `app_name`.
+- The reaper's idleness signal no longer counts `needs_tick_at`: the flag
+  is written by other builds' transitions now, and was redundant with the
+  event stream before.
+
 - **The reactive scheduler no longer logs an ERROR for a task-store miss it
   recovers from.** `BuildTaskStore.load_task` logged
   `... not found in the build task store — cannot (re)schedule it` on every

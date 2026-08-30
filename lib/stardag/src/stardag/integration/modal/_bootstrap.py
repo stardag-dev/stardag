@@ -23,6 +23,7 @@ import modal
 
 from stardag import BaseTask
 from stardag.build import BuildTaskStore, discover_and_register_aio
+from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.build._task_modules import (
     PickleElisionPlan,
     TaskModulesError,
@@ -236,6 +237,7 @@ def run_reactive_bootstrap(
     task_module_patterns: typing.Sequence[str],
     elide_pickles: bool,
     require_pickle_free: bool,
+    limit_key_selector: LimitKeySelector | None = None,
 ) -> ReactiveBootstrapResult:
     """Discover the DAG, persist it, arm the build, spawn the first tick.
 
@@ -272,9 +274,18 @@ def run_reactive_bootstrap(
     partial success, it is a build nothing will ever move (a watchdog
     would eventually adopt it; an app without one would simply stall).
     """
+    # ``limit_key_selector`` rides along so every task is registered with
+    # the concurrency-limit keys it will run under. The registry uses those
+    # plan-time keys to wake the builds queued on a key when a slot frees —
+    # it can learn them nowhere else, since the selector is deployed-app
+    # code.
     discovery = asyncio.run(
         discover_and_register_aio(
-            registry, build_id, tuple(task_list), retry_failed=True
+            registry,
+            build_id,
+            tuple(task_list),
+            retry_failed=True,
+            limit_key_selector=limit_key_selector,
         )
     )
     # --- task-module coverage pre-flight (see _preflight_task_modules) ---

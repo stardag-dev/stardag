@@ -354,242 +354,136 @@ If you connected to the Stardag Registry, you can also click the latest build to
 
 ![modal-poc dag in the Registry UI](https://github.com/user-attachments/assets/08e2d3b1-17f5-4b3d-b6ed-1b91c8a3f968)
 
-### Restart-safe triggering with `build_trigger` (recommended with Registry)
+### Restart-safe triggering with `build_trigger`
 
-With `build_spawn`, the registry build id is created _inside_ the Modal build
-container — if that container is restarted (preemption, timeout, a Modal-level
-retry), the new invocation starts a **new** build in the registry.
-
-When you use the Stardag Registry, prefer `build_trigger`: it creates the
-build in the registry from the calling process first, then passes the build id
-to the build function as `resume_build_id`. Any restart of the build function
-then _resumes_ the same build — tasks whose outputs already exist are detected
-during discovery and skipped:
+With `build_spawn`, the registry build id is minted _inside_ the Modal
+build container, so a restarted container starts a **new** build. With a
+registry, prefer `build_trigger`: it mints the build first and passes the
+id in, so any restart — a Modal retry, a manual re-trigger — **resumes**
+the same build, and tasks whose outputs exist are skipped.
 
 ```{.python notest}
 result = app.build_trigger(root_task)
-print(result.build_id)       # registry build id, minted at the trigger point
-result.function_call.get()   # optionally block on the Modal build function
-```
+print(result.build_id)       # minted at the trigger point
+result.function_call.get()   # optionally block on the build function
 
-Re-triggering with the same build id re-attaches to the build (e.g. after a
-failure, or to bring a preempted build back up):
-
-```{.python notest}
+# Re-attach to the same build later (after a failure, or a preemption):
 app.build_trigger(root_task, build_id=result.build_id)
 ```
 
-To let Modal restart the build function automatically after infrastructure
-failures (and thereby auto-resume the build), configure retries on the
-builder:
-
-```{.python notest}
-app = sd_modal.StardagApp(
-    "stardag-poc",
-    builder_settings=sd_modal.FunctionSettings(image=image, retries=2),
-    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
-)
-```
-
-Note that `build_trigger` requires registry credentials in the calling process
-(the active stardag profile), in addition to Modal credentials — unlike
-`build_spawn`, which only needs Modal credentials locally.
+`builder_settings=FunctionSettings(..., retries=2)` lets Modal restart the
+build function after infrastructure failures, which then auto-resumes.
+`build_trigger` needs registry credentials in the calling process (the
+active stardag profile) as well as Modal credentials.
 
 ### Detached execution: running tasks survive restarts
 
-Tasks are executed as _detached_ Modal function calls by default: the worker
-invocation is spawned (not held open by a blocking call), and its function
-call id is recorded in the registry with the task's started event. When a
-build is resumed (via `resume_build_id` / `build_trigger`), tasks that are
-still running in live workers are **re-attached instead of re-executed** — a
-preempted or restarted build function does not restart your long-running
-tasks. This also applies across builds: if another build is already running
-the same task, the new build attaches to that execution rather than
-duplicating it.
+Tasks run as detached Modal function calls by default, and workers report
+their own lifecycle to the registry — see [Orchestration on
+Modal](../concepts/modal-orchestration.md#detached-execution-and-self-reporting-workers)
+for what that buys. Two practical notes:
 
-Detached mode also makes cancellation real: when a build fails fast or is
-cancelled, the tracked function calls are explicitly cancelled on Modal
-(with the legacy blocking mode, workers of a dead build kept running to
-completion).
+- Driving an app deployed with an **older** stardag from a newer SDK: pass
+  `ModalTaskExecutor(worker_reports_lifecycle=False)` or redeploy, so the
+  build engine does not wait for events old workers never send.
+- Executor metadata (app, workspace, environment, function name) is
+  recorded with starts and surfaced in the UI as Modal deep links. The
+  workspace is resolved from the cached Modal token; set
+  `StardagApp(modal_workspace=...)` to be explicit.
 
-Workers additionally report their own lifecycle events (started, completed
-with artifacts, suspended, failed) directly to the registry when the app has
-registry credentials — so a task's registry state stays accurate even if the
-build function dies while the task is running. If you drive a deployed app
-built with an older stardag version from a newer local SDK, pass
-`ModalTaskExecutor(worker_reports_lifecycle=False)` (or redeploy the app) so
-the build engine doesn't skip events the old workers won't send.
+To opt out (legacy blocking `remote` calls): `StardagApp(...,
+build_function=sd_modal.Builder(detached=False))`.
 
-Modal executions also record descriptive **executor metadata** with task
-starts and triggered builds — the Modal app name, workspace, environment,
-and function name — which the Stardag UI surfaces (e.g. as deep links to
-the Modal dashboard). Resolution is automatic and best-effort (the
-workspace comes from a cached Modal token lookup); pass
-`StardagApp(modal_workspace=...)` to set the workspace name explicitly.
-
-### Reactive scheduling: no resident build function (experimental)
-
-With `build_trigger(..., reactive=True)` the build runs with **no resident
-orchestrator at all**. The trigger mints the build, registers the root
-tasks and spawns one deployed function — `bootstrap` — with those roots
-passed by value; everything else is driven by short-lived scheduler
-_ticks_, spawned by the bootstrap, when a worker finishes a task and no
-scheduler is already live to notice, and (recommended) by a periodic
-watchdog. Between ticks, nothing runs except your tasks: a multi-day build
-with a few long-running tasks costs no orchestrator container time, and
-there is no orchestrator process whose crash could affect the build.
-
-A finishing worker always sets the build's wake-up flag; it spawns a tick
-only when the registry tells it no scheduler holds the build's lease. On a
-build whose tasks are short relative to a container start, that is one
-working tick rather than one cold start per completion — see
-[wake-ups](../concepts/build-execution.md#wake-ups-one-tick-not-one-per-completion)
-for why skipping is safe. A registry that predates this reports nothing,
-and every wake-up spawns a tick as before.
-
-**Triggering is fast and does no target I/O.** Discovering a DAG means one
-target existence check per task, and the trigger performs none of them:
-the `bootstrap` container walks the DAG, registers it, persists the task
-objects and only then arms the build and spawns the first tick. The
-difference is not cosmetic for a `modalvol://` target root — inside Modal
-the volume is a mounted filesystem, while from your laptop each check is a
-rate-limited Volume API call. Triggering a wide DAG used to spend most of
-its time in rate-limit backoff; now it returns as soon as the spawn is
-acknowledged. It also means a reactive trigger needs **registry
-credentials only** — no target-root access at all.
+### Reactive scheduling: no resident build function
 
 ```{.python notest}
-app = sd_modal.StardagApp(
-    "stardag-poc",
-    builder_settings=sd_modal.FunctionSettings(image=image),
-    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
-    # Recommended with reactive mode: periodically re-check running builds
-    # (covers lost wake-ups and builds cancelled from the UI).
-    watchdog_period_minutes=5,
-)
-
-# After deploy:
 result = app.build_trigger(root_task, reactive=True)
-# Re-trigger with the same build id to wake a stalled build, to add new
-# root tasks to the running build, or to change the tick configuration:
+
+# Same build id: wake a stalled build, add roots, or change tick config.
 app.build_trigger(
     more_tasks, build_id=result.build_id, reactive=True,
     tick_kwargs={"linger_seconds": 60},
 )
 ```
 
-Requirements and current limitations: the app must be deployed with this
-stardag version — **both** the Modal app and the registry server (an older
-server fails reactive triggers with a "does not support reactive
-scheduling" error, and an app deployed before the `bootstrap` function
-existed has nothing to spawn — see `reactive_discovery` below); the
-triggering process needs registry credentials (task _objects_ are
-persisted to the target root as pickles for the ticks, but that write now
-happens inside the `bootstrap` container — the reactive marker, owning
-app, and tick config live in the registry, not on the target root, so
-re-triggering works even when the target root is immutable/append-only and
-a re-trigger may update `tick_kwargs`; declaring
-[`task_modules`](#declaring-your-task-modules-recommended) removes the
-target-root write entirely for most builds); the global
-concurrency lock and build-local
-`ConcurrencyConfig` limits are not applied by ticks (use the
-registry-backed named limits above; Modal's per-function
-`concurrency_limit` also still applies). Builds cancelled from the
-registry UI are picked up by the next tick (within the watchdog period),
-which cancels the running Modal function calls; on failure, tasks
-transitively blocked by the failed task are marked skipped.
+The model — bootstrap, ticks, wake-ups, retries, the watchdog — is on
+[Orchestration on Modal](../concepts/modal-orchestration.md#reactive-scheduling).
+What you configure:
 
-**Sizing the bootstrap.** `bootstrap` is a separate deployed function
-rather than work folded into the first tick, because the two want
-different timeouts. A tick is one frontier pass and is meant to be short
-(its timeout also derives the per-pass spawn cap); the bootstrap is a
-single whole-DAG walk whose cost scales with the DAG and is paid once per
-trigger. One number cannot honestly cover both — shortening the tick,
-normally a good idea, would start killing the bootstrap of large DAGs. It
-defaults to `builder_settings` (same image, secrets and target-root
-volume mounts as the builder, which does the same discovery for resident
-builds); override it with `bootstrap_settings`:
+**Requirements.** Both the Modal app and the registry server must run a
+matching stardag version (an older server fails reactive triggers with a
+clear "does not support reactive scheduling" error; an app deployed before
+the `bootstrap` function existed has nothing to spawn — see
+`reactive_discovery` below). The triggering process needs registry
+credentials only. Builds cancelled in the UI are picked up by the next
+tick in the environment, which cancels the running Modal calls.
+
+**Function sizing.** `tick_settings` and `bootstrap_settings` default to
+`builder_settings`. They want different timeouts: a tick is one frontier
+pass, and its `timeout` also derives the per-pass spawn cap; the bootstrap
+is one whole-DAG walk, paid once per trigger.
 
 ```{.python notest}
 app = sd_modal.StardagApp(
     "stardag-poc",
     builder_settings=sd_modal.FunctionSettings(image=image),
-    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
-    tick_settings=sd_modal.FunctionSettings(image=image, timeout=300),
-    # Discovery of a very wide DAG gets its own budget.
+    worker_settings={
+        "default": sd_modal.FunctionSettings(image=image, timeout=3600)
+    },
+    tick_settings=sd_modal.FunctionSettings(image=image, timeout=600),
     bootstrap_settings=sd_modal.FunctionSettings(image=image, timeout=1800),
-    watchdog_period_minutes=5,
 )
 ```
 
-**Failures leave no orphan builds.** A reactive trigger mints a `RUNNING`
-build and then walks away, so both sides of the spawn record a terminal
-`BUILD_FAILED` before propagating: the trigger for anything that goes
-wrong once it knows the build is running (a re-trigger whose `build_resume`
-fails is deliberately excluded — until that lands the build may still be
-terminal, and failing it would misattribute someone else's outcome), and
-the bootstrap for anything that goes wrong in its container, including a
-failed first-tick spawn. The bootstrap's exception also surfaces on
-`result.function_call.get()`.
+Set an explicit worker `timeout`: the execution claim's TTL is derived
+from it, which is what lets other builds tell an abandoned claim from a
+live one, and what keeps a live claim from being taken early.
 
-**Running discovery locally instead.** `StardagApp(reactive_discovery=
-"local")` runs the identical bootstrap in the triggering process — the
-behaviour reactive triggers had before the `bootstrap` function existed.
-Reach for it when the deployed app predates that function, or when the
-target root is reachable from your machine but not from the Modal app.
-Note that it also puts the coverage pre-flight below on your _local_
-`task_modules` rather than the deployed one, reinstating the stale-deploy
-blind spot.
+**Per-build knobs** (`tick_kwargs`, persisted with the build so every tick
+shares them): `linger_seconds` (default 120), `poll_interval_seconds` (3),
+`fail_mode`, `max_attempts` (2), `max_interruptions` (20),
+`max_concurrent_actions` (50), `max_spawns_per_tick` (derived). Callables —
+`worker_selector`, `limit_key_selector` — are deployed-app configuration,
+never per-trigger.
 
-Two operational notes:
+**Named concurrency limits** are enforced registry-side, across builds.
+Configure caps (`stardag concurrency-limits set gpu 4`) and tag tasks on
+the app:
 
-- **Avoid redeploying the app with changed task definitions while
-  reactive builds are in flight.** Task objects are persisted as pickles
-  for the scheduler; if a stored pickle becomes unloadable (e.g. after a
-  redeploy), the tick falls back to **reconstructing the task from the
-  registry's stored data** — which works as long as the task class is
-  still importable and its fields are compatible (nested task fields
-  must use `sd.TaskLoads`/`sd.SubClass` annotations). Only if both paths
-  fail is the task failed by the next tick (never a silent stall).
-  Declaring [`task_modules`](#declaring-your-task-modules-recommended) is
-  what makes "still importable" true by construction — and lets stardag
-  skip the pickle in the first place.
-- **The watchdog sweep runs one quick scheduling pass per running build
-  that this app owns** (it skips the linger), so its per-period cost is
-  one short function invocation plus a frontier query per such build.
-  The sweep asks the registry only for RUNNING builds whose reactive
-  owner is this app, so unrelated builds in the environment — resident
-  builds, and builds left RUNNING by an orchestrator that died without
-  emitting a terminal event — cost nothing and cannot crowd out the
-  sweep's per-period cap. A build owned by an app deployed _without_
-  `watchdog_period_minutes` therefore has no watchdog covering it, even
-  if another app in the environment has one.
-- **Define the callables you pass to `StardagApp` in an importable
-  module.** `worker_selector`, `limit_key_selector`, and any custom
-  build/run functions are captured by the serialized Modal functions
-  (build, workers, and the reactive `tick` / `tick_watchdog`), which Modal
-  deserializes in fresh containers — including the scheduled watchdog,
-  which always runs cold. A plain module-level function is pickled _by
-  reference_, so its defining module must be importable in the container:
-  put these callables in a module that is part of the source you add via
-  `add_local_python_source(...)`, **not** in a loose deploy script. A
-  selector defined directly in a script deployed by path
-  (`stardag modal deploy app.py`, which Modal loads as a top-level module
-  named `app`) fails to deserialize on the first cold container with a
-  `ModuleNotFoundError` for the `app` module. (The `modal/basic` example
-  is unaffected only because it passes no such callables; the
-  `modal/walkthrough` example keeps its selectors in a dedicated
-  `selectors.py` for exactly this reason.)
-- **Every deployed function needs the registry secret** — the workers
-  self-report their lifecycle (started/completed/…) and the tick/watchdog
-  read and update build state, so all of them make registry calls and
-  `401` without credentials. As of stardag 0.10.2 this is handled by
-  `StardagApp(stardag_api_key_secret=...)`: the named secret (default
-  `"stardag-api-key"`, created by `stardag modal stardag-api-key create`)
-  is injected into every function, so you declare it once — or just rely
-  on the default and don't declare a registry secret at all. (On stardag
-  ≤ 0.10.1 you instead had to put the secret on the builder — 0.10.1 —
-  or on every worker — 0.10.0.)
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    ...,
+    limit_key_selector=lambda task: ["gpu"] if needs_gpu(task) else [],
+)
+```
+
+A denied task stays pending and runs when a slot frees — whichever build
+frees it. Resident builds enforce the same limits with
+`RegistryConcurrencyLimiter`.
+
+**The watchdog** (`watchdog_period_minutes`) is deployed always and
+scheduled only when set. Leave it off unless a stall of a few minutes is
+unacceptable; a standing sweep keeps a scale-to-zero registry database
+awake. Without a period, a full sweep is one click away in the Modal UI
+(`tick_watchdog`).
+
+**Local discovery.** `StardagApp(reactive_discovery="local")` runs the
+bootstrap in the triggering process — for an app deployed before the
+`bootstrap` function existed, or a target root reachable from your machine
+but not from Modal. It puts the task-module coverage check on your local
+app definition rather than the deployed one.
+
+**Redeploying mid-build.** Task objects are persisted as pickles for the
+ticks; if a redeploy invalidates one, the tick rebuilds the task from the
+registry's stored data, which works as long as the class is importable
+(declare [`task_modules`](#declaring-your-task-modules-recommended)). Only
+if both fail is the task failed — never silently stalled.
+
+**Seeing what a tick decided.** `stardag builds ticks <build-id>` lists
+every tick's summary — outcome, spawns, retries, neighbours woken, a
+crashed tick's exception. `stardag builds frontier <build-id>` shows what
+a build is waiting on and which build owns it.
 
 #### Declaring your task modules (recommended)
 
@@ -846,7 +740,7 @@ round, so on a task already at budget the retry succeeds and the scheduler
 still refuses to start it. The tick logs that case explicitly, names the
 re-trigger, and fails the task again rather than leaving it pending and
 inert. See
-[Task retries](../concepts/build-execution.md#task-retries-the-failures-no-backend-can-retry-for-you).
+[Retries and interruptions](../concepts/modal-orchestration.md#retries-and-interruptions).
 
 ### Preemption and timeouts
 
@@ -1028,99 +922,6 @@ functions.
     the SDK logs a warning and records nothing, which is exactly its
     behaviour before this existed — a version skew degrades to the old
     recovery path, never to a failed build.
-
-**Claim expiry and your worker `timeout`.** Every start a tick records
-carries a claim TTL derived from the `timeout` of the worker function the
-task routes to (`FunctionSettings(timeout=...)`), plus a grace margin — so
-the claim outlives the execution it guards by a small margin and no more,
-and other builds can tell an abandoned claim from a live one without
-probing Modal themselves. Workers that declare no `timeout` fall back to
-the registry's default expiry. This is the main reason to set an explicit
-`timeout` on long-running workers: it is what keeps a claim from being
-taken while the execution is still alive, and equally what lets a claim
-left behind by a dead scheduler heal promptly.
-
-**Wide layers.** A tick fans out concurrently, up to
-`max_concurrent_actions` spawns in flight (default 50), and caps how many
-tasks one pass commits to via `max_spawns_per_tick`. Left unset, that cap
-is derived from **the `tick` function's own `timeout`** — a fraction of it,
-spread over the in-flight bound — because the cap exists to stop a tick
-starting more work than its container can live long enough to finish. The
-app reads that timeout at deploy time from `tick_settings` (or
-`builder_settings`, which `tick_settings` falls back to), so a deployment
-like
-
-```{.python notest}
-app = sd_modal.StardagApp(
-    "stardag-poc",
-    builder_settings=sd_modal.FunctionSettings(image=image),
-    worker_settings={
-        "default": sd_modal.FunctionSettings(image=image, timeout=3600)
-    },
-    tick_settings=sd_modal.FunctionSettings(image=image, timeout=600),
-    watchdog_period_minutes=5,
-)
-```
-
-gives the cap the right number with no further configuration: the one-hour
-worker `timeout` is what claim TTLs are derived from, the ten-minute tick
-`timeout` is what the spawn cap is derived from. If neither the tick nor
-the builder declares a `timeout`, the cap falls back to the worker timeout
-as a proxy — a different quantity, and the tick's log line says it is on
-that rung.
-
-When a pass truncates at the cap it says so in the tick log and immediately
-re-evaluates on a fresh frontier; the layer goes out in batches, not over
-the watchdog period. Every tick also logs its cap and which input produced
-it, once per tick. Both knobs are `tick_kwargs`, so they can be overridden
-per build at trigger time:
-
-```{.python notest}
-app.build_trigger(
-    root_task, reactive=True,
-    tick_kwargs={"max_concurrent_actions": 100, "max_spawns_per_tick": 2000},
-)
-```
-
-The **watchdog** sweeps every running build sequentially inside a single
-container, so it hands each build a proportional share of that container's
-budget instead of letting the first wide build size its fan-out as though
-it owned the whole timeout. Watchdog passes therefore spawn in smaller
-batches than a build's own ticks do — which is what you want from a safety
-net.
-
-**Seeing what a tick decided.** Every tick reports its summary to the registry
-(`stardag builds ticks <build-id>`), so a build driven by dozens of
-short-lived tick containers does not leave its reasoning scattered across as
-many logs. A tick that _crashes_ is reported too, as `outcome="error"` with
-the exception's type and message — usually the most informative thing a "why
-did this build stall?" question can turn up. Reporting is best-effort
-throughout: it can never fail a tick, change its outcome or mask its
-exception, and it is tolerated by servers that predate the endpoint. Turn it
-off for a whole deployment with `TickConfig(report_tick_summaries=False)`;
-it is app-level configuration, not a per-trigger `tick_kwarg`.
-
-Requirements and current limitations: the app must be deployed with this
-stardag version (scheduler `tick` function + self-reporting workers); the
-triggering process needs registry credentials and access to the default
-target root (task _objects_ are persisted there for the ticks — the
-reactive marker/owner/tick config live in the registry); the global
-concurrency lock and build-local `ConcurrencyConfig` limits are not applied
-by ticks (use the registry-backed named limits above; Modal's per-function
-`concurrency_limit` also still applies). Builds cancelled from the registry UI are picked up by
-the next tick (within the watchdog period), which cancels the running
-Modal function calls.
-
-To opt out (legacy blocking `remote` calls), pass `detached=False`:
-
-```{.python notest}
-app = sd_modal.StardagApp(
-    "stardag-poc",
-    build_function=sd_modal.Builder(detached=False),
-    builder_settings=sd_modal.FunctionSettings(image=image),
-    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
-)
-```
 
 ## Where to define what you pass to `StardagApp`
 

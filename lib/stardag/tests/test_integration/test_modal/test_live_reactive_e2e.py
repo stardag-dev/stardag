@@ -111,7 +111,7 @@ class MiniReactiveRegistry(NoOpRegistry):
         if tick_kwargs is not None:
             self.reactive_tick_kwargs = tick_kwargs
 
-    async def task_register_bulk_aio(self, build_id, tasks):
+    async def task_register_bulk_aio(self, build_id, tasks, *, limit_keys=None):
         for task in tasks:
             tid = str(task.id)
             self.statuses.setdefault(tid, "pending")

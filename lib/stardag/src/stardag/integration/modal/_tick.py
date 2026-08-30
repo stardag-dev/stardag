@@ -16,14 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import functools
 import logging
 import typing
 from uuid import UUID
 
-import modal
 
-from stardag import BaseTask
 from stardag.build import (
     BuildTaskStore,
     FailMode,
@@ -31,6 +28,7 @@ from stardag.build import (
     run_tick_aio,
 )
 from stardag.build._base import GlobalLockConfig
+from stardag.build._wakeups import SpawnTick
 from stardag.build._task_modules import (
     import_task_modules,
     set_declared_task_module_patterns,
@@ -38,15 +36,14 @@ from stardag.build._task_modules import (
 from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.integration.modal._logging import _setup_logging
+from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.integration.modal._selector import WorkerSelector
+from stardag.integration.modal._spawn import spawn_tick
 from stardag.integration.modal._settings import FunctionSettings
 from stardag.registry._base import NoOpRegistry, registry_provider
 from stardag.registry._lock import RegistryGlobalConcurrencyLockManager
 
 logger = logging.getLogger(__name__)
-
-LimitKeySelector = typing.Callable[[BaseTask], typing.Sequence[str]]
-"""Maps a task to the named registry concurrency-limit keys it runs under."""
 
 
 # --- Per-build tick configuration ---
@@ -106,16 +103,8 @@ def _tick_function_timeout_seconds(
     return float(timeout) if timeout is not None else None
 
 
-def _spawn_tick(app_name: str, build_id: UUID) -> None:
-    """Spawn the deployed ``tick`` function of ``app_name`` for a build.
-
-    The one way this integration starts a tick, shared by the scheduler's
-    exit hand-off and the foreign-app forward below — both of which mean
-    exactly "somebody has to look at this build, and it is not me".
-    """
-    modal.Function.from_name(app_name=app_name, name="tick").spawn(
-        build_id=str(build_id)
-    )
+# The one way this integration starts a tick; see ``_spawn``.
+_spawn_tick = spawn_tick
 
 
 def _build_tick_config(
@@ -123,7 +112,7 @@ def _build_tick_config(
     tick_kwargs: dict[str, typing.Any] | None,
     limit_key_selector: LimitKeySelector | None,
     tick_timeout_seconds: float | None = None,
-    spawn_successor_tick: typing.Callable[[UUID], None] | None = None,
+    spawn_tick: SpawnTick | None = None,
 ) -> TickConfig:
     """Assemble a TickConfig for one tick invocation.
 
@@ -151,7 +140,7 @@ def _build_tick_config(
     config_kwargs.setdefault("tick_timeout_seconds", tick_timeout_seconds)
     return TickConfig(
         limit_key_selector=limit_key_selector,
-        spawn_successor_tick=spawn_successor_tick,
+        spawn_tick=spawn_tick,
         **config_kwargs,
     )
 
@@ -295,7 +284,7 @@ def _run_tick(
     if owner_app != app_name:
         forwarded = False
         try:
-            _spawn_tick(owner_app, build_uuid)
+            _spawn_tick(build_uuid, owner_app)
             forwarded = True
         except Exception as e:
             # Owner app deleted/renamed: the build is orphaned —
@@ -325,12 +314,14 @@ def _run_tick(
         tick_kwargs,
         deployment.limit_key_selector,
         tick_timeout_seconds=deployment.tick_timeout_seconds,
-        # The exit hand-off. Paired with the worker's conditional wake-up
-        # (see ``_WorkerLifecycleReporter._wake_scheduler``): the worker
-        # stops spawning while a scheduler is live, and this is what
-        # guarantees the scheduler cannot exit past a wake-up it never
-        # served. Neither half is correct without the other.
-        spawn_successor_tick=functools.partial(_spawn_tick, app_name),
+        # How this tick starts another. Two uses: the exit hand-off —
+        # paired with the worker's conditional wake-up (see
+        # ``_WorkerLifecycleReporter._wake_scheduler``), the worker stops
+        # spawning while a scheduler is live and this is what guarantees
+        # the scheduler cannot exit past a wake-up it never served — and the
+        # cross-build drain, which spawns ticks for the flagged builds the
+        # registry hands out (see ``stardag.build._wakeups``).
+        spawn_tick=_spawn_tick,
     )
 
     # Register the app's task classes in THIS container before the

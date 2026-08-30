@@ -5,7 +5,7 @@ import os
 import subprocess
 from datetime import datetime
 from functools import lru_cache
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
@@ -218,6 +218,21 @@ class BuildFrontier(StardagBaseModel):
     # backstop marker check — the Modal tick reads it from the lighter
     # ``build_get`` before acquiring the lease.
     reactive_tick_kwargs: dict[str, Any] | None = None
+
+
+class WakeCandidate(StardagBaseModel):
+    """A build the caller should spawn a scheduler tick for.
+
+    The hand-over between the two halves of a cross-build wake-up: the
+    registry flags builds whose frontier may have changed (it sees every
+    write) and hands them out here, once per window; the caller — a tick,
+    or a resident engine with a Modal executor — spawns. Carries the app
+    name because that is what reaches the right deployed ``tick`` function;
+    the build may belong to a different app than the caller.
+    """
+
+    build_id: UUID
+    reactive_app_name: str
 
 
 class BuildNotifyResult(StardagBaseModel):
@@ -630,7 +645,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
         pass
 
     def task_register_bulk(
-        self, build_id: UUID, tasks: Sequence["BaseTask"]
+        self,
+        build_id: UUID,
+        tasks: Sequence["BaseTask"],
+        *,
+        limit_keys: Mapping[UUID, Sequence[str]] | None = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Register many tasks to a build in a single call.
 
@@ -652,6 +671,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
             Per-task :class:`RegisteredTaskInfo` (used by the build engine
             to re-attach to detached executions that are still running), or
             None when the backend doesn't provide it.
+
+        ``limit_keys`` maps task ids to the named concurrency-limit keys the
+        task runs under, for backends that record them at plan time (the
+        API registry does — a slot release wakes the builds queued on a key
+        only if the registry knows which pending tasks want it). The
+        default ignores it.
         """
         for task in tasks:
             self.task_register(build_id, task)
@@ -864,7 +889,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of build_skip_blocked."""
         return self.build_skip_blocked(build_id)
 
-    def build_notify(self, build_id: UUID) -> "BuildNotifyResult":
+    def build_notify(
+        self, build_id: UUID, *, can_spawn: bool = True
+    ) -> "BuildNotifyResult":
         """Set the build's scheduler wake-up flag (reactive scheduling).
 
         Returns what the server knew *after* the set — in particular
@@ -878,13 +905,32 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         return BuildNotifyResult(build_id=build_id)
 
-    async def build_notify_aio(self, build_id: UUID) -> "BuildNotifyResult":
+    async def build_notify_aio(
+        self, build_id: UUID, *, can_spawn: bool = True
+    ) -> "BuildNotifyResult":
         """Async version of build_notify."""
-        return self.build_notify(build_id)
+        return self.build_notify(build_id, can_spawn=can_spawn)
 
     def build_clear_notify(self, build_id: UUID) -> None:
         """Clear the build's scheduler wake-up flag. Default: no-op."""
         pass
+
+    def build_wake_candidates(self, limit: int = 20) -> list[WakeCandidate]:
+        """Hand out the reactive builds that need a tick and have no scheduler.
+
+        The spawn half of a cross-build wake-up (``POST
+        /builds/wake-candidates``): every build returned is flagged, holds
+        no live scheduler lease, and has not been handed out within the
+        server's window — and is marked handed out by this call, so
+        concurrent callers get disjoint answers. The caller spawns one tick
+        per entry. Default: nothing, which is correct for a backend with no
+        notion of cross-build wake-ups.
+        """
+        return []
+
+    async def build_wake_candidates_aio(self, limit: int = 20) -> list[WakeCandidate]:
+        """Async version of build_wake_candidates."""
+        return self.build_wake_candidates(limit)
 
     async def build_clear_notify_aio(self, build_id: UUID) -> None:
         """Async version of build_clear_notify."""
@@ -1213,7 +1259,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
         self.task_register(build_id, task)
 
     async def task_register_bulk_aio(
-        self, build_id: UUID, tasks: Sequence["BaseTask"]
+        self,
+        build_id: UUID,
+        tasks: Sequence["BaseTask"],
+        *,
+        limit_keys: Mapping[UUID, Sequence[str]] | None = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Async version of task_register_bulk.
 

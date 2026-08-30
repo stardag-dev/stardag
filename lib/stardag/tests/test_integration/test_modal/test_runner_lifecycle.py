@@ -284,7 +284,7 @@ class TestReactiveWorkerBehavior:
     ) -> None:
         """Point the registry's ``build_notify`` at a canned answer."""
 
-        def build_notify(build_id: UUID):
+        def build_notify(build_id: UUID, *, can_spawn: bool = True):
             if notified is not None:
                 notified.append(build_id)
             if isinstance(result, Exception):
@@ -418,7 +418,7 @@ class TestReactiveWorkerBehavior:
         registered_bulk: list[str] = []
         added_edges: list[tuple[str, list[str]]] = []
 
-        async def record_bulk(b, tasks):
+        async def record_bulk(b, tasks, *, limit_keys=None):
             registered_bulk.extend(str(t.id) for t in tasks)
             return None
 

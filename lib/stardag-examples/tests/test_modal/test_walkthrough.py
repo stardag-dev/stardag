@@ -103,8 +103,9 @@ def test_worker_and_limit_key_selectors():
     assert walkthrough_app.limit_key_selector(scan) == []
     assert walkthrough_app.limit_key_selector(summary) == []
 
-    # The app enables the reactive-mode safety-net watchdog.
-    assert walkthrough_app.app.watchdog_period_minutes == 5
+    # No watchdog timer: everything a build waits for is pushed to it, and
+    # the sweep function is deployed regardless so it can be run by hand.
+    assert walkthrough_app.app.watchdog_period_minutes is None
 
 
 def test_selectors_are_defined_in_an_importable_container_safe_module():

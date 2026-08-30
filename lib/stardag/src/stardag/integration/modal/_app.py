@@ -44,6 +44,7 @@ from stardag.integration.modal._container_setup import (
     _validate_container_setup,
     _validate_serialized_callable,
 )
+from stardag.integration.modal._limit_keys import set_deployed_limit_key_selector
 from stardag.integration.modal._logging import _setup_logging
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
@@ -449,11 +450,26 @@ class StardagApp:
                 triggering process is not a container this app deployed
                 (see that argument). Discovery there runs against whatever
                 the triggering process is already configured with.
-            watchdog_period_minutes: If set, register a scheduled watchdog
-                that periodically re-ticks running reactive builds (the
-                safety net for lost wake-ups, UI-cancelled builds, and stale
-                concurrency-limit slots). Strongly recommended when using
-                ``build_trigger(reactive=True)``. Default: no watchdog.
+            watchdog_period_minutes: If set, run the ``tick_watchdog`` sweep
+                on this period: one scheduling pass over every running
+                reactive build this app owns. The sweep function itself is
+                always deployed and can be invoked on demand; the period
+                only decides whether it also runs on a timer.
+
+                Default (``None``, no timer) is the right choice for most
+                apps. Everything a build normally waits for is pushed to it
+                — its own workers finishing, a shared task changing status
+                in another build, a concurrency slot freeing, a cancel from
+                the UI — and carried by the next scheduler pass anywhere on
+                the deployment. What only a timer catches is a worker that
+                died without reporting (its execution claim expires with
+                nothing to notice), and a change made while nothing on the
+                deployment is ticking. A standing sweep polls the registry
+                whether or not anything is building — enough to keep a
+                scale-to-zero database awake, a cost that does not show up
+                as Modal usage — so set it when leaving a build stalled for
+                even a few minutes is unacceptable, and pick the period
+                from how long that is.
             limit_key_selector: Maps a task to the named registry
                 concurrency-limit keys it runs under in reactive scheduling
                 (deployed-app configuration applied by every tick). Default:
@@ -933,6 +949,7 @@ class StardagApp:
             return build_fn(tasks, worker_selector, app_name, build_kwargs=build_kwargs)
 
         run_fn = self._run_function
+        limit_key_selector = self.limit_key_selector
         # The ``RunFunction`` protocol gained an optional ``env_overrides``
         # parameter. Older custom run functions implemented the protocol with a
         # bare ``(task)`` signature, so only forward ``env_overrides`` to those
@@ -952,6 +969,9 @@ class StardagApp:
             # dynamic deps were just constructed by user code, so their
             # classes are registered by definition.
             set_declared_task_module_patterns(task_module_patterns)
+            # Likewise the app's concurrency-limit key selector, so the
+            # dynamic deps a worker registers carry their keys.
+            set_deployed_limit_key_selector(limit_key_selector)
             if run_fn_accepts_env:
                 run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)
                 return run_fn_with_env(task, env_overrides=env_overrides)
@@ -1035,6 +1055,7 @@ class StardagApp:
                     task_module_patterns=task_module_patterns,
                     elide_pickles=elide_pickles,
                     require_pickle_free=require_pickle_free,
+                    limit_key_selector=tick_deployment.limit_key_selector,
                 )
             except BaseException as e:
                 # The trigger handed this container a RUNNING build and
@@ -1051,30 +1072,39 @@ class StardagApp:
         )
         function_names.append("bootstrap")
 
-        if self.watchdog_period_minutes is not None:
+        # Always deployed, scheduled only when a period is set. The sweep is
+        # a capability of the app — "tick every running build I own" — and
+        # whether it runs on a timer is a separate, cost-driven decision.
+        # Deploying it unconditionally is what makes a full sweep one click
+        # (or one `modal run`) away on an app that runs no cron, which is
+        # the answer to "then how do I recover a stalled build?" when the
+        # watchdog is left off.
+        def _modal_tick_watchdog() -> None:
+            _run_container_setup(container_setup)
+            _setup_logging()
+            # The watchdog runs on the same settings as `tick`, so its
+            # container has the same timeout — which it then splits
+            # across the builds it sweeps (see _run_watchdog_sweep).
+            # Scoped to this app's own reactive builds, and handed the
+            # container's own timeout to split across them — see
+            # _run_watchdog_sweep for both.
+            _run_watchdog_sweep(
+                registry_provider.get(),
+                _modal_tick,
+                tick_timeout_seconds=tick_deployment.tick_timeout_seconds,
+                reactive_app_name=app_name,
+            )
 
-            def _modal_tick_watchdog() -> None:
-                _run_container_setup(container_setup)
-                _setup_logging()
-                # The watchdog runs on the same settings as `tick`, so its
-                # container has the same timeout — which it then splits
-                # across the builds it sweeps (see _run_watchdog_sweep).
-                # Scoped to this app's own reactive builds, and handed the
-                # container's own timeout to split across them — see
-                # _run_watchdog_sweep for both.
-                _run_watchdog_sweep(
-                    registry_provider.get(),
-                    _modal_tick,
-                    tick_timeout_seconds=tick_deployment.tick_timeout_seconds,
-                    reactive_app_name=app_name,
-                )
-
-            register(
-                "tick_watchdog",
-                tick_settings,
-                schedule=modal.Period(minutes=self.watchdog_period_minutes),
-            )(_modal_tick_watchdog)
-            function_names.append("tick_watchdog")
+        register(
+            "tick_watchdog",
+            tick_settings,
+            **(
+                {"schedule": modal.Period(minutes=self.watchdog_period_minutes)}
+                if self.watchdog_period_minutes is not None
+                else {}
+            ),
+        )(_modal_tick_watchdog)
+        function_names.append("tick_watchdog")
 
         self._is_finalized = True
 
@@ -1241,15 +1271,6 @@ class StardagApp:
             )
 
         if reactive:
-            if self.watchdog_period_minutes is None:
-                logger.warning(
-                    "Reactive build triggered on an app without a watchdog "
-                    "(watchdog_period_minutes is not set): a lost wake-up "
-                    "(e.g. a silently dead worker, or a tick killed while "
-                    "holding the scheduler lease) can stall the build until "
-                    "it is manually re-triggered. Strongly recommended: "
-                    "StardagApp(watchdog_period_minutes=5)."
-                )
             return self._trigger_reactive(
                 task_list,
                 build_id=build_id,
@@ -1415,6 +1436,7 @@ class StardagApp:
                             self._task_modules_declared or self.require_pickle_free
                         ),
                         require_pickle_free=self.require_pickle_free,
+                        limit_key_selector=self.limit_key_selector,
                     ).tick_call,
                 )
             # Early, roots-only advisory (see the function's docstring):

@@ -1535,10 +1535,12 @@ class BulkTrackingRegistry(NoOpRegistry):
     async def task_register_aio(self, build_id: UUID, task) -> None:
         self.per_task_register_calls.append(task.id)
 
-    def task_register_bulk(self, build_id: UUID, tasks) -> None:
+    def task_register_bulk(self, build_id: UUID, tasks, *, limit_keys=None) -> None:
         self.bulk_batches.append([t.id for t in tasks])
 
-    async def task_register_bulk_aio(self, build_id: UUID, tasks) -> None:
+    async def task_register_bulk_aio(
+        self, build_id: UUID, tasks, *, limit_keys=None
+    ) -> None:
         self.bulk_batches.append([t.id for t in tasks])
 
     def task_start(

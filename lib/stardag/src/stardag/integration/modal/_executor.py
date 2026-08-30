@@ -42,6 +42,7 @@ from stardag.integration.modal._metadata import (
     _get_modal_function_id_aio,
     _get_modal_workspace_aio,
 )
+from stardag.integration.modal._spawn import spawn_tick
 from stardag.integration.modal._selector import (
     WorkerSelector,
     _normalize_worker_selection,
@@ -519,6 +520,18 @@ class ModalTaskExecutor(TaskExecutorABC):
                 return DetachedExecutionStatus.UNKNOWN
             return DetachedExecutionStatus.FAILED
         return DetachedExecutionStatus.SUCCEEDED
+
+    def can_spawn_scheduler_ticks(self) -> bool:
+        return True
+
+    def spawn_scheduler_tick(self, build_id: UUID, app_name: str) -> None:
+        """Spawn the deployed ``tick`` of ``app_name`` for ``build_id``.
+
+        What lets a resident build with Modal workers (a hybrid run) wake the
+        reactive builds its completions unblocked — the same call a tick
+        makes for its neighbours.
+        """
+        spawn_tick(build_id, app_name)
 
     async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
         """Cancel a spawned function call by its recorded id."""

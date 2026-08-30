@@ -451,6 +451,27 @@ class TaskExecutorABC(ABC):
         """
         pass
 
+    def can_spawn_scheduler_ticks(self) -> bool:
+        """Whether :meth:`spawn_scheduler_tick` reaches a deployed ``tick``.
+
+        The resident engine asks this once per build before it starts
+        draining the registry's wake candidates after each result (see
+        ``stardag.build._wakeups``); an executor with no deployment behind
+        it — the default — is never asked to spawn.
+        """
+        return False
+
+    def spawn_scheduler_tick(self, build_id: UUID, app_name: str) -> None:
+        """Spawn a reactive scheduler tick for ``build_id`` on ``app_name``.
+
+        The spawn half of a cross-build wake-up, for a *resident* build: the
+        registry flags reactive builds whose frontier this build's work may
+        have changed, and a resident engine whose executor can reach a
+        deployed tick finishes the job after each result it processes. Only
+        called when :meth:`can_spawn_scheduler_ticks` returned True.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot spawn scheduler ticks")
+
 
 # Type variable for executor routing keys
 ExecutorKeyT = TypeVar("ExecutorKeyT")
@@ -526,6 +547,18 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         if executor is None:
             return False
         return executor.reports_lifecycle(task)
+
+    def can_spawn_scheduler_ticks(self) -> bool:
+        """True if any routed executor can — a hybrid run's Modal half."""
+        return any(e.can_spawn_scheduler_ticks() for e in self.executors.values())
+
+    def spawn_scheduler_tick(self, build_id: UUID, app_name: str) -> None:
+        """Spawn through the first routed executor that can."""
+        for executor in self.executors.values():
+            if executor.can_spawn_scheduler_ticks():
+                executor.spawn_scheduler_tick(build_id, app_name)
+                return
+        raise NotImplementedError("no routed executor can spawn scheduler ticks")
 
     def supports_detached(self, task: BaseTask) -> bool:
         """Route to the owning executor's detached support."""

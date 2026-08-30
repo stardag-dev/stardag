@@ -87,6 +87,10 @@ app = sd_modal.StardagApp(
     worker_selector=worker_selector,
     # Reactive-mode safety net: periodically re-check running builds
     # (lost wake-ups, UI cancellations, stale limit slots).
-    watchdog_period_minutes=5,
+    # Off by default: everything a build waits for is pushed to it, and the
+    # sweep is deployed regardless so it can be run by hand. Set a period only
+    # if a stall of a few minutes is unacceptable (a standing sweep keeps a
+    # scale-to-zero registry database awake).
+    # watchdog_period_minutes=5,
     limit_key_selector=limit_key_selector,
 )
