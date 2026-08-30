@@ -4758,6 +4758,14 @@ class TestSchedulerLease:
         # far longer than this test lingers.
         monkeypatch.setattr(reactive_module, "_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
         registry.lease_stolen = True
+        # Land a wake-up in the release window, so a tick that still held
+        # the build *would* legitimately hand off. Without this the flag is
+        # already cleared by exit time and the assertion below would hold
+        # for the wrong reason — it would be about having nothing to hand
+        # off rather than about having no standing to.
+        registry.reactive_app_name = "my-app"
+        registry.lease_on_release = lambda: setattr(registry, "needs_tick", True)
+        spawned: list[UUID] = []
 
         summary = await run_tick_aio(
             uuid4(),
@@ -4765,11 +4773,20 @@ class TestSchedulerLease:
             task_executor=executor,
             task_store=store,
             config=dataclasses.replace(
-                FAST_TICK, linger_seconds=5.0, poll_interval_seconds=0.01
+                FAST_TICK,
+                linger_seconds=5.0,
+                poll_interval_seconds=0.01,
+                spawn_tick=lambda bid, app: spawned.append(bid),
             ),
         )
 
         assert summary.outcome == "lease_lost"
+        # And it must not hand off. A successor already holds the lease, so
+        # spawning one would only add a container that finds it held and
+        # exits — the tick that lost the build has no standing to schedule
+        # for it.
+        assert summary.successor_spawned == 0
+        assert spawned == []
 
     async def test_a_lapsed_lease_is_re_taken_rather_than_abandoning_the_build(
         self,

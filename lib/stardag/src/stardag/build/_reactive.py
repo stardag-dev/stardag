@@ -384,16 +384,15 @@ class SchedulerLease:
         if self._renewal is not None:
             renewal, self._renewal = self._renewal, None
             renewal.cancel()
-            try:
-                await renewal
-            except asyncio.CancelledError:
-                # Only swallow the *child's* cancellation. If this task is
-                # itself being cancelled, the error we just caught may be
-                # ours, and suppressing it would strand the caller's
-                # cancellation — ``run_tick_aio`` is public, so a caller
-                # wrapping it in ``wait_for`` or a TaskGroup hits this.
-                if not renewal.cancelled():
-                    raise
+            # ``gather(..., return_exceptions=True)`` reaps the child's
+            # ``CancelledError`` as a *result* rather than raising it, while
+            # still propagating a cancellation of this task. Catching
+            # ``CancelledError`` here cannot tell the two apart — we
+            # cancelled the child ourselves, so ``renewal.cancelled()`` is
+            # true whichever one arrived — and swallowing it would strand
+            # the caller's cancellation. ``run_tick_aio`` is public, so a
+            # caller wrapping it in ``wait_for`` or a TaskGroup hits this.
+            await asyncio.gather(renewal, return_exceptions=True)
         if not self.acquired:
             return
         try:
@@ -1067,15 +1066,21 @@ def _bounded(text: str, limit: int) -> str:
     return text[: limit - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
 
 
-# Outcomes that end a tick with nothing left for anyone to serve, so the
-# exit handshake's post-release re-read is skipped (see
+# Outcomes that end a tick with nothing left for *this* tick to hand off,
+# so the exit handshake's post-release re-read is skipped (see
 # :func:`_hand_off_if_needed`). ``terminal`` means the build is finished —
-# a wake-up arriving after it changes nothing a tick could act on — and
-# ``not_reactive`` means this build is not tick-driven at all. Every other
-# outcome that got as far as holding the lease (``lingered_out``, and the
-# crash path, which is still ``lingered_out`` here because ``run_tick_aio``
-# relabels it afterwards) may have left a wake-up unserved.
-_NO_HANDOFF_OUTCOMES = frozenset({"terminal", "not_reactive"})
+# a wake-up arriving after it changes nothing a tick could act on;
+# ``not_reactive`` means this build is not tick-driven at all; and
+# ``lease_lost`` means a successor is already driving it, so spawning one
+# would only add a container that finds the lease held and exits. (The
+# drain is not skipped for ``lease_lost``: it is about *other* builds, and
+# our own is filtered out of the candidates by the successor's live lease.)
+#
+# Every other outcome that got as far as holding the lease
+# (``lingered_out``, and the crash path, which is still ``lingered_out``
+# here because ``run_tick_aio`` relabels it afterwards) may have left a
+# wake-up unserved.
+_NO_HANDOFF_OUTCOMES = frozenset({"terminal", "not_reactive", "lease_lost"})
 
 
 async def _hand_off_if_needed(
