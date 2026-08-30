@@ -16,6 +16,16 @@ dicts, and run containers. They are gated centrally by
   This guards against accidentally running live tests — which create
   apps/volumes visible to the whole workspace — against a shared or
   production-adjacent profile.
+- ``STARDAG_MODAL_TEST_WORKSPACE``: if set, the workspace the *credentials
+  actually belong to* must match. Prefer this wherever the credentials come
+  from the environment rather than from a ``.modal.toml`` profile — CI, most
+  obviously. ``STARDAG_MODAL_TEST_PROFILE`` compares a profile *name*, and a
+  profile name is self-asserted: ``MODAL_PROFILE`` selects a section of a
+  config file, but ``MODAL_TOKEN_ID`` / ``MODAL_TOKEN_SECRET`` take
+  precedence over that file and are not bound to the name at all. So the
+  profile check can pass while the token points somewhere else entirely. The
+  workspace check resolves the workspace from the token itself, which is the
+  thing worth asserting.
 
 All live test modules should also carry ``pytestmark = pytest.mark.modal_live``
 so the live tier can be excluded wholesale with ``pytest -m "not modal_live"``.
@@ -24,11 +34,45 @@ so the live tier can be excluded wholesale with ``pytest -m "not modal_live"``.
 from __future__ import annotations
 
 import os
+import typing
 
 DEFAULT_TEST_VOLUME = "stardag-testing"
 
 _TRUE = ("1", "true", "require")
 _FALSE = ("0", "false", "skip")
+
+
+_WORKSPACE_UNRESOLVED = object()
+_workspace_cache: object | str | None = _WORKSPACE_UNRESOLVED
+
+
+def _active_modal_workspace() -> str | None:
+    """The workspace the configured Modal credentials belong to.
+
+    Resolved from the token via Modal's own workspace lookup, deliberately
+    *not* from ``STARDAG_MODAL_WORKSPACE`` — an env var a caller can set to
+    any value is no use as a guard. Returns None when it cannot be
+    determined (no credentials, no network, an API surface change), which
+    the caller treats as a failed assertion rather than a pass.
+
+    Cached: the guard runs once per live module, and this is a network
+    round trip.
+    """
+    global _workspace_cache
+    if _workspace_cache is not _WORKSPACE_UNRESOLVED:
+        return typing.cast("str | None", _workspace_cache)
+
+    workspace: str | None
+    try:
+        import asyncio
+
+        from stardag.integration.modal._metadata import _lookup_modal_workspace_aio
+
+        workspace = asyncio.run(_lookup_modal_workspace_aio())
+    except Exception:
+        workspace = None
+    _workspace_cache = workspace
+    return workspace
 
 
 def _active_modal_profile() -> str | None:
@@ -76,6 +120,23 @@ def live_modal_guard(volume_name: str = DEFAULT_TEST_VOLUME) -> None:
                 f"Active Modal profile {active!r} does not match "
                 f"STARDAG_MODAL_TEST_PROFILE={expected_profile!r}"
             )
+            if required:
+                pytest.fail(msg)
+            pytest.skip(msg, allow_module_level=True)
+
+    # Before the credential check below, which *creates* a volume: verifying
+    # the workspace only after having written to it would be backwards.
+    expected_workspace = os.environ.get("STARDAG_MODAL_TEST_WORKSPACE")
+    if expected_workspace:
+        active_workspace = _active_modal_workspace()
+        if active_workspace != expected_workspace:
+            msg = (
+                f"Modal credentials resolve to workspace "
+                f"{active_workspace!r}, which does not match "
+                f"STARDAG_MODAL_TEST_WORKSPACE={expected_workspace!r}"
+            )
+            if active_workspace is None:
+                msg += " (no credentials, or the workspace lookup failed)"
             if required:
                 pytest.fail(msg)
             pytest.skip(msg, allow_module_level=True)
