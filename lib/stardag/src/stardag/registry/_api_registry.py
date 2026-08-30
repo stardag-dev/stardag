@@ -1814,9 +1814,16 @@ class APIRegistry(RegistryABC):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
+        claim: bool = True,
         claim_ttl_seconds: int | None = None,
     ) -> StartClaimResult:
-        """Claiming start against the API (``claim=true`` on ``/start``).
+        """Arbitrated start against the API's one ``/start`` endpoint.
+
+        ``claim`` and ``enforce_limits`` are orthogonal flags on that
+        endpoint, and this method is how both are reached: ``claim=True``
+        (the default) arbitrates the execution claim, ``limit_keys``
+        enforces the named concurrency limits, and a caller wanting only
+        the second passes ``claim=False``.
 
         Maps the structured 409 denials (``task_already_running`` /
         ``task_already_completed`` / ``concurrency_limit_reached``) to a
@@ -1829,7 +1836,8 @@ class APIRegistry(RegistryABC):
         params: dict[str, Any] = self._get_start_params(
             executor, executor_ref, executor_metadata, claim_ttl_seconds
         )
-        params["claim"] = "true"
+        if claim:
+            params["claim"] = "true"
         if limit_keys:
             params["limit_key"] = list(limit_keys)
             params["enforce_limits"] = "true"
@@ -1838,7 +1846,7 @@ class APIRegistry(RegistryABC):
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
                 params=params,
-                operation=f"Start task {task.id} (claim)",
+                operation=f"Start task {task.id} ({'claim' if claim else 'limits'})",
             )
         except APIError as e:
             payload = e.payload or {}
@@ -1863,40 +1871,6 @@ class APIRegistry(RegistryABC):
                 )
             raise
         return StartClaimResult(started=True)
-
-    async def task_start_with_limits_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        executor: str | None = None,
-        executor_ref: str | None = None,
-        executor_metadata: dict[str, Any] | None = None,
-        limit_keys: Sequence[str] | None = None,
-    ) -> bool:
-        """Start a task with atomic server-side concurrency-limit acquisition.
-
-        Sends ``limit_key`` (repeated) + ``enforce_limits=true``; a 409 with
-        error code ``concurrency_limit_reached`` means a key was at capacity
-        — returns False without recording anything.
-        """
-        params: dict[str, Any] = self._get_start_params(
-            executor, executor_ref, executor_metadata
-        )
-        if limit_keys:
-            params["limit_key"] = list(limit_keys)
-            params["enforce_limits"] = "true"
-        try:
-            await self._arequest(
-                "POST",
-                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
-                params=params,
-                operation=f"Start task {task.id} (limits)",
-            )
-        except APIError as e:
-            if e.status_code == 409 and "concurrency_limit_reached" in (e.detail or ""):
-                return False
-            raise
-        return True
 
     async def task_start_aio(
         self,

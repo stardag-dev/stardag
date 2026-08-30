@@ -89,19 +89,6 @@ class TestRegistryABCForwarding:
             )
         ]
 
-    async def test_task_start_with_limits_aio_default_forwards_metadata(self):
-        registry = MetadataAwareRegistry()
-        started = await registry.task_start_with_limits_aio(
-            uuid4(),
-            _make_task(),
-            executor="modal",
-            executor_ref="fc-1",
-            executor_metadata=METADATA,
-            limit_keys=["gpu"],
-        )
-        assert started is True
-        assert registry.calls[0][1]["executor_metadata"] == METADATA
-
     async def test_build_start_aio_forwards_metadata(self):
         aware = MetadataAwareRegistry()
         await aware.build_start_aio(executor_metadata=METADATA)

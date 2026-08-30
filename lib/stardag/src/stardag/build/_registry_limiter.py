@@ -11,10 +11,14 @@ limiter".
 Semantics (mirroring the reactive tick's acquisition):
 
 - A slot is acquired by an *enforced task start*
-  (``task_start_with_limits_aio``): the server atomically counts RUNNING
-  holders per key against the environment caps and records TASK_STARTED
-  on success (the engine's own later start-with-executor-refs is a
-  tolerated duplicate).
+  (``task_start_claim_aio(limit_keys=..., claim=False)``): the server
+  atomically counts RUNNING holders per key against the environment caps
+  and records TASK_STARTED on success (the engine's own later
+  start-with-executor-refs is a tolerated duplicate). ``claim=False`` is
+  load-bearing, not a default taken by accident: the engine claims the
+  task *before* it enters ``slot()`` (see ``_concurrent.py``), so a
+  claiming acquire would be denied ``already_running`` by its own build
+  and poll until ``max_wait_seconds``.
 - The slot is released by the task leaving RUNNING status — the engine's
   completed/failed/cancelled events, or TASK_SUSPENDED while a task waits
   on its dynamic deps (parity with ``LocalConcurrencyLimiter``, which
@@ -184,8 +188,8 @@ class RegistryConcurrencyLimiter:
                 # the task is already RUNNING with a ref in another build it
                 # transiently clears latest_executor_ref until the engine's
                 # ref-recording start lands (churn-only; see module docs).
-                started = await self.registry.task_start_with_limits_aio(
-                    build_id, task, limit_keys=limit_keys
+                result = await self.registry.task_start_claim_aio(
+                    build_id, task, limit_keys=limit_keys, claim=False
                 )
             except Exception as e:
                 # A registry blip must not cascade into task/build failures
@@ -202,13 +206,17 @@ class RegistryConcurrencyLimiter:
                     f"{delay:.1f}s): {e}"
                 )
             else:
-                if started:
+                if result.started:
                     return
                 error_backoff = self.poll_interval_seconds  # healthy again
                 delay = self.poll_interval_seconds
+                # ``limit`` is the only denial an unclaiming start can get;
+                # log the keys the server actually held back on, which is a
+                # subset of ours and the one worth naming.
                 logger.debug(
                     f"Task {task.id} denied by concurrency limits "
-                    f"{limit_keys}; retrying in {delay:.1f}s"
+                    f"{result.denied_keys or limit_keys}; "
+                    f"retrying in {delay:.1f}s"
                 )
             # Jitter so N waiters don't re-take the server's limit rows
             # (FOR UPDATE) in lockstep.

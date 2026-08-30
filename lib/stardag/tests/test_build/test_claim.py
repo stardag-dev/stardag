@@ -71,6 +71,7 @@ class ClaimRegistry(RecordingRegistry):
         executor_ref=None,
         executor_metadata=None,
         limit_keys=None,
+        claim=True,
         claim_ttl_seconds=None,
     ) -> StartClaimResult:
         tid = str(task.id)
