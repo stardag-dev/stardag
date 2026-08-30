@@ -1841,12 +1841,19 @@ class APIRegistry(RegistryABC):
         if limit_keys:
             params["limit_key"] = list(limit_keys)
             params["enforce_limits"] = "true"
+        # Name both flags, not one: the two compose, and a log line saying
+        # only "claim" for a start that also acquired slots sends a reader
+        # looking for the wrong denial.
+        arbitration = (
+            "+".join(k for k, on in (("claim", claim), ("limits", limit_keys)) if on)
+            or "plain"
+        )
         try:
             await self._arequest(
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
                 params=params,
-                operation=f"Start task {task.id} ({'claim' if claim else 'limits'})",
+                operation=f"Start task {task.id} ({arbitration})",
             )
         except APIError as e:
             payload = e.payload or {}

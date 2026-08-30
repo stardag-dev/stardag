@@ -16,10 +16,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `RegistryConcurrencyLimiter` acquires its slots with `claim=False` (the
   engine has already claimed the task before entering the slot, so a
   claiming acquire would be denied `already_running` by its own build) and
-  now logs the keys the server actually held back on. **Breaking for a
-  custom `RegistryABC` subclass** that implemented or called
-  `task_start_with_limits_aio`; no wire change, and no change for anyone
-  using `APIRegistry`.
+  now logs the keys the server actually held back on. No wire change and nothing to do for a
+  build driven through the engines. **Breaking for any direct caller of
+  `task_start_with_limits_aio`** — a custom `RegistryABC` subclass that
+  implemented it, or code calling it on `APIRegistry`, where it is also
+  removed; both migrate to `task_start_claim_aio(..., claim=False)`.
 - The Modal worker's wake-up reads `BuildNotifyResult.scheduler_live` off
   the result directly instead of through `getattr`. Unknown still spawns —
   an older registry leaves the field `None`, and a notify that raised

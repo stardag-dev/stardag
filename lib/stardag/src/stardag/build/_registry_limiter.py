@@ -210,12 +210,17 @@ class RegistryConcurrencyLimiter:
                     return
                 error_backoff = self.poll_interval_seconds  # healthy again
                 delay = self.poll_interval_seconds
-                # ``limit`` is the only denial an unclaiming start can get;
-                # log the keys the server actually held back on, which is a
-                # subset of ours and the one worth naming.
+                # ``limit`` is the only denial an unclaiming start can get
+                # (the server gates both others on ``claim``), so name the
+                # reason rather than assume it: anything else here is
+                # version skew or a regression, and a log line asserting
+                # "concurrency limits" would hide it. Retrying regardless is
+                # still the safe direction — a denial we do not understand
+                # is not grounds to fail the task, and ``max_wait_seconds``
+                # bounds the wait either way.
                 logger.debug(
-                    f"Task {task.id} denied by concurrency limits "
-                    f"{result.denied_keys or limit_keys}; "
+                    f"Task {task.id} start denied ({result.denied_reason}) "
+                    f"on keys {result.denied_keys or limit_keys}; "
                     f"retrying in {delay:.1f}s"
                 )
             # Jitter so N waiters don't re-take the server's limit rows
