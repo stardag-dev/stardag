@@ -508,6 +508,119 @@ class TestRehydrationFallback:
         assert summary.terminal_status == "failed"
 
 
+class TestRehydrationOnAPickleFreeBuild:
+    """``require_pickle_free`` binds the tick too, not just the trigger.
+
+    The trigger-time gate (``PickleElisionPlan.require_pickle_free_error``)
+    only ever inspected the DAG before the build started. The tick is a
+    *writer* of the same store — a rehydrated task was written straight back
+    — so on a writable target root a build that declared it writes no
+    pickles quietly accumulated them anyway, one per task, the first time
+    each was rehydrated.
+    """
+
+    @staticmethod
+    def _decorator_built_dag():
+        """A DAG whose class is rehydratable but NOT picklable by reference.
+
+        ``@sd.task`` generates a class whose name differs from the module
+        attribute holding it, so ``pickle.dumps`` fails on it — which is what
+        made the write-back audible (a warning every tick) rather than merely
+        wrong. Registry-data rehydration is unaffected: it is a lookup in the
+        polymorphic registry, not a pickle.
+        """
+        import stardag as sd
+
+        @sd.task(name="PickleFreeRehydrateTask")
+        def pickle_free_task(limit: int) -> list[int]:
+            return list(range(limit))
+
+        return pickle_free_task(limit=3)
+
+    @staticmethod
+    def _registry_for(root):
+        registry = FakeReactiveRegistry(
+            root_task_ids=[str(root.id)], auto_complete=True
+        )
+        registry.add_task(str(root.id))
+        registry.metadata_bodies[str(root.id)] = root.model_dump(mode="json")
+        return registry
+
+    async def test_the_rehydrated_task_is_not_written_back(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        root = self._decorator_built_dag()
+        registry = self._registry_for(root)
+        store = InMemoryTaskStore(uuid4(), pickle_free=True)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=(executor := FakeTickExecutor()),
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        # Rehydration still works and the task is still scheduled — the
+        # write-back was only ever a cache over an object already in hand.
+        assert executor.spawned == [root.id]
+        assert summary.terminal_status == "completed"
+        # ...and the build kept the property it declared.
+        assert store.load_task(root.id) is None
+
+    async def test_no_warning_is_logged(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """The visible half of the bug: a failed write-back warned per tick.
+
+        On a build of unpicklable-by-reference classes the write could not
+        succeed, so the cost was log noise — which matters most exactly where
+        this configuration is used, in CI, where it competed with real signal.
+        """
+        root = self._decorator_built_dag()
+        registry = self._registry_for(root)
+        store = InMemoryTaskStore(uuid4(), pickle_free=True)
+
+        with caplog.at_level(logging.DEBUG):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=FakeTickExecutor(),
+                task_store=store,
+                config=FAST_TICK,
+            )
+
+        loader = "stardag.build._reactive._frontier_actions"
+        records = [r for r in caplog.records if r.name == loader]
+        assert [r for r in records if r.levelno >= logging.WARNING] == []
+        # Rehydration is the designed path here, not an exception to report:
+        # it happens for every task on every tick, so it is DEBUG, not INFO.
+        rehydrated = [r for r in records if "Rehydrated task" in r.getMessage()]
+        assert rehydrated and all(r.levelno == logging.DEBUG for r in rehydrated)
+
+    async def test_an_ordinary_build_still_caches_the_rehydration(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The skip is opt-in. A build that did not declare pickle-freedom
+        still heals its store, which is the whole point of the write-back:
+        there, a miss means a pickle was expected and was not there."""
+        root = self._decorator_built_dag()
+        registry = self._registry_for(root)
+        store = InMemoryTaskStore(uuid4())
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=FakeTickExecutor(),
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert store.load_task(root.id) is not None
+
+
 class TestRehydrationDiagnostics:
     """A rehydration failure names the declared task modules that failed to
     import — "class X unresolved" and "the module defining X blew up on

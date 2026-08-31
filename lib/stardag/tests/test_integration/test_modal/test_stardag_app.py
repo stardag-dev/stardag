@@ -1808,6 +1808,87 @@ class TestReactivePickleElision:
 
         assert BuildTaskStore(result.build_id).load_task(root.id) is None
 
+    def test_the_flag_reaches_the_deployed_tick(self):
+        """The trigger-time gate is not the whole promise: a tick writes to
+        the store too (it caches the tasks it rehydrates), so the flag has to
+        be baked into the deployment alongside the module list — the tick
+        container has no access to the app that configured it."""
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules(
+            "tm-require-tick",
+            task_modules=[SyncOnlyTask.__module__],
+            require_pickle_free=True,
+        )
+        registered = _finalize_capturing_functions(app)
+
+        with patch("stardag.integration.modal._app._run_tick") as run_tick:
+            run_tick.return_value = {}
+            registered["tick"](str(uuid4()), None)
+
+        assert run_tick.call_args.kwargs["deployment"].require_pickle_free is True
+
+    def test_an_ordinary_app_deploys_a_writing_tick(self):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules(
+            "tm-require-tick-off", task_modules=[SyncOnlyTask.__module__]
+        )
+        registered = _finalize_capturing_functions(app)
+
+        with patch("stardag.integration.modal._app._run_tick") as run_tick:
+            run_tick.return_value = {}
+            registered["tick"](str(uuid4()), None)
+
+        assert run_tick.call_args.kwargs["deployment"].require_pickle_free is False
+
+
+class TestTickTaskStoreIsPickleFree:
+    """...and the tick builds its store from that flag.
+
+    Split from the test above because the two halves fail independently: a
+    flag that is carried but never read looks exactly like a fix.
+    """
+
+    def _run_tick_capturing_store(self, *, require_pickle_free: bool):
+        from stardag.integration.modal import _tick as tick_module
+
+        deployment = tick_module._TickDeployment(
+            app_name="tm-tick-store",
+            worker_selector=lambda task: "default",
+            limit_key_selector=None,
+            modal_workspace=None,
+            worker_timeouts={},
+            tick_timeout_seconds=None,
+            task_modules=(),
+            task_module_patterns=(),
+            require_pickle_free=require_pickle_free,
+        )
+        registry = MagicMock(spec=RegistryABC)
+        # Not reactively scheduled: _run_tick returns before it schedules
+        # anything, but only AFTER constructing the store — which is all
+        # this asserts on.
+        registry.build_get.return_value = MagicMock(reactive_app_name=None)
+        stores: list = []
+        real_store = tick_module.BuildTaskStore
+
+        def capture(*args, **kwargs):
+            store = real_store(*args, **kwargs)
+            stores.append(store)
+            return store
+
+        with patch.object(tick_module, "BuildTaskStore", capture):
+            with registry_provider.override(registry):
+                tick_module._run_tick(str(uuid4()), None, deployment=deployment)
+        assert len(stores) == 1
+        return stores[0]
+
+    def test_a_declaring_app_gets_a_refusing_store(self):
+        assert self._run_tick_capturing_store(require_pickle_free=True).pickle_free
+
+    def test_an_ordinary_app_gets_the_store_it_always_had(self):
+        assert not self._run_tick_capturing_store(require_pickle_free=False).pickle_free
+
 
 class TestDynamicDepPickleElision:
     """Dynamic deps registered from inside a worker get the same treatment —

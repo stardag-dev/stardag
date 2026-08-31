@@ -177,10 +177,21 @@ async def _load_task(
     The pickle-free fallback reconstructs the task from the registry's
     stored ``task_data`` (see ``stardag.task_from_registry_data``) — which
     also survives cases the pickle store can't (e.g. an app redeploy with
-    compatible task definitions invalidating stored pickles). Successful
-    rehydrations are written back to the store (best-effort: the task
-    object is already in hand, so a transient store error must not abort
-    the caller).
+    compatible task definitions invalidating stored pickles).
+
+    Successful rehydrations are written back to the store, so a build that
+    fell back once does not keep paying for it. Two qualifications, in
+    this order:
+
+    * **Not on a pickle-free store.** A build whose app declared
+      ``require_pickle_free`` gets a store that refuses every write, so
+      this call is a no-op there — the cache would otherwise leave pickles
+      on a target root the build promised never to write to, silently and
+      on a build where rehydration is the *designed* path rather than a
+      fallback. The guard lives in ``BuildTaskStore.save_task_aio``, which
+      is why no argument is threaded down here.
+    * **Best-effort when it does write.** The task object is already in
+      hand, so a store error must not abort the caller.
 
     With ``quiet=True`` a rehydration failure logs a single warning without
     the stack trace — for callers where a missing object is tolerated (a
@@ -213,7 +224,15 @@ async def _load_task(
         else:
             logger.exception(f"{message}.{note}")
         return None
-    logger.info(f"Rehydrated task {task_id} from registry data.")
+    # DEBUG on a pickle-free build, INFO otherwise: there, a store miss is
+    # the expected path for every task on every tick, and reporting it at
+    # INFO trains readers to skim the scheduler's log lines on the very
+    # configuration the feature recommends. Elsewhere a miss means a pickle
+    # was expected and was not there, which is worth a line.
+    if task_store.pickle_free:
+        logger.debug(f"Rehydrated task {task_id} from registry data.")
+    else:
+        logger.info(f"Rehydrated task {task_id} from registry data.")
     try:
         await task_store.save_task_aio(task)
     except Exception as e:

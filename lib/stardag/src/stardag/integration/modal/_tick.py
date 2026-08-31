@@ -239,6 +239,15 @@ class _TickDeployment:
         task_module_patterns: The declared patterns behind that list,
             published for the coverage checks that report against patterns
             rather than expansions.
+        require_pickle_free: The app's ``require_pickle_free``, which the
+            tick needs because it is a *writer* of the build task store —
+            rehydrating a task writes it back — and the flag's promise is
+            that the build writes no pickles at all. Deploy-time like the
+            module list beside it, and for the same reason: the flag
+            describes the deployment (an immutable target root, or a
+            redeploy that makes stored pickles a liability), and the
+            trigger's own copy is the caller's local app definition rather
+            than the one the ticks were built from.
     """
 
     app_name: str
@@ -249,6 +258,7 @@ class _TickDeployment:
     tick_timeout_seconds: float | None
     task_modules: tuple[str, ...]
     task_module_patterns: tuple[str, ...]
+    require_pickle_free: bool
 
 
 def _run_tick(
@@ -270,7 +280,7 @@ def _run_tick(
     _setup_logging()
     app_name = deployment.app_name
     build_uuid = UUID(build_id)
-    task_store = BuildTaskStore(build_uuid)
+    task_store = BuildTaskStore(build_uuid, pickle_free=deployment.require_pickle_free)
     registry = registry_provider.get()
     # The reactive marker/owner/config live in the registry (not on
     # the target root): read them with the lighter GET /builds/{id}

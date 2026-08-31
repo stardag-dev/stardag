@@ -124,3 +124,71 @@ def test_load_missing_task_does_not_log_an_error(
     records = [r for r in caplog.records if r.name == logger_name]
     assert [r for r in records if r.levelno >= logging.WARNING] == []
     assert any(r.levelno == logging.DEBUG for r in records)
+
+
+class TestPickleFreeStore:
+    """``require_pickle_free`` reaches the store, so no writer can violate it.
+
+    The flag used to be a trigger-time gate only, which left the scheduler
+    tick — a writer, via the rehydration write-back in ``_load_task`` — free
+    to put pickles on a target root the build had declared it would never
+    write to.
+    """
+
+    def test_save_task_writes_nothing(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        store = BuildTaskStore(uuid4(), pickle_free=True)
+        task = SyncOnlyTask(name="pickle-free")
+        store.save_task(task)
+        assert store.load_task(task.id) is None
+
+    async def test_save_task_aio_writes_nothing(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        # The tick's write-back is the async one; the sync path above is not
+        # evidence about it.
+        store = BuildTaskStore(uuid4(), pickle_free=True)
+        task = SyncOnlyTask(name="pickle-free-aio")
+        await store.save_task_aio(task)
+        assert await store.load_task_aio(task.id) is None
+
+    def test_save_tasks_writes_nothing(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        store = BuildTaskStore(uuid4(), pickle_free=True)
+        a, b = SyncOnlyTask(name="pf-a"), SyncOnlyTask(name="pf-b")
+        store.save_tasks([a, b])
+        assert store.load_task(a.id) is None
+        assert store.load_task(b.id) is None
+
+    def test_the_skip_is_silent(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        caplog: pytest.LogCaptureFixture,
+    ):
+        # A tick rehydrates every task of such a build on every pass, so
+        # anything above DEBUG here is per-task, per-tick noise — the same
+        # reason a store miss was demoted (see the test above). Nothing is
+        # lost by skipping: the caller already holds the object.
+        store = BuildTaskStore(uuid4(), pickle_free=True)
+        logger_name = "stardag.build._task_store"
+        with caplog.at_level(logging.DEBUG, logger=logger_name):
+            store.save_task(SyncOnlyTask(name="pf-quiet"))
+        records = [r for r in caplog.records if r.name == logger_name]
+        assert [r for r in records if r.levelno > logging.DEBUG] == []
+        assert any(r.levelno == logging.DEBUG for r in records)
+
+    def test_default_still_writes(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        # The flag is opt-in: a build that did not declare it keeps the
+        # store it always had.
+        store = BuildTaskStore(uuid4())
+        task = SyncOnlyTask(name="pf-default")
+        store.save_task(task)
+        assert store.load_task(task.id) is not None
