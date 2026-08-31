@@ -367,16 +367,25 @@ class SchedulerLease:
             return False
         return asyncio.get_event_loop().time() >= self._expires_at
 
-    def _arm(self) -> None:
-        self._expires_at = asyncio.get_event_loop().time() + _LEASE_TTL_SECONDS
+    def _arm(self, granted_after: float) -> None:
+        # Anchored to a timestamp taken BEFORE the granting request was
+        # sent, not to when its answer arrived: the server starts the TTL
+        # when it writes the row, which is inside that window, so anchoring
+        # at the reply would leave the client believing in the lease for up
+        # to one network round-trip after the server had let it lapse. The
+        # error must land on the safe side — expiring early is a spurious
+        # re-acquire; expiring late is the double-drive the deadline exists
+        # to rule out.
+        self._expires_at = granted_after + _LEASE_TTL_SECONDS
 
     async def __aenter__(self) -> "SchedulerLease":
+        asked_at = asyncio.get_event_loop().time()
         result = await self._registry.build_acquire_scheduler_lease_aio(
             self._build_id, owner_id=self._owner_id, ttl_seconds=_LEASE_TTL_SECONDS
         )
         self.acquired = result.held
         if self.acquired:
-            self._arm()
+            self._arm(asked_at)
             self._renewal = asyncio.create_task(self._renew_forever())
         return self
 
@@ -420,17 +429,19 @@ class SchedulerLease:
         performs for any lapsed lease. Only if that *also* fails is somebody
         else driving the build, and only then must this tick stop.
         """
+        asked_at = asyncio.get_event_loop().time()
         result = await self._registry.build_renew_scheduler_lease_aio(
             self._build_id, owner_id=self._owner_id, ttl_seconds=_LEASE_TTL_SECONDS
         )
         if result.held:
-            self._arm()
+            self._arm(asked_at)
             return True
+        asked_at = asyncio.get_event_loop().time()
         retaken = await self._registry.build_acquire_scheduler_lease_aio(
             self._build_id, owner_id=self._owner_id, ttl_seconds=_LEASE_TTL_SECONDS
         )
         if retaken.held:
-            self._arm()
+            self._arm(asked_at)
             logger.info(
                 "Scheduler lease for build %s had lapsed and was re-taken; "
                 "nothing else was driving it.",

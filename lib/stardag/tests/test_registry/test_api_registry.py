@@ -1398,6 +1398,22 @@ class TestSchedulerLeaseCalls:
         path = f"/api/v1/builds/{bid}/scheduler-lease"
         assert seen == [("POST", path), ("PUT", path), ("DELETE", path)]
 
+    async def test_an_answer_without_held_grants_rather_than_denies(self):
+        """A 200 whose JSON lacks ``held`` is malformed, and malformed must
+        degrade to *grant* — ``payload.get("held")`` would quietly turn it
+        into ``held=False``, denying anyone the build for as long as the
+        server misbehaves."""
+        r = self._registry(
+            lambda request: httpx.Response(200, json={"expires": "not-the-shape"})
+        )
+        result = await r.build_acquire_scheduler_lease_aio(
+            uuid4(), owner_id="t", ttl_seconds=60
+        )
+        assert result.held is True
+        assert r._scheduler_lease_route_missing is False, (
+            "malformed is not version skew; the next call must probe again"
+        )
+
     async def test_a_denied_acquire_is_reported_not_raised(self):
         r = self._registry(lambda request: httpx.Response(200, json={"held": False}))
         result = await r.build_acquire_scheduler_lease_aio(

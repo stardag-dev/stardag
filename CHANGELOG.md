@@ -101,8 +101,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - **The tick no longer uses the global concurrency lock at all.**
   `run_tick_aio` **drops its `lock_manager` parameter** — the lease was its
   only use — and takes the lease through the registry instead, renewing it
-  in the background while it lingers and stopping (`TickSummary.outcome ==
-"lease_lost"`) if a renewal reports it was taken over. `RegistryABC` gains
+  in the background while it lingers and stopping
+  (`TickSummary.outcome == "lease_lost"`) if a renewal reports it was taken
+  over. `RegistryABC` gains
   `build_acquire_scheduler_lease_aio` / `build_renew_scheduler_lease_aio` /
   `build_release_scheduler_lease_aio`, defaulting to granting, and the
   duplicated `SCHEDULER_LOCK_PREFIX` is gone from both sides.

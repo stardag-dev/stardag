@@ -1613,7 +1613,7 @@ async def acquire_build_scheduler_lease(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     owner_id: _LeaseOwner,
-    ttl_seconds: _LeaseTtl = 300,
+    ttl_seconds: _LeaseTtl = 60,
 ):
     """Take the build's scheduler lease. At most one tick drives a build.
 
@@ -1644,7 +1644,7 @@ async def renew_build_scheduler_lease(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     owner_id: _LeaseOwner,
-    ttl_seconds: _LeaseTtl = 300,
+    ttl_seconds: _LeaseTtl = 60,
 ):
     """Extend the lease, for its holder only.
 

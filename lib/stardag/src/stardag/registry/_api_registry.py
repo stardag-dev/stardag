@@ -1820,9 +1820,12 @@ class APIRegistry(RegistryABC):
             return SchedulerLeaseResult(build_id=build_id, held=True)
         try:
             payload = response.json()
+            # ``held`` is required, not defaulted: an answer without it is
+            # malformed, and falling through to ``False`` here would deny
+            # driving the build — the opposite of the degradation below.
             return SchedulerLeaseResult(
                 build_id=build_id,
-                held=bool(payload.get("held")),
+                held=bool(payload["held"]),
                 expires_at=payload.get("expires_at"),
             )
         except Exception:
