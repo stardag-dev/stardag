@@ -267,6 +267,12 @@ def _resolve_keep_warm(
 # Sentinel recorded as the deployed "version" for --from-source deploys.
 FROM_SOURCE_VERSION = "source"
 
+# `--server-version latest` is a keyword resolved at CLI time, not a tag we
+# deploy. See _resolve_version_keyword.
+LATEST_VERSION = "latest"
+SERVER_TAG_PREFIX = "server-v"
+SERVER_RELEASES_API = "https://api.github.com/repos/stardag-dev/stardag/releases"
+
 
 def _parse_semver(version: str) -> tuple[int, int, int] | None:
     """Parse 'X.Y.Z' into a comparable tuple; None for anything else."""
@@ -278,6 +284,95 @@ def _parse_semver(version: str) -> tuple[int, int, int] | None:
     except ValueError:
         return None
     return major, minor, patch
+
+
+def _latest_released_server_version() -> str:
+    """The newest published server release, as a bare ``X.Y.Z``.
+
+    Read from the GitHub *Releases* API rather than the tags API on purpose:
+    the release job in ``publish-server-image.yml`` runs ``needs:
+    publish-image``, so a ``server-vX.Y.Z`` release exists only if the image
+    push succeeded. A tag can outlive a failed build; a release cannot.
+    """
+    import httpx
+
+    headers = {"Accept": "application/vnd.github+json"}
+    # Unauthenticated GitHub allows 60 requests/hour per IP, which is ample
+    # for a CLI - but honour a token when one is around, so a shared-egress
+    # CI runner does not trip over someone else's budget.
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        response = httpx.get(
+            SERVER_RELEASES_API,
+            params={"per_page": 100},
+            headers=headers,
+            timeout=30.0,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        releases = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        error_console.print(
+            f"Could not resolve --server-version {LATEST_VERSION}: {exc}\n"
+            "Pass an explicit --server-version X.Y.Z instead - see "
+            "https://github.com/stardag-dev/stardag/releases"
+        )
+        raise typer.Exit(1) from exc
+
+    if not isinstance(releases, list):
+        # raise_for_status catches the usual failures, but a 200 carrying
+        # something other than the release array must still exit cleanly
+        # rather than crash on the first .get().
+        error_console.print(
+            f"Could not resolve --server-version {LATEST_VERSION}: unexpected "
+            "response from the GitHub releases API. Pass an explicit "
+            "--server-version X.Y.Z instead."
+        )
+        raise typer.Exit(1)
+
+    versions = [
+        parsed
+        for release in releases
+        if isinstance(release, dict)
+        if not release.get("draft") and not release.get("prerelease")
+        for tag in [release.get("tag_name") or ""]
+        if tag.startswith(SERVER_TAG_PREFIX)
+        for parsed in [_parse_semver(tag[len(SERVER_TAG_PREFIX) :])]
+        if parsed is not None
+    ]
+    if not versions:
+        error_console.print(
+            f"Could not resolve --server-version {LATEST_VERSION}: no "
+            f"{SERVER_TAG_PREFIX}X.Y.Z releases found. Pass an explicit "
+            "--server-version X.Y.Z instead."
+        )
+        raise typer.Exit(1)
+
+    return ".".join(str(part) for part in max(versions))
+
+
+def _resolve_version_keyword(server_version: str | None) -> str | None:
+    """Resolve the ``latest`` keyword to the concrete version it means now.
+
+    Everything downstream - the image reference, the recorded deployment
+    meta, ``status`` - then works in explicit ``X.Y.Z`` terms. Deploying the
+    mutable ``:latest`` tag instead would be cached like any other image
+    definition, so an upgrade could silently redeploy the image already
+    built for that tag, and nothing afterwards could say which release is
+    actually running. GHCR's ``:latest`` tag is unaffected and stays usable
+    directly.
+    """
+    if server_version != LATEST_VERSION:
+        return server_version
+    resolved = _latest_released_server_version()
+    console.print(
+        f"Resolved [bold]{LATEST_VERSION}[/bold] to server version "
+        f"[bold]{resolved}[/bold]."
+    )
+    return resolved
 
 
 def _record_deployed_server_version(
@@ -318,12 +413,17 @@ def _resolve_upgrade_server_version(
 ) -> str:
     """Server version for prebuilt-image `upgrade` runs.
 
-    Resolution order: explicit --server-version flag > recorded deployed
-    version > DEFAULT_SERVER_VERSION. Defaulting to the recorded version
-    means a plain `upgrade` never silently downgrades a deployment running
-    a version newer than this SDK's default (whose migrations may have
-    advanced the DB schema past what the default server release knows).
-    An explicitly passed older version wins, with a warning.
+    An explicit --server-version wins outright (with a warning if it is a
+    downgrade). Otherwise a plain `upgrade` takes the *newer* of the
+    recorded deployed version and DEFAULT_SERVER_VERSION:
+
+    - the recorded version wins when it is ahead, so an upgrade never
+      silently downgrades a deployment whose migrations may have advanced
+      the DB schema past what this SDK's default server release knows;
+    - the SDK's default wins when it is ahead, so `uvx` picking up a newer
+      SDK actually rolls the server forward. Returning the recorded version
+      unconditionally meant a deployment froze at whatever it first
+      recorded and only an explicit flag could ever move it.
     """
     deployed = _deployed_server_version(app_name, environment_name)
     if explicit is not None:
@@ -348,7 +448,20 @@ def _resolve_upgrade_server_version(
             "to keep building from a local checkout)."
         )
         return DEFAULT_SERVER_VERSION
+    if deployed == LATEST_VERSION:
+        # Recorded by an SDK that deployed the mutable tag itself. Resolve it
+        # once; the concrete version is what gets recorded, so the deployment
+        # converts to a pin and stops depending on the tag.
+        return _resolve_version_keyword(LATEST_VERSION) or DEFAULT_SERVER_VERSION
     if deployed is not None:
+        deployed_semver = _parse_semver(deployed)
+        default_semver = _parse_semver(DEFAULT_SERVER_VERSION)
+        if (
+            deployed_semver is not None
+            and default_semver is not None
+            and default_semver > deployed_semver
+        ):
+            return DEFAULT_SERVER_VERSION
         return deployed
     return DEFAULT_SERVER_VERSION
 
@@ -612,7 +725,8 @@ def up(
     server_version: str | None = typer.Option(
         None,
         "--server-version",
-        help="Prebuilt server image version to deploy: X.Y.Z or 'latest' "
+        help="Prebuilt server image version to deploy: X.Y.Z, or 'latest' "
+        "to resolve the newest published server release at deploy time "
         f"(default: {DEFAULT_SERVER_VERSION}, the version this SDK release "
         "is tested against)",
     ),
@@ -777,6 +891,7 @@ def up(
     target root, and a local SDK registry + profile.
     """
     interactive = not yes
+    server_version = _resolve_version_keyword(server_version)
     repo_root, resolved_server_version = _resolve_image_source(
         repo, from_source, server_version
     )
@@ -1048,8 +1163,9 @@ def upgrade(
     server_version: str | None = typer.Option(
         None,
         "--server-version",
-        help="Prebuilt server image version to deploy: X.Y.Z or 'latest' "
-        "(default: the currently deployed version, falling back to "
+        help="Prebuilt server image version to deploy: X.Y.Z, or 'latest' "
+        "to resolve the newest published server release at deploy time "
+        "(default: the newer of the currently deployed version and "
         f"{DEFAULT_SERVER_VERSION}, the version this SDK release is tested "
         "against)",
     ),
@@ -1081,6 +1197,7 @@ def upgrade(
     ),
 ):
     """Update the deployment: apply DB migrations and redeploy."""
+    server_version = _resolve_version_keyword(server_version)
     repo_root, resolved_server_version = _resolve_image_source(
         repo, from_source, server_version
     )

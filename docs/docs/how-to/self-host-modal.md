@@ -110,13 +110,40 @@ stardag self-host connect
 uvx --from "stardag[selfhost]" stardag self-host upgrade
 ```
 
-This applies any new database migrations and redeploys the API + UI. Each
-SDK release pins the server version it was tested against, so `uvx` picking
-up a newer SDK also rolls the server forward; pass
-`--server-version X.Y.Z` (or `latest`) to deploy a specific
-[server release](https://github.com/stardag-dev/stardag/releases). The JWT
-keypair secret is left untouched, so existing sessions and SDK logins
-survive upgrades.
+This applies any new database migrations and redeploys the API + UI. The JWT
+keypair secret is left untouched, so existing sessions and SDK logins survive
+upgrades.
+
+### Which server version you get
+
+Each SDK release pins the
+[server release](https://github.com/stardag-dev/stardag/releases) it was
+tested against. A plain `upgrade` deploys **the newer of that pin and the
+version you are already running** — so `uvx` picking up a newer SDK rolls the
+server forward, and an upgrade never quietly moves you backwards onto an
+older server than the one whose migrations have already run.
+
+Two ways to override it:
+
+```bash
+# Deploy a specific release and stay there
+stardag self-host upgrade --server-version 0.2.0
+
+# Deploy whatever the newest published release is right now
+stardag self-host upgrade --server-version latest
+```
+
+`latest` is resolved **when the command runs**, and the concrete version it
+resolves to is what gets deployed and recorded — the command prints
+`Resolved latest to server version 0.2.0`, `self-host status` reports
+`0.2.0`, and a later plain `upgrade` treats it as the pinned version it is.
+Nothing downstream deploys a moving tag, so what is running is always
+something you can name.
+
+New server releases are cut after each significant change to the Registry
+API or the UI, which is more often than the SDK's pin moves. If you want
+those as they land, `--server-version latest` each time is the way; if you
+would rather move in step with the SDK, plain `upgrade` already does that.
 
 If you deployed with a non-default `--name` or `--server-modal-env`, pass
 the **same** values to `upgrade` (and `status`/`destroy`) — otherwise the
@@ -215,8 +242,11 @@ stardag self-host destroy    # stop the Modal app (never touches the database)
 
 Useful flags for `up` (all prompts have flag equivalents for CI):
 
-- `--server-version X.Y.Z` (or `latest`) — prebuilt server image version to
-  deploy (default: the version this SDK release is tested against)
+- `--server-version X.Y.Z` — prebuilt server image version to deploy
+  (default: the version this SDK release is tested against). `latest`
+  resolves to the newest published release at deploy time and deploys that
+  version explicitly; see
+  [Which server version you get](#which-server-version-you-get)
 - `--from-source` — build the image from a local repo checkout instead of
   the prebuilt image (see
   [Deploying from source](#deploying-from-source-development))
