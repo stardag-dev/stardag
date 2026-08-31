@@ -28,22 +28,59 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 10
     groups:
-      python:
+      # Minor and patch only. Majors arrive one PR per package, so a single
+      # unresolvable one cannot hold the safe updates hostage.
+      #
+      # These six stay in ONE entry on purpose, unlike npm below. They share
+      # path dependencies: a constraint edited in lib/stardag's manifest
+      # invalidates the locks of /docs and /integration-tests too, and one PR
+      # that carries the manifest and every affected lock together is exactly
+      # what stops a lock being left behind.
+      python-minor-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
+  # The two npm directories get an entry each, unlike the uv projects above.
+  # They share no dependency purpose — the UI and the CDK tooling — so there is
+  # nothing to gain from a common PR and something to lose: a break in either
+  # blocked the other. #276 was one PR across both.
+  #
+  # The limit is 5 each rather than 10, so the npm total stays at the 10 it was
+  # before the split instead of quietly doubling. Majors now arrive
+  # individually, so the cap does real work; raise it if majors start queueing
+  # behind each other, which would be the same blocking problem in miniature.
   - package-ecosystem: "npm"
-    directories:
-      - "/app/stardag-ui"
-      - "/infra/aws-cdk"
+    directory: "/app/stardag-ui"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     groups:
-      javascript:
+      stardag-ui-minor-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
+  - package-ecosystem: "npm"
+    directory: "/infra/aws-cdk"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      aws-cdk-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Deliberately left as one all-update-types group. Action pins are written
+  # `@v7`, so almost every bump reads as a major — a minor/patch split here
+  # would turn one tidy PR into a stream of individual ones for no benefit.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
