@@ -5,12 +5,18 @@
 # grouped into one PR per ecosystem per week to avoid a flood of single-dep PRs.
 #
 # Ecosystems:
-#   - pip: all Python projects (uv.lock is detected by the pip ecosystem)
+#   - uv: all Python projects. Every one is a uv project with a committed
+#     uv.lock, and dependabot's uv updater reads pyproject.toml and uv.lock
+#     natively. This used to say `pip`, which is what let the uv updater run
+#     outside the group below — see the note at the end of this file.
 #   - npm: the UI and the AWS CDK tooling
 #   - github-actions: workflow action pins
+#
+# `directory`/`directories` take no glob patterns, so every project is listed
+# explicitly. A new Python project needs a line here or dependabot ignores it.
 version: 2
 updates:
-  - package-ecosystem: "pip"
+  - package-ecosystem: "uv"
     directories:
       - "/app/stardag-api"
       - "/lib/stardag"
@@ -46,3 +52,19 @@ updates:
       actions:
         patterns:
           - "*"
+# Why `uv` and not `pip`
+#
+# These six directories were declared under `pip` and the group still did not
+# apply to all of them. The branch names show it: the cryptography bump landed
+# as `dependabot/uv/docs/cryptography-gte-50.0.0` and
+# `dependabot/uv/integration-tests/cryptography-gte-50.0.0` — the `uv`
+# updater, and no `python-<hash>` group suffix — while the standalone Modal
+# example came through as `dependabot/pip/.../python-f0b66d50f1`, grouped.
+# One dependency, two ungrouped PRs, which is the exact flood the group exists
+# to prevent.
+#
+# It also explains a stale lockfile. Scoped to `/docs`, dependabot edited the
+# constraint where it is declared — `lib/stardag/pyproject.toml` — and
+# regenerated only `/docs`'s lock, leaving `lib/stardag/uv.lock` behind.
+# Declaring each project under the ecosystem dependabot actually routes it to
+# is what gets its own lock refreshed by the bump that changes its manifest.
