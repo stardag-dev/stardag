@@ -963,6 +963,7 @@ class StardagApp:
             settings: FunctionSettings,
             *,
             default_concurrency: InputConcurrency | None = None,
+            never_concurrent: bool = False,
             **extra: typing.Any,
         ):
             """Register one function on the Modal app under ``name``.
@@ -971,6 +972,13 @@ class StardagApp:
             particular function should be packed, applied only when the
             app's own settings say nothing — see the ``tick`` registration
             below, which is the one function that has one.
+
+            ``never_concurrent`` refuses input concurrency for this
+            function whatever the settings say. Needed because settings
+            are shared: ``tick`` and ``tick_watchdog`` are registered from
+            one ``tick_settings``, so an app that packs its tick would
+            otherwise pack a sync watchdog too — onto Modal's *threads*,
+            which is the hazard the async tick exists to avoid.
             """
             prepared = _prepare_function_settings(
                 settings,
@@ -983,7 +991,11 @@ class StardagApp:
             # Input concurrency is a decorator rather than a `function()`
             # keyword (Modal moved it in April 2025), so it is applied to
             # the callable first and `function()` registers the result.
-            concurrency = prepared.concurrency or default_concurrency
+            concurrency = (
+                None
+                if never_concurrent
+                else prepared.concurrency or default_concurrency
+            )
             if concurrency is None:
                 return decorate
 
@@ -1171,20 +1183,23 @@ class StardagApp:
             # where each tick is spawned — see _run_watchdog_sweep.
             _run_watchdog_sweep(registry_provider.get(), app_name)
 
-        # Deliberately no `default_concurrency`, even though it shares
-        # `tick_settings` with the tick: this is its own Modal function with
-        # its own containers, receiving one input per watchdog period, so
-        # packing would change nothing in the steady state — while quietly
-        # opting a `def` into Modal's *threaded* concurrency, which is the
-        # hazard `_modal_tick` is a coroutine to avoid.
+        # `never_concurrent`, not merely "no default": it shares
+        # `tick_settings` with the tick, so a declared value would reach it
+        # too. This is its own Modal function with its own containers,
+        # receiving one input per watchdog period, so packing would change
+        # nothing in the steady state — while quietly opting a `def` into
+        # Modal's *threaded* concurrency, which is the hazard
+        # `_modal_tick` is a coroutine to avoid. Modal accepts a sync
+        # function with `@modal.concurrent` and a `schedule` without
+        # complaint, so nothing downstream would have caught it.
         watchdog_schedule: dict[str, typing.Any] = (
             {"schedule": modal.Period(minutes=self.watchdog_period_minutes)}
             if self.watchdog_period_minutes is not None
             else {}
         )
-        register("tick_watchdog", tick_settings, **watchdog_schedule)(
-            _modal_tick_watchdog
-        )
+        register(
+            "tick_watchdog", tick_settings, never_concurrent=True, **watchdog_schedule
+        )(_modal_tick_watchdog)
         function_names.append("tick_watchdog")
 
         self._is_finalized = True

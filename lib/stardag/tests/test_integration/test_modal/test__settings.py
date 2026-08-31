@@ -21,6 +21,7 @@ except ImportError:
 from unittest.mock import MagicMock  # noqa: E402
 
 from stardag.integration.modal import FunctionSettings  # noqa: E402
+from stardag.exceptions import StardagError  # noqa: E402
 from stardag.integration.modal._settings import (  # noqa: E402
     _RENAMED_SETTINGS,
     _prepare_function_settings,
@@ -127,10 +128,27 @@ class TestInputConcurrencyIsLiftedOutOfTheKwargs:
             )
         ) == {"max_inputs": 8, "target_inputs": 6}
 
-    def test_a_target_alone_is_honoured(self):
-        assert _concurrency(
-            FunctionSettings(image=MagicMock(), target_concurrent_inputs=6)
-        ) == {"target_inputs": 6}
+    def test_a_target_alone_is_refused(self):
+        """Modal requires ``max_inputs`` whenever the decorator is applied,
+        and refuses at *registration* with a ``TypeError`` naming a
+        parameter the user never wrote. Caught here instead, in the names
+        they did write — and not papered over by merging stardag's own
+        tick default underneath, which would invent a ceiling nobody asked
+        for and could still be below the target."""
+        with pytest.raises(StardagError, match="without max_concurrent_inputs"):
+            _concurrency(
+                FunctionSettings(image=MagicMock(), target_concurrent_inputs=6)
+            )
+
+    def test_a_target_above_the_max_is_refused(self):
+        with pytest.raises(StardagError, match="above max_concurrent_inputs"):
+            _concurrency(
+                FunctionSettings(
+                    image=MagicMock(),
+                    max_concurrent_inputs=4,
+                    target_concurrent_inputs=6,
+                )
+            )
 
     def test_no_declaration_is_none_rather_than_a_concurrency_of_one(self):
         """``@modal.concurrent`` changes how a container serves inputs at
@@ -161,3 +179,56 @@ class TestSecretsAndVolumesStillMerge:
             "/mnt/x": user_volume,
             "/mnt/y": auto_volume,
         }
+
+
+class TestModalAcceptsWhatWeProduce:
+    """Every concurrency dict this module can emit, through the real Modal.
+
+    The app-level tests stub ``modal.concurrent`` out with a recording
+    identity decorator so they can invoke the wrappers, which means nothing
+    over there ever reaches Modal's own validation — and a declaration that
+    fails only at registration would sail through the whole suite and break
+    a deploy. So the shapes are checked against the real client here, the
+    same way the legacy-name premise is.
+    """
+
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            FunctionSettings(image=MagicMock(), max_concurrent_inputs=10),
+            FunctionSettings(
+                image=MagicMock(),
+                max_concurrent_inputs=10,
+                target_concurrent_inputs=8,
+            ),
+            FunctionSettings(image=MagicMock(), allow_concurrent_inputs=3),
+        ],
+    )
+    def test_the_declaration_registers(self, settings):
+        concurrency = _concurrency(settings)
+        assert concurrency is not None
+
+        app = modal.App("settings-roundtrip")
+
+        async def body(x):
+            return x
+
+        # Decorator order matters and this is the order ``register`` uses:
+        # ``@app.function()`` on the outside, ``@modal.concurrent`` under
+        # it. The reverse raises ``InvalidError``.
+        app.function(image=modal.Image.debian_slim(), serialized=True, name="f")(
+            modal.concurrent(**concurrency)(body)
+        )
+
+    def test_the_stardag_tick_default_registers(self):
+        """The one concurrency stardag applies on its own initiative."""
+        from stardag.integration.modal._app import _TICK_CONCURRENCY
+
+        app = modal.App("settings-roundtrip-default")
+
+        async def body(x):
+            return x
+
+        app.function(image=modal.Image.debian_slim(), serialized=True, name="tick")(
+            modal.concurrent(**_TICK_CONCURRENCY)(body)
+        )

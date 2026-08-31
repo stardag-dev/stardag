@@ -29,7 +29,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   old one.** `max_containers`, `min_containers`, `buffer_containers`,
   `scaledown_window`, `max_concurrent_inputs` and `target_concurrent_inputs`
   are now accepted; the last two are applied via `@modal.concurrent` rather
-  than passed to `App.function()`. The four legacy names Modal renamed in 2025
+  than passed to `App.function()`, and validated in stardag's own vocabulary
+  rather than left to fail at registration with a `TypeError` naming a
+  parameter nobody wrote. The four legacy names Modal renamed in 2025
   — `concurrency_limit`, `keep_warm`, `container_idle_timeout` and
   `allow_concurrent_inputs` — are translated with a warning instead of being
   forwarded. This is a **bug fix, not a deprecation**: Modal's client raises

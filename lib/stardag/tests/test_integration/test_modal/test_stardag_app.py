@@ -3307,18 +3307,21 @@ class TestInputConcurrency:
         )
         assert concurrency["tick"] == {"max_inputs": 32, "target_inputs": 24}
 
-    def test_the_default_is_not_merged_into_a_partial_override(self):
-        """An app that says only ``target_concurrent_inputs`` means it —
-        merging stardag's ``max_inputs`` underneath would silently cap a
-        deliberate declaration."""
-        concurrency = self._concurrency(
-            self._app(
-                tick_settings=FunctionSettings(
-                    image=_make_image(), target_concurrent_inputs=4
+    def test_a_target_without_a_max_fails_the_deploy_here(self):
+        """Not by merging stardag's own ceiling underneath — that would
+        invent a limit nobody asked for, and could still sit below the
+        target. Modal refuses the function either way; this refuses it
+        first, in the setting names the app actually wrote."""
+        from stardag.exceptions import StardagError
+
+        with pytest.raises(StardagError, match="without max_concurrent_inputs"):
+            self._concurrency(
+                self._app(
+                    tick_settings=FunctionSettings(
+                        image=_make_image(), target_concurrent_inputs=4
+                    )
                 )
             )
-        )
-        assert concurrency["tick"] == {"target_inputs": 4}
 
     def test_the_legacy_spelling_also_overrides_it(self):
         """``allow_concurrent_inputs`` is the name someone would reach for
@@ -3331,6 +3334,24 @@ class TestInputConcurrency:
             )
         )
         assert concurrency["tick"] == {"max_inputs": 3}
+
+    def test_a_packed_tick_does_not_drag_the_watchdog_with_it(self):
+        """``tick`` and ``tick_watchdog`` are registered from one
+        ``tick_settings``, so "no default for the watchdog" is not enough —
+        a declared value would reach it too. The watchdog is sync, so that
+        is Modal's *threaded* concurrency, which is the whole hazard the
+        tick is a coroutine to avoid; and Modal accepts a sync ``def`` with
+        ``@modal.concurrent`` and a ``schedule`` without complaint, so
+        nothing downstream would catch it."""
+        concurrency = self._concurrency(
+            self._app(
+                tick_settings=FunctionSettings(
+                    image=_make_image(), max_concurrent_inputs=32
+                )
+            )
+        )
+        assert concurrency["tick"] == {"max_inputs": 32}
+        assert concurrency["tick_watchdog"] is None
 
     def test_a_worker_may_opt_in_explicitly(self):
         """Stardag has no opinion for workers; an app that knows its own

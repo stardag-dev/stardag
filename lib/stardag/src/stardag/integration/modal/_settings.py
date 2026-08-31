@@ -26,6 +26,8 @@ import typing
 
 import modal
 
+from stardag.exceptions import StardagError
+
 logger = logging.getLogger(__name__)
 
 
@@ -206,7 +208,40 @@ def _input_concurrency(
         for stardag_name, modal_name in _CONCURRENCY_SETTINGS.items()
         if normalized.get(stardag_name) is not None
     }
-    return concurrency or None
+    if not concurrency:
+        return None
+    _validate_input_concurrency(concurrency)
+    return concurrency
+
+
+def _validate_input_concurrency(concurrency: InputConcurrency) -> None:
+    """Reject a concurrency declaration Modal will refuse, in stardag's words.
+
+    Both of these are caught by Modal too — but at *registration*, and
+    phrased in its own parameter names, which are not the ones the user
+    wrote. ``max_concurrent_inputs=…`` producing a ``TypeError`` about a
+    missing ``max_inputs`` is a bad way to learn this, so the settings
+    module that owns the renaming owns the error message too.
+    """
+    if "max_inputs" not in concurrency:
+        raise StardagError(
+            "FunctionSettings sets target_concurrent_inputs="
+            f"{concurrency['target_inputs']} without max_concurrent_inputs. "
+            "A target is the concurrency Modal's autoscaler aims for "
+            "*below* a ceiling, so it is meaningless on its own and Modal "
+            "refuses the function. Set max_concurrent_inputs as well — and "
+            "note that stardag's own default for the reactive tick is not "
+            "merged in underneath, because a ceiling nobody asked for is "
+            "not a safe thing to invent."
+        )
+    if (target := concurrency.get("target_inputs")) is not None:
+        if target > concurrency["max_inputs"]:
+            raise StardagError(
+                f"FunctionSettings sets target_concurrent_inputs={target} "
+                f"above max_concurrent_inputs={concurrency['max_inputs']}. "
+                "The target is what the autoscaler aims for below the "
+                "ceiling; it cannot exceed it."
+            )
 
 
 def _dedupe_secrets(secrets: list[modal.Secret]) -> list[modal.Secret]:

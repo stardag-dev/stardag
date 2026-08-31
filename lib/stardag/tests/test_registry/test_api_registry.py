@@ -1594,3 +1594,10 @@ class TestAsyncClientUnderConcurrentCallers:
             "and A's next read gets a third client, so the one it was "
             "using mid-tick was replaced underneath it"
         )
+        # The destructive half, and the reason this is a bug rather than
+        # wasted allocation: the displaced client is closed, so a request
+        # already in flight on it fails.
+        assert clients["a"].is_closed, (
+            "the displaced client was left open — the hazard here is that "
+            "it is closed under a caller mid-request"
+        )

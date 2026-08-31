@@ -462,6 +462,12 @@ A worker that opts in must be safe to run **concurrently on threads** —
 Modal serves concurrent inputs to a sync function that way, and to an
 `async def` as asyncio tasks on one event loop.
 
+`target_concurrent_inputs` is the concurrency Modal's autoscaler _aims_
+for below the ceiling, so it requires `max_concurrent_inputs` alongside
+it; setting it alone is refused at deploy. Note also that `tick_settings`
+registers both `tick` and `tick_watchdog`, but a concurrency declared
+there applies only to the tick — the watchdog is sync and never packed.
+
 **Per-build knobs** (`tick_kwargs`, persisted with the build so every tick
 shares them): `linger_seconds` (default 120), `poll_interval_seconds` (3),
 `fail_mode`, `max_attempts` (2), `max_interruptions` (20),
