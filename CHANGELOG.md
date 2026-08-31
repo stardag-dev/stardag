@@ -84,7 +84,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   (`DEFAULT_SERVER_VERSION = "0.3.0"`, from the `server-v0.3.0` release) —
   the server version this SDK release is tested against, and the one that
   carries the two endpoints this release's reactive changes call
-  (`GET /builds/{id}/notify` and the scheduler-lease routes). The image tag
+  (`GET /builds/{build_id}/notify` and the scheduler-lease routes). The
+  image tag
   and `--server-version` take the bare `X.Y.Z`; `server-v` prefixes the git
   tag only.
 
@@ -158,7 +159,7 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `GET /builds/{build_id}/notify` (the linger poll's one-row read) and the
   scheduler lease on the build row —
   `POST`/`PUT`/`DELETE /builds/{build_id}/scheduler-lease` plus the
-  `builds.scheduler_lease_until` / `scheduler_lease_owner` migration
+  `builds.scheduler_lease_until` / `builds.scheduler_lease_owner` migration
   (`b41c7d9e2f08`, no backfill). Minor rather than patch for the same
   reason as `0.2.0`: the HTTP surface grew and there is a schema migration.
   Self-hosters upgrade with `stardag self-host upgrade`; redeploy Modal
