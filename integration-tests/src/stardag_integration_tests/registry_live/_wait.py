@@ -15,6 +15,13 @@ from uuid import UUID
 
 TERMINAL = ("completed", "failed", "cancelled")
 
+TASK_PAGE_SIZE = 100
+# A provisioned stack is meant to be kept and re-run against, so tasks of
+# one name accumulate across runs and the one being looked for is not
+# necessarily on the first page. Bounded so a lookup for a task that does
+# not exist fails in seconds rather than paging a large registry forever.
+MAX_TASK_PAGES = 20
+
 
 def tick_summaries(build_id: UUID, limit: int = 50) -> list[dict[str, Any]]:
     """The build's retained tick summaries, oldest first.
@@ -31,21 +38,29 @@ def tick_summaries(build_id: UUID, limit: int = 50) -> list[dict[str, Any]]:
 def find_task(task_id: str, *, task_name: str):
     """The registry's row for one task, by its stardag task id.
 
-    ``task_list`` filters by name, not by id, so the name narrows the page
-    and the id picks the row out of it. Worth the round trip because the
-    row carries ``latest_status_build_id`` -- the answer to "which build
-    holds, or held, this task's execution claim", which no tick summary
-    can give.
+    ``task_list`` filters by name, not by id, so the name narrows the
+    search and the id picks the row out of it. Worth the round trips
+    because the row carries ``latest_status_build_id`` -- the answer to
+    "which build holds, or held, this task's execution claim", which no
+    tick summary can give.
     """
     from stardag.registry import registry_provider
 
-    page = registry_provider.get().task_list(page_size=100, task_name=task_name)
-    for task in page.tasks:
-        if task.task_id == task_id:
-            return task
+    registry = registry_provider.get()
+    seen = 0
+    for page_number in range(1, MAX_TASK_PAGES + 1):
+        page = registry.task_list(
+            page_size=TASK_PAGE_SIZE, page=page_number, task_name=task_name
+        )
+        for task in page.tasks:
+            if task.task_id == task_id:
+                return task
+        seen += len(page.tasks)
+        if len(page.tasks) < TASK_PAGE_SIZE:
+            break
     raise AssertionError(
-        f"No {task_name!r} task with id {task_id!r} in the registry "
-        f"(saw {[t.task_id for t in page.tasks]})."
+        f"No {task_name!r} task with id {task_id!r} among {seen} "
+        f"{task_name!r} tasks in the registry."
     )
 
 

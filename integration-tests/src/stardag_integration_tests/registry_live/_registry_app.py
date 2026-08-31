@@ -42,10 +42,25 @@ PG_DB = "stardag"
 
 DEFAULT_APP_NAME = "registry"
 
+# Where the build records which Postgres it initialised the cluster with.
+#
 # Discovering the bin directory beats naming a major version: the base
 # image's Debian release decides which Postgres `apt` installs, and pinning
-# the version here would break silently the next time that moves.
-_PGBIN = "PGBIN=$(ls -d /usr/lib/postgresql/*/bin | head -1)"
+# it here would break silently the next time that moves. But the *build*
+# and the *container start* must agree on the answer, and two independent
+# rules for picking it are two rules that can diverge -- initialising a
+# data directory with one major and starting it with another does not
+# degrade, it fails.
+#
+# So the build decides once and writes the answer down; startup reads it.
+PGBIN_MARKER = "/pgbin-path"
+
+# `sort -V` rather than a plain sort: lexicographically, "9" sorts after
+# "10".
+_PGBIN = (
+    f"PGBIN=$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1) "
+    f'&& echo "$PGBIN" > {PGBIN_MARKER}'
+)
 
 
 def client_python_version() -> str:
@@ -101,7 +116,7 @@ def _image(repo_root: Path, python_version: str | None = None) -> "modal.Image":
     )
 
 
-def _make_web(api_remote_dir: str, pgdata: str):
+def _make_web(api_remote_dir: str, pgdata: str, pgbin_marker: str):
     """Return the ASGI-app factory as a **closure**.
 
     Not a module-level function, and this is not a style choice.
@@ -114,13 +129,15 @@ def _make_web(api_remote_dir: str, pgdata: str):
     """
 
     def _web():
-        import glob
         import subprocess
         import time
         import uuid
+        from pathlib import Path
 
         t0 = time.monotonic()
-        pgbin = sorted(glob.glob("/usr/lib/postgresql/*/bin"))[-1]
+        # The directory the image build initialised the cluster with, not a
+        # fresh guess -- see PGBIN_MARKER.
+        pgbin = Path(pgbin_marker).read_text().strip()
 
         def run(cmd: str, **kwargs) -> subprocess.CompletedProcess:
             return subprocess.run(
@@ -209,7 +226,9 @@ def build_registry_app(
         name="web",
     )(
         modal.concurrent(max_inputs=100)(
-            modal.asgi_app(label=app_name)(_make_web(API_REMOTE_DIR, PGDATA))
+            modal.asgi_app(label=app_name)(
+                _make_web(API_REMOTE_DIR, PGDATA, PGBIN_MARKER)
+            )
         )
     )
 

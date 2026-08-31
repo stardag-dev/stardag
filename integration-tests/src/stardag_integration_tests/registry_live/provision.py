@@ -177,8 +177,41 @@ def down(modal_environment: str) -> None:
         capture_output=True,
         text=True,
     )
-    print((result.stdout or result.stderr).strip())
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    print(output)
+
+    # Only forget the stack once it is actually gone. Dropping the
+    # coordinates on a failed delete is the worst of both worlds: the
+    # environment is still there, still holding an always-on container, and
+    # the local record that would let anyone find it again is gone -- so it
+    # reads as torn down and is not.
+    if result.returncode != 0 and not _looks_like_no_such_environment(output):
+        raise SystemExit(
+            f"Could not delete Modal environment {modal_environment!r}, so "
+            "it is still there and still costing. The coordinates file has "
+            f"been left in place: {coordinates_path(modal_environment)}"
+        )
     coordinates_path(modal_environment).unlink(missing_ok=True)
+
+
+def _looks_like_no_such_environment(output: str) -> bool:
+    """Whether the delete failed because there was nothing to delete.
+
+    That is success for this purpose. Narrow on purpose, like the
+    equivalent check for apps: an unrecognised message is treated as a real
+    failure, so a wording change makes teardown noisy rather than silently
+    leaving environments behind.
+    """
+    lowered = output.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "not found",
+            "could not find",
+            "no environment",
+            "does not exist",
+        )
+    )
 
 
 def _require_disposable_name(modal_environment: str, action: str) -> None:
@@ -201,6 +234,32 @@ def _require_disposable_name(modal_environment: str, action: str) -> None:
             f"deployments. Local stacks are named {LOCAL_PREFIX}*; pass "
             "--modal-env, or let it default to this checkout's name."
         )
+
+
+def _environment_exists(name: str) -> bool:
+    """Whether a Modal environment of exactly this name exists.
+
+    Parsed rather than substring-matched. A substring test against the raw
+    JSON answers a different question than the one being asked: any field
+    that happens to contain the name -- a web suffix, another environment
+    whose name extends this one -- makes it true, and a CLI that prefixes a
+    warning to its output makes it false.
+    """
+    listed = subprocess.run(
+        [modal_cli(), "environment", "list", "--json"],
+        capture_output=True,
+        text=True,
+    )
+    if listed.returncode != 0:
+        return False
+    try:
+        environments = json.loads(listed.stdout)
+    except json.JSONDecodeError:
+        # Not knowing is not the same as knowing it is absent, but the
+        # caller's next move either way is to try creating it -- and that
+        # now treats "already exists" as success.
+        return False
+    return any(entry.get("name") == name for entry in environments)
 
 
 def _require_expected_workspace() -> None:
@@ -246,12 +305,7 @@ def _require_expected_workspace() -> None:
 
 
 def _ensure_modal_environment(name: str) -> None:
-    listed = subprocess.run(
-        [modal_cli(), "environment", "list", "--json"],
-        capture_output=True,
-        text=True,
-    )
-    if listed.returncode == 0 and f'"{name}"' in listed.stdout:
+    if _environment_exists(name):
         print(f"[provision] reusing Modal environment {name!r}")
         return
     created = subprocess.run(
