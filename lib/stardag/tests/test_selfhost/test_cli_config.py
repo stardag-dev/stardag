@@ -7,17 +7,22 @@ import pytest
 pytest.importorskip("modal")
 pytest.importorskip("cryptography")
 
+import typer  # noqa: E402
+
 from stardag._cli.selfhost import (  # noqa: E402
     FROM_SOURCE_VERSION,
+    LATEST_VERSION,
     MAX_ADMIN_PASSWORD_BYTES,
     MIN_ADMIN_PASSWORD_CHARS,
     _admin_password_error,
     _build_config_env,
     _generate_jwt_keypair,
+    _latest_released_server_version,
     _provided_config_flags,
     _record_deployed_server_version,
     _resolve_keep_warm,
     _resolve_upgrade_server_version,
+    _resolve_version_keyword,
 )
 from stardag.selfhost._modal_app import DEFAULT_SERVER_VERSION  # noqa: E402
 from stardag.selfhost._modal_app import find_repo_root  # noqa: E402
@@ -229,8 +234,9 @@ def test_upgrade_version_explicit_flag_wins(monkeypatch: pytest.MonkeyPatch):
     _patch_meta_dict(monkeypatch, store)
     # Explicit newer version: no warning path, explicit wins
     assert _resolve_upgrade_server_version("myapp", "0.3.0") == "0.3.0"
-    # Explicit 'latest' (not comparable): explicit wins
-    assert _resolve_upgrade_server_version("myapp", "latest") == "latest"
+    # An explicit version is passed through verbatim. The commands resolve
+    # the `latest` keyword before calling this, so it only ever sees X.Y.Z.
+    assert _resolve_upgrade_server_version("myapp", "0.2.1") == "0.2.1"
 
 
 def test_upgrade_version_explicit_downgrade_warns_but_proceeds(
@@ -253,6 +259,145 @@ def test_upgrade_version_from_source_deploy_uses_default(
     store: dict = {"server_version": FROM_SOURCE_VERSION}
     _patch_meta_dict(monkeypatch, store)
     assert _resolve_upgrade_server_version("myapp", None) == DEFAULT_SERVER_VERSION
+
+
+# --- `latest` resolution ----------------------------------------------------
+
+
+def _patch_releases(monkeypatch: pytest.MonkeyPatch, payload) -> dict:
+    """Patch httpx.get to answer the GitHub releases call with `payload`."""
+    import httpx
+
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return FakeResponse()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    return captured
+
+
+def test_latest_released_server_version_picks_highest_semver(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured = _patch_releases(
+        monkeypatch,
+        [
+            {"tag_name": "server-v0.2.0"},
+            {"tag_name": "server-v0.10.0"},
+            {"tag_name": "server-v0.9.3"},
+        ],
+    )
+    # 0.10.0 > 0.9.3 numerically, not lexically
+    assert _latest_released_server_version() == "0.10.0"
+    assert captured["url"].endswith("/repos/stardag-dev/stardag/releases")
+
+
+def test_latest_released_server_version_ignores_other_tags(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_releases(
+        monkeypatch,
+        [
+            {"tag_name": "v0.22.0"},  # SDK release, not the server
+            {"tag_name": "server-v0.1.2"},
+            {"tag_name": "server-vnonsense"},
+            {"tag_name": "server-v0.2.0", "draft": True},
+            {"tag_name": "server-v0.3.0", "prerelease": True},
+        ],
+    )
+    assert _latest_released_server_version() == "0.1.2"
+
+
+def test_latest_released_server_version_no_releases_exits(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_releases(monkeypatch, [{"tag_name": "v0.22.0"}])
+    with pytest.raises(typer.Exit):
+        _latest_released_server_version()
+
+
+def test_latest_released_server_version_http_error_exits(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import httpx
+
+    def fake_get(url, **kwargs):
+        raise httpx.ConnectError("no network")
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    with pytest.raises(typer.Exit):
+        _latest_released_server_version()
+
+
+def test_latest_released_server_version_sends_token_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_example")
+    captured = _patch_releases(monkeypatch, [{"tag_name": "server-v0.2.0"}])
+    assert _latest_released_server_version() == "0.2.0"
+    assert captured["kwargs"]["headers"]["Authorization"] == "Bearer ghp_example"
+
+
+def test_resolve_version_keyword_passes_through(monkeypatch: pytest.MonkeyPatch):
+    # No network call for anything but the keyword
+    import httpx
+
+    def explode(*args, **kwargs):
+        raise AssertionError("should not have called the releases API")
+
+    monkeypatch.setattr(httpx, "get", explode)
+    assert _resolve_version_keyword(None) is None
+    assert _resolve_version_keyword("0.2.0") == "0.2.0"
+
+
+def test_resolve_version_keyword_resolves_latest(monkeypatch: pytest.MonkeyPatch):
+    _patch_releases(monkeypatch, [{"tag_name": "server-v0.4.1"}])
+    assert _resolve_version_keyword(LATEST_VERSION) == "0.4.1"
+
+
+# --- upgrade rolls forward as well as refusing to roll back -----------------
+
+
+def test_upgrade_version_rolls_forward_to_sdk_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The SDK's tested pin wins when it is ahead of what is deployed.
+
+    Returning the recorded version unconditionally froze a deployment at
+    whatever it first recorded, so a plain `upgrade` could never move it.
+    """
+    store: dict = {"server_version": "0.0.1"}
+    _patch_meta_dict(monkeypatch, store)
+    assert _resolve_upgrade_server_version("myapp", None) == DEFAULT_SERVER_VERSION
+
+
+def test_upgrade_version_recorded_latest_resolves_to_concrete(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A deployment recorded as `latest` by an older SDK converts to a pin."""
+    store: dict = {"server_version": LATEST_VERSION}
+    _patch_meta_dict(monkeypatch, store)
+    _patch_releases(monkeypatch, [{"tag_name": "server-v0.5.0"}])
+    assert _resolve_upgrade_server_version("myapp", None) == "0.5.0"
+
+
+def test_upgrade_version_unparseable_recorded_version_is_kept(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An unrecognised recorded value is left alone rather than guessed at."""
+    store: dict = {"server_version": "some-custom-tag"}
+    _patch_meta_dict(monkeypatch, store)
+    assert _resolve_upgrade_server_version("myapp", None) == "some-custom-tag"
 
 
 def test_generate_jwt_keypair_pem():

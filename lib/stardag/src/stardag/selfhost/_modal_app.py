@@ -70,7 +70,13 @@ MIN_IMAGE_PYTHON = (3, 10)
 
 
 def server_image_ref(version: str) -> str:
-    """Full image reference for a released server version (or "latest")."""
+    """Full image reference for a released server version.
+
+    Callers pass a concrete ``X.Y.Z``: the CLI resolves ``latest`` to one
+    before it gets here, so no mutable tag ends up in a Modal image
+    definition. ``"latest"`` still produces a valid reference for anyone
+    using the repo directly.
+    """
     return f"{SERVER_IMAGE_REPO}:{version}"
 
 

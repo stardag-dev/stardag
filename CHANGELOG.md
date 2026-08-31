@@ -8,6 +8,29 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **`--server-version latest` is resolved at deploy time, not deployed as a
+  tag.** `stardag self-host up/upgrade --server-version latest` now asks the
+  GitHub Releases API for the newest `server-vX.Y.Z`, prints what it resolved
+  to, and uses that concrete version for the image reference, the recorded
+  deployment meta and `self-host status`. Previously the literal string
+  reached `modal.Image.from_registry`, where a mutable tag is cached like any
+  other image definition — so an upgrade could silently redeploy the image
+  already built for `:latest`, and nothing afterwards could say which release
+  was running (`status` echoed `latest`). Releases rather than git tags are
+  the source of truth because the release job runs `needs: publish-image`, so
+  a release exists only if the image push succeeded. A deployment recorded as
+  `latest` by an older SDK resolves once on its next upgrade and converts to a
+  pin. GHCR's `:latest` tag is unchanged and still usable directly.
+- **A plain `stardag self-host upgrade` rolls the server version forward
+  again.** `_resolve_upgrade_server_version` returned the recorded deployed
+  version unconditionally, so once a deployment had recorded a version only an
+  explicit `--server-version` could ever move it — a newer SDK's pin was
+  ignored, contrary to what the self-host docs said. It now deploys the newer
+  of the recorded version and `DEFAULT_SERVER_VERSION`, which keeps the
+  anti-downgrade property that motivated the original behaviour (a deployment
+  ahead of this SDK's pin stays where it is) while letting the pin move a
+  deployment that is behind.
+
 - **One arbitrated start method on `RegistryABC`.**
   `task_start_with_limits_aio` is removed; `task_start_claim_aio` gains a
   `claim: bool = True` parameter, so the two orthogonal flags the registry's
