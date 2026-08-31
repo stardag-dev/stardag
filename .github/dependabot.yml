@@ -58,9 +58,9 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     # Held back because the UI needs code changes first, not because the
-    # version is bad. Each of these blocks on work tracked in
-    # `.claude/tasks/frontend-dep-migrations.md`, and **deleting the ignore is
-    # step one of doing that work** — they are placeholders, not decisions.
+    # version is bad. **Deleting the ignore is step one of doing that work** —
+    # these are placeholders, not decisions, and each says below what has to
+    # be true before it goes.
     #
     # Only things blocked on *us* are listed. Anything blocked upstream is
     # deliberately left to open a PR: `typescript` 7 is unusable today because
