@@ -566,12 +566,16 @@ async def _hand_off_if_needed(
             # guessing one would be worse than leaving the flag for the
             # next completion or the watchdog.
             return
-        # Sync call in async code, on purpose: spawning is what every
-        # executor integration offers, this is the last thing the tick does
-        # (the lease is released, its renewal task cancelled, nothing else
-        # is in flight), and requiring an async spawner would exclude the
-        # integrations that only have a blocking one.
-        spawn(build_id, info.reactive_app_name)
+        # Blocking spawner in async code, so off the loop: spawning is what
+        # every executor integration offers, and requiring an async spawner
+        # would exclude the ones that only have a blocking call. It used to
+        # run inline, justified by "the last thing the tick does — lease
+        # released, renewal cancelled, nothing else in flight". True of the
+        # tick; false of its *container*, once ticks share one (see the
+        # Modal integration's ``_TICK_CONCURRENCY``), where an inline
+        # backend RPC stalls every co-resident tick's polling.
+        # ``drain_wake_candidates`` already spawns this way.
+        await asyncio.to_thread(spawn, build_id, info.reactive_app_name)
         summary.successor_spawned += 1
         logger.info(
             "Build %s was notified while this tick released the scheduler "

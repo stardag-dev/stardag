@@ -1483,3 +1483,108 @@ class TestSchedulerLeaseCalls:
         )
         assert new._scheduler_lease_route_missing is False
         assert result.held is False, "the other registry's latch leaked"
+
+
+class TestAsyncClientUnderConcurrentCallers:
+    """The invariant that lets scheduler ticks share a Modal container.
+
+    ``registry_provider`` hands out one process-wide ``APIRegistry``, and
+    its ``async_client`` is cached **per event loop**: a call from a
+    different loop rebuilds it and closes the previous one. That is fine
+    while one caller owns the process, and actively destructive once
+    several do — which is exactly what input concurrency introduces.
+
+    Modal decides the shape: an ``async def`` gets its concurrent inputs as
+    asyncio tasks on one loop, a ``def`` gets them on threads, each
+    running its own ``asyncio.run``. So "the deployed tick is async" and
+    "ticks may share a container" are one decision, and this class pins
+    both halves of it — the safe shape and the hazard it avoids — because
+    neither is visible until two ticks actually overlap.
+    """
+
+    @staticmethod
+    def _registry() -> APIRegistry:
+        return APIRegistry(api_url="http://test.invalid", api_key="test-key")
+
+    def test_concurrent_callers_on_one_loop_share_one_stable_client(self):
+        """The async tick's world: N ticks, one loop, one client.
+
+        Each "tick" reads the client, yields (as a real one does on every
+        await), and reads it again. All four reads must be the same object,
+        and it must still be open — a rebuild would have closed it under
+        whoever was mid-request.
+        """
+        import asyncio
+
+        registry = self._registry()
+
+        async def fake_tick() -> list[httpx.AsyncClient]:
+            first = registry.async_client
+            await asyncio.sleep(0)
+            return [first, registry.async_client]
+
+        async def main():
+            return await asyncio.gather(*(fake_tick() for _ in range(4)))
+
+        seen: list[list[httpx.AsyncClient]] = asyncio.run(main())
+
+        clients = {id(client) for reads in seen for client in reads}
+        assert len(clients) == 1, (
+            "ticks sharing a container must share one async client; a "
+            "rebuild closes the client another tick is using"
+        )
+        assert not next(iter(seen))[0].is_closed
+
+    def test_callers_on_separate_loops_rebuild_and_close_the_shared_client(
+        self,
+    ):
+        """The sync tick's world, and why the deployed tick is not that.
+
+        Threaded concurrency gives each input its own ``asyncio.run`` and
+        therefore its own loop, so the second caller's first property access
+        tears down the first caller's client mid-flight. Asserted rather
+        than merely described: if Modal or ``APIRegistry`` ever stopped
+        behaving this way, making the tick async would have stopped being
+        load-bearing, and that is worth being told about.
+        """
+        import asyncio
+        import threading
+
+        registry = self._registry()
+        clients: dict[str, httpx.AsyncClient] = {}
+        first_read = threading.Event()
+        b_done = threading.Event()
+
+        def caller_a():
+            async def body():
+                clients["a"] = registry.async_client
+                first_read.set()
+                # Wait for B to touch the property from its own loop.
+                await asyncio.get_running_loop().run_in_executor(None, b_done.wait, 5)
+                clients["a_again"] = registry.async_client
+
+            asyncio.run(body())
+
+        def caller_b():
+            async def body():
+                first_read.wait(5)
+                clients["b"] = registry.async_client
+
+            asyncio.run(body())
+            b_done.set()
+
+        thread_a = threading.Thread(target=caller_a)
+        thread_b = threading.Thread(target=caller_b)
+        thread_a.start()
+        thread_b.start()
+        thread_a.join(timeout=10)
+        thread_b.join(timeout=10)
+
+        assert clients["b"] is not clients["a"], (
+            "a second event loop rebuilds the cached client — this is the "
+            "thrash the deployed tick is async to avoid"
+        )
+        assert clients["a_again"] is not clients["a"], (
+            "and A's next read gets a third client, so the one it was "
+            "using mid-tick was replaced underneath it"
+        )

@@ -68,6 +68,26 @@ logger = logging.getLogger(__name__)
 _notify_read_route_missing = False
 
 
+# Connection-pool limits for the async client. Sized for a *process*, not
+# for one caller, which is the thing that changed: the client is cached per
+# event loop on a registry that is itself a process-wide singleton, so
+# whatever shares a loop shares this pool. A Modal container now serves up
+# to ``_TICK_CONCURRENCY`` scheduler ticks on one loop, each of which may
+# have ``TickConfig.max_concurrent_actions`` registry calls in flight.
+#
+# The old values — 10 and 5 — were a per-tick budget by accident, because a
+# tick used to own its container. Leaving them would have quietly divided
+# that budget by the number of co-resident ticks, i.e. turned a packing win
+# into a latency regression on wide frontiers. These restore roughly the
+# per-tick concurrency a tick had when it ran alone.
+#
+# ``keepalive_expiry`` is deliberately left where it was; it guards against
+# connections going stale behind a load balancer, and that has nothing to
+# do with how many callers share the pool.
+_ASYNC_MAX_CONNECTIONS = 100
+_ASYNC_MAX_KEEPALIVE_CONNECTIONS = 50
+
+
 def _latch_notify_read_missing(error: Exception) -> bool:
     """Whether ``error`` says the server predates ``GET .../notify``.
 
@@ -1135,8 +1155,8 @@ class APIRegistry(RegistryABC):
             # Use limits to prevent stale connection issues
             # keepalive_expiry=5 closes idle connections after 5 seconds
             limits = httpx.Limits(
-                max_connections=10,
-                max_keepalive_connections=5,
+                max_connections=_ASYNC_MAX_CONNECTIONS,
+                max_keepalive_connections=_ASYNC_MAX_KEEPALIVE_CONNECTIONS,
                 keepalive_expiry=5,
             )
             transport = RetryTransport(retry=_RETRY_CONFIG)

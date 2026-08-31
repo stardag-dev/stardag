@@ -3,15 +3,30 @@
 :class:`FunctionSettings` is what a user writes when configuring an app's
 builder/worker/tick functions. :func:`_prepare_function_settings` is what
 :meth:`stardag.integration.modal.StardagApp.finalize` applies to it before
-handing the result to ``modal.App.function()``.
+handing the result to Modal — as a :class:`PreparedFunction`, because a
+declaration reaches Modal through two doors rather than one: see below.
+
+**These settings are not a pass-through, and cannot be.** Modal renamed
+three container-scaling parameters in February 2025 and moved input
+concurrency out of ``function()`` into the ``@modal.concurrent`` decorator
+in April 2025, and its client *raises* on the old spellings rather than
+warning. A ``FunctionSettings`` carrying one of them is therefore a failed
+deploy, not a deprecation notice. So this module owns the vocabulary:
+current Modal names are what a user should write, the four legacy names are
+accepted and translated (see :data:`_RENAMED_SETTINGS`), and the two
+concurrency keys are lifted out of the ``function()`` kwargs and returned
+beside them for the decorator.
 """
 
 from __future__ import annotations
 
+import logging
 import pathlib
 import typing
 
 import modal
+
+logger = logging.getLogger(__name__)
 
 
 class FunctionSettings(typing.TypedDict, total=False):
@@ -37,10 +52,27 @@ class FunctionSettings(typing.TypedDict, total=False):
             unset, ``timeout`` covers both.
         volumes: Dict of mount path to Volume or CloudBucketMount.
         secrets: List of Modal secrets to inject.
-        concurrency_limit: Max number of concurrent containers.
-        allow_concurrent_inputs: Max concurrent inputs per container.
-        container_idle_timeout: Seconds before idle container shuts down.
-        keep_warm: Number of containers to keep warm.
+        max_containers: Ceiling on how many containers this function may
+            scale out to.
+        min_containers: Containers kept warm regardless of load.
+        buffer_containers: Extra idle containers kept ready above current
+            demand, to absorb a burst without a cold start.
+        scaledown_window: Seconds an idle container is kept before it is
+            shut down.
+        max_concurrent_inputs: How many inputs one container may serve at
+            once. **Only safe on a function whose body is safe to run
+            concurrently**, and what "concurrently" means depends on the
+            function: Modal serves an ``async def`` as asyncio tasks on one
+            event loop, and a ``def`` on threads, which is the harder
+            contract. Stardag defaults this for the reactive ``tick``
+            (async, and almost entirely I/O wait) and deliberately not for
+            workers, which run user code — see ``StardagApp.finalize``.
+        target_concurrent_inputs: The per-container concurrency Modal's
+            autoscaler *aims* for, below ``max_concurrent_inputs``, which
+            containers may burst past when demand outruns supply. Trades a
+            little average latency for smaller tail latencies. Leaving it
+            unset maximises packing, which is usually what you want for an
+            I/O-bound function.
         ephemeral_disk: Ephemeral disk size in MB.
         retries: Number of retries on failure. Covers exceptions raised
             *inside* the container and function timeouts; it is not what
@@ -55,6 +87,11 @@ class FunctionSettings(typing.TypedDict, total=False):
             that genuinely cannot checkpoint. Modal client >= 1.2.3;
             carries a 3x price multiplier on CPU and memory, and is not
             supported for GPU functions.
+        concurrency_limit: Deprecated alias for ``max_containers``.
+        keep_warm: Deprecated alias for ``min_containers``.
+        container_idle_timeout: Deprecated alias for ``scaledown_window``.
+        allow_concurrent_inputs: Deprecated alias for
+            ``max_concurrent_inputs``.
     """
 
     image: typing.Required[modal.Image]
@@ -68,13 +105,108 @@ class FunctionSettings(typing.TypedDict, total=False):
         typing.Union[modal.Volume, modal.CloudBucketMount],
     ]
     secrets: list[modal.Secret]
-    concurrency_limit: int
-    allow_concurrent_inputs: int
-    container_idle_timeout: int
-    keep_warm: int
+    max_containers: int
+    min_containers: int
+    buffer_containers: int
+    scaledown_window: int
+    max_concurrent_inputs: int
+    target_concurrent_inputs: int
     ephemeral_disk: int
     retries: int
     nonpreemptible: bool
+    # Legacy Modal spellings, translated at deploy — see _RENAMED_SETTINGS.
+    concurrency_limit: int
+    keep_warm: int
+    container_idle_timeout: int
+    allow_concurrent_inputs: int
+
+
+_RENAMED_SETTINGS: dict[str, str] = {
+    # Renamed by Modal on 2025-02-24.
+    "concurrency_limit": "max_containers",
+    "keep_warm": "min_containers",
+    "container_idle_timeout": "scaledown_window",
+    # Moved out of `function()` into `@modal.concurrent` on 2025-04-09; the
+    # stardag name keeps "max" in front for the same reason Modal's
+    # `max_inputs=` does, and because `allow_…` reads like a boolean.
+    "allow_concurrent_inputs": "max_concurrent_inputs",
+}
+"""Legacy Modal parameter names accepted in :class:`FunctionSettings`.
+
+Translated rather than rejected, and translated silently enough to be
+worth spelling out: every one of these was a **hard error** from Modal
+≥1.0 — its client raises ``DeprecationError`` from ``function()`` instead
+of warning — so an app that sets one does not deploy at all today. There
+is no behaviour anyone can be relying on, which makes translation pure
+gain and makes a one-line warning the right volume for it.
+"""
+
+
+# stardag's own names for the two `@modal.concurrent` arguments, and the
+# Modal ones they map to. Kept apart from _RENAMED_SETTINGS because these
+# are not renames: they are settings that stop being `function()` keywords
+# and become a decorator, which is a different edit to make on the way out.
+_CONCURRENCY_SETTINGS: dict[str, str] = {
+    "max_concurrent_inputs": "max_inputs",
+    "target_concurrent_inputs": "target_inputs",
+}
+
+
+InputConcurrency = dict[str, int]
+"""Keyword arguments for ``modal.concurrent`` — ``max_inputs``/``target_inputs``."""
+
+
+def _normalize_legacy_names(settings: typing.Mapping[str, typing.Any]) -> dict:
+    """Rewrite any legacy Modal parameter names to their current spelling.
+
+    Warns once per call site rather than raising: the alternative is the
+    ``DeprecationError`` Modal itself throws, which is what this exists to
+    prevent. An explicit current-name value wins over a legacy one — the
+    two would otherwise resolve by dict order, which is not a rule anyone
+    should have to know.
+    """
+    result = dict(settings)
+    for legacy, current in _RENAMED_SETTINGS.items():
+        if legacy not in result:
+            continue
+        value = result.pop(legacy)
+        if current in result:
+            logger.warning(
+                "Modal function settings declare both %r and its current "
+                "name %r; using %r=%r and ignoring %r.",
+                legacy,
+                current,
+                current,
+                result[current],
+                legacy,
+            )
+            continue
+        logger.warning(
+            "Modal function setting %r has been renamed to %r; stardag is "
+            "translating it, but please update the declaration.",
+            legacy,
+            current,
+        )
+        result[current] = value
+    return result
+
+
+def _input_concurrency(
+    normalized: typing.Mapping[str, typing.Any],
+) -> InputConcurrency | None:
+    """The ``modal.concurrent`` arguments a normalized declaration carries.
+
+    ``None`` when it carries none — which is not the same as
+    ``max_inputs=1``. Modal's decorator changes how a container serves
+    inputs at all, so a function that never asks for concurrency should not
+    be wrapped in it.
+    """
+    concurrency: InputConcurrency = {
+        modal_name: normalized[stardag_name]
+        for stardag_name, modal_name in _CONCURRENCY_SETTINGS.items()
+        if normalized.get(stardag_name) is not None
+    }
+    return concurrency or None
 
 
 def _dedupe_secrets(secrets: list[modal.Secret]) -> list[modal.Secret]:
@@ -96,20 +228,49 @@ def _dedupe_secrets(secrets: list[modal.Secret]) -> list[modal.Secret]:
     return result
 
 
+class PreparedFunction(typing.NamedTuple):
+    """One ``FunctionSettings`` resolved into the two things Modal needs.
+
+    Two, and not one, because Modal takes them through different doors:
+    ``kwargs`` goes to ``modal.App.function()`` and ``concurrency`` — when
+    the declaration asks for any — to ``@modal.concurrent``. Returning them
+    together is what keeps a single declaration from being read twice and
+    from being half-applied.
+
+    Attributes:
+        kwargs: Keyword arguments for ``modal.App.function()``.
+        concurrency: Keyword arguments for ``modal.concurrent``, or None
+            when this function declared no input concurrency.
+    """
+
+    kwargs: dict[str, typing.Any]
+    concurrency: InputConcurrency | None
+
+
 def _prepare_function_settings(
     settings: FunctionSettings,
     *,
     extra_secrets: list[modal.Secret],
     auto_volumes: dict[str, modal.Volume],
-) -> dict[str, typing.Any]:
-    """Merge extra secrets and auto-volumes into function settings.
+) -> PreparedFunction:
+    """Resolve ``settings`` into what ``StardagApp.finalize`` hands Modal.
 
     Auto-mounted volumes are merged with user volumes, where user-specified
     volumes at the same mount path take precedence over auto-mounted ones.
     Secrets are de-duplicated by name (a named secret propagated from the
     builder plus one the function already declares should apply once).
+
+    Legacy parameter names are translated to their current spelling here —
+    once, which is why this is the only public way in: normalizing in two
+    places would warn twice about the same declaration. The
+    input-concurrency settings are then lifted out of the ``function()``
+    kwargs, because they are not ``function()`` keywords at all.
     """
-    result: dict[str, typing.Any] = dict(settings)
+    normalized = _normalize_legacy_names(settings)
+    concurrency = _input_concurrency(normalized)
+    result: dict[str, typing.Any] = normalized
+    for stardag_name in _CONCURRENCY_SETTINGS:
+        result.pop(stardag_name, None)
 
     # Merge secrets: existing + extra, de-duplicated by name.
     existing_secrets: list[modal.Secret] = list(result.get("secrets") or [])
@@ -119,4 +280,4 @@ def _prepare_function_settings(
     user_volumes = dict(result.get("volumes") or {})
     result["volumes"] = {**auto_volumes, **user_volumes}
 
-    return result
+    return PreparedFunction(kwargs=result, concurrency=concurrency)

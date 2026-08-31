@@ -166,8 +166,8 @@ holding a slot leaves its task `RUNNING` until the claim lapses; reactive
 scheduling on Modal heals this itself, which is one reason to prefer it
 for unattended limited runs.
 
-Infrastructure-level limits (Modal's per-function `concurrency_limit`,
-say) apply independently underneath.
+Infrastructure-level limits (Modal's per-function `max_containers`, say)
+apply independently underneath.
 
 ### Global concurrency lock (deprecated)
 
