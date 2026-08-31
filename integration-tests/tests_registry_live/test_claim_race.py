@@ -94,8 +94,10 @@ def test_a_shared_task_runs_once_across_two_builds(deployment) -> None:
     spawned = sum(s.get("spawned", 0) for s in (*summaries_a, *summaries_b))
     assert spawned == DISTINCT_TASKS, (
         f"{spawned} spawns for {DISTINCT_TASKS} distinct tasks. More than "
-        "one spawn of the shared task means two builds executed it "
-        "concurrently and the registry's claim did not arbitrate.\n"
+        f"{DISTINCT_TASKS} means the shared task ran in both builds and the "
+        "registry's claim did not arbitrate; fewer means a task did not run "
+        "at all, or a tick's summary had not been reported when the trail "
+        "was read.\n"
         f"--- build A ---\n{describe(build_a)}\n"
         f"--- build B ---\n{describe(build_b)}"
     )

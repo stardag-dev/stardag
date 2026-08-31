@@ -312,11 +312,25 @@ jobs:
   # most likely and most expensive: the registry pins `min_containers=1`, so
   # an abandoned one keeps a container alive until its scaledown window
   # expires.
+  #
+  # `!cancelled()` because of the other direction of the same problem, and
+  # it bites in practice. `cancel-in-progress` supersedes a PR's run on the
+  # next push, but a cancelled run still executes this job -- and the
+  # environment is named per *PR*, so it deletes the one the superseding run
+  # has already started using. Observed: a cancelled run's teardown removed
+  # `ci-pr-<n>` about a minute after its replacement had begun deploying
+  # into it.
+  #
+  # Skipping is safe precisely because the name is per PR: whichever run
+  # ends up last owns the environment and tears it down. A *manually*
+  # cancelled run does leak one, until `cleanup-closed-pr` fires on PR
+  # close or the weekly sweeper picks it up -- which is the backstop model
+  # this workflow already relies on.
   teardown:
     name: Delete the run's Modal environment
     runs-on: ubuntu-latest
     needs: [decide, modal-live, registry-live]
-    if: always() && needs.decide.outputs.ephemeral == 'true'
+    if: always() && !cancelled() && needs.decide.outputs.ephemeral == 'true'
     environment: modal-live-ci
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
