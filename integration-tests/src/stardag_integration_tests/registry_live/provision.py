@@ -259,12 +259,20 @@ def _ensure_modal_environment(name: str) -> None:
         capture_output=True,
         text=True,
     )
-    if created.returncode != 0:
-        raise SystemExit(
-            f"Could not create Modal environment {name!r}: "
-            f"{(created.stderr or created.stdout).strip()}"
-        )
-    print(f"[provision] created Modal environment {name!r}")
+    if created.returncode == 0:
+        print(f"[provision] created Modal environment {name!r}")
+        return
+
+    # Losing a race to create it is success, not failure. In CI the two
+    # tiers run in parallel and share one environment, so both can find it
+    # missing and both try to create it; whichever loses would otherwise
+    # abort a job for having got what it wanted.
+    output = ((created.stderr or "") + (created.stdout or "")).strip()
+    if "already exists" in output.lower():
+        print(f"[provision] Modal environment {name!r} was created concurrently")
+        return
+
+    raise SystemExit(f"Could not create Modal environment {name!r}: {output}")
 
 
 def _deploy_dag_app(repo_root: Path, modal_environment: str) -> None:

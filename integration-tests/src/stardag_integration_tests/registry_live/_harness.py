@@ -323,7 +323,19 @@ def _looks_like_no_such_app(output: str) -> bool:
     lowered = output.lower()
     return any(
         phrase in lowered
-        for phrase in ("could not find", "not found", "no such app", "no apps")
+        for phrase in (
+            # Modal's actual wording, as of 1.5: "No App with name 'x'
+            # found in the 'y' environment." Note it does not contain the
+            # substring "not found", which an earlier version of this list
+            # assumed and which cost a CI run to discover -- on the very
+            # first run against a fresh environment, where there is by
+            # definition nothing to stop.
+            "no app with name",
+            "could not find",
+            "not found",
+            "no such app",
+            "no apps",
+        )
     )
 
 
