@@ -195,7 +195,7 @@ def test_reactive_build_completes_without_resident_orchestrator():
         # discover + register + persist task objects, and only THEN set
         # the reactive marker/config in the registry.
         discovery = await discover_and_register_aio(registry, build_id, task)
-        store.save_tasks(discovery.incomplete.values())
+        await store.save_tasks_aio(discovery.incomplete.values())
         await registry.build_set_reactive_meta_aio(
             build_id, app_name=TEST_APP_NAME, tick_kwargs={}
         )

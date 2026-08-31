@@ -825,6 +825,12 @@ class InMemoryTaskStore(BuildTaskStore):
     def load_task(self, task_id):
         return self._tasks.get(str(task_id))
 
+    async def save_task_aio(self, task: BaseTask) -> None:
+        self.save_task(task)
+
+    async def load_task_aio(self, task_id):
+        return self.load_task(task_id)
+
 
 # =============================================================================
 # Helpers
