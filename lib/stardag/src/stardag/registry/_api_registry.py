@@ -1820,12 +1820,17 @@ class APIRegistry(RegistryABC):
             return SchedulerLeaseResult(build_id=build_id, held=True)
         try:
             payload = response.json()
-            # ``held`` is required, not defaulted: an answer without it is
-            # malformed, and falling through to ``False`` here would deny
-            # driving the build — the opposite of the degradation below.
+            # ``held`` must be present and an actual boolean — anything
+            # else is a malformed answer and belongs in the grant path
+            # below. Defaulting a missing key, or coercing (``bool(0)``,
+            # ``bool("no")``), would quietly turn a shape error into a
+            # denial — the opposite of the degradation this guards.
+            held = payload["held"]
+            if not isinstance(held, bool):
+                raise TypeError(f"held is {held!r}, not a boolean")
             return SchedulerLeaseResult(
                 build_id=build_id,
-                held=bool(payload["held"]),
+                held=held,
                 expires_at=payload.get("expires_at"),
             )
         except Exception:

@@ -609,6 +609,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         # refused. A *stolen* one is not: somebody else holds it.
         self._lease_acquires += 1
         if self.lease_stolen and self._lease_acquires > 1:
+            self.lease_owner = "__successor__"
             return SchedulerLeaseResult(build_id=build_id, held=False)
         self.lease_lapsed = False
         self.lease_owner = owner_id if self.lease_acquired else self.lease_owner
@@ -624,7 +625,14 @@ class FakeReactiveRegistry(NoOpRegistry):
         #
         # ``lease_stolen``: somebody else holds it, so the re-acquire fails
         # too and the tick must stop.
-        if self.lease_lapsed or self.lease_stolen:
+        if self.lease_stolen:
+            # The theft is visible in the owner column, exactly as on the
+            # server: the successor's acquire replaced our id, so every
+            # later owner-checked call by us is refused — including the
+            # exit release, which must not clear the successor's lease.
+            self.lease_owner = "__successor__"
+            return SchedulerLeaseResult(build_id=build_id, held=False)
+        if self.lease_lapsed:
             return SchedulerLeaseResult(build_id=build_id, held=False)
         return SchedulerLeaseResult(
             build_id=build_id, held=self.lease_owner == owner_id
@@ -635,8 +643,13 @@ class FakeReactiveRegistry(NoOpRegistry):
         if held:
             self.lease_owner = None
         if self.lease_on_release is not None:
-            # The hook the exit-handshake tests use to land a wake-up
-            # exactly as the lease goes away.
+            # Fires on the release *attempt*, deliberately not only on a
+            # successful release: it models a wake-up landing in the
+            # release window, and the notifier is a third party whose
+            # timing does not depend on whether this release was still the
+            # holder's to make. Gating it on ``held`` would leave the
+            # lease-lost exit-handshake test asserting against a flag that
+            # can never be set.
             self.lease_on_release()
         return SchedulerLeaseResult(build_id=build_id, held=held)
 
@@ -4787,6 +4800,12 @@ class TestSchedulerLease:
         # for it.
         assert summary.successor_spawned == 0
         assert spawned == []
+        # And the exit release was refused rather than honoured: clearing
+        # the successor's lease on the way out is exactly what the owner
+        # check exists to prevent.
+        assert registry.lease_owner == "__successor__", (
+            "the lost tick's exit release cleared the successor's lease"
+        )
 
     async def test_a_lapsed_lease_is_re_taken_rather_than_abandoning_the_build(
         self,
