@@ -79,16 +79,16 @@ async def _clear(client: AsyncClient, *build_ids: str) -> None:
         await client.delete(f"/api/v1/builds/{build_id}/notify")
 
 
-async def _hold_lease(client: AsyncClient, build_id: str, ttl: int = 60) -> None:
+async def _hold_lease(client: AsyncClient, build_id: str, ttl: int = 60) -> str:
+    """Take the build's scheduler lease, as a tick does. Returns the owner."""
+    owner_id = str(uuid.uuid4())
     response = await client.post(
-        f"/api/v1/locks/__scheduler__:{build_id}/acquire",
-        json={
-            "owner_id": str(uuid.uuid4()),
-            "ttl_seconds": ttl,
-            "check_task_completion": False,
-        },
+        f"/api/v1/builds/{build_id}/scheduler-lease",
+        params={"owner_id": owner_id, "ttl_seconds": ttl},
     )
     assert response.status_code == 200, response.text
+    assert response.json()["held"] is True, response.text
+    return owner_id
 
 
 async def _candidates(client: AsyncClient, **params) -> list[dict]:
@@ -427,17 +427,18 @@ async def test_wake_candidates_skips_a_build_with_a_live_scheduler(
 async def test_wake_candidates_ignores_an_expired_scheduler_lease(
     client: AsyncClient, async_session: AsyncSession
 ):
-    from stardag_api.models import DistributedLock
+    from stardag_api.models import Build
 
     a, b = await _shared(client)
     await client.post(f"/api/v1/builds/{a}/tasks/shared/complete")
     await _hold_lease(client, b, ttl=60)
-    lock = (
-        await async_session.execute(
-            select(DistributedLock).where(DistributedLock.name == f"__scheduler__:{b}")
-        )
+    # Age the lease past its expiry. A tick whose container died leaves the
+    # column set, and treating that as a live scheduler would suppress
+    # wake-ups for exactly the build that most needs them.
+    build = (
+        await async_session.execute(select(Build).where(Build.id == uuid.UUID(b)))
     ).scalar_one()
-    lock.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    build.scheduler_lease_until = datetime.now(timezone.utc) - timedelta(seconds=1)
     await async_session.commit()
     assert [c["build_id"] for c in await _candidates(client)] == [b]
 
@@ -654,3 +655,124 @@ async def test_reading_the_flag_reports_no_scheduler_liveness(client: AsyncClien
 async def test_reading_the_flag_of_an_unknown_build_is_404(client: AsyncClient):
     response = await client.get(f"/api/v1/builds/{uuid.uuid4()}/notify")
     assert response.status_code == 404
+
+
+# --- The scheduler lease, on the build row (STA-17) ---------------------
+
+
+LEASE = "/api/v1/builds/{}/scheduler-lease"
+
+
+async def _lease(client: AsyncClient, method: str, build_id: str, **params) -> dict:
+    response = await client.request(method, LEASE.format(build_id), params=params)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+@pytest.mark.asyncio
+async def test_one_tick_holds_the_lease_and_the_next_is_refused(client: AsyncClient):
+    """The single-flight guarantee: at most one tick drives a build."""
+    build_id = await _build(client)
+
+    first = await _lease(client, "POST", build_id, owner_id="tick-1", ttl_seconds=60)
+    second = await _lease(client, "POST", build_id, owner_id="tick-2", ttl_seconds=60)
+
+    assert first["held"] is True
+    assert second["held"] is False
+    # The denial reports the current holder's expiry, so a caller learns how
+    # long the build is spoken for without a second read.
+    assert second["expires_at"] == first["expires_at"]
+
+
+@pytest.mark.asyncio
+async def test_a_lapsed_lease_is_taken_over(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """A tick whose container vanished releases nothing, and across
+    containers there is nothing to release it with. The takeover *is* the
+    healing mechanism."""
+    build_id = await _build(client)
+    await _lease(client, "POST", build_id, owner_id="dead-tick", ttl_seconds=60)
+    build = (
+        await async_session.execute(
+            select(Build).where(Build.id == uuid.UUID(build_id))
+        )
+    ).scalar_one()
+    build.scheduler_lease_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await async_session.commit()
+
+    taken = await _lease(client, "POST", build_id, owner_id="new-tick", ttl_seconds=60)
+
+    assert taken["held"] is True
+    # And the dead holder cannot renew its way back in.
+    assert (
+        await _lease(client, "PUT", build_id, owner_id="dead-tick", ttl_seconds=60)
+    )["held"] is False
+
+
+@pytest.mark.asyncio
+async def test_only_the_holder_can_renew_or_release(client: AsyncClient):
+    """Owner-checked, and that is what makes a slow tick safe: one whose
+    lease lapsed and was taken over must not extend or clear its
+    successor's."""
+    build_id = await _build(client)
+    await _lease(client, "POST", build_id, owner_id="holder", ttl_seconds=60)
+
+    assert (await _lease(client, "PUT", build_id, owner_id="impostor", ttl_seconds=60))[
+        "held"
+    ] is False
+    assert (await _lease(client, "DELETE", build_id, owner_id="impostor"))[
+        "held"
+    ] is False
+    # The real holder still has it.
+    assert (
+        await _lease(client, "POST", build_id, owner_id="somebody-else", ttl_seconds=60)
+    )["held"] is False
+
+    assert (await _lease(client, "DELETE", build_id, owner_id="holder"))["held"] is True
+    # Released: free for the next tick.
+    assert (await _lease(client, "POST", build_id, owner_id="next", ttl_seconds=60))[
+        "held"
+    ] is True
+
+
+@pytest.mark.asyncio
+async def test_renewing_extends_the_expiry(client: AsyncClient):
+    build_id = await _build(client)
+    first = await _lease(client, "POST", build_id, owner_id="t", ttl_seconds=10)
+    renewed = await _lease(client, "PUT", build_id, owner_id="t", ttl_seconds=600)
+
+    assert renewed["held"] is True
+    assert renewed["expires_at"] > first["expires_at"]
+
+
+@pytest.mark.asyncio
+async def test_a_held_lease_hides_the_build_from_wake_candidates(client: AsyncClient):
+    """The same column answers both questions now — one query, no second
+    table and no lock name assembled from a build id."""
+    a, b = await _shared(client)
+    await _lease(client, "POST", b, owner_id="tick-b", ttl_seconds=60)
+    await client.post(f"/api/v1/builds/{a}/tasks/shared/complete")
+
+    assert [c["build_id"] for c in await _candidates(client)] == []
+
+    await _lease(client, "DELETE", b, owner_id="tick-b")
+    assert [c["build_id"] for c in await _candidates(client)] == [b]
+
+
+@pytest.mark.asyncio
+async def test_lease_ttl_is_bounded(client: AsyncClient):
+    """A lease so short it lapses mid-pass would let a second tick in; one
+    long enough to outlive a person's patience holds a build hostage."""
+    build_id = await _build(client)
+
+    assert (
+        await client.post(
+            LEASE.format(build_id), params={"owner_id": "t", "ttl_seconds": 1}
+        )
+    ).status_code == 422
+    assert (
+        await client.post(
+            LEASE.format(build_id), params={"owner_id": "t", "ttl_seconds": 99999}
+        )
+    ).status_code == 422

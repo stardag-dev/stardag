@@ -282,6 +282,20 @@ class BuildInfo(StardagBaseModel):
     reactive_tick_kwargs: dict[str, Any] | None = None
 
 
+class SchedulerLeaseResult(StardagBaseModel):
+    """Outcome of acquiring, renewing or releasing a build's scheduler lease.
+
+    ``held`` is the whole answer: for an acquire it means "you may drive
+    this build", for a renew and a release "you still held it". A renew
+    answering False is how a tick whose lease lapsed learns it was taken
+    over — the honest response is to stop driving, not to keep going.
+    """
+
+    build_id: UUID | None = None
+    held: bool = False
+    expires_at: datetime | None = None
+
+
 class StartClaimResult(StardagBaseModel):
     """Outcome of a claiming task start (see ``task_start_claim_aio``).
 
@@ -944,6 +958,42 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of build_get_notify."""
         frontier = await self.build_get_frontier_aio(build_id)
         return BuildNotifyResult(build_id=build_id, needs_tick=frontier.needs_tick)
+
+    async def build_acquire_scheduler_lease_aio(
+        self, build_id: UUID, *, owner_id: str, ttl_seconds: int
+    ) -> SchedulerLeaseResult:
+        """Take the build's scheduler single-flight lease.
+
+        At most one tick drives a build at a time. ``held=False`` means
+        somebody else is, and this tick should no-op — safe because the
+        wake-up that spawned it was flagged *before* the spawn, so the
+        holder's own re-checks (its linger poll, then the exit handshake)
+        cover it.
+
+        Default: grant unconditionally. A backend with no notion of a lease
+        cannot arbitrate one, and the honest failure there is duplicate
+        ticks — wasteful, but idempotent, and task starts are arbitrated
+        separately by the execution claim — rather than a build that
+        nothing drives.
+        """
+        return SchedulerLeaseResult(build_id=build_id, held=True)
+
+    async def build_renew_scheduler_lease_aio(
+        self, build_id: UUID, *, owner_id: str, ttl_seconds: int
+    ) -> SchedulerLeaseResult:
+        """Extend the lease while a tick keeps driving the build.
+
+        ``held=False`` means the lease lapsed and was taken over, so this
+        tick no longer owns the build. Default: grant, per
+        ``build_acquire_scheduler_lease_aio``.
+        """
+        return SchedulerLeaseResult(build_id=build_id, held=True)
+
+    async def build_release_scheduler_lease_aio(
+        self, build_id: UUID, *, owner_id: str
+    ) -> SchedulerLeaseResult:
+        """Drop the lease, if this caller still holds it. Default: no-op."""
+        return SchedulerLeaseResult(build_id=build_id, held=True)
 
     def build_clear_notify(self, build_id: UUID) -> None:
         """Clear the build's scheduler wake-up flag. Default: no-op."""

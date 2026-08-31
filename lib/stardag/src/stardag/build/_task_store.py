@@ -81,9 +81,24 @@ class BuildTaskStore:
         with target.open("wb") as handle:
             handle.write(pickle.dumps(task))
 
+    async def save_task_aio(self, task: BaseTask) -> None:
+        # Async variant of save_task; same write-once semantics. Callers on
+        # an event loop must use this one: the sync path does blocking
+        # remote I/O (e.g. Modal's rate-limited volume API) directly on the
+        # loop, stalling every other coroutine for a network round-trip.
+        target = self._target(f"tasks/{task.id}.pkl")
+        if await target.exists_aio():
+            return
+        async with target.open_aio("wb") as handle:
+            await handle.write(pickle.dumps(task))
+
     def save_tasks(self, tasks: typing.Iterable[BaseTask]) -> None:
         for task in tasks:
             self.save_task(task)
+
+    async def save_tasks_aio(self, tasks: typing.Iterable[BaseTask]) -> None:
+        for task in tasks:
+            await self.save_task_aio(task)
 
     def load_task(self, task_id: UUID | str) -> BaseTask | None:
         """Load a task by id; None if not persisted.
@@ -97,13 +112,44 @@ class BuildTaskStore:
         """
         target = self._target(f"tasks/{task_id}.pkl")
         if not target.exists():
-            logger.debug(
-                f"Task {task_id} of build {self.build_id} is not in the "
-                f"build task store (expected when pickles are elided)."
-            )
+            self._log_miss(task_id)
             return None
         with target.open("rb") as handle:
-            task = pickle.loads(handle.read())
+            data = handle.read()
+        return self._deserialize(task_id, data)
+
+    async def load_task_aio(self, task_id: UUID | str) -> BaseTask | None:
+        # Async variant of load_task; same miss semantics (see its docstring
+        # and save_task_aio for why loop-based callers need this).
+        target = self._target(f"tasks/{task_id}.pkl")
+        if not await target.exists_aio():
+            self._log_miss(task_id)
+            return None
+        async with target.open_aio("rb") as handle:
+            data = await handle.read()
+        return self._deserialize(task_id, data)
+
+    def _log_miss(self, task_id: UUID | str) -> None:
+        logger.debug(
+            f"Task {task_id} of build {self.build_id} is not in the "
+            f"build task store (expected when pickles are elided)."
+        )
+
+    def _deserialize(self, task_id: UUID | str, data: bytes) -> BaseTask | None:
+        # None (never raise) on a bad entry: the store is a fallback, and the
+        # caller (`_reactive._load_task`) rehydrates from registry data on a
+        # miss — a stale pickle (e.g. from before a redeploy) or a corrupt one
+        # must route there too, not abort the tick.
+        try:
+            task = pickle.loads(data)
+        except Exception:
+            logger.warning(
+                f"Task store entry for {task_id} of build {self.build_id} "
+                f"could not be unpickled (stale after a redeploy, or corrupt); "
+                f"treating it as missing.",
+                exc_info=True,
+            )
+            return None
         if not isinstance(task, BaseTask):
             logger.error(
                 f"Task store entry for {task_id} of build {self.build_id} "

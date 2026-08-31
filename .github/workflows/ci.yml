@@ -24,6 +24,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # Needed by the uv-lock-check hook. The pyright hooks also shell out to
+      # uv, but they are skipped below, so this job had no uv until now.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:

@@ -43,6 +43,56 @@ def test_save_tasks_skips_already_persisted(
     assert store.load_task(b.id) is not None
 
 
+async def test_save_task_aio_is_idempotent(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    store = BuildTaskStore(uuid4())
+    task = SyncOnlyTask(name="ws")
+    await store.save_task_aio(task)
+    await store.save_task_aio(task)
+    loaded = await store.load_task_aio(task.id)
+    assert loaded is not None
+    assert loaded.id == task.id
+
+
+async def test_sync_and_aio_paths_share_the_store(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    # The aio variants exist so loop-based callers (the reactive tick) avoid
+    # blocking I/O on the event loop — they must read/write the very same
+    # entries as the sync path used by the trigger and workers.
+    store = BuildTaskStore(uuid4())
+    a, b = SyncOnlyTask(name="a"), SyncOnlyTask(name="b")
+    store.save_task(a)
+    await store.save_tasks_aio([a, b])  # write-once: overlap must not fail
+    loaded_a = await store.load_task_aio(a.id)
+    assert loaded_a is not None and loaded_a.id == a.id
+    loaded_b = store.load_task(b.id)
+    assert loaded_b is not None and loaded_b.id == b.id
+
+
+async def test_load_task_aio_missing_returns_none(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    store = BuildTaskStore(uuid4())
+    assert await store.load_task_aio(uuid4()) is None
+
+
+async def test_corrupt_pickle_reads_as_a_miss(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    # A stale (pre-redeploy) or corrupt entry must load as None — the same
+    # as a miss — so `_reactive._load_task` falls back to registry
+    # rehydration instead of the tick aborting on the raise.
+    store = BuildTaskStore(uuid4())
+    task = SyncOnlyTask(name="corrupt")
+    target = store._target(f"tasks/{task.id}.pkl")
+    with target.open("wb") as handle:
+        handle.write(b"not a pickle")
+    assert store.load_task(task.id) is None
+    assert await store.load_task_aio(task.id) is None
+
+
 def test_load_missing_task_returns_none(
     default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
 ):

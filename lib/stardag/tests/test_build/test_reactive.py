@@ -35,11 +35,6 @@ from stardag.build import (
     discover_and_register_aio,
     run_tick_aio,
 )
-from stardag.build._base import (
-    GlobalConcurrencyLockManager,
-    LockAcquisitionResult,
-    LockAcquisitionStatus,
-)
 from stardag.build import _reactive as reactive_module
 from stardag.build._reactive import (
     _RETRYABLE_STATUSES,
@@ -48,6 +43,7 @@ from stardag.build._reactive import (
 )
 from stardag.exceptions import NotFoundError
 from stardag.registry import (
+    SchedulerLeaseResult,
     BuildFrontier,
     BuildNotifyResult,
     FrontierExternalBlocker,
@@ -96,6 +92,20 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.refs: dict[str, tuple[str | None, str | None]] = {}
         self.start_metadata: dict[str, dict | None] = {}
         self.needs_tick = False
+        # Scheduler lease state (see build_acquire_scheduler_lease_aio).
+        self.lease_acquired = True
+        self.lease_owner: str | None = None
+        # Our own lease expired between renewals, with nobody having taken
+        # it: renew refuses, re-acquire succeeds. The SDK heals and carries
+        # on.
+        self.lease_lapsed = False
+        # A successor holds the lease: renew refuses and so does the
+        # re-acquire, so the tick must stop. Applies from the *second*
+        # acquire onwards, since the tick has to get the lease before it
+        # can lose it.
+        self.lease_stolen = False
+        self._lease_acquires = 0
+        self.lease_on_release: typing.Callable[[], None] | None = None
         self.build_status = "running"
         self.build_error_message: str | None = None
         self.calls: list[tuple[str, str | None]] = []
@@ -589,6 +599,60 @@ class FakeReactiveRegistry(NoOpRegistry):
         # exactly what the linger poll's cost depends on.
         return BuildNotifyResult(build_id=build_id, needs_tick=self.needs_tick)
 
+    # --- scheduler lease (STA-17: on the build row, not a lock table) ---
+
+    async def build_acquire_scheduler_lease_aio(
+        self, build_id, *, owner_id, ttl_seconds
+    ):
+        # A lapsed lease is re-acquirable — that takeover *is* the healing
+        # mechanism, and it is what the SDK falls back on when a renewal is
+        # refused. A *stolen* one is not: somebody else holds it.
+        self._lease_acquires += 1
+        if self.lease_stolen and self._lease_acquires > 1:
+            self.lease_owner = "__successor__"
+            return SchedulerLeaseResult(build_id=build_id, held=False)
+        self.lease_lapsed = False
+        self.lease_owner = owner_id if self.lease_acquired else self.lease_owner
+        return SchedulerLeaseResult(build_id=build_id, held=self.lease_acquired)
+
+    async def build_renew_scheduler_lease_aio(self, build_id, *, owner_id, ttl_seconds):
+        # The server refuses a renewal for two different reasons, and the
+        # SDK responds to them differently, so both are modelled.
+        #
+        # ``lease_lapsed``: our own lease expired between renewals and
+        # nobody took it, so the owner column still says us. The SDK
+        # re-acquires and carries on.
+        #
+        # ``lease_stolen``: somebody else holds it, so the re-acquire fails
+        # too and the tick must stop.
+        if self.lease_stolen:
+            # The theft is visible in the owner column, exactly as on the
+            # server: the successor's acquire replaced our id, so every
+            # later owner-checked call by us is refused — including the
+            # exit release, which must not clear the successor's lease.
+            self.lease_owner = "__successor__"
+            return SchedulerLeaseResult(build_id=build_id, held=False)
+        if self.lease_lapsed:
+            return SchedulerLeaseResult(build_id=build_id, held=False)
+        return SchedulerLeaseResult(
+            build_id=build_id, held=self.lease_owner == owner_id
+        )
+
+    async def build_release_scheduler_lease_aio(self, build_id, *, owner_id):
+        held = self.lease_owner == owner_id
+        if held:
+            self.lease_owner = None
+        if self.lease_on_release is not None:
+            # Fires on the release *attempt*, deliberately not only on a
+            # successful release: it models a wake-up landing in the
+            # release window, and the notifier is a third party whose
+            # timing does not depend on whether this release was still the
+            # holder's to make. Gating it on ``held`` would leave the
+            # lease-lost exit-handshake test asserting against a flag that
+            # can never be set.
+            self.lease_on_release()
+        return SchedulerLeaseResult(build_id=build_id, held=held)
+
     async def build_get_frontier_aio(self, build_id) -> BuildFrontier:
         if self.frontier_error is not None:
             raise self.frontier_error
@@ -694,58 +758,6 @@ class FakeReactiveRegistry(NoOpRegistry):
         )
 
 
-class FakeLease:
-    def __init__(
-        self,
-        acquired: bool,
-        on_release: typing.Callable[[], None] | None = None,
-    ):
-        self.result = LockAcquisitionResult(
-            status=(
-                LockAcquisitionStatus.ACQUIRED
-                if acquired
-                else LockAcquisitionStatus.HELD_BY_OTHER
-            ),
-            acquired=acquired,
-        )
-        self._on_release = on_release
-
-    def mark_completed(self) -> None:
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        # The release, which is exactly where the exit handshake's window
-        # is: ``on_release`` lets a test act at that instant (see
-        # ``TestExitHandshake``).
-        if self._on_release is not None and self.result.acquired:
-            self._on_release()
-        return False
-
-
-class FakeLockManager:
-    def __init__(
-        self,
-        acquired: bool = True,
-        on_release: typing.Callable[[], None] | None = None,
-    ):
-        self.acquired = acquired
-        self.on_release = on_release
-        self.lock_names: list[str] = []
-
-    def lock(self, task_id: str) -> FakeLease:
-        self.lock_names.append(task_id)
-        return FakeLease(self.acquired, self.on_release)
-
-    async def acquire(self, task_id: str) -> LockAcquisitionResult:
-        raise NotImplementedError
-
-    async def release(self, task_id: str, task_completed: bool = False) -> bool:
-        return True
-
-
 class FakeTickExecutor(TaskExecutorABC):
     """Detached executor for ticks: spawn only (results never awaited)."""
 
@@ -813,6 +825,12 @@ class InMemoryTaskStore(BuildTaskStore):
     def load_task(self, task_id):
         return self._tasks.get(str(task_id))
 
+    async def save_task_aio(self, task: BaseTask) -> None:
+        self.save_task(task)
+
+    async def load_task_aio(self, task_id):
+        return self.load_task(task_id)
+
 
 # =============================================================================
 # Helpers
@@ -830,17 +848,6 @@ def _chain(*names: str) -> list[BaseTask]:
     return tasks
 
 
-def _lock_manager(
-    acquired: bool = True,
-    on_release: typing.Callable[[], None] | None = None,
-) -> "GlobalConcurrencyLockManager":
-    # The fakes satisfy the runtime contract; cast for the type checker
-    # (LockHandle is structurally stricter than the tests need).
-    return typing.cast(
-        "GlobalConcurrencyLockManager", FakeLockManager(acquired, on_release)
-    )
-
-
 def _setup(
     tasks: list[BaseTask],
     *,
@@ -850,7 +857,6 @@ def _setup(
     on_release: typing.Callable[[], None] | None = None,
 ) -> tuple[
     FakeReactiveRegistry,
-    "GlobalConcurrencyLockManager",
     FakeTickExecutor,
     InMemoryTaskStore,
 ]:
@@ -858,6 +864,11 @@ def _setup(
     registry = FakeReactiveRegistry(
         root_task_ids=[str(root.id)], auto_complete=auto_complete
     )
+    # The scheduler lease is registry state now, not a separate lock
+    # manager, so the knobs that used to configure the fake lock manager
+    # configure the fake registry.
+    registry.lease_acquired = lease_acquired
+    registry.lease_on_release = on_release
     for task in tasks:
         registry.add_task(
             str(task.id),
@@ -867,7 +878,6 @@ def _setup(
     store.save_tasks(tasks)
     return (
         registry,
-        _lock_manager(lease_acquired, on_release),
         executor or FakeTickExecutor(),
         store,
     )
@@ -885,13 +895,12 @@ class TestTickHappyPath:
         """Instant workers: one tick drives dep → root → BUILD_COMPLETED via
         linger wake-ups, spawning in dependency order."""
         dep, root = _chain("tick-dep", "tick-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -906,13 +915,12 @@ class TestTickHappyPath:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         dep, root = _chain("lease-dep", "lease-root")
-        registry, locks, executor, store = _setup([dep, root], lease_acquired=False)
+        registry, executor, store = _setup([dep, root], lease_acquired=False)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -925,7 +933,7 @@ class TestTickHappyPath:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         (root,) = _chain("not-reactive-root")
-        registry, locks, executor, store = _setup([root])
+        registry, executor, store = _setup([root])
         # No reactive_app_name on the frontier → not a reactively-scheduled
         # build; the tick must not act on it.
         registry.reactive_app_name = None
@@ -934,7 +942,6 @@ class TestTickHappyPath:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -954,7 +961,7 @@ class TestRunningTaskResolution:
         executor = FakeTickExecutor(
             statuses={"fc-live": DetachedExecutionStatus.RUNNING}
         )
-        registry, locks, executor, store = _setup(
+        registry, executor, store = _setup(
             [root], auto_complete=False, executor=executor
         )
         registry.add_task(
@@ -965,7 +972,6 @@ class TestRunningTaskResolution:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -982,7 +988,7 @@ class TestRunningTaskResolution:
         finishes."""
         (root,) = _chain("heal-root")
         root.run()  # target now exists
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id), status="running", executor="fake", executor_ref="fc-gone"
         )
@@ -991,7 +997,6 @@ class TestRunningTaskResolution:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1009,9 +1014,7 @@ class TestRunningTaskResolution:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, locks, _, store = _setup(
-            [root], auto_complete=False, executor=executor
-        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -1027,7 +1030,6 @@ class TestRunningTaskResolution:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1042,7 +1044,7 @@ class TestRunningTaskResolution:
     ):
         """UNKNOWN probe status → conservatively leave (no duplicate spawn)."""
         (root,) = _chain("unknown-ref-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
@@ -1054,7 +1056,6 @@ class TestRunningTaskResolution:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1068,7 +1069,7 @@ class TestTerminalHandling:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         (root,) = _chain("cancelled-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id), status="running", executor="fake", executor_ref="fc-run"
         )
@@ -1078,7 +1079,6 @@ class TestTerminalHandling:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1094,14 +1094,13 @@ class TestTerminalHandling:
         """CONTINUE mode with a failed upstream: nothing runnable/running →
         the tick fails the build rather than idling forever."""
         dep, root = _chain("blocked-dep", "blocked-root")
-        registry, locks, executor, store = _setup([dep, root], auto_complete=False)
+        registry, executor, store = _setup([dep, root], auto_complete=False)
         registry.add_task(str(dep.id), status="failed")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
@@ -1119,7 +1118,7 @@ class TestTerminalHandling:
     ):
         dep, root = _chain("ff-dep", "ff-root")
         other = SyncOnlyTask(name="ff-other")
-        registry, locks, executor, store = _setup([dep, root], auto_complete=False)
+        registry, executor, store = _setup([dep, root], auto_complete=False)
         store.save_task(other)
         registry.add_task(str(dep.id), status="failed")
         registry.add_task(
@@ -1131,7 +1130,6 @@ class TestTerminalHandling:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,  # FAIL_FAST default
         )
@@ -1199,14 +1197,13 @@ class TestMissingTaskStoreEntry:
         rather than leaving it in the frontier forever, where endless
         watchdog ticks would do nothing."""
         (root,) = _chain("missing-pickle-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         store._tasks.clear()  # simulate a lost/never-written pickle
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1226,7 +1223,7 @@ class TestRetryPath:
         to pending by discovery (retry_failed=True) and the re-triggered
         build runs to completion instead of FAIL_FASTing on tick 1."""
         (root,) = _chain("retry-root")
-        registry, locks, executor, store = _setup([root])
+        registry, executor, store = _setup([root])
         registry.add_task(str(root.id), status="failed")
 
         # What the reactive trigger does on (re-)trigger:
@@ -1240,7 +1237,6 @@ class TestRetryPath:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1255,7 +1251,7 @@ class TestRetryPath:
         permanently unschedulable, since the re-trigger's retry skipped it.
         It is now reset like any other non-completed status."""
         (root,) = _chain("suspended-retry-root")
-        registry, locks, executor, store = _setup([root])
+        registry, executor, store = _setup([root])
         registry.add_task(str(root.id), status="suspended")
 
         result = await discover_and_register_aio(
@@ -1269,7 +1265,6 @@ class TestRetryPath:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1283,7 +1278,7 @@ class TestRetryPath:
         retry_failed=False, so widening the retryable set cannot make a
         suspending worker reset its own task."""
         (root,) = _chain("suspended-worker-root")
-        registry, _, _, _ = _setup([root], auto_complete=False)
+        registry, _, _ = _setup([root], auto_complete=False)
         registry.add_task(str(root.id), status="suspended")
 
         result = await discover_and_register_aio(registry, uuid4(), root)
@@ -1298,14 +1293,13 @@ class TestRetryPath:
         """Control: without the retry, the failed status poisons the build
         (the pre-fix behavior the stack review flagged)."""
         (root,) = _chain("poison-root")
-        registry, locks, executor, store = _setup([root])
+        registry, executor, store = _setup([root])
         registry.add_task(str(root.id), status="failed")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1321,7 +1315,7 @@ class TestAddedRootsTerminalDetection:
         re-triggered subtrees)."""
         (r1,) = _chain("roots-r1")
         r2 = SyncOnlyTask(name="roots-r2")
-        registry, locks, executor, store = _setup([r1])
+        registry, executor, store = _setup([r1])
         store.save_task(r2)
         # Original root completed already; new root appended (as the
         # re-trigger path does server-side) but still pending.
@@ -1333,7 +1327,6 @@ class TestAddedRootsTerminalDetection:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1350,9 +1343,7 @@ class TestCancelDynamicDepWindow:
         → not actionable) is still cancelled on build cancellation."""
         blocker = SyncOnlyTask(name="cxl-blocker")
         runner = SyncOnlyTask(name="cxl-runner")
-        registry, locks, executor, store = _setup(
-            [blocker, runner], auto_complete=False
-        )
+        registry, executor, store = _setup([blocker, runner], auto_complete=False)
         registry.add_task(
             str(runner.id),
             status="running",
@@ -1366,7 +1357,6 @@ class TestCancelDynamicDepWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1385,14 +1375,13 @@ class TestConcurrencyLimits:
         a = SyncOnlyTask(name="lim-a")
         b = SyncOnlyTask(name="lim-b")
         root = SyncOnlyTask(name="lim-root", deps=(a, b))
-        registry, locks, executor, store = _setup([a, b, root], auto_complete=False)
+        registry, executor, store = _setup([a, b, root], auto_complete=False)
         registry.limits["one-slot"] = 1
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
@@ -1419,14 +1408,13 @@ class TestConcurrencyLimits:
         a = SyncOnlyTask(name="rel-a")
         b = SyncOnlyTask(name="rel-b")
         root = SyncOnlyTask(name="rel-root", deps=(a, b))
-        registry, locks, executor, store = _setup([a, b, root])
+        registry, executor, store = _setup([a, b, root])
         registry.limits["one-slot"] = 1
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.5,
@@ -1447,13 +1435,12 @@ class TestConcurrencyLimits:
         exactly-once arbitration), but carries no limit keys — so nothing
         is enforced and no slot is held."""
         (root,) = _chain("nolim-root")
-        registry, locks, executor, store = _setup([root])
+        registry, executor, store = _setup([root])
 
         await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1474,7 +1461,7 @@ class TestRunningWithoutRef:
         # Default: at the default 2-attempt budget, so a lapsed claim ends
         # as a plain failure. Pass a lower count to exercise the retry.
         (root,) = _chain(f"noref-root-{expires_at}-{attempt_count}")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
@@ -1486,7 +1473,6 @@ class TestRunningWithoutRef:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1560,14 +1546,13 @@ class TestDerivedClaimTtl:
         from stardag.build._reactive import _CLAIM_TTL_GRACE_SECONDS
 
         (root,) = _chain("ttl-root")
-        registry, locks, _, store = _setup([root])
+        registry, _, store = _setup([root])
         executor = FakeTickExecutor(timeout_seconds=3600.0)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1583,13 +1568,12 @@ class TestDerivedClaimTtl:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         (root,) = _chain("ttl-none-root")
-        registry, locks, executor, store = _setup([root])
+        registry, executor, store = _setup([root])
 
         await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,  # no timeout
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1641,14 +1625,13 @@ class TestSkipBlockedOnFailure:
         bad = SyncOnlyTask(name="skip-bad")
         mid = SyncOnlyTask(name="skip-mid", deps=(bad,))
         root = SyncOnlyTask(name="skip-root", deps=(mid,))
-        registry, locks, executor, store = _setup([bad, mid, root], auto_complete=False)
+        registry, executor, store = _setup([bad, mid, root], auto_complete=False)
         registry.add_task(str(bad.id), status="failed")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,  # FAIL_FAST default
         )
@@ -1669,7 +1652,7 @@ class TestSkipBlockedOnFailure:
         long_running = SyncOnlyTask(name="cb-running")
         downstream = SyncOnlyTask(name="cb-downstream", deps=(long_running,))
         root = SyncOnlyTask(name="cb-root", deps=(bad, downstream))
-        registry, locks, executor, store = _setup(
+        registry, executor, store = _setup(
             [bad, long_running, downstream, root], auto_complete=False
         )
         registry.add_task(str(bad.id), status="failed")
@@ -1685,7 +1668,6 @@ class TestSkipBlockedOnFailure:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,  # FAIL_FAST default
         )
@@ -1700,14 +1682,13 @@ class TestSkipBlockedOnFailure:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         dep, root = _chain("skip-cont-dep", "skip-cont-root")
-        registry, locks, executor, store = _setup([dep, root], auto_complete=False)
+        registry, executor, store = _setup([dep, root], auto_complete=False)
         registry.add_task(str(dep.id), status="failed")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
@@ -1776,7 +1757,6 @@ class TestRehydrationFallback:
             uuid4(),
             registry=registry,
             task_executor=(executor := FakeTickExecutor()),
-            lock_manager=_lock_manager(),
             task_store=store,
             config=FAST_TICK,
         )
@@ -1793,7 +1773,7 @@ class TestRehydrationFallback:
         """Without rehydratable data either, the stall-prevention failure
         path is preserved."""
         (root,) = _chain("no-rehydrate-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         store._tasks.clear()
         # no metadata_bodies entry -> fallback raises -> task failed
 
@@ -1801,7 +1781,6 @@ class TestRehydrationFallback:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1835,7 +1814,7 @@ class TestRehydrationDiagnostics:
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
     ):
         (root,) = _chain("diagnostic-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         store._tasks.clear()  # neither a pickle nor rehydratable metadata
 
         with caplog.at_level("WARNING"):
@@ -1843,7 +1822,6 @@ class TestRehydrationDiagnostics:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=FAST_TICK,
             )
@@ -1860,7 +1838,7 @@ class TestRehydrationDiagnostics:
 
         _reset_import_state_for_tests()
         (root,) = _chain("diagnostic-clean-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         store._tasks.clear()
 
         with caplog.at_level("WARNING"):
@@ -1868,7 +1846,6 @@ class TestRehydrationDiagnostics:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=FAST_TICK,
             )
@@ -1898,13 +1875,12 @@ class TestExecutorMetadataRecording:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         (root,) = _chain("meta-root")
-        registry, locks, _, store = _setup([root])
+        registry, _, store = _setup([root])
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=self.MetadataTickExecutor(),
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -1973,7 +1949,6 @@ class TestAcquiringStartExecutorMetadata:
             uuid4(),
             registry=registry,
             task_executor=self.PreSpawnMetadataExecutor(),
-            lock_manager=_lock_manager(),
             task_store=store,
             config=config,
         )
@@ -2058,7 +2033,6 @@ class TestTickClaims:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=_lock_manager(),
             task_store=store,
             config=FAST_TICK,
         )
@@ -2094,7 +2068,6 @@ class TestTickClaims:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=_lock_manager(),
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.5,
@@ -2136,7 +2109,7 @@ class TestExternalBlockers:
     ):
         """A build whose only task is gated by an upstream it does not own."""
         (root,) = _chain("ext-blocked-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_blocking_task(
             self.BLOCKER_ID,
             blocks={str(root.id)},
@@ -2160,7 +2133,7 @@ class TestExternalBlockers:
             namespace="pipelines",
             name="Ingest",
         )
-        return root, registry, locks, executor, store
+        return root, registry, executor, store
 
     async def test_running_blocker_in_another_build_waits_instead_of_failing(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -2170,13 +2143,12 @@ class TestExternalBlockers:
         executing. That upstream's completion will unblock it, so the tick
         must wait (as it does for a concurrency-limit denial) rather than
         fail the build."""
-        _, registry, locks, executor, store = self._blocked_build()
+        _, registry, executor, store = self._blocked_build()
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2193,7 +2165,7 @@ class TestExternalBlockers:
     ):
         """The claim's expiry is in the future: somebody is executing it and
         the server still honours their claim. Wait — no lookup, no timer."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_expires_in_seconds=3600
         )
 
@@ -2201,7 +2173,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2220,7 +2191,7 @@ class TestExternalBlockers:
         — the server will hand it to the next claimant. This build is not
         that claimant, so it still fails, but now with certainty, naming the
         blocking task and the build that owns it."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_age_seconds=60 * 60 * 24,
             blocker_expires_in_seconds=-60,  # lapsed a minute ago
         )
@@ -2229,7 +2200,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2265,7 +2235,7 @@ class TestExternalBlockers:
         evidence of death: waiting keeps a live blocker from failing a
         healthy build, and the log line says the wait cannot be shown to
         end. Deliberate; see _classify_external_blockers."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_age_seconds=60 * 60 * 24 * 365,  # a year, and still waited on
             blocker_expires_in_seconds=None,
         )
@@ -2274,7 +2244,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2293,7 +2262,7 @@ class TestExternalBlockers:
         """A live owning build proves nothing about one of its claims, and a
         terminal one does not release them — so for a RUNNING blocker the
         owner's status is not consulted in either direction."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_expires_in_seconds=3600,
             owner_build_status=owner_build_status,
         )
@@ -2302,7 +2271,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2320,7 +2288,7 @@ class TestExternalBlockers:
         Once that build has gone terminal, nobody is, and waiting would be
         waiting forever. Fail now, naming the task, the build that owns it and
         the one remedy there is."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status=blocker_status, owner_build_status="completed"
         )
 
@@ -2328,7 +2296,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2356,7 +2323,7 @@ class TestExternalBlockers:
         failure, the very class of bug being fixed. A build the server still
         reports as pending counts as live too: it may yet start, and the
         staleness bound is what keeps that from being an unbounded wait."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status="pending", owner_build_status=owner_build_status
         )
 
@@ -2364,7 +2331,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2385,7 +2351,7 @@ class TestExternalBlockers:
         expiry with it and there is nothing to read — the owning-build lookup
         is not kept out of caution, it is the only evidence that exists. The
         abandoned-SUSPENDED wedge is real and still has to be decided."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status=blocker_status,
             blocker_age_seconds=60 * 60 * 24 * 30,  # age is not the question
             owner_build_status="running",
@@ -2395,7 +2361,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2411,16 +2376,13 @@ class TestExternalBlockers:
         denormalisation), so no status-moving event was ever recorded against
         it — there is no evidence anyone intends to run it, and no build to
         ask. Fail, with the remediation intact."""
-        _, registry, locks, executor, store = self._blocked_build(
-            blocker_status="pending"
-        )
+        _, registry, executor, store = self._blocked_build(blocker_status="pending")
         registry.status_build_id[self.BLOCKER_ID] = None
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2440,7 +2402,7 @@ class TestExternalBlockers:
         """An unresolvable owner (deleted build, unreachable registry) is not
         evidence of life: the build fails with a precise message rather than
         the lookup error escaping the tick."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status="pending", owner_build_known=False
         )
 
@@ -2448,7 +2410,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2463,7 +2424,7 @@ class TestExternalBlockers:
         """Same treatment for a server (or custom registry) that doesn't
         report the derived build status: the field defaults to None, unknown
         is not evidence of life, and the message says so."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status="pending", owner_build_status=None
         )
 
@@ -2471,7 +2432,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2485,7 +2445,7 @@ class TestExternalBlockers:
         """A wide DAG stalled behind one build yields one blocker entry per
         blocked edge, all naming the same owner — that must cost one request,
         not one per entry."""
-        root, registry, locks, executor, store = self._blocked_build(
+        root, registry, executor, store = self._blocked_build(
             blocker_status="pending", owner_build_id=(owner := uuid4())
         )
         sibling = SyncOnlyTask(name="ext-memo-sibling")
@@ -2505,7 +2465,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(linger_seconds=0.0, poll_interval_seconds=0.01),
         )
@@ -2530,7 +2489,7 @@ class TestExternalBlockers:
         Nothing owns the task now: no claim, no live execution. It is in B's
         plan, so B resets it and runs it.
         """
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status="cancelled", in_build=True
         )
 
@@ -2538,7 +2497,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
@@ -2565,7 +2523,7 @@ class TestExternalBlockers:
         hit a row that is already PENDING, so they fail and log, and
         ``in_build_blockers_reset`` would count edges rather than tasks.
         """
-        root, registry, locks, executor, store = self._blocked_build(
+        root, registry, executor, store = self._blocked_build(
             blocker_status="cancelled", in_build=True
         )
         # A second task of this build gated by the *same* blocker.
@@ -2578,7 +2536,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
@@ -2607,7 +2564,7 @@ class TestExternalBlockers:
         retries bounds this one too, and the build fails once it is spent —
         which is the honest outcome, since nothing will move the task.
         """
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status="cancelled", in_build=True, blocker_attempts=5
         )
 
@@ -2615,7 +2572,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
@@ -2650,7 +2606,7 @@ class TestExternalBlockers:
         Budget deliberately intact (attempts 0 of 2): the point is the status,
         not an exhausted retry allowance.
         """
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status=blocker_status, in_build=True, blocker_attempts=0
         )
 
@@ -2658,7 +2614,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
@@ -2695,7 +2650,7 @@ class TestExternalBlockers:
         suspended task with every upstream complete is simply schedulable, and
         that is not the state S2 is about.
         """
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status="suspended",
             in_build=True,
             owner_build_id=(owner := uuid4()),
@@ -2714,7 +2669,7 @@ class TestExternalBlockers:
             namespace="pipelines",
             name="Child",
         )
-        return registry, locks, executor, store
+        return registry, executor, store
 
     async def test_suspended_blocker_in_this_builds_plan_is_waited_on(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -2731,7 +2686,7 @@ class TestExternalBlockers:
         progresses the children, and A stalling on one of them stalls on a
         RUNNING task whose claim expires.
         """
-        registry, locks, executor, store = self._suspended_shared_task(
+        registry, executor, store = self._suspended_shared_task(
             owner_build_status="running", child_claim_lapsed=False
         )
 
@@ -2739,7 +2694,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
@@ -2769,7 +2723,7 @@ class TestExternalBlockers:
         child, the owner's status for the parent — and the build fails naming
         them instead of waiting forever. A re-trigger resets the whole chain.
         """
-        registry, locks, executor, store = self._suspended_shared_task(
+        registry, executor, store = self._suspended_shared_task(
             owner_build_status="failed", child_claim_lapsed=True
         )
 
@@ -2777,7 +2731,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
@@ -2799,7 +2752,7 @@ class TestExternalBlockers:
     ):
         """Not every in-plan blocker is recoverable. One in a status no
         retry moves is named and the build fails, rather than idling."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status="unregistered", in_build=True
         )
 
@@ -2807,7 +2760,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
@@ -2830,7 +2782,7 @@ class TestExternalBlockers:
     ):
         """One blocker nothing will ever run means the build cannot complete,
         whatever else it is also waiting on."""
-        root, registry, locks, executor, store = self._blocked_build()
+        root, registry, executor, store = self._blocked_build()
         registry.add_blocking_task(
             "dead-blocker",
             blocks={str(root.id)},
@@ -2845,7 +2797,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2864,7 +2815,7 @@ class TestExternalBlockers:
     ):
         """The server caps its blocker list; the failure must not read as an
         exhaustive account of what is holding the build back."""
-        _, registry, locks, executor, store = self._blocked_build(
+        _, registry, executor, store = self._blocked_build(
             blocker_status="suspended", owner_build_status="failed"
         )
         registry.blocked_by_external_truncated = True
@@ -2873,7 +2824,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2887,14 +2837,13 @@ class TestExternalBlockers:
         """A server predating blocked_by_external leaves the fields at their
         defaults, and terminal detection degrades to the pre-fix failure —
         the bug is unfixable client-side there, but nothing regresses."""
-        _, registry, locks, executor, store = self._blocked_build()
+        _, registry, executor, store = self._blocked_build()
         registry.serves_blocked_by_external = False
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2913,13 +2862,12 @@ class TestExternalBlockers:
         """The frontier reports blockers only while a build looks stalled, so
         a build that runs to completion records none."""
         dep, root = _chain("ext-healthy-dep", "ext-healthy-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -2933,7 +2881,7 @@ class TestExternalBlockers:
         """End of the wait: once the owning build completes the blocker (and
         wakes this scheduler), the same lingering tick schedules the task it
         would previously have failed the build over."""
-        root, registry, locks, executor, store = self._blocked_build()
+        root, registry, executor, store = self._blocked_build()
         registry.auto_complete = True
 
         async def complete_blocker_soon() -> None:
@@ -2946,7 +2894,6 @@ class TestExternalBlockers:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(linger_seconds=1.0, poll_interval_seconds=0.01),
         )
@@ -2976,7 +2923,6 @@ class TestTickSummaryReporting:
     async def _run(
         self,
         registry: FakeReactiveRegistry,
-        locks,
         executor,
         store,
         config: TickConfig | None = None,
@@ -2985,7 +2931,6 @@ class TestTickSummaryReporting:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=config or FAST_TICK,
         )
@@ -2994,9 +2939,9 @@ class TestTickSummaryReporting:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         dep, root = _chain("report-dep", "report-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
 
-        summary = await self._run(registry, locks, executor, store)
+        summary = await self._run(registry, executor, store)
 
         assert summary.outcome == "terminal"
         assert len(registry.reported_tick_summaries) == 1
@@ -3013,14 +2958,14 @@ class TestTickSummaryReporting:
     ):
         """A tick that found nothing to do still says so."""
         (task,) = _chain("linger-only")
-        registry, locks, executor, store = _setup([task], auto_complete=False)
+        registry, executor, store = _setup([task], auto_complete=False)
         # Nothing actionable and something running -> not terminal, so the
         # tick lingers and exits on its deadline.
         registry.statuses[str(task.id)] = "running"
         registry.refs[str(task.id)] = ("fake", "ref-live")
         executor.probe_statuses["ref-live"] = DetachedExecutionStatus.RUNNING
 
-        summary = await self._run(registry, locks, executor, store)
+        summary = await self._run(registry, executor, store)
 
         assert summary.outcome == "lingered_out"
         assert [s["outcome"] for s in registry.reported_tick_summaries] == [
@@ -3032,9 +2977,9 @@ class TestTickSummaryReporting:
     ):
         """Contention is signal: many of these means ticks are piling up."""
         dep, root = _chain("held-dep", "held-root")
-        registry, locks, executor, store = _setup([dep, root], lease_acquired=False)
+        registry, executor, store = _setup([dep, root], lease_acquired=False)
 
-        summary = await self._run(registry, locks, executor, store)
+        summary = await self._run(registry, executor, store)
 
         assert summary.outcome == "lease_held"
         assert [s["outcome"] for s in registry.reported_tick_summaries] == [
@@ -3046,10 +2991,10 @@ class TestTickSummaryReporting:
     ):
         """A stray tick on a non-reactive build learnt nothing worth keeping."""
         dep, root = _chain("stray-dep", "stray-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
         registry.reactive_app_name = None
 
-        summary = await self._run(registry, locks, executor, store)
+        summary = await self._run(registry, executor, store)
 
         assert summary.outcome == "not_reactive"
         assert registry.reported_tick_summaries == []
@@ -3058,11 +3003,10 @@ class TestTickSummaryReporting:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         dep, root = _chain("off-dep", "off-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
 
         summary = await self._run(
             registry,
-            locks,
             executor,
             store,
             config=TickConfig(
@@ -3080,10 +3024,10 @@ class TestTickSummaryReporting:
     ):
         """The contract: a broken registry must not fail or alter a tick."""
         dep, root = _chain("raise-dep", "raise-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
         registry.tick_summary_error = RuntimeError("registry exploded")
 
-        summary = await self._run(registry, locks, executor, store)
+        summary = await self._run(registry, executor, store)
 
         assert summary.outcome == "terminal"
         assert summary.terminal_status == "completed"
@@ -3097,21 +3041,21 @@ class TestTickSummaryReporting:
     ):
         """An older server 404s the route; don't pay for it every tick."""
         dep, root = _chain("route-dep", "route-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
         # FastAPI's generic missing-route body — version skew, not an error.
         registry.tick_summary_error = NotFoundError(
             "Report tick summary: resource not found", detail="Not Found"
         )
 
-        summary = await self._run(registry, locks, executor, store)
+        summary = await self._run(registry, executor, store)
         assert summary.outcome == "terminal"
         assert len(registry.reported_tick_summaries) == 1
         assert reactive_module._tick_summary_route_missing is True
 
         # Second tick on a fresh build: the latch keeps it from re-trying.
         dep2, root2 = _chain("route-dep-2", "route-root-2")
-        registry2, locks2, executor2, store2 = _setup([dep2, root2])
-        summary2 = await self._run(registry2, locks2, executor2, store2)
+        registry2, executor2, store2 = _setup([dep2, root2])
+        summary2 = await self._run(registry2, executor2, store2)
         assert summary2.outcome == "terminal"
         assert registry2.reported_tick_summaries == []
 
@@ -3120,12 +3064,12 @@ class TestTickSummaryReporting:
     ):
         """A build that vanished is not a reason to stop reporting others."""
         dep, root = _chain("gone-dep", "gone-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
         registry.tick_summary_error = NotFoundError(
             "Report tick summary: resource not found", detail="Build not found"
         )
 
-        summary = await self._run(registry, locks, executor, store)
+        summary = await self._run(registry, executor, store)
 
         assert summary.outcome == "terminal"
         assert reactive_module._tick_summary_route_missing is False
@@ -3139,11 +3083,11 @@ class TestTickSummaryReporting:
         exception is re-raised, with its type and message captured.
         """
         dep, root = _chain("crash-dep", "crash-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
         registry.frontier_error = RuntimeError("frontier query exploded")
 
         with pytest.raises(RuntimeError, match="frontier query exploded"):
-            await self._run(registry, locks, executor, store)
+            await self._run(registry, executor, store)
 
         assert len(registry.reported_tick_summaries) == 1
         reported = registry.reported_tick_summaries[0]
@@ -3157,11 +3101,11 @@ class TestTickSummaryReporting:
         """An unbounded message would blow the server's 8 KiB summary cap —
         turning a recorded failure into no record at all."""
         dep, root = _chain("huge-dep", "huge-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
         registry.frontier_error = RuntimeError("x" * 50_000)
 
         with pytest.raises(RuntimeError):
-            await self._run(registry, locks, executor, store)
+            await self._run(registry, executor, store)
 
         reported = registry.reported_tick_summaries[0]
         message = reported["error_message"]
@@ -3175,24 +3119,23 @@ class TestTickSummaryReporting:
     ):
         """A failure to record the failure is swallowed, never substituted."""
         dep, root = _chain("mask-dep", "mask-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
         registry.frontier_error = RuntimeError("the original problem")
         registry.tick_summary_error = RuntimeError("and the reporter died too")
 
         with pytest.raises(RuntimeError, match="the original problem"):
-            await self._run(registry, locks, executor, store)
+            await self._run(registry, executor, store)
 
     async def test_crash_reporting_respects_the_config_toggle(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         dep, root = _chain("crash-off-dep", "crash-off-root")
-        registry, locks, executor, store = _setup([dep, root])
+        registry, executor, store = _setup([dep, root])
         registry.frontier_error = RuntimeError("boom")
 
         with pytest.raises(RuntimeError, match="boom"):
             await self._run(
                 registry,
-                locks,
                 executor,
                 store,
                 config=TickConfig(
@@ -3478,14 +3421,13 @@ class TestFanOutConcurrency:
         """
         width, bound = 200, 5
         leaves, root = _wide_layer("fanout", width)
-        registry, locks, _, store = _setup([*leaves, root], auto_complete=False)
+        registry, _, store = _setup([*leaves, root], auto_complete=False)
         executor = InstrumentedTickExecutor(call_log=registry.calls)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.0,
@@ -3511,14 +3453,13 @@ class TestFanOutConcurrency:
         exist yet)."""
         width = 40
         leaves, root = _wide_layer("order", width)
-        registry, locks, _, store = _setup([*leaves, root], auto_complete=False)
+        registry, _, store = _setup([*leaves, root], auto_complete=False)
         executor = InstrumentedTickExecutor(call_log=registry.calls)
 
         await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.0,
@@ -3553,7 +3494,7 @@ class TestFanOutConcurrency:
         root = SyncOnlyTask(
             name="count-root", deps=tuple([*spawnable, *healed, *dead, *lost])
         )
-        registry, locks, _, store = _setup(
+        registry, _, store = _setup(
             [*spawnable, *healed, *dead, *lost, root], auto_complete=False
         )
         executor = InstrumentedTickExecutor(call_log=registry.calls)
@@ -3581,7 +3522,6 @@ class TestFanOutConcurrency:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.0,
@@ -3603,7 +3543,7 @@ class TestFanOutConcurrency:
         acquires and spawns, and no denied task is ever submitted."""
         width = 10
         leaves, root = _wide_layer("denied", width)
-        registry, locks, _, store = _setup([*leaves, root], auto_complete=False)
+        registry, _, store = _setup([*leaves, root], auto_complete=False)
         executor = InstrumentedTickExecutor(call_log=registry.calls)
         registry.limits["one-slot"] = 1
 
@@ -3611,7 +3551,6 @@ class TestFanOutConcurrency:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.05,
@@ -3646,13 +3585,12 @@ class TestSpawnCap:
         A cap that "just truncated" would leave 20 of the 30 unspawned."""
         width, cap = 30, 10
         leaves, root = _wide_layer("cap", width)
-        registry, locks, executor, store = _setup([*leaves, root], auto_complete=False)
+        registry, executor, store = _setup([*leaves, root], auto_complete=False)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.0,
@@ -3675,13 +3613,12 @@ class TestSpawnCap:
         goes out in a single acting pass."""
         width = 30
         leaves, root = _wide_layer("uncapped", width)
-        registry, locks, executor, store = _setup([*leaves, root], auto_complete=False)
+        registry, executor, store = _setup([*leaves, root], auto_complete=False)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(linger_seconds=0.0, poll_interval_seconds=30.0),
         )
@@ -3696,7 +3633,7 @@ class TestSpawnCap:
         truncates it, rather than only being readable in _spawn_cap."""
         width = 200
         leaves, root = _wide_layer("tick-timeout", width)
-        registry, locks, executor, store = _setup([*leaves, root], auto_complete=False)
+        registry, executor, store = _setup([*leaves, root], auto_complete=False)
         # A tiny container: min cap (50) per pass, so 200 leaves take four.
         config = TickConfig(
             linger_seconds=0.0,
@@ -3715,7 +3652,6 @@ class TestSpawnCap:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=config,
         )
@@ -3732,14 +3668,13 @@ class TestSpawnCap:
         very different inputs, so a truncating tick is only diagnosable if
         the log says which one was read."""
         leaves, root = _wide_layer("cap-log", 3)
-        registry, locks, executor, store = _setup([*leaves, root], auto_complete=False)
+        registry, executor, store = _setup([*leaves, root], auto_complete=False)
 
         with caplog.at_level(logging.INFO, logger="stardag.build._reactive"):
             await run_tick_aio(
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=TickConfig(
                     linger_seconds=0.0,
@@ -3918,15 +3853,12 @@ class TestAttemptBudget:
         build — bounded, not a loop."""
         (root,) = _chain("budget-spawn-fail")
         executor = SpawnFailingExecutor()
-        registry, locks, _, store = _setup(
-            [root], auto_complete=False, executor=executor
-        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,  # max_attempts=2, FAIL_FAST
         )
@@ -3949,9 +3881,7 @@ class TestAttemptBudget:
         failure recorded on the way there."""
         (root,) = _chain("budget-probe-retry")
         executor = FakeTickExecutor(statuses={"fc-oom": DetachedExecutionStatus.FAILED})
-        registry, locks, _, store = _setup(
-            [root], auto_complete=False, executor=executor
-        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -3964,7 +3894,6 @@ class TestAttemptBudget:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -3989,9 +3918,7 @@ class TestAttemptBudget:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, locks, _, store = _setup(
-            [root], auto_complete=False, executor=executor
-        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -4005,7 +3932,6 @@ class TestAttemptBudget:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=FAST_TICK,
             )
@@ -4038,7 +3964,7 @@ class TestAttemptBudget:
         reason this message exists.
         """
         (root,) = _chain("budget-operator-retry")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         # Exactly what `stardag tasks retry` / the UI's Retry leaves behind:
         # pending again, with the attempts already spent.
         registry.add_task(str(root.id), status="pending", attempt_count=2)
@@ -4048,7 +3974,6 @@ class TestAttemptBudget:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=FAST_TICK,
             )
@@ -4083,14 +4008,13 @@ class TestAttemptBudget:
         """
         build_id = uuid4()
         (root,) = _chain("budget-round-reset")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(str(root.id), status="pending", attempt_count=2)
 
         refused = await run_tick_aio(
             build_id,
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -4110,7 +4034,6 @@ class TestAttemptBudget:
             build_id,
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -4128,14 +4051,13 @@ class TestAttemptBudget:
         """0 is "not attempted in this build", never "out of budget" — even
         with retries switched off entirely."""
         (root,) = _chain("budget-zero-count")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(str(root.id), status="pending", attempt_count=0)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=1
@@ -4153,14 +4075,13 @@ class TestAttemptBudget:
         suspend-heavy task is "over budget" while perfectly healthy. Gating
         it would cap dynamic dependencies, not retries."""
         (root,) = _chain("budget-suspended")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(str(root.id), status="suspended", attempt_count=5)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=2
@@ -4178,14 +4099,13 @@ class TestAttemptBudget:
         the second reading finds the same absence. Retrying it would burn
         the budget to arrive at the same failure, later."""
         (root,) = _chain("budget-no-object")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         store._tasks.pop(str(root.id), None)  # no pickle, no registry data
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -4203,15 +4123,12 @@ class TestAttemptBudget:
         """The pre-``max_attempts`` behaviour, still available verbatim."""
         (root,) = _chain("budget-disabled")
         executor = SpawnFailingExecutor()
-        registry, locks, _, store = _setup(
-            [root], auto_complete=False, executor=executor
-        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=1
@@ -4233,9 +4150,7 @@ class TestAttemptBudget:
         policy silently doing nothing is its own trap."""
         (root,) = _chain("budget-old-server")
         executor = SpawnFailingExecutor()
-        registry, locks, _, store = _setup(
-            [root], auto_complete=False, executor=executor
-        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
         registry.serves_attempt_counts = False
 
         with caplog.at_level("WARNING"):
@@ -4243,7 +4158,6 @@ class TestAttemptBudget:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=FAST_TICK,
             )
@@ -4264,15 +4178,12 @@ class TestAttemptBudget:
         this build fail on a transient error?" is answerable without logs."""
         (root,) = _chain("budget-summary")
         executor = SpawnFailingExecutor()
-        registry, locks, _, store = _setup(
-            [root], auto_complete=False, executor=executor
-        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
 
         await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -4334,14 +4245,13 @@ class TestInterruptedTasks:
         """No configuration involved: the status exists only because a
         worker asked to be resumed, so the tick resumes it."""
         (root,) = _chain("interrupted-default")
-        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry, executor, store = _setup([root], auto_complete=True)
         registry.statuses[str(root.id)] = "interrupted"
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -4359,14 +4269,13 @@ class TestInterruptedTasks:
         """An INTERRUPTED task is one that asked to be resumed, so it goes
         straight back to the frontier with no failure in its history."""
         (root,) = _chain("interrupted-restart")
-        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry, executor, store = _setup([root], auto_complete=True)
         registry.statuses[str(root.id)] = "interrupted"
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
@@ -4387,14 +4296,13 @@ class TestInterruptedTasks:
         """Exempt from the attempt budget does not mean unbounded: a task
         that times out forever must stop, with a message naming the knob."""
         (root,) = _chain("interrupted-exhausted")
-        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry, executor, store = _setup([root], auto_complete=True)
         registry.add_task(str(root.id), status="interrupted", interrupt_count=3)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
@@ -4417,7 +4325,7 @@ class TestInterruptedTasks:
         interruptions with ``max_attempts=2`` — a task charged for them
         would already be refused a start."""
         (root,) = _chain("interrupted-not-an-attempt")
-        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry, executor, store = _setup([root], auto_complete=True)
         registry.add_task(str(root.id), status="interrupted", interrupt_count=2)
         assert registry.attempt_count(str(root.id)) == 1
 
@@ -4425,7 +4333,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
@@ -4470,7 +4377,7 @@ class TestInterruptedTasks:
                     return DetachedExecutionStatus.RUNNING
                 return DetachedExecutionStatus.FAILED
 
-        registry, locks, executor, store = _setup(
+        registry, executor, store = _setup(
             [root], auto_complete=True, executor=SettlingExecutor()
         )
         registry.add_task(
@@ -4484,7 +4391,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -4505,7 +4411,7 @@ class TestInterruptedTasks:
         A permanently-live ref lingers out rather than duplicating the
         execution."""
         (root,) = _chain("interrupted-still-live")
-        registry, locks, executor, store = _setup(
+        registry, executor, store = _setup(
             [root],
             auto_complete=False,
             executor=FakeTickExecutor(
@@ -4523,7 +4429,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(linger_seconds=0.1, poll_interval_seconds=0.02),
         )
@@ -4539,7 +4444,7 @@ class TestInterruptedTasks:
         """The control for the guard above: a ref that probes FAILED is a
         finished execution, so the task is the scheduler's to start."""
         (root,) = _chain("interrupted-dead-ref")
-        registry, locks, executor, store = _setup(
+        registry, executor, store = _setup(
             [root],
             auto_complete=True,
             executor=FakeTickExecutor(
@@ -4557,7 +4462,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
@@ -4579,7 +4483,7 @@ class TestInterruptedTasks:
         would wedge the build rather than protect it."""
         (root,) = _chain("interrupted-unknown-ref")
         # FakeTickExecutor answers UNKNOWN for any ref it was not told about.
-        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry, executor, store = _setup([root], auto_complete=True)
         registry.add_task(
             str(root.id),
             status="interrupted",
@@ -4591,7 +4495,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
@@ -4609,7 +4512,7 @@ class TestInterruptedTasks:
         loop, so resumption degrades to the bounded thing rather than to an
         unbounded one."""
         (root,) = _chain("interrupted-no-counter")
-        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry, executor, store = _setup([root], auto_complete=True)
         registry.statuses[str(root.id)] = "interrupted"
         registry.serves_interrupt_counts = False
 
@@ -4617,7 +4520,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
@@ -4636,14 +4538,13 @@ class TestInterruptedTasks:
         what must not happen when the platform, not the task, ended the
         run. The dep is interrupted and the build still completes."""
         dep, root = _chain("ff-dep", "ff-root")
-        registry, locks, executor, store = _setup([dep, root], auto_complete=True)
+        registry, executor, store = _setup([dep, root], auto_complete=True)
         registry.statuses[str(dep.id)] = "interrupted"
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
@@ -4673,7 +4574,7 @@ class TestInterruptedTasks:
         broken = SyncOnlyTask(name="ff-cancel-broken", deps=())
         resuming = SyncOnlyTask(name="ff-cancel-resuming", deps=())
         root = SyncOnlyTask(name="ff-cancel-root", deps=(broken, resuming))
-        registry, locks, executor, store = _setup(
+        registry, executor, store = _setup(
             [broken, resuming, root],
             auto_complete=False,
             executor=FakeTickExecutor(
@@ -4692,7 +4593,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.05,
@@ -4723,7 +4623,7 @@ class TestInterruptedTasks:
         broken = SyncOnlyTask(name="ff-fresh-broken", deps=())
         resuming = SyncOnlyTask(name="ff-fresh-resuming", deps=())
         root = SyncOnlyTask(name="ff-fresh-root", deps=(broken, resuming))
-        registry, locks, executor, store = _setup(
+        registry, executor, store = _setup(
             [broken, resuming, root],
             auto_complete=False,
             # The interrupted task's OLD ref is dead, so the pass resumes it.
@@ -4743,7 +4643,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0.05,
@@ -4784,7 +4683,7 @@ class TestLingerPollCost:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         (root,) = _chain("poll-cost-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
@@ -4812,7 +4711,6 @@ class TestLingerPollCost:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=dataclasses.replace(
                 FAST_TICK, linger_seconds=0.2, poll_interval_seconds=0.02
@@ -4829,6 +4727,149 @@ class TestLingerPollCost:
             f"the linger poll read the frontier {len(frontier_reads) - 1} "
             "extra time(s); it must ask the one-row flag endpoint"
         )
+
+
+class TestSchedulerLease:
+    """The single-flight lease, now a column on the build row.
+
+    It used to ride on the deprecated global concurrency lock, which meant
+    every reader assembled a lock name from a build id and queried a second
+    table to answer "does this build have a scheduler?".
+    """
+
+    async def test_a_held_lease_makes_the_tick_a_no_op(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        (root,) = _chain("lease-held-root")
+        registry, executor, store = _setup([root], lease_acquired=False)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.outcome == "lease_held"
+        assert executor.spawned == [], "a refused tick must not schedule"
+
+    async def test_losing_the_lease_stops_the_tick(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        monkeypatch,
+    ):
+        """A renewal answering "not yours" means the lease already lapsed
+        and a successor took it over. Carrying on would be exactly the
+        double-scheduling the lease exists to prevent, so the tick stops
+        instead — the successor holds the flag and will act on it.
+        """
+        (root,) = _chain("lease-lost-root")
+        registry, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="other-backend",
+            executor_ref="job-1",
+        )
+        # A successor took it over, so both the renewal and the re-acquire
+        # behind it are refused. The renewal interval is 20 s in production,
+        # far longer than this test lingers.
+        monkeypatch.setattr(reactive_module, "_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+        registry.lease_stolen = True
+        # Land a wake-up in the release window, so a tick that still held
+        # the build *would* legitimately hand off. Without this the flag is
+        # already cleared by exit time and the assertion below would hold
+        # for the wrong reason — it would be about having nothing to hand
+        # off rather than about having no standing to.
+        registry.reactive_app_name = "my-app"
+        registry.lease_on_release = lambda: setattr(registry, "needs_tick", True)
+        spawned: list[UUID] = []
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=dataclasses.replace(
+                FAST_TICK,
+                linger_seconds=5.0,
+                poll_interval_seconds=0.01,
+                spawn_tick=lambda bid, app: spawned.append(bid),
+            ),
+        )
+
+        assert summary.outcome == "lease_lost"
+        # And it must not hand off. A successor already holds the lease, so
+        # spawning one would only add a container that finds it held and
+        # exits — the tick that lost the build has no standing to schedule
+        # for it.
+        assert summary.successor_spawned == 0
+        assert spawned == []
+        # And the exit release was refused rather than honoured: clearing
+        # the successor's lease on the way out is exactly what the owner
+        # check exists to prevent.
+        assert registry.lease_owner == "__successor__", (
+            "the lost tick's exit release cleared the successor's lease"
+        )
+
+    async def test_a_lapsed_lease_is_re_taken_rather_than_abandoning_the_build(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        monkeypatch,
+    ):
+        """A refused renewal usually means our own lease expired between
+        renewals — not that anything took it over, since nothing is normally
+        competing for the build. Stopping there would abandon a build nobody
+        else is driving, which is worse than the double-scheduling the check
+        guards against. So the tick re-acquires and carries on, and only a
+        re-acquire that *also* fails is a real loss.
+        """
+        (root,) = _chain("lease-lapse-root")
+        registry, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="other-backend",
+            executor_ref="job-1",
+        )
+        monkeypatch.setattr(reactive_module, "_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+        registry.lease_lapsed = True
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=dataclasses.replace(
+                FAST_TICK, linger_seconds=0.15, poll_interval_seconds=0.01
+            ),
+        )
+
+        assert summary.outcome == "lingered_out", (
+            "a lease that merely lapsed must be re-taken, not treated as lost"
+        )
+
+    async def test_the_lease_is_released_on_the_way_out(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Not left to expire: the next tick for this build should not have
+        to wait out a TTL for a scheduler that already finished."""
+        (root,) = _chain("lease-release-root")
+        registry, executor, store = _setup([root])
+        released: list[bool] = []
+        registry.lease_on_release = lambda: released.append(True)
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert released == [True]
+        assert registry.lease_owner is None
 
 
 class TestExitHandshake:
@@ -4860,15 +4901,14 @@ class TestExitHandshake:
         executor = FakeTickExecutor(
             statuses={"fc-live": DetachedExecutionStatus.RUNNING}
         )
-        registry, locks, executor, store = _setup(
+        registry, executor, store = _setup(
             [root], auto_complete=False, executor=executor
         )
         registry.add_task(
             str(root.id), status="running", executor="fake", executor_ref="fc-live"
         )
         # The worker's notify lands exactly as the lease is released.
-        locks_impl = typing.cast(typing.Any, locks)
-        locks_impl.on_release = lambda: setattr(registry, "needs_tick", True)
+        registry.lease_on_release = lambda: setattr(registry, "needs_tick", True)
 
         spawned, spawn = self._spawner()
         build_id = uuid4()
@@ -4876,7 +4916,6 @@ class TestExitHandshake:
             build_id,
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
@@ -4894,7 +4933,7 @@ class TestExitHandshake:
         deadline, so the tick still holds the lease and simply keeps it —
         no successor container, no cold start."""
         (root,) = _chain("extend-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
@@ -4931,7 +4970,6 @@ class TestExitHandshake:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=dataclasses.replace(
                 FAST_TICK,
@@ -4953,7 +4991,7 @@ class TestExitHandshake:
         """The overwhelmingly common exit: nothing was notified, so neither
         half of the handshake fires."""
         (root,) = _chain("quiet-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
@@ -4966,7 +5004,6 @@ class TestExitHandshake:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
@@ -4982,16 +5019,14 @@ class TestExitHandshake:
         """A finished build has nothing a successor could act on, so the
         post-release read is skipped even with the flag set."""
         (root,) = _chain("terminal-handoff-root")
-        registry, locks, executor, store = _setup([root], auto_complete=True)
-        locks_impl = typing.cast(typing.Any, locks)
-        locks_impl.on_release = lambda: setattr(registry, "needs_tick", True)
+        registry, executor, store = _setup([root], auto_complete=True)
+        registry.lease_on_release = lambda: setattr(registry, "needs_tick", True)
 
         spawned, spawn = self._spawner()
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
@@ -5008,7 +5043,7 @@ class TestExitHandshake:
         holder does. Handing off from here would spawn a tick per wake-up
         again, which is the cost this removes."""
         (root,) = _chain("held-handoff-root")
-        registry, locks, executor, store = _setup(
+        registry, executor, store = _setup(
             [root], auto_complete=False, lease_acquired=False
         )
         registry.needs_tick = True
@@ -5018,7 +5053,6 @@ class TestExitHandshake:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
@@ -5042,7 +5076,7 @@ class TestExitHandshake:
         ``test_a_crash_before_the_first_clear_hands_nothing_on``.
         """
         (root,) = _chain("crash-handoff-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
@@ -5075,7 +5109,6 @@ class TestExitHandshake:
                 build_id,
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
             )
@@ -5098,7 +5131,7 @@ class TestExitHandshake:
         nothing, so it hands nothing on.
         """
         (root,) = _chain("cascade-guard-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.needs_tick = True  # and it stays set: the clear never lands
 
         async def clear_always_fails(bid):
@@ -5112,7 +5145,6 @@ class TestExitHandshake:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
             )
@@ -5135,7 +5167,7 @@ class TestExitHandshake:
         window, it does not resurrect a crashed tick's own wake-up.
         """
         (root,) = _chain("crash-after-clear-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.needs_tick = True
         real_clear = registry.build_clear_notify_aio
 
@@ -5151,7 +5183,6 @@ class TestExitHandshake:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
             )
@@ -5169,7 +5200,7 @@ class TestExitHandshake:
         it says so — once per process, since it is a property of how the
         process was configured."""
         (root,) = _chain("no-spawner-warning-root")
-        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry, executor, store = _setup([root], auto_complete=True)
 
         reactive_module._warned_missing_successor_spawner = False
         with caplog.at_level(logging.WARNING, logger=reactive_module.__name__):
@@ -5177,7 +5208,6 @@ class TestExitHandshake:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=FAST_TICK,
             )
@@ -5187,7 +5217,6 @@ class TestExitHandshake:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=FAST_TICK,
             )
@@ -5200,7 +5229,7 @@ class TestExitHandshake:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget], caplog
     ):
         (root,) = _chain("spawner-no-warning-root")
-        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry, executor, store = _setup([root], auto_complete=True)
         _, spawn = self._spawner()
 
         reactive_module._warned_missing_successor_spawner = False
@@ -5209,7 +5238,6 @@ class TestExitHandshake:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
             )
@@ -5223,7 +5251,7 @@ class TestExitHandshake:
         exception is unwinding, so anything it raises would replace the
         error the caller is about to see."""
         (root,) = _chain("handoff-boom-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
 
         real_clear = registry.build_clear_notify_aio
 
@@ -5242,7 +5270,6 @@ class TestExitHandshake:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                lock_manager=locks,
                 task_store=store,
                 config=dataclasses.replace(FAST_TICK, spawn_tick=explode),
             )
@@ -5254,7 +5281,7 @@ class TestExitHandshake:
         whose wake-ups spawn unconditionally) must not pay a frontier fetch
         to discover it has nowhere to hand off to."""
         (root,) = _chain("no-spawner-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
@@ -5269,19 +5296,17 @@ class TestExitHandshake:
             return await real_frontier(bid)
 
         registry.build_get_frontier_aio = traced_frontier  # type: ignore[method-assign]
-        locks_impl = typing.cast(typing.Any, locks)
 
         def on_release() -> None:
             trace.append("release")
             registry.needs_tick = True
 
-        locks_impl.on_release = on_release
+        registry.lease_on_release = on_release
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=FAST_TICK,
         )
@@ -5301,7 +5326,7 @@ class TestExitHandshake:
         an already-expired deadline, so a steadily-notified build would spin
         without ever sleeping. The hand-off covers it instead."""
         (root,) = _chain("sweep-root")
-        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
@@ -5323,7 +5348,6 @@ class TestExitHandshake:
             build_id,
             registry=registry,
             task_executor=executor,
-            lock_manager=locks,
             task_store=store,
             config=TickConfig(
                 linger_seconds=0,

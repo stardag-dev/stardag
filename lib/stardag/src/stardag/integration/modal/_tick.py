@@ -27,7 +27,6 @@ from stardag.build import (
     TickConfig,
     run_tick_aio,
 )
-from stardag.build._base import GlobalLockConfig
 from stardag.build._wakeups import SpawnTick
 from stardag.build._task_modules import (
     import_task_modules,
@@ -41,7 +40,6 @@ from stardag.integration.modal._selector import WorkerSelector
 from stardag.integration.modal._spawn import spawn_tick
 from stardag.integration.modal._settings import FunctionSettings
 from stardag.registry._base import NoOpRegistry, registry_provider
-from stardag.registry._lock import RegistryGlobalConcurrencyLockManager
 
 logger = logging.getLogger(__name__)
 
@@ -379,17 +377,11 @@ def _run_tick(
         modal_workspace=deployment.modal_workspace,
         worker_timeouts=deployment.worker_timeouts,
     )
-    lock_manager = RegistryGlobalConcurrencyLockManager(
-        # No waiting on the scheduler lease: a held lease means
-        # another tick is active and will observe the wake-up flag.
-        config=GlobalLockConfig(lock_wait_timeout_seconds=None),
-    )
     summary = asyncio.run(
         run_tick_aio(
             build_uuid,
             registry=registry,
             task_executor=executor,
-            lock_manager=lock_manager,
             task_store=task_store,
             config=config,
         )

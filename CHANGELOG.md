@@ -80,11 +80,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   longest live input, a couple of stale `RUNNING` builds would be enough to
   keep the tick function warm, however few they are.
 
-- Default prebuilt server image bumped to `0.2.0`
-  (`DEFAULT_SERVER_VERSION = "0.2.0"`, from the `server-v0.2.0` release) —
-  the server version this SDK release is tested against. The image tag and
-  `--server-version` take the bare `X.Y.Z`; `server-v` prefixes the git tag
-  only.
+- Default prebuilt server image bumped to `0.3.0`
+  (`DEFAULT_SERVER_VERSION = "0.3.0"`, from the `server-v0.3.0` release) —
+  the server version this SDK release is tested against, and the one that
+  carries the new server surface this release's reactive changes call:
+  `GET /builds/{build_id}/notify` and the scheduler-lease routes. The
+  image tag
+  and `--server-version` take the bare `X.Y.Z`; `server-v` prefixes the git
+  tag only.
 
 - **The linger poll no longer reads the frontier.**
   `RegistryABC.build_get_notify[_aio]` reads the wake-up flag, and the tick's
@@ -98,6 +101,37 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   delegates to the frontier, so a custom backend needs no changes to keep
   working, and can override for the cheap read.
 
+- **The tick no longer uses the global concurrency lock at all.**
+  `run_tick_aio` **drops its `lock_manager` parameter** — the lease was its
+  only use — and takes the lease through the registry instead, renewing it
+  in the background while it lingers and stopping
+  (`TickSummary.outcome == "lease_lost"`) if a renewal reports it was taken
+  over. `RegistryABC` gains
+  `build_acquire_scheduler_lease_aio` / `build_renew_scheduler_lease_aio` /
+  `build_release_scheduler_lease_aio`, defaulting to granting, and the
+  duplicated `SCHEDULER_LOCK_PREFIX` is gone from both sides.
+
+  Against a server without the routes the tick runs unleased and says so
+  once: duplicate ticks become possible (idempotent, and task starts stay
+  arbitrated by the execution claim). That server also reports
+  `scheduler_live=False` to every worker, because it reads a lock table this
+  SDK no longer writes — so wake-ups spawn unconditionally too, which is the
+  pre-lease behaviour end to end rather than a half-broken one.
+
+  **The other direction is the one a real deployment takes**, since the API
+  upgrades before the Modal apps that bake in their SDK: a new server does
+  not read the legacy lock an old tick takes, so it reports
+  `scheduler_live=False` for every completion and every worker spawns a tick
+  that immediately no-ops. Correct, but it costs containers until each app
+  is redeployed — worth doing promptly rather than leaving.
+
+  The lease TTL is 60 s, unchanged from the lock-table lease it replaces,
+  and it is the dead-tick recovery window: until it lapses, the build is
+  hidden from drainers _and_ workers skip their spawn. Renewal moved from
+  half the TTL to a third, so two consecutive renewal failures are
+  survivable — and a third is too, because a refused renewal re-acquires
+  rather than abandoning a build nothing else is driving.
+
 ### Registry API
 
 - **`GET /builds/{build_id}/notify`** reads a build's scheduler wake-up flag
@@ -107,7 +141,31 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   statements, one of them a window-function aggregate over the event log,
   of which it read a single boolean.
 
+- **The reactive scheduler's lease lives on the build row.** New
+  `POST`/`PUT`/`DELETE /builds/{build_id}/scheduler-lease` acquire, renew and
+  release a build's single-flight lease, recorded as
+  `builds.scheduler_lease_until` / `scheduler_lease_owner` (migration, no
+  backfill — a lease is transient). It used to ride on the deprecated global
+  concurrency lock, so both readers had to assemble a lock name from a build
+  id and query `distributed_locks`: `select_wake_candidates` is now one query
+  instead of two, and "is a scheduler live?" is a column comparison. Renew
+  and release are owner-checked, so a tick whose lease lapsed and was taken
+  over cannot extend or clear its successor's. The global lock is untouched
+  for its remaining use (executions without probeable liveness).
+
 ### Deployment
+
+- **Server image `0.3.0`**, carrying the two Registry API changes above:
+  `GET /builds/{build_id}/notify` (the linger poll's one-row read) and the
+  scheduler lease on the build row —
+  `POST`/`PUT`/`DELETE /builds/{build_id}/scheduler-lease` plus the
+  `builds.scheduler_lease_until` / `builds.scheduler_lease_owner` migration
+  (`b41c7d9e2f08`, no backfill). Minor rather than patch for the same
+  reason as `0.2.0`: the HTTP surface grew and there is a schema migration.
+  Self-hosters upgrade with `stardag self-host upgrade`; redeploy Modal
+  apps promptly after — until each app is redeployed, its old ticks take a
+  legacy lock this server no longer reads, so every completion reports no
+  live scheduler and spawns a tick that immediately no-ops.
 
 - **Server image `0.2.0`**, the first server release since `0.1.2`
   (2026-08-12). It carries the Registry API and UI changes recorded under

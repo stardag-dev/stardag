@@ -58,6 +58,7 @@ from stardag_api.schemas import (
     BuildFrontierResponse,
     BuildListResponse,
     BuildNotifyResponse,
+    SchedulerLeaseResponse,
     BuildResponse,
     BulkCancelBuildsRequest,
     BulkCancelBuildsResponse,
@@ -93,11 +94,16 @@ from stardag_api.services.build_cleanup import (
     select_cancellable_builds,
 )
 from stardag_api.services.claims import claim_is_live, live_claim_filter
-from stardag_api.services.lock import is_scheduler_live
 from stardag_api.services.wakeups import (
     MAX_WAKE_CANDIDATES,
+    MAX_LEASE_TTL_SECONDS,
+    MIN_LEASE_TTL_SECONDS,
+    acquire_scheduler_lease,
     flag_build,
+    lease_is_live,
     mark_tick_requested,
+    release_scheduler_lease,
+    renew_scheduler_lease,
     select_wake_candidates,
 )
 from stardag_api.services.status import (
@@ -417,6 +423,10 @@ async def _get_build_for_update(
 
     A build is always locked *before* any task rows it cascades to, so this
     and ``_create_task_event`` acquire in one consistent order.
+
+    The scheduler-lease routes take it for the same reason: acquire, renew
+    and release are each a read-modify-write on the lease columns, and two
+    ticks racing to take one build's lease have to serialize somewhere.
 
     Read-only paths (``GET /builds``, ``/{id}``, the frontier) deliberately
     don't take it — they just read the columns.
@@ -1568,6 +1578,111 @@ async def _get_build_checked(build_id: UUID, db: AsyncSession, auth: SdkAuth) ->
     return build
 
 
+_LeaseOwner = Annotated[
+    str,
+    Query(
+        # ``min_length`` is not cosmetic: the whole "a lapsed tick cannot
+        # clear its successor's lease" property rests on this string, and
+        # two callers both sending "" would hold each other's lease.
+        min_length=1,
+        max_length=64,
+        description=(
+            "Identity of the scheduler asking. Renew and release are "
+            "owner-checked, so a tick whose lease lapsed and was taken over "
+            "cannot extend or clear its successor's."
+        ),
+    ),
+]
+_LeaseTtl = Annotated[
+    int,
+    Query(
+        ge=MIN_LEASE_TTL_SECONDS,
+        le=MAX_LEASE_TTL_SECONDS,
+        description=(
+            "How long the lease stays believable, in seconds, from now. "
+            "Nothing renews it on the server's side: a tick that wants to "
+            "keep driving a build renews it itself while it lingers."
+        ),
+    ),
+]
+
+
+@router.post("/{build_id}/scheduler-lease", response_model=SchedulerLeaseResponse)
+async def acquire_build_scheduler_lease(
+    build_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    owner_id: _LeaseOwner,
+    ttl_seconds: _LeaseTtl = 60,
+):
+    """Take the build's scheduler lease. At most one tick drives a build.
+
+    ``held=False`` means somebody else is driving it and this tick should
+    no-op — which is safe because the wake-up that spawned it was flagged
+    *before* the spawn, so the holder's own re-checks (its linger poll and
+    the exit handshake) cover it.
+
+    A lapsed lease denies nothing: this acquire takes it over, replacing
+    the dead holder's owner and expiry together. That takeover is the
+    healing mechanism — a tick whose container vanished releases nothing,
+    and across containers there is nothing to release it with.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    build = await _get_build_for_update(build_id, db, auth)
+    acquired, expires_at = acquire_scheduler_lease(
+        build, owner_id=owner_id, ttl_seconds=ttl_seconds
+    )
+    await db.commit()
+    return SchedulerLeaseResponse(
+        build_id=build_id, held=acquired, expires_at=expires_at
+    )
+
+
+@router.put("/{build_id}/scheduler-lease", response_model=SchedulerLeaseResponse)
+async def renew_build_scheduler_lease(
+    build_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    owner_id: _LeaseOwner,
+    ttl_seconds: _LeaseTtl = 60,
+):
+    """Extend the lease, for its holder only.
+
+    ``held=False`` means this tick no longer owns the build: its lease
+    lapsed and somebody took it over. Being refused here is how it finds
+    out, and the honest answer is to stop driving.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    build = await _get_build_for_update(build_id, db, auth)
+    expires_at = renew_scheduler_lease(
+        build, owner_id=owner_id, ttl_seconds=ttl_seconds
+    )
+    await db.commit()
+    return SchedulerLeaseResponse(
+        build_id=build_id, held=expires_at is not None, expires_at=expires_at
+    )
+
+
+@router.delete("/{build_id}/scheduler-lease", response_model=SchedulerLeaseResponse)
+async def release_build_scheduler_lease(
+    build_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    owner_id: _LeaseOwner,
+):
+    """Drop the lease, for its holder only.
+
+    ``held`` reports whether this caller was still the holder — a release
+    by a tick that had already lost the build is a no-op rather than a way
+    to clear its successor's lease.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    build = await _get_build_for_update(build_id, db, auth)
+    released = release_scheduler_lease(build, owner_id=owner_id)
+    await db.commit()
+    return SchedulerLeaseResponse(build_id=build_id, held=released)
+
+
 @router.post("/{build_id}/notify", response_model=BuildNotifyResponse)
 async def notify_build(
     build_id: UUID,
@@ -1618,7 +1733,14 @@ async def notify_build(
     if can_spawn:
         await mark_tick_requested(db, build, now=now)
     await db.commit()
-    scheduler_live = await is_scheduler_live(db, auth.environment_id, build_id)
+    # Re-read from the database, not off the ORM instance. The session is
+    # created with ``expire_on_commit=False``, so ``build`` still holds the
+    # values loaded *before* the commit — and reading the lease from those
+    # would invert the one ordering this endpoint's guarantee rests on. The
+    # refresh is what makes ``scheduler_live=True`` mean "the lease was
+    # still held once the flag was already durable".
+    await db.refresh(build, ["scheduler_lease_until"])
+    scheduler_live = lease_is_live(build)
     if scheduler_live and can_spawn:
         build.tick_requested_at = previous_stamp
         await db.commit()

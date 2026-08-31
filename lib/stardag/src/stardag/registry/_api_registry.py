@@ -34,6 +34,7 @@ from stardag.exceptions import (
     is_missing_route_error,
 )
 from stardag.registry._base import (
+    SchedulerLeaseResult,
     StartClaimResult,
     BuildCancelResult,
     BuildFrontier,
@@ -226,6 +227,18 @@ class APIRegistry(RegistryABC):
                 "Set STARDAG_API_URL or configure a profile with a registry."
             )
         self.api_url = resolved_url.rstrip("/")
+
+        # Latched when this registry answers a scheduler-lease call with a
+        # missing-route error. Latched rather than re-probed because a tick
+        # asks on acquire, on every renew while it lingers, and on release,
+        # so a doomed request each time would be the whole cost of the
+        # feature for deployments that do not have it.
+        #
+        # Per instance, not per process: two registries in one process may
+        # point at different servers, and a global would let one of them
+        # decide the other has no lease routes. It also keeps the flag out
+        # of test isolation.
+        self._scheduler_lease_route_missing = False
 
         # Timeout: explicit > config
         self.timeout = (
@@ -1737,6 +1750,98 @@ class APIRegistry(RegistryABC):
         static check is the only check it gets.
         """
         return BuildNotifyResult(build_id=build_id, needs_tick=frontier.needs_tick)
+
+    async def build_acquire_scheduler_lease_aio(
+        self, build_id: UUID, *, owner_id: str, ttl_seconds: int
+    ) -> SchedulerLeaseResult:
+        """Take the build's scheduler lease (``POST .../scheduler-lease``).
+
+        Against a server predating the route, grants unconditionally and
+        says so once. That is the pre-lease behaviour — every tick runs —
+        which costs duplicate containers on a build being woken repeatedly
+        and nothing else: ticks are idempotent, and two of them cannot both
+        start a task, because the execution claim arbitrates that
+        separately. The same server also reports ``scheduler_live=False``
+        to every worker (it reads a lock table this SDK no longer writes),
+        so wake-ups spawn unconditionally too — the two halves degrade
+        together, which is what makes the combination coherent rather than
+        merely survivable.
+        """
+        return await self._lease_call(
+            "POST", build_id, {"owner_id": owner_id, "ttl_seconds": ttl_seconds}
+        )
+
+    async def build_renew_scheduler_lease_aio(
+        self, build_id: UUID, *, owner_id: str, ttl_seconds: int
+    ) -> SchedulerLeaseResult:
+        """Extend the lease (``PUT .../scheduler-lease``)."""
+        return await self._lease_call(
+            "PUT", build_id, {"owner_id": owner_id, "ttl_seconds": ttl_seconds}
+        )
+
+    async def build_release_scheduler_lease_aio(
+        self, build_id: UUID, *, owner_id: str
+    ) -> SchedulerLeaseResult:
+        """Drop the lease (``DELETE .../scheduler-lease``)."""
+        return await self._lease_call("DELETE", build_id, {"owner_id": owner_id})
+
+    async def _lease_call(
+        self, method: str, build_id: UUID, params: dict[str, Any]
+    ) -> SchedulerLeaseResult:
+        if self._scheduler_lease_route_missing:
+            return SchedulerLeaseResult(build_id=build_id, held=True)
+        try:
+            response = await self._arequest(
+                method,
+                f"{self.api_url}/api/v1/builds/{build_id}/scheduler-lease",
+                params={**self._get_params(), **params},
+                operation=f"{method} scheduler lease for build {build_id}",
+            )
+        except (NotFoundError, APIError) as e:
+            # 405: the path exists for other verbs. 404 (missing route): the
+            # server predates it entirely. A resource 404 — no such build —
+            # must still propagate, which is what is_missing_route_error
+            # separates.
+            unsupported = (
+                is_missing_route_error(e)
+                if isinstance(e, NotFoundError)
+                else e.status_code == 405
+            )
+            if not unsupported:
+                raise
+            self._scheduler_lease_route_missing = True
+            logger.warning(
+                "Registry API has no scheduler-lease route; reactive ticks "
+                "run without a single-flight lease in this process. Duplicate "
+                "ticks are possible (idempotent, and task starts are still "
+                "arbitrated by the execution claim). Upgrade stardag-api to "
+                "restore single-flighting."
+            )
+            return SchedulerLeaseResult(build_id=build_id, held=True)
+        try:
+            payload = response.json()
+            # ``held`` must be present and an actual boolean — anything
+            # else is a malformed answer and belongs in the grant path
+            # below. Defaulting a missing key, or coercing (``bool(0)``,
+            # ``bool("no")``), would quietly turn a shape error into a
+            # denial — the opposite of the degradation this guards.
+            held = payload["held"]
+            if not isinstance(held, bool):
+                raise TypeError(f"held is {held!r}, not a boolean")
+            return SchedulerLeaseResult(
+                build_id=build_id,
+                held=held,
+                expires_at=payload.get("expires_at"),
+            )
+        except Exception:
+            # A malformed answer must not decide that nobody may drive the
+            # build: unknown grants, exactly like a missing route.
+            logger.warning(
+                "Unparseable scheduler-lease response for build %s; "
+                "proceeding without single-flighting.",
+                build_id,
+            )
+            return SchedulerLeaseResult(build_id=build_id, held=True)
 
     def build_clear_notify(self, build_id: UUID) -> None:
         """Clear the build's scheduler wake-up flag."""
