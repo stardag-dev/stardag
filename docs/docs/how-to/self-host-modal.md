@@ -110,9 +110,13 @@ stardag self-host connect
 uvx --from "stardag[selfhost]" stardag self-host upgrade
 ```
 
-This applies any new database migrations and redeploys the API + UI. The JWT
-keypair secret is left untouched, so existing sessions and SDK logins survive
-upgrades.
+This applies any new database migrations and redeploys the API + UI. Each
+SDK release pins the server version it was tested against, so `uvx` picking
+up a newer SDK also rolls the server forward; pass
+`--server-version X.Y.Z` (or `latest`) to deploy a specific
+[server release](https://github.com/stardag-dev/stardag/releases). The JWT
+keypair secret is left untouched, so existing sessions and SDK logins
+survive upgrades.
 
 If you deployed with a non-default `--name` or `--server-modal-env`, pass
 the **same** values to `upgrade` (and `status`/`destroy`) — otherwise the
@@ -120,38 +124,6 @@ command looks in the wrong place and reports nothing deployed. In
 particular, a deployment created before these defaults changed (app
 `stardag-server` in Modal's default environment) is upgraded with
 `--name stardag-server --server-modal-env ''`.
-
-### Which server version you get
-
-A new [server release](https://github.com/stardag-dev/stardag/releases) is
-cut after each significant change to the Registry API or the UI, which is
-more often than the SDK's pin moves. Each SDK release pins the server version
-it was **tested against** — that is a known-good pairing, not necessarily the
-newest image — so `uvx` picking up a newer SDK also rolls the server forward,
-just not always to the latest release.
-
-**To track server releases as they land, deploy with `--server-version
-latest`:**
-
-```bash
-uvx --from "stardag[selfhost]" stardag self-host upgrade --server-version latest
-```
-
-The choice is remembered, so later plain `upgrade` runs stay on `latest`.
-Pass `--server-version X.Y.Z` to hold a specific release instead — that is
-also how you get back off `latest`.
-
-!!! note "Confirm what you actually deployed"
-
-    `latest` is a mutable tag, and image builds are cached, so an `upgrade`
-    that changes nothing else may reuse the image already built for that tag
-    rather than pulling a newer one.
-
-    `stardag self-host status` will not tell you: it echoes what you asked
-    for at deploy time, so it just says `latest`. The running release is the
-    one baked into the image, reported by `GET /api/v1/version` on your
-    deployment and shown in the footer of the Settings page. If it has not
-    moved and you expected it to, redeploy with the explicit `X.Y.Z`.
 
 ## Deploying from source (development)
 
@@ -244,8 +216,7 @@ stardag self-host destroy    # stop the Modal app (never touches the database)
 Useful flags for `up` (all prompts have flag equivalents for CI):
 
 - `--server-version X.Y.Z` (or `latest`) — prebuilt server image version to
-  deploy (default: the version this SDK release is tested against; see
-  [Which server version you get](#which-server-version-you-get))
+  deploy (default: the version this SDK release is tested against)
 - `--from-source` — build the image from a local repo checkout instead of
   the prebuilt image (see
   [Deploying from source](#deploying-from-source-development))

@@ -307,9 +307,7 @@ Bump the minor when the HTTP surface grows or there is a migration, the patch
 for fixes and dependency floors.
 
 Bump `DEFAULT_SERVER_VERSION` in the same PR — the pin is what a fresh
-`stardag self-host up` gets. Self-hosters who would rather track releases as
-they land deploy with `--server-version latest`; see
-[Updating to a new version](docs/docs/how-to/self-host-modal.md#updating-to-a-new-version).
+`stardag self-host up` gets.
 
 ### Dropping support for older SDKs
 
