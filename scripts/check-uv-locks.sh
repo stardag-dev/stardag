@@ -24,10 +24,15 @@ fi
 status=0
 while IFS= read -r lock; do
     project="$(dirname "$lock")"
-    if uv lock --project "$project" --check >/dev/null 2>&1; then
+    if output="$(uv lock --project "$project" --check 2>&1)"; then
         printf 'ok     %s\n' "$project"
     else
         printf 'STALE  %s\n' "$project"
+        # Keep uv's own message. `--check` fails for reasons other than drift
+        # too — a malformed manifest, an unresolvable requirement, a uv
+        # internal error — and swallowing those makes every one of them read
+        # as drift, sending the reader to `uv lock`, which is the wrong fix.
+        printf '%s\n' "$output" | sed 's/^/       /'
         status=1
     fi
 done < <(git ls-files | grep -E '(^|/)uv\.lock$' | sort)
