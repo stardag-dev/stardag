@@ -247,7 +247,16 @@ jobs:
           # what it wanted.
           elif uvx modal environment create "$name" 2>&1 | tee /tmp/create.log; then
             echo "Created '$name'."
-          elif grep -qi "already exists" /tmp/create.log; then
+          # Re-ask, rather than matching the error text. The first version
+          # of this grepped for "already exists", which Modal has never
+          # said — it says "Can not create an environment with the same
+          # name or web label suffix as an existing one" — so the race
+          # guard above it never actually fired, and the first PR to run
+          # both tiers together failed here. What the guard wants to know
+          # is whether the environment exists now, which the list answers
+          # directly and no vendor rewording can break.
+          elif uvx modal environment list --json | jq -e --arg n "$name" \
+                 'any(.[]; .name == $n)' > /dev/null; then
             echo "Environment '$name' was created concurrently."
           else
             cat /tmp/create.log
