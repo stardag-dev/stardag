@@ -83,8 +83,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - Default prebuilt server image bumped to `0.3.0`
   (`DEFAULT_SERVER_VERSION = "0.3.0"`, from the `server-v0.3.0` release) —
   the server version this SDK release is tested against, and the one that
-  carries the two endpoints this release's reactive changes call
-  (`GET /builds/{build_id}/notify` and the scheduler-lease routes). The
+  carries the new server surface this release's reactive changes call:
+  `GET /builds/{build_id}/notify` and the scheduler-lease routes. The
   image tag
   and `--server-version` take the bare `X.Y.Z`; `server-v` prefixes the git
   tag only.
