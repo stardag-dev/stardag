@@ -309,9 +309,10 @@ jobs:
   # bug rather than a workflow one.
   #
   # `always()` because a red run is exactly when a leaked environment is
-  # most likely and most expensive: the registry pins `min_containers=1`, so
-  # an abandoned one keeps a container alive until its scaledown window
-  # expires.
+  # most likely and most expensive. `min_containers=1` on the registry keeps
+  # a container warm *even when the function is idle*, and `scaledown_window`
+  # governs only containers above that minimum -- so a leaked environment
+  # does not wind down on its own. It runs until something deletes it.
   #
   # `!cancelled()` because of the other direction of the same problem, and
   # it bites in practice. `cancel-in-progress` supersedes a PR's run on the
@@ -401,12 +402,30 @@ jobs:
       pull-requests: read
       actions: read
     needs: [modal-live, registry-live]
-    # `always()` is load-bearing: with `needs`, a failed or cancelled
-    # modal-live would otherwise skip the sweeper -- and a red suite is exactly
-    # when leaked environments accumulate.
+    # `always()` is load-bearing: with `needs`, a failed or cancelled tier
+    # would otherwise skip the sweeper -- and a red run is exactly when
+    # leaked environments accumulate.
+    #
+    # **Every run, not just the scheduled one.** It used to sweep weekly,
+    # which was a reasonable backstop when teardown always ran. It is not
+    # one now: teardown skips on cancellation (see above), so a
+    # hand-cancelled run leaks its environment, and `ci-manual-*` is not
+    # reachable by `cleanup-closed-pr` either -- nothing but this job would
+    # touch it until the following Monday. A leaked environment holds a
+    # warm container for the whole of that time.
+    #
+    # Sweeping this often is safe because the job reads GitHub state rather
+    # than elapsed time: an environment is deleted when its PR is closed or
+    # its run has finished, which is as true at noon as it is on Monday. It
+    # costs a listing and a lookup per `ci-*` environment, and it does not
+    # widen what it is willing to delete by one name.
+    #
+    # Fork PRs are excluded because they receive no secrets; the job would
+    # go red for want of a Modal token rather than for anything it found.
     if: >-
       always() &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     environment: modal-live-ci
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
@@ -418,6 +437,24 @@ jobs:
       - name: Delete environments whose PR is closed or whose run has finished
         run: |
           set -euo pipefail
+
+          # Deleting is best-effort *per environment*, and deliberately so
+          # now that this runs on every workflow run. Two sweeps can
+          # overlap, and a sweep can race a run's own teardown or the
+          # closed-PR job, so "already gone" is a normal outcome and is
+          # success by another route. Aborting the loop on it would leave
+          # every environment after this one unswept -- the opposite of
+          # what a backstop is for. A genuine failure is logged and picked
+          # up by the next sweep.
+          delete_environment() {
+            if uvx modal environment delete "$1" --yes; then
+              echo "  deleted $1"
+            else
+              echo "  could not delete $1 -- already gone, or a real" \
+                   "failure; the next sweep will retry"
+            fi
+          }
+
           # Two filters, both required, and the only names ever passed to
           # `environment delete`: the jq select below and the case arms. No
           # other environment in the workspace is reachable from here.
@@ -438,7 +475,7 @@ jobs:
                       echo "Could not determine the state of PR #$n -- keeping $name"
                     elif [ "$state" != "OPEN" ]; then
                       echo "PR #$n is $state -- deleting $name"
-                      uvx modal environment delete "$name" --yes
+                      delete_environment "$name"
                     fi
                     ;;
                   ci-manual-*)
@@ -449,7 +486,7 @@ jobs:
                       echo "Could not determine the state of run $id -- keeping $name"
                     elif [ "$status" != "in_progress" ] && [ "$status" != "queued" ]; then
                       echo "Run $id is $status -- deleting $name"
-                      uvx modal environment delete "$name" --yes
+                      delete_environment "$name"
                     fi
                     ;;
                 esac

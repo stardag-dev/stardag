@@ -201,14 +201,21 @@ def _looks_like_no_such_environment(output: str) -> bool:
     equivalent check for apps: an unrecognised message is treated as a real
     failure, so a wording change makes teardown noisy rather than silently
     leaving environments behind.
+
+    The first phrase is Modal's actual wording, read off the CLI rather
+    than guessed -- "No such environment 'x'". An earlier version of this
+    list held four plausible phrasings and not that one, so all four
+    missed. The identical mistake against the *app* wording had already
+    cost a CI run; the lesson that stuck is to run the failing command and
+    read what it prints.
     """
     lowered = output.lower()
     return any(
         phrase in lowered
         for phrase in (
+            "no such environment",
             "not found",
             "could not find",
-            "no environment",
             "does not exist",
         )
     )

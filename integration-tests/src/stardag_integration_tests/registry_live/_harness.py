@@ -284,8 +284,11 @@ def stop_existing_app(app_name: str, modal_environment: str) -> None:
     RUNNING until the scenario timed out.
 
     Stopping also keeps a reused environment from accumulating always-on
-    containers: the registry pins ``min_containers=1``, so an abandoned
-    deployment goes on costing until its scaledown window expires.
+    containers. ``min_containers=1`` keeps a container warm *even when the
+    function is idle*, and ``scaledown_window`` governs only containers
+    above that minimum -- so an abandoned deployment does not wind down on
+    its own at all. It runs until someone stops the app or deletes the
+    environment.
     """
     result = subprocess.run(
         [modal_cli(), "app", "stop", app_name, "-e", modal_environment, "--yes"],
