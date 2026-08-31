@@ -109,7 +109,18 @@ def test_prebuilt_functions_are_by_reference_file_entrypoints():
     imports it in-container by its stem (``_modal_entry``) - no cloudpickle,
     so the deploy is independent of the client interpreter version.
     """
-    from modal._utils.function_utils import FunctionInfo
+    try:
+        # Newer modal renamed FunctionInfo -> FunctionSourceInfo. Same
+        # constructor and the same three properties this asserts on; the
+        # rename landed in a patch release, which is why both names are
+        # handled rather than pinned to one.
+        from modal._utils.function_utils import (
+            FunctionSourceInfo as FunctionInfo,  # pyright: ignore[reportAttributeAccessIssue]
+        )
+    except ImportError:  # older modal
+        from modal._utils.function_utils import (
+            FunctionInfo,  # pyright: ignore[reportAttributeAccessIssue]
+        )
 
     from stardag.selfhost._modal_app import _load_prebuilt_entry_module
 
