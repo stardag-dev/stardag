@@ -162,12 +162,15 @@ def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
        the re-acquire fails, release clears nothing, and the successor's
        lease survives untouched.
     """
-    from stardag.build import _reactive
-    from stardag.build._reactive import SchedulerLease
+    # The lease timing knobs are mutable globals, so the patch must land on
+    # the module whose code reads them — the package deliberately does not
+    # re-export them, precisely so a patch against it fails loudly here
+    # rather than silently patching nothing.
+    from stardag.build._reactive import SchedulerLease, _tick
 
     ttl = 10
-    monkeypatch.setattr(_reactive, "_LEASE_TTL_SECONDS", ttl)
-    monkeypatch.setattr(_reactive, "_LEASE_RENEW_INTERVAL_SECONDS", 1.0)
+    monkeypatch.setattr(_tick, "_LEASE_TTL_SECONDS", ttl)
+    monkeypatch.setattr(_tick, "_LEASE_RENEW_INTERVAL_SECONDS", 1.0)
 
     registry = _registry()
     bystander = _registry()

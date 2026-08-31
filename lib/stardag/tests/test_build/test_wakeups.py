@@ -26,7 +26,7 @@ from stardag.target._in_memory import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
 from tests.test_build.conftest import RecordingRegistry
 from tests.test_build.test_detached import FakeDetachedExecutor
-from tests.test_build.test_reactive import (
+from tests.test_build.reactive_fakes import (
     FAST_TICK,
     FakeReactiveRegistry,
     FakeTickExecutor,

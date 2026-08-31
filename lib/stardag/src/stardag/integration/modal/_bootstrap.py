@@ -165,6 +165,14 @@ def _persist_discovered_tasks(
     including apps written before the feature existed, and an SDK upgrade
     must never start dropping pickles on its own.
     """
+    # Deliberately NOT a ``pickle_free=require_pickle_free`` store, unlike
+    # the tick's (see ``_TickDeployment.require_pickle_free``). Here the
+    # gate below is the enforcement, and it is exact: it names the offending
+    # tasks and fails the build. A store that silently dropped the same
+    # writes would, if the gate ever stopped firing first, leave a build
+    # that starts fine and stalls later at "could not rehydrate" — strictly
+    # the worse failure. The tick has no such gate and nothing to lose: its
+    # write-back is a cache over an object it already holds.
     store = BuildTaskStore(build_id)
     if not task_module_patterns or not elide_pickles:
         store.save_tasks(tasks)

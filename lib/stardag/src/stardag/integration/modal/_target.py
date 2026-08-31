@@ -8,7 +8,6 @@ from pathlib import Path
 import aiofiles
 import modal
 from modal.exception import NotFoundError, ResourceExhaustedError
-from modal.volume import FileEntryType
 from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
 from tenacity import (
@@ -18,6 +17,21 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential_jitter,
 )
+
+try:
+    # Newer modal defines this in the public `modal.types`. `modal.volume`
+    # still re-exports it at runtime, but its .pyi no longer does, so
+    # importing it from there resolves fine and then type-checks as a
+    # missing symbol.
+    from modal.types import (  # pyright: ignore[reportMissingImports]
+        FileEntryType,
+    )
+except ModuleNotFoundError:  # no `modal.types` yet — inside `modal>=1.0.0`
+    # Narrow on purpose: a broken `modal.types` should surface, not fall
+    # through to a stale import path.
+    from modal.volume import (
+        FileEntryType,  # pyright: ignore[reportAttributeAccessIssue]
+    )
 
 from stardag.integration.modal._config import modal_config_provider
 from stardag.target import (

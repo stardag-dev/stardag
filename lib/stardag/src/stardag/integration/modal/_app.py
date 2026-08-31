@@ -515,18 +515,28 @@ class StardagApp:
                 and why. Off by default (the fallback is what keeps the
                 feature additive).
 
-                Enforced by the reactive bootstrap, where the task
+                The *gate* is the reactive bootstrap, where the task
                 store is written — normally in the ``bootstrap``
                 container. It fails loudly: the ``TaskModulesError``
                 records a terminal BUILD_FAILED and is re-raised on the
                 bootstrap's Modal call, so it surfaces both in the
                 registry and on
-                ``BuildTriggerResult.function_call.get()``. Dynamic
-                dependencies registered from inside a worker apply the
-                same elision but never raise: their task has already run,
-                and failing its bookkeeping to enforce a storage
-                preference would be a strictly worse outcome than one
-                extra pickle.
+                ``BuildTriggerResult.function_call.get()``.
+
+                The *guarantee* is separate, because the bootstrap is not
+                the only writer: a scheduler tick writes back the tasks it
+                rehydrates. Ticks of an app with this flag therefore get a
+                store that refuses every write (see
+                ``BuildTaskStore(pickle_free=...)``), which costs nothing —
+                the write-back is a cache, and on such a build every task
+                is rehydratable by construction.
+
+                One documented exception, unchanged: dynamic dependencies
+                registered from inside a worker apply the same elision but
+                never raise, and an uncovered one still gets its pickle.
+                Their task has already run, and failing its bookkeeping to
+                enforce a storage preference would be a strictly worse
+                outcome than one extra pickle.
             modal_workspace: Explicit Modal workspace name recorded in the
                 executor metadata of triggered builds and started tasks
                 (used by the UI for Modal dashboard deep links). Default:
@@ -1005,6 +1015,10 @@ class StardagApp:
             ),
             task_modules=tuple(task_modules),
             task_module_patterns=task_module_patterns,
+            # The tick writes to the build task store too (rehydrating a
+            # task writes it back), so the flag has to reach it or the
+            # "writes no pickles" promise holds only until the first tick.
+            require_pickle_free=self.require_pickle_free,
         )
 
         def _modal_tick(
