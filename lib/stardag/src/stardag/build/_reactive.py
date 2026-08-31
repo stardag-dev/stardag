@@ -1700,7 +1700,7 @@ async def _load_task(
     ``rehydrate.py``, which stays a pure reconstruction primitive with no
     notion of how its classes got imported.
     """
-    task = task_store.load_task(task_id)
+    task = await task_store.load_task_aio(task_id)
     if task is not None:
         return task
     try:
@@ -1719,7 +1719,7 @@ async def _load_task(
         return None
     logger.info(f"Rehydrated task {task_id} from registry data.")
     try:
-        task_store.save_task(task)
+        await task_store.save_task_aio(task)
     except Exception as e:
         logger.warning(f"Failed to write rehydrated task {task_id} back: {e}")
     return task
