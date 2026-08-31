@@ -157,7 +157,7 @@ these runs the tier automatically:
 
 **The `modal-live` label is the manual override**, for a change that touches
 none of those and still warrants a live run — a dependency bump, a `selfhost`
-change, a hunch. The `Decide whether to run` job logs which rule applied and
+change, a hunch. The `Decide what to run` job logs which rule applied and
 why, so a surprising skip is one click to explain.
 
 The schedule is weekly rather than nightly, and it is not there to catch
@@ -178,7 +178,120 @@ semantics. It does _not_ exercise registry interaction — the registries in
 these tests are `NoOpRegistry` subclasses, so claim arbitration and reactive
 wake-ups are simulated in-process rather than checked against the real API.
 Registry behaviour is covered separately by `app/stardag-api`'s own suite
-against Postgres.
+against Postgres, and the crossing between the two by the registry-live tier
+below.
+
+#### Registry-live tests
+
+The tier above runs real Modal workers against fake registries. The API's own
+suite runs a real registry with no Modal. **Neither covers the crossing** — a
+real worker reporting to a real registry over the network — and that crossing
+is not a detail of reactive scheduling, it _is_ reactive scheduling: the
+worker writes status, the registry flags wake candidates, and the worker
+spawns the next tick when no scheduler is live.
+
+`integration-tests/tests_registry_live/` covers it, by deploying a registry
+for the run.
+
+**The registry runs its own Postgres inside its own Modal container.** There
+is no database account to create, nothing to provision and nothing to clean
+up: `modal environment delete` takes the API, the database, the worker app,
+the target-root volume and the API-key secret in one call. Migrations run from
+scratch on every container start, which is a check the deployed path never
+performs.
+
+##### Running it against your own Modal account
+
+You need Modal credentials and nothing else. Everything lands in a Modal
+environment named after your checkout, so several worktrees can each have
+their own stack at once:
+
+```bash
+export MODAL_PROFILE=<your-dev-profile>
+
+# Bring a stack up: ~30s against a warm image cache, ~90s cold.
+uv run --project integration-tests python \
+  -m stardag_integration_tests.registry_live.provision up
+
+# Run the scenarios (concurrently).
+tox -e registry-modal-live
+
+# ...iterate on a scenario against the same stack, as often as you like...
+
+# Throw the whole thing away.
+uv run --project integration-tests python \
+  -m stardag_integration_tests.registry_live.provision down
+```
+
+`provision` names the environment `dev-<checkout-directory>` — so a worktree
+at `stardag-worktrees/sta-24` gets `dev-sta-24`. Pass `--modal-env` to
+override. It refuses any name outside the `dev-` and `ci-` prefixes: deleting
+a Modal environment is irrevocable and takes everything inside it, and the
+workspace may well also hold deployments you care about.
+
+**Keeping the stack between runs is the point.** Provisioning is the slow
+part; re-running one scenario against a live stack takes seconds. Tear it down
+when you are done with the branch, not after every run.
+
+Set `STARDAG_MODAL_TEST_WORKSPACE` if you want provisioning to assert which
+Modal account it is about to build in — resolved from the token, not from a
+profile name.
+
+##### Concurrency, and turning it off
+
+The scenarios run concurrently (`-n 4`). They are almost entirely sleep —
+each waits on Modal containers it does not own — so running them together
+costs little more than running the longest, and the tier's runtime stops
+being the sum of its parts as scenarios are added. They share one registry
+container, which serves them concurrently, and each salts its own task ids.
+
+**When something fails, run them one at a time.** A shared registry and
+interleaved logs make a low-level failure much harder to read:
+
+```bash
+tox -e registry-modal-live -- -n0 tests_registry_live -k cross_build_wake
+```
+
+Note the path is repeated: `--` replaces tox's default posargs wholesale, so
+passing only flags would drop it. In CI the same switch is the `serial` input
+on `workflow_dispatch`.
+
+##### Gating
+
+`STARDAG_REGISTRY_LIVE_TESTS` is on or off, with no `auto` in between —
+unlike the Modal tier, which can cheaply ask "are there credentials?" and skip
+politely. Here there is nothing to detect: the registry does not exist until
+this tier deploys one, so "detect and decide" would mean building the stack in
+order to find out whether to build it. The tox env sets it, and the tier lives
+outside the project's default `testpaths`, so neither a bare `pytest` nor a
+bare `tox` can reach it.
+
+When it is on, the guard asserts — at module import, so a misconfiguration is
+a collection error rather than a scenario that quietly ran against nothing:
+
+- the resolved registry is a real `APIRegistry`, not a `NoOp` (with no
+  registry configured the SDK falls back to one, and the scenarios would pass
+  having checked nothing);
+- it is **this session's deployment**, by URL. The type check alone is not
+  enough: a production registry is a perfectly real `APIRegistry`, and these
+  scenarios trigger builds, race claims and cancel things;
+- it answers an authenticated request, made through the registry's own
+  client, so the credentials are proven rather than assumed.
+
+The SDK is configured from `STARDAG_API_URL` / `STARDAG_WORKSPACE_ID` /
+`STARDAG_ENVIRONMENT_ID` / `STARDAG_API_KEY` rather than a profile, and that
+matters more than it looks: profile resolution reads `~/.stardag/config.toml`
+_and_ walks the working directory's parents looking for one, so a checkout
+under your home directory finds your real config several levels up.
+
+##### In CI
+
+The same workflow runs both tiers, decided separately, into the same
+per-run Modal environment. A change under `app/stardag-api/`,
+`lib/stardag/src/stardag/{build,registry,integration/modal,selfhost}/` or
+`integration-tests/` triggers this one. Teardown is its own job that waits for
+both tiers — sharing an environment means whichever finished first would
+otherwise delete the other's stack out from under it.
 
 ### Linting & Formatting
 
