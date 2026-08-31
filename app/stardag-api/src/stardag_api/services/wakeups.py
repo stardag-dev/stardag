@@ -35,20 +35,18 @@ import logging
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import ColumnElement, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
     Build,
     BuildStatus,
-    DistributedLock,
     Event,
     Task,
     TaskLimitKey,
     TaskStatus,
 )
-from stardag_api.models.base import utc_now
-from stardag_api.services.lock import scheduler_lock_name
+from stardag_api.models.base import as_utc, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +206,104 @@ async def flag_after_task_transition(
     await _flag_builds(db, waiting_builds, environment_id=task.environment_id, now=now)
 
 
+# Bounds on a scheduler lease's TTL, in seconds. The lower bound stops a
+# lease so short it lapses mid-pass (which would let a second tick in while
+# the first is still acting); the upper bound stops a dead tick from
+# holding a build hostage for longer than a person will wait.
+MIN_LEASE_TTL_SECONDS = 5
+MAX_LEASE_TTL_SECONDS = 3600
+
+
+def lease_is_live(build: Build, now: datetime | None = None) -> bool:
+    """Whether ``build`` currently has a scheduler driving it.
+
+    Expiry is part of the question, not a detail: a tick whose container
+    died leaves the column set until the TTL lapses, and treating that as a
+    live scheduler would suppress wake-ups for exactly the build that most
+    needs them.
+    """
+    if build.scheduler_lease_until is None:
+        return False
+    return as_utc(build.scheduler_lease_until) > (now or utc_now())
+
+
+def live_lease_filter(now: datetime | None = None) -> ColumnElement[bool]:
+    """SQL for :func:`lease_is_live`, for filtering builds.
+
+    The two must agree: a candidate query that counted expired leases as
+    live would hide precisely the abandoned builds the wake-up exists to
+    rescue.
+    """
+    return Build.scheduler_lease_until > (now or utc_now())
+
+
+def acquire_scheduler_lease(
+    build: Build,
+    *,
+    owner_id: str,
+    ttl_seconds: int,
+    now: datetime | None = None,
+) -> tuple[bool, datetime | None]:
+    """Take the build's scheduler lease if it is free or has lapsed.
+
+    Returns ``(acquired, expires_at)``. Pure over the ORM instance — the
+    caller owns the transaction, and must have loaded ``build`` FOR UPDATE:
+    two ticks racing for one build have to serialize somewhere, and the
+    build row is where.
+
+    A lapsed lease denies nothing — this acquire takes it over, replacing
+    the dead holder's owner and expiry together. That takeover *is* the
+    healing mechanism; nothing has to release the old lease first, and
+    across containers there is nothing to release it with.
+    """
+    now = now or utc_now()
+    if lease_is_live(build, now):
+        # Live implies non-null; narrowed for the type checker.
+        assert build.scheduler_lease_until is not None
+        return False, as_utc(build.scheduler_lease_until)
+    build.scheduler_lease_owner = owner_id
+    build.scheduler_lease_until = now + timedelta(seconds=ttl_seconds)
+    return True, build.scheduler_lease_until
+
+
+def renew_scheduler_lease(
+    build: Build,
+    *,
+    owner_id: str,
+    ttl_seconds: int,
+    now: datetime | None = None,
+) -> datetime | None:
+    """Extend the lease, but only for the holder. None = not the holder.
+
+    Owner-checked rather than blind, and the check is what makes a slow
+    tick safe: one whose lease lapsed and was taken over must not be able
+    to extend the new holder's lease out from under it. It learns it lost
+    by being refused here.
+    """
+    now = now or utc_now()
+    if build.scheduler_lease_owner != owner_id or not lease_is_live(build, now):
+        return None
+    build.scheduler_lease_until = now + timedelta(seconds=ttl_seconds)
+    return build.scheduler_lease_until
+
+
+def release_scheduler_lease(
+    build: Build,
+    *,
+    owner_id: str,
+) -> bool:
+    """Drop the lease if ``owner_id`` still holds it.
+
+    Owner-checked for the same reason renew is: a tick that lost its lease
+    to a takeover and then exits must not clear the successor's.
+    """
+    if build.scheduler_lease_owner != owner_id:
+        return False
+    build.scheduler_lease_owner = None
+    build.scheduler_lease_until = None
+    return True
+
+
 async def mark_tick_requested(
     db: AsyncSession, build: Build, *, now: datetime | None = None
 ) -> None:
@@ -241,15 +337,17 @@ async def select_wake_candidates(
     other either). Oldest wake-up first, so a starved build is not starved
     by newer ones.
 
-    The lease check is a second query over the candidates rather than a
-    join: lock names are strings built from the build id, and spelling that
-    concatenation portably across dialects is not worth the one round-trip
-    it would save on a path that runs once per tick pass.
+    One query. The lease used to live in ``distributed_locks`` under a name
+    built by concatenating a prefix with the build id, so "has a live
+    scheduler" was a second round-trip over the candidates — the join was
+    not worth spelling portably. On the build row it is a column
+    comparison in the same WHERE, and the over-fetch that existed to absorb
+    the post-filter goes with it.
     """
     now = now or utc_now()
     limit = max(1, min(limit, MAX_WAKE_CANDIDATES))
     handout_before = now - WAKE_HANDOUT_WINDOW
-    candidates = (
+    chosen = list(
         (
             await db.execute(
                 select(Build)
@@ -258,34 +356,19 @@ async def select_wake_candidates(
                     Build.needs_tick_at.is_not(None),
                     (Build.tick_requested_at.is_(None))
                     | (Build.tick_requested_at < handout_before),
+                    # No live scheduler. NULL is "never leased", which SQL
+                    # comparison drops, so it is spelled out — a build that
+                    # has never been leased is exactly one that needs a tick.
+                    (Build.scheduler_lease_until.is_(None)) | ~live_lease_filter(now),
                 )
                 .order_by(Build.needs_tick_at.asc(), Build.id.asc())
-                # Over-fetch so that leased builds filtered out below do
-                # not shrink the answer under the limit for no reason.
-                .limit(limit * 2)
+                .limit(limit)
                 .with_for_update(skip_locked=True)
             )
         )
         .scalars()
         .all()
     )
-    if not candidates:
-        return []
-    lock_names = {scheduler_lock_name(b.id): b for b in candidates}
-    held = set(
-        (
-            await db.execute(
-                select(DistributedLock.name).where(
-                    DistributedLock.environment_id == environment_id,
-                    DistributedLock.name.in_(lock_names),
-                    DistributedLock.expires_at > now,
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    chosen = [b for name, b in lock_names.items() if name not in held][:limit]
     for build in chosen:
         build.tick_requested_at = now
     return chosen

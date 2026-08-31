@@ -24,7 +24,6 @@ exactly once, in the worker spawned by the first tick.
 import asyncio
 import subprocess
 import time
-import typing
 import uuid as uuid_module
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -48,11 +47,6 @@ try:
         TickConfig,
         discover_and_register_aio,
         run_tick_aio,
-    )
-    from stardag.build._base import (
-        GlobalConcurrencyLockManager,
-        LockAcquisitionResult,
-        LockAcquisitionStatus,
     )
     from stardag.integration.modal._executor import ModalTaskExecutor
     from stardag.integration.modal._metadata import MODAL_EXECUTOR_NAME
@@ -182,35 +176,6 @@ class MiniReactiveRegistry(NoOpRegistry):
         )
 
 
-class LocalLease:
-    def __init__(self):
-        self.result = LockAcquisitionResult(
-            status=LockAcquisitionStatus.ACQUIRED, acquired=True
-        )
-
-    def mark_completed(self) -> None:
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        return False
-
-
-class LocalLockManager:
-    """Single-process lease (the test is the only scheduler)."""
-
-    def lock(self, task_id: str) -> LocalLease:
-        return LocalLease()
-
-    async def acquire(self, task_id: str) -> LockAcquisitionResult:
-        raise NotImplementedError
-
-    async def release(self, task_id: str, task_completed: bool = False) -> bool:
-        return True
-
-
 def test_reactive_build_completes_without_resident_orchestrator():
     salt = uuid_module.uuid4().hex
     task = SleepAndSaveCallId(sleep_seconds=15.0, salt=salt)
@@ -250,9 +215,6 @@ def test_reactive_build_completes_without_resident_orchestrator():
                 build_id,
                 registry=registry,
                 task_executor=executor,
-                lock_manager=typing.cast(
-                    GlobalConcurrencyLockManager, LocalLockManager()
-                ),
                 task_store=store,
                 config=tick_config,
             )

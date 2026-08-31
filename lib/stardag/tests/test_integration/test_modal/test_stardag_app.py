@@ -1468,9 +1468,6 @@ class TestFinalizeBakesTaskModules:
             patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
             patch("stardag.integration.modal._tick.registry_provider") as rp,
             patch(
-                "stardag.integration.modal._tick.RegistryGlobalConcurrencyLockManager"
-            ),
-            patch(
                 "stardag.integration.modal._tick.import_task_modules"
             ) as import_modules,
         ):
@@ -1501,9 +1498,6 @@ class TestFinalizeBakesTaskModules:
         with (
             patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
             patch("stardag.integration.modal._tick.registry_provider") as rp,
-            patch(
-                "stardag.integration.modal._tick.RegistryGlobalConcurrencyLockManager"
-            ),
             patch(
                 "stardag.integration.modal._tick.import_task_modules"
             ) as import_modules,
@@ -2270,9 +2264,6 @@ class TestTickAppOwnership:
         with (
             patch("stardag.integration.modal._tick.registry_provider") as rp,
             patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
-            patch(
-                "stardag.integration.modal._tick.RegistryGlobalConcurrencyLockManager"
-            ),
         ):
             rp.get.return_value = registry
             tick(str(build_id))
@@ -2395,9 +2386,6 @@ class TestTickAppOwnership:
         with (
             patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
             patch("stardag.integration.modal._tick.registry_provider") as rp,
-            patch(
-                "stardag.integration.modal._tick.RegistryGlobalConcurrencyLockManager"
-            ),
         ):
             rp.get.return_value = own_registry
             assert tick(str(own))["outcome"] == "noop"
