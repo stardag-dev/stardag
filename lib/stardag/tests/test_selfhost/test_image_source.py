@@ -117,6 +117,9 @@ def test_prebuilt_functions_are_by_reference_file_entrypoints():
         from modal._utils.function_utils import (
             FunctionSourceInfo as FunctionInfo,  # pyright: ignore[reportAttributeAccessIssue]
         )
+    # ImportError and not ModuleNotFoundError, unlike the `modal.types`
+    # fallback in _target.py: here the *module* exists on both versions and
+    # only the symbol moved, which does not raise ModuleNotFoundError.
     except ImportError:  # older modal
         from modal._utils.function_utils import (
             FunctionInfo,  # pyright: ignore[reportAttributeAccessIssue]

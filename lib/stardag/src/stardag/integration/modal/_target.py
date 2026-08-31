@@ -26,7 +26,9 @@ try:
     from modal.types import (  # pyright: ignore[reportMissingImports]
         FileEntryType,
     )
-except ImportError:  # no `modal.types` yet — still inside `modal>=1.0.0`
+except ModuleNotFoundError:  # no `modal.types` yet — inside `modal>=1.0.0`
+    # Narrow on purpose: a broken `modal.types` should surface, not fall
+    # through to a stale import path.
     from modal.volume import (
         FileEntryType,  # pyright: ignore[reportAttributeAccessIssue]
     )
