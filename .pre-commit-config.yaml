@@ -17,6 +17,17 @@ repos:
   # Pyright hooks - one per Python package, each using its own .venv
   - repo: local
     hooks:
+      # Lockfile freshness. Nothing else catches drift: tox runs plain
+      # `uv sync`, which silently re-resolves a stale lock, so CI ends up
+      # testing a resolution nobody committed. One hook covers every uv
+      # project — the script discovers them from the committed lockfiles.
+      - id: uv-lock-check
+        name: uv lock --check (all uv projects)
+        entry: scripts/check-uv-locks.sh
+        language: system
+        files: (^|/)(pyproject\.toml|uv\.lock)$
+        pass_filenames: false
+        verbose: true
       - id: pyright-stardag
         name: pyright (lib/stardag)
         entry: bash -c 'cd lib/stardag && uv sync --all-extras && uv run pyright src tests'
