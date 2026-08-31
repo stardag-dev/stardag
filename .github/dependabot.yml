@@ -47,11 +47,16 @@ updates:
   # They share no dependency purpose — the UI and the CDK tooling — so there is
   # nothing to gain from a common PR and something to lose: a break in either
   # blocked the other. #276 was one PR across both.
+  #
+  # The limit is 5 each rather than 10, so the npm total stays at the 10 it was
+  # before the split instead of quietly doubling. Majors now arrive
+  # individually, so the cap does real work; raise it if majors start queueing
+  # behind each other, which would be the same blocking problem in miniature.
   - package-ecosystem: "npm"
     directory: "/app/stardag-ui"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     groups:
       stardag-ui-minor-patch:
         patterns:
@@ -64,7 +69,7 @@ updates:
     directory: "/infra/aws-cdk"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     groups:
       aws-cdk-minor-patch:
         patterns:
