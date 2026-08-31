@@ -133,6 +133,7 @@ def sdk_environment(deployment: Deployment) -> dict[str, str]:
 def up(modal_environment: str) -> Deployment:
     """Deploy the registry, wire the SDK to it, deploy the scenario app."""
     _require_disposable_name(modal_environment, "provision into")
+    _require_expected_workspace()
     repo_root = _repo_root()
     admin_password = f"harness-{secrets.token_urlsafe(24)}"
 
@@ -200,6 +201,48 @@ def _require_disposable_name(modal_environment: str, action: str) -> None:
             f"deployments. Local stacks are named {LOCAL_PREFIX}*; pass "
             "--modal-env, or let it default to this checkout's name."
         )
+
+
+def _require_expected_workspace() -> None:
+    """Assert the credentials belong to ``STARDAG_MODAL_TEST_WORKSPACE``.
+
+    Opt-in, and unset means no check -- a contributor pointing this at
+    their own Modal account should not have to name it. CI sets it, which
+    is where the assertion earns its keep.
+
+    Resolved from the *token*, not from a profile name, and the difference
+    is the whole point: ``MODAL_PROFILE`` selects a section of a
+    ``.modal.toml``, but ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` take
+    precedence over that file and are not bound to the name, so a profile
+    name can agree with itself while the credentials point somewhere else
+    entirely. Same mechanism, and same env var, as ``live_modal_guard``'s
+    check -- deliberately one convention rather than two.
+
+    An unresolvable workspace counts as a mismatch. The alternative is
+    treating "could not tell" as "fine", on the one code path whose job is
+    to be sure.
+    """
+    expected = os.environ.get("STARDAG_MODAL_TEST_WORKSPACE", "").strip()
+    if not expected:
+        return
+
+    # Private, and reached deliberately: it is the same helper the live
+    # Modal guard uses, in this repo, and duplicating the lookup would let
+    # the two answers drift.
+    from stardag.testing.modal._live import _active_modal_workspace
+
+    active = _active_modal_workspace()
+    if active != expected:
+        raise SystemExit(
+            f"Modal credentials resolve to workspace {active!r}, which does "
+            f"not match STARDAG_MODAL_TEST_WORKSPACE={expected!r}"
+            + (
+                " (no credentials, or the workspace lookup failed)"
+                if active is None
+                else ""
+            )
+        )
+    print(f"[provision] Modal workspace {active!r} confirmed from the token")
 
 
 def _ensure_modal_environment(name: str) -> None:

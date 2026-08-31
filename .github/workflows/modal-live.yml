@@ -26,6 +26,15 @@ on:
     # red on platform latency and nobody reads is worse than no schedule.
     - cron: "17 3 * * 1"
   workflow_dispatch:
+    inputs:
+      serial:
+        description: >-
+          Run the registry-live scenarios one at a time. They are concurrent
+          by default; a shared registry and interleaved logs make a
+          low-level failure much harder to read, so this is the switch to
+          reach for when debugging a red run.
+        type: boolean
+        default: false
   pull_request:
     types: [opened, labeled, synchronize, reopened, closed]
 
@@ -56,23 +65,53 @@ concurrency:
 jobs:
   # Whether to run, in one place with a readable log line saying why.
   #
-  # Two ways in, and the path check is the important one: a label means
-  # remembering to apply it, which is the failure this whole tier exists to fix.
-  # The label stays as the manual override for a change that touches none of
-  # these paths but still warrants a live run -- a dependency bump, a selfhost
-  # change -- so it cannot be a `paths:` filter on the trigger. GitHub applies
-  # `paths:` to *every* activity type, which would silently swallow the label
-  # event too, and the closed-PR cleanup with it.
+  # Two tiers, decided separately, because they cover different things and
+  # are triggered by different code. `modal-live` is Modal *execution* with
+  # NoOp registries; `registry-live` is a real Modal worker reporting to a
+  # real deployed registry. A change under `app/stardag-api/` should run the
+  # second and not the first; a change to the detached executor, the first
+  # and not necessarily the second.
+  #
+  # The path check is the important trigger: a label means remembering to
+  # apply it, which is the failure this whole tier exists to fix. The label
+  # stays as the manual override for a change that touches none of these
+  # paths but still warrants a live run -- a dependency bump, a selfhost
+  # change -- and it forces *both* tiers, since it means "exercise the live
+  # Modal stuff" rather than naming one of them.
+  #
+  # Not a `paths:` filter on the trigger: GitHub applies those to every
+  # activity type, which would silently swallow the label event too, and the
+  # closed-PR cleanup with it.
   decide:
-    name: Decide whether to run
+    name: Decide what to run
     runs-on: ubuntu-latest
     if: github.event.action != 'closed'
     permissions:
       contents: read
       pull-requests: read
     outputs:
-      run: ${{ steps.decide.outputs.run }}
+      modal_live: ${{ steps.decide.outputs.modal_live }}
+      registry_live: ${{ steps.decide.outputs.registry_live }}
+      env_name: ${{ steps.env.outputs.name }}
+      ephemeral: ${{ steps.env.outputs.ephemeral }}
     steps:
+      # One name for the run, decided here rather than in each job, because
+      # both tiers deploy into the *same* Modal environment and the teardown
+      # job has to name it too. Three places computing it independently is
+      # three chances for them to disagree, and the failure mode of that is
+      # a leaked environment holding always-on containers.
+      - name: Resolve the Modal environment for this run
+        id: env
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request)      name="ci-pr-${{ github.event.pull_request.number }}"; ephemeral=true ;;
+            workflow_dispatch) name="ci-manual-${{ github.run_id }}";                ephemeral=true ;;
+            *)                 name="ci-main";                                       ephemeral=false ;;
+          esac
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "ephemeral=$ephemeral" >> "$GITHUB_OUTPUT"
+          echo "Modal environment: $name (ephemeral=$ephemeral)"
+
       - id: decide
         env:
           GH_TOKEN: ${{ github.token }}
@@ -84,41 +123,49 @@ jobs:
         run: |
           set -euo pipefail
 
-          decision() {
-            echo "run=$1" >> "$GITHUB_OUTPUT"
-            echo "$2"
-            exit 0
-          }
+          # What each tier actually exercises, plus the harness itself and
+          # the dependency lists baked into the images it builds.
+          MODAL_PATHS='^(lib/stardag/src/stardag/(integration/modal|build|testing/modal)/|lib/stardag/tests/test_integration/test_modal/|lib/stardag/pyproject\.toml$|tox\.ini$|\.github/workflows/modal-live\.yml$)'
+          # The registry tier additionally owns the API itself (its image is
+          # built from `app/stardag-api`), the registry client, and the
+          # selfhost path the harness reuses to wire a deployment up.
+          REGISTRY_PATHS='^(app/stardag-api/|lib/stardag/src/stardag/(build|registry|integration/modal|selfhost)/|lib/stardag/pyproject\.toml$|integration-tests/|tox\.ini$|\.github/workflows/modal-live\.yml$)'
 
-          [ "$EVENT" = "pull_request" ] || decision true "$EVENT -- running."
+          emit() { echo "$1=$2" >> "$GITHUB_OUTPUT"; echo "$1=$2 -- $3"; }
+
+          both() { emit modal_live "$1" "$2"; emit registry_live "$1" "$2"; exit 0; }
+
+          [ "$EVENT" = "pull_request" ] || both true "$EVENT -- running both tiers."
 
           # Fork PRs receive no secrets, so this could only fail in require
           # mode. Skipping is the honest outcome, not a green tick.
-          [ "$HEAD_REPO" = "$REPO" ] || decision false \
+          [ "$HEAD_REPO" = "$REPO" ] || both false \
             "PR is from a fork ($HEAD_REPO); GitHub withholds the Modal credentials."
 
-          [ "$LABELLED" = "true" ] && decision true "Labelled modal-live -- running."
+          [ "$LABELLED" = "true" ] && both true "Labelled modal-live."
 
-          # Everything the live tier actually exercises, plus the harness
-          # itself and the dependency list baked into the worker image.
           changed=$(gh pr diff "$PR" --repo "$REPO" --name-only)
-          if printf '%s\n' "$changed" | grep -qE \
-               '^(lib/stardag/src/stardag/(integration/modal|build|testing/modal)/|lib/stardag/tests/test_integration/test_modal/|lib/stardag/pyproject\.toml$|tox\.ini$|\.github/workflows/modal-live\.yml$)'; then
-            echo "Changed files touching the live tier:"
-            printf '%s\n' "$changed" | grep -E \
-              '^(lib/stardag/src/stardag/(integration/modal|build|testing/modal)/|lib/stardag/tests/test_integration/test_modal/|lib/stardag/pyproject\.toml$|tox\.ini$|\.github/workflows/modal-live\.yml$)' \
-              | sed 's/^/  /'
-            decision true "Running."
-          fi
 
-          decision false \
-            "No label and nothing changed under the live tier's paths. Add the 'modal-live' label to force a run."
+          for tier in modal_live registry_live; do
+            case "$tier" in
+              modal_live)    pattern=$MODAL_PATHS ;;
+              registry_live) pattern=$REGISTRY_PATHS ;;
+            esac
+            if printf '%s\n' "$changed" | grep -qE "$pattern"; then
+              echo "$tier -- changed files:"
+              printf '%s\n' "$changed" | grep -E "$pattern" | sed 's/^/  /'
+              emit "$tier" true "paths matched."
+            else
+              emit "$tier" false \
+                "nothing changed under its paths. Add the 'modal-live' label to force a run."
+            fi
+          done
 
   modal-live:
     name: Live Modal tier
     runs-on: ubuntu-latest
     needs: decide
-    if: needs.decide.outputs.run == 'true'
+    if: needs.decide.outputs.modal_live == 'true'
     timeout-minutes: 25 # the suite measures ~6 minutes; this is slack, not a budget
     # The same-repo restriction lives in `decide` above. It is the contributor
     # check: a branch only exists here if the pusher has write access, and
@@ -148,6 +195,7 @@ jobs:
       # released stardag inside the container while the branch's code sits
       # unexercised, and the job would still be green.
       STARDAG_MODAL_LOCAL_STARDAG_SOURCE: "yes"
+      MODAL_ENVIRONMENT: ${{ needs.decide.outputs.env_name }}
 
     steps:
       - uses: actions/checkout@v7
@@ -163,23 +211,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Resolve the Modal environment for this run
-        id: env
-        run: |
-          case "${{ github.event_name }}" in
-            pull_request)     name="ci-pr-${{ github.event.pull_request.number }}"; ephemeral=true ;;
-            workflow_dispatch) name="ci-manual-${{ github.run_id }}";               ephemeral=true ;;
-            *)                name="ci-main";                                       ephemeral=false ;;
-          esac
-          echo "name=$name" >> "$GITHUB_OUTPUT"
-          echo "ephemeral=$ephemeral" >> "$GITHUB_OUTPUT"
-          echo "MODAL_ENVIRONMENT=$name" >> "$GITHUB_ENV"
-          echo "Modal environment: $name (ephemeral=$ephemeral)"
-
       - name: Create the Modal environment
         run: |
           set -euo pipefail
-          name="${{ steps.env.outputs.name }}"
+          name="${{ needs.decide.outputs.env_name }}"
           if uvx modal environment list --json | jq -e --arg n "$name" \
                'any(.[]; .name == $n)' > /dev/null; then
             echo "Environment '$name' already exists, reusing it."
@@ -193,15 +228,120 @@ jobs:
       - name: Run the live Modal tier
         run: tox -e stardag-modal-live
 
-      # Ephemeral environments take everything the tier leaves behind with them
-      # -- deployed apps, the `stardag-testing` volume, the probe's dict -- in
-      # one call. `ci-main` is kept, so the nightly path has no churn.
+  # The crossing the tier above cannot reach: a real Modal worker reporting
+  # to a real registry over the network. That is not a detail of reactive
+  # scheduling, it *is* reactive scheduling -- the worker writes status, the
+  # registry flags wake candidates, and the worker spawns the next tick when
+  # no scheduler is live. Every registry in `modal-live` is a NoOp
+  # subclass, so none of that is exercised there.
+  #
+  # The registry is deployed for the run with its Postgres inside its own
+  # Modal container, so there is no database account, no provisioning and no
+  # teardown beyond deleting the environment.
+  registry-live:
+    name: Registry-live tier
+    runs-on: ubuntu-latest
+    needs: decide
+    if: needs.decide.outputs.registry_live == 'true'
+    # Provisioning is about a minute and the scenarios run concurrently in
+    # roughly three; the rest is slack for Modal latency, not a budget.
+    timeout-minutes: 30
+    environment: modal-live-ci
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      # Asserted against the workspace resolved from the token itself. A
+      # profile name would assert nothing: MODAL_PROFILE selects a section
+      # of a .modal.toml, but the token env vars take precedence over that
+      # file without being bound to the name.
+      STARDAG_MODAL_TEST_WORKSPACE: andhus
+      # Never unset. This workspace also holds standing deployments, and
+      # everything this tier builds -- an API, a database, a secret, a
+      # volume -- goes into the run's own environment or nowhere.
+      MODAL_ENVIRONMENT: ${{ needs.decide.outputs.env_name }}
+      # Require mode: a misconfigured job must fail, not skip. With no
+      # registry configured the SDK falls back to a NoOp and the scenarios
+      # would pass having checked nothing.
+      STARDAG_REGISTRY_LIVE_TESTS: "1"
+      # Build the worker image from *this checkout*, not the last release.
+      STARDAG_MODAL_LOCAL_STARDAG_SOURCE: "yes"
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      # Pinned deliberately rather than incidentally. Both images this tier
+      # builds take their Python from whatever interpreter serializes their
+      # functions, and cloudpickle bytecode is not portable across minors --
+      # a mismatch kills the container with a bare SIGSEGV and leaves a
+      # build that looks empty.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install tox
+        run: pip install tox
+
+      # A separate step from the run below, so a provisioning failure reads
+      # as one rather than as a scenario failing for reasons of its own.
+      - name: Provision the registry and the scenario app
+        run: |
+          uv run --project integration-tests --python 3.12 \
+            python -m stardag_integration_tests.registry_live.provision up
+
+      # The test path is repeated in the serial form on purpose: `--`
+      # replaces tox's default posargs wholesale, so passing only `-n0`
+      # would drop the path and send pytest at the project's default
+      # testpaths -- the docker-compose suite, which is not this tier.
+      - name: Run the registry-live scenarios
+        run: >-
+          tox -e registry-modal-live
+          ${{ inputs.serial && '-- -n0 tests_registry_live' || '' }}
+
+  # Teardown waits for *both* tiers, and that is the point of it being its
+  # own job. They share one Modal environment, so whichever finished first
+  # would otherwise delete the other's registry, database and worker app out
+  # from under it -- and the victim's failure would look like a scheduling
+  # bug rather than a workflow one.
+  #
+  # `always()` because a red run is exactly when a leaked environment is
+  # most likely and most expensive: the registry pins `min_containers=1`, so
+  # an abandoned one keeps a container alive until its scaledown window
+  # expires.
+  teardown:
+    name: Delete the run's Modal environment
+    runs-on: ubuntu-latest
+    needs: [decide, modal-live, registry-live]
+    if: always() && needs.decide.outputs.ephemeral == 'true'
+    environment: modal-live-ci
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      # One call takes the deployed apps, the volumes, the dicts, the
+      # API-key secret, and the registry's container and therefore its
+      # database. That completeness is why the database lives in the
+      # container rather than in a hosted service.
       #
-      # `cancel-in-progress` means this step is sometimes skipped, so leaks are
-      # expected rather than exceptional; the sweeper job below is the backstop.
-      - name: Delete the Modal environment
-        if: always() && steps.env.outputs.ephemeral == 'true'
-        run: uvx modal environment delete "${{ steps.env.outputs.name }}" --yes
+      # `cancel-in-progress` means this job is sometimes skipped entirely,
+      # so leaks are expected rather than exceptional and the sweeper below
+      # is the backstop.
+      - name: Delete ${{ needs.decide.outputs.env_name }}
+        run: |
+          set -euo pipefail
+          name="${{ needs.decide.outputs.env_name }}"
+          if uvx modal environment list --json | jq -e --arg n "$name" \
+               'any(.[]; .name == $n)' > /dev/null; then
+            uvx modal environment delete "$name" --yes
+          else
+            echo "No environment '$name' to delete."
+          fi
 
   # --- Cleanup backstops -----------------------------------------------------
 
@@ -246,7 +386,7 @@ jobs:
       contents: read
       pull-requests: read
       actions: read
-    needs: modal-live
+    needs: [modal-live, registry-live]
     # `always()` is load-bearing: with `needs`, a failed or cancelled
     # modal-live would otherwise skip the sweeper -- and a red suite is exactly
     # when leaked environments accumulate.
