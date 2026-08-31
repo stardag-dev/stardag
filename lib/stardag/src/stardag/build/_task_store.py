@@ -136,7 +136,20 @@ class BuildTaskStore:
         )
 
     def _deserialize(self, task_id: UUID | str, data: bytes) -> BaseTask | None:
-        task = pickle.loads(data)
+        # None (never raise) on a bad entry: the store is a fallback, and the
+        # caller (`_reactive._load_task`) rehydrates from registry data on a
+        # miss — a stale pickle (e.g. from before a redeploy) or a corrupt one
+        # must route there too, not abort the tick.
+        try:
+            task = pickle.loads(data)
+        except Exception:
+            logger.warning(
+                f"Task store entry for {task_id} of build {self.build_id} "
+                f"could not be unpickled (stale after a redeploy, or corrupt); "
+                f"treating it as missing.",
+                exc_info=True,
+            )
+            return None
         if not isinstance(task, BaseTask):
             logger.error(
                 f"Task store entry for {task_id} of build {self.build_id} "

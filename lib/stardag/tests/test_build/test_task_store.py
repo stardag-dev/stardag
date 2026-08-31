@@ -78,6 +78,21 @@ async def test_load_task_aio_missing_returns_none(
     assert await store.load_task_aio(uuid4()) is None
 
 
+async def test_corrupt_pickle_reads_as_a_miss(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    # A stale (pre-redeploy) or corrupt entry must load as None — the same
+    # as a miss — so `_reactive._load_task` falls back to registry
+    # rehydration instead of the tick aborting on the raise.
+    store = BuildTaskStore(uuid4())
+    task = SyncOnlyTask(name="corrupt")
+    target = store._target(f"tasks/{task.id}.pkl")
+    with target.open("wb") as handle:
+        handle.write(b"not a pickle")
+    assert store.load_task(task.id) is None
+    assert await store.load_task_aio(task.id) is None
+
+
 def test_load_missing_task_returns_none(
     default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
 ):
