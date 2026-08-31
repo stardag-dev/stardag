@@ -154,8 +154,15 @@ jobs:
           [ "$HEAD_REPO" = "$REPO" ] || both false \
             "PR is from a fork ($HEAD_REPO); GitHub withholds the Modal credentials."
 
+          #
+          # To run the tiers on a dependabot PR anyway -- worth it when the
+          # bump touches something the live tiers exercise -- add the
+          # `modal-live` label. `labeled` is one of this workflow's triggers,
+          # and the labelling run is attributed to whoever clicked, so it gets
+          # the credentials this one does not. The label check below then
+          # forces both tiers.
           [ "$ACTOR" = "dependabot[bot]" ] && both false \
-            "triggered by dependabot; GitHub withholds the Modal credentials."
+            "triggered by dependabot; GitHub withholds the Modal credentials. Add the 'modal-live' label to run them."
 
           [ "$LABELLED" = "true" ] && both true "Labelled modal-live."
 
