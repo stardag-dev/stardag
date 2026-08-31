@@ -1537,8 +1537,16 @@ class TestFinalizeBakesTaskModules:
         _, _, captured = self._finalize(task_modules=[])
         build_id = uuid4()
         registry = MagicMock(spec=RegistryABC)
-        registry.build_get.return_value = BuildInfo(
-            id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+        # `build_get_aio`, not `build_get` — and it has to be stubbed
+        # explicitly. `MagicMock(spec=...)` auto-specs an async member as an
+        # AsyncMock, so leaving it alone does not raise: it returns a mock
+        # whose `reactive_app_name` is a mock, the tick decides the build
+        # belongs to another app, and the assertion below then passes
+        # because the tick never got as far as importing anything.
+        registry.build_get_aio = AsyncMock(
+            return_value=BuildInfo(
+                id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+            )
         )
 
         async def stub_tick_aio(build_uuid, **kwargs):
@@ -1871,9 +1879,12 @@ class TestReactivePickleElision:
         )
         registered = _finalize_capturing_functions(app)
 
-        with patch("stardag.integration.modal._app._run_tick") as run_tick:
+        with patch(
+            "stardag.integration.modal._app._run_deployed_tick_aio",
+            new_callable=AsyncMock,
+        ) as run_tick:
             run_tick.return_value = {}
-            registered["tick"](str(uuid4()), None)
+            _invoke(registered["tick"], str(uuid4()), None)
 
         assert run_tick.call_args.kwargs["deployment"].require_pickle_free is True
 
@@ -1885,9 +1896,12 @@ class TestReactivePickleElision:
         )
         registered = _finalize_capturing_functions(app)
 
-        with patch("stardag.integration.modal._app._run_tick") as run_tick:
+        with patch(
+            "stardag.integration.modal._app._run_deployed_tick_aio",
+            new_callable=AsyncMock,
+        ) as run_tick:
             run_tick.return_value = {}
-            registered["tick"](str(uuid4()), None)
+            _invoke(registered["tick"], str(uuid4()), None)
 
         assert run_tick.call_args.kwargs["deployment"].require_pickle_free is False
 
@@ -1914,10 +1928,12 @@ class TestTickTaskStoreIsPickleFree:
             require_pickle_free=require_pickle_free,
         )
         registry = MagicMock(spec=RegistryABC)
-        # Not reactively scheduled: _run_tick returns before it schedules
-        # anything, but only AFTER constructing the store — which is all
-        # this asserts on.
-        registry.build_get.return_value = MagicMock(reactive_app_name=None)
+        # Not reactively scheduled: the tick body returns before it
+        # schedules anything, but only AFTER constructing the store —
+        # which is all this asserts on.
+        registry.build_get_aio = AsyncMock(
+            return_value=MagicMock(reactive_app_name=None)
+        )
         stores: list = []
         real_store = tick_module.BuildTaskStore
 
@@ -1928,7 +1944,11 @@ class TestTickTaskStoreIsPickleFree:
 
         with patch.object(tick_module, "BuildTaskStore", capture):
             with registry_provider.override(registry):
-                tick_module._run_tick(str(uuid4()), None, deployment=deployment)
+                asyncio.run(
+                    tick_module._run_deployed_tick_aio(
+                        str(uuid4()), None, deployment=deployment
+                    )
+                )
         assert len(stores) == 1
         return stores[0]
 
@@ -3375,6 +3395,9 @@ class TestConcurrentTicksInOneContainer:
 
         tick = self._tick_wrapper()
         build_ids = [uuid4(), uuid4()]
+        # `asyncio.Barrier` is 3.11+, which the engine already requires
+        # (`_reactive/_discovery.py` uses `asyncio.TaskGroup` and
+        # `BaseExceptionGroup`) — CI runs 3.11-3.14.
         barrier = asyncio.Barrier(len(build_ids))
         driven: list[str] = []
 
