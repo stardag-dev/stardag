@@ -709,10 +709,12 @@ class BuildNotifyResponse(BaseModel):
     # is what pins it to that side of the write; a separate query invites
     # the opposite ordering.
     #
-    # None on DELETE (the clearing caller *is* the scheduler, so it has no
-    # use for the answer), and read by the SDK as "unknown" — which it also
-    # is on any server predating this field, and which falls back to
-    # spawning unconditionally.
+    # Answered only on POST. None on DELETE and on GET — in both cases the
+    # caller *is* the scheduler (it holds the lease it would be asking
+    # about), so the answer would be its own reflection, and computing it
+    # would cost the second table the GET exists to avoid. Read by the SDK
+    # as "unknown", which it also is on any server predating this field,
+    # and which falls back to spawning unconditionally.
     scheduler_live: bool | None = None
 
 

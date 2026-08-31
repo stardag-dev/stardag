@@ -582,6 +582,13 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def build_clear_notify_aio(self, build_id):
         self.needs_tick = False
 
+    async def build_get_notify_aio(self, build_id) -> BuildNotifyResult:
+        # The cheap flag read, overridden rather than inherited: the ABC
+        # default delegates to the frontier, and a double that inherits it
+        # cannot tell "read the flag" from "read the frontier" — which is
+        # exactly what the linger poll's cost depends on.
+        return BuildNotifyResult(build_id=build_id, needs_tick=self.needs_tick)
+
     async def build_get_frontier_aio(self, build_id) -> BuildFrontier:
         if self.frontier_error is not None:
             raise self.frontier_error
@@ -4764,6 +4771,66 @@ class TestInterruptedTasks:
         assert "interrupted" in _RETRYABLE_STATUSES
 
 
+class TestLingerPollCost:
+    """A lingering tick with nothing to do must not read the frontier.
+
+    The poll asks one question — "has anything changed?" — every few
+    seconds, per lingering build. It used to ask it by fetching the whole
+    frontier: seven statements, one of them a window-function aggregate over
+    the event log, of which it read a single boolean.
+    """
+
+    async def test_linger_poll_reads_the_flag_not_the_frontier(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        (root,) = _chain("poll-cost-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="other-backend",
+            executor_ref="job-1",
+        )
+
+        frontier_reads: list[int] = []
+        notify_reads: list[int] = []
+        real_frontier = registry.build_get_frontier_aio
+        real_notify = registry.build_get_notify_aio
+
+        async def counting_frontier(bid):
+            frontier_reads.append(1)
+            return await real_frontier(bid)
+
+        async def counting_notify(bid):
+            notify_reads.append(1)
+            return await real_notify(bid)
+
+        registry.build_get_frontier_aio = counting_frontier  # type: ignore[method-assign]
+        registry.build_get_notify_aio = counting_notify  # type: ignore[method-assign]
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=dataclasses.replace(
+                FAST_TICK, linger_seconds=0.2, poll_interval_seconds=0.02
+            ),
+        )
+
+        assert summary.outcome == "lingered_out"
+        # Several polls happened — otherwise this proves nothing.
+        assert len(notify_reads) >= 3, notify_reads
+        # ...and the frontier was read once, by the pass itself. Not once
+        # per poll. The exact number is the point of the test, so it is
+        # asserted rather than bounded.
+        assert len(frontier_reads) == 1, (
+            f"the linger poll read the frontier {len(frontier_reads) - 1} "
+            "extra time(s); it must ask the one-row flag endpoint"
+        )
+
+
 class TestExitHandshake:
     """The two re-reads that make a *conditional* wake-up safe.
 
@@ -4836,24 +4903,28 @@ class TestExitHandshake:
         )
 
         # Land the wake-up in the gap deterministically. With one poll per
-        # linger (poll interval > linger), the reads are: 1 the pass's own
-        # frontier, 2 the single linger poll, 3 the pre-release re-check.
-        # Setting the flag right after read 2 puts it exactly between the
-        # last poll and the deadline — the gap the re-check exists for.
+        # linger (poll interval > linger), the *flag* reads are: 1 the
+        # single linger poll, 2 the pre-release re-check. Setting the flag
+        # as read 1 answers "no" puts it exactly between the last poll and
+        # the deadline — the gap the re-check exists for.
+        #
+        # These are notify reads, not frontier reads: the linger poll asks
+        # the one-row endpoint now, so hooking the frontier would no longer
+        # land the flag in this window at all.
         reads: list[int] = []
-        real_frontier = registry.build_get_frontier_aio
+        real_notify = registry.build_get_notify_aio
 
-        async def frontier_then_notify(bid):
-            frontier = await real_frontier(bid)
+        async def notify_then_set(bid):
+            result = await real_notify(bid)
             reads.append(1)
-            if len(reads) == 2:
+            if len(reads) == 1:
                 # Complete the target too, so the extended pass reaches a
                 # terminal state instead of lingering out a second time.
                 root.run()
                 registry.needs_tick = True
-            return frontier
+            return result
 
-        registry.build_get_frontier_aio = frontier_then_notify  # type: ignore[method-assign]
+        registry.build_get_notify_aio = notify_then_set  # type: ignore[method-assign]
 
         spawned, spawn = self._spawner()
         summary = await run_tick_aio(

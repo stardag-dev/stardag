@@ -1627,6 +1627,31 @@ async def notify_build(
     )
 
 
+@router.get("/{build_id}/notify", response_model=BuildNotifyResponse)
+async def read_build_notify(
+    build_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Read the build's scheduler wake-up flag. One row, nothing derived.
+
+    A lingering tick asks one question every few seconds — "has anything
+    changed?" — and used to ask it by fetching the whole frontier: seven
+    statements, one of them a window-function aggregate over the event log,
+    of which it read a single boolean. This is that boolean.
+
+    ``scheduler_live`` is deliberately not answered here, and its absence is
+    not a version signal. The caller is the tick that *holds* the lease, so
+    the answer would only ever be "yourself"; computing it would cost the
+    second table this endpoint exists to avoid.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    build = await _get_build_checked(build_id, db, auth)
+    return BuildNotifyResponse(
+        build_id=build_id, needs_tick=build.needs_tick_at is not None
+    )
+
+
 @router.delete("/{build_id}/notify", response_model=BuildNotifyResponse)
 async def clear_build_notify(
     build_id: UUID,

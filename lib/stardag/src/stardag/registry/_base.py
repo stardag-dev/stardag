@@ -911,6 +911,40 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of build_notify."""
         return self.build_notify(build_id, can_spawn=can_spawn)
 
+    def build_get_notify(self, build_id: UUID) -> BuildNotifyResult:
+        """Read the build's scheduler wake-up flag without setting it.
+
+        The linger poll's question, and the cheapest possible answer to it:
+        one boolean, one row. A lingering tick asks it every few seconds and
+        used to ask it by fetching the whole frontier, of which it read this
+        field alone.
+
+        ``scheduler_live`` is not reported — the caller holds the lease, so
+        the answer is always itself.
+
+        Default: read the flag off the frontier, which is where this poll
+        got it before and which every backend that supports reactive
+        scheduling can already answer. Deliberately *not* a constant:
+        "always needs a tick" turns the linger loop into a hot loop, and
+        "never" stalls the build until the watchdog — there is no safe
+        direction to default to, only the real answer.
+
+        **Override both this and the async version** to make the poll
+        cheap. Unlike every other ``_aio`` default on this class, which
+        delegates to its sync twin, ``build_get_notify_aio`` goes sideways
+        to ``build_get_frontier_aio`` — delegating to a blocking call on
+        the hot path would stall the event loop. The cost of that choice is
+        that overriding only the sync method here silently has no effect on
+        the path the tick actually takes.
+        """
+        frontier = self.build_get_frontier(build_id)
+        return BuildNotifyResult(build_id=build_id, needs_tick=frontier.needs_tick)
+
+    async def build_get_notify_aio(self, build_id: UUID) -> BuildNotifyResult:
+        """Async version of build_get_notify."""
+        frontier = await self.build_get_frontier_aio(build_id)
+        return BuildNotifyResult(build_id=build_id, needs_tick=frontier.needs_tick)
+
     def build_clear_notify(self, build_id: UUID) -> None:
         """Clear the build's scheduler wake-up flag. Default: no-op."""
         pass

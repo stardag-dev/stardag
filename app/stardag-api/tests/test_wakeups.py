@@ -591,3 +591,66 @@ async def test_bulk_registration_flags_nobody(client: AsyncClient):
 
     assert await _needs_tick(client, a) is False
     assert await _needs_tick(client, b) is False
+
+
+# --- GET /builds/{id}/notify: the linger poll's one-row read (STA-18) ----
+
+
+async def test_reading_the_flag_agrees_with_the_frontier(client: AsyncClient):
+    """The whole point is that it is the *same* boolean, more cheaply.
+
+    A second source of truth for "does this build need a tick" would be
+    worse than the frontier read it replaces, so the two are asserted
+    together rather than separately.
+    """
+    build_id, other_id = await _shared(client)
+    await _clear(client, build_id, other_id)
+
+    assert (await client.get(f"/api/v1/builds/{build_id}/notify")).json()[
+        "needs_tick"
+    ] is False
+    assert await _needs_tick(client, build_id) is False
+
+    await client.post(f"/api/v1/builds/{build_id}/notify")
+
+    assert (await client.get(f"/api/v1/builds/{build_id}/notify")).json()[
+        "needs_tick"
+    ] is True
+    assert await _needs_tick(client, build_id) is True
+
+
+async def test_reading_the_flag_does_not_set_or_clear_it(client: AsyncClient):
+    """A GET is a read. The linger poll calls it every few seconds while
+    the tick still holds the lease; a read with a side effect on the flag
+    would either wake the build forever or swallow a wake-up."""
+    build_id = await _build(client)
+    await client.post(f"/api/v1/builds/{build_id}/notify")
+
+    for _ in range(3):
+        assert (await client.get(f"/api/v1/builds/{build_id}/notify")).json()[
+            "needs_tick"
+        ] is True
+
+    await client.delete(f"/api/v1/builds/{build_id}/notify")
+    for _ in range(3):
+        assert (await client.get(f"/api/v1/builds/{build_id}/notify")).json()[
+            "needs_tick"
+        ] is False
+
+
+async def test_reading_the_flag_reports_no_scheduler_liveness(client: AsyncClient):
+    """``scheduler_live`` is absent by design, not by omission: the caller
+    holds the lease, so the answer would only ever be itself — and computing
+    it costs the second table this endpoint exists to avoid. It must not be
+    reported as ``False``, which a caller reads as "nobody is scheduling"."""
+    build_id = await _build(client)
+    await _hold_lease(client, build_id)
+
+    body = (await client.get(f"/api/v1/builds/{build_id}/notify")).json()
+
+    assert body["scheduler_live"] is None
+
+
+async def test_reading_the_flag_of_an_unknown_build_is_404(client: AsyncClient):
+    response = await client.get(f"/api/v1/builds/{uuid.uuid4()}/notify")
+    assert response.status_code == 404
