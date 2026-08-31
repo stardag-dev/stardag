@@ -802,20 +802,25 @@ class InMemoryTaskStore(BuildTaskStore):
 
     Pickle-only now: the reactive marker/owner/config live in the registry
     (see ``FakeReactiveRegistry.reactive_meta``), not the store.
+
+    Overrides the ``_write_task`` hooks, not ``save_task`` itself, so the
+    base class's ``pickle_free`` guard applies here exactly as it does in
+    production. A double that wrote where the real store refuses would make
+    the tests for that guard vacuous.
     """
 
-    def __init__(self, build_id: UUID):
-        super().__init__(build_id)
+    def __init__(self, build_id: UUID, *, pickle_free: bool = False):
+        super().__init__(build_id, pickle_free=pickle_free)
         self._tasks: dict[str, BaseTask] = {}
 
-    def save_task(self, task: BaseTask) -> None:
+    def _write_task(self, task: BaseTask) -> None:
         self._tasks[str(task.id)] = task
 
     def load_task(self, task_id):
         return self._tasks.get(str(task_id))
 
-    async def save_task_aio(self, task: BaseTask) -> None:
-        self.save_task(task)
+    async def _write_task_aio(self, task: BaseTask) -> None:
+        self._write_task(task)
 
     async def load_task_aio(self, task_id):
         return self.load_task(task_id)

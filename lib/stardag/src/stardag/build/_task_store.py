@@ -32,6 +32,15 @@ remains are the payloads that genuinely cannot be reconstructed:
 ``AliasTask`` (pickled ``loads_type``, deliberately never auto-unpickled
 from registry data), dynamically generated classes, and anything whose
 serialization does not round-trip to the same task id.
+
+``pickle_free=True`` turns that preference into a guarantee: every write
+becomes a no-op, for a build whose app declared ``require_pickle_free``.
+The flag belongs on the store because the writers are spread across the
+trigger, the workers and the scheduler tick, and only the trigger's is
+close enough to the app to consult the declaration itself — the tick's
+rehydration write-back sits several frames below anything that knows what
+the build asked for, and duly wrote pickles to builds that had forbidden
+them. A store that refuses is the one place all writers pass through.
 """
 
 from __future__ import annotations
@@ -56,9 +65,19 @@ class BuildTaskStore:
         self,
         build_id: UUID,
         target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
+        *,
+        pickle_free: bool = False,
     ) -> None:
         self.build_id = build_id
         self.target_root_key = target_root_key
+        # The build declared ``require_pickle_free`` (see
+        # ``StardagApp``): every write is a no-op. Carried by the store
+        # rather than passed per call because the writers are spread
+        # across the trigger, the workers and the scheduler tick, and the
+        # one that leaked — the tick's rehydration write-back in
+        # ``_reactive._load_task`` — is several frames below anything that
+        # knows what the build declared.
+        self.pickle_free = pickle_free
 
     def _target(self, relpath: str):
         return target_factory_provider.get().get_file_target(
@@ -69,6 +88,32 @@ class BuildTaskStore:
     # --- task pickles ---
 
     def save_task(self, task: BaseTask) -> None:
+        """Persist ``task``, unless this build declared itself pickle-free.
+
+        The guard lives here, not at the call sites, so that "this build
+        writes no task pickles" is a property of the store and cannot be
+        forgotten by a writer — which is exactly how the tick's
+        rehydration write-back came to violate it. Subclasses override
+        :meth:`_write_task`, so they inherit the guard too.
+
+        Skipping is silent by design: on a pickle-free build the caller
+        already holds the task object (rehydration produced it), so the
+        write was only ever a cache and nothing is lost by not doing it.
+        """
+        if self.pickle_free:
+            self._log_skipped_write(task)
+            return
+        self._write_task(task)
+
+    async def save_task_aio(self, task: BaseTask) -> None:
+        # Async variant of save_task; same pickle-free guard and write-once
+        # semantics.
+        if self.pickle_free:
+            self._log_skipped_write(task)
+            return
+        await self._write_task_aio(task)
+
+    def _write_task(self, task: BaseTask) -> None:
         # Write-once: a task id maps to one immutable object, so an existing
         # pickle is already correct — skip it. This keeps the store
         # compatible with immutable/append-only target roots and lets
@@ -81,8 +126,8 @@ class BuildTaskStore:
         with target.open("wb") as handle:
             handle.write(pickle.dumps(task))
 
-    async def save_task_aio(self, task: BaseTask) -> None:
-        # Async variant of save_task; same write-once semantics. Callers on
+    async def _write_task_aio(self, task: BaseTask) -> None:
+        # Async variant of _write_task; same write-once semantics. Callers on
         # an event loop must use this one: the sync path does blocking
         # remote I/O (e.g. Modal's rate-limited volume API) directly on the
         # loop, stalling every other coroutine for a network round-trip.
@@ -91,6 +136,12 @@ class BuildTaskStore:
             return
         async with target.open_aio("wb") as handle:
             await handle.write(pickle.dumps(task))
+
+    def _log_skipped_write(self, task: BaseTask) -> None:
+        logger.debug(
+            f"Not persisting task {task.id} of build {self.build_id}: the "
+            f"build declared require_pickle_free."
+        )
 
     def save_tasks(self, tasks: typing.Iterable[BaseTask]) -> None:
         for task in tasks:

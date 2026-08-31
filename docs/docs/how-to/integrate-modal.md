@@ -547,10 +547,18 @@ discovered task whose class is covered _and_ whose payload round-trips to
 the same task id is persisted **without a pickle**. A build whose classes
 are all covered writes nothing to the target root at all. Set
 `require_pickle_free=True` to turn the fallback into a hard error that
-names every task that would have needed a pickle and why — enforced in
+names every task that would have needed a pickle and why — gated in
 the `bootstrap` container, where the task store is written, and loud:
 it fails the build in the registry _and_ propagates on
-`result.function_call.get()`.
+`result.function_call.get()`. Ticks of such an app also get a task store
+that refuses every write, so the flag means "no pickles" for the life of
+the build and not merely at its start: a tick that rebuilds a task from
+registry data would otherwise cache it back as a pickle, on a target root
+you asked it never to write to. The one remaining exception is a
+**dynamic dependency whose class is not covered** — registered from
+inside a worker whose task has already run, where failing the bookkeeping
+to enforce a storage preference would be the worse outcome, so it still
+gets its pickle.
 
 **Skipping pickles requires the explicit declaration** — the inferred
 default never elides on its own. Inference happens for every app,

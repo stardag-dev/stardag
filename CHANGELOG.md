@@ -8,6 +8,22 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **`require_pickle_free=True` now binds the scheduler tick, not just the
+  trigger.** The flag was a trigger-time gate: the bootstrap refused to start
+  a build whose tasks would need pickles, and nothing carried the intent any
+  further. But a tick is a writer of the same store — it wrote back every task
+  it rehydrated from registry data — so on a writable target root a build that
+  declared it writes no pickles quietly left them there anyway, one per task,
+  the first time each was rehydrated. Where the class could not be pickled the
+  write merely failed, warning once per rehydration per tick. `BuildTaskStore`
+  now takes `pickle_free`, which makes every write a no-op, and the deployed
+  tick builds its store from the app's flag. Nothing is lost by skipping: the
+  write-back is a cache over an object the caller already holds, and on such a
+  build every task is rehydratable by construction. Unchanged: the trigger-time
+  gate, and the documented carve-out for an uncovered _dynamic_ dependency
+  registered from inside a worker, which still gets its pickle rather than
+  failing the bookkeeping of a task that has already run.
+
 - **`--server-version latest` is resolved at deploy time, not deployed as a
   tag.** `stardag self-host up/upgrade --server-version latest` now asks the
   GitHub Releases API for the newest `server-vX.Y.Z`, prints what it resolved
