@@ -11,6 +11,10 @@ on:
   release:
     types: [published, edited]
 
+# Nothing in this workflow writes to the repo. Matches modal-live.yml.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint (pre-commit)
@@ -135,6 +139,73 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+
+  # infra/aws-cdk and the standalone Modal example are both dependabot-managed
+  # and, until now, built by nothing. A bump that broke either merged green —
+  # see the TypeScript 7 / ts-jest peer conflict and the TypeScript 6 @types
+  # change that #276 hit in infra/aws-cdk, both caught only by hand.
+  test-infra-cdk:
+    name: Test Infra (aws-cdk)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/aws-cdk
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: infra/aws-cdk/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      # Synths the stacks in-process; needs no AWS credentials.
+      - name: Run tests
+        run: npm test
+
+  # Installability only. Real Modal coverage for the examples belongs to the
+  # modal-live workflow, not this job — the import below is deliberately the
+  # whole test, and the step denies it Modal credentials outright.
+  test-example-standalone-modal:
+    name: Test Example (standalone stardag-modal)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lib/stardag-examples/standalone/stardag-modal
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # --frozen so this installs the committed lock rather than re-resolving
+      # it. A plain `uv sync` silently resolves past a stale lock, which would
+      # make the "pins" claim below untrue. Lock *freshness* is the
+      # uv-lock-check hook's job, not this one's.
+      - name: Install dependencies
+        run: uv sync --frozen
+      # Defining the image, the StardagApp and the DAG all happen at import
+      # time, so this catches an example that no longer loads against the
+      # stardag its lockfile pins.
+      #
+      # The example names a modal.Secret and builds a modal.Image, both lazy,
+      # so importing reaches Modal not at all. The empty MODAL_* values and the
+      # nonexistent config path keep that true even on event types where repo
+      # secrets are available, rather than leaving it to be re-verified.
+      - name: Import the example
+        env:
+          MODAL_TOKEN_ID: ""
+          MODAL_TOKEN_SECRET: ""
+          MODAL_PROFILE: ""
+          MODAL_CONFIG_PATH: /nonexistent/modal.toml
+        run: uv run --no-sync python -c "import stardag_modal.main"
 
   integration-tests:
     name: Integration Tests
