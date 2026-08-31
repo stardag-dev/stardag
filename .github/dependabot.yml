@@ -57,6 +57,35 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    # Held back because the UI needs code changes first, not because the
+    # version is bad. Each of these blocks on work tracked in
+    # `.claude/tasks/frontend-dep-migrations.md`, and **deleting the ignore is
+    # step one of doing that work** — they are placeholders, not decisions.
+    #
+    # Only things blocked on *us* are listed. Anything blocked upstream is
+    # deliberately left to open a PR: `typescript` 7 is unusable today because
+    # typescript-eslint peers at `<6.1.0`, and when that changes the PR going
+    # green is how we find out. An ignore would hide it.
+    ignore:
+      # 7.1 adds set-state-in-effect and preserve-manual-memoization to its
+      # recommended set, which flags 33 pre-existing errors. Minor by version
+      # number, breaking in effect — which is why the minor/patch group below
+      # cannot protect itself from it. Coupled to eslint 10: 7.0.x peers at
+      # eslint ^9, so these three move together or not at all.
+      - dependency-name: "eslint-plugin-react-hooks"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      - dependency-name: "eslint"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@eslint/js"
+        update-types: ["version-update:semver-major"]
+      # v4 is an API rewrite: PanelGroup -> Group, PanelResizeHandle ->
+      # Separator, refs move to usePanelRef() hooks. BuildView and
+      # TaskExplorer both need porting, with the collapse behaviour checked by
+      # hand.
+      - dependency-name: "react-resizable-panels"
+        update-types: ["version-update:semver-major"]
     groups:
       stardag-ui-minor-patch:
         patterns:
