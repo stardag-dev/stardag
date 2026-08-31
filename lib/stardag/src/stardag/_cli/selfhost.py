@@ -322,9 +322,21 @@ def _latest_released_server_version() -> str:
         )
         raise typer.Exit(1) from exc
 
+    if not isinstance(releases, list):
+        # raise_for_status catches the usual failures, but a 200 carrying
+        # something other than the release array must still exit cleanly
+        # rather than crash on the first .get().
+        error_console.print(
+            f"Could not resolve --server-version {LATEST_VERSION}: unexpected "
+            "response from the GitHub releases API. Pass an explicit "
+            "--server-version X.Y.Z instead."
+        )
+        raise typer.Exit(1)
+
     versions = [
         parsed
         for release in releases
+        if isinstance(release, dict)
         if not release.get("draft") and not release.get("prerelease")
         for tag in [release.get("tag_name") or ""]
         if tag.startswith(SERVER_TAG_PREFIX)

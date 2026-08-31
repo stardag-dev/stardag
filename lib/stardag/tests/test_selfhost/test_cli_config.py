@@ -326,6 +326,22 @@ def test_latest_released_server_version_no_releases_exits(
         _latest_released_server_version()
 
 
+def test_latest_released_server_version_non_list_payload_exits(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A 200 carrying an error object must exit cleanly, not AttributeError."""
+    _patch_releases(monkeypatch, {"message": "API rate limit exceeded"})
+    with pytest.raises(typer.Exit):
+        _latest_released_server_version()
+
+
+def test_latest_released_server_version_skips_non_dict_entries(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_releases(monkeypatch, ["nonsense", {"tag_name": "server-v0.2.0"}])
+    assert _latest_released_server_version() == "0.2.0"
+
+
 def test_latest_released_server_version_http_error_exits(
     monkeypatch: pytest.MonkeyPatch,
 ):
