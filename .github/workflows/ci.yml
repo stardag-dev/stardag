@@ -132,6 +132,59 @@ jobs:
       - name: Build
         run: npm run build
 
+  # infra/aws-cdk and the standalone Modal example are both dependabot-managed
+  # and, until now, built by nothing. A bump that broke either merged green —
+  # see the TypeScript 7 / ts-jest peer conflict and the TypeScript 6 @types
+  # change that #276 hit in infra/aws-cdk, both caught only by hand.
+  test-infra-cdk:
+    name: Test Infra (aws-cdk)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/aws-cdk
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: infra/aws-cdk/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      # Synths the stacks in-process; needs no AWS credentials.
+      - name: Run tests
+        run: npm test
+
+  # Installability only. Real Modal coverage for the examples is STA-15's
+  # modal-live workflow, not this job: no credentials are available here, and
+  # the import below is deliberately the whole test.
+  test-example-standalone-modal:
+    name: Test Example (standalone stardag-modal)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lib/stardag-examples/standalone/stardag-modal
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync
+      # Defining the image, the StardagApp and the DAG happens at import time,
+      # so this catches an example that no longer even loads against the
+      # stardag it pins. It does not reach Modal.
+      - name: Import the example
+        run: uv run --no-sync python -c "import stardag_modal.main"
+
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
