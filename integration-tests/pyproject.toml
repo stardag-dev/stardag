@@ -8,10 +8,16 @@ dependencies = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-timeout>=2.3",
+    # The registry-live tier runs its scenarios concurrently; they are
+    # almost entirely sleep, waiting on Modal.
+    "pytest-xdist>=3.6",
     "httpx>=0.27",
     "python-dotenv>=1.0",
-    # Include stardag SDK with CLI and API extras for testing
-    "stardag[cli,api]",
+    # The stardag SDK. `selfhost` is for the registry-live tier under
+    # tests_registry_live/: it carries both modal and cryptography, and it
+    # makes the connect flow importable, so the harness reuses that rather
+    # than reimplementing the post-deploy wiring.
+    "stardag[selfhost]",
 ]
 
 [project.optional-dependencies]
@@ -42,11 +48,12 @@ addopts = [
 markers = [
     "browser: marks tests that require a browser (deselect with '-m \"not browser\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "registry_live: hits a registry deployed onto Modal for the run (gated by STARDAG_REGISTRY_LIVE_TESTS; lives under tests_registry_live/, outside testpaths)",
 ]
 timeout = 120
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "tests_registry_live"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
 
