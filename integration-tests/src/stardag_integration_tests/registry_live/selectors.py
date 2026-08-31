@@ -11,21 +11,27 @@ from __future__ import annotations
 
 import stardag as sd
 
+# A suggested key for the scenario that will test concurrency slots
+# (nothing sets it yet). Named here rather than inline so that scenario and
+# any `stardag concurrency-limits set` invocation cannot drift apart.
 SLOW_LIMIT_KEY = "registry-live-slow"
 
 
 def registry_live_limit_keys(task: sd.BaseTask) -> list[str]:
-    """Every ``Slow`` task occupies one ``registry-live-slow`` slot.
+    """The key a task asked for, or none.
 
-    **Every scenario currently runs ``Slow`` tasks**, so every one of them
-    takes a slot under this key. That is harmless only because no limit is
-    configured for it: an unconfigured key is unlimited, so the accounting
-    happens and constrains nothing.
+    Opt-in rather than by task name, because a limit key does more than
+    feed a limiter. On every transition out of RUNNING the registry flags
+    every build in the environment holding a PENDING task under the same
+    key -- with no check that a limit is configured for it. So a key
+    applied to every ``Slow`` task would couple the scenarios: they run
+    concurrently in one environment, and one finishing would wake
+    another's build, quietly supplying the "other explanation" that the
+    wake-up scenarios assert cannot exist.
 
-    The key exists for the scenario that checks a released concurrency slot
-    wakes the build waiting on it, which will set the limit to 1
-    explicitly. Worth knowing before adding that: with the limit set, every
-    other scenario's ``Slow`` task contends for the same slot, so it needs
-    its own key or its own task rather than reusing this one.
+    Reading the key off the task instead means a scenario opts in exactly
+    when the key is the thing under test, and the others are genuinely
+    independent.
     """
-    return [SLOW_LIMIT_KEY] if task.get_name() == "Slow" else []
+    key = getattr(task, "limit_key", "")
+    return [key] if key else []

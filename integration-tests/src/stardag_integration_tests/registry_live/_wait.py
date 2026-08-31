@@ -23,7 +23,19 @@ TASK_PAGE_SIZE = 100
 MAX_TASK_PAGES = 20
 
 
-def tick_summaries(build_id: UUID, limit: int = 50) -> list[dict[str, Any]]:
+# The server retains this many summaries per build and prunes older ones on
+# insert. Asking for exactly that many means a full page is indistinguishable
+# from a truncated one, which matters because assertions here read
+# `summaries[0]` as "the first tick" -- past the cap it silently becomes "the
+# oldest one still kept", and a `lingered_out` assertion quietly changes
+# meaning without failing. `assert_trail_complete` below turns that into a
+# failure instead.
+SERVER_TRAIL_RETENTION = 50
+
+
+def tick_summaries(
+    build_id: UUID, limit: int = SERVER_TRAIL_RETENTION
+) -> list[dict[str, Any]]:
     """The build's retained tick summaries, oldest first.
 
     The registry returns newest first; reversed here because these read as
@@ -43,6 +55,13 @@ def find_task(task_id: str, *, task_name: str):
     because the row carries ``latest_status_build_id`` -- the answer to
     "which build holds, or held, this task's execution claim", which no
     tick summary can give.
+
+    Paging is by offset, so a row can in principle be skipped if another
+    scenario inserts tasks of the same name *while* this walks the pages.
+    Reachable only on a long-lived stack that has accumulated more than one
+    page of them -- which is the mode the docs recommend -- so the failure
+    is a spurious "no such task" rather than a wrong answer, and re-running
+    clears it.
     """
     from stardag.registry import registry_provider
 
@@ -62,6 +81,21 @@ def find_task(task_id: str, *, task_name: str):
         f"No {task_name!r} task with id {task_id!r} among {seen} "
         f"{task_name!r} tasks in the registry."
     )
+
+
+def assert_trail_complete(build_id: UUID, summaries: list[dict[str, Any]]) -> None:
+    """Refuse to reason about a trail that may have been pruned.
+
+    Call before treating ``summaries[0]`` as the build's *first* tick.
+    """
+    if len(summaries) >= SERVER_TRAIL_RETENTION:
+        raise AssertionError(
+            f"This build has at least {SERVER_TRAIL_RETENTION} tick "
+            "summaries, which is the server's retention cap -- so the "
+            "oldest ones have been pruned and the first entry is no longer "
+            "the build's first tick. Any assertion about how the build "
+            "started is unsound here.\n" + describe(build_id)
+        )
 
 
 def describe(build_id: UUID) -> str:

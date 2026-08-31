@@ -31,6 +31,7 @@ from pathlib import Path
 import httpx
 
 from ._registry_app import (
+    DEFAULT_APP_NAME,
     build_registry_app,
     generate_jwt_keypair,
     registry_config,
@@ -90,7 +91,7 @@ def deploy_registry(
     *,
     modal_environment: str,
     admin_password: str,
-    app_name: str = "registry",
+    app_name: str = DEFAULT_APP_NAME,
     workspace_name: str = DEFAULT_WORKSPACE_NAME,
     environment_slug: str = DEFAULT_ENVIRONMENT_SLUG,
     health_timeout: float = 300.0,
@@ -334,10 +335,14 @@ def _looks_like_no_such_app(output: str) -> bool:
             # first run against a fresh environment, where there is by
             # definition nothing to stop.
             "no app with name",
-            "could not find",
-            "not found",
+            # Kept as a second spelling of the same idea, because this one
+            # is specific to apps. The bare "not found" / "could not find"
+            # that used to sit here are gone: they are substrings of
+            # unrelated Modal errors (auth, network, a stale CLI), so they
+            # undid the narrowness the docstring claims -- and swallowing
+            # one of those turns this helper back into the no-op it once
+            # silently was.
             "no such app",
-            "no apps",
         )
     )
 

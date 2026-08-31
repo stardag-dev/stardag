@@ -33,6 +33,7 @@ import pytest
 
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._wait import (
+    assert_trail_complete,
     describe,
     tick_summaries,
     wait_for_terminal,
@@ -58,7 +59,7 @@ LET_A_CLAIM_SECONDS = 40
 BUILD_TIMEOUT_SECONDS = 600
 
 
-def test_a_blockers_completion_wakes_a_dormant_build(deployment) -> None:
+def test_a_blockers_completion_wakes_a_dormant_build() -> None:
     import time
 
     from stardag_integration_tests.registry_live.dag_app import app
@@ -106,6 +107,7 @@ def test_a_blockers_completion_wakes_a_dormant_build(deployment) -> None:
     )
 
     summaries_b = tick_summaries(build_b)
+    assert_trail_complete(build_b, summaries_b)
 
     # B really was dormant. Its first tick found the shared task claimed by
     # someone else, waited out its linger and exited with the build still
@@ -131,5 +133,3 @@ def test_a_blockers_completion_wakes_a_dormant_build(deployment) -> None:
         "own root, having waited for the shared task rather than running a "
         "second copy of it.\n" + describe(build_b)
     )
-
-    deployment.assert_same_container()

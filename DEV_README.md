@@ -210,7 +210,7 @@ their own stack at once:
 export MODAL_PROFILE=<your-dev-profile>
 
 # Bring a stack up: ~30s against a warm image cache, ~90s cold.
-uv run --project integration-tests python \
+uv run --project integration-tests --python 3.12 python \
   -m stardag_integration_tests.registry_live.provision up
 
 # Run the scenarios (concurrently).
@@ -219,9 +219,24 @@ tox -e registry-modal-live
 # ...iterate on a scenario against the same stack, as often as you like...
 
 # Throw the whole thing away.
-uv run --project integration-tests python \
+uv run --project integration-tests --python 3.12 python \
   -m stardag_integration_tests.registry_live.provision down
 ```
+
+**`--python 3.12` is not optional.** Both Modal images take their Python
+from whatever interpreter serializes their functions, and the tox env pins
+3.12 (`basepython`, `UV_PYTHON`). Provisioning under a different
+interpreter — which `uv` will happily pick, since the project only requires
+`>=3.11` — deploys functions one minor version cannot unpickle, and the
+container dies with `Runner segmentation fault (SIGSEGV), exit code: 139`,
+no traceback, leaving a build that looks empty. It also rebuilds the venv on
+every alternation between the two commands.
+
+`provision stop` is the middle option: it stops the deployed apps but keeps
+the environment and its warm image layers, so the next `up` is still fast.
+Worth it if you are done for the day but not done with the branch — the
+registry pins `min_containers=1`, so a deployment left up keeps a container
+warm indefinitely rather than scaling to zero.
 
 `provision` names the environment `dev-<checkout-directory>` — so a worktree
 at `worktrees/my-feature` gets `dev-my-feature`. Pass `--modal-env` to
@@ -288,8 +303,11 @@ under your home directory finds your real config several levels up.
 
 The same workflow runs both tiers, decided separately, into the same
 per-run Modal environment. A change under `app/stardag-api/`,
-`lib/stardag/src/stardag/{build,registry,integration/modal,selfhost}/` or
-`integration-tests/` triggers this one. Teardown is its own job that waits for
+`lib/stardag/src/stardag/{build,registry,integration/modal,selfhost,testing/modal,_cli}/`
+or `integration-tests/` triggers this one. (`_cli/` is in that list because
+the post-deploy wiring the harness reuses — login, workspace resolution,
+minting the API key and pushing it as a Modal secret — lives in
+`_cli/_selfhost_connect.py`.) Teardown is its own job that waits for
 both tiers — sharing an environment means whichever finished first would
 otherwise delete the other's stack out from under it.
 

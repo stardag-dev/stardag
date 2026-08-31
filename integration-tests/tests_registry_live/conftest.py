@@ -88,6 +88,26 @@ def pytest_configure(config: pytest.Config) -> None:
     _deployment = deployment
 
 
+@pytest.fixture(autouse=True)
+def _registry_survived(deployment: Deployment):
+    """Check after every scenario that the database still exists.
+
+    A finaliser rather than a line at the end of each test, and the
+    difference is the whole point of the check. A recycled container takes
+    the database with it, and the symptoms -- tasks reverted to
+    unregistered, a build that cannot find its own plan -- fail one of the
+    scenario's own assertions *first*. A trailing call therefore runs
+    exactly never in the case it was written for, leaving behind a very
+    convincing impression of a scheduling bug.
+
+    Raising here on an already-failed test adds an error rather than
+    replacing the failure, which is right: both are true, and the second
+    explains the first.
+    """
+    yield
+    deployment.assert_same_container()
+
+
 @pytest.fixture(scope="session")
 def deployment() -> Deployment:
     """The provisioned registry for this session."""

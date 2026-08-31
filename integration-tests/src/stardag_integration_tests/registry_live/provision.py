@@ -2,6 +2,7 @@
 
     python -m stardag_integration_tests.registry_live.provision up
     python -m stardag_integration_tests.registry_live.provision status
+    python -m stardag_integration_tests.registry_live.provision stop
     python -m stardag_integration_tests.registry_live.provision down
 
 Provisioning is **outside pytest**, and that is not a stylistic choice.
@@ -42,6 +43,7 @@ from ._harness import (
     modal_cli,
     stop_existing_app,
 )
+from ._registry_app import DEFAULT_APP_NAME as DEFAULT_REGISTRY_APP
 
 # Local stacks are named `dev-*`; CI's are `ci-pr-<n>` and
 # `ci-manual-<run-id>`. Keeping the two prefixes disjoint is load-bearing:
@@ -163,6 +165,32 @@ def up(modal_environment: str) -> Deployment:
     return deployment
 
 
+def stop(modal_environment: str) -> None:
+    """Stop both apps, leaving the environment and its image cache.
+
+    The counterpart to ``down`` for an environment that is meant to
+    survive. The registry pins ``min_containers=1``, which keeps a
+    container warm *even when idle* -- so a deployment nobody deletes goes
+    on running indefinitely rather than winding down.
+
+    That matters for exactly one environment: CI's scheduled run uses a
+    permanent `ci-main`, which no cleanup path can name (teardown is gated
+    on the environment being ephemeral, the closed-PR job only knows
+    `ci-pr-*`, and the sweeper's filters exclude it by design). Without
+    this, one scheduled run leaves a registry serving nothing until the
+    next one replaces it a week later.
+
+    Stopping rather than deleting keeps the workspace-level image layers
+    warm, which is what makes the next run's deploy take seconds.
+    """
+    _require_disposable_name(modal_environment, "stop apps in")
+    from .dag_app import APP_NAME
+
+    for app_name in (DEFAULT_REGISTRY_APP, APP_NAME):
+        stop_existing_app(app_name, modal_environment)
+    coordinates_path(modal_environment).unlink(missing_ok=True)
+
+
 def down(modal_environment: str) -> None:
     """Delete the Modal environment, and with it everything in the stack.
 
@@ -172,6 +200,10 @@ def down(modal_environment: str) -> None:
     container rather than in a hosted service.
     """
     _require_disposable_name(modal_environment, "delete")
+    # The destructive half deserves the workspace assertion at least as
+    # much as `up` does: the same reasoning about token env vars beating a
+    # profile name applies, and this call cannot be undone.
+    _require_expected_workspace()
     result = subprocess.run(
         [modal_cli(), "environment", "delete", modal_environment, "--yes"],
         capture_output=True,
@@ -202,23 +234,19 @@ def _looks_like_no_such_environment(output: str) -> bool:
     failure, so a wording change makes teardown noisy rather than silently
     leaving environments behind.
 
-    The first phrase is Modal's actual wording, read off the CLI rather
-    than guessed -- "No such environment 'x'". An earlier version of this
-    list held four plausible phrasings and not that one, so all four
-    missed. The identical mistake against the *app* wording had already
-    cost a CI run; the lesson that stuck is to run the failing command and
-    read what it prints.
+    Exactly one phrase, and it is Modal's actual wording read off the CLI
+    rather than guessed -- "No such environment 'x'".
+
+    An earlier version held four plausible phrasings and not that one, so
+    all four missed. The fix was to add the real one; the *rest* of the
+    list then had to go, because "narrow" was doing real work here and the
+    extras quietly undid it. Bare "not found" and "could not find" are
+    substrings of a wide class of unrelated Modal errors -- auth, network,
+    a stale CLI -- and matching one of those here means `down` skips its
+    refusal and deletes the coordinates while the environment lives on,
+    which is precisely the outcome the caller's guard exists to prevent.
     """
-    lowered = output.lower()
-    return any(
-        phrase in lowered
-        for phrase in (
-            "no such environment",
-            "not found",
-            "could not find",
-            "does not exist",
-        )
-    )
+    return "no such environment" in output.lower()
 
 
 def _require_disposable_name(modal_environment: str, action: str) -> None:
@@ -380,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("action", choices=("up", "down", "status"))
+    parser.add_argument("action", choices=("up", "down", "stop", "status"))
     parser.add_argument(
         "--modal-env",
         default=os.environ.get("MODAL_ENVIRONMENT") or default_environment_name(),
@@ -403,6 +431,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.action == "down":
         down(args.modal_env)
+        return 0
+
+    if args.action == "stop":
+        stop(args.modal_env)
         return 0
 
     deployment = load_coordinates(args.modal_env)

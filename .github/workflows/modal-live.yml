@@ -128,8 +128,15 @@ jobs:
           MODAL_PATHS='^(lib/stardag/src/stardag/(integration/modal|build|testing/modal)/|lib/stardag/tests/test_integration/test_modal/|lib/stardag/pyproject\.toml$|tox\.ini$|\.github/workflows/modal-live\.yml$)'
           # The registry tier additionally owns the API itself (its image is
           # built from `app/stardag-api`), the registry client, and the
-          # selfhost path the harness reuses to wire a deployment up.
-          REGISTRY_PATHS='^(app/stardag-api/|lib/stardag/src/stardag/(build|registry|integration/modal|selfhost)/|lib/stardag/pyproject\.toml$|integration-tests/|tox\.ini$|\.github/workflows/modal-live\.yml$)'
+          # paths the harness reuses to wire a deployment up. `_cli/` is in
+          # there because the whole post-deploy flow -- login, workspace and
+          # environment resolution, target roots, minting the API key and
+          # pushing it as a Modal secret -- lives in
+          # `_cli/_selfhost_connect.py`, and `testing/modal/` because
+          # provisioning asserts the workspace through its guard. Omitting
+          # either means a PR that breaks the connect flow does not run the
+          # tier that catches it.
+          REGISTRY_PATHS='^(app/stardag-api/|lib/stardag/src/stardag/(build|registry|integration/modal|selfhost|testing/modal|_cli)/|lib/stardag/pyproject\.toml$|integration-tests/|tox\.ini$|\.github/workflows/modal-live\.yml$)'
 
           emit() { echo "$1=$2" >> "$GITHUB_OUTPUT"; echo "$1=$2 -- $3"; }
 
@@ -218,8 +225,18 @@ jobs:
           if uvx modal environment list --json | jq -e --arg n "$name" \
                'any(.[]; .name == $n)' > /dev/null; then
             echo "Environment '$name' already exists, reusing it."
+          # Losing the race to create it is success, not failure: this job
+          # and the registry tier run in parallel and share one environment,
+          # so both can find it missing and both try. Without this the
+          # *first* run on every PR can fail here for having got exactly
+          # what it wanted.
+          elif uvx modal environment create "$name" 2>&1 | tee /tmp/create.log; then
+            echo "Created '$name'."
+          elif grep -qi "already exists" /tmp/create.log; then
+            echo "Environment '$name' was created concurrently."
           else
-            uvx modal environment create "$name"
+            cat /tmp/create.log
+            exit 1
           fi
 
       - name: Install tox
@@ -301,6 +318,22 @@ jobs:
         run: >-
           tox -e registry-modal-live
           ${{ inputs.serial && '-- -n0 tests_registry_live' || '' }}
+
+      # The scheduled run provisions into the *permanent* `ci-main`, which
+      # no cleanup path can name: teardown is gated on the environment being
+      # ephemeral, `cleanup-closed-pr` only knows `ci-pr-*`, and the
+      # sweeper's filters exclude it deliberately. The registry pins
+      # `min_containers=1`, so without this a Monday run would leave a
+      # registry serving nothing until the next Monday replaced it.
+      #
+      # Unconditional rather than gated on `ci-main`: stopping an app in an
+      # environment that is about to be deleted anyway costs a few seconds
+      # and removes a way for the two paths to disagree.
+      - name: Stop the deployed apps
+        if: always()
+        run: |
+          uv run --project integration-tests --python 3.12 \
+            python -m stardag_integration_tests.registry_live.provision stop
 
   # Teardown waits for *both* tiers, and that is the point of it being its
   # own job. They share one Modal environment, so whichever finished first

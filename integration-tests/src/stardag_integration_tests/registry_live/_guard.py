@@ -133,6 +133,16 @@ def _assert_registry_points_at(
     Worth stating plainly, because it is the sharp edge of this whole tier:
     these scenarios trigger builds, race claims and cancel things. Pointed
     at a registry someone depends on, they are not a test.
+
+    What this does *not* do, despite an earlier comment here claiming
+    otherwise: cross-check two independent sources. Both the expectation
+    and the SDK's configuration are set from the same provisioned
+    ``Deployment``, so they cannot disagree about which stack was
+    provisioned. What it catches is the SDK ignoring that configuration and
+    resolving somewhere else entirely -- from an ambient profile, or a
+    config file found by walking the working directory's parents. That is
+    narrower than "two sources agree", and it is the failure that actually
+    happened.
     """
     expected = api_url.rstrip("/")
     actual = (registry.api_url or "").rstrip("/")

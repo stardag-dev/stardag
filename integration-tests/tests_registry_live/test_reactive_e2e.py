@@ -33,6 +33,7 @@ import pytest
 
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._wait import (
+    assert_trail_complete,
     describe,
     tick_summaries,
     wait_for_terminal,
@@ -64,7 +65,7 @@ BUILD_TIMEOUT_SECONDS = 420
 TASKS_IN_PLAN = 3
 
 
-def test_a_worker_wakes_the_build_that_has_no_scheduler(deployment) -> None:
+def test_a_worker_wakes_the_build_that_has_no_scheduler() -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         get_range,
@@ -93,6 +94,7 @@ def test_a_worker_wakes_the_build_that_has_no_scheduler(deployment) -> None:
     assert status == "completed", describe(build_id)
 
     summaries = tick_summaries(build_id)
+    assert_trail_complete(build_id, summaries)
 
     # The first tick gave up and left. `lingered_out` is the outcome that
     # says so: it polled, found nothing more to do, and exited with the
@@ -118,9 +120,16 @@ def test_a_worker_wakes_the_build_that_has_no_scheduler(deployment) -> None:
 
     # One spawn per task across every tick: each ran exactly once. Double
     # execution is the thing the claim exists to prevent, and a spawn count
-    # above this is what it looks like.
-    assert sum(s.get("spawned", 0) for s in summaries) == TASKS_IN_PLAN, describe(
-        build_id
+    # above this is what it looks like -- though a Modal preemption also
+    # produces a legitimate re-spawn, so read the trail before blaming the
+    # claim.
+    spawned = sum(s.get("spawned", 0) for s in summaries)
+    assert spawned == TASKS_IN_PLAN, (
+        f"{spawned} spawns for {TASKS_IN_PLAN} tasks. More than "
+        f"{TASKS_IN_PLAN} usually means double execution, but an "
+        "interrupted worker legitimately respawns -- check the trail for "
+        "interruption counters before concluding the claim failed.\n"
+        + describe(build_id)
     )
 
     # At least one completion arrived as a report from its worker rather
@@ -147,4 +156,3 @@ def test_a_worker_wakes_the_build_that_has_no_scheduler(deployment) -> None:
     )
 
     # The database this was all recorded in still exists.
-    deployment.assert_same_container()

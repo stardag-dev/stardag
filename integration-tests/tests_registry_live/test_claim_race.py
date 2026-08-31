@@ -26,6 +26,7 @@ import pytest
 
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._wait import (
+    assert_trail_complete,
     describe,
     find_task,
     tick_summaries,
@@ -55,7 +56,7 @@ BUILD_TIMEOUT_SECONDS = 480
 DISTINCT_TASKS = 4
 
 
-def test_a_shared_task_runs_once_across_two_builds(deployment) -> None:
+def test_a_shared_task_runs_once_across_two_builds() -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         get_range,
@@ -87,6 +88,8 @@ def test_a_shared_task_runs_once_across_two_builds(deployment) -> None:
 
     summaries_a = tick_summaries(build_a)
     summaries_b = tick_summaries(build_b)
+    assert_trail_complete(build_a, summaries_a)
+    assert_trail_complete(build_b, summaries_b)
 
     # The whole point. Four distinct tasks exist across the two plans, and
     # four spawns happened in total: the shared pair ran once, not once per
@@ -95,40 +98,43 @@ def test_a_shared_task_runs_once_across_two_builds(deployment) -> None:
     assert spawned == DISTINCT_TASKS, (
         f"{spawned} spawns for {DISTINCT_TASKS} distinct tasks. More than "
         f"{DISTINCT_TASKS} means the shared task ran in both builds and the "
-        "registry's claim did not arbitrate; fewer means a task did not run "
-        "at all, or a tick's summary had not been reported when the trail "
-        "was read.\n"
+        "registry's claim did not arbitrate -- or that an interrupted "
+        "worker legitimately respawned, so check the trail's interruption "
+        "counters first; fewer means a task did not run at all.\n"
         f"--- build A ---\n{describe(build_a)}\n"
         f"--- build B ---\n{describe(build_b)}"
     )
 
-    # And one identifiable build owns the shared task's status. This is the
-    # claim itself rather than a proxy for it: the row is unique per
-    # (environment, task), so `latest_status_build_id` is the registry's own
-    # answer to "who ran this", and it cannot be both builds.
+    # Diagnostics, not a second assertion. It is worth *printing* which
+    # build ended up owning the shared task, and worth failing if nothing
+    # does -- but `latest_status_build_id` is a single column on a row that
+    # is unique per (environment, task), and the only builds that ever
+    # touch this salted task are A and B. So "the owner is A or B" holds
+    # unconditionally, including in the very failure this test exists to
+    # catch: if the claim broke and both builds ran the task, the column
+    # simply holds whichever wrote last.
     #
-    # Note what is deliberately *not* asserted: that some tick recorded
-    # `claim_denied`. A refused claim only happens when two ticks read the
-    # frontier before either has written, which is a genuine race and
-    # therefore not a property a test can require. The frequent outcome is
-    # quieter -- the second build's tick reads a frontier in which the task
-    # is already RUNNING and never attempts the claim at all. Both are the
-    # registry arbitrating, and the invariant below holds either way, so it
-    # is the invariant that gets asserted. The counter is reported in the
-    # message because it is useful to see, not because it must be non-zero.
+    # An earlier version of this test asserted exactly that and described
+    # it as "the claim itself rather than a proxy for it". It was neither.
+    # The spawn count above is the whole test.
+    #
+    # `claim_denied` is likewise reported and not asserted: a refused claim
+    # only happens when two ticks read the frontier before either has
+    # written, which is a genuine race and not a property a test may
+    # require. The commoner outcome is the second tick reading a frontier
+    # where the task is already RUNNING and never attempting the claim.
+    # Both are the registry arbitrating.
     shared_row = find_task(str(shared.id), task_name="Slow")
     owner = shared_row.latest_status_build_id
     denied = sum(s.get("claim_denied", 0) for s in (*summaries_a, *summaries_b))
-    assert owner in (build_a, build_b), (
-        f"The shared task's status is owned by {owner!r}, which is neither "
-        f"build A ({build_a}) nor build B ({build_b}).\n"
+    assert owner is not None, (
+        "The shared task completed but no build owns its status, so the "
+        "registry has no record of who ran it.\n"
         f"--- build A ---\n{describe(build_a)}\n"
         f"--- build B ---\n{describe(build_b)}"
     )
     print(
         f"[claim] shared task ran under "
-        f"{'A' if owner == build_a else 'B'}; the other build reused it "
-        f"(claim_denied across both builds: {denied})"
+        f"{'A' if owner == build_a else 'B' if owner == build_b else owner}; "
+        f"the other build reused it (claim_denied across both: {denied})"
     )
-
-    deployment.assert_same_container()

@@ -48,7 +48,7 @@ def get_sum(integers: sd.Depends[list[int]]) -> int:
 
 
 @sd.task(name="Slow")
-def slow(values: sd.Depends[list[int]], seconds: int) -> list[int]:
+def slow(values: sd.Depends[list[int]], seconds: int, limit_key: str = "") -> list[int]:
     """Runs long enough to still be RUNNING when someone else asks for it.
 
     Two scenarios need that. The cross-build ones need a task genuinely
@@ -56,8 +56,20 @@ def slow(values: sd.Depends[list[int]], seconds: int) -> list[int]:
     build's first tick even fetches a frontier; and the wake-up scenario
     needs it to outlive the waiting build's tick, so that when it finishes
     there is provably no scheduler left anywhere to notice on its own.
+
+    ``limit_key`` is **opt-in and empty by default**, and that default is
+    load-bearing rather than tidy. A task carrying a concurrency-limit key
+    is not merely accounted against a limiter: on every transition out of
+    RUNNING the registry flags *every build in the environment* holding a
+    PENDING task under the same key, whether or not a limit is configured
+    for it. With a key applied unconditionally and the scenarios running
+    concurrently in one environment, one scenario's ``Slow`` finishing
+    would wake another scenario's build -- and a build that gets woken by
+    a neighbour is a build whose own wake-up path was never tested. So a
+    scenario asks for a key only when the key is what it is testing.
     """
     import time
 
+    del limit_key  # read off the task by the app's limit-key selector
     time.sleep(seconds)
     return values
