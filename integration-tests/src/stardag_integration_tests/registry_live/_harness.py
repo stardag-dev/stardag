@@ -22,8 +22,8 @@ inside the container in the first place.
 
 from __future__ import annotations
 
-import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -244,6 +244,28 @@ def _pick(items: list[dict], wanted: str, *, what: str) -> dict:
     )
 
 
+def modal_cli() -> str:
+    """The ``modal`` executable from *this* interpreter's environment.
+
+    Not a bare ``modal`` off ``PATH``. A developer machine can easily have
+    an older Modal on the path -- a pyenv shim, a pipx install -- and the
+    CLI's options move between versions. When that happens the failure is
+    not a clean "command not found" but an argument parse error from a
+    different program than the one intended, which is easy to mistake for
+    the operation simply having nothing to do.
+
+    Same reasoning as resolving the ``stardag`` CLI next to
+    ``sys.executable`` in ``provision``: the tool that runs should be the
+    one this environment installed.
+    """
+    candidate = Path(sys.executable).with_name("modal")
+    if candidate.exists():
+        return str(candidate)
+    # A packaged environment may put it elsewhere; PATH is the fallback,
+    # not the default.
+    return "modal"
+
+
 def stop_existing_app(app_name: str, modal_environment: str) -> None:
     """Stop an app of this name in this environment, if one is deployed.
 
@@ -266,19 +288,42 @@ def stop_existing_app(app_name: str, modal_environment: str) -> None:
     deployment goes on costing until its scaledown window expires.
     """
     result = subprocess.run(
-        ["modal", "app", "stop", app_name, "-e", modal_environment, "--yes"],
+        [modal_cli(), "app", "stop", app_name, "-e", modal_environment, "--yes"],
         capture_output=True,
         text=True,
     )
     if result.returncode == 0:
         print(f"[harness] stopped the previous {app_name!r} deployment")
         return
-    # Nothing deployed under that name is the common case and not a
-    # failure. Anything else is worth seeing, but not worth aborting on:
-    # the deploy that follows will fail loudly enough if this mattered.
-    print(
-        f"[harness] no previous {app_name!r} to stop "
-        f"({(result.stderr or result.stdout).strip()[:200]})"
+
+    output = ((result.stderr or "") + (result.stdout or "")).strip()
+    if _looks_like_no_such_app(output):
+        print(f"[harness] no previous {app_name!r} to stop")
+        return
+
+    # Anything else is a real failure and must not be swallowed. Treating
+    # every non-zero exit as "nothing to stop" hid an argument-parse error
+    # from a stale `modal` on PATH for a whole afternoon, and the effect
+    # was that nothing was ever stopped -- which is precisely the bug this
+    # function exists to prevent, silently reintroduced.
+    raise RuntimeError(
+        f"Could not stop the existing {app_name!r} deployment in Modal "
+        f"environment {modal_environment!r}: {output[:500]}"
+    )
+
+
+def _looks_like_no_such_app(output: str) -> bool:
+    """Whether Modal's complaint means "there is nothing deployed here".
+
+    Matched on text because the CLI exits 1 for both this and real errors.
+    Deliberately narrow: an unrecognised message is treated as a failure,
+    so a future wording change makes the tier noisy rather than silently
+    ineffective.
+    """
+    lowered = output.lower()
+    return any(
+        phrase in lowered
+        for phrase in ("could not find", "not found", "no such app", "no apps")
     )
 
 
@@ -336,15 +381,14 @@ def connect(
     no subprocess, and its return value says what it actually did instead of
     having to be parsed back out of console output.
 
-    **This writes to the SDK config under ``$HOME``.** The session fixture
-    points ``HOME`` at a temporary directory before calling it -- without
-    that, a local run silently rewrites the developer's own ``selfhosted``
-    profile to point at a deployment that is about to be deleted.
+    It writes an SDK registry and profile under ``~/.stardag`` as a side
+    effect. Nothing here relies on that profile -- the returned
+    ``Deployment`` carries the coordinates, and callers configure the SDK
+    from environment variables instead (see ``provision.sdk_environment``)
+    -- but be aware that running this against a personal machine adds a
+    profile named ``registry-live``.
     """
     from stardag._cli._selfhost_connect import login_local, run_connect
-    from stardag.config.loader import clear_config_cache
-    from stardag.registry import registry_provider
-    from stardag.target._factory import target_factory_provider
 
     if not execution_modal_env:
         raise ValueError(
@@ -377,38 +421,6 @@ def connect(
         workspace_name=workspace_name,
         environment_slug=environment_slug,
     )
-    # Configure the SDK *entirely from the environment*, which bypasses
-    # profile resolution and every config file.
-    #
-    # This is not belt and braces, it is the only thing that works. Moving
-    # HOME is not enough: `find_project_config` walks the working
-    # directory's parents looking for `.stardag/config.toml`, and a
-    # checkout under the developer's home directory finds their real one
-    # several levels up -- whose default profile, on a machine that has one,
-    # points at the *production* registry. Env vars take precedence over
-    # both the project file and the home file, so setting them is what
-    # makes the deployment this session just built the registry it talks
-    # to.
-    #
-    # The guard asserts the resulting URL as well, because this happening
-    # silently is the difference between a scenario and an accident.
-    os.environ["STARDAG_API_URL"] = api_url
-    os.environ["STARDAG_WORKSPACE_ID"] = workspace_id
-    os.environ["STARDAG_ENVIRONMENT_ID"] = environment_id
-    os.environ["STARDAG_API_KEY"] = api_key
-    # A profile named in the ambient config would otherwise still be
-    # consulted for anything the overrides above do not cover.
-    os.environ.pop("STARDAG_PROFILE", None)
-
-    # The SDK config is read once and cached per process, and this process
-    # started with no profile at all (HOME was moved before any of this).
-    # Without dropping both caches, everything downstream -- the guard, the
-    # scenarios, the trigger -- keeps using the registry resolved from the
-    # config as it was *before* connect wrote a profile, which is to say no
-    # credentials and a 401 on the first authenticated call.
-    clear_config_cache()
-    registry_provider.clear()
-    target_factory_provider.clear()
 
     if outcome.modal_secret_name is None:
         raise RuntimeError(

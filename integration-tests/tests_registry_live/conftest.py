@@ -1,45 +1,39 @@
 """Session setup for the registry-live tier.
 
-**The deployment happens in ``pytest_sessionstart``, not in a fixture**, and
-that ordering is the whole reason this file is shaped the way it is. Each
-scenario module calls ``registry_live_guard()`` at import, so that a
-misconfigured run is a collection error rather than a scenario quietly
-executing against a NoOp registry. Module import happens during collection,
-which happens *before* any fixture runs -- so a deployment created by a
-fixture would not exist yet and every guard would fail. ``sessionstart``
-runs before collection, which is exactly early enough.
+This file **deploys nothing**. The stack is brought up separately, by
+``registry_live.provision``, and the scenarios are pure consumers of it.
 
-One deployment per session, shared by every scenario. Deploying the registry
-and the DAG app costs about a minute, and nothing here wants a fresh
-database: the scenarios salt their own task ids, which is cheaper and a
-better test besides, since each one then runs against a registry that
-already holds other builds.
+That split is what makes the tier concurrent. Under ``pytest-xdist`` every
+worker process runs its own session hooks, so a session-scoped deployment
+would be built once per worker -- several registries, several databases,
+and scenarios talking to whichever one their worker happened to create.
+Provisioning outside pytest means each worker instead reads the same
+coordinates off disk. The scenarios spend nearly all their wall clock
+asleep waiting on Modal containers, so running them together costs almost
+nothing and the tier's runtime stops being the sum of its parts.
+
+It also means a developer keeps a stack between runs, which turns
+iterating on one scenario from a two-minute cycle into a twenty-second
+one. See ``provision``'s docstring and the DEV_README section.
 
 Deliberately a *separate* test root from ``tests/``: that directory's
-conftest brings up docker-compose and Playwright, which this tier needs none
-of, and ``testpaths`` in ``pyproject.toml`` still points only at ``tests``,
-so a bare ``pytest`` in this project never reaches the live tier. Running it
-is an explicit act, which is what keeps it from costing anyone Modal compute
-by surprise.
+conftest brings up docker-compose and Playwright, which this tier needs
+none of, and ``testpaths`` in ``pyproject.toml`` still points only at
+``tests``, so a bare ``pytest`` never reaches the live tier.
 """
 
 from __future__ import annotations
 
 import os
-import secrets
-import subprocess
-import sys
-import tempfile
-from pathlib import Path
 
 import pytest
 
 from stardag_integration_tests.registry_live._guard import ENV_API_URL, is_enabled
-from stardag_integration_tests.registry_live._harness import (
-    Deployment,
-    connect,
-    deploy_registry,
-    stop_existing_app,
+from stardag_integration_tests.registry_live._harness import Deployment
+from stardag_integration_tests.registry_live.provision import (
+    default_environment_name,
+    load_coordinates,
+    sdk_environment,
 )
 
 ENV_MODAL_ENVIRONMENT = "MODAL_ENVIRONMENT"
@@ -47,150 +41,59 @@ ENV_MODAL_ENVIRONMENT = "MODAL_ENVIRONMENT"
 _deployment: Deployment | None = None
 
 
-def pytest_sessionstart(session: pytest.Session) -> None:
-    """Deploy the registry and the DAG app, before anything is collected."""
+def pytest_configure(config: pytest.Config) -> None:
+    """Point this process at the provisioned stack, before collection.
+
+    Runs in the xdist controller *and* in every worker, which is exactly
+    right: each process needs these environment variables set before it
+    imports a scenario module, and reading one small file is cheap enough
+    to do several times.
+
+    Before collection matters because each scenario module calls
+    ``registry_live_guard()`` at import, so a stack that is missing, or
+    pointed somewhere unexpected, is a collection error rather than a
+    scenario that quietly ran against the wrong registry.
+    """
     global _deployment
     if not is_enabled():
         return
 
-    _isolate_sdk_home()
-    modal_environment = _require_modal_environment()
-    repo_root = _repo_root()
-    admin_password = f"harness-{secrets.token_urlsafe(24)}"
-
-    api_url = deploy_registry(
-        repo_root,
-        modal_environment=modal_environment,
-        admin_password=admin_password,
+    modal_environment = (
+        os.environ.get(ENV_MODAL_ENVIRONMENT, "").strip() or default_environment_name()
     )
-    _deployment = connect(
-        api_url,
-        admin_password=admin_password,
-        execution_modal_env=modal_environment,
-    )
+    deployment = load_coordinates(modal_environment)
+    if deployment is None:
+        raise pytest.UsageError(
+            f"No provisioned stack for Modal environment "
+            f"{modal_environment!r}. This tier deploys nothing itself. "
+            "Bring one up first:\n\n"
+            "    python -m stardag_integration_tests.registry_live.provision "
+            f"up --modal-env {modal_environment}\n\n"
+            "and tear it down with `provision down` when you are finished "
+            "with it."
+        )
 
-    # Set before the scenario modules are imported: their guards read it,
-    # and the SDK profile connect just wrote is what makes the registry
-    # resolve to an APIRegistry pointed here.
-    os.environ[ENV_API_URL] = api_url
-
-    _deploy_dag_app(repo_root, modal_environment)
+    # Direct overrides rather than a profile: profile resolution walks the
+    # working directory's parents for a config file as well as reading
+    # ~/.stardag, so a checkout under the developer's home finds their real
+    # config -- whose default profile may be a registry other people depend
+    # on. The guard asserts the resulting URL regardless.
+    os.environ.update(sdk_environment(deployment))
+    os.environ.pop("STARDAG_PROFILE", None)
+    # What the guard compares the resolved registry against. Kept separate
+    # from the SDK variables above on purpose: those *configure* the SDK,
+    # this one records what the answer is supposed to be, and a check that
+    # reads its expectation from the thing it is checking proves nothing.
+    os.environ[ENV_API_URL] = deployment.api_url
+    _deployment = deployment
 
 
 @pytest.fixture(scope="session")
 def deployment() -> Deployment:
-    """The live registry for this session.
-
-    No teardown, on purpose. Everything the session creates lives inside the
-    run's Modal environment, and deleting that environment removes the app,
-    the volume, the secret and the database in one call -- which is the
-    caller's job (the workflow's teardown step), because it must also run
-    when the session died before any finaliser could.
-    """
+    """The provisioned registry for this session."""
     if _deployment is None:
         pytest.fail(
-            "No deployment: pytest_sessionstart did not complete. The error "
+            "No deployment: pytest_configure did not complete. The error "
             "that stopped it is above this line."
         )
     return _deployment
-
-
-def _repo_root() -> Path:
-    """The stardag checkout, located by the package the image is built from."""
-    here = Path(__file__).resolve()
-    for candidate in [here, *here.parents]:
-        if (candidate / "app" / "stardag-api" / "pyproject.toml").exists():
-            return candidate
-    raise RuntimeError(
-        f"Could not locate the stardag repo root from {here} "
-        "(looked for app/stardag-api/pyproject.toml)."
-    )
-
-
-def _require_modal_environment() -> str:
-    """The run's own Modal environment. Required, never defaulted.
-
-    The Modal workspace this runs in also holds real deployments, so falling
-    back to the account's default environment is not a convenience -- it
-    would deploy a registry, push a secret and create a volume alongside
-    them.
-    """
-    name = os.environ.get(ENV_MODAL_ENVIRONMENT, "").strip()
-    if not name:
-        raise RuntimeError(
-            f"{ENV_MODAL_ENVIRONMENT} must name a throwaway Modal environment "
-            "for this run (CI uses ci-pr-<n> / ci-manual-<run-id>). This tier "
-            "deploys a registry and pushes a secret; it will not do that into "
-            "a default environment shared with real deployments."
-        )
-    return name
-
-
-def _isolate_sdk_home() -> None:
-    """Point ``HOME`` at a temporary directory for the rest of the session.
-
-    The connect flow writes an SDK registry and profile under ``~/.stardag``.
-    Without this, a local run rewrites the developer's own profile of that
-    name to point at a deployment that is deleted minutes later, and their
-    next ordinary command talks to nothing.
-
-    Modal credentials are unaffected in CI, where they come from
-    ``MODAL_TOKEN_ID`` / ``MODAL_TOKEN_SECRET`` and never from a file. A
-    local run needs either those or ``MODAL_CONFIG_PATH``, so the real
-    config path is captured here before ``HOME`` moves out from under it.
-    """
-    if "MODAL_CONFIG_PATH" not in os.environ:
-        real_modal_config = Path.home() / ".modal.toml"
-        if real_modal_config.exists():
-            os.environ["MODAL_CONFIG_PATH"] = str(real_modal_config)
-
-    os.environ["HOME"] = tempfile.mkdtemp(prefix="registry-live-home-")
-
-
-def _deploy_dag_app(repo_root: Path, modal_environment: str) -> None:
-    """Deploy the scenario DAG app with the CLI, under *this* interpreter.
-
-    The CLI is taken from this interpreter's own environment rather than
-    from ``PATH``: the app's Modal functions are serialized by whatever
-    interpreter imports the module, and every later trigger unpickles them
-    in a container built for that Python. Resolving the CLI next to
-    ``sys.executable`` makes the deploy and the scenarios agree by
-    construction rather than by coincidence -- a mismatch kills the
-    container with a bare SIGSEGV and leaves a build that looks empty.
-    """
-    # Import here rather than at module scope: it constructs the StardagApp
-    # and the image spec, which is work the session should not do when the
-    # tier is disabled.
-    from stardag_integration_tests.registry_live.dag_app import APP_NAME
-
-    # Retire warm containers from a previous run first. They carry the
-    # `stardag-api-key` secret as it was when they started, and connect has
-    # just *rotated* that key -- so a survivor authenticates with a revoked
-    # credential and takes a 401 from the registry partway through a build.
-    # See `stop_existing_app`.
-    stop_existing_app(APP_NAME, modal_environment)
-
-    stardag_cli = Path(sys.executable).with_name("stardag")
-    if not stardag_cli.exists():
-        raise RuntimeError(
-            f"No stardag CLI next to {sys.executable}. This tier deploys with "
-            "the CLI from its own environment on purpose -- see the note "
-            "above about interpreter agreement."
-        )
-    result = subprocess.run(
-        [
-            str(stardag_cli),
-            "modal",
-            "deploy",
-            "-m",
-            "stardag_integration_tests.registry_live.dag_app",
-        ],
-        cwd=repo_root / "integration-tests",
-        capture_output=True,
-        text=True,
-        env={**os.environ, ENV_MODAL_ENVIRONMENT: modal_environment},
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Failed to deploy the scenario DAG app:\n{result.stdout}\n{result.stderr}"
-        )
