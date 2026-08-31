@@ -1580,6 +1580,12 @@ class TestAsyncClientUnderConcurrentCallers:
         thread_a.join(timeout=10)
         thread_b.join(timeout=10)
 
+        # Before reading `clients`: a thread still alive means one of the
+        # waits above timed out, and every assertion below would then fail
+        # with a KeyError that says nothing about what actually went wrong.
+        assert not thread_a.is_alive() and not thread_b.is_alive(), (
+            "a caller thread did not finish; the two never rendezvoused"
+        )
         assert clients["b"] is not clients["a"], (
             "a second event loop rebuilds the cached client — this is the "
             "thrash the deployed tick is async to avoid"

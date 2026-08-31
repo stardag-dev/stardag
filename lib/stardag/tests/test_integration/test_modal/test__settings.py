@@ -10,13 +10,18 @@ translation problem, and this is where the translation is pinned.
 from __future__ import annotations
 
 import typing
-from unittest.mock import MagicMock
 
-import modal
 import pytest
 
-from stardag.integration.modal import FunctionSettings
-from stardag.integration.modal._settings import (
+try:
+    import modal
+except ImportError:
+    pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
+
+from unittest.mock import MagicMock  # noqa: E402
+
+from stardag.integration.modal import FunctionSettings  # noqa: E402
+from stardag.integration.modal._settings import (  # noqa: E402
     _RENAMED_SETTINGS,
     _prepare_function_settings,
 )
