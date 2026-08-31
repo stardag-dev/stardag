@@ -118,6 +118,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           REPO: ${{ github.repository }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          ACTOR: ${{ github.actor }}
           PR: ${{ github.event.pull_request.number }}
           LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'modal-live') }}
         run: |
@@ -144,10 +145,17 @@ jobs:
 
           [ "$EVENT" = "pull_request" ] || both true "$EVENT -- running both tiers."
 
-          # Fork PRs receive no secrets, so this could only fail in require
-          # mode. Skipping is the honest outcome, not a green tick.
+          # The rule is "this run gets no secrets", so the tiers could only
+          # fail in require mode. Skipping is the honest outcome, not a green
+          # tick. Two things trigger it, and they are unrelated causes:
+          # a fork PR, and any run dependabot triggered (its PRs live in this
+          # repo, so the fork check below does not catch them -- GitHub keeps
+          # Dependabot secrets in a separate store).
           [ "$HEAD_REPO" = "$REPO" ] || both false \
             "PR is from a fork ($HEAD_REPO); GitHub withholds the Modal credentials."
+
+          [ "$ACTOR" = "dependabot[bot]" ] && both false \
+            "triggered by dependabot; GitHub withholds the Modal credentials."
 
           [ "$LABELLED" = "true" ] && both true "Labelled modal-live."
 
@@ -401,10 +409,15 @@ jobs:
     name: Delete the closed PR's Modal environment
     runs-on: ubuntu-latest
     permissions: {}
+    # `github.actor` and not the PR author: secrets are withheld from runs
+    # dependabot *triggered*, so a dependabot PR closed by a human does get
+    # them, and should be cleaned up normally. Only dependabot closing its own
+    # superseded PR needs skipping.
     if: >-
       github.event_name == 'pull_request' &&
       github.event.action == 'closed' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
     environment: modal-live-ci
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
@@ -453,10 +466,14 @@ jobs:
     # costs a listing and a lookup per `ci-*` environment, and it does not
     # widen what it is willing to delete by one name.
     #
-    # Fork PRs are excluded because they receive no secrets; the job would
-    # go red for want of a Modal token rather than for anything it found.
+    # Runs that receive no secrets are excluded: the job would go red for want
+    # of a Modal token rather than for anything it found. Two unrelated causes
+    # produce that, and naming only one of them is how this regressed --
+    # dependabot's PRs are not forks, so the fork check let them through and
+    # every dependabot PR carried a red sweep.
     if: >-
       always() &&
+      github.actor != 'dependabot[bot]' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
     environment: modal-live-ci
