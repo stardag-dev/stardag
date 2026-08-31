@@ -80,11 +80,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   longest live input, a couple of stale `RUNNING` builds would be enough to
   keep the tick function warm, however few they are.
 
-- Default prebuilt server image bumped to `0.2.0`
-  (`DEFAULT_SERVER_VERSION = "0.2.0"`, from the `server-v0.2.0` release) —
-  the server version this SDK release is tested against. The image tag and
-  `--server-version` take the bare `X.Y.Z`; `server-v` prefixes the git tag
-  only.
+- Default prebuilt server image bumped to `0.3.0`
+  (`DEFAULT_SERVER_VERSION = "0.3.0"`, from the `server-v0.3.0` release) —
+  the server version this SDK release is tested against, and the one that
+  carries the new server surface this release's reactive changes call:
+  `GET /builds/{build_id}/notify` and the scheduler-lease routes. The
+  image tag
+  and `--server-version` take the bare `X.Y.Z`; `server-v` prefixes the git
+  tag only.
 
 - **The linger poll no longer reads the frontier.**
   `RegistryABC.build_get_notify[_aio]` reads the wake-up flag, and the tick's
@@ -151,6 +154,18 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   for its remaining use (executions without probeable liveness).
 
 ### Deployment
+
+- **Server image `0.3.0`**, carrying the two Registry API changes above:
+  `GET /builds/{build_id}/notify` (the linger poll's one-row read) and the
+  scheduler lease on the build row —
+  `POST`/`PUT`/`DELETE /builds/{build_id}/scheduler-lease` plus the
+  `builds.scheduler_lease_until` / `builds.scheduler_lease_owner` migration
+  (`b41c7d9e2f08`, no backfill). Minor rather than patch for the same
+  reason as `0.2.0`: the HTTP surface grew and there is a schema migration.
+  Self-hosters upgrade with `stardag self-host upgrade`; redeploy Modal
+  apps promptly after — until each app is redeployed, its old ticks take a
+  legacy lock this server no longer reads, so every completion reports no
+  live scheduler and spawns a tick that immediately no-ops.
 
 - **Server image `0.2.0`**, the first server release since `0.1.2`
   (2026-08-12). It carries the Registry API and UI changes recorded under
