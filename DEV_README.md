@@ -224,7 +224,7 @@ uv run --project integration-tests python \
 ```
 
 `provision` names the environment `dev-<checkout-directory>` — so a worktree
-at `stardag-worktrees/sta-24` gets `dev-sta-24`. Pass `--modal-env` to
+at `worktrees/my-feature` gets `dev-my-feature`. Pass `--modal-env` to
 override. It refuses any name outside the `dev-` and `ci-` prefixes: deleting
 a Modal environment is irrevocable and takes everything inside it, and the
 workspace may well also hold deployments you care about.
