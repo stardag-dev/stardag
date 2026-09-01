@@ -1555,34 +1555,43 @@ class TestAsyncClientUnderConcurrentCallers:
         first_read = threading.Event()
         b_done = threading.Event()
 
+        # The rendezvous waits are deliberately unbounded, and the threads
+        # daemons. A bounded wait would let a thread that never
+        # rendezvoused carry on into the reads below and fail one of the
+        # real assertions, which would then be describing a coordination
+        # failure in the language of a client-caching bug. Unbounded, a
+        # thread that cannot proceed simply does not finish, and the one
+        # bound that matters — `join(timeout=...)` plus `is_alive()` — says
+        # exactly that. `daemon=True` is what keeps such a thread from
+        # holding the interpreter open at exit.
         def caller_a():
             async def body():
                 clients["a"] = registry.async_client
                 first_read.set()
                 # Wait for B to touch the property from its own loop.
-                await asyncio.get_running_loop().run_in_executor(None, b_done.wait, 5)
+                await asyncio.get_running_loop().run_in_executor(None, b_done.wait)
                 clients["a_again"] = registry.async_client
 
             asyncio.run(body())
 
         def caller_b():
             async def body():
-                first_read.wait(5)
+                first_read.wait()
                 clients["b"] = registry.async_client
 
             asyncio.run(body())
             b_done.set()
 
-        thread_a = threading.Thread(target=caller_a)
-        thread_b = threading.Thread(target=caller_b)
+        thread_a = threading.Thread(target=caller_a, daemon=True)
+        thread_b = threading.Thread(target=caller_b, daemon=True)
         thread_a.start()
         thread_b.start()
         thread_a.join(timeout=10)
         thread_b.join(timeout=10)
 
-        # Before reading `clients`: a thread still alive means one of the
-        # waits above timed out, and every assertion below would then fail
-        # with a KeyError that says nothing about what actually went wrong.
+        # Before reading `clients`: a thread still alive means the two
+        # never rendezvoused, and every assertion below would otherwise
+        # fail with a KeyError that says nothing about what went wrong.
         assert not thread_a.is_alive() and not thread_b.is_alive(), (
             "a caller thread did not finish; the two never rendezvoused"
         )
