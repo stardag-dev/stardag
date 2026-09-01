@@ -9,7 +9,7 @@ The tick is deployed as a Modal function, so it runs in a container with no
 access to the ``StardagApp`` object that configured it. Everything it needs
 from deploy time is therefore captured in a :class:`_TickDeployment` at
 ``finalize()`` and closed over by the registered wrapper — which keeps that
-wrapper a two-line delegation to :func:`_run_tick` here.
+wrapper a two-line delegation to :func:`_run_deployed_tick_aio` here.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 import typing
 from uuid import UUID
 
@@ -261,7 +262,7 @@ class _TickDeployment:
     require_pickle_free: bool
 
 
-def _run_tick(
+async def _run_deployed_tick_aio(
     build_id: str,
     tick_kwargs: dict[str, typing.Any] | None = None,
     *,
@@ -276,6 +277,21 @@ def _run_tick(
     ``run_tick_aio`` summary, or a short ``{"outcome": ...}`` record for
     the two cases that stop before the scheduler lease is even acquired —
     a build that is not reactively scheduled, and one owned by another app.
+
+    Named for the function it *is* the body of, not for the engine
+    entry point it calls: ``run_tick_aio`` below is
+    :func:`stardag.build.run_tick_aio`, the executor-agnostic scheduler
+    pass, and this is the Modal-specific preamble around it.
+
+    **A coroutine, awaited by the deployed wrapper rather than driven by
+    ``asyncio.run``.** Ticks share a container (``_TICK_CONCURRENCY``), and
+    what makes that safe is that they share the container's *event loop*
+    and therefore the process-wide ``APIRegistry``'s one async client. So
+    everything below runs on the caller's loop, and every blocking call on
+    the way — the pre-lease registry read, the foreign-app forward, the
+    task-module import — is either awaited or deliberately accounted for:
+    on a shared container, a blocking call is not this tick's own latency,
+    it is a stall for every tick beside it.
     """
     _setup_logging()
     app_name = deployment.app_name
@@ -290,7 +306,7 @@ def _run_tick(
     # only on a genuine missing route; a resource-level 404 (build
     # deleted) must propagate as a real not-found.
     try:
-        build_info = registry.build_get(build_uuid)
+        build_info = await registry.build_get_aio(build_uuid)
     except NotFoundError as e:
         if not is_missing_route_error(e):
             raise
@@ -327,7 +343,10 @@ def _run_tick(
     if owner_app != app_name:
         forwarded = False
         try:
-            _spawn_tick(build_uuid, owner_app)
+            # Blocking backend call (a Modal RPC, hydrating a cold client),
+            # so off the loop: on a shared container it would stall every
+            # other tick. Same reasoning as ``drain_wake_candidates``.
+            await asyncio.to_thread(_spawn_tick, build_uuid, owner_app)
             forwarded = True
         except Exception as e:
             # Owner app deleted/renamed: the build is orphaned —
@@ -378,6 +397,16 @@ def _run_tick(
     # later "could not rehydrate" error can name them.
     if deployment.task_modules:
         set_declared_task_module_patterns(deployment.task_module_patterns)
+        # Stays ON the loop, unlike the forward above, and that is a
+        # deliberate trade. It is the one unbounded piece of work here — it
+        # can pull in a whole ML stack — so the first tick into a fresh
+        # container does stall any tick beside it. But this imports
+        # *arbitrary user modules*, and import-time side effects are
+        # routinely main-thread-only (``signal.signal`` raises outright off
+        # it), so running them in a worker thread trades a one-off,
+        # once-per-container stall for a class of failure that would
+        # surface as an unexplained import error in production. The
+        # per-module-list cache means later ticks return immediately.
         import_task_modules(deployment.task_modules)
 
     executor = ModalTaskExecutor(
@@ -387,16 +416,24 @@ def _run_tick(
         modal_workspace=deployment.modal_workspace,
         worker_timeouts=deployment.worker_timeouts,
     )
-    summary = asyncio.run(
-        run_tick_aio(
-            build_uuid,
-            registry=registry,
-            task_executor=executor,
-            task_store=task_store,
-            config=config,
-        )
+    summary = await run_tick_aio(
+        build_uuid,
+        registry=registry,
+        task_executor=executor,
+        task_store=task_store,
+        config=config,
     )
-    logger.info(f"Tick for build {build_id}: {summary}")
+    # The container id is in the line because ticks now share containers
+    # (``_TICK_CONCURRENCY``), and "how well are they packing?" is otherwise
+    # unanswerable from logs: ``modal app logs`` interleaves every function
+    # of the app with no per-container attribution, and ``modal container
+    # list`` names the app but not the function. Grouping this one line by
+    # container answers it, and it is also what tells you which container
+    # to reach for when one tick of many is misbehaving.
+    logger.info(
+        f"Tick for build {build_id} (container "
+        f"{os.environ.get('MODAL_TASK_ID', 'unknown')}): {summary}"
+    )
     return dataclasses.asdict(summary)
 
 

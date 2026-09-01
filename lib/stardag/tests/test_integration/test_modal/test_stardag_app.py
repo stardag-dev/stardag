@@ -1,7 +1,9 @@
 """Tests for StardagApp build_function and run_function customization."""
 
+import asyncio
 import contextlib
 import importlib.util
+import inspect
 import io
 import pickletools
 import sys
@@ -16,7 +18,7 @@ try:
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 from uuid import uuid4
 
 import stardag as _sd
@@ -44,6 +46,51 @@ from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
 def _make_image() -> modal.Image:
     return modal.Image.debian_slim()
+
+
+# What ``@modal.concurrent`` was asked for, keyed by the callable it was
+# applied to. Populated by the autouse stub below and read by
+# ``TestInputConcurrency``; cleared per test.
+_CONCURRENCY_REQUESTS: dict[typing.Callable, dict[str, int]] = {}
+
+
+@pytest.fixture(autouse=True)
+def _stub_modal_concurrent():
+    """Replace ``modal.concurrent`` with a recording identity decorator.
+
+    The real decorator returns an opaque ``PartialFunction`` whose raw
+    callable is only reachable through Modal's synchronicity internals, and
+    every test in this file wants to *invoke* the registered wrapper. So the
+    decorator is stubbed out: the wrappers stay plain functions, and what
+    stardag asked Modal for is recorded instead. That request is the part
+    worth pinning here anyway — how Modal implements input concurrency is
+    Modal's business, and asserting it would pin their internals.
+    """
+
+    def concurrent(**kwargs):
+        def decorator(fn):
+            _CONCURRENCY_REQUESTS[fn] = kwargs
+            return fn
+
+        return decorator
+
+    _CONCURRENCY_REQUESTS.clear()
+    with patch("modal.concurrent", concurrent):
+        yield
+    _CONCURRENCY_REQUESTS.clear()
+
+
+def _invoke(fn, *args, **kwargs):
+    """Call a registered wrapper, driving it to completion if it is async.
+
+    The deployed ``tick`` is an ``async def`` so that concurrent inputs
+    share one event loop and therefore one registry client; every other
+    wrapper is sync. Tests call both through here rather than caring.
+    """
+    result = fn(*args, **kwargs)
+    if inspect.iscoroutine(result):
+        return asyncio.run(result)
+    return result
 
 
 def _finalize_capturing_functions(app: StardagApp) -> dict:
@@ -1457,8 +1504,10 @@ class TestFinalizeBakesTaskModules:
         _, result, captured = self._finalize(task_modules=["stardag.utils.*"])
         build_id = uuid4()
         registry = MagicMock(spec=RegistryABC)
-        registry.build_get.return_value = BuildInfo(
-            id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+        registry.build_get_aio = AsyncMock(
+            return_value=BuildInfo(
+                id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+            )
         )
 
         async def stub_tick_aio(build_uuid, **kwargs):
@@ -1472,7 +1521,7 @@ class TestFinalizeBakesTaskModules:
             ) as import_modules,
         ):
             rp.get.return_value = registry
-            captured["tick"](str(build_id))
+            _invoke(captured["tick"], str(build_id))
 
         # Exactly the list frozen at deploy time — not re-derived in the
         # container, where the filesystem walk would cost cold-start time.
@@ -1488,8 +1537,16 @@ class TestFinalizeBakesTaskModules:
         _, _, captured = self._finalize(task_modules=[])
         build_id = uuid4()
         registry = MagicMock(spec=RegistryABC)
-        registry.build_get.return_value = BuildInfo(
-            id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+        # `build_get_aio`, not `build_get` — and it has to be stubbed
+        # explicitly. `MagicMock(spec=...)` auto-specs an async member as an
+        # AsyncMock, so leaving it alone does not raise: it returns a mock
+        # whose `reactive_app_name` is a mock, the tick decides the build
+        # belongs to another app, and the assertion below then passes
+        # because the tick never got as far as importing anything.
+        registry.build_get_aio = AsyncMock(
+            return_value=BuildInfo(
+                id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+            )
         )
 
         async def stub_tick_aio(build_uuid, **kwargs):
@@ -1503,7 +1560,7 @@ class TestFinalizeBakesTaskModules:
             ) as import_modules,
         ):
             rp.get.return_value = registry
-            captured["tick"](str(build_id))
+            _invoke(captured["tick"], str(build_id))
 
         import_modules.assert_not_called()
 
@@ -1822,9 +1879,12 @@ class TestReactivePickleElision:
         )
         registered = _finalize_capturing_functions(app)
 
-        with patch("stardag.integration.modal._app._run_tick") as run_tick:
+        with patch(
+            "stardag.integration.modal._app._run_deployed_tick_aio",
+            new_callable=AsyncMock,
+        ) as run_tick:
             run_tick.return_value = {}
-            registered["tick"](str(uuid4()), None)
+            _invoke(registered["tick"], str(uuid4()), None)
 
         assert run_tick.call_args.kwargs["deployment"].require_pickle_free is True
 
@@ -1836,9 +1896,12 @@ class TestReactivePickleElision:
         )
         registered = _finalize_capturing_functions(app)
 
-        with patch("stardag.integration.modal._app._run_tick") as run_tick:
+        with patch(
+            "stardag.integration.modal._app._run_deployed_tick_aio",
+            new_callable=AsyncMock,
+        ) as run_tick:
             run_tick.return_value = {}
-            registered["tick"](str(uuid4()), None)
+            _invoke(registered["tick"], str(uuid4()), None)
 
         assert run_tick.call_args.kwargs["deployment"].require_pickle_free is False
 
@@ -1865,10 +1928,12 @@ class TestTickTaskStoreIsPickleFree:
             require_pickle_free=require_pickle_free,
         )
         registry = MagicMock(spec=RegistryABC)
-        # Not reactively scheduled: _run_tick returns before it schedules
-        # anything, but only AFTER constructing the store — which is all
-        # this asserts on.
-        registry.build_get.return_value = MagicMock(reactive_app_name=None)
+        # Not reactively scheduled: the tick body returns before it
+        # schedules anything, but only AFTER constructing the store —
+        # which is all this asserts on.
+        registry.build_get_aio = AsyncMock(
+            return_value=MagicMock(reactive_app_name=None)
+        )
         stores: list = []
         real_store = tick_module.BuildTaskStore
 
@@ -1879,7 +1944,11 @@ class TestTickTaskStoreIsPickleFree:
 
         with patch.object(tick_module, "BuildTaskStore", capture):
             with registry_provider.override(registry):
-                tick_module._run_tick(str(uuid4()), None, deployment=deployment)
+                asyncio.run(
+                    tick_module._run_deployed_tick_aio(
+                        str(uuid4()), None, deployment=deployment
+                    )
+                )
         assert len(stores) == 1
         return stores[0]
 
@@ -2260,15 +2329,17 @@ class TestDeployedFunctionsAreSerializable:
 
         build_id = uuid4()
         registry = MagicMock(spec=RegistryABC)
-        registry.build_get.return_value = BuildInfo(
-            id=build_id, reactive_app_name="another-app", reactive_tick_kwargs=None
+        registry.build_get_aio = AsyncMock(
+            return_value=BuildInfo(
+                id=build_id, reactive_app_name="another-app", reactive_tick_kwargs=None
+            )
         )
         with (
             patch("stardag.integration.modal._tick.registry_provider") as rp,
             patch("modal.Function.from_name", side_effect=Exception("no such app")),
         ):
             rp.get.return_value = registry
-            result = tick(str(build_id))
+            result = _invoke(tick, str(build_id))
 
         # It compared the build's owner against the app name it was
         # deployed with, which means that capture survived the round trip.
@@ -2281,7 +2352,7 @@ class TestDeployedFunctionsAreSerializable:
 
 class TestTickAppOwnership:
     """Only the app recorded as the build's reactive_app_name (in the
-    registry) may drive its ticks — read via the lighter build_get."""
+    registry) may drive its ticks — read via the lighter build_get_aio."""
 
     def _capture_tick(self, app_name: str):
         app = StardagApp(
@@ -2306,17 +2377,19 @@ class TestTickAppOwnership:
 
     @staticmethod
     def _registry_with_reactive_app(build_id, reactive_app_name, tick_kwargs=None):
-        """A registry whose build_get returns the given reactive marker.
+        """A registry whose build_get_aio returns the given reactive marker.
 
         ``reactive_app_name=None`` models a non-reactive build.
         """
         from stardag.registry import BuildInfo
 
         registry = MagicMock(spec=RegistryABC)
-        registry.build_get.return_value = BuildInfo(
-            id=build_id,
-            reactive_app_name=reactive_app_name,
-            reactive_tick_kwargs=tick_kwargs,
+        registry.build_get_aio = AsyncMock(
+            return_value=BuildInfo(
+                id=build_id,
+                reactive_app_name=reactive_app_name,
+                reactive_tick_kwargs=tick_kwargs,
+            )
         )
         return registry
 
@@ -2347,7 +2420,7 @@ class TestTickAppOwnership:
             patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
         ):
             rp.get.return_value = registry
-            tick(str(build_id))
+            _invoke(tick, str(build_id))
 
         config = captured_config["config"]
         assert config.spawn_tick is not None
@@ -2384,7 +2457,7 @@ class TestTickAppOwnership:
             patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
         ):
             rp.get.return_value = registry
-            result = tick(str(build_id))
+            result = _invoke(tick, str(build_id))
 
         assert result == {
             "outcome": "foreign_app",
@@ -2417,7 +2490,7 @@ class TestTickAppOwnership:
             ),
         ):
             rp.get.return_value = registry
-            result = tick(str(build_id))
+            result = _invoke(tick, str(build_id))
 
         assert result == {
             "outcome": "foreign_app",
@@ -2440,7 +2513,7 @@ class TestTickAppOwnership:
             patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
         ):
             rp.get.return_value = registry
-            result = tick(str(build_id))
+            result = _invoke(tick, str(build_id))
 
         assert result == {"outcome": "not_reactive"}
         tick_aio.assert_not_called()
@@ -2469,7 +2542,7 @@ class TestTickAppOwnership:
             patch("stardag.integration.modal._tick.registry_provider") as rp,
         ):
             rp.get.return_value = own_registry
-            assert tick(str(own))["outcome"] == "noop"
+            assert _invoke(tick, str(own))["outcome"] == "noop"
         assert ticked == [str(own)]
 
 
@@ -2880,7 +2953,10 @@ class TestContainerSetup:
         """Stub out what the wrappers delegate to, leaving only the hook."""
         with contextlib.ExitStack() as stack:
             tick = stack.enter_context(
-                patch("stardag.integration.modal._app._run_tick")
+                patch(
+                    "stardag.integration.modal._app._run_deployed_tick_aio",
+                    new_callable=AsyncMock,
+                )
             )
             bootstrap = stack.enter_context(
                 patch("stardag.integration.modal._app.run_reactive_bootstrap")
@@ -2897,7 +2973,7 @@ class TestContainerSetup:
         "build": lambda fn: fn("task", "selector", "test-app", None),
         "worker_default": lambda fn: fn("task"),
         "worker_gpu": lambda fn: fn("task"),
-        "tick": lambda fn: fn(str(uuid4()), None),
+        "tick": lambda fn: _invoke(fn, str(uuid4()), None),
         "bootstrap": lambda fn: fn(str(uuid4()), [], None),
         "tick_watchdog": lambda fn: fn(),
     }
@@ -2927,7 +3003,7 @@ class TestContainerSetup:
             registered["worker_default"]("task")
             registered["worker_gpu"]("task")
             registered["build"]("task", "selector", "test-app", None)
-            registered["tick"](str(uuid4()), None)
+            _invoke(registered["tick"], str(uuid4()), None)
 
         assert calls == ["setup"]
 
@@ -3004,7 +3080,7 @@ class TestContainerSetup:
 
         registered = _finalize_capturing_functions(app)
         with self._stubbed_bodies(), registry_provider.override(NoOpRegistry()):
-            registered["tick"](str(uuid4()), None)
+            _invoke(registered["tick"], str(uuid4()), None)
 
         # Nothing recorded, so nothing was run and nothing is retained.
         assert _container_setup_module._setup_done == []
@@ -3020,7 +3096,7 @@ class TestContainerSetup:
 
         Everything the feature claims rests on this: the hook has to
         precede the wrapper's own body, which is what puts it ahead of
-        ``Builder.setup`` / ``Runner.setup`` / ``_run_tick`` and therefore
+        ``Builder.setup`` / ``Runner.setup`` / the tick body, and therefore
         ahead of stardag's ``logging.basicConfig`` default. Asserting only
         that the hook ran would pass with the call moved to the bottom of
         every wrapper.
@@ -3047,7 +3123,10 @@ class TestContainerSetup:
 
         with contextlib.ExitStack() as stack:
             tick = stack.enter_context(
-                patch("stardag.integration.modal._app._run_tick")
+                patch(
+                    "stardag.integration.modal._app._run_deployed_tick_aio",
+                    new_callable=AsyncMock,
+                )
             )
             bootstrap = stack.enter_context(
                 patch("stardag.integration.modal._app.run_reactive_bootstrap")
@@ -3086,7 +3165,10 @@ class TestContainerSetup:
 
         with contextlib.ExitStack() as stack:
             tick = stack.enter_context(
-                patch("stardag.integration.modal._app._run_tick")
+                patch(
+                    "stardag.integration.modal._app._run_deployed_tick_aio",
+                    new_callable=AsyncMock,
+                )
             )
             sweep = stack.enter_context(
                 patch("stardag.integration.modal._app._run_watchdog_sweep")
@@ -3142,6 +3224,324 @@ class TestContainerSetup:
         otherwise deploy cleanly and raise in every container."""
         with pytest.raises(TypeError, match="no arguments"):
             self._app(lambda config: None)  # type: ignore[arg-type,misc]
+
+
+class TestInputConcurrency:
+    """Which deployed functions may serve several inputs per container.
+
+    The tick and nothing else. It is almost entirely I/O wait — read the
+    frontier, spawn, then poll on a sleep until its linger deadline — so a
+    container per tick is close to the worst packing available, and the
+    linger that makes reactive scheduling efficient is what keeps those
+    containers alive. Nothing else in the app has that shape.
+
+    The two halves are one decision: Modal serves concurrent inputs to an
+    ``async def`` as tasks on one event loop and to a ``def`` on threads,
+    and threaded ticks would thrash the process-wide registry's per-loop
+    HTTP client (see ``TestAsyncClientUnderConcurrentCallers`` in the
+    registry tests). So "async" and "concurrent" are asserted together.
+    """
+
+    @staticmethod
+    def _app(**app_kwargs) -> StardagApp:
+        return StardagApp(
+            "test-concurrency",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                "default": FunctionSettings(image=_make_image()),
+                "gpu": FunctionSettings(image=_make_image()),
+            },
+            watchdog_period_minutes=5,
+            **app_kwargs,
+        )
+
+    def _concurrency(self, app) -> dict:
+        """What ``@modal.concurrent`` was asked for, by function name."""
+        registered = _finalize_capturing_functions(app)
+        return {name: _CONCURRENCY_REQUESTS.get(fn) for name, fn in registered.items()}
+
+    def test_the_deployed_tick_is_a_coroutine_function(self):
+        """Load-bearing, not a style choice: a sync tick would be served
+        on threads, each with its own ``asyncio.run`` and therefore its own
+        event loop, and the shared ``APIRegistry`` closes and rebuilds its
+        async client whenever the running loop changes."""
+        registered = _finalize_capturing_functions(self._app())
+        assert inspect.iscoroutinefunction(registered["tick"])
+
+    def test_every_other_registered_function_is_sync(self):
+        """The tick is the exception, and it should stay legible as one."""
+        registered = _finalize_capturing_functions(self._app())
+        assert [
+            name for name, fn in registered.items() if inspect.iscoroutinefunction(fn)
+        ] == ["tick"]
+
+    def test_the_tick_gets_a_default(self):
+        assert self._concurrency(self._app())["tick"] == {"max_inputs": 10}
+
+    def test_nothing_else_does(self):
+        """Workers run user code and may be CPU- or GPU-bound; the builder
+        runs a whole build; the bootstrap walks a DAG. And the watchdog —
+        which shares ``tick_settings`` — is a separate function with its own
+        containers that receives one input per period, so packing it would
+        change nothing while quietly opting a ``def`` into threading."""
+        concurrency = self._concurrency(self._app())
+        assert concurrency.pop("tick") is not None
+        assert set(concurrency) == {
+            "build",
+            "worker_default",
+            "worker_gpu",
+            "bootstrap",
+            "tick_watchdog",
+        }
+        assert all(value is None for value in concurrency.values())
+
+    def test_tick_settings_override_the_default(self):
+        concurrency = self._concurrency(
+            self._app(
+                tick_settings=FunctionSettings(
+                    image=_make_image(),
+                    max_concurrent_inputs=32,
+                    target_concurrent_inputs=24,
+                )
+            )
+        )
+        assert concurrency["tick"] == {"max_inputs": 32, "target_inputs": 24}
+
+    def test_a_target_without_a_max_fails_the_deploy_here(self):
+        """Not by merging stardag's own ceiling underneath — that would
+        invent a limit nobody asked for, and could still sit below the
+        target. Modal refuses the function either way; this refuses it
+        first, in the setting names the app actually wrote."""
+        from stardag.exceptions import StardagError
+
+        with pytest.raises(StardagError, match="without max_concurrent_inputs"):
+            self._concurrency(
+                self._app(
+                    tick_settings=FunctionSettings(
+                        image=_make_image(), target_concurrent_inputs=4
+                    )
+                )
+            )
+
+    def test_the_legacy_spelling_also_overrides_it(self):
+        """``allow_concurrent_inputs`` is the name someone would reach for
+        from Modal's pre-1.0 docs, and it never worked here — it raised."""
+        concurrency = self._concurrency(
+            self._app(
+                tick_settings=FunctionSettings(
+                    image=_make_image(), allow_concurrent_inputs=3
+                )
+            )
+        )
+        assert concurrency["tick"] == {"max_inputs": 3}
+
+    def test_a_packed_tick_does_not_drag_the_watchdog_with_it(self):
+        """``tick`` and ``tick_watchdog`` are registered from one
+        ``tick_settings``, so "no default for the watchdog" is not enough —
+        a declared value would reach it too. The watchdog is sync, so that
+        is Modal's *threaded* concurrency, which is the whole hazard the
+        tick is a coroutine to avoid; and Modal accepts a sync ``def`` with
+        ``@modal.concurrent`` and a ``schedule`` without complaint, so
+        nothing downstream would catch it."""
+        concurrency = self._concurrency(
+            self._app(
+                tick_settings=FunctionSettings(
+                    image=_make_image(), max_concurrent_inputs=32
+                )
+            )
+        )
+        assert concurrency["tick"] == {"max_inputs": 32}
+        assert concurrency["tick_watchdog"] is None
+
+    def test_a_worker_may_opt_in_explicitly(self):
+        """Stardag has no opinion for workers; an app that knows its own
+        run function is I/O-bound is entitled to one."""
+        app = StardagApp(
+            "test-concurrency",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                "default": FunctionSettings(
+                    image=_make_image(), max_concurrent_inputs=5
+                )
+            },
+        )
+        assert self._concurrency(app)["worker_default"] == {"max_inputs": 5}
+
+
+class TestConcurrentTicksInOneContainer:
+    """Two ticks genuinely overlapping in one process, which is the only
+    condition under which any of this is observable.
+
+    ``TestInputConcurrency`` pins that the tick is async and asks for
+    concurrency; this pins that two of them actually running at once stay
+    out of each other's way. Every hazard here is silent until it happens:
+    a shared registry singleton, a shared HTTP client, a ``ContextVar``
+    holding "the build this code is running for".
+    """
+
+    @staticmethod
+    def _tick_wrapper(app_name: str = "shared-container"):
+        app = StardagApp(
+            app_name,
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+        return _finalize_capturing_functions(app)["tick"]
+
+    @staticmethod
+    def _registry(app_name: str = "shared-container"):
+        from stardag.registry import BuildInfo
+
+        registry = MagicMock(spec=RegistryABC)
+
+        async def build_get_aio(build_id):
+            # A round trip, so the two ticks interleave here as well as in
+            # the body — the pre-lease read is the tick's first await.
+            await asyncio.sleep(0)
+            return BuildInfo(
+                id=build_id,
+                reactive_app_name=app_name,
+                reactive_tick_kwargs=None,
+            )
+
+        registry.build_get_aio = build_get_aio
+        return registry
+
+    def test_overlapping_ticks_each_drive_their_own_build(
+        self, default_in_memory_fs_target
+    ):
+        """The bodies are held at a barrier, so neither can finish before
+        the other has started: whatever they share, they share it live."""
+        from stardag.build import TickSummary
+
+        tick = self._tick_wrapper()
+        build_ids = [uuid4(), uuid4()]
+        # `asyncio.Barrier` is 3.11+, which the engine already requires
+        # (`_reactive/_discovery.py` uses `asyncio.TaskGroup` and
+        # `BaseExceptionGroup`) — CI runs 3.11-3.14.
+        barrier = asyncio.Barrier(len(build_ids))
+        driven: list[str] = []
+
+        async def stub_tick_aio(build_uuid, **kwargs):
+            await barrier.wait()
+            driven.append(str(build_uuid))
+            return TickSummary(outcome="lingered_out", iterations=1)
+
+        async def main():
+            return await asyncio.gather(
+                *(tick(str(build_id)) for build_id in build_ids)
+            )
+
+        with (
+            patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+        ):
+            rp.get.return_value = self._registry()
+            summaries = asyncio.run(main())
+
+        assert sorted(driven) == sorted(str(b) for b in build_ids)
+        assert [summary["outcome"] for summary in summaries] == [
+            "lingered_out",
+            "lingered_out",
+        ]
+
+    def test_the_build_id_context_var_stays_per_tick(self, default_in_memory_fs_target):
+        """``current_build_id_var`` is how a task's registry calls learn
+        which build they belong to. Asyncio tasks copy context, so a set
+        inside one tick is invisible to the other — but only as long as
+        each input really is its own task, which is the assumption the
+        whole design rides on. Held at a barrier so the two sets are live
+        at the same moment.
+        """
+        from stardag.build import TickSummary
+        from stardag.build._base import current_build_id_var
+
+        tick = self._tick_wrapper()
+        build_ids = [uuid4(), uuid4()]
+        barrier = asyncio.Barrier(len(build_ids))
+        observed: dict[str, object] = {}
+
+        async def stub_tick_aio(build_uuid, **kwargs):
+            token = current_build_id_var.set(build_uuid)
+            try:
+                await barrier.wait()
+                observed[str(build_uuid)] = current_build_id_var.get()
+                return TickSummary(outcome="lingered_out")
+            finally:
+                current_build_id_var.reset(token)
+
+        async def main():
+            await asyncio.gather(*(tick(str(b)) for b in build_ids))
+
+        with (
+            patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+        ):
+            rp.get.return_value = self._registry()
+            asyncio.run(main())
+
+        assert observed == {str(b): b for b in build_ids}
+        assert current_build_id_var.get() is None
+
+    def test_a_foreign_app_forward_does_not_block_the_other_tick(
+        self, default_in_memory_fs_target, modal_function_stub
+    ):
+        """The forward is a blocking Modal RPC. It has to leave the event
+        loop, or one tick that lands on the wrong app stalls every tick
+        beside it for the length of a backend round trip."""
+        tick = self._tick_wrapper("app-b")
+        forwarding_build, own_build = uuid4(), uuid4()
+        released = threading.Event()
+        progressed: list[str] = []
+        spawn_saw_progress: list[bool] = []
+
+        def slow_spawn(build_id, app_name, tick_kwargs=None):
+            # Blocks until the *other* tick has run. Off the loop that
+            # happens; on the loop nothing else can run while this call is
+            # on the stack, so the wait times out and the assertion below
+            # is what tells you the spawn went back inline.
+            spawn_saw_progress.append(released.wait(timeout=2))
+
+        async def stub_tick_aio(build_uuid, **kwargs):
+            from stardag.build import TickSummary
+
+            progressed.append(str(build_uuid))
+            released.set()
+            return TickSummary(outcome="lingered_out")
+
+        registry = MagicMock(spec=RegistryABC)
+
+        async def build_get_aio(build_id):
+            from stardag.registry import BuildInfo
+
+            return BuildInfo(
+                id=build_id,
+                reactive_app_name="app-a" if build_id == forwarding_build else "app-b",
+                reactive_tick_kwargs=None,
+            )
+
+        registry.build_get_aio = build_get_aio
+
+        async def main():
+            return await asyncio.gather(
+                tick(str(forwarding_build)), tick(str(own_build))
+            )
+
+        with (
+            patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._tick._spawn_tick", slow_spawn),
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+        ):
+            rp.get.return_value = registry
+            forwarded, own = asyncio.run(main())
+
+        assert forwarded["outcome"] == "foreign_app"
+        assert forwarded["forwarded"] is True
+        assert progressed == [str(own_build)]
+        assert spawn_saw_progress == [True], (
+            "the other tick made no progress while the forward's blocking "
+            "spawn was in flight — it is running on the event loop"
+        )
 
 
 class TestUnreachableWorkerWarning:

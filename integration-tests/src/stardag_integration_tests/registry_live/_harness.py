@@ -301,8 +301,8 @@ def stop_existing_app(app_name: str, modal_environment: str) -> None:
         return
 
     output = ((result.stderr or "") + (result.stdout or "")).strip()
-    if _looks_like_no_such_app(output):
-        print(f"[harness] no previous {app_name!r} to stop")
+    if _looks_like_nothing_to_stop(output):
+        print(f"[harness] no running {app_name!r} to stop")
         return
 
     # Anything else is a real failure and must not be swallowed. Treating
@@ -316,8 +316,13 @@ def stop_existing_app(app_name: str, modal_environment: str) -> None:
     )
 
 
-def _looks_like_no_such_app(output: str) -> bool:
-    """Whether Modal's complaint means "there is nothing deployed here".
+def _looks_like_nothing_to_stop(output: str) -> bool:
+    """Whether Modal's complaint means "there is nothing running here".
+
+    Two ways to already be in the state this function wants: no such app,
+    and an app that is already stopped. Both satisfy what the caller
+    actually needs — no survivor serving the previous run's data or code,
+    and no warm container holding a since-rotated API key.
 
     Matched on text because the CLI exits 1 for both this and real errors.
     Deliberately narrow: an unrecognised message is treated as a failure,
@@ -343,6 +348,14 @@ def _looks_like_no_such_app(output: str) -> bool:
             # one of those turns this helper back into the no-op it once
             # silently was.
             "no such app",
+            # An app that has been stopped already. Reached on the *second*
+            # run against a reused environment — the per-PR environment
+            # outlives a run and is deleted only when the PR closes, so the
+            # previous run's teardown (or its cancellation) leaves the app
+            # stopped and the next run found that fatal. "Already in the
+            # state I was asked to put it in" is success, exactly as it is
+            # for the environment-create race in `modal-live.yml`.
+            "already stopped",
         )
     )
 

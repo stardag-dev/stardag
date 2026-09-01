@@ -260,7 +260,7 @@ class TestUserVolumesOverride:
             ),
             extra_secrets=[],
             auto_volumes=result.auto_volumes,
-        )
+        ).kwargs
         # User volume should override auto volume at the same path
         assert settings["volumes"][EXPECTED_MOUNT_PATH] is user_volume
 
@@ -284,7 +284,7 @@ class TestUserVolumesOverride:
             FunctionSettings(image=TEST_IMAGE),
             extra_secrets=[],
             auto_volumes=result.auto_volumes,
-        )
+        ).kwargs
         assert EXPECTED_MOUNT_PATH in settings["volumes"]
 
 

@@ -65,12 +65,13 @@ from stardag.integration.modal._selector import (
 )
 from stardag.integration.modal._settings import (
     FunctionSettings,
+    InputConcurrency,
     _prepare_function_settings,
 )
 from stardag.integration.modal._target import get_default_volume_mount_path
 from stardag.integration.modal._tick import (
     LimitKeySelector,
-    _run_tick,
+    _run_deployed_tick_aio,
     _run_watchdog_sweep,
     _tick_function_timeout_seconds,
     _TickDeployment,
@@ -84,6 +85,38 @@ from stardag.registry._base import NoOpRegistry, registry_provider
 from stardag.utils.env import temp_env_vars
 
 logger = logging.getLogger(__name__)
+
+
+# How many scheduler ticks one container may serve at once, unless the app
+# says otherwise via ``tick_settings``.
+#
+# **Why the tick and nothing else.** A tick is almost entirely I/O wait: it
+# reads the frontier, spawns, and then polls on a sleep until its linger
+# deadline. One container per tick is therefore close to the worst possible
+# packing — and the linger that makes reactive scheduling efficient (one
+# resident scheduler driving level after level, instead of a cold start per
+# level) is precisely what keeps those containers alive. Sharing makes the
+# linger nearly free. No other function in the app has that shape: workers
+# run user code and may be CPU- or GPU-bound, the builder runs a whole
+# build, and the bootstrap walks a DAG.
+#
+# **Not ``tick_watchdog``**, even though it shares ``tick_settings``. It is
+# a separate Modal function with its own containers and receives one input
+# per ``watchdog_period_minutes``, so concurrency would change nothing in
+# the steady state; and it is a ``def``, which Modal would serve on
+# threads — the exact hazard ``_modal_tick`` is async to avoid.
+#
+# **Why 10, and why bounded at all.** Concurrency is not free per tick: each
+# holds a ``BuildTaskStore``, up to ``TickConfig.max_concurrent_actions``
+# in-flight registry calls, and a share of one HTTP connection pool (see
+# ``APIRegistry``'s async limits, sized against this number). Ten is enough
+# that the linger stops driving container count at the scale reactive builds
+# actually run at, and small enough that one container's loss is bounded.
+#
+# ``target_inputs`` is deliberately unset: it would have Modal provision a
+# further container rather than pack up to the max, which is the opposite of
+# the point here.
+_TICK_CONCURRENCY: InputConcurrency = {"max_inputs": 10}
 
 
 class FinalizeResult(typing.NamedTuple):
@@ -925,16 +958,51 @@ class StardagApp:
         task_module_patterns = self.task_modules
         task_modules = expand_task_module_patterns(task_module_patterns)
 
-        def register(name: str, settings: FunctionSettings, **extra: typing.Any):
-            """Register one function on the Modal app under ``name``."""
+        def register(
+            name: str,
+            settings: FunctionSettings,
+            *,
+            default_concurrency: InputConcurrency | None = None,
+            never_concurrent: bool = False,
+            **extra: typing.Any,
+        ):
+            """Register one function on the Modal app under ``name``.
+
+            ``default_concurrency`` is stardag's opinion about how this
+            particular function should be packed, applied only when the
+            app's own settings say nothing — see the ``tick`` registration
+            below, which is the one function that has one.
+
+            ``never_concurrent`` refuses input concurrency for this
+            function whatever the settings say. Needed because settings
+            are shared: ``tick`` and ``tick_watchdog`` are registered from
+            one ``tick_settings``, so an app that packs its tick would
+            otherwise pack a sync watchdog too — onto Modal's *threads*,
+            which is the hazard the async tick exists to avoid.
+            """
             prepared = _prepare_function_settings(
                 settings,
                 extra_secrets=extra_secrets,
                 auto_volumes=auto_volumes,
             )
-            return self.modal_app.function(
-                **{**prepared, "name": name, "serialized": True, **extra}
+            decorate = self.modal_app.function(
+                **{**prepared.kwargs, "name": name, "serialized": True, **extra}
             )
+            # Input concurrency is a decorator rather than a `function()`
+            # keyword (Modal moved it in April 2025), so it is applied to
+            # the callable first and `function()` registers the result.
+            concurrency = (
+                None
+                if never_concurrent
+                else prepared.concurrency or default_concurrency
+            )
+            if concurrency is None:
+                return decorate
+
+            def decorate_concurrent(fn):
+                return decorate(modal.concurrent(**concurrency)(fn))
+
+            return decorate_concurrent
 
         # Wrap callables in real functions for Modal compatibility.
         # Modal's is_async() only accepts inspect.isfunction()-compatible objects,
@@ -1002,7 +1070,7 @@ class StardagApp:
         # safe to invoke at any time; no-ops on non-reactive builds.
         #
         # Everything the deployed tick needs from deploy time is bundled
-        # here and closed over; the body lives in _tick._run_tick.
+        # here and closed over; the body lives in _tick._run_deployed_tick_aio.
         app_name = self.name
         tick_deployment = _TickDeployment(
             app_name=app_name,
@@ -1021,18 +1089,32 @@ class StardagApp:
             require_pickle_free=self.require_pickle_free,
         )
 
-        def _modal_tick(
+        # ``async def`` on purpose, and load-bearing. Modal serves
+        # concurrent inputs to an async function as asyncio tasks on ONE
+        # event loop, and to a sync one on threads — and a tick on its own
+        # thread would run its own ``asyncio.run``, i.e. its own loop.
+        # ``APIRegistry`` is a process-wide singleton whose ``async_client``
+        # is cached per loop and *closed and rebuilt* whenever the running
+        # loop differs, so two threaded ticks would tear down each other's
+        # in-flight HTTP client. Awaiting the body here keeps every tick in
+        # the container on one loop and therefore on one client, which is
+        # what makes sharing a container safe rather than merely allowed.
+        async def _modal_tick(
             build_id: str,
             tick_kwargs: dict[str, typing.Any] | None = None,
         ) -> dict[str, typing.Any]:
             _run_container_setup(container_setup)
-            return _run_tick(build_id, tick_kwargs, deployment=tick_deployment)
+            return await _run_deployed_tick_aio(
+                build_id, tick_kwargs, deployment=tick_deployment
+            )
 
         # tick/watchdog default to builder_settings when tick_settings is
         # not given; the api-key secret is in extra_secrets so they get
         # registry credentials regardless of which settings apply.
         tick_settings = self._tick_settings or self._builder_settings
-        register("tick", tick_settings)(_modal_tick)
+        register("tick", tick_settings, default_concurrency=_TICK_CONCURRENCY)(
+            _modal_tick
+        )
         function_names.append("tick")
 
         # Reactive bootstrap (see run_reactive_bootstrap). Spawned by
@@ -1101,14 +1183,22 @@ class StardagApp:
             # where each tick is spawned — see _run_watchdog_sweep.
             _run_watchdog_sweep(registry_provider.get(), app_name)
 
+        # `never_concurrent`, not merely "no default": it shares
+        # `tick_settings` with the tick, so a declared value would reach it
+        # too. This is its own Modal function with its own containers,
+        # receiving one input per watchdog period, so packing would change
+        # nothing in the steady state — while quietly opting a `def` into
+        # Modal's *threaded* concurrency, which is the hazard
+        # `_modal_tick` is a coroutine to avoid. Modal accepts a sync
+        # function with `@modal.concurrent` and a `schedule` without
+        # complaint, so nothing downstream would have caught it.
+        watchdog_schedule: dict[str, typing.Any] = (
+            {"schedule": modal.Period(minutes=self.watchdog_period_minutes)}
+            if self.watchdog_period_minutes is not None
+            else {}
+        )
         register(
-            "tick_watchdog",
-            tick_settings,
-            **(
-                {"schedule": modal.Period(minutes=self.watchdog_period_minutes)}
-                if self.watchdog_period_minutes is not None
-                else {}
-            ),
+            "tick_watchdog", tick_settings, never_concurrent=True, **watchdog_schedule
         )(_modal_tick_watchdog)
         function_names.append("tick_watchdog")
 

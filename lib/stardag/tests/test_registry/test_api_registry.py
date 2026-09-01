@@ -1483,3 +1483,145 @@ class TestSchedulerLeaseCalls:
         )
         assert new._scheduler_lease_route_missing is False
         assert result.held is False, "the other registry's latch leaked"
+
+
+class TestAsyncClientUnderConcurrentCallers:
+    """The invariant that lets scheduler ticks share a Modal container.
+
+    ``registry_provider`` hands out one process-wide ``APIRegistry``, and
+    its ``async_client`` is cached **per event loop**: a call from a
+    different loop rebuilds it and closes the previous one. That is fine
+    while one caller owns the process, and actively destructive once
+    several do — which is exactly what input concurrency introduces.
+
+    Modal decides the shape: an ``async def`` gets its concurrent inputs as
+    asyncio tasks on one loop, a ``def`` gets them on threads, each
+    running its own ``asyncio.run``. So "the deployed tick is async" and
+    "ticks may share a container" are one decision, and this class pins
+    both halves of it — the safe shape and the hazard it avoids — because
+    neither is visible until two ticks actually overlap.
+    """
+
+    @staticmethod
+    def _registry() -> APIRegistry:
+        return APIRegistry(api_url="http://test.invalid", api_key="test-key")
+
+    def test_concurrent_callers_on_one_loop_share_one_stable_client(self):
+        """The async tick's world: N ticks, one loop, one client.
+
+        Each "tick" reads the client, yields (as a real one does on every
+        await), and reads it again. All four reads must be the same object,
+        and it must still be open — a rebuild would have closed it under
+        whoever was mid-request.
+        """
+        import asyncio
+
+        registry = self._registry()
+
+        async def fake_tick() -> list[httpx.AsyncClient]:
+            first = registry.async_client
+            await asyncio.sleep(0)
+            return [first, registry.async_client]
+
+        async def main() -> None:
+            reads: list[list[httpx.AsyncClient]] = await asyncio.gather(
+                *(fake_tick() for _ in range(4))
+            )
+
+            clients = {id(client) for tick_reads in reads for client in tick_reads}
+            assert len(clients) == 1, (
+                "ticks sharing a container must share one async client; a "
+                "rebuild closes the client another tick is using"
+            )
+            assert not reads[0][0].is_closed
+
+            # Asserted and closed inside the loop, not after it. An
+            # AsyncClient belongs to the loop it was built on and can only
+            # be closed from there, so a test that returns one and tidies
+            # up afterwards has no way to close it at all.
+            await registry.aclose()
+
+        asyncio.run(main())
+
+    def test_callers_on_separate_loops_rebuild_and_close_the_shared_client(
+        self,
+    ):
+        """The sync tick's world, and why the deployed tick is not that.
+
+        Threaded concurrency gives each input its own ``asyncio.run`` and
+        therefore its own loop, so the second caller's first property access
+        tears down the first caller's client mid-flight. Asserted rather
+        than merely described: if Modal or ``APIRegistry`` ever stopped
+        behaving this way, making the tick async would have stopped being
+        load-bearing, and that is worth being told about.
+        """
+        import asyncio
+        import threading
+
+        registry = self._registry()
+        clients: dict[str, httpx.AsyncClient] = {}
+        first_read = threading.Event()
+        b_done = threading.Event()
+
+        # The rendezvous waits are deliberately unbounded, and the threads
+        # daemons. A bounded wait would let a thread that never
+        # rendezvoused carry on into the reads below and fail one of the
+        # real assertions, which would then be describing a coordination
+        # failure in the language of a client-caching bug. Unbounded, a
+        # thread that cannot proceed simply does not finish, and the one
+        # bound that matters — `join(timeout=...)` plus `is_alive()` — says
+        # exactly that. `daemon=True` is what keeps such a thread from
+        # holding the interpreter open at exit.
+        def caller_a():
+            async def body():
+                clients["a"] = registry.async_client
+                first_read.set()
+                # Wait for B to touch the property from its own loop.
+                await asyncio.get_running_loop().run_in_executor(None, b_done.wait)
+                clients["a_again"] = registry.async_client
+
+            asyncio.run(body())
+
+        def caller_b():
+            async def body():
+                first_read.wait()
+                clients["b"] = registry.async_client
+
+            asyncio.run(body())
+            b_done.set()
+
+        thread_a = threading.Thread(target=caller_a, daemon=True)
+        thread_b = threading.Thread(target=caller_b, daemon=True)
+        thread_a.start()
+        thread_b.start()
+        thread_a.join(timeout=10)
+        thread_b.join(timeout=10)
+
+        # The two survivors are deliberately left unclosed. Each belongs to
+        # a loop that has since ended, so there is nowhere to close them
+        # from — which is the hazard this test exists to describe, not an
+        # oversight in the test. Nothing leaks in practice: no request is
+        # ever issued here, so no connection is ever opened, and the suite
+        # is clean under `-W error::ResourceWarning`.
+
+        # Before reading `clients`: a thread still alive means the two
+        # never rendezvoused, and every assertion below would otherwise
+        # fail with a KeyError that says nothing about what went wrong.
+        assert not thread_a.is_alive() and not thread_b.is_alive(), (
+            "a caller thread did not finish; the two never rendezvoused"
+        )
+        assert clients["b"] is not clients["a"], (
+            "a second event loop rebuilds the cached client — this is the "
+            "thrash the deployed tick is async to avoid"
+        )
+        assert clients["a_again"] is not clients["a"], (
+            "and A's next read gets a third client, so the one it was "
+            "using mid-tick was replaced underneath it"
+        )
+        # The destructive half, and the reason this is a bug rather than
+        # wasted allocation: the displaced client is closed, so a request
+        # already in flight on it fails.
+        assert clients["a"].is_closed, (
+            "the displaced client was left open — the hazard here is that "
+            "it is closed under a caller mid-request"
+        )

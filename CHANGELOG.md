@@ -8,6 +8,36 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Scheduler ticks share a container.** The deployed Modal `tick` is now an
+  `async def` and is registered with `max_concurrent_inputs=10`, so up to ten
+  concurrent reactive builds are served by one container instead of one each.
+  A tick is almost entirely I/O wait — read the frontier, spawn, then poll on
+  a sleep until the linger deadline — so this is close to free, and it is what
+  makes `linger_seconds` cheap: a resident tick driving level after level no
+  longer costs a container of its own. Async is load-bearing rather than
+  stylistic: Modal serves concurrent inputs to a sync function on _threads_,
+  each running its own `asyncio.run`, and `APIRegistry`'s async client is
+  cached per event loop and closed when the loop changes — so threaded ticks
+  would tear down each other's in-flight HTTP client. Workers are deliberately
+  not packed (they run user code and may be CPU- or GPU-bound), nor is
+  `tick_watchdog` (its own function, one input per period). Supporting
+  changes: the async client's connection pool is sized for a shared process
+  rather than for one caller, and the tick's two remaining blocking calls —
+  the foreign-app forward and the successor hand-off's spawn — moved off the
+  event loop, where they would have stalled every co-resident tick.
+- **`FunctionSettings` speaks Modal's current vocabulary, and translates the
+  old one.** `max_containers`, `min_containers`, `buffer_containers`,
+  `scaledown_window`, `max_concurrent_inputs` and `target_concurrent_inputs`
+  are now accepted; the last two are applied via `@modal.concurrent` rather
+  than passed to `App.function()`, and validated in stardag's own vocabulary
+  rather than left to fail at registration with a `TypeError` naming a
+  parameter nobody wrote. The four legacy names Modal renamed in 2025
+  — `concurrency_limit`, `keep_warm`, `container_idle_timeout` and
+  `allow_concurrent_inputs` — are translated with a warning instead of being
+  forwarded. This is a **bug fix, not a deprecation**: Modal's client raises
+  `DeprecationError` on all four, and `FunctionSettings` passed them straight
+  through, so any app that set one failed to deploy.
+
 - **`require_pickle_free=True` now binds the scheduler tick, not just the
   trigger.** The flag was a trigger-time gate: the bootstrap refused to start
   a build whose tasks would need pickles, and nothing carried the intent any
