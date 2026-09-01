@@ -1523,17 +1523,25 @@ class TestAsyncClientUnderConcurrentCallers:
             await asyncio.sleep(0)
             return [first, registry.async_client]
 
-        async def main():
-            return await asyncio.gather(*(fake_tick() for _ in range(4)))
+        async def main() -> None:
+            reads: list[list[httpx.AsyncClient]] = await asyncio.gather(
+                *(fake_tick() for _ in range(4))
+            )
 
-        seen: list[list[httpx.AsyncClient]] = asyncio.run(main())
+            clients = {id(client) for tick_reads in reads for client in tick_reads}
+            assert len(clients) == 1, (
+                "ticks sharing a container must share one async client; a "
+                "rebuild closes the client another tick is using"
+            )
+            assert not reads[0][0].is_closed
 
-        clients = {id(client) for reads in seen for client in reads}
-        assert len(clients) == 1, (
-            "ticks sharing a container must share one async client; a "
-            "rebuild closes the client another tick is using"
-        )
-        assert not next(iter(seen))[0].is_closed
+            # Asserted and closed inside the loop, not after it. An
+            # AsyncClient belongs to the loop it was built on and can only
+            # be closed from there, so a test that returns one and tidies
+            # up afterwards has no way to close it at all.
+            await registry.aclose()
+
+        asyncio.run(main())
 
     def test_callers_on_separate_loops_rebuild_and_close_the_shared_client(
         self,
@@ -1588,6 +1596,13 @@ class TestAsyncClientUnderConcurrentCallers:
         thread_b.start()
         thread_a.join(timeout=10)
         thread_b.join(timeout=10)
+
+        # The two survivors are deliberately left unclosed. Each belongs to
+        # a loop that has since ended, so there is nowhere to close them
+        # from — which is the hazard this test exists to describe, not an
+        # oversight in the test. Nothing leaks in practice: no request is
+        # ever issued here, so no connection is ever opened, and the suite
+        # is clean under `-W error::ResourceWarning`.
 
         # Before reading `clients`: a thread still alive means the two
         # never rendezvoused, and every assertion below would otherwise
