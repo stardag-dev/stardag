@@ -11,8 +11,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 ### SDK
 
 - **Scheduler ticks share a container.** The deployed Modal `tick` is now an
-  `async def` and is registered with `max_concurrent_inputs=10`, so up to ten
-  concurrent reactive builds are served by one container instead of one each.
+  `async def` and is registered with `@modal.concurrent(max_inputs=10)`, so up
+  to ten concurrent reactive builds are served by one container instead of one
+  each — stardag's default for this function, overridable through
+  `FunctionSettings(max_concurrent_inputs=...)`.
   A tick is almost entirely I/O wait — read the frontier, spawn, then poll on
   a sleep until the linger deadline — so this is close to free, and it is what
   makes `linger_seconds` cheap: a resident tick driving level after level no
@@ -22,7 +24,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   cached per event loop and closed when the loop changes — so threaded ticks
   would tear down each other's in-flight HTTP client. Workers are deliberately
   not packed (they run user code and may be CPU- or GPU-bound), nor is
-  `tick_watchdog` (its own function, one input per period). Supporting
+  `tick_watchdog` (its own function, one input per period), which shares
+  `tick_settings` with the tick and so is held out explicitly rather than by
+  having no default. Supporting
   changes: the async client's connection pool is sized for a shared process
   rather than for one caller, and the tick's two remaining blocking calls —
   the foreign-app forward and the successor hand-off's spawn — moved off the

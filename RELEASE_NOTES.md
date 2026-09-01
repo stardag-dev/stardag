@@ -29,8 +29,10 @@ until each app is redeployed. See Compatibility.
 ### Ticks share a container
 
 The deployed `tick` is now an `async def` registered with
-`max_concurrent_inputs=10`, so one container serves up to ten concurrent
-reactive builds instead of one each.
+`@modal.concurrent(max_inputs=10)`, so one container serves up to ten
+concurrent reactive builds instead of one each. That is stardag's default
+for this one function; your own apps set input concurrency through
+`FunctionSettings(max_concurrent_inputs=...)`, which overrides it.
 
 A tick is almost entirely I/O wait — read the frontier, spawn, then poll
 on a sleep until the linger deadline — so the packing is close to free.
@@ -52,8 +54,12 @@ be CPU- or GPU-bound; the builder, which runs a whole build; the
 bootstrap, which walks a DAG. Nor `tick_watchdog` — it is its own
 function receiving one input per period, so packing would buy nothing in
 the steady state while quietly opting a `def` into the threading above.
-`never_concurrent=True` refuses that combination at registration rather
-than letting Modal accept it silently.
+`tick` and `tick_watchdog` are registered from one `tick_settings`, so
+"no default for the watchdog" was not enough — a declared
+`max_concurrent_inputs` would have reached it too. `never_concurrent=True`
+drops input concurrency for the watchdog whatever the shared settings say.
+Modal accepts a sync function with `@modal.concurrent` without complaint,
+so nothing downstream would have caught it.
 
 Two supporting changes, each correct per-tick and wrong per-container: the
 async client's connection pool is now sized for a shared process rather
