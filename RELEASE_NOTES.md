@@ -6,6 +6,135 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.23.0 — The reactive scheduler moves onto the build row
+
+Additive for anyone using the Modal integration as documented; breaking
+only for a custom `RegistryABC` implementation, loudly, in the two ways
+listed under Migration.
+
+**Upgrade the registry to server `0.3.0` and redeploy your Modal apps.**
+Unlike the last two releases, the skew here is not free — an upgraded
+registry paired with apps still running an older SDK costs containers
+until each app is redeployed. See Compatibility.
+
+### What changes
+
+Two things the reactive tick used to derive now live on the build row
+itself:
+
+- **The single-flight lease.** It rode on the deprecated global
+  concurrency lock, so both the tick and the registry had to assemble a
+  lock name from a build id and query `distributed_locks`. It is now
+  `builds.scheduler_lease_until` / `scheduler_lease_owner` behind
+  `POST`/`PUT`/`DELETE /builds/{build_id}/scheduler-lease`, and
+  "is a scheduler live?" is a column comparison instead of a second
+  query. Renew and release are owner-checked, so a tick whose lease
+  lapsed and was taken over cannot extend or clear its successor's.
+- **The wake-up flag.** A lingering tick asks "has anything changed?"
+  every few seconds, and used to answer it by fetching the whole
+  frontier — seven statements, one of them a window-function aggregate
+  over the event log — to read a single boolean.
+  `GET /builds/{build_id}/notify` reads the one row. The frontier is
+  fetched only when there is something to act on.
+
+The lease TTL is 60 s, unchanged, and is still the dead-tick recovery
+window. Renewal moved from half the TTL to a third, so two consecutive
+renewal failures are survivable.
+
+**The watchdog sweep now spawns instead of running ticks inline.**
+`tick_watchdog` lists the running reactive builds its app owns, spawns one
+`tick` per build and returns. Three things stop being a function of how
+many builds the environment happens to be running: each build's spawn cap
+(that one container's timeout was divided across the sweep), whether the
+sweep finished at all, and how long the last build in the list waits. A
+swept build's tick still does one pass and exits — a wake-up lingers
+because something just happened, a sweep looks at builds where nothing is
+known to have happened.
+
+### Compatibility
+
+Both skew directions are correct; one of them is expensive.
+
+- **New SDK against an old registry (< `0.3.0`).** No lease routes: the
+  tick runs unleased and says so once. Duplicate ticks become possible —
+  idempotent, and task starts stay arbitrated by the execution claim. The
+  linger poll falls back to the frontier read it did before. That server
+  also reports `scheduler_live=False` to every worker, because it reads a
+  lock table this SDK no longer writes, so wake-ups spawn
+  unconditionally: the pre-lease behaviour end to end, rather than a
+  half-broken one.
+- **New registry against old Modal apps — the direction a real
+  deployment takes**, since the API upgrades before the apps that bake in
+  their SDK. The new server does not read the legacy lock an old tick
+  takes, so it reports `scheduler_live=False` for every completion and
+  every worker spawns a tick that immediately no-ops. Correct, but it
+  costs containers until each app is redeployed. **Redeploy promptly.**
+- **Migration:** two nullable columns on `builds` (`b41c7d9e2f08`). No
+  backfill — a lease is transient.
+
+`DEFAULT_SERVER_VERSION` is now `0.3.0`, so `stardag self-host up` and a
+plain `stardag self-host upgrade` both land there.
+
+### Migration
+
+Nothing to change for documented usage beyond upgrading the registry and
+redeploying the apps. For a **custom `RegistryABC` implementation**, two
+breaking changes, both loud:
+
+- **`task_start_with_limits_aio` is removed.** `task_start_claim_aio`
+  gains `claim: bool = True`, so the two orthogonal flags the registry's
+  single `/start` endpoint carries — `claim` and `enforce_limits` — are
+  reached through one method. Any direct caller migrates to
+  `task_start_claim_aio(..., claim=False)`. An existing
+  `task_start_claim_aio` **override must accept `claim`** or it raises
+  `TypeError` the first time `RegistryConcurrencyLimiter` calls it. A
+  backend that implemented only `task_start_with_limits_aio` and relied on
+  its no-op default now raises `NotImplementedError` from the limiter
+  instead of silently skipping enforcement.
+- **The Modal worker reads `BuildNotifyResult.scheduler_live` off the
+  result directly** instead of through `getattr`. Unknown still spawns —
+  an older registry leaves the field `None` — but the tolerance for a
+  backend answering with some other shape is gone.
+
+Additive on the same interface: `RegistryABC` gains
+`build_get_notify[_aio]` and
+`build_acquire`/`renew`/`release_scheduler_lease_aio`, all with working
+defaults (delegate to the frontier; grant), so an existing backend needs
+no changes and can override for the cheap reads. `run_tick_aio` **drops
+its `lock_manager` parameter** — the lease was its only use — which
+affects only code driving a tick by hand.
+
+### Also in this release
+
+- **`require_pickle_free=True` now binds the scheduler tick, not just the
+  trigger.** It was a trigger-time gate, and a tick is a writer of the
+  same store: on a writable target root a build that declared it writes no
+  pickles quietly left one per task anyway, the first time each was
+  rehydrated. `BuildTaskStore` takes `pickle_free` and the deployed tick
+  builds its store from the app's flag.
+- **`--server-version latest` is resolved at deploy time**, against the
+  GitHub Releases API, rather than handed to `modal.Image.from_registry`
+  as a mutable tag that image caching could serve stale — and
+  `self-host status` can now say which release is running. A deployment
+  recorded as `latest` by an older SDK converts to a pin on its next
+  upgrade.
+- **A plain `stardag self-host upgrade` rolls the server version forward
+  again.** It returned the recorded deployed version unconditionally, so
+  only an explicit `--server-version` could ever move a deployment. It now
+  deploys the newer of the recorded version and `DEFAULT_SERVER_VERSION`,
+  which keeps the anti-downgrade property while letting the pin move a
+  deployment that is behind.
+- **`BuildTaskStore` gains `save_task_aio` / `save_tasks_aio` /
+  `load_task_aio`.** The async call sites used to reach the blocking
+  methods straight from the event loop. A corrupt or truncated store
+  pickle also reads as a miss now, so the tick falls back to registry
+  rehydration instead of raising.
+- **Compatible with modal 1.5.5**, which moved `FileEntryType` to
+  `modal.types` and renamed `FunctionInfo` in a patch release. Handled
+  with an import fallback, so the declared `modal>=1.0.0` still holds.
+
+---
+
 ## v0.22.0 — A finished task wakes every build waiting on it
 
 Additive for anyone using the Modal integration as documented. Reactive
