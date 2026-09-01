@@ -191,7 +191,31 @@ worker writes status, the registry flags wake candidates, and the worker
 spawns the next tick when no scheduler is live.
 
 `integration-tests/tests_registry_live/` covers it, by deploying a registry
-for the run.
+for the run. What the scenarios there assert:
+
+| Scenario                    | The question it answers                                                                 |
+| --------------------------- | --------------------------------------------------------------------------------------- |
+| `test_reactive_e2e`         | With nothing resident anywhere, does a worker spawn the next tick?                      |
+| `test_claim_race`           | Two builds want one task; does the registry let exactly one run it?                     |
+| `test_cross_build_wake`     | A blocker finishes in one build — is a different, dormant build woken?                  |
+| `test_wake_storm`           | Several dormant builds flagged at once — is each woken _once_, not once per notifier?   |
+| `test_limit_slot_wake`      | A concurrency slot frees — is the build queued on it woken, though it shares no task?   |
+| `test_suspended_blocker`    | A task suspended on dynamic children holds no claim. Is it waited on rather than reset? |
+| `test_failed_blocker`       | A shared task _failed_. Is that left alone as a result, rather than reset?              |
+| `test_watchdog_sweep`       | Does one sweep spawn a tick per build and return in seconds?                            |
+| `test_wide_fan_out`         | A layer wider than one pass may spawn — throttle, or stall?                             |
+| `test_scheduler_lease_live` | Does the lease serialize on real Postgres, and lapse on the real clock?                 |
+
+**Two apps are deployed, not one.** `registry-live-dag` runs everything
+except the watchdog sweep, which gets `registry-live-watchdog` to itself.
+The sweep lists running builds scoped by _reactive app name_, so a sweep
+driven against the shared app would spawn ticks for whatever else was
+running at that moment — waking the dormant builds that four other
+scenarios assert cannot be woken by anything but the mechanism they test.
+They would not fail; they would quietly stop meaning anything. The
+environment stays shared, because it is the unit of teardown; only the app
+name separates them, and the image is identical so the extra deploy is
+seconds.
 
 **The registry runs its own Postgres inside its own Modal container.** There
 is no database account to create, nothing to provision and nothing to clean
@@ -254,11 +278,40 @@ profile name.
 
 ##### Concurrency, and turning it off
 
-The scenarios run concurrently (`-n 4`). They are almost entirely sleep —
-each waits on Modal containers it does not own — so running them together
-costs little more than running the longest, and the tier's runtime stops
-being the sum of its parts as scenarios are added. They share one registry
-container, which serves them concurrently, and each salts its own task ids.
+The scenarios run concurrently (`-n 12`, sized to the scenario count). They
+are almost entirely sleep — each waits on Modal containers it does not own —
+so running them together costs little more than running the longest, and the
+tier's runtime is the length of its slowest scenario rather than the sum of
+its parts. They share one registry container, which serves them concurrently,
+and each salts its own task ids.
+
+Measured: **~3.5 minutes** for the twelve tests, plus ~40s to provision.
+The bound is `test_suspended_blocker` at ~200s — it has to hold a task
+RUNNING long enough for a second build to register against it, then
+SUSPENDED long enough for that build to tick while it is.
+
+**Wait on a state, never on a clock.** Every scenario here rests on an
+ordering — a second build registering while a task is still RUNNING, a tick
+landing while one is SUSPENDED — and a `sleep` sized for that window is wrong
+in both directions. It is wall clock on every run, and on the one run where
+Modal is slow to start a container it silently produces the situation it was
+meant to prevent: a scenario that still passes while testing something
+weaker. `_wait.wait_for_task_status` is the alternative, and where a window
+is a guess about infrastructure rather than about scheduling, the scenario
+asserts the ordering actually held and says which constant to raise if it
+did not.
+
+**A scenario that needs its second build woken _twice_ should keep that
+build resident instead.** `select_wake_candidates` hands a flagged build
+out at most once per 120s window and does not compare the flag's timestamp
+against the hand-out's — so a build re-flagged after being handed out
+waits for the window to lapse, and then needs someone to drain. In the
+full concurrent tier another scenario's tick does that (drains are not
+scoped to the caller's build), so such a scenario passes here and hangs
+under `-n0`. The watchdog is the production backstop for it, and this tier
+runs none. The two blocker scenarios keep their second build resident for
+this reason — which is the better shape anyway, since what they test is
+what a tick _decides_, not who called it.
 
 **When something fails, run them one at a time.** A shared registry and
 interleaved logs make a low-level failure much harder to read:

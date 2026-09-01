@@ -73,3 +73,101 @@ def slow(values: sd.Depends[list[int]], seconds: int, limit_key: str = "") -> li
     del limit_key  # read off the task by the app's limit-key selector
     time.sleep(seconds)
     return values
+
+
+@sd.task(name="Fails")
+def fails(values: sd.Depends[list[int]], seconds: int) -> list[int]:
+    """Runs for ``seconds``, then fails deterministically.
+
+    For the scenario where a shared task's status is a *result* rather than
+    a revocation. The sleep is what makes the decision observable: the
+    second build has to register while this task is still RUNNING, because
+    RUNNING is the one status a trigger will not reset -- and a trigger
+    resetting it is the (correct) behaviour that would hide the mid-flight
+    decision under test.
+    """
+    import time
+
+    time.sleep(seconds)
+    del values
+    raise RuntimeError("deliberate failure: this task exists to fail")
+
+
+class SuspendingParent(sd.Task[list[int]]):
+    """Registers dynamic children, yields, and so sits SUSPENDED while they run.
+
+    The shape one scenario needs and nothing else here produces: a shared
+    task whose worker registered its children, yielded and returned. It
+    holds **no claim** -- so nothing but its owning build's liveness says
+    whether anyone is still progressing it, and a second build that reset
+    it would redo every bit of the pre-yield work for nothing while the
+    first build is legitimately mid-flight.
+
+    Note which duration bounds that window. It is the *worker* timeout, not
+    the claim TTL: the TTL is derived from the timeout plus a grace, so it
+    is strictly the looser of the two, and a fixture sized against it would
+    be guaranteed to outlive its own execution budget.
+
+    ``salt`` reaches the leaf, and through it this task's own id and its
+    children's -- see the note on ``get_range``.
+    """
+
+    salt: str
+    children: int = 2
+    child_seconds: int = 60
+    pre_yield_seconds: int = 20
+
+    def requires(self):
+        return get_range(limit=self.children, salt=self.salt)
+
+    def run(self):
+        import time
+
+        indices = self.requires().load()
+        # A RUNNING window before the yield, and it is load-bearing rather
+        # than padding: the second build has to *register* while this task
+        # is still RUNNING. Register any later and plan closure follows the
+        # freshly-written dynamic edges, pulls the children into that
+        # build's plan too, and it is then simply a build with running
+        # tasks of its own -- never stalled, so never classifying a blocker
+        # at all. Correct behaviour; just not the state under test.
+        time.sleep(self.pre_yield_seconds)
+        # The children hang off the leaf this task already required, which
+        # is complete by the time they are registered -- so the suspended
+        # window costs one level of container start rather than two.
+        #
+        # Their ids are made distinct by the one parameter that was going
+        # to differ anyway. A task id is derived from its parameters, so
+        # two children given identical ones would be a single task and the
+        # fan-out would be imaginary.
+        kids = [
+            slow(values=self.requires(), seconds=self.child_seconds + index)
+            for index in indices
+        ]
+        yield kids
+        self._save([len(kid.load()) for kid in kids])
+
+
+class FanIn(sd.Task[int]):
+    """A single root over ``width`` independent leaves: one wide layer.
+
+    Flat rather than a binary tree, and that is the whole design. What the
+    fan-out scenario exercises is how many actionable tasks one tick pass
+    can put on workers, so the quantity that matters is the width of a
+    *single* layer. A tree over the same leaves would nearly double the
+    task count -- and every extra task is another real Modal container --
+    while making no layer any wider than this one.
+
+    Distinct ``limit`` values give the leaves distinct ids, so these really
+    are N independent tasks rather than one task referenced N times, which
+    is what makes it a fan-out rather than a deduplication test.
+    """
+
+    salt: str
+    width: int = 24
+
+    def requires(self):
+        return [get_range(limit=index, salt=self.salt) for index in range(self.width)]
+
+    def run(self):
+        self._save(sum(len(leaf.load()) for leaf in self.requires()))

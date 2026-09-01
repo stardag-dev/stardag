@@ -36,6 +36,7 @@ from stardag_integration_tests.registry_live._wait import (
     assert_trail_complete,
     describe,
     tick_summaries,
+    wait_for_task_status,
     wait_for_terminal,
 )
 
@@ -48,20 +49,17 @@ pytestmark = [
 
 # The shared task must outlive B's tick by a clear margin. These two
 # numbers are the scenario; if they ever cross, it silently degrades into
-# "a tick watched a task finish" and still passes.
-SHARED_SLEEP_SECONDS = 90
-B_LINGER_SECONDS = 20
+# "a tick watched a task finish" and still passes. The assertion on B's
+# first tick outcome is what catches that, which is what allows these to be
+# sized tightly rather than padded.
+SHARED_SLEEP_SECONDS = 75
+B_LINGER_SECONDS = 15
 
-# Let A claim and start the shared task before B is triggered, so B meets
-# it RUNNING and waits rather than racing for it.
-LET_A_CLAIM_SECONDS = 40
-
+STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
 def test_a_blockers_completion_wakes_a_dormant_build() -> None:
-    import time
-
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         get_range,
@@ -80,10 +78,21 @@ def test_a_blockers_completion_wakes_a_dormant_build() -> None:
         reactive=True,
         # A lingers long enough to see its own work through, so that the
         # only build depending on a wake-up is B.
-        tick_kwargs={"linger_seconds": 200, "poll_interval_seconds": 3},
+        tick_kwargs={"linger_seconds": 150, "poll_interval_seconds": 3},
     ).build_id
 
-    time.sleep(LET_A_CLAIM_SECONDS)
+    # Let A claim and start the shared task before B is triggered, so B
+    # meets it RUNNING and waits rather than racing for it. Waiting on the
+    # status rather than sleeping a guess at how long that takes: the guess
+    # is wall clock on every run, and is wrong in the one case that matters
+    # -- a slow container start, where it silently produces the racing B it
+    # was meant to prevent.
+    wait_for_task_status(
+        shared.id,
+        expected="running",
+        build_id=build_a,
+        timeout=STATUS_TIMEOUT_SECONDS,
+    )
 
     build_b = app.build_trigger(
         square(values=shared, offset=11),
@@ -116,9 +125,9 @@ def test_a_blockers_completion_wakes_a_dormant_build() -> None:
     assert summaries_b[0].get("outcome") == "lingered_out", (
         "Build B's first tick did not linger out, so it may have been "
         "resident when the blocker completed and noticed on its own poll. "
-        f"The shared task's sleep ({SHARED_SLEEP_SECONDS}s) must comfortably "
-        f"outlast B's linger ({B_LINGER_SECONDS}s) plus the "
-        f"{LET_A_CLAIM_SECONDS}s head start.\n" + describe(build_b)
+        f"The shared task's sleep ({SHARED_SLEEP_SECONDS}s) must "
+        f"comfortably outlast B's linger ({B_LINGER_SECONDS}s) plus B's "
+        "bootstrap.\n" + describe(build_b)
     )
     assert len(summaries_b) > 1, (
         "Build B ran exactly one tick, so it cannot have been woken.\n"

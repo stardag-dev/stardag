@@ -133,7 +133,7 @@ def sdk_environment(deployment: Deployment) -> dict[str, str]:
 
 
 def up(modal_environment: str) -> Deployment:
-    """Deploy the registry, wire the SDK to it, deploy the scenario app."""
+    """Deploy the registry, wire the SDK to it, deploy the scenario apps."""
     _require_disposable_name(modal_environment, "provision into")
     _require_expected_workspace()
     repo_root = _repo_root()
@@ -157,7 +157,7 @@ def up(modal_environment: str) -> Deployment:
     os.environ.update(sdk_environment(deployment))
     os.environ.pop("STARDAG_PROFILE", None)
 
-    _deploy_dag_app(repo_root, modal_environment)
+    _deploy_dag_apps(repo_root, modal_environment)
 
     path = coordinates_path(modal_environment)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +166,7 @@ def up(modal_environment: str) -> Deployment:
 
 
 def stop(modal_environment: str) -> None:
-    """Stop both apps, leaving the environment and its image cache.
+    """Stop every app in the stack, leaving the environment and its images.
 
     The counterpart to ``down`` for an environment that is meant to
     survive. The registry pins ``min_containers=1``, which keeps a
@@ -184,9 +184,8 @@ def stop(modal_environment: str) -> None:
     warm, which is what makes the next run's deploy take seconds.
     """
     _require_disposable_name(modal_environment, "stop apps in")
-    from .dag_app import APP_NAME
 
-    for app_name in (DEFAULT_REGISTRY_APP, APP_NAME):
+    for app_name in (DEFAULT_REGISTRY_APP, *(name for _, name in _scenario_apps())):
         stop_existing_app(app_name, modal_environment)
     coordinates_path(modal_environment).unlink(missing_ok=True)
 
@@ -195,7 +194,7 @@ def down(modal_environment: str) -> None:
     """Delete the Modal environment, and with it everything in the stack.
 
     One call removes the registry app, its container and therefore its
-    database, the scenario app, the target-root volume and the API-key
+    database, both scenario apps, the target-root volume and the API-key
     secret. That completeness is the reason the database lives inside the
     container rather than in a hosted service.
     """
@@ -364,42 +363,64 @@ def _ensure_modal_environment(name: str) -> None:
     raise SystemExit(f"Could not create Modal environment {name!r}: {output}")
 
 
-def _deploy_dag_app(repo_root: Path, modal_environment: str) -> None:
-    """Deploy the scenario app with the CLI from *this* environment.
+def _deploy_dag_apps(repo_root: Path, modal_environment: str) -> None:
+    """Deploy both scenario apps with the CLI from *this* environment.
 
-    Not a bare ``stardag`` off ``PATH``: the app's Modal functions are
+    Not a bare ``stardag`` off ``PATH``: an app's Modal functions are
     serialized by whatever interpreter imports the module, and every later
     trigger unpickles them in a container built for that Python. Resolving
     the CLI next to ``sys.executable`` makes the deploy and the scenarios
     agree by construction. A mismatch is not a graceful error -- the
     container dies with a bare SIGSEGV and leaves a build that looks empty.
+
+    The second app costs one more deploy of an image that is already built,
+    and buys the watchdog scenario a build population of its own -- see
+    ``watchdog_app``.
     """
-    from .dag_app import APP_NAME
-
-    # Warm containers from an earlier run hold the `stardag-api-key` secret
-    # as it was when they started, and connect has just *rotated* that key.
-    # A survivor authenticates with a revoked credential and takes a 401
-    # from the registry partway through a build.
-    stop_existing_app(APP_NAME, modal_environment)
-
     stardag_cli = Path(sys.executable).with_name("stardag")
     if not stardag_cli.exists():
         raise SystemExit(
             f"No stardag CLI next to {sys.executable}. This tier deploys with "
             "the CLI from its own environment on purpose -- see above."
         )
-    result = subprocess.run(
-        [str(stardag_cli), "modal", "deploy", "-m", f"{__package__}.dag_app"],
-        cwd=repo_root / "integration-tests",
-        capture_output=True,
-        text=True,
-        env={**os.environ, "MODAL_ENVIRONMENT": modal_environment},
-    )
-    if result.returncode != 0:
-        raise SystemExit(
-            f"Failed to deploy the scenario app:\n{result.stdout}\n{result.stderr}"
+
+    for module_name, app_name in _scenario_apps():
+        # Warm containers from an earlier run hold the `stardag-api-key`
+        # secret as it was when they started, and connect has just
+        # *rotated* that key. A survivor authenticates with a revoked
+        # credential and takes a 401 from the registry partway through a
+        # build.
+        stop_existing_app(app_name, modal_environment)
+
+        result = subprocess.run(
+            [str(stardag_cli), "modal", "deploy", "-m", module_name],
+            cwd=repo_root / "integration-tests",
+            capture_output=True,
+            text=True,
+            env={**os.environ, "MODAL_ENVIRONMENT": modal_environment},
         )
-    print(f"[provision] deployed {APP_NAME!r}")
+        if result.returncode != 0:
+            raise SystemExit(
+                f"Failed to deploy {app_name!r}:\n{result.stdout}\n{result.stderr}"
+            )
+        print(f"[provision] deployed {app_name!r}")
+
+
+def _scenario_apps() -> list[tuple[str, str]]:
+    """(module, app name) for every app this tier deploys.
+
+    One list, read by both the deploy and the stop paths, so an app cannot
+    be added to one and forgotten in the other -- which would leave a
+    deployment with ``min_containers`` running after a `stop` that reported
+    success.
+    """
+    from .dag_app import APP_NAME as DAG_APP
+    from .watchdog_app import APP_NAME as WATCHDOG_APP
+
+    return [
+        (f"{__package__}.dag_app", DAG_APP),
+        (f"{__package__}.watchdog_app", WATCHDOG_APP),
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
