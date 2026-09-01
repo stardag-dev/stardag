@@ -6,11 +6,15 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-09-01
+
 ### SDK
 
 - **Scheduler ticks share a container.** The deployed Modal `tick` is now an
-  `async def` and is registered with `max_concurrent_inputs=10`, so up to ten
-  concurrent reactive builds are served by one container instead of one each.
+  `async def` and is registered with `@modal.concurrent(max_inputs=10)`, so up
+  to ten concurrent reactive builds are served by one container instead of one
+  each — stardag's default for this function, overridable through
+  `FunctionSettings(max_concurrent_inputs=...)`.
   A tick is almost entirely I/O wait — read the frontier, spawn, then poll on
   a sleep until the linger deadline — so this is close to free, and it is what
   makes `linger_seconds` cheap: a resident tick driving level after level no
@@ -20,11 +24,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   cached per event loop and closed when the loop changes — so threaded ticks
   would tear down each other's in-flight HTTP client. Workers are deliberately
   not packed (they run user code and may be CPU- or GPU-bound), nor is
-  `tick_watchdog` (its own function, one input per period). Supporting
+  `tick_watchdog` (its own function, one input per period), which shares
+  `tick_settings` with the tick and so is held out explicitly rather than by
+  having no default. Supporting
   changes: the async client's connection pool is sized for a shared process
   rather than for one caller, and the tick's two remaining blocking calls —
   the foreign-app forward and the successor hand-off's spawn — moved off the
-  event loop, where they would have stalled every co-resident tick.
+  event loop, where they would have stalled every co-resident tick. The
+  tick's completion log line now carries `MODAL_TASK_ID`, since packing is
+  otherwise unobservable: `modal app logs` has no per-container attribution
+  and `modal container list` names the app but not the function.
 - **`FunctionSettings` speaks Modal's current vocabulary, and translates the
   old one.** `max_containers`, `min_containers`, `buffer_containers`,
   `scaledown_window`, `max_concurrent_inputs` and `target_concurrent_inputs`
@@ -53,6 +62,23 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   gate, and the documented carve-out for an uncovered _dynamic_ dependency
   registered from inside a worker, which still gets its pickle rather than
   failing the bookkeeping of a task that has already run.
+
+- **`BuildTaskStore` gains async variants** — `save_task_aio` /
+  `save_tasks_aio` / `load_task_aio`, built on the targets' existing
+  `exists_aio` / `open_aio`. The reactive tick's `_load_task` and the async
+  trigger path called the blocking methods straight from the event loop, which
+  stalled every other coroutine in the tick for a network round-trip and drew
+  Modal's `AsyncUsageWarning` on volume-backed roots. The sync methods stay for
+  the sync callers. Also: a corrupt or truncated store pickle now reads as a
+  **miss**, so the tick falls back to registry rehydration instead of raising.
+
+- **Compatible with modal 1.5.5**, which moved two symbols in a patch release:
+  `modal.volume.FileEntryType` → `modal.types.FileEntryType` (still re-exported
+  at runtime, but dropped from the stub, so it broke type checking rather than
+  execution) and `_utils.function_utils.FunctionInfo` → `FunctionSourceInfo`.
+  Both are handled with an import fallback rather than a version floor bump,
+  since the declared `modal>=1.0.0` spans both spellings — verified against
+  1.5.0 and 1.5.5 alike.
 
 - **`--server-version latest` is resolved at deploy time, not deployed as a
   tag.** `stardag self-host up/upgrade --server-version latest` now asks the
@@ -177,6 +203,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   half the TTL to a third, so two consecutive renewal failures are
   survivable — and a third is too, because a refused renewal re-acquires
   rather than abandoning a build nothing else is driving.
+
+- _Internal:_ `stardag/build/_reactive.py` (3,412 lines) is now the
+  `_reactive/` package — `_discovery`, `_tick`, `_frontier_actions`,
+  `_terminal`, `_budgets` — split along the section banners the module already
+  had. No behaviour change and no import change: `stardag.build`'s re-exports
+  are untouched and the package `__init__` re-exports what the module did, with
+  one deliberate exception. The **mutable module globals** (the lease timing
+  knobs, the tick-summary route latch, the successor-spawner warning latch) are
+  _not_ re-exported: rebinding an alias leaves the reading module untouched, so
+  a monkeypatch against the package would go green while patching nothing.
+  Reach into the owning submodule instead.
 
 ### Registry API
 
