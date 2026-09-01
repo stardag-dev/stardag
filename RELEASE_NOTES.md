@@ -8,16 +8,18 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ## v0.23.0 — Ten lingering builds per container, not one
 
-Two changes, both about what reactive scheduling costs to keep alive: a
-lingering tick no longer needs a container of its own, and the two things
-it used to derive from elsewhere now live on the build row.
+The headline is two changes, both about what reactive scheduling costs to
+keep alive: a lingering tick no longer needs a container of its own, and
+the two things it used to derive from elsewhere now live on the build row.
+
+A third fix rides along, independent of both, and is the one worth reading
+even if you use none of this: **an app that set `concurrency_limit`,
+`keep_warm`, `container_idle_timeout` or `allow_concurrent_inputs` on
+`FunctionSettings` could not deploy at all**, and now can.
 
 Additive for anyone using the Modal integration as documented; breaking
 only for a custom `RegistryABC` implementation, loudly, in the two ways
-listed under Migration. One fix is worth reading even if you use none of
-this: **an app that set `concurrency_limit`, `keep_warm`,
-`container_idle_timeout` or `allow_concurrent_inputs` on `FunctionSettings`
-could not deploy at all**, and now can.
+listed under Migration.
 
 **Upgrade the registry to server `0.3.0` and redeploy your Modal apps.**
 Unlike the last two releases, the skew here is not free — an upgraded
