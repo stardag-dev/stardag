@@ -97,12 +97,13 @@ breaking changes, both loud:
   backend answering with some other shape is gone.
 
 Additive on the same interface: `RegistryABC` gains
-`build_get_notify[_aio]` and
-`build_acquire`/`renew`/`release_scheduler_lease_aio`, all with working
-defaults (delegate to the frontier; grant), so an existing backend needs
-no changes and can override for the cheap reads. `run_tick_aio` **drops
-its `lock_manager` parameter** — the lease was its only use — which
-affects only code driving a tick by hand.
+`build_get_notify` / `build_get_notify_aio`,
+`build_acquire_scheduler_lease_aio`, `build_renew_scheduler_lease_aio` and
+`build_release_scheduler_lease_aio`, all with working defaults (delegate to
+the frontier; grant), so an existing backend needs no changes and can
+override for the cheap reads. `run_tick_aio` **drops its `lock_manager`
+parameter** — the lease was its only use — which affects only code driving
+a tick by hand.
 
 ### Also in this release
 
