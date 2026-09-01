@@ -6,18 +6,87 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## v0.23.0 — The reactive scheduler moves onto the build row
+## v0.23.0 — Ten lingering builds per container, not one
+
+Two changes, both about what reactive scheduling costs to keep alive: a
+lingering tick no longer needs a container of its own, and the two things
+it used to derive from elsewhere now live on the build row.
 
 Additive for anyone using the Modal integration as documented; breaking
 only for a custom `RegistryABC` implementation, loudly, in the two ways
-listed under Migration.
+listed under Migration. One fix is worth reading even if you use none of
+this: **an app that set `concurrency_limit`, `keep_warm`,
+`container_idle_timeout` or `allow_concurrent_inputs` on `FunctionSettings`
+could not deploy at all**, and now can.
 
 **Upgrade the registry to server `0.3.0` and redeploy your Modal apps.**
 Unlike the last two releases, the skew here is not free — an upgraded
 registry paired with apps still running an older SDK costs containers
 until each app is redeployed. See Compatibility.
 
-### What changes
+### Ticks share a container
+
+The deployed `tick` is now an `async def` registered with
+`max_concurrent_inputs=10`, so one container serves up to ten concurrent
+reactive builds instead of one each.
+
+A tick is almost entirely I/O wait — read the frontier, spawn, then poll
+on a sleep until the linger deadline — so the packing is close to free.
+It is also what makes `linger_seconds` cheap: the resident tick driving
+level after level, instead of a cold start per level, was exactly what
+kept a container alive per build. Verified live at five concurrent
+lingering builds, all served by one container, all completed.
+
+**Async here is load-bearing, not stylistic.** Modal serves concurrent
+inputs to a _sync_ function on threads, each running its own
+`asyncio.run` and therefore its own event loop. `APIRegistry` is a
+process-wide singleton whose async client is cached per loop and closed
+and rebuilt when the loop changes — so two threaded ticks would tear down
+each other's in-flight HTTP client. Awaiting the body keeps every tick in
+a container on one loop, and therefore on one client.
+
+**What is not packed**, deliberately: workers, which run your code and may
+be CPU- or GPU-bound; the builder, which runs a whole build; the
+bootstrap, which walks a DAG. Nor `tick_watchdog` — it is its own
+function receiving one input per period, so packing would buy nothing in
+the steady state while quietly opting a `def` into the threading above.
+`never_concurrent=True` refuses that combination at registration rather
+than letting Modal accept it silently.
+
+Two supporting changes, each correct per-tick and wrong per-container: the
+async client's connection pool is now sized for a shared process rather
+than for one caller (ten co-resident ticks would otherwise have divided it
+between them, turning a packing win into a latency regression on wide
+frontiers), and the tick's two remaining blocking calls — the foreign-app
+forward and the successor hand-off's spawn — moved off the event loop.
+
+The task-module import deliberately **stays** on the loop: it imports
+arbitrary user modules, and import-time side effects are routinely
+main-thread-only (`signal.signal` raises outright off it), so moving it
+would trade a once-per-container stall for a class of failure that
+surfaces as an unexplained import error in production.
+
+### `FunctionSettings` speaks Modal's current vocabulary
+
+A bug fix, not a deprecation. Modal renamed three container-scaling
+parameters in Feb 2025 and moved input concurrency into `@modal.concurrent`
+in Apr 2025, and its client **raises** `DeprecationError` on the old
+spellings rather than warning. `FunctionSettings` declared all four and
+passed them straight through, so any app that set one of them failed to
+deploy — no behaviour can have depended on that.
+
+It now accepts `max_containers`, `min_containers`, `buffer_containers`,
+`scaledown_window`, `max_concurrent_inputs` and
+`target_concurrent_inputs`, applies the last two via `@modal.concurrent`
+rather than passing them to `App.function()`, and translates the four
+legacy names — `concurrency_limit`, `keep_warm`, `container_idle_timeout`,
+`allow_concurrent_inputs` — with a warning. Validation happens in
+stardag's own vocabulary too: a `target_concurrent_inputs` with no max, or
+above its own max, is refused in the setting names you wrote, rather than
+failing at registration with a `TypeError` naming a parameter you never
+wrote.
+
+### The scheduler moves onto the build row
 
 Two things the reactive tick used to derive now live on the build row
 itself:
@@ -68,7 +137,8 @@ Both skew directions are correct; one of them is expensive.
   their SDK. The new server does not read the legacy lock an old tick
   takes, so it reports `scheduler_live=False` for every completion and
   every worker spawns a tick that immediately no-ops. Correct, but it
-  costs containers until each app is redeployed. **Redeploy promptly.**
+  costs containers until each app is redeployed. **Redeploy promptly** —
+  that redeploy is also what gets you the tick packing above.
 - **Migration:** two nullable columns on `builds` (`b41c7d9e2f08`). No
   backfill — a lease is transient.
 
@@ -78,8 +148,12 @@ plain `stardag self-host upgrade` both land there.
 ### Migration
 
 Nothing to change for documented usage beyond upgrading the registry and
-redeploying the apps. For a **custom `RegistryABC` implementation**, two
-breaking changes, both loud:
+redeploying the apps. If you set container-scaling parameters on
+`FunctionSettings` under Modal's pre-2025 names, they still work and now
+warn; move to the current names at your convenience.
+
+For a **custom `RegistryABC` implementation**, two breaking changes, both
+loud:
 
 - **`task_start_with_limits_aio` is removed.** `task_start_claim_aio`
   gains `claim: bool = True`, so the two orthogonal flags the registry's
@@ -104,6 +178,10 @@ the frontier; grant), so an existing backend needs no changes and can
 override for the cheap reads. `run_tick_aio` **drops its `lock_manager`
 parameter** — the lease was its only use — which affects only code driving
 a tick by hand.
+
+A custom registry backend used from a packed tick should expect
+**concurrent callers in one process** now, which is the constraint the
+async-client note above describes.
 
 ### Also in this release
 
@@ -130,6 +208,10 @@ a tick by hand.
   methods straight from the event loop. A corrupt or truncated store
   pickle also reads as a miss now, so the tick falls back to registry
   rehydration instead of raising.
+- **The tick's completion log line carries `MODAL_TASK_ID`**, which is what
+  makes "how well are ticks packing?" answerable at all: `modal app logs`
+  has no per-container attribution, and `modal container list` names the
+  app but not the function.
 - **Compatible with modal 1.5.5**, which moved `FileEntryType` to
   `modal.types` and renamed `FunctionInfo` in a patch release. Handled
   with an import fallback, so the declared `modal>=1.0.0` still holds.

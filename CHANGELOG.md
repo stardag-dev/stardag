@@ -26,7 +26,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   changes: the async client's connection pool is sized for a shared process
   rather than for one caller, and the tick's two remaining blocking calls —
   the foreign-app forward and the successor hand-off's spawn — moved off the
-  event loop, where they would have stalled every co-resident tick.
+  event loop, where they would have stalled every co-resident tick. The
+  tick's completion log line now carries `MODAL_TASK_ID`, since packing is
+  otherwise unobservable: `modal app logs` has no per-container attribution
+  and `modal container list` names the app but not the function.
 - **`FunctionSettings` speaks Modal's current vocabulary, and translates the
   old one.** `max_containers`, `min_containers`, `buffer_containers`,
   `scaledown_window`, `max_concurrent_inputs` and `target_concurrent_inputs`
