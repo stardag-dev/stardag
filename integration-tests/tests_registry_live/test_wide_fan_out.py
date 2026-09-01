@@ -62,11 +62,15 @@ WIDTH = 24
 # provoked.
 MAX_SPAWNS_PER_TICK = 8
 
-# One tick should see the whole build through, so that what is under test
-# is a *pass* boundary rather than a container boundary. Without the
-# linger, each truncated pass would end the tick and the next pass would
-# arrive as a wake-up -- which is a different mechanism, tested elsewhere,
-# and would hide whether the pass loop resumes on its own.
+# Long enough that one tick can carry the whole build, so what is under
+# test is a *pass* boundary rather than a container boundary: without it,
+# each truncated pass would end the tick and the next pass would arrive as
+# a wake-up, which is a different mechanism tested elsewhere.
+#
+# Nothing below *asserts* that only one tick ran, and deliberately not --
+# the spawn-count assertion is the real subject and holds however the
+# passes were distributed across containers, so pinning the tick count
+# would only add a way to fail for reasons that are not the point.
 LINGER_SECONDS = 150
 
 # WIDTH leaves plus the single root that joins them.

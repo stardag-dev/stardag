@@ -64,10 +64,12 @@ BUILD_TIMEOUT_SECONDS = 600
 def slot_limit():
     """One slot for the scenario's key, removed again afterwards.
 
-    Torn down because the limit outlives the build that needed it: a stack
-    is meant to be kept and re-run against, and a leftover cap of 1 would
-    silently serialize a later run of this same scenario against the
-    previous one's leftovers.
+    Torn down because a concurrency limit is environment-global and
+    outlives the run that set it. Nothing else opts into this key today, so
+    the leftover would be harmless today -- but it is a piece of registry
+    configuration silently left behind on a stack meant to be kept and
+    re-run against, and the next task to ask for the key would be
+    serialized by a cap nobody set on purpose.
     """
     from stardag.registry import registry_provider
 

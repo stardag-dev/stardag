@@ -54,11 +54,28 @@ image = sd_modal.with_stardag_on_image(
     modal.Image.debian_slim(python_version=python_version)
 ).add_local_python_source("stardag_integration_tests")
 
-# The deployed ``tick`` function's own Modal timeout. Named because a
-# scenario asserts against it: it is what the per-tick spawn cap is derived
-# from, so a fan-out scenario reasoning about the cap has to read the same
-# number the tick reads rather than restating it.
+# The deployed ``tick`` function's own Modal timeout. Named here so a
+# scenario can read it rather than restate it -- see ``MAX_LINGER_SECONDS``.
 TICK_TIMEOUT_SECONDS = 300
+
+# The longest linger a tick can actually honour, and the reason a scenario
+# must not simply ask for the timeout itself.
+#
+# A linger is a deadline the tick body watches; the Modal timeout is a
+# deadline the *container* is killed on, and the container's clock starts
+# first -- before the image loads, before the tick body runs. So the two are
+# not a tie at equal values: Modal always wins. A tick that reaches a linger
+# equal to its timeout is killed rather than exiting through
+# ``lingered_out``, which means it writes no summary and performs no exit
+# hand-off. In this tier that is unrecoverable, because there is no watchdog
+# to spawn a replacement: a build that genuinely stalls hangs to the pytest
+# timeout and reports it as the tick having died mid-report, which points
+# at the wrong thing entirely.
+#
+# The margin is generous because it is covering a container start, and
+# nothing is paid for it: a tick exits as soon as its build goes terminal,
+# so a linger is an upper bound that a passing run never reaches.
+MAX_LINGER_SECONDS = TICK_TIMEOUT_SECONDS - 60
 
 
 def build_scenario_app(app_name: str) -> sd_modal.StardagApp:

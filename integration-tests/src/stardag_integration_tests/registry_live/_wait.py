@@ -263,3 +263,14 @@ def wait_for_task_status(
         poll_interval=poll_interval,
         what=f"task {task_id} to reach {' or '.join(wanted)}",
     )
+
+
+def build_status(build_id: UUID) -> str | None:
+    """One build's current status, as the registry currently reports it.
+
+    ``None`` where the registry has not derived one yet, which a caller
+    comparing against a named status handles for free.
+    """
+    from stardag.registry import registry_provider
+
+    return registry_provider.get().build_get(build_id).status

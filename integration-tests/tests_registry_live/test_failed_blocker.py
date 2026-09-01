@@ -50,6 +50,7 @@ from stardag_integration_tests.registry_live._events import (
     wait_until_registered,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._scenario_app import MAX_LINGER_SECONDS
 from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     assert_trail_complete,
@@ -74,10 +75,12 @@ pytestmark = [
 FAIL_AFTER_SECONDS = 60
 
 # B stays resident across the whole window, so its own polling tick is
-# the one that meets the failure -- see the module docstring. This costs
-# nothing in wall clock: a tick exits as soon as its build goes terminal,
-# so the linger is an upper bound that is never reached.
-LINGER_SECONDS = 300
+# the one that meets the failure -- see the module docstring. Read from the
+# app rather than restated: a linger equal to the tick's own Modal timeout
+# is not a tie, because the container's clock starts first, so such a tick
+# is killed instead of exiting through ``lingered_out`` -- writing no
+# summary and running no exit hand-off. See MAX_LINGER_SECONDS.
+LINGER_SECONDS = MAX_LINGER_SECONDS
 
 STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600

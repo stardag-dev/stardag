@@ -45,21 +45,24 @@ is the watchdog's job, and this tier deliberately runs none.
 
 from __future__ import annotations
 
-import time
 import uuid
+from datetime import datetime
 
 import pytest
 
 from stardag_integration_tests.registry_live._events import (
     describe_events,
+    first_event_at,
     resets_by,
     task_events,
     wait_until_registered,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._scenario_app import MAX_LINGER_SECONDS
 from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     assert_trail_complete,
+    build_status,
     describe,
     task_status,
     tick_summaries,
@@ -100,9 +103,16 @@ PRE_YIELD_SECONDS = 45
 CHILD_SECONDS = 35
 
 # B stays resident across the whole window -- see the module docstring.
-# This costs nothing in wall clock: a tick exits as soon as its build goes
-# terminal, so the linger is an upper bound that is never reached.
-B_LINGER_SECONDS = 300
+# Read from the app rather than restated: a linger equal to the tick's own
+# Modal timeout is not a tie, because the container's clock starts first,
+# so such a tick is killed instead of exiting through ``lingered_out`` --
+# writing no summary and running no exit hand-off. See MAX_LINGER_SECONDS.
+B_LINGER_SECONDS = MAX_LINGER_SECONDS
+
+# How often B's resident tick re-reads the frontier. Named because the
+# closing assertion is stated in terms of it: the suspended window has to
+# be wide enough that a build polling this often cannot have missed it.
+B_POLL_INTERVAL_SECONDS = 3
 
 STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
@@ -143,14 +153,13 @@ def test_a_suspended_blocker_is_waited_on_rather_than_reset(
         build_id=build_a,
         timeout=STATUS_TIMEOUT_SECONDS,
     )
-    running_at = time.monotonic()
 
     build_b = app.build_trigger(
         square(values=shared, offset=5),
         reactive=True,
         tick_kwargs={
             "linger_seconds": B_LINGER_SECONDS,
-            "poll_interval_seconds": 3,
+            "poll_interval_seconds": B_POLL_INTERVAL_SECONDS,
         },
     ).build_id
 
@@ -159,16 +168,7 @@ def test_a_suspended_blocker_is_waited_on_rather_than_reset(
     # rather than assumed, because a miss leaves the rest of the test
     # passing against a different situation.
     wait_until_registered(deployment, task_id=shared.id, build_id=build_b)
-    # Printed on every run, because PRE_YIELD_SECONDS is the one number
-    # here that is a guess about infrastructure rather than about
-    # scheduling, and this is the evidence for whether it is still the
-    # right guess. A margin trending towards zero is the warning that the
-    # assertion below is about to start failing.
-    margin = PRE_YIELD_SECONDS - (time.monotonic() - running_at)
-    print(
-        f"[suspended] build B registered with {margin:.0f}s of the "
-        f"{PRE_YIELD_SECONDS}s pre-yield window to spare"
-    )
+    _report_margin(deployment, shared_id=shared.id, build_id=build_b)
     status_when_registered = task_status(shared.id)
     assert status_when_registered == "running", (
         f"Build B registered against the shared task when it was already "
@@ -187,6 +187,25 @@ def test_a_suspended_blocker_is_waited_on_rather_than_reset(
         expected="suspended",
         build_id=build_a,
         timeout=STATUS_TIMEOUT_SECONDS,
+    )
+
+    # Half of the scenario's defining precondition: B is alive at the
+    # moment the task suspends. The other half -- that the suspended window
+    # was wide enough for B's poll to land inside it -- is checked after
+    # the run, from the event log's own clock. Together they are what makes
+    # this the SUSPENDED case rather than a second copy of the RUNNING one.
+    #
+    # It needs saying because the tick counters cannot do this job. B's
+    # bootstrap tick already meets the task RUNNING and waits, so
+    # `external_blockers_waited >= 1` is satisfied before the yield ever
+    # happens; on its own it would let this scenario decay into what
+    # `test_cross_build_wake` already covers, and still pass.
+    status_b_now = build_status(build_b)
+    assert status_b_now == "running", (
+        f"Build B was already {status_b_now!r} by the time the shared task "
+        "suspended, so it never met the blocker in the state this scenario "
+        "exists to test -- everything below would be about the RUNNING "
+        "case, which is covered elsewhere.\n" + describe(build_b)
     )
 
     # Both builds run to completion. B's is the one in question -- it can
@@ -237,6 +256,28 @@ def test_a_suspended_blocker_is_waited_on_rather_than_reset(
         "the window and scheduled work of its own instead. Nothing above "
         "this line is meaningful in that case.\n" + describe(build_b)
     )
+    # The other half of the precondition, from the registry's clock: the
+    # task really did sit suspended for long enough that a build polling
+    # every B_POLL_INTERVAL_SECONDS, and shown above to be alive when it
+    # suspended, must have evaluated it in that state.
+    suspended_for = _suspended_window_seconds(events)
+    assert suspended_for is not None, (
+        "The shared task's event log records no suspension at all, so the "
+        "state this scenario is named for never existed.\n"
+        f"--- events on the shared task ---\n"
+        f"{describe_events(events, A=build_a, B=build_b)}"
+    )
+    assert suspended_for >= 4 * B_POLL_INTERVAL_SECONDS, (
+        f"The shared task was suspended for only {suspended_for:.0f}s, "
+        f"which is too close to B's {B_POLL_INTERVAL_SECONDS}s poll "
+        "interval to conclude B ever saw it in that state -- so the "
+        "assertions above may all be about the RUNNING case, which is "
+        f"covered elsewhere. Raise CHILD_SECONDS (currently "
+        f"{CHILD_SECONDS}s).\n"
+        f"--- events on the shared task ---\n"
+        f"{describe_events(events, A=build_a, B=build_b)}"
+    )
+
     fatal = sum(s.get("external_blockers_fatal", 0) for s in summaries_b)
     assert fatal == 0, (
         "Build B treated the suspended task as a fatal blocker. A task "
@@ -251,3 +292,53 @@ def test_a_suspended_blocker_is_waited_on_rather_than_reset(
         "its own root, having waited for the suspended task rather than "
         "starting a second copy of it.\n" + describe(build_b)
     )
+
+
+def _report_margin(deployment: Deployment, *, shared_id, build_id) -> None:
+    """Print how much of the pre-yield window B had left when it registered.
+
+    Printed on every run because ``PRE_YIELD_SECONDS`` is the one number in
+    this file that is a guess about infrastructure rather than about
+    scheduling, and this is the evidence for whether it is still the right
+    guess. A margin trending towards zero is the warning that the assertion
+    below it is about to start failing.
+
+    Both timestamps come from the **registry's** clock -- when the task
+    started, and when this build first recorded an event against it.
+    Measuring from when a client poll happened to notice the transition
+    instead would overstate the remaining window by up to a poll interval
+    plus a round trip, which is exactly the direction that makes an early
+    warning useless.
+    """
+    from stardag.registry import registry_provider
+
+    started_at = registry_provider.get().task_get_metadata(shared_id).started_at
+    registered_at = first_event_at(task_events(deployment, shared_id), build_id)
+    if started_at is None or registered_at is None:
+        print("[suspended] margin unavailable (missing registry timestamps)")
+        return
+    elapsed = (datetime.fromisoformat(registered_at) - started_at).total_seconds()
+    print(
+        f"[suspended] build B registered {elapsed:.0f}s after the task "
+        f"started, leaving {PRE_YIELD_SECONDS - elapsed:.0f}s of the "
+        f"{PRE_YIELD_SECONDS}s pre-yield window"
+    )
+
+
+def _suspended_window_seconds(events) -> float | None:
+    """How long the task sat SUSPENDED, by the registry's clock.
+
+    From ``task_suspended`` to whatever ended it. ``None`` when no
+    suspension was recorded at all, which is a different failure and is
+    reported as one.
+    """
+    for position, event in enumerate(events):
+        if event.get("event_type") != "task_suspended":
+            continue
+        suspended_at = datetime.fromisoformat(str(event["created_at"]))
+        for later in events[position + 1 :]:
+            if later.get("event_type") != "task_suspended":
+                ended_at = datetime.fromisoformat(str(later["created_at"]))
+                return (ended_at - suspended_at).total_seconds()
+        return None
+    return None

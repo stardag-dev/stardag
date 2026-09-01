@@ -135,21 +135,41 @@ def test_many_dormant_builds_are_each_woken_once() -> None:
             f"({NEIGHBOUR_LINGER_SECONDS}s).\n" + describe(build_id)
         )
 
-        # The property this scenario exists for. One tick after the
-        # bootstrap is the woken one; a second is tolerated because the
-        # owning tick's exit hand-off can genuinely race a drain, and it
-        # costs one container that finds the lease held and leaves. Three
-        # or more is the storm: several notifiers each spawning for the
-        # same build, which is what the hand-out stamp prevents.
-        woken = len(summaries) - 1
-        assert 1 <= woken <= 2, (
-            f"Neighbour {index} ran {woken} tick(s) after its bootstrap; "
-            "expected 1 (the wake-up), or 2 if the exit hand-off raced a "
-            "drain. More than that means several notifiers each spawned a "
-            "tick for the same build, so the wake-candidate hand-out is "
-            "not stamping builds as it hands them out -- within one "
-            f"{WAKE_HANDOUT_WINDOW_SECONDS}s window a build must be handed "
-            "to exactly one caller.\n" + describe(build_id)
+        # It was woken at all.
+        assert len(summaries) > 1, (
+            f"Neighbour {index} ran exactly one tick, so it was never "
+            "woken.\n" + describe(build_id)
+        )
+
+        # The property this scenario exists for, measured by the outcome
+        # that means "a container started for a build somebody else was
+        # already driving". That is what a redundant spawn *is*, and
+        # counting those is not the same as counting ticks.
+        #
+        # An earlier version bounded the total tick count instead, and it
+        # conflated two unrelated things. A neighbour's woken tick spawns
+        # its own root and then re-arms only the linger it was triggered
+        # with; the deadline resets on an action, so a root whose container
+        # start plus run outlasts that linger costs a further tick --
+        # legitimately, spawned by its own worker. The count would then
+        # trip and the message would blame the hand-out stamp for
+        # something that is just a cold container.
+        #
+        # ``lease_held`` cannot be reached that way: it means a tick
+        # arrived while another held the lease for the same build. One is
+        # allowed, because the owning tick's exit hand-off can genuinely
+        # race a drain. Several is the storm the hand-out stamp exists to
+        # prevent -- every notifier spawning for every flagged build.
+        contended = sum(1 for s in summaries if s.get("outcome") == "lease_held")
+        assert contended <= 1, (
+            f"Neighbour {index} had {contended} tick(s) find the scheduler "
+            "lease already held, so that many redundant containers were "
+            "started for one build. At most one is expected (the exit "
+            "hand-off racing a drain); more means several notifiers each "
+            "spawned a tick for the same build, so the wake-candidate "
+            "hand-out is not stamping builds as it hands them out -- "
+            f"within one {WAKE_HANDOUT_WINDOW_SECONDS}s window a build "
+            "must be handed to exactly one caller.\n" + describe(build_id)
         )
 
         # It waited for the owner's copy rather than running a second one:

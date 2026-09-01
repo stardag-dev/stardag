@@ -28,20 +28,30 @@ from ._harness import Deployment
 RESET_EVENT = "task_retried"
 
 
-def task_events(deployment: Deployment, task_id: Any) -> list[dict[str, Any]]:
+def task_events(
+    deployment: Deployment, task_id: Any, *, missing_ok: bool = False
+) -> list[dict[str, Any]]:
     """Every event recorded against one task, across all builds, oldest first.
-
-    ``task_id`` is the stardag task id (the parameter hash), not the
-    registry's row UUID -- the same string ``task.id`` gives.
 
     The API answers newest first; reversed here because these read as a
     story and a story runs forwards.
+
+    ``missing_ok`` decides what an unregistered task means, and the default
+    is the strict reading on purpose. At assertion time a task the registry
+    has never heard of is a real failure and must not read as "no resets
+    happened" -- an empty list is the answer this function's callers treat
+    as *proof of correct behaviour*. Only a caller that is polling *for*
+    the registration should pass True, where 404 is the expected first
+    answer rather than a problem; that mirrors the None-for-missing
+    contract ``_wait.task_status`` documents for the same situation.
     """
     with httpx.Client(timeout=60.0) as client:
         response = client.get(
             f"{deployment.api_url.rstrip('/')}/api/v1/tasks/{task_id}/events",
             headers={"X-API-Key": deployment.api_key},
         )
+        if missing_ok and response.status_code == 404:
+            return []
         response.raise_for_status()
         return list(reversed(response.json()))
 
@@ -107,9 +117,25 @@ def wait_until_registered(
     from ._wait import wait_until
 
     wait_until(
-        lambda: bool(events_by(task_events(deployment, task_id), build_id)),
+        lambda: bool(
+            events_by(task_events(deployment, task_id, missing_ok=True), build_id)
+        ),
         build_id=build_id,
         timeout=timeout,
         poll_interval=3.0,
         what=f"build {build_id} to register against task {task_id}",
     )
+
+
+def first_event_at(events: Iterable[dict[str, Any]], build_id: Any) -> str | None:
+    """When this build first touched the task, by the registry's clock.
+
+    Server-side timestamps on both ends is the point: a margin computed
+    from when a *client poll happened to notice* a transition is
+    systematically optimistic by up to one poll interval plus a round trip,
+    and a diagnostic that flatters itself is worse than none -- it reads
+    healthy right up to the moment the thing it is warning about starts
+    failing.
+    """
+    mine = events_by(events, build_id)
+    return str(mine[0]["created_at"]) if mine else None
