@@ -10,7 +10,7 @@ regressed" and "the Modal worker never started".
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 from uuid import UUID
 
 TERMINAL = ("completed", "failed", "cancelled")
@@ -203,3 +203,74 @@ def _terminal_status(build_id: UUID) -> str | None:
 
     status = registry_provider.get().build_get(build_id).status
     return status if status in TERMINAL else None
+
+
+def task_status(task_id: UUID) -> str | None:
+    """One task's current status, or None if the registry has no row yet.
+
+    A single request against the task's own row, which is what makes it
+    cheap enough to poll. ``find_task`` answers a richer question and pages
+    through every task of a name to do it -- far too expensive to sit in a
+    loop.
+
+    None rather than an exception for the unregistered case, because it is
+    the *normal* first answer: a scenario starts polling as soon as it has
+    triggered a build, and the plan reaches the registry a moment later.
+    """
+    from stardag.registry import registry_provider
+    from stardag.exceptions import NotFoundError
+
+    try:
+        return registry_provider.get().task_get_metadata(task_id).status
+    except NotFoundError:
+        return None
+
+
+def wait_for_task_status(
+    task_id: UUID,
+    *,
+    expected: str | Sequence[str],
+    build_id: UUID,
+    timeout: float,
+    poll_interval: float = 3.0,
+) -> str:
+    """Block until ``task_id`` reaches one of ``expected``. Returns which.
+
+    **This is what a scenario should wait on, rather than sleeping.** Every
+    cross-build scenario here is built on an ordering -- a second build has
+    to register while a shared task is still RUNNING, a tick has to be
+    driven once a task is SUSPENDED -- and the ordering is the scenario. A
+    fixed sleep sized for that window is wrong in both directions: it is
+    longer than needed on a warm run, which is pure wall clock across a
+    tier of these, and too short whenever Modal takes an unusual time to
+    start a container, which silently converts the scenario into a
+    different and much weaker one that still passes.
+
+    Waiting for the state itself removes both. The timeout is then a real
+    timeout -- "this never happened" -- rather than a guess at how long it
+    ought to take.
+    """
+    wanted = (expected,) if isinstance(expected, str) else tuple(expected)
+
+    def reached() -> str | None:
+        status = task_status(task_id)
+        return status if status in wanted else None
+
+    return wait_until(
+        reached,
+        build_id=build_id,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        what=f"task {task_id} to reach {' or '.join(wanted)}",
+    )
+
+
+def build_status(build_id: UUID) -> str | None:
+    """One build's current status, as the registry currently reports it.
+
+    ``None`` where the registry has not derived one yet, which a caller
+    comparing against a named status handles for free.
+    """
+    from stardag.registry import registry_provider
+
+    return registry_provider.get().build_get(build_id).status
