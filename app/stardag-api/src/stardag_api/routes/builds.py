@@ -539,6 +539,40 @@ async def _replace_limit_keys(
     await db.execute(insert_stmt.values(rows).on_conflict_do_nothing())
 
 
+async def _latest_started_execution(
+    db: AsyncSession, build_id: UUID, task_pk: UUID
+) -> tuple[str | None, str] | None:
+    """The last execution ``build_id`` recorded a start for on this task.
+
+    ``(executor, executor_ref)``, or None if this build never recorded one
+    carrying a ref. The same question ``GET /builds/{id}/executions`` asks
+    of every task at once, asked here for one — and asked of the event log
+    for the same reason: the task row's executor columns describe whoever
+    holds the task now, and are set *or cleared* by every start, so a worker
+    self-reporting without executor fields wipes the ref of the very
+    execution it is reporting.
+    """
+    ref_column = Event.event_metadata["executor_ref"].as_string()
+    executor_column = Event.event_metadata["executor"].as_string()
+    row = (
+        await db.execute(
+            select(executor_column, ref_column)
+            .where(
+                Event.build_id == build_id,
+                Event.task_id == task_pk,
+                Event.event_type == EventType.TASK_STARTED,
+                ref_column.is_not(None),
+            )
+            # id (UUID7) breaks created_at ties, as everywhere else here.
+            .order_by(Event.created_at.desc(), Event.id.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        return None
+    return row[0], cast(str, row[1])
+
+
 async def _create_task_event(
     build_id: UUID,
     task_id: str,
@@ -648,16 +682,27 @@ async def _create_task_event(
         # A no-op rather than a 409: the caller is doing best-effort
         # cleanup over a list, and "it moved on" is a normal outcome, not an
         # error to log per task.
-        # The pair, not the ref alone: a ref is backend-specific by
-        # contract — ``cancel_detached`` takes ``(executor, ref)`` — so two
-        # backends can mint the same string, and comparing half the identity
-        # would let a cancel through for an execution the caller never
-        # stopped.
+        # Compared against the **event log**, not against the task row's
+        # executor columns, and that is not a stylistic choice — the row is
+        # the wrong source for the same reason this whole cleanup path reads
+        # the log. Every TASK_STARTED sets *or clears* those columns from
+        # its own metadata, so a worker self-reporting its start with no
+        # executor fields nulls the ref of the execution it is reporting.
+        # Comparing there rejected the cancel for every Modal task whose
+        # worker had checked in, left the task RUNNING under a build that is
+        # gone, and was caught by a live scenario rather than by any of
+        # this file's tests.
+        #
+        # The pair, not the ref alone: a ref is backend-specific by contract
+        # — ``cancel_detached`` takes ``(executor, ref)`` — so two backends
+        # can mint the same string, and half an identity is not one.
+        started = await _latest_started_execution(db, build_id, db_task.id)
         held = (
             db_task.latest_status in (TaskStatus.RUNNING, TaskStatus.INTERRUPTED)
             and db_task.latest_status_build_id == build_id
-            and db_task.latest_executor_ref == if_executor_ref
-            and (if_executor is None or db_task.latest_executor == if_executor)
+            and started is not None
+            and started[1] == if_executor_ref
+            and (if_executor is None or started[0] == if_executor)
         )
         if not held:
             status, _, _, _, attempt_count = await get_task_status_in_build(
