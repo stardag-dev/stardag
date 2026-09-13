@@ -165,12 +165,18 @@ def _reports_on_the_current_execution(task: Task, event: Event) -> bool:
       is about (``executor_ref``), and it is honoured only while the task
       still holds that one.
 
-    The ref is optional, and absent it the first two tests stand alone:
-    an SDK that predates this sends no ref, and refusing its reports would
-    turn a version skew into silent stalls. Note also that a backend which
-    restarts an input *under the same ref* — Modal's preemption — is by
-    construction still the same execution, so the ref rightly does not
-    separate the report from the restart.
+    The ref is optional, and **only a report that names none** falls back to
+    the first two tests: an SDK that predates this sends no ref, and
+    refusing its reports would turn a version skew into silent stalls. A
+    report that *does* name one requires a current ref equal to it —
+    treating a missing current ref as a wildcard would reopen the hole,
+    because a replacement's claiming start clears the ref before its spawn
+    records the new one, so the whole acquire→spawn gap would accept the
+    dead execution's report.
+
+    Note what the ref rightly does not separate: a backend that restarts an
+    input *under the same ref* — Modal's preemption — is by construction
+    still the same execution.
     """
     if (
         task.latest_status != TaskStatus.RUNNING
@@ -178,9 +184,32 @@ def _reports_on_the_current_execution(task: Task, event: Event) -> bool:
     ):
         return False
     reported_ref = (event.event_metadata or {}).get("executor_ref")
-    if reported_ref is None or task.latest_executor_ref is None:
+    if reported_ref is None:
         return True
     return str(reported_ref) == str(task.latest_executor_ref)
+
+
+def _replay_report_applies(
+    status: TaskStatus, event: Event, current_ref: str | None
+) -> bool:
+    """The replay's twin of :func:`_reports_on_the_current_execution`.
+
+    Same rule, from what a replay can see. Build ownership is implicit —
+    each replay walks one build's events — so what is left is "still
+    running" and "still the same execution", with ``current_ref`` tracked
+    off the starts as the walk goes.
+
+    It has to be the same rule. The replays answer the per-build view that
+    the UI and the frontier read, and the row answers the environment-global
+    one; a report the row refuses but a replay applies shows the same task
+    as INTERRUPTED in one place and RUNNING in the other.
+    """
+    if status != TaskStatus.RUNNING:
+        return False
+    reported_ref = (event.event_metadata or {}).get("executor_ref")
+    if reported_ref is None:
+        return True
+    return str(reported_ref) == str(current_ref)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -853,6 +882,12 @@ async def get_task_status_in_build(
     error_message: str | None = None
     attempt_count = 0
     prev_ordering_type: str | None = None
+    # The ref of the most recent start, tracked so an end-of-execution
+    # report can be matched against the execution it names — see
+    # _replay_report_applies. Set *and cleared* on every start, exactly as
+    # the task row does it: a claiming start carries no ref, and treating
+    # its absence as "matches anything" is the hole this closes.
+    current_ref: str | None = None
 
     # Process events from oldest to newest to build final state
     for event in reversed(events):
@@ -874,6 +909,7 @@ async def get_task_status_in_build(
         elif event.event_type == EventType.TASK_STARTED:
             status = TaskStatus.RUNNING
             started_at = event.created_at
+            current_ref = (event.event_metadata or {}).get("executor_ref")
         elif event.event_type == EventType.TASK_SUSPENDED:
             status = TaskStatus.SUSPENDED
         elif event.event_type == EventType.TASK_RESUMED:
@@ -910,7 +946,7 @@ async def get_task_status_in_build(
             # mirrors _apply_event_to_task, including the unconditional
             # error_message write (a stale one would explain this
             # interruption with an earlier failure's text).
-            if status == TaskStatus.RUNNING:
+            if _replay_report_applies(status, event, current_ref):
                 status = TaskStatus.INTERRUPTED
                 error_message = event.error_message
         elif event.event_type == EventType.TASK_PREEMPTED:
@@ -949,6 +985,9 @@ async def get_all_task_statuses_in_build(
     statuses: dict[
         UUID, tuple[TaskStatus, datetime | None, datetime | None, str | None]
     ] = {}
+    # Per task, the ref of its most recent start — see the twin in
+    # get_task_status_in_build.
+    current_refs: dict[UUID, str | None] = {}
 
     for event in events:
         if event.task_id is None:
@@ -966,6 +1005,7 @@ async def get_all_task_statuses_in_build(
         elif event.event_type == EventType.TASK_STARTED:
             status = TaskStatus.RUNNING
             started_at = event.created_at
+            current_refs[task_id] = (event.event_metadata or {}).get("executor_ref")
         elif event.event_type == EventType.TASK_SUSPENDED:
             status = TaskStatus.SUSPENDED
         elif event.event_type == EventType.TASK_RESUMED:
@@ -991,14 +1031,15 @@ async def get_all_task_statuses_in_build(
             completed_at = event.created_at
             error_message = event.error_message
         elif event.event_type == EventType.TASK_INTERRUPTED:
-            # Only while this build's own view has the task running — see
-            # get_task_status_in_build, whose rule this mirrors.
+            # Only while this build's own view has the task running on the
+            # execution being reported on — see get_task_status_in_build,
+            # whose rule this mirrors.
             #
             # Not an ending, so completed_at is deliberately untouched —
             # mirrors _apply_event_to_task, including the unconditional
             # error_message write (a stale one would explain this
             # interruption with an earlier failure's text).
-            if status == TaskStatus.RUNNING:
+            if _replay_report_applies(status, event, current_refs.get(task_id)):
                 status = TaskStatus.INTERRUPTED
                 error_message = event.error_message
         elif event.event_type == EventType.TASK_PREEMPTED:

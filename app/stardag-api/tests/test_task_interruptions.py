@@ -569,6 +569,59 @@ async def test_a_report_does_not_apply_to_a_replacement_execution(
 
 
 @pytest.mark.asyncio
+async def test_a_missing_current_ref_is_not_a_wildcard(client: AsyncClient):
+    """The replacement's *claiming* start carries no ref — the spawn has not
+    happened yet — and clears the one the dead execution left. If a missing
+    current ref matched anything, the whole acquire→spawn gap would accept
+    the dead execution's report, which is precisely the window a
+    replacement is most likely to be in."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-old"},
+    )
+    # The claim lapsed; the replacement has acquired but not yet spawned.
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start")
+
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
+        params={"executor_ref": "fc-old"},
+    )
+
+    assert (await _task(client, "t-1"))["latest_status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_the_replay_agrees_with_the_row_about_a_stale_report(
+    client: AsyncClient,
+):
+    """The two derivations answer the same question for different readers —
+    the per-build view the UI and the frontier read, and the
+    environment-global row. A report the row refuses but a replay applies
+    would show one task as INTERRUPTED in one place and RUNNING in the
+    other."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-old"},
+    )
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"executor": "modal", "executor_ref": "fc-new"},
+    )
+
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
+        params={"executor_ref": "fc-old"},
+    )
+
+    assert (await _task(client, "t-1"))["latest_status"] == "running"
+    assert (await _replayed(client, build_id, "t-1"))["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_a_report_naming_the_current_execution_still_applies(
     client: AsyncClient,
 ):
