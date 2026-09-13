@@ -475,6 +475,13 @@ class TaskSummary(StardagBaseModel):
     latest_status: str | None = None
     latest_status_at: datetime | None = None
     latest_status_build_id: UUID | None = None
+    # ...and "until when", plus why it may be sooner than the executor's
+    # timeout would imply. A preemption brings the expiry forward to a
+    # restart-sized grace, so the pair reads as "a restart is due by then";
+    # ``latest_preempted_at > latest_status_at`` is the test for one still
+    # outstanding. Both None on servers predating the fields.
+    latest_status_expires_at: datetime | None = None
+    latest_preempted_at: datetime | None = None
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict[str, Any] | None = None
@@ -1158,7 +1165,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
         pass
 
     def task_interrupt(
-        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        reason: str | None = None,
+        executor_ref: str | None = None,
     ) -> None:
         """Record that a task's execution was interrupted by the platform.
 
@@ -1173,11 +1184,19 @@ class RegistryABC(metaclass=abc.ABCMeta):
             build_id: The build UUID returned by build_start.
             task: The task whose execution was interrupted.
             reason: Optional description of what interrupted it.
+            executor_ref: Optional name of the execution being reported
+                on. The registry honours the report only while the task
+                still holds this ref, which is what stops a slow report
+                from applying to a replacement execution.
         """
         pass
 
     def task_preempt(
-        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        reason: str | None = None,
+        executor_ref: str | None = None,
     ) -> None:
         """Record that the platform is restarting this execution itself.
 
@@ -1198,6 +1217,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
             build_id: The build UUID returned by build_start.
             task: The task whose execution was preempted.
             reason: Optional description of what preempted it.
+            executor_ref: As for :meth:`task_interrupt`.
         """
         pass
 
@@ -1481,16 +1501,24 @@ class RegistryABC(metaclass=abc.ABCMeta):
         self.task_fail(build_id, task, error_message)
 
     async def task_interrupt_aio(
-        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        reason: str | None = None,
+        executor_ref: str | None = None,
     ) -> None:
         """Async version of task_interrupt."""
-        self.task_interrupt(build_id, task, reason)
+        self.task_interrupt(build_id, task, reason, executor_ref)
 
     async def task_preempt_aio(
-        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        reason: str | None = None,
+        executor_ref: str | None = None,
     ) -> None:
         """Async version of task_preempt."""
-        self.task_preempt(build_id, task, reason)
+        self.task_preempt(build_id, task, reason, executor_ref)
 
     async def task_suspend_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_suspend."""

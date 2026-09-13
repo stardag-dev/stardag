@@ -146,10 +146,14 @@ class RecordingRegistry(NoOpRegistry):
         await super().task_skip_aio(build_id, task)
 
     async def task_interrupt_aio(
-        self, build_id: UUID, task: BaseTask, reason: str | None = None
+        self,
+        build_id: UUID,
+        task: BaseTask,
+        reason: str | None = None,
+        executor_ref: str | None = None,
     ) -> None:
         self._record("task_interrupt_aio", task.id, reason=reason)
-        await super().task_interrupt_aio(build_id, task, reason)
+        await super().task_interrupt_aio(build_id, task, reason, executor_ref)
 
     async def task_suspend_aio(self, build_id: UUID, task: BaseTask) -> None:
         self._record("task_suspend_aio", task.id)

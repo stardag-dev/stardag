@@ -150,6 +150,11 @@ _INTERRUPT_REPORT_TIMEOUT_SECONDS = 10.0
 # discovers the dead execution.
 _TIMEOUT_DETECTION_SLACK_SECONDS = 5.0
 
+# How many links of an exception chain ``_platform_signal`` will visit.
+# A chain is normally one link; this bounds the pathological cases (a
+# cycle, a deeply nested re-raise) inside a container that is being killed.
+_CHAIN_WALK_LIMIT = 20
+
 # What a caught BaseException meant, and therefore what the worker does.
 _PREEMPTION = "preemption"
 _TIMEOUT = "timeout"
@@ -196,23 +201,38 @@ def _platform_signal(exception: BaseException) -> BaseException | None:
     ``ResumableInterruption`` on its own initiative rather than in response
     to a signal (a self-imposed time budget, a spot-price check) — a
     legitimate thing to do, and why the elapsed-time fallback still exists.
+
+    **Both links are followed, not one.** ``__cause__`` and ``__context__``
+    are not two names for the same chain: an exception can carry both at
+    once, with an explicit cause of its own while the platform signal is
+    reachable only through the implicit context. ``raise ... from error``
+    inside an ``except MODAL_INTERRUPTIONS`` block produces exactly that,
+    and following only ``__cause__`` would walk away from the answer.
     """
     signals: tuple[type[BaseException], ...] = (KeyboardInterrupt, SystemExit)
     if _InputCancellation is not None:
         signals = signals + (_InputCancellation,)
 
     seen: set[int] = set()
-    current: BaseException | None = exception
-    # Bounded rather than a while loop: a chain is normally one link, and
-    # anything pathological — a cycle, a deeply nested re-raise — must not
+    # Breadth-first, so the *nearest* signal wins when a chain forks —
+    # and bounded rather than exhaustive: a chain is normally one link, and
+    # anything pathological (a cycle, a deeply nested re-raise) must not
     # spin inside a container that is already being killed.
-    for _ in range(10):
-        if current is None or id(current) in seen:
+    queue: list[BaseException] = [exception]
+    for _ in range(_CHAIN_WALK_LIMIT):
+        if not queue:
             return None
+        current = queue.pop(0)
+        if id(current) in seen:
+            continue
         seen.add(id(current))
         if current is not exception and isinstance(current, signals):
             return current
-        current = current.__cause__ or current.__context__
+        queue.extend(
+            link
+            for link in (current.__cause__, current.__context__)
+            if link is not None
+        )
     return None
 
 
@@ -428,18 +448,29 @@ class _WorkerLifecycleReporter:
             )
             return None
 
+    def _executor_ref(self) -> str | None:
+        """This container's call id — the name of the execution it is in.
+
+        Recorded on the start, and repeated on an end-of-execution report so
+        the registry can honour the report only while the task still holds
+        that ref. That is what stops a report which took longer to land than
+        its execution took to be replaced from applying to the replacement.
+
+        Best-effort: outside a Modal container there is no call id, and the
+        server falls back to the build-ownership test alone.
+        """
+        try:
+            return modal.current_function_call_id()
+        except Exception:
+            return None
+
     def started(self) -> None:
         def _do() -> None:
-            ref: str | None = None
-            try:
-                ref = modal.current_function_call_id()
-            except Exception:
-                pass
             self.registry.task_start(
                 self.build_id,
                 self.task,
                 executor=MODAL_EXECUTOR_NAME,
-                executor_ref=ref,
+                executor_ref=self._executor_ref(),
                 executor_metadata=self.executor_metadata,
                 claim_ttl_seconds=self.claim_ttl_seconds,
             )
@@ -494,7 +525,10 @@ class _WorkerLifecycleReporter:
         """
         self._report_in_grace_window(
             lambda: self.registry.task_interrupt(
-                self.build_id, self.task, reason=reason
+                self.build_id,
+                self.task,
+                reason=reason,
+                executor_ref=self._executor_ref(),
             ),
             label="interrupt",
             what="interruption",
@@ -516,7 +550,12 @@ class _WorkerLifecycleReporter:
         rather than being indistinguishable from a task running happily.
         """
         self._report_in_grace_window(
-            lambda: self.registry.task_preempt(self.build_id, self.task, reason=reason),
+            lambda: self.registry.task_preempt(
+                self.build_id,
+                self.task,
+                reason=reason,
+                executor_ref=self._executor_ref(),
+            ),
             label="preempt",
             what="preemption",
             consequence=(

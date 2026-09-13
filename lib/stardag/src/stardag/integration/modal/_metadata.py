@@ -68,31 +68,32 @@ claim, which absorbed however long the call sat queued.
 STARDAG_MODAL_FUNCTION_TIMEOUT_ENV = "STARDAG_MODAL_FUNCTION_TIMEOUT"
 """Env var carrying the worker function's declared ``timeout``, in seconds.
 
-The one fact a worker needs to tell a **timeout** apart from a
-**cancellation**, and it cannot get it any other way.
+Read only by ``_runner._classify_interruption``'s **fallback**, and it is
+worth knowing why that is all it is now.
 
-Both arrive identically: Modal signals SIGUSR1 and the container sees
-``modal.exception.InputCancellation("Input was cancelled by user")`` —
-same type, same message, whether the function ran out of time or somebody
-called ``FunctionCall.cancel()``. Verified live (modal 1.5.0). The two want
-opposite handling: a timeout is an interruption the scheduler should act
-on, while a cancellation is one *stardag itself* usually issued (FAIL_FAST,
-or the UI's cancel), and reporting an interruption there would resurrect a
-task the build just cancelled.
+It was forwarded to tell a **timeout** apart from a **cancellation**, which
+arrive identically: Modal signals SIGUSR1 and the container sees
+``modal.exception.InputCancellation("Input was cancelled by user")`` — same
+type, same message, whether the function ran out of time or somebody called
+``FunctionCall.cancel()``. Verified live (modal 1.5.0). The separator was
+*when* the signal lands, Modal delivering the timeout one at the declared
+timeout to the millisecond (20.000s / 20.001s / 19.997s across five probes
+of a 20s function).
 
-What separates them is *when* the signal lands. Modal delivers the timeout
-one at the declared timeout to the millisecond (20.000s / 20.001s /
-19.997s, measured across five probes of a 20s function), so comparing
-elapsed execution time against this value decides it — see
-``_runner._classify_interruption``.
+**That distinction turned out not to be the one the worker needs.** What it
+needs is whether the backend will restart the input — only a *preemption*
+does, and a preemption is a ``KeyboardInterrupt``, so the exception type
+answers it exactly. A timeout and a cancel both mean "nothing is coming",
+both are reported, and whether a report *applies* is decided by the
+registry, which issued any cancel. Elapsed time is consulted only when the
+raised exception has no platform signal on its chain at all — a task that
+raised ``ResumableInterruption`` on its own initiative.
 
 Absent — an older orchestrator, or a worker function that declares no
-``timeout`` of its own — the two cases split. An ``InputCancellation``
-nobody asked to be resumed from still reads as a cancellation and is not
-reported. But a task that DID ask (``ResumableInterruption``) is reported
-anyway, because the backend applies its own default timeout regardless:
-"unknown" does not mean "no timeout fired", and guessing wrong in that
-direction strands the task. See ``_runner._classify_interruption``.
+``timeout`` of its own — that fallback still errs towards reporting, because
+the backend applies its own default timeout regardless: "unknown" does not
+mean "no timeout fired", and guessing wrong in that direction strands the
+task. See ``_runner._classify_interruption``.
 """
 
 STARDAG_MODAL_WORKSPACE_ENV = "STARDAG_MODAL_WORKSPACE"

@@ -888,13 +888,15 @@ Three things carry it:
   task gets resumed.
 - **Raise it from inside the `except` block.** Stardag reads the
   interruption you caught off the exception you raise, to tell a
-  preemption (Modal restarts the same container, in seconds) from a
-  timeout or a cancel (nothing restarts it, so the scheduler has to). Both
-  `raise ... from None` and a plain `raise` keep that link —
-  `from None` hides the "During handling…" preamble, it does not discard
-  the original exception. Saving the exception and raising after the
-  block has exited loses it, and stardag falls back to comparing elapsed
-  time against your worker's `timeout`, which is a guess.
+  preemption (Modal restarts the _input_ on the same call id, in seconds —
+  in a fresh container, so nothing in memory survives) from a timeout or a
+  cancel (nothing restarts it, so the scheduler has to). Both
+  `raise ... from None` and a plain `raise` keep that link — `from None`
+  hides the "During handling…" preamble, it does not discard the original
+  exception. What loses it is raising somewhere the interruption is no
+  longer reachable: outside the `except` block, with no explicit
+  `from err`. Then stardag falls back to comparing elapsed time against
+  your worker's `timeout`, which is a guess.
 - **The checkpoint lives inside the task's own directory target**, and
   `mark_done()` is what makes the task complete. Writing a checkpoint does
   not — `DirectoryTarget.exists()` is backed by a `._DONE` flag file — so

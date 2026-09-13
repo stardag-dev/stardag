@@ -52,11 +52,22 @@ class ResumableInterruption(StardagError):
     would be one more thing slipping past your control flow.
 
     What the Modal runner does with it depends on whether a restart is
-    still possible. Raised before the function timeout, it re-raises an
-    interrupt in its place so the backend sees a crashed container and
-    restarts the input. Raised at or after the timeout — when no restart is
-    coming — it records the interruption for a scheduler to act on and lets
-    your exception propagate unchanged.
+    still possible, which it reads off **the interruption you caught** —
+    still reachable from the exception you raise, and ``raise ... from
+    None`` keeps it there (that form hides the "During handling…" preamble;
+    it does not discard the original).
+
+    Caught a *preemption*, the runner re-raises an interrupt in its place so
+    the backend sees a crashed container and restarts the input on the same
+    call id, and records the preemption so a restart that never arrives is
+    visible. Caught a *function timeout* or a *cancel* — when no restart is
+    coming — it records an interruption for a scheduler to act on instead,
+    and lets your exception propagate unchanged.
+
+    So raise this from inside the ``except`` block. Raised where the
+    original interruption cannot be reached from, the runner falls back to
+    comparing elapsed time against the worker's declared ``timeout``, which
+    is a guess on a clock that starts after the container does.
     """
 
 

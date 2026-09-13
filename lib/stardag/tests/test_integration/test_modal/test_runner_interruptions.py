@@ -83,11 +83,15 @@ class RecordingRegistry(NoOpRegistry):
     def task_fail(self, build_id, task, error_message=None) -> None:
         self.calls.append(("task_fail", {"error_message": error_message}))
 
-    def task_interrupt(self, build_id, task, reason=None) -> None:
-        self.calls.append(("task_interrupt", {"reason": reason}))
+    def task_interrupt(self, build_id, task, reason=None, executor_ref=None) -> None:
+        self.calls.append(
+            ("task_interrupt", {"reason": reason, "executor_ref": executor_ref})
+        )
 
-    def task_preempt(self, build_id, task, reason=None) -> None:
-        self.calls.append(("task_preempt", {"reason": reason}))
+    def task_preempt(self, build_id, task, reason=None, executor_ref=None) -> None:
+        self.calls.append(
+            ("task_preempt", {"reason": reason, "executor_ref": executor_ref})
+        )
 
     def methods(self) -> list[str]:
         return [m for (m, _) in self.calls]
@@ -333,6 +337,46 @@ class TestClassifyByExceptionChain:
                 )
                 == _PREEMPTION
             )
+
+    def test_an_explicit_cause_does_not_hide_the_context(self):
+        """``__cause__`` and ``__context__`` are not two names for one
+        chain. A task that raises ``from`` an error of its own — a failed
+        checkpoint write, say — still carries the platform signal on
+        ``__context__``, and following only the cause walks away from the
+        answer."""
+        write_error = OSError("checkpoint write failed")
+        try:
+            try:
+                raise InputCancellation("Input was cancelled by user")
+            except BaseException:
+                raise sd.ResumableInterruption("checkpointed") from write_error
+        except sd.ResumableInterruption as request:
+            assert request.__cause__ is write_error
+            assert isinstance(request.__context__, InputCancellation)
+            assert (
+                _classify_interruption(
+                    request, elapsed_seconds=5.0, function_timeout_seconds=300.0
+                )
+                == _TIMEOUT
+            )
+
+    def test_a_cyclic_chain_terminates(self):
+        """A dying container must not spin. The walk is bounded and
+        remembers what it has seen, so a chain that loops back on itself
+        simply runs out rather than hanging the report."""
+        first = RuntimeError("first")
+        second = RuntimeError("second")
+        first.__context__ = second
+        second.__context__ = first
+        request = sd.ResumableInterruption("checkpointed")
+        request.__context__ = first
+
+        assert (
+            _classify_interruption(
+                request, elapsed_seconds=5.0, function_timeout_seconds=300.0
+            )
+            == _PREEMPTION
+        )
 
     def test_the_signal_is_found_past_an_unrelated_link(self):
         """...and when the platform signal *is* further down the chain, it

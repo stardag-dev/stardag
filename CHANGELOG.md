@@ -31,9 +31,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   to decide, since it issued any cancel.
 
   The signal is read off `__cause__`/`__context__` of whatever the task
-  raises, so the documented recipe keeps working unchanged — `raise ...
-from None` clears `__cause__` and suppresses the traceback preamble, not
-  the context. The elapsed-time rule remains as a fallback for a task that
+  raises, so the documented recipe keeps working unchanged: `raise ... from
+None` clears `__cause__` and suppresses the traceback preamble, not the
+  context. The elapsed-time rule remains as a fallback for a task that
   raises `ResumableInterruption` on its own initiative, where there is
   nothing on the chain to read.
 

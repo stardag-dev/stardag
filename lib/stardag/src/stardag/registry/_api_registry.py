@@ -825,7 +825,11 @@ class APIRegistry(RegistryABC):
         )
 
     def task_interrupt(
-        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        reason: str | None = None,
+        executor_ref: str | None = None,
     ) -> None:
         """Record that the platform interrupted this task's execution.
 
@@ -840,6 +844,8 @@ class APIRegistry(RegistryABC):
         params = self._get_event_params()
         if reason:
             params["reason"] = reason
+        if executor_ref:
+            params["executor_ref"] = executor_ref
         try:
             self._request(
                 "POST",
@@ -860,7 +866,11 @@ class APIRegistry(RegistryABC):
             )
 
     def task_preempt(
-        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        reason: str | None = None,
+        executor_ref: str | None = None,
     ) -> None:
         """Record that the platform is restarting this execution itself.
 
@@ -874,6 +884,8 @@ class APIRegistry(RegistryABC):
         params = self._get_event_params()
         if reason:
             params["reason"] = reason
+        if executor_ref:
+            params["executor_ref"] = executor_ref
         try:
             self._request(
                 "POST",
@@ -2226,7 +2238,11 @@ class APIRegistry(RegistryABC):
         )
 
     async def task_interrupt_aio(
-        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        reason: str | None = None,
+        executor_ref: str | None = None,
     ) -> None:
         """Async version - record a platform interruption.
 
@@ -2236,6 +2252,8 @@ class APIRegistry(RegistryABC):
         params = self._get_event_params()
         if reason:
             params["reason"] = reason
+        if executor_ref:
+            params["executor_ref"] = executor_ref
         try:
             await self._arequest(
                 "POST",
@@ -2255,7 +2273,11 @@ class APIRegistry(RegistryABC):
             )
 
     async def task_preempt_aio(
-        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        reason: str | None = None,
+        executor_ref: str | None = None,
     ) -> None:
         """Async version - record a platform preemption.
 
@@ -2264,6 +2286,8 @@ class APIRegistry(RegistryABC):
         params = self._get_event_params()
         if reason:
             params["reason"] = reason
+        if executor_ref:
+            params["executor_ref"] = executor_ref
         try:
             await self._arequest(
                 "POST",

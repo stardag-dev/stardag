@@ -186,11 +186,13 @@ id, and records the preemption so a restart that never arrives is visible.
 Caught a function timeout or a cancel — when no restart is coming — it
 records an interruption for a scheduler tick to act on instead.
 
-So raise it **from inside the `except` block**. Raised somewhere the
-original interruption cannot be reached from — after the block has exited,
-or on a condition of your own — stardag falls back to comparing elapsed
-time against the worker's declared `timeout`, which is a guess on a clock
-that starts after the container does.
+So raise it **from inside the `except` block**. Both `from None` and a
+plain `raise` keep the link, and so does an explicit `from err` on a saved
+exception. What loses it is raising somewhere the interruption is no longer
+reachable — outside the block with no explicit cause, or on a condition of
+your own. Then stardag falls back to comparing elapsed time against the
+worker's declared `timeout`, which is a guess on a clock that starts after
+the container does.
 
 Resumption is bounded by `TickConfig.max_interruptions` (default 20), a
 budget separate from `max_attempts` — see

@@ -466,7 +466,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.fail_reasons.setdefault(tid, []).append(error_message)
         self.statuses[tid] = "failed"
 
-    async def task_interrupt_aio(self, build_id, task, reason=None):
+    async def task_interrupt_aio(self, build_id, task, reason=None, executor_ref=None):
         """What a worker reports when the platform took its container.
 
         Mirrors the server: the claim goes (so no expiry survives) but the
