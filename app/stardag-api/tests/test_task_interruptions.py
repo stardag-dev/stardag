@@ -387,6 +387,32 @@ async def test_the_no_op_still_records_the_event(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_a_refused_report_does_not_spend_the_interruption_budget(
+    client: AsyncClient,
+):
+    """A worker cannot tell a cancel from a timeout, so it reports both —
+    and a cancel's report is always refused. Counting those would let
+    cancelling and retrying a task inside one build round eat the budget a
+    genuine interruption needs, and the task would then fail on its first
+    real one."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/cancel")
+
+    # The dying worker reports, not knowing it was cancelled.
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/retry")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+
+    assert (await _counts(client, build_id))["t-1"] == (2, 0)
+
+    # ...and a genuine one still counts.
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+    assert (await _counts(client, build_id))["t-1"] == (2, 1)
+
+
+@pytest.mark.asyncio
 async def test_either_interleaving_of_cancel_and_interrupt_ends_cancelled(
     client: AsyncClient,
 ):
@@ -809,3 +835,35 @@ async def test_preemption_is_invisible_to_the_sql_attempt_count(
 
     assert restarted.json()["attempt_count"] == 1
     assert await _counts(pg_client, build_id) == {"pg-1": (1, 0)}
+
+
+@pytest.mark.asyncio
+async def test_refused_reports_are_excluded_from_the_count_on_postgres(
+    pg_client: AsyncClient,
+):
+    """The exclusion is a JSON predicate on the event metadata, and JSON
+    accessors are the most dialect-specific thing in this query — SQLite
+    reads it through ``JSON_EXTRACT`` and Postgres through ``->``. Both
+    have to agree that a key which is *absent* still counts."""
+    build_id = await _new_build(pg_client)
+    await _register_task(pg_client, build_id, "pg-1")
+    await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-1/start", params={"claim": True}
+    )
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/cancel")
+    # The dying worker reports, not knowing it was cancelled. Refused, so
+    # audited but not counted. (Asserted after the retry below: a cancelled
+    # task is in no frontier list, so there is nothing to read counts off
+    # until it is schedulable again.)
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/interrupt")
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/retry")
+    await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-1/start", params={"claim": True}
+    )
+
+    assert await _counts(pg_client, build_id) == {"pg-1": (2, 0)}
+
+    # ...and a genuine one still counts, so the key's absence is not being
+    # read as "excluded".
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/interrupt")
+    assert await _counts(pg_client, build_id) == {"pg-1": (2, 1)}

@@ -189,6 +189,29 @@ def _reports_on_the_current_execution(task: Task, event: Event) -> bool:
     return str(reported_ref) == str(task.latest_executor_ref)
 
 
+# Event-metadata key recording that a report was written but did not move
+# the task. Read by ``get_interrupt_counts_in_build``: a refused report is
+# not an interruption and must not spend the resumption budget. It matters
+# because a worker cannot tell a cancel from a timeout and so reports both,
+# and a cancel's report is always refused — without this, cancelling and
+# retrying a task inside one build round would eat the budget a genuine
+# interruption needs.
+#
+# Recorded on the event rather than simply not written, because the event
+# is the only trace that the execution ended at all.
+REPORT_APPLIED_KEY = "report_applied"
+
+
+def _mark_report_refused(event: Event) -> None:
+    """Record that this report was kept as audit but changed nothing.
+
+    Reassigns rather than mutating in place: ``event_metadata`` is a plain
+    ``JSON`` column, so an in-place update is not seen as a change and
+    would not be persisted.
+    """
+    event.event_metadata = {**(event.event_metadata or {}), REPORT_APPLIED_KEY: False}
+
+
 def _replay_report_applies(
     status: TaskStatus, event: Event, current_ref: str | None
 ) -> bool:
@@ -416,6 +439,12 @@ async def get_interrupt_counts_in_build(
                 Event.build_id == build_id,
                 Event.task_id.is_not(None),
                 Event.event_type == EventType.TASK_INTERRUPTED.value,
+                # Refused reports are audit, not interruptions — see
+                # REPORT_APPLIED_KEY. ``is_not(False)`` rather than a
+                # truthiness test so the key's *absence* (every event
+                # written before this existed, and every applied one)
+                # still counts: NULL IS NOT FALSE is true on both dialects.
+                Event.event_metadata[REPORT_APPLIED_KEY].as_boolean().is_not(False),
                 or_(resumed_at.is_(None), Event.created_at >= resumed_at),
             )
             .where(
@@ -640,6 +669,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # written either way: it happened, and it is the only trace that
         # this execution ended at all.
         if not _reports_on_the_current_execution(task, event):
+            _mark_report_refused(event)
             return
         task.latest_status = TaskStatus.INTERRUPTED
         task.latest_status_at = event.created_at
@@ -679,6 +709,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # Subject to the same authority rule as TASK_INTERRUPTED above, for
         # the same reasons.
         if not _reports_on_the_current_execution(task, event):
+            _mark_report_refused(event)
             return
         # ...and to one more, which the interruption does not need. An
         # interruption *ends* a claim, so applying it to a lapsed one is
@@ -687,6 +718,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # resurrect a task the server had already made re-claimable, and a
         # racing claimant would then be denied by a corpse.
         if not claim_is_live(task):
+            _mark_report_refused(event)
             return
         # What this event is *for*: recording that a restart is now due.
         # Without it the registry cannot tell "running happily since T0"
