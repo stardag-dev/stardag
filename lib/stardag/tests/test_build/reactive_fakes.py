@@ -474,11 +474,13 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.calls.append(("add_roots", ",".join(root_task_ids)))
         self.root_task_ids += [t for t in root_task_ids if t not in self.root_task_ids]
 
-    async def task_cancel_aio(self, build_id, task, *, if_executor_ref=None):
+    async def task_cancel_aio(
+        self, build_id, task, *, if_executor=None, if_executor_ref=None
+    ):
         tid = str(task.id)
         if if_executor_ref is not None and (
             self.statuses.get(tid) not in ("running", "interrupted")
-            or self.refs.get(tid, (None, None))[1] != if_executor_ref
+            or self.refs.get(tid, (None, None)) != (if_executor, if_executor_ref)
         ):
             # The server's rule, on the locked row: nothing to revoke under
             # that execution, so nothing is recorded. Modelled because the

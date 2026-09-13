@@ -9,7 +9,7 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 ### SDK
 
 - **Breaking, for anyone implementing `RegistryABC` outside this repo:**
-  `task_cancel_aio` takes a keyword-only `if_executor_ref`, and
+  `task_cancel_aio` takes keyword-only `if_executor` and `if_executor_ref`, and
   `build_get_executions` / `build_get_executions_aio` take a keyword-only
   `cursor`. Subclasses that override the old signatures raise `TypeError`
   when the reactive tick calls them; the call sites log and continue, so the
@@ -72,12 +72,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   question is about the past: releasing a claim is what lets the next build
   take the task over, so by the time a cancelled build ticks, the row may
   already name somebody else's execution. A ref is not a claim — cancelling
-  the one this build recorded cannot reach another build's container.
+  the one this build recorded cannot reach another build's container. It can
+  only report executions whose reference reached the registry: a resident
+  build resuming a task from its dynamic dependencies, with workers that do
+  not self-report lifecycle, records only `TASK_RESUMED` and so never sends
+  the resumed handle's reference at all.
 - `FrontierTaskRef.latest_status_build_id`: who holds each task in the
   frontier, so a scheduler can tell its own executions from a neighbour's.
 - `POST /builds/{id}/notify` flags only a RUNNING build, and reports
   `needs_tick` accordingly.
-- `POST /builds/{b}/tasks/{t}/cancel?if_executor_ref=…` records nothing
+- `POST /builds/{b}/tasks/{t}/cancel?if_executor=…&if_executor_ref=…` records nothing
   unless this build still holds the task in RUNNING or INTERRUPTED **under
   that execution** — evaluated on the locked row, so an engine cleaning up
   after itself from a listing it read a moment ago can neither stamp a task

@@ -1548,13 +1548,19 @@ class RegistryABC(metaclass=abc.ABCMeta):
         self.task_resume(build_id, task)
 
     async def task_cancel_aio(
-        self, build_id: UUID, task: "BaseTask", *, if_executor_ref: str | None = None
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        if_executor: str | None = None,
+        if_executor_ref: str | None = None,
     ) -> None:
         """Async version of task_cancel.
 
-        ``if_executor_ref``: record nothing unless this build still holds
-        the task in a status with an execution to revoke (RUNNING or
-        INTERRUPTED), **under that execution**. For an engine cleaning up
+        ``if_executor`` / ``if_executor_ref``: record nothing unless this
+        build still holds the task in a status with an execution to revoke
+        (RUNNING or INTERRUPTED), **under that execution** — the pair, since
+        a reference is backend-specific by contract. For an engine cleaning up
         after itself from a listing it read a moment ago: by then another
         build may have reset the task and be about to run it, or this build
         may have started it again under a new ref — and revoking the claim
@@ -1562,7 +1568,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         direction. Backends that cannot evaluate it ignore it; the argument
         is a narrowing, so ignoring it is the old behaviour.
         """
-        del if_executor_ref
+        del if_executor, if_executor_ref
         self.task_cancel(build_id, task)
 
     async def task_skip_aio(self, build_id: UUID, task: "BaseTask") -> None:
