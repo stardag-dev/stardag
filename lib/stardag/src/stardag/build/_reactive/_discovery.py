@@ -222,14 +222,14 @@ async def _register_chunk(
     starting them faster than this can clear them, which is a reason to
     fail rather than to keep trying.
     """
-    cancelled: set[str] = set()
+    handled: set[str] = set()
     while True:
         try:
             return await register()
         except DependencyDeclarationConflictError as conflict:
             if not cancel_conflicting or not conflict.build_ids:
                 raise
-            fresh = [b for b in conflict.build_ids if b not in cancelled]
+            fresh = [b for b in conflict.build_ids if b not in handled]
             # The budget is checked against what this pass *would* cancel,
             # not against what it already has. One refusal can name every
             # running holder of a popular task, so testing only the running
@@ -238,7 +238,7 @@ async def _register_chunk(
             # before cancelling any of them: stopping half way would take
             # work down without clearing the way, which is the one outcome
             # worse than refusing.
-            if not fresh or len(cancelled) + len(fresh) > _MAX_CONFLICTING_BUILDS:
+            if not fresh or len(handled) + len(fresh) > _MAX_CONFLICTING_BUILDS:
                 raise
             logger.warning(
                 "Registration conflicts with build(s) %s over task %s; "
@@ -247,8 +247,44 @@ async def _register_chunk(
                 conflict.task_id,
             )
             for build_id_str in fresh:
+                handled.add(build_id_str)
+                if await _has_finished(registry, UUID(build_id_str)):
+                    # It was RUNNING when the refusal was written, and the
+                    # refusal is the only thing that says so. Cancelling a
+                    # build that has since finished would relabel a
+                    # completed one as cancelled — the server takes the
+                    # event unconditionally — and would run a cascade over
+                    # somebody's finished work on the strength of a fact
+                    # that has expired. It is also pointless: a build that
+                    # is not live is not in the way, so the retry below
+                    # will not be refused over it.
+                    logger.info(
+                        "Build %s finished before it could be cancelled; "
+                        "nothing to clear.",
+                        build_id_str,
+                    )
+                    continue
                 await registry.build_cancel_aio(UUID(build_id_str), cascade=True)
-                cancelled.add(build_id_str)
+
+
+_TERMINAL_BUILD_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+async def _has_finished(registry: RegistryABC, build_id: UUID) -> bool:
+    """Whether ``build_id`` is *known* to be over.
+
+    False whenever the answer is not certain — an older server reporting no
+    status, a registry that does not implement it, a build that has been
+    deleted, a request that fails. The caller uses this to skip a cancel,
+    and skipping one that was needed leaves a build in the way that the
+    user asked to have cleared; cancelling one that was not needed is the
+    behaviour this replaces. So uncertainty resolves to "cancel it".
+    """
+    try:
+        info = await registry.build_get_aio(build_id)
+    except Exception:  # noqa: BLE001 - any failure means "not known to be over"
+        return False
+    return info.status in _TERMINAL_BUILD_STATUSES
 
 
 async def discover_and_register_aio(

@@ -396,6 +396,53 @@ class TestDeclarationConflict:
             "cancelled part of the crowd and still failed"
         )
 
+    async def test_a_holder_that_finished_first_is_not_cancelled(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The refusal is the only evidence the build was live, and it is
+        already out of date when it arrives.
+
+        Cancelling one that has since finished would relabel a *completed*
+        build as cancelled — the server takes the event unconditionally —
+        and run a cascade over somebody's finished work. It is pointless
+        too: a build that is not live is not in the way.
+        """
+        root = SyncOnlyTask(name="conflict-finished-root")
+        other = uuid4()
+        registry = FakeReactiveRegistry(root_task_ids=[str(root.id)])
+        registry.other_build_statuses[other] = "completed"
+        registry.declaration_conflict = self._conflict(other)
+
+        result = await discover_and_register_aio(
+            registry, uuid4(), root, cancel_conflicting=True
+        )
+
+        assert registry.cancelled_builds == [], "relabelled a finished build"
+        assert root.id in result.incomplete, "the retry did not go through"
+
+    async def test_an_unknowable_status_still_gets_cancelled(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Uncertainty resolves towards cancelling, not towards skipping.
+
+        An older server reports no build status at all. Skipping a cancel
+        that was needed leaves a build in the way the user asked to have
+        cleared; cancelling one that was not needed is only the behaviour
+        this check replaces.
+        """
+        root = SyncOnlyTask(name="conflict-unknown-status-root")
+        other = uuid4()
+        registry = FakeReactiveRegistry(root_task_ids=[str(root.id)])
+        registry.other_build_statuses[other] = None
+        registry.declaration_conflict = self._conflict(other)
+
+        result = await discover_and_register_aio(
+            registry, uuid4(), root, cancel_conflicting=True
+        )
+
+        assert registry.cancelled_builds == [(other, True)]
+        assert root.id in result.incomplete
+
     async def test_a_conflict_naming_nobody_is_not_retried(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
