@@ -28,6 +28,18 @@ repos:
         files: (^|/)(pyproject\.toml|uv\.lock)$
         pass_filenames: false
         verbose: true
+      # Action pins. The workflows reference every action by commit SHA; this
+      # asserts that they still all do. A single unpinned `uses:` added later
+      # — in, say, the job that publishes to PyPI — would otherwise undo the
+      # property silently, since nothing about a workflow file makes a
+      # movable ref look wrong.
+      - id: check-action-pins
+        name: actions pinned to commit SHAs
+        entry: scripts/check-action-pins.sh
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+        pass_filenames: false
+        verbose: true
       - id: pyright-stardag
         name: pyright (lib/stardag)
         entry: bash -c 'cd lib/stardag && uv sync --all-extras && uv run pyright src tests'

@@ -107,6 +107,33 @@ uv run pre-commit run --all-files
 - **Integration tests**: In `integration-tests/` directory
 - **E2E tests**: Run with `./scripts/e2e-test.sh`
 
+## GitHub Actions
+
+Every action in `.github/workflows/` is referenced by a full commit SHA, with
+the release it corresponds to in a trailing comment:
+
+```yaml
+uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+```
+
+A tag is a movable label, not an address — whoever controls the action's
+repository can repoint `v7` at different code at any time, and the next run
+would execute it with no commit or diff here to review. A commit ID is a
+fingerprint of the code, so changing what runs means changing a tracked file.
+
+If you add or change a `uses:` line, run [`pinact`](https://github.com/suzuki-shunsuke/pinact)
+to resolve it:
+
+```bash
+brew install pinact   # or see the project's install instructions
+pinact run
+```
+
+`scripts/check-action-pins.sh` runs as a pre-commit hook and fails on any
+unpinned ref or missing version comment. Note that pinact refuses to pin a
+branch ref; resolve those by hand to the release tag whose commit the branch
+head is at.
+
 ## Documentation
 
 - Documentation source is in `docs/`
