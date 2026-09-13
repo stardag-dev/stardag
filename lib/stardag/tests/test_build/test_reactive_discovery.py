@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import typing
+
+import pytest
 from uuid import UUID, uuid4
 
 
@@ -16,6 +18,7 @@ from stardag import (
 from stardag.build import (
     discover_and_register_aio,
 )
+from stardag.exceptions import DependencyDeclarationConflictError
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
@@ -261,3 +264,77 @@ class TestConcurrentDiscovery:
 # =============================================================================
 # Bounded concurrent fan-out
 # =============================================================================
+
+
+class TestDeclarationConflict:
+    """What a build does when the registry refuses its declaration.
+
+    The registry refuses a chunk that re-points a task another *live* build
+    is building differently. Both declarations are legitimate — a task's id
+    promises its output, not how it was produced — so the question is not
+    which is right but which build should stop.
+    """
+
+    def _conflict(self, other_build: UUID) -> DependencyDeclarationConflictError:
+        return DependencyDeclarationConflictError(
+            "R is declared differently by a running build",
+            task_id="R",
+            declared=["U2"],
+            recorded=["U1"],
+            build_ids=[str(other_build)],
+        )
+
+    async def test_the_conflict_surfaces_by_default(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The new build fails, at the trigger, naming the builds in the
+        way. That is the default because the alternative — cancelling
+        somebody else's running build — is not something to do without
+        being asked."""
+        root = SyncOnlyTask(name="conflict-root")
+        registry = FakeReactiveRegistry(root_task_ids=[str(root.id)])
+        registry.declaration_conflict = self._conflict(uuid4())
+
+        with pytest.raises(DependencyDeclarationConflictError) as caught:
+            await discover_and_register_aio(registry, uuid4(), root)
+
+        assert caught.value.task_id == "R"
+        assert registry.cancelled_builds == [], "nothing was cancelled unasked"
+
+    async def test_cancel_conflicting_clears_the_way_and_retries(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The opt-in answer: take the tasks over.
+
+        Cascading, because a cancel that left the other build's containers
+        running would put two executions on the same tasks — the very thing
+        the refusal exists to prevent.
+        """
+        root = SyncOnlyTask(name="conflict-cancel-root")
+        other = uuid4()
+        registry = FakeReactiveRegistry(root_task_ids=[str(root.id)])
+        registry.declaration_conflict = self._conflict(other)
+
+        result = await discover_and_register_aio(
+            registry, uuid4(), root, cancel_conflicting=True
+        )
+
+        assert registry.cancelled_builds == [(other, True)]
+        assert root.id in result.incomplete, "the retry did not go through"
+
+    async def test_a_conflict_naming_nobody_is_not_retried(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Retrying would hit the same refusal forever: there is nothing to
+        cancel, so nothing this build can do will clear it."""
+        root = SyncOnlyTask(name="conflict-nobody-root")
+        registry = FakeReactiveRegistry(root_task_ids=[str(root.id)])
+        registry.declaration_conflict = DependencyDeclarationConflictError(
+            "R is declared differently", task_id="R", build_ids=[]
+        )
+
+        with pytest.raises(DependencyDeclarationConflictError):
+            await discover_and_register_aio(
+                registry, uuid4(), root, cancel_conflicting=True
+            )
+        assert registry.cancelled_builds == []

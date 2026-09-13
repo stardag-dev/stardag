@@ -178,6 +178,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.tick_summary_error: Exception | None = None
         # Set to make the frontier fetch blow up, i.e. crash the tick itself.
         self.frontier_error: Exception | None = None
+        # Set to make the next bulk registration refuse with a declaration
+        # conflict, once.
+        self.declaration_conflict: Exception | None = None
+        self.cancelled_builds: list[tuple[UUID, bool]] = []
         # Set to make every id-based retry fail — a transient registry
         # error, or a route an older server does not serve.
         self.retry_by_id_error: Exception | None = None
@@ -317,6 +321,14 @@ class FakeReactiveRegistry(NoOpRegistry):
     # --- registry surface used by the tick ---
 
     async def task_register_bulk_aio(self, build_id, tasks, *, limit_keys=None):
+        if self.declaration_conflict is not None:
+            # Refused once, as the registry refuses a chunk that re-points a
+            # task a live build is building differently. Cleared on the way
+            # out so a caller that cancels the named build and retries gets
+            # through, which is the behaviour under test.
+            conflict = self.declaration_conflict
+            self.declaration_conflict = None
+            raise conflict
         infos = []
         for task in tasks:
             tid = str(task.id)
@@ -675,6 +687,10 @@ class FakeReactiveRegistry(NoOpRegistry):
             # can never be set.
             self.lease_on_release()
         return SchedulerLeaseResult(build_id=build_id, held=held)
+
+    async def build_cancel_aio(self, build_id, *, cascade: bool = False):
+        self.cancelled_builds.append((build_id, cascade))
+        return None
 
     async def build_get_executions_aio(
         self, build_id, *, cursor=None

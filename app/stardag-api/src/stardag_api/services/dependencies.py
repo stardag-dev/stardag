@@ -7,7 +7,12 @@ upstream and suspended. The two therefore go stale for different reasons and
 need different rules, and this module implements the second one — an edge
 stops counting when the attempt that produced it is abandoned.
 
-Nothing abandons a static edge, so nothing here touches one.
+A static edge is not abandoned by an execution, so retraction never
+touches one. It goes stale a different way — a later registration of the
+same task declares a different set — and that is what
+:func:`reconcile_static_declaration` below handles, on the rule that the
+declaration is authoritative and a *disagreement between live builds* is a
+conflict rather than something to reconcile silently.
 
 **Scope of the "one attempt at a time" assumption.** A retraction is keyed
 by the task, not by the attempt that recorded the edges, which is sound as
@@ -45,10 +50,20 @@ import logging
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import update
+from dataclasses import dataclass
+
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import Event, EventType, Task, TaskDependency, TaskStatus
+from stardag_api.models import (
+    Build,
+    BuildStatus,
+    Event,
+    EventType,
+    Task,
+    TaskDependency,
+    TaskStatus,
+)
 from stardag_api.models.base import utc_now
 
 logger = logging.getLogger(__name__)
@@ -149,3 +164,144 @@ def _begins_new_attempt(
             and previous_status_build_id != event.build_id
         )
     return False
+
+
+@dataclass(frozen=True)
+class StaticDeclarationConflict:
+    """Two live builds disagree about how a task is built.
+
+    A task id promises a world state, not a provenance, so changing how a
+    task is produced — a different upstream, a different partitioning — and
+    keeping the id is correct. What is not correct is two builds
+    materialising it over different upstream DAGs at the same time: both
+    are legitimate, both write the same target, and one of them is wasted
+    by construction.
+
+    Unlike a dynamic fan-out, this really can happen concurrently. `U1` and
+    `U2` are different tasks with no claim between them, so nothing
+    serialises the two builds the way the execution claim serialises two
+    attempts at one task.
+    """
+
+    task_id: str
+    declared: list[str]
+    recorded: list[str]
+    build_ids: list[UUID]
+
+
+async def reconcile_static_declaration(
+    db: AsyncSession,
+    *,
+    downstream: Task,
+    declared_upstream_pks: set[UUID],
+    build_id: UUID,
+    now: datetime | None = None,
+) -> StaticDeclarationConflict | None:
+    """Make the declared static upstream set authoritative for ``downstream``.
+
+    A static edge is *declared*, in full, by every build that registers the
+    task — so unlike a dynamic edge the server knows the current set exactly,
+    and an edge the latest declaration omits has stopped describing how the
+    task is built. Superseding it is what lets a task be re-pointed at a new
+    upstream without minting a new id for a downstream whose promise has not
+    changed.
+
+    **Except when somebody else is still building it that way.** If a live
+    build holds the task, superseding would rewrite the gates under a build
+    that is running right now — so the difference is reported instead, and
+    the caller refuses the registration. Returns the conflict and writes
+    nothing; returns None (having superseded) when the change is uncontested.
+
+    Nothing to drop is the overwhelmingly common case — the same code
+    registering the same task — and costs one indexed read.
+    """
+    recorded = (
+        await db.execute(
+            select(TaskDependency.upstream_task_id, Task.task_id)
+            .join(Task, Task.id == TaskDependency.upstream_task_id)
+            .where(
+                TaskDependency.downstream_task_id == downstream.id,
+                TaskDependency.is_dynamic.is_(False),
+                TaskDependency.superseded_at.is_(None),
+            )
+        )
+    ).all()
+    dropped = {
+        pk: task_id for pk, task_id in recorded if pk not in declared_upstream_pks
+    }
+    if not dropped:
+        return None
+
+    holders = await _live_builds_holding(db, downstream, exclude=build_id)
+    if holders:
+        declared_ids = (
+            (
+                await db.execute(
+                    select(Task.task_id).where(Task.id.in_(declared_upstream_pks))
+                )
+            )
+            .scalars()
+            .all()
+            if declared_upstream_pks
+            else []
+        )
+        return StaticDeclarationConflict(
+            task_id=downstream.task_id,
+            declared=sorted(declared_ids),
+            recorded=sorted(task_id for _, task_id in recorded),
+            build_ids=holders,
+        )
+
+    await db.execute(
+        update(TaskDependency)
+        .where(
+            TaskDependency.downstream_task_id == downstream.id,
+            TaskDependency.upstream_task_id.in_(list(dropped)),
+            TaskDependency.is_dynamic.is_(False),
+            TaskDependency.superseded_at.is_(None),
+        )
+        .values(superseded_at=now or utc_now())
+    )
+    logger.info(
+        "Task %s no longer declares %d static upstream(s); superseded.",
+        downstream.task_id,
+        len(dropped),
+    )
+    return None
+
+
+async def _live_builds_holding(
+    db: AsyncSession, task: Task, *, exclude: UUID
+) -> list[UUID]:
+    """Builds other than ``exclude`` that are RUNNING and hold ``task``.
+
+    "Holds" is plan membership — an event for the task — which is the same
+    relation the wake-up flag uses, and deliberately wider than "declared
+    these edges". A build that only inherited the task through plan closure
+    is still a build that may run it, and the cost of being wrong in that
+    direction is a refused trigger with an actionable message, where being
+    wrong the other way is two builds crunching the same data over different
+    upstream DAGs.
+    """
+    holders = (
+        (
+            await db.execute(
+                select(Build.id)
+                .where(
+                    Build.id.in_(
+                        select(Event.build_id)
+                        .where(Event.task_id == task.id)
+                        .distinct()
+                        .scalar_subquery()
+                    ),
+                    Build.id != exclude,
+                    Build.environment_id == task.environment_id,
+                    Build.latest_status == BuildStatus.RUNNING,
+                )
+                .order_by(Build.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(holders)

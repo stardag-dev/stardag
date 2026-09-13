@@ -1129,6 +1129,7 @@ class StardagApp:
             build_id: str,
             tasks: typing.Sequence[BaseTask] | BaseTask,
             tick_kwargs: dict[str, typing.Any] | None = None,
+            cancel_conflicting: bool = False,
         ) -> dict[str, typing.Any]:
             _run_container_setup(container_setup)
             _setup_logging()
@@ -1152,6 +1153,7 @@ class StardagApp:
                     elide_pickles=elide_pickles,
                     require_pickle_free=require_pickle_free,
                     limit_key_selector=tick_deployment.limit_key_selector,
+                    cancel_conflicting=cancel_conflicting,
                 )
             except BaseException as e:
                 # The trigger handed this container a RUNNING build and
@@ -1264,6 +1266,7 @@ class StardagApp:
         description: str | None = None,
         reactive: bool = False,
         tick_kwargs: dict[str, typing.Any] | None = None,
+        cancel_conflicting: bool = False,
     ) -> BuildTriggerResult:
         """Trigger a build with a registry build id minted at the trigger point.
 
@@ -1283,6 +1286,17 @@ class StardagApp:
         Set ``retries`` in the app's ``builder_settings`` to let Modal
         automatically re-run (and thereby resume) the build function after
         infrastructure failures.
+
+        ``cancel_conflicting`` decides what happens when a task in this
+        build's DAG is already being built a *different* way by a build that
+        is still running — a different upstream, a different partitioning.
+        Both declarations are legitimate, since a task's id promises its
+        output and not how it was produced, but materialising one task over
+        two upstream DAGs at once is waste nobody asked for, so the registry
+        refuses the registration. By default that failure surfaces here, at
+        the trigger, naming the builds in the way. Set it to cancel those
+        builds (cascading, so their containers stop too) and take the tasks
+        over instead.
 
         Requires registry credentials in the calling process (the active
         stardag profile), in addition to Modal credentials. If no registry is
@@ -1374,6 +1388,7 @@ class StardagApp:
                 tick_kwargs=tick_kwargs,
                 is_retrigger=explicit_build_id,
                 executor_metadata=executor_metadata,
+                cancel_conflicting=cancel_conflicting,
             )
 
         merged_kwargs["resume_build_id"] = build_id
@@ -1438,6 +1453,7 @@ class StardagApp:
         tick_kwargs: dict[str, typing.Any] | None,
         is_retrigger: bool,
         executor_metadata: dict[str, typing.Any] | None = None,
+        cancel_conflicting: bool = False,
     ) -> BuildTriggerResult:
         """Reactive trigger: register the roots, then spawn ``bootstrap``.
 
@@ -1533,6 +1549,7 @@ class StardagApp:
                         ),
                         require_pickle_free=self.require_pickle_free,
                         limit_key_selector=self.limit_key_selector,
+                        cancel_conflicting=cancel_conflicting,
                     ).tick_call,
                 )
             # Early, roots-only advisory (see the function's docstring):
@@ -1545,10 +1562,17 @@ class StardagApp:
             bootstrap_function = modal.Function.from_name(
                 app_name=self.name, name="bootstrap"
             )
+            # ``cancel_conflicting`` is passed only when it is asked for,
+            # so an ordinary trigger sends exactly the arguments a
+            # deployment from before this option expects. A newer SDK
+            # against an older app therefore keeps working right up until
+            # somebody actually uses the option, where failing loudly is the
+            # right answer anyway.
             function_call = bootstrap_function.spawn(
                 build_id=str(build_id),
                 tasks=task_list,
                 tick_kwargs=tick_kwargs,
+                **({"cancel_conflicting": True} if cancel_conflicting else {}),
             )
         except BaseException as e:
             _fail_build_best_effort(registry, build_id, e)

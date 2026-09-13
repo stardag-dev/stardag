@@ -50,7 +50,11 @@ async def _register(
         "task_name": "T",
         "task_namespace": "",
         "task_data": {},
-        "dependency_task_ids": deps or [],
+        # Omitted, not empty, when the caller names no deps: an absent
+        # list is "I am saying nothing about this task's dependencies",
+        # where an empty one declares it has none and supersedes any
+        # recorded edge. Most references here mean the former.
+        **({"dependency_task_ids": deps} if deps is not None else {}),
     }
     if limit_keys is not None:
         payload["limit_keys"] = limit_keys

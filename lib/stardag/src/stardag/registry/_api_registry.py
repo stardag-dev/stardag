@@ -23,6 +23,7 @@ from stardag.registry._http_client import (
 from stardag.exceptions import (
     APIError,
     AuthorizationError,
+    DependencyDeclarationConflictError,
     EnvironmentAccessError,
     InvalidAPIKeyError,
     InvalidTokenError,
@@ -396,6 +397,20 @@ class APIRegistry(RegistryABC):
                 raise RateLimitError(retry_after=retry_after, detail=detail)
             else:
                 raise QuotaExceededError(detail=detail)
+
+        elif status_code == 409 and error_code == "dependency_declaration_conflict":
+            # Surfaced as its own type rather than a generic 409 because a
+            # caller can act on it: the payload names the builds in the way,
+            # and the trigger can be asked to cancel them.
+            payload = raw_detail if isinstance(raw_detail, dict) else {}
+            raise DependencyDeclarationConflictError(
+                detail,
+                task_id=payload.get("task_id"),
+                declared=payload.get("declared"),
+                recorded=payload.get("recorded"),
+                build_ids=payload.get("conflicting_build_ids"),
+                payload=payload or None,
+            )
 
         else:
             raise APIError(

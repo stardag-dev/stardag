@@ -14,6 +14,8 @@ how a scenario silently stops testing anything.
 
 from __future__ import annotations
 
+import typing
+
 import stardag as sd
 
 
@@ -146,6 +148,35 @@ class SuspendingParent(sd.Task[list[int]]):
         ]
         yield kids
         self._save([len(kid.load()) for kid in kids])
+
+
+class ForkingRoot(sd.Task[int]):
+    """One task id whose static ``requires()`` differs between builds.
+
+    The shape STA-41 is about, and the only way to produce it: two builds
+    that disagree about how one downstream is built. ``upstream_seconds`` is
+    **excluded from the hash**, so changing it gives the same root a
+    different upstream — which is exactly what re-pointing a task at a new
+    dependency does, and correctly does not change the root's own id, since
+    its promise has not changed.
+
+    The exclusion works here for a reason worth knowing, because it does
+    *not* work everywhere (see STA-43): a triggered root is serialized to
+    the bootstrap and its ``requires()`` is evaluated on the object that
+    arrives, so this value survives. A task rehydrated from the registry
+    would get whatever the first registration recorded instead.
+    """
+
+    salt: str
+    upstream_seconds: typing.Annotated[int, sd.StardagField(hash_exclude=True)] = 30
+
+    def requires(self):
+        return slow(
+            values=get_range(limit=1, salt=self.salt), seconds=self.upstream_seconds
+        )
+
+    def run(self):
+        self._save(len(self.requires().load()))
 
 
 # Modal Dict holding the fan-out each ``GenerationalParent`` should yield,

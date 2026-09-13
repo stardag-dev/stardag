@@ -246,6 +246,7 @@ def run_reactive_bootstrap(
     elide_pickles: bool,
     require_pickle_free: bool,
     limit_key_selector: LimitKeySelector | None = None,
+    cancel_conflicting: bool = False,
 ) -> ReactiveBootstrapResult:
     """Discover the DAG, persist it, arm the build, spawn the first tick.
 
@@ -294,6 +295,7 @@ def run_reactive_bootstrap(
             tuple(task_list),
             retry_failed=True,
             limit_key_selector=limit_key_selector,
+            cancel_conflicting=cancel_conflicting,
         )
     )
     # --- task-module coverage pre-flight (see _preflight_task_modules) ---

@@ -103,6 +103,10 @@ from stardag_api.services.build_cleanup import (
     last_activity_at,
     select_cancellable_builds,
 )
+from stardag_api.services.dependencies import (
+    StaticDeclarationConflict,
+    reconcile_static_declaration,
+)
 from stardag_api.services.claims import (
     claim_is_live,
     live_claim_filter,
@@ -546,6 +550,65 @@ async def _replace_limit_keys(
         else pg_insert(TaskLimitKey)
     )
     await db.execute(insert_stmt.values(rows).on_conflict_do_nothing())
+
+
+async def _resolve_task_pks(
+    db: AsyncSession, environment_id: UUID, task_ids: "Sequence[str]"
+) -> set[UUID]:
+    """Primary keys for task ids already known in this environment.
+
+    Ids with no row yet are simply absent: they are about to be created as
+    phantoms by the edge reconciliation, and an upstream that does not exist
+    cannot be one the *previous* declaration recorded, which is the only
+    question the caller is asking.
+    """
+    if not task_ids:
+        return set()
+    rows = (
+        await db.execute(
+            select(Task.id)
+            .where(Task.environment_id == environment_id)
+            .where(Task.task_id.in_(list(task_ids)))
+        )
+    ).scalars()
+    return set(rows)
+
+
+def _raise_declaration_conflict(conflict: StaticDeclarationConflict) -> None:
+    """Refuse a registration that would re-point a task another build is on.
+
+    The message is the product here. A build refused for this reason looks,
+    to the person who triggered it, exactly like stardag declining to run —
+    so it has to say which task, what changed, who else is on it, and both
+    ways forward, or it reads as an outage.
+    """
+    gone = sorted(set(conflict.recorded) - set(conflict.declared))
+    added = sorted(set(conflict.declared) - set(conflict.recorded))
+    others = ", ".join(str(b) for b in conflict.build_ids)
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error_code": "dependency_declaration_conflict",
+            "task_id": conflict.task_id,
+            "declared": conflict.declared,
+            "recorded": conflict.recorded,
+            "conflicting_build_ids": [str(b) for b in conflict.build_ids],
+            "message": (
+                f"Task {conflict.task_id} is registered here with a different "
+                f"set of static dependencies than the one recorded"
+                + (f" (no longer requires: {', '.join(gone)})" if gone else "")
+                + (f" (now requires: {', '.join(added)})" if added else "")
+                + f", and build(s) {others} are running and hold that task. "
+                "Both declarations are legitimate — a task's id promises its "
+                "output, not how it was produced — but materialising it over "
+                "two different upstream DAGs at once is wasted work, so this "
+                "registration is refused rather than rewriting a running "
+                "build's dependencies. Wait for that build, cancel it "
+                "(`stardag builds cancel <id> --cascade`), or re-trigger with "
+                "the option to cancel conflicting builds."
+            ),
+        },
+    )
 
 
 async def _latest_started_execution(
@@ -3096,7 +3159,7 @@ async def register_task(
     )
     _raise_if_limit_exceeded(
         check_structural_limit(
-            len(task.dependency_task_ids),
+            len(task.dependency_task_ids or []),
             limits_settings.max_dependency_ids_per_task,
             ErrorCode.DEPENDENCY_COUNT_LIMIT,
             "dependency_task_ids",
@@ -3162,12 +3225,28 @@ async def register_task(
         db_task.output_uri = task.output_uri
         db_task.is_phantom = False
 
+    # The declared set is authoritative for this task's static edges, so an
+    # edge it drops is superseded — unless a live build is still building
+    # the task that way, which is a conflict rather than something to
+    # reconcile silently.
+    if task.dependency_task_ids is not None:
+        conflict = await reconcile_static_declaration(
+            db,
+            downstream=db_task,
+            declared_upstream_pks=await _resolve_task_pks(
+                db, build.environment_id, task.dependency_task_ids
+            ),
+            build_id=build_id,
+        )
+        if conflict is not None:
+            _raise_declaration_conflict(conflict)
+
     # Reconcile static dependency edges (is_dynamic=False).
     await _reconcile_dependency_edges(
         db=db,
         environment_id=build.environment_id,
         downstream_task_pk=db_task.id,
-        upstream_task_ids=task.dependency_task_ids,
+        upstream_task_ids=task.dependency_task_ids or [],
         is_dynamic=False,
     )
 
@@ -3294,7 +3373,7 @@ async def register_tasks_bulk(
         )
         _raise_if_limit_exceeded(
             check_structural_limit(
-                len(t.dependency_task_ids),
+                len(t.dependency_task_ids or []),
                 limits_settings.max_dependency_ids_per_task,
                 ErrorCode.DEPENDENCY_COUNT_LIMIT,
                 "dependency_task_ids",
@@ -3439,7 +3518,7 @@ async def register_tasks_bulk(
     # Collect all upstream task_ids referenced anywhere in the batch.
     all_upstream_ids: set[str] = set()
     for t in tasks_in:
-        all_upstream_ids.update(t.dependency_task_ids)
+        all_upstream_ids.update(t.dependency_task_ids or [])
     # Subtract task_ids already in our map (in-batch deps + pre-existing).
     unknown_upstream_ids = all_upstream_ids - set(pk_by_task_id.keys())
     if unknown_upstream_ids:
@@ -3488,6 +3567,33 @@ async def register_tasks_bulk(
             )
             for pk, t_id in refetch_result.all():
                 pk_by_task_id[t_id] = pk
+
+    # The declared set is authoritative for each task's static edges, so an
+    # edge a declaration drops is superseded — unless a live build is still
+    # building that task the old way, which is refused. Checked for every
+    # task in the batch, including the ones declaring nothing: "requires()
+    # now returns nothing" drops edges just as much as re-pointing does.
+    #
+    # Before any edge is written, and before the events below. A conflict
+    # raises, which rolls the whole request back, so a refused chunk leaves
+    # the registry exactly as it found it — no half-registered plan, and no
+    # edges superseded on behalf of a build that is about to fail.
+    for t in tasks_in:
+        if t.dependency_task_ids is None:
+            continue
+        conflict = await reconcile_static_declaration(
+            db,
+            downstream=db_task_by_task_id[t.task_id],
+            declared_upstream_pks={
+                pk_by_task_id[dep]
+                for dep in t.dependency_task_ids
+                if dep in pk_by_task_id
+            },
+            build_id=build_id,
+            now=now,
+        )
+        if conflict is not None:
+            _raise_declaration_conflict(conflict)
 
     # Build edge rows for the whole batch and bulk-insert in one shot.
     edge_rows: list[dict[str, object]] = []

@@ -121,6 +121,15 @@ that, and nothing else does.
   result, and the build's `fail_mode` decides.
 - **Authority to revoke is build-scoped.** Cancelling build B releases
   only the claims B's own executions hold, never build C's.
+- **Two live builds may not build one task two different ways.** Changing
+  what a task depends on, without changing what it promises, is an ordinary
+  thing to do and keeps its id — so the registry takes a task's declared
+  `requires()` as authoritative and supersedes the edges it drops. But if
+  another build is _running_ on the old declaration, the registration is
+  refused instead: both are legitimate, and materialising one task over two
+  upstream DAGs at once is waste nobody asked for. The new build fails at
+  its trigger naming the build in the way, or, with
+  `build_trigger(..., cancel_conflicting=True)`, cancels it and takes over.
 - **A dependency edge stops counting when the act that asserted it is
   withdrawn.** A static edge is declared by every build that registers the
   task. A dynamic edge is discovered — one execution attempt yielded it and

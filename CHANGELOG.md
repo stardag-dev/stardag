@@ -8,6 +8,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- `build_trigger(..., cancel_conflicting=True)` clears a declaration
+  conflict instead of failing on it: the builds in the way are cancelled
+  (cascading, so their containers stop too) and this build takes the tasks
+  over. Off by default — cancelling somebody else's running build is not
+  something to do unasked. The conflict surfaces as
+  `DependencyDeclarationConflictError`, which carries the task, both
+  declarations and the build ids.
+
 - **Breaking, for anyone implementing `RegistryABC` outside this repo:**
   `task_cancel_aio` takes keyword-only `if_executor` and `if_executor_ref`, and
   `build_get_executions` / `build_get_executions_aio` take a keyword-only
@@ -54,6 +62,24 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   itself, and it survives until a tick drains it.
 
 ### Registry API
+
+- **A task's declared static dependencies are authoritative, and a
+  disagreement between live builds is refused.** Re-pointing a task at a new
+  upstream — or re-partitioning how it is produced — does not change what it
+  promises, so it keeps its id, and registering it now supersedes the static
+  edges the declaration omits. Previously those edges were permanent: a
+  re-registered task stayed gated on an upstream its `requires()` no longer
+  returned, and the only escape was to bump the _downstream's_ version.
+  Unless another **live** build holds the task, where the registration is
+  refused with 409 `dependency_declaration_conflict` and nothing is written
+  — `U1` and `U2` are different tasks with no claim between them, so nothing
+  else stops two builds materialising one downstream over two upstream DAGs
+  at once.
+- `TaskCreate.dependency_task_ids` is now `list[str] | None`. A list is a
+  declaration and is authoritative; **null is not a declaration** and leaves
+  recorded edges alone. An empty list cannot carry both meanings, and
+  reading silence as a declaration would let a caller that never knew a
+  task's dependencies delete them. Every SDK registration sends a list.
 
 - **An abandoned execution attempt no longer drags its dynamic dependencies
   behind it.** Dynamic edges are written `ON CONFLICT DO NOTHING`, so a

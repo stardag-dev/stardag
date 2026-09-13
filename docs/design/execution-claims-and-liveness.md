@@ -155,6 +155,47 @@ go wrong rather than a new failure of the claim; the general remedy is to
 bind an edge to the execution attempt that asserted it, which is the same
 missing attempt identity the late-write case needs.
 
+### A declaration is authoritative; a disagreement is a conflict
+
+The static half of the same principle, and it needs a different rule for a
+reason that is easy to miss.
+
+A dynamic edge is discovered by one execution attempt, and a task has one
+claim, so its attempts are sequential — retraction is enough. A static edge
+is declared, in full, by every build that registers the task, and `U1` and
+`U2` are **different tasks with no claim between them**. Nothing serialises
+two builds that disagree about which of them `R` requires, so both can be
+materialising one downstream over two different upstream DAGs at the same
+moment.
+
+Both declarations are legitimate. A task id promises a world state, not a
+provenance, so changing how `R` is produced — a different upstream, a
+different partitioning — while keeping its id is correct, and is exactly
+what the version-bump discipline is _not_ for. What is not legitimate is
+doing both at once.
+
+So the latest declaration wins when nobody else is on the task, and is
+refused when somebody is:
+
+- registering a task supersedes the static edges its declaration omits;
+- unless another **live** build holds that task, in which case the
+  registration is refused with `dependency_declaration_conflict`, naming
+  the builds in the way, and nothing is written;
+- the refused build fails at its trigger, or — if it asked — cancels those
+  builds and takes the tasks over.
+
+"Holds" is plan membership, which is wider than "declared these edges": a
+build that only inherited the task through plan closure may still run it,
+and a refused trigger with an actionable message is a much cheaper error
+than two builds crunching the same data.
+
+**An omitted declaration is not an empty one.** `dependency_task_ids: null`
+means "I am registering this task and saying nothing about its
+dependencies"; `[]` means "it has none". An empty list cannot carry both,
+and reading silence as a declaration would let a caller that never knew a
+task's dependencies delete them. Every SDK registration sends a list, so
+SDK-driven registration is always authoritative.
+
 ### Revocation is not a result
 
 "Acts on everything in its plan" is not "resets everything in its plan". A

@@ -264,6 +264,44 @@ class SDKVersionUnsupportedError(APIError):
         )
 
 
+class DependencyDeclarationConflictError(APIError):
+    """Two live builds declare different static dependencies for one task.
+
+    A task id promises a world state, not a provenance, so re-pointing a
+    task at a new upstream — or re-partitioning how it is produced — and
+    keeping the id is correct, and the registry takes the latest declaration
+    as authoritative. What it will not do is take it while another build is
+    running on the old one: both declarations are legitimate, both produce
+    the same target, and running the two of them is waste nobody asked for.
+
+    Raised by registration, so it surfaces at trigger time rather than as a
+    build that quietly does twice the work. The server's message names the
+    task, what changed, and which builds are in the way; ``build_ids`` is
+    there so a caller that has been asked to cancel them can.
+    """
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        task_id: str | None = None,
+        declared: "list[str] | None" = None,
+        recorded: "list[str] | None" = None,
+        build_ids: "list[str] | None" = None,
+        payload: dict | None = None,
+    ) -> None:
+        super().__init__(
+            detail or "Conflicting static dependency declaration",
+            status_code=409,
+            detail=detail,
+            payload=payload,
+        )
+        self.task_id = task_id
+        self.declared = declared or []
+        self.recorded = recorded or []
+        self.build_ids = build_ids or []
+
+
 class RateLimitError(APIError):
     """Per-minute rate limit exceeded (retryable).
 

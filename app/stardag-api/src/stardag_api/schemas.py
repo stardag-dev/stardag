@@ -204,7 +204,22 @@ class TaskCreate(BaseModel):
     task_data: dict
     version: str | None = None
     output_uri: str | None = None  # Path to task output (if FileSystemTarget)
-    dependency_task_ids: list[str] = []  # task_ids of upstream dependencies
+    # Upstream task_ids from this task's static ``requires()``.
+    #
+    # **A list is a declaration and is authoritative**: it is the task's
+    # whole static dependency set as the registering code sees it, so an
+    # edge it omits has stopped describing how the task is built and is
+    # superseded. That is what lets a task be re-pointed at a new upstream
+    # without minting a new id for a downstream whose promise has not
+    # changed.
+    #
+    # **None is not a declaration** — "I am registering this task and saying
+    # nothing about its dependencies" — and leaves recorded edges alone. The
+    # distinction exists because the two are genuinely different intents and
+    # an empty list cannot carry both: a caller that does not know a task's
+    # dependencies must not silently drop them. The SDK always sends a list,
+    # so SDK-driven registration is always authoritative.
+    dependency_task_ids: list[str] | None = None
     # The named concurrency-limit keys this task runs under, as the
     # registering app's ``limit_key_selector`` computes them. Recorded at
     # registration so the server knows which *pending* tasks want a key —

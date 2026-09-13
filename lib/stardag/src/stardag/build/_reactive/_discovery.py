@@ -5,7 +5,7 @@ import logging
 import typing
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Callable, Coroutine, Sequence
+from typing import Any, Awaitable, Callable, Coroutine, Sequence
 from uuid import UUID
 
 from stardag import (
@@ -13,6 +13,7 @@ from stardag import (
     TaskStruct,
     flatten_task_struct,
 )
+from stardag.exceptions import DependencyDeclarationConflictError
 from stardag.registry import (
     RegistryABC,
 )
@@ -174,11 +175,51 @@ def _limit_keys_for(
     return {task.id: list(selector(task)) for task in tasks}
 
 
+async def _register_chunk(
+    register: "Callable[[], Awaitable[Any]]",
+    *,
+    registry: RegistryABC,
+    cancel_conflicting: bool,
+) -> "Any":
+    """Register one chunk, optionally clearing a declaration conflict first.
+
+    The registry refuses a chunk that re-points a task another *live* build
+    is building differently: both declarations are legitimate, and running
+    them both is the waste the refusal exists to prevent. By default that
+    propagates and the build fails at trigger, which is the outcome to want
+    — the person who triggered it finds out immediately rather than paying
+    for two upstream DAGs.
+
+    With ``cancel_conflicting`` they asked for the other answer: cancel the
+    builds in the way and take the task over. Cascading, because a cancel
+    that leaves the other build's containers running would put two
+    executions on the same tasks — the very thing being avoided — and one
+    retry only, since a second refusal means something is starting builds
+    faster than this can clear them, and looping on that would be worse than
+    failing.
+    """
+    try:
+        return await register()
+    except DependencyDeclarationConflictError as conflict:
+        if not cancel_conflicting or not conflict.build_ids:
+            raise
+        logger.warning(
+            "Registration conflicts with build(s) %s over task %s; "
+            "cancelling them as requested, then retrying.",
+            ", ".join(conflict.build_ids),
+            conflict.task_id,
+        )
+        for build_id_str in conflict.build_ids:
+            await registry.build_cancel_aio(UUID(build_id_str), cascade=True)
+        return await register()
+
+
 async def discover_and_register_aio(
     registry: RegistryABC,
     build_id: UUID,
     tasks: TaskStruct,
     retry_failed: bool = False,
+    cancel_conflicting: bool = False,
     _chunk_size: int = 50,
     max_concurrent_discover: int = _DEFAULT_MAX_CONCURRENT_DISCOVER,
     limit_key_selector: "Callable[[BaseTask], Sequence[str]] | None" = None,
@@ -312,8 +353,16 @@ async def discover_and_register_aio(
         # registry whose bulk registration predates it is untouched unless
         # a selector is actually configured.
         keys = _limit_keys_for(chunk, limit_key_selector)
-        infos = await registry.task_register_bulk_aio(
-            build_id, chunk, **({"limit_keys": keys} if keys is not None else {})
+        register = partial(
+            registry.task_register_bulk_aio,
+            build_id,
+            chunk,
+            **({"limit_keys": keys} if keys is not None else {}),
+        )
+        infos = await _register_chunk(
+            register,
+            registry=registry,
+            cancel_conflicting=cancel_conflicting,
         )
         if not retry_failed:
             continue
