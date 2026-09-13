@@ -11,7 +11,7 @@
 # to in the trailing comment. This job holds `packages: write` and pushes the
 # image that `stardag self-host up` pulls by default, so a movable ref here is
 # a path to a malicious server image running in someone else's account. See
-# the note in publish.yml; `scripts/check-action-pins.sh` asserts the pins.
+# the note in publish.yml; `scripts/check-action-pins.py` asserts the pins.
 name: Publish Server Image
 
 on:

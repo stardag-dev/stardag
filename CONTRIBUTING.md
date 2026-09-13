@@ -129,10 +129,21 @@ brew install pinact   # or see the project's install instructions
 pinact run
 ```
 
-`scripts/check-action-pins.sh` runs as a pre-commit hook and fails on any
-unpinned ref or missing version comment. Note that pinact refuses to pin a
-branch ref; resolve those by hand to the release tag whose commit the branch
-head is at.
+`scripts/check-action-pins.py` runs as a pre-commit hook and fails on any
+unpinned ref or missing version comment. It parses the workflow YAML rather
+than matching lines, so it sees every `uses` — a step's, a flow-style or
+quoted one, and `jobs.<id>.uses` calling a reusable workflow. Container
+actions are held to the same standard by image digest
+(`docker://<image>@sha256:<digest>`); only a local `./…` action is exempt,
+being this repo's own tracked code.
+
+Two things pinact will not do for you:
+
+- It refuses to pin a **branch** ref. Resolve those by hand to the release tag
+  whose commit the branch head is at — `pypa/gh-action-pypi-publish` is the
+  one in this repo, and `publish.yml` explains why.
+- It does not touch `docker://` refs. Pin those with the digest from
+  `docker buildx imagetools inspect <image>:<tag>`.
 
 ## Documentation
 

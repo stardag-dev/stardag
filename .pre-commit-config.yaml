@@ -35,8 +35,14 @@ repos:
       # movable ref look wrong.
       - id: check-action-pins
         name: actions pinned to commit SHAs
-        entry: scripts/check-action-pins.sh
-        language: system
+        entry: scripts/check-action-pins.py
+        # `python` rather than `system`: pre-commit builds the hook its own
+        # env, so pyyaml is guaranteed without asking every contributor (or
+        # the CI runner) to have it. The check parses the workflows because
+        # `uses` is a mapping key, not a line format — see the module
+        # docstring.
+        language: python
+        additional_dependencies: ["pyyaml==6.0.3"]
         files: ^\.github/workflows/.*\.ya?ml$
         pass_filenames: false
         verbose: true

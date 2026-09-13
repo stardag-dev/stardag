@@ -7,7 +7,7 @@
 # path to a malicious `stardag` published to PyPI under our name and signed as
 # ours, reaching everyone who installs it — not just us.
 #
-# `scripts/check-action-pins.sh` (a pre-commit hook) asserts the pins are all
+# `scripts/check-action-pins.py` (a pre-commit hook) asserts the pins are all
 # still there; `pinact run` refreshes them. See CONTRIBUTING.md.
 #
 # Note on pypa/gh-action-pypi-publish: PyPA's own documentation says to use
