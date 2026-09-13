@@ -589,6 +589,92 @@ class TestTaskInterrupt404Swallow:
         assert "/interrupt?" in seen["url"]
         assert "reason=hit+the+300s+timeout" in seen["url"]
 
+    def test_preempt_route_missing_404_is_swallowed(self, caplog):
+        """Same degradation for ``/preempt``, and here it costs even less:
+        the event releases nothing and starts nothing, so an old server
+        loses only the ability to notice a restart that never came before
+        the full claim lapses — i.e. exactly the old behaviour."""
+        import logging
+        from uuid import UUID
+
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Not Found"})
+
+        registry = self._registry(handler)
+
+        with caplog.at_level(logging.WARNING):
+            registry.task_preempt(
+                build_id=UUID(self.BUILD_ID),
+                task=self._fake_task(),  # type: ignore[arg-type]
+                reason="preempted",
+            )
+
+        assert any(
+            "does not support POST /preempt" in rec.message for rec in caplog.records
+        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
+
+    def test_preempt_app_level_404_propagates(self):
+        from uuid import UUID
+
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Build not found"})
+
+        registry = self._registry(handler)
+
+        with pytest.raises(NotFoundError):
+            registry.task_preempt(
+                build_id=UUID(self.BUILD_ID),
+                task=self._fake_task(),  # type: ignore[arg-type]
+            )
+
+    @pytest.mark.asyncio
+    async def test_aio_preempt_route_missing_404_is_swallowed(self, caplog):
+        import logging
+        from uuid import UUID
+
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Not Found"})
+
+        registry = self._registry(handler)
+        self._inject_async_mock(registry, handler)
+
+        with caplog.at_level(logging.WARNING):
+            await registry.task_preempt_aio(
+                build_id=UUID(self.BUILD_ID),
+                task=self._fake_task(),  # type: ignore[arg-type]
+            )
+
+        assert any(
+            "does not support POST /preempt" in rec.message for rec in caplog.records
+        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
+
+    def test_the_preempt_reason_rides_as_a_query_param(self):
+        from uuid import UUID
+
+        import httpx
+
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            return httpx.Response(200, json={"task_id": "t", "status": "running"})
+
+        registry = self._registry(handler)
+        registry.task_preempt(
+            build_id=UUID(self.BUILD_ID),
+            task=self._fake_task(),  # type: ignore[arg-type]
+            reason="preempted 12.0s in",
+        )
+
+        assert "/preempt?" in seen["url"]
+        assert "reason=preempted+12.0s+in" in seen["url"]
+
 
 class TestBuildResume404Swallow:
     """``build_resume`` / ``build_resume_aio`` follow the same backward-

@@ -1176,6 +1176,31 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
+    def task_preempt(
+        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+    ) -> None:
+        """Record that the platform is restarting this execution itself.
+
+        A preemption, as distinct from :meth:`task_interrupt`. The
+        container was taken away, but the backend restarts the *same*
+        execution — same ref, no attempt spent — so the task does not
+        change status and does **not** release its claim: releasing it
+        would invite a second, concurrent execution of a task that is
+        about to resume.
+
+        What it records is that a restart is now *due*, which is otherwise
+        invisible: a task whose restart never arrives is indistinguishable
+        from one running happily, and stays that way until its whole claim
+        lapses. The registry shortens that claim to a restart-sized grace
+        instead, and the restart's own ``task_start`` re-grants it.
+
+        Args:
+            build_id: The build UUID returned by build_start.
+            task: The task whose execution was preempted.
+            reason: Optional description of what preempted it.
+        """
+        pass
+
     def task_suspend(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as suspended waiting for dynamic dependencies.
 
@@ -1460,6 +1485,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
     ) -> None:
         """Async version of task_interrupt."""
         self.task_interrupt(build_id, task, reason)
+
+    async def task_preempt_aio(
+        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+    ) -> None:
+        """Async version of task_preempt."""
+        self.task_preempt(build_id, task, reason)
 
     async def task_suspend_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_suspend."""

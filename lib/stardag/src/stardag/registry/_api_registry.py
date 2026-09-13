@@ -859,6 +859,39 @@ class APIRegistry(RegistryABC):
                 task.id,
             )
 
+    def task_preempt(
+        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+    ) -> None:
+        """Record that the platform is restarting this execution itself.
+
+        Degrades to silence on a server without the route, like
+        :meth:`task_interrupt` — and here the degradation costs even less,
+        because this event releases nothing and starts nothing. What an
+        old server loses is only the ability to notice a restart that
+        never arrives before the full claim lapses, which is exactly the
+        behaviour that predates this call.
+        """
+        params = self._get_event_params()
+        if reason:
+            params["reason"] = reason
+        try:
+            self._request(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/preempt",
+                params=params,
+                operation=f"Record preemption of task {task.id}",
+            )
+        except NotFoundError as e:
+            if not is_missing_route_error(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /preempt; the "
+                "preemption of task %s will not be recorded, so a restart "
+                "that never arrives will be noticed only when its full "
+                "execution claim lapses. Upgrade the Registry API.",
+                task.id,
+            )
+
     def task_suspend(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as suspended (waiting for dynamic dependencies)."""
         self._request(
@@ -2218,6 +2251,33 @@ class APIRegistry(RegistryABC):
                 "interruption of task %s will not be recorded. Upgrade the "
                 "Registry API for immediate rescheduling of interrupted "
                 "tasks.",
+                task.id,
+            )
+
+    async def task_preempt_aio(
+        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+    ) -> None:
+        """Async version - record a platform preemption.
+
+        Same old-server behaviour as the sync version: silence.
+        """
+        params = self._get_event_params()
+        if reason:
+            params["reason"] = reason
+        try:
+            await self._arequest(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/preempt",
+                params=params,
+                operation=f"Record preemption of task {task.id}",
+            )
+        except NotFoundError as e:
+            if not is_missing_route_error(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /preempt; the "
+                "preemption of task %s will not be recorded. Upgrade the "
+                "Registry API.",
                 task.id,
             )
 
