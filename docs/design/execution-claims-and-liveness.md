@@ -137,9 +137,23 @@ un-gate it.
 
 Note this is not the static-edge problem, which is a different shape: two
 live builds can declare different static upstreams for one task id, because
-`U1` and `U2` are different tasks with no claim between them. Dynamic
-divergence cannot happen concurrently — one task, one claim, one executing
-build at a time — so it needs retraction, not arbitration.
+`U1` and `U2` are different tasks with no claim between them. Between two
+_claimed_ executions there is no such gap — one task, one claim, one
+executing build at a time — so dynamic divergence is sequential, and what it
+needs is retraction rather than arbitration.
+
+**That holds only as far as the claim does**, which is worth stating plainly
+because it is easy to read the sentence above as stronger than it is. The
+claim is taken for _probeable_ executions; under `claim=None` a local
+executor takes none at all, and the deprecated global lock is what used to
+cover those. Two unclaimed builds can therefore run one task at once, yield
+different fan-outs, and have either one's reset retract the other's edges —
+because a retraction is keyed by the task, not by the attempt that made
+them. Concurrent unclaimed execution is already outside what the claim
+promises (the two runs write the same target), so this adds a way for it to
+go wrong rather than a new failure of the claim; the general remedy is to
+bind an edge to the execution attempt that asserted it, which is the same
+missing attempt identity the late-write case needs.
 
 ### Revocation is not a result
 

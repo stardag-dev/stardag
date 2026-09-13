@@ -9,6 +9,17 @@ stops counting when the attempt that produced it is abandoned.
 
 Nothing abandons a static edge, so nothing here touches one.
 
+**Scope of the "one attempt at a time" assumption.** A retraction is keyed
+by the task, not by the attempt that recorded the edges, which is sound as
+far as the execution claim reaches: a claimed task has one executing build
+at a time, so its attempts are sequential. Under ``claim=None`` a local
+executor takes no claim, and two such builds can run one task at once — in
+which case either one's reset retracts the other's edges. That configuration
+is already outside what the claim promises (both runs write the same
+target); binding an edge to its attempt is the general fix, and the same
+missing identity would close the late-write race a worker of an abandoned
+attempt can still win.
+
 Why it is needed at all: dynamic edges are written ``ON CONFLICT DO
 NOTHING``, so a task's set only ever grew across attempts. Usually invisible,
 because a previous generation's children are COMPLETED and completed
