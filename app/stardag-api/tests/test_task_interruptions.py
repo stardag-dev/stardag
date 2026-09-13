@@ -597,10 +597,14 @@ async def test_the_replay_agrees_with_the_row_about_a_stale_report(
     client: AsyncClient,
 ):
     """The two derivations answer the same question for different readers —
-    the per-build view the UI and the frontier read, and the
-    environment-global row. A report the row refuses but a replay applies
-    would show one task as INTERRUPTED in one place and RUNNING in the
-    other."""
+    the per-build view and the environment-global row. A report the row
+    refuses but a replay applies would show one task as INTERRUPTED in one
+    place and RUNNING in the other.
+
+    Read off the **event response**, which is the one thing that returns
+    ``get_task_status_in_build``'s answer: ``GET /builds/{id}/tasks`` is
+    backed by the denormalised row, so asserting there would pass with the
+    replay rule removed entirely."""
     build_id = await _new_build(client)
     await _register_task(client, build_id, "t-1")
     await client.post(
@@ -612,13 +616,42 @@ async def test_the_replay_agrees_with_the_row_about_a_stale_report(
         params={"executor": "modal", "executor_ref": "fc-new"},
     )
 
-    await client.post(
+    stale = await client.post(
         f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
         params={"executor_ref": "fc-old"},
     )
 
+    assert stale.json()["status"] == "running", stale.text
+    assert stale.json()["latest_status"] == "running"
     assert (await _task(client, "t-1"))["latest_status"] == "running"
-    assert (await _replayed(client, build_id, "t-1"))["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_clears_the_ref_the_replay_matches_against(
+    client: AsyncClient,
+):
+    """A retry re-runs from scratch, so the row clears the executor ref with
+    it. The replay has to clear the ref it tracks at the same point, or a
+    delayed report from the abandoned execution is accepted there after a
+    resume while the row refuses it — the divergence the ref rule exists to
+    close, reintroduced one branch over."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-old"},
+    )
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/fail")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/retry")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/resume")
+
+    stale = await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
+        params={"executor_ref": "fc-old"},
+    )
+
+    assert stale.json()["status"] == "running", stale.text
+    assert stale.json()["latest_status"] == "running"
 
 
 @pytest.mark.asyncio

@@ -924,6 +924,9 @@ async def get_task_status_in_build(
                 status = TaskStatus.PENDING
                 completed_at = None
                 error_message = None
+                # Cleared with the status, exactly as the row fold does it —
+                # see the twin in get_all_task_statuses_in_build.
+                current_ref = None
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
             # Informational: blocked by global lock, stays PENDING
             pass
@@ -1020,6 +1023,12 @@ async def get_all_task_statuses_in_build(
                 status = TaskStatus.PENDING
                 completed_at = None
                 error_message = None
+                # The row fold clears the executor ref here too: a retry
+                # re-runs from scratch, so the ref of the execution that
+                # will never resume must not survive it. Keeping it would
+                # let a delayed report from that execution be accepted
+                # after a later resume, by this replay but not by the row.
+                current_refs.pop(task_id, None)
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
             # Informational: blocked by global lock, stays PENDING
             pass
