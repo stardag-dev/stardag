@@ -3374,7 +3374,12 @@ async def interrupt_task(
         auth,
         reason,
         commit_hash=commit_hash,
-        extra_metadata=({"executor_ref": executor_ref} if executor_ref else None),
+        # ``is not None``, not truthiness, matching how ``/start``
+        # records the ref: an empty string dropped here would reach the
+        # fold as *no* ref and take the legacy accept-anything path.
+        extra_metadata=(
+            {"executor_ref": executor_ref} if executor_ref is not None else None
+        ),
     )
 
 
@@ -3422,7 +3427,12 @@ async def preempt_task(
         auth,
         reason,
         commit_hash=commit_hash,
-        extra_metadata=({"executor_ref": executor_ref} if executor_ref else None),
+        # ``is not None``, not truthiness, matching how ``/start``
+        # records the ref: an empty string dropped here would reach the
+        # fold as *no* ref and take the legacy accept-anything path.
+        extra_metadata=(
+            {"executor_ref": executor_ref} if executor_ref is not None else None
+        ),
     )
 
 
