@@ -1,0 +1,175 @@
+"""An execution the platform ended is reported, not mistaken for a restart.
+
+STA-44, reproduced against a real worker and a real registry.
+
+A worker that catches a platform interruption and asks to be resumed has to
+decide one thing before it dies: *is anything going to restart this input?*
+Only a preemption is. A function timeout and an explicit cancel both end the
+call for good, and both arrive as ``InputCancellation`` — so a worker that
+guesses "preemption" there reports nothing, nothing restarts the input, and
+the task sits RUNNING behind a claim nobody will release until the claim
+lapses. In the incident that was a day.
+
+It used to guess from ``elapsed >= declared_timeout - 5s``, on a clock that
+starts *inside* the container after boot, image load and deserialisation. It
+therefore under-reads, and the guess was wrong by three seconds on an
+86400-second worker.
+
+**Why this scenario cancels the call rather than waiting for a timeout.**
+The two are the same event as far as the worker can see — identical signal,
+identical exception, identical message — and a cancel arrives on demand
+where a timeout would cost this tier the worker's whole 600s budget. It is
+also the *harder* case: elapsed is nowhere near the declared timeout, so the
+old rule classifies it as a preemption with total confidence. Against the
+fix, the exception chain says ``InputCancellation`` and the worker reports.
+
+**Why the cancel comes from outside stardag.** A cancel stardag issued
+itself would be one it has already recorded, and the registry would then
+(correctly) refuse the interruption as a report about a task it just
+cancelled — the authority rule. Cancelling the Modal call directly is a
+platform-ended execution the registry has no other way to learn about,
+which is exactly the class of event this path exists for.
+
+What the old code does here: nothing is reported, the task stays RUNNING,
+no tick is woken, and the build hangs to the pytest timeout.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+
+from stardag_integration_tests.registry_live._events import task_events
+from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
+from stardag_integration_tests.registry_live._wait import (
+    assert_trail_complete,
+    describe,
+    find_task,
+    tick_summaries,
+    wait_for_task_status,
+    wait_for_terminal,
+    wait_until,
+)
+
+registry_live_guard()
+
+pytestmark = [
+    pytest.mark.registry_live,
+    pytest.mark.timeout(900),
+]
+
+# Long enough that the task is still asleep when the harness has noticed it
+# is RUNNING and cancelled its call — the sleep is the window the whole
+# scenario happens inside. Short enough that the *resumed* execution, which
+# starts the sleep again from zero, does not dominate the run.
+SLEEP_SECONDS = 45
+
+# Ticks exit quickly so the interruption is met by a woken tick rather than
+# by one that happened to still be lingering.
+TICK_LINGER_SECONDS = 10
+
+BUILD_TIMEOUT_SECONDS = 600
+
+# Time for the first worker to get a container and report itself RUNNING
+# with the call id the cancel needs.
+RUNNING_TIMEOUT_SECONDS = 300
+
+
+def _executor_ref(task_id: str) -> str | None:
+    """The Modal call id the registry has recorded for this task, if any.
+
+    Two starts are recorded per execution — the claiming one, then the one
+    carrying the ref — so a task can be RUNNING for a moment with no ref to
+    cancel. Hence polling for the ref rather than for the status.
+    """
+    row = find_task(str(task_id), task_name="Resumable")
+    return row.latest_executor_ref
+
+
+def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
+    deployment: Deployment,
+) -> None:
+    import modal
+
+    from stardag_integration_tests.registry_live.dag_app import app
+    from stardag_integration_tests.registry_live.tasks import Resumable
+
+    salt = uuid.uuid4().hex
+    root = Resumable(salt=salt, seconds=SLEEP_SECONDS)
+
+    triggered = app.build_trigger(
+        root,
+        reactive=True,
+        tick_kwargs={
+            "linger_seconds": TICK_LINGER_SECONDS,
+            "poll_interval_seconds": 3,
+        },
+    )
+    build_id = triggered.build_id
+
+    wait_for_task_status(
+        root.id,
+        expected="running",
+        build_id=build_id,
+        timeout=RUNNING_TIMEOUT_SECONDS,
+    )
+    ref = wait_until(
+        lambda: _executor_ref(root.id),
+        build_id=build_id,
+        timeout=RUNNING_TIMEOUT_SECONDS,
+        what=f"task {root.id} to record its Modal call id",
+    )
+
+    # The platform ends the execution. From inside the container this is
+    # indistinguishable from the function timeout firing.
+    modal.FunctionCall.from_id(ref).cancel()
+
+    # The assertion the incident is about. The worker is the only thing that
+    # knows this execution has ended: it is dying, nothing else is watching,
+    # and the tick that spawned it lingered out long ago.
+    def interruption_recorded() -> list[dict] | None:
+        found = task_events(deployment, root.id)
+        types = [event["event_type"] for event in found]
+        return found if "task_interrupted" in types else None
+
+    events = wait_until(
+        interruption_recorded,
+        build_id=build_id,
+        timeout=RUNNING_TIMEOUT_SECONDS,
+        what=(
+            f"task {root.id} to record an interruption. Without one the "
+            "worker classified a cancelled input as a preemption and "
+            "reported nothing, which is STA-44"
+        ),
+    )
+    assert not any(event["event_type"] == "task_preempted" for event in events), (
+        "The worker recorded a preemption for an input nothing was going to "
+        "restart. The exception chain carried an InputCancellation, so the "
+        "classification should not have consulted the clock at all.\n"
+        + describe(build_id)
+    )
+
+    # ...and the recovery the report buys: the interruption released the
+    # claim and woke a tick, which resumed the task on a fresh container.
+    status = wait_for_terminal(build_id, timeout=BUILD_TIMEOUT_SECONDS)
+    assert status == "completed", describe(build_id)
+
+    summaries = tick_summaries(build_id)
+    assert_trail_complete(build_id, summaries)
+
+    # The resumption was a *resumption*, not a retry. An interruption is
+    # bounded by its own budget and deliberately spends no attempt — a task
+    # designed to be killed and resumed until it converges would otherwise
+    # fail the build for the one reason it was built to survive.
+    row = find_task(str(root.id), task_name="Resumable")
+    assert row.latest_status == "completed", describe(build_id)
+
+    resumptions = sum(s.get("interruptions_restarted", 0) for s in summaries)
+    assert resumptions >= 1, (
+        "No tick reported resuming the interrupted task, so the build "
+        "completed by some other route than the one under test.\n" + describe(build_id)
+    )
+
+    deployment.assert_same_container()
