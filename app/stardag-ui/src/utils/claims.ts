@@ -47,6 +47,31 @@ export function availableClaimActions(status: TaskStatus): ClaimAction[] {
 /** A task whose global status is one of these is holding an execution claim. */
 export const CLAIM_HOLDING_STATUSES: TaskStatus[] = ["running", "suspended"];
 
+/**
+ * Whether the platform said it was restarting this task's execution and
+ * the restart has not landed yet.
+ *
+ * Derived rather than stored, which is what keeps it honest: the restarted
+ * execution records its own `task_started`, moving `latest_status_at` past
+ * `latest_preempted_at`, and this goes false with nothing to clear. A task
+ * that is no longer running cannot be waiting for a restart at all.
+ *
+ * Worth surfacing because RUNNING alone cannot distinguish "a container is
+ * working" from "a container was taken away and the replacement never
+ * arrived". The claim's expiry is pulled in to a few minutes when this is
+ * true, so the pair reads as "a restart is due by then".
+ */
+export function restartExpected(task: {
+  latest_status?: TaskStatus | null;
+  latest_status_at?: string | null;
+  latest_preempted_at?: string | null;
+}): boolean {
+  if (task.latest_status !== "running") return false;
+  if (!task.latest_preempted_at) return false;
+  if (!task.latest_status_at) return true;
+  return Date.parse(task.latest_preempted_at) > Date.parse(task.latest_status_at);
+}
+
 export type SchedulingPanelForm = "hidden" | "collapsed" | "stalled" | "satisfied";
 
 /**

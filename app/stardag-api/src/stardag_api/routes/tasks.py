@@ -154,6 +154,8 @@ async def list_tasks(
                 latest_status=t.latest_status,
                 latest_status_at=t.latest_status_at,
                 latest_status_build_id=t.latest_status_build_id,
+                latest_status_expires_at=t.latest_status_expires_at,
+                latest_preempted_at=t.latest_preempted_at,
             )
             for t in tasks
         ],

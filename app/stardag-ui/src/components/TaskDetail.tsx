@@ -293,6 +293,11 @@ function getEventTypeStyle(eventType: EventType): string {
   if (eventType.includes("waiting") || eventType.includes("suspended")) {
     return "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400";
   }
+  // Orange, matching StatusBadge's interrupted: the platform ended the
+  // execution, so nothing is wrong and nothing is done.
+  if (eventType.includes("interrupted") || eventType.includes("preempted")) {
+    return "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400";
+  }
   return "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400";
 }
 
