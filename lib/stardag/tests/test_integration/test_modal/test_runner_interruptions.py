@@ -265,7 +265,6 @@ class TestClassifyByExceptionChain:
         [
             # The backend restarts the same call id. Keep the claim.
             (KeyboardInterrupt(), _PREEMPTION),
-            (SystemExit(), _PREEMPTION),
             # Nothing restarts a call the platform has finished with,
             # whether it finished by timeout or by an explicit cancel —
             # indistinguishable here, and deliberately not distinguished.
@@ -284,6 +283,28 @@ class TestClassifyByExceptionChain:
                 )
                 == expected
             )
+
+    def test_a_system_exit_on_the_chain_is_not_a_platform_signal(self):
+        """``SystemExit`` is not in ``MODAL_INTERRUPTIONS`` — the platform
+        does not end an execution with one — so it must not be read off the
+        chain as a preemption. Read as one, the runner would translate the
+        request back into an interrupt, the backend would restart the input,
+        the task would exit the same way, and the loop would repeat ungated
+        by ``retries``, because a backend restart spends no attempt. Falling
+        through to the clock is bounded."""
+        request = _checkpointed(SystemExit())
+        assert (
+            _classify_interruption(
+                request, elapsed_seconds=5.0, function_timeout_seconds=300.0
+            )
+            == _PREEMPTION  # the clock's answer, not the chain's
+        )
+        assert (
+            _classify_interruption(
+                request, elapsed_seconds=300.0, function_timeout_seconds=300.0
+            )
+            == _TIMEOUT
+        )
 
     def test_the_incident(self):
         """STA-44, to the numbers. A 86400s worker whose timeout fired at

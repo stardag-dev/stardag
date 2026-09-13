@@ -202,6 +202,15 @@ def _platform_signal(exception: BaseException) -> BaseException | None:
     to a signal (a self-imposed time budget, a spot-price check) — a
     legitimate thing to do, and why the elapsed-time fallback still exists.
 
+    **The set is exactly** :data:`MODAL_INTERRUPTIONS`, the pair the
+    platform actually ends an execution with, and nothing wider. A
+    ``SystemExit`` is not one of them: read as a preemption it would have
+    the runner translate the request back into an interrupt, the backend
+    restart the input, the task exit the same way, and the loop repeat —
+    ungated by ``retries``, because a backend restart spends no attempt.
+    An unrecognised exception on the chain falls through to the clock,
+    which is bounded.
+
     **Both links are followed, not one.** ``__cause__`` and ``__context__``
     are not two names for the same chain: an exception can carry both at
     once, with an explicit cause of its own while the platform signal is
@@ -209,10 +218,6 @@ def _platform_signal(exception: BaseException) -> BaseException | None:
     inside an ``except MODAL_INTERRUPTIONS`` block produces exactly that,
     and following only ``__cause__`` would walk away from the answer.
     """
-    signals: tuple[type[BaseException], ...] = (KeyboardInterrupt, SystemExit)
-    if _InputCancellation is not None:
-        signals = signals + (_InputCancellation,)
-
     seen: set[int] = set()
     # Breadth-first, so the *nearest* signal wins when a chain forks —
     # and bounded rather than exhaustive: a chain is normally one link, and
@@ -226,7 +231,7 @@ def _platform_signal(exception: BaseException) -> BaseException | None:
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if current is not exception and isinstance(current, signals):
+        if current is not exception and isinstance(current, MODAL_INTERRUPTIONS):
             return current
         queue.extend(
             link
@@ -311,11 +316,9 @@ def _classify_interruption(
     if isinstance(exception, ResumableInterruption):
         signal = _platform_signal(exception)
         if signal is not None:
-            return (
-                _PREEMPTION
-                if isinstance(signal, (KeyboardInterrupt, SystemExit))
-                else _TIMEOUT
-            )
+            # KeyboardInterrupt is the preemption; the only other member of
+            # the set is InputCancellation, which is a timeout or a cancel.
+            return _PREEMPTION if isinstance(signal, KeyboardInterrupt) else _TIMEOUT
         timed_out = function_timeout_seconds is None or (
             elapsed_seconds
             >= function_timeout_seconds - _TIMEOUT_DETECTION_SLACK_SECONDS
