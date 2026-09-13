@@ -181,6 +181,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         # Set to make the next bulk registration refuse with a declaration
         # conflict, once.
         self.declaration_conflict: Exception | None = None
+        # A queue, for the chunk that collides with more than one build: a
+        # refusal reports the first conflicting task only, so the caller has
+        # to be refused again after clearing the first one.
+        self.declaration_conflicts: list[Exception] = []
         self.cancelled_builds: list[tuple[UUID, bool]] = []
         # Set to make every id-based retry fail — a transient registry
         # error, or a route an older server does not serve.
@@ -321,6 +325,8 @@ class FakeReactiveRegistry(NoOpRegistry):
     # --- registry surface used by the tick ---
 
     async def task_register_bulk_aio(self, build_id, tasks, *, limit_keys=None):
+        if self.declaration_conflicts:
+            raise self.declaration_conflicts.pop(0)
         if self.declaration_conflict is not None:
             # Refused once, as the registry refuses a chunk that re-points a
             # task a live build is building differently. Cleared on the way

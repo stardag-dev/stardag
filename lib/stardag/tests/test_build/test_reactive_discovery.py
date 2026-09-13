@@ -5,10 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import typing
-
-import pytest
 from uuid import UUID, uuid4
 
+import pytest
 
 from stardag import (
     BaseTask,
@@ -321,6 +320,52 @@ class TestDeclarationConflict:
 
         assert registry.cancelled_builds == [(other, True)]
         assert root.id in result.incomplete, "the retry did not go through"
+
+    async def test_every_build_in_the_way_is_cleared_not_just_the_first(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A refusal names the first conflicting task, so a chunk colliding
+        with two builds over two tasks surfaces them one at a time.
+
+        Retrying once would cancel the first build and then fail on the
+        second — having taken somebody's work down and still not run, which
+        is the worst of both answers.
+        """
+        root = SyncOnlyTask(name="conflict-two-builds-root")
+        first, second = uuid4(), uuid4()
+        registry = FakeReactiveRegistry(root_task_ids=[str(root.id)])
+        registry.declaration_conflicts = [
+            self._conflict(first),
+            self._conflict(second),
+        ]
+
+        result = await discover_and_register_aio(
+            registry, uuid4(), root, cancel_conflicting=True
+        )
+
+        assert registry.cancelled_builds == [(first, True), (second, True)]
+        assert root.id in result.incomplete, "the retry did not go through"
+
+    async def test_a_refusal_naming_only_cancelled_builds_gives_up(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The loop's own termination condition. Cancelling a build it has
+        already cancelled would clear nothing, so a refusal that names only
+        those means something is starting builds faster than this can stop
+        them — and looping on that is worse than failing."""
+        root = SyncOnlyTask(name="conflict-same-build-root")
+        other = uuid4()
+        registry = FakeReactiveRegistry(root_task_ids=[str(root.id)])
+        registry.declaration_conflicts = [
+            self._conflict(other),
+            self._conflict(other),
+        ]
+
+        with pytest.raises(DependencyDeclarationConflictError):
+            await discover_and_register_aio(
+                registry, uuid4(), root, cancel_conflicting=True
+            )
+        assert registry.cancelled_builds == [(other, True)], "cancelled once only"
 
     async def test_a_conflict_naming_nobody_is_not_retried(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]

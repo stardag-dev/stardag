@@ -1300,6 +1300,16 @@ class StardagApp:
         for the take-over answer, so it raises rather than quietly ignoring
         the flag.
 
+        **It covers this build's own discovery, not its workers'.** A task
+        that first appears after a dynamic yield is registered from the
+        worker, which does not carry this choice, so a conflict discovered
+        there is refused whatever was asked for here — and, since worker
+        reporting is best-effort, refused quietly: the parent suspends
+        rather than failing loudly. Static divergence on a *yielded*
+        subgraph is the narrower case and wants the option persisted with
+        the build to fix properly; until then, treat this as covering the
+        DAG the trigger can see.
+
         Requires registry credentials in the calling process (the active
         stardag profile), in addition to Modal credentials. If no registry is
         configured, use :meth:`build_spawn` instead.

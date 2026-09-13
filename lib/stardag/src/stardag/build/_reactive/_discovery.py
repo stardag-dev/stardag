@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 # filesystem can raise it, and one on a stricter backend can lower it.
 _DEFAULT_MAX_CONCURRENT_DISCOVER = 16
 
+# A backstop on ``cancel_conflicting``, not a tuning knob. Clearing the way
+# already terminates on its own — every pass has to cancel a build it has
+# not cancelled before — so reaching this means builds are being started
+# faster than they can be cancelled, and at that point failing is the kinder
+# answer than cancelling an unbounded number of other people's work.
+_MAX_CONFLICTING_BUILDS = 32
+
 
 # =============================================================================
 # Bounded concurrency (shared by discovery and the tick)
@@ -193,25 +200,38 @@ async def _register_chunk(
     With ``cancel_conflicting`` they asked for the other answer: cancel the
     builds in the way and take the task over. Cascading, because a cancel
     that leaves the other build's containers running would put two
-    executions on the same tasks — the very thing being avoided — and one
-    retry only, since a second refusal means something is starting builds
-    faster than this can clear them, and looping on that would be worse than
-    failing.
+    executions on the same tasks — the very thing being avoided.
+
+    **Retried until the way is clear, not once.** A refusal reports the
+    first conflicting task in the chunk, so a chunk that collides with two
+    different builds over two different tasks surfaces them one at a time:
+    a single retry would cancel the first build and then fail on the
+    second, having taken somebody's work down and still not run. Each pass
+    must cancel at least one build it has not cancelled before, which is
+    what keeps this from looping — a build can only be in the way once, and
+    a refusal naming only builds already cancelled means something is
+    starting them faster than this can clear them, which is a reason to
+    fail rather than to keep trying.
     """
-    try:
-        return await register()
-    except DependencyDeclarationConflictError as conflict:
-        if not cancel_conflicting or not conflict.build_ids:
-            raise
-        logger.warning(
-            "Registration conflicts with build(s) %s over task %s; "
-            "cancelling them as requested, then retrying.",
-            ", ".join(conflict.build_ids),
-            conflict.task_id,
-        )
-        for build_id_str in conflict.build_ids:
-            await registry.build_cancel_aio(UUID(build_id_str), cascade=True)
-        return await register()
+    cancelled: set[str] = set()
+    while True:
+        try:
+            return await register()
+        except DependencyDeclarationConflictError as conflict:
+            if not cancel_conflicting or not conflict.build_ids:
+                raise
+            fresh = [b for b in conflict.build_ids if b not in cancelled]
+            if not fresh or len(cancelled) >= _MAX_CONFLICTING_BUILDS:
+                raise
+            logger.warning(
+                "Registration conflicts with build(s) %s over task %s; "
+                "cancelling them as requested, then retrying.",
+                ", ".join(fresh),
+                conflict.task_id,
+            )
+            for build_id_str in fresh:
+                await registry.build_cancel_aio(UUID(build_id_str), cascade=True)
+                cancelled.add(build_id_str)
 
 
 async def discover_and_register_aio(
