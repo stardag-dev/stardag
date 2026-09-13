@@ -107,12 +107,20 @@ starts at each re-trigger). An exception _inside_ your task is reported by
 the worker as `FAILED` and never reaches this budget; that is what Modal's
 own `retries=` is for.
 
-A task the platform took away — preempted, or past its `timeout` — that
-caught the interruption, checkpointed and raised `ResumableInterruption`
-is recorded `INTERRUPTED` and resumed, up to `max_interruptions` (default
-20). An interruption the task did not catch is an ordinary failure: it had
-no plan for one. Recipe and knobs: [Preemption and
+A task past its `timeout` that caught the interruption, checkpointed and
+raised `ResumableInterruption` is recorded `INTERRUPTED` and resumed, up to
+`max_interruptions` (default 20). A task **preempted** the same way is not:
+Modal restarts that input itself, on the same call id and in seconds, which
+is better than a reschedule on every count — so the worker keeps its claim
+and gets out of the way, recording only that a restart is now due. An
+interruption the task did not catch is an ordinary failure: it had no plan
+for one. Recipe and knobs: [Preemption and
 timeouts](../how-to/integrate-modal.md#preemption-and-timeouts).
+
+Which of the two it is comes from the exception the task caught, not from
+how long the execution had been running — Modal raises `KeyboardInterrupt`
+for a preemption and `InputCancellation` for a timeout, and only the first
+restarts.
 
 ### Wake-ups: how a build with no process learns something changed
 
@@ -185,6 +193,25 @@ registry whether or not anything is building, enough to keep a
 scale-to-zero database awake. Turn it on when leaving a build stalled for
 even a few minutes is unacceptable, and pick the period from how long that
 is — it is the recovery time for the two cases above, nothing else.
+
+**Turn it on if you run long detached tasks.** Everything else in this
+chapter is triggered by a write: a status changes, the registry flags the
+builds it concerns, the next scheduler pass carries the wake-up. A claim
+_expiring_ is not a write. Nobody records it, so nothing is flagged, and
+the recovery only happens when something looks — which the watchdog is the
+only thing that reliably does.
+
+There is no way to make it self-limiting by scheduling a single wake-up at
+the moment a claim is due to lapse. Modal has no delayed invocation: a
+schedule is `Cron` or `Period`, both recurring and both fixed at deploy
+time, and `Function.spawn()` takes no start time. "Wake at T" is therefore
+only expressible as a container that stays alive until T — which for a
+worker timeout measured in hours is the cost the reactive mode exists to
+avoid — or as a recurring sweep, which is this.
+
+So the period is a genuine trade: it is the longest a silently-dead worker
+can hold a claim before anything notices. A minute of sweeping against a
+day of a wedged task is usually the easy side of that.
 
 The sweep itself is cheap in proportion to the environment: one pass per
 running build, per period, each in a container that exits as soon as it has
