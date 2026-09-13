@@ -201,6 +201,11 @@ def _reports_on_the_current_execution(task: Task, event: Event) -> bool:
 # is the only trace that the execution ended at all.
 REPORT_APPLIED_KEY = "report_applied"
 
+# The event types a worker sends to describe the end of *its own*
+# execution, and therefore the ones that can be refused rather than
+# applied. Named so the refusal paths cannot drift apart.
+_END_OF_EXECUTION_REPORTS = (EventType.TASK_INTERRUPTED, EventType.TASK_PREEMPTED)
+
 
 def _mark_report_refused(event: Event) -> None:
     """Record that this report was kept as audit but changed nothing.
@@ -566,6 +571,13 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
 
     # All branches below are no-ops once the task is COMPLETED.
     if task.latest_status == TaskStatus.COMPLETED:
+        # A report that lands after somebody completed the task is refused
+        # like any other that cannot apply, and has to be *marked* so —
+        # this return is upstream of the branches that mark, and an
+        # unmarked report is counted against the resumption budget. Same
+        # reasoning as the authority rule; a different way to arrive.
+        if et in _END_OF_EXECUTION_REPORTS:
+            _mark_report_refused(event)
         return
 
     if et == EventType.TASK_STARTED:
@@ -1012,7 +1024,11 @@ async def get_all_task_statuses_in_build(
         select(Event)
         .where(Event.build_id == build_id)
         .where(Event.task_id.isnot(None))
-        .order_by(Event.created_at.asc())
+        # id (UUID7) breaks created_at ties, as the single-task replay
+        # does. The ref tracking below is order-dependent, so without it a
+        # replacement start and a stale report sharing a timestamp could
+        # replay either way round and refuse or apply the report at random.
+        .order_by(Event.created_at.asc(), Event.id.asc())
     )
     events = result.scalars().all()
 

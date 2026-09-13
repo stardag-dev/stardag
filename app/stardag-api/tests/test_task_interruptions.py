@@ -413,6 +413,29 @@ async def test_a_refused_report_does_not_spend_the_interruption_budget(
 
 
 @pytest.mark.asyncio
+async def test_a_report_after_a_completion_does_not_spend_the_budget(
+    client: AsyncClient,
+):
+    """The second way to be refused, and it arrives by a different route:
+    sticky-COMPLETED returns before the report's own branch is reached, so
+    the refusal has to be marked there too or the event is counted as a
+    real interruption.
+
+    Declared as a root so the counts stay readable: a completed task is in
+    no other frontier list."""
+    build_id = await _new_build(client, roots=["t-1"])
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/complete")
+
+    # A worker whose output another build already observed reports late.
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+
+    assert (await _task(client, "t-1"))["latest_status"] == "completed"
+    assert (await _counts(client, build_id))["t-1"] == (1, 0)
+
+
+@pytest.mark.asyncio
 async def test_either_interleaving_of_cancel_and_interrupt_ends_cancelled(
     client: AsyncClient,
 ):
