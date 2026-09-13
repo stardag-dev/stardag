@@ -538,6 +538,120 @@ async def test_preemption_spends_neither_budget(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_a_report_does_not_apply_to_a_replacement_execution(
+    client: AsyncClient,
+):
+    """The build can replace its *own* execution — its claim lapses, it
+    retries, it starts again — and the build id alone cannot see that. A
+    report naming the execution it is about is only honoured while the task
+    still holds that one."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-old"},
+    )
+    # The claim lapsed and the same build started a replacement.
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"executor": "modal", "executor_ref": "fc-new"},
+    )
+
+    # The first execution's report finally lands.
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
+        params={"executor_ref": "fc-old"},
+    )
+
+    task = await _task(client, "t-1")
+    assert task["latest_status"] == "running"
+    assert task["latest_executor_ref"] == "fc-new"
+
+
+@pytest.mark.asyncio
+async def test_a_report_naming_the_current_execution_still_applies(
+    client: AsyncClient,
+):
+    """The control. The ref narrows the rule; it must not disable it."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-1"},
+    )
+
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt", params={"executor_ref": "fc-1"}
+    )
+
+    assert (await _task(client, "t-1"))["latest_status"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_a_report_with_no_ref_still_applies(client: AsyncClient):
+    """An SDK predating the ref sends none. Refusing its reports would turn
+    a version skew into exactly the silent stall this whole path removes."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-1"},
+    )
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+
+    assert (await _task(client, "t-1"))["latest_status"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_preempt_never_extends_a_claim(client: AsyncClient):
+    """A claim shorter than the restart grace — a 60s worker preempted near
+    its deadline — must not be *extended* by a report whose entire purpose
+    is to shorten it."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "claim_ttl_seconds": 60},
+    )
+    granted = (await _task(client, "t-1"))["latest_status_expires_at"]
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/preempt")
+
+    # 60s is well inside the 300s grace, so the grace is the *later* of the
+    # two and must lose.
+    assert (await _task(client, "t-1"))["latest_status_expires_at"] == granted
+
+
+@pytest.mark.asyncio
+async def test_preempt_does_not_resurrect_a_lapsed_claim(
+    client: AsyncClient, monkeypatch
+):
+    """An interruption applied to a lapsed claim merely releases something
+    already released. A preemption *grants* a window, so applying it to a
+    lapsed claim would make a task re-claimable a moment ago deniable
+    again — by a corpse."""
+    from stardag_api.services import status as status_module
+
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "claim_ttl_seconds": 60},
+    )
+
+    # The claim lapses without anyone writing anything — which is the whole
+    # point of an expiry, and the only way to reach this state. Patched
+    # rather than waited out: the minimum TTL the server accepts is 60s.
+    monkeypatch.setattr(status_module, "claim_is_live", lambda task, now=None: False)
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/preempt")
+
+    task = await _task(client, "t-1")
+    assert task["latest_preempted_at"] is None
+
+
+@pytest.mark.asyncio
 async def test_preempt_obeys_the_same_authority_rule(client: AsyncClient):
     """A cancelled task must not have its claim quietly re-granted for
     another five minutes by a worker that has not noticed yet."""

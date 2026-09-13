@@ -8,7 +8,12 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import Build, BuildStatus, Event, EventType, Task, TaskStatus
-from stardag_api.services.claims import claim_expires_at, preempt_restart_expires_at
+from stardag_api.models.base import as_utc
+from stardag_api.services.claims import (
+    claim_expires_at,
+    claim_is_live,
+    preempt_restart_expires_at,
+)
 from stardag_api.services.wakeups import flag_after_task_transition
 
 # Statuses TASK_RETRIED resets to PENDING. Shared by the denormalised path
@@ -134,6 +139,48 @@ def starts_new_attempt(event_type: str | None, prev_event_type: str | None) -> b
         event_type == EventType.TASK_STARTED
         and prev_event_type not in _ATTEMPT_CONTINUING_EVENT_TYPES
     )
+
+
+def _reports_on_the_current_execution(task: Task, event: Event) -> bool:
+    """Whether a worker's end-of-execution report still applies.
+
+    A worker reporting an interruption or a preemption is describing *one
+    execution*. By the time the report lands, the task may have moved on —
+    and applying a dead execution's report to a live one is how a scheduler
+    ends up starting a task that is already running. Three tests, narrowing:
+
+    - **Still RUNNING.** Usually it is not because somebody cancelled it —
+      a UI cancel, a FAIL_FAST cascade — and the cancel is what interrupted
+      the worker in the first place. Modal delivers a deliberate
+      ``FunctionCall.cancel()`` and a function timeout as the *same*
+      exception, so the worker cannot tell them apart and must report
+      either way. Deciding here is what makes that safe: the registry
+      initiated the cancel and knows, where the worker can only guess.
+    - **Still RUNNING under the reporting build.** This worker's claim
+      lapsed and somebody else took it; evicting the live holder is exactly
+      the duplicate execution claims exist to prevent.
+    - **Still the same execution.** The build can also replace its *own*
+      execution — its claim lapses, it retries, it starts again — and the
+      build id alone cannot see that. So a report may name the execution it
+      is about (``executor_ref``), and it is honoured only while the task
+      still holds that one.
+
+    The ref is optional, and absent it the first two tests stand alone:
+    an SDK that predates this sends no ref, and refusing its reports would
+    turn a version skew into silent stalls. Note also that a backend which
+    restarts an input *under the same ref* — Modal's preemption — is by
+    construction still the same execution, so the ref rightly does not
+    separate the report from the restart.
+    """
+    if (
+        task.latest_status != TaskStatus.RUNNING
+        or task.latest_status_build_id != event.build_id
+    ):
+        return False
+    reported_ref = (event.event_metadata or {}).get("executor_ref")
+    if reported_ref is None or task.latest_executor_ref is None:
+        return True
+    return str(reported_ref) == str(task.latest_executor_ref)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -559,27 +606,11 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_expires_at = None
     elif et == EventType.TASK_INTERRUPTED:
         # An interruption is a report about *one execution*, so it applies
-        # only to the claim that execution held. Two states it must not
-        # touch, and both are reachable today:
-        #
-        #   - The task is no longer RUNNING. Usually because somebody
-        #     cancelled it — a UI cancel, a FAIL_FAST cascade — and the
-        #     cancel is what interrupted the worker in the first place.
-        #     Modal delivers a deliberate ``FunctionCall.cancel()`` and a
-        #     function timeout as the *same* exception, so the worker
-        #     cannot tell them apart and must report either way. Deciding
-        #     here is what makes that safe: the registry initiated the
-        #     cancel and knows, where the worker can only guess.
-        #   - The task is RUNNING under a *different* build. This worker's
-        #     claim lapsed and somebody else took it; its report is about a
-        #     dead execution and would otherwise evict the live holder.
-        #
-        # The event row is still written either way — it happened, and it
-        # is the only trace that this execution ended at all.
-        if (
-            task.latest_status != TaskStatus.RUNNING
-            or task.latest_status_build_id != event.build_id
-        ):
+        # only to the claim that execution held — see
+        # ``_reports_on_the_current_execution``. The event row is still
+        # written either way: it happened, and it is the only trace that
+        # this execution ended at all.
+        if not _reports_on_the_current_execution(task, event):
             return
         task.latest_status = TaskStatus.INTERRUPTED
         task.latest_status_at = event.created_at
@@ -618,10 +649,15 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         #
         # Subject to the same authority rule as TASK_INTERRUPTED above, for
         # the same reasons.
-        if (
-            task.latest_status != TaskStatus.RUNNING
-            or task.latest_status_build_id != event.build_id
-        ):
+        if not _reports_on_the_current_execution(task, event):
+            return
+        # ...and to one more, which the interruption does not need. An
+        # interruption *ends* a claim, so applying it to a lapsed one is
+        # harmless — it releases something already released. This grants a
+        # claim a fresh window, so applying it to a lapsed one would
+        # resurrect a task the server had already made re-claimable, and a
+        # racing claimant would then be denied by a corpse.
+        if not claim_is_live(task):
             return
         # What this event is *for*: recording that a restart is now due.
         # Without it the registry cannot tell "running happily since T0"
@@ -630,12 +666,23 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # nobody and noticed by nothing.
         task.latest_preempted_at = event.created_at
         # And the half that makes the absence *actionable*. The claim stays,
-        # but its expiry is pulled in from the worker's whole declared
+        # but its expiry is brought forward from the worker's whole declared
         # timeout (up to a day) to a grace sized for the restart. A restart
         # that arrives re-grants the full TTL with its own TASK_STARTED; one
         # that never arrives leaves a lapsed claim within minutes, which the
         # ordinary self-heal path already knows what to do with.
-        task.latest_status_expires_at = preempt_restart_expires_at(event.created_at)
+        #
+        # Strictly forward, never back: a claim shorter than the grace — a
+        # 60s worker preempted near its deadline, or any claim already most
+        # of the way through — would otherwise be *extended* by a report
+        # whose entire purpose is to shorten it.
+        grace_expiry = preempt_restart_expires_at(event.created_at)
+        current_expiry = task.latest_status_expires_at
+        task.latest_status_expires_at = (
+            grace_expiry
+            if current_expiry is None
+            else min(as_utc(current_expiry), grace_expiry)
+        )
         # latest_status_at, latest_status_event_id and latest_status_build_id
         # are all deliberately untouched: the status did not move, and
         # "a restart is outstanding" is derived as latest_preempted_at >

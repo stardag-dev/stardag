@@ -196,10 +196,10 @@ class Task(Base, TimestampMixin):
     # derived flag goes false on its own. One write site, no clear sites,
     # and no way for the two to disagree.
     #
-    # The preemption also pulls ``latest_status_expires_at`` in to a short
-    # restart grace, which is what makes a restart that never arrives
-    # *visible*: the claim lapses in minutes instead of at the end of the
-    # worker's whole declared timeout.
+    # The preemption also brings ``latest_status_expires_at`` forward to a
+    # short restart grace, which is what makes a restart that never
+    # arrives *visible*: the claim lapses in minutes instead of at the end
+    # of the worker's whole declared timeout.
     latest_preempted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
     )
