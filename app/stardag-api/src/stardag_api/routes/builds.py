@@ -550,6 +550,7 @@ async def _create_task_event(
     extra_metadata: dict | None = None,
     limit_keys: list[str] | None = None,
     claim: bool = False,
+    if_executor: str | None = None,
     if_executor_ref: str | None = None,
 ) -> TaskEventResponse:
     """Create a task event and return slim response.
@@ -564,9 +565,9 @@ async def _create_task_event(
     the whole transaction (no event, no limit-key rows, and any
     limit-row locks taken by the enforce_limits pre-check are released).
 
-    ``if_executor_ref`` (TASK_CANCELLED only): record nothing unless this
-    build still holds the task, in a status with an execution to revoke,
-    under *that* execution. See :func:`cancel_task`.
+    ``if_executor`` / ``if_executor_ref`` (TASK_CANCELLED only): record
+    nothing unless this build still holds the task, in a status with an
+    execution to revoke, under *that* execution. See :func:`cancel_task`.
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -647,10 +648,16 @@ async def _create_task_event(
         # A no-op rather than a 409: the caller is doing best-effort
         # cleanup over a list, and "it moved on" is a normal outcome, not an
         # error to log per task.
+        # The pair, not the ref alone: a ref is backend-specific by
+        # contract — ``cancel_detached`` takes ``(executor, ref)`` — so two
+        # backends can mint the same string, and comparing half the identity
+        # would let a cancel through for an execution the caller never
+        # stopped.
         held = (
             db_task.latest_status in (TaskStatus.RUNNING, TaskStatus.INTERRUPTED)
             and db_task.latest_status_build_id == build_id
             and db_task.latest_executor_ref == if_executor_ref
+            and (if_executor is None or db_task.latest_executor == if_executor)
         )
         if not held:
             status, _, _, _, attempt_count = await get_task_status_in_build(
@@ -2450,6 +2457,17 @@ async def get_build_executions(
     touch anybody else's container, which is what makes answering from the
     past safe rather than reckless.
 
+    **What this cannot see, because nothing recorded it.** A detached
+    execution is findable here only if its reference reached the registry,
+    and one path never sends it: a resident build resuming a task from its
+    dynamic dependencies, with a backend whose workers do not self-report
+    lifecycle, submits a fresh detached handle and records only
+    TASK_RESUMED — which carries no ref (``build/_concurrent.py`` says so in
+    its own comment, since the same gap makes that execution unre-attachable
+    after a crash). So for that mode the answer is the last execution the
+    registry was told about, not the one running now. Reactive builds are
+    unaffected: their workers self-report, and every start carries its ref.
+
     Paged with a keyset ``cursor`` over the **task**, not over the start
     time. Paging at all, because stopping an execution records nothing — a
     cancel is a request, not an end, which is the whole point above — so
@@ -3993,6 +4011,17 @@ async def cancel_task(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     commit_hash: str | None = None,
+    if_executor: Annotated[
+        str | None,
+        Query(
+            description=(
+                "The backend of the execution named by ``if_executor_ref``. "
+                "A reference is backend-specific by contract, so the pair is "
+                "the execution's identity; passing only the reference "
+                "compares half of it."
+            ),
+        ),
+    ] = None,
     if_executor_ref: Annotated[
         str | None,
         Query(
@@ -4034,6 +4063,7 @@ async def cancel_task(
         db,
         auth,
         commit_hash=commit_hash,
+        if_executor=if_executor,
         if_executor_ref=if_executor_ref,
     )
 

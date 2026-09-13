@@ -794,7 +794,10 @@ async def _cancel_running(
             # again under a new ref, where writing CANCELLED would revoke the
             # claim of an execution nobody stopped.
             await registry.task_cancel_aio(
-                build_id, task, if_executor_ref=item.executor_ref
+                build_id,
+                task,
+                if_executor=item.executor,
+                if_executor_ref=item.executor_ref,
             )
         except Exception as e:
             logger.warning(f"Failed to record cancellation of task {item.task_id}: {e}")
