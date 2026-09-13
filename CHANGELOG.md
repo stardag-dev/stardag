@@ -140,9 +140,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   and terminal statuses stay cancellable by any build; they hold no claim.
 - `GET /builds/{build_id}/executions`: the detached executions this build
   started and has not seen end, with the backend and ref to stop them by.
-  Paged with a keyset `cursor` — stopping an execution records nothing, so
-  the answer does not shrink as a caller works through it, and a bare cap
-  would hand back the same page forever.
+  Paged with a keyset `cursor` over the task — stopping an execution records
+  nothing, so the answer does not shrink as a caller works through it, and a
+  bare cap would hand back the same page forever. Keyed on the task rather
+  than the start time because a task restarted between two page requests
+  would otherwise be re-ranked past the cursor and skipped.
   Answered from the event log rather than from the task rows, because the
   question is about the past: releasing a claim is what lets the next build
   take the task over, so by the time a cancelled build ticks, the row may

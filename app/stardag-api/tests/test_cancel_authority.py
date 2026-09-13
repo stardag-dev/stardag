@@ -441,6 +441,49 @@ async def test_executions_page_through_a_cursor(client: AsyncClient, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_paging_does_not_skip_a_task_restarted_mid_drain(
+    client: AsyncClient, monkeypatch
+):
+    """The cursor keys on the task because that is the only part of a row
+    that does not move. Ordering by the start's timestamp would re-rank a
+    task that gets a newer start between two page requests, carrying it to
+    the far side of the cursor where the drain never looks again — and on a
+    terminal build there is no second chance."""
+    from stardag_api.routes import builds as builds_routes
+
+    monkeypatch.setattr(builds_routes, "_MAX_BUILD_EXECUTIONS", 2)
+    build = await _new_build(client)
+    for index in range(5):
+        await _start(client, build, f"wide-{index}")
+
+    first = (await client.get(f"/api/v1/builds/{build}/executions")).json()
+    seen = [e["task_id"] for e in first["executions"]]
+
+    # A task that has not been handed out yet is started again, which under
+    # a time-ordered cursor would move it ahead of the boundary.
+    await client.post(
+        f"/api/v1/builds/{build}/tasks/wide-4/start",
+        params={"executor": "modal", "executor_ref": "fc-restarted"},
+    )
+
+    cursor = first["next_cursor"]
+    for _ in range(5):
+        page = (
+            await client.get(
+                f"/api/v1/builds/{build}/executions", params={"cursor": cursor}
+            )
+        ).json()
+        seen += [e["task_id"] for e in page["executions"]]
+        cursor = page["next_cursor"]
+        if not page["truncated"]:
+            break
+
+    assert sorted(seen) == [f"wide-{i}" for i in range(5)], (
+        f"a task restarted mid-drain was skipped: {seen}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_malformed_cursor_is_rejected(client: AsyncClient):
     """Rather than silently restarting from the top, which is the loop this
     paging exists to remove."""

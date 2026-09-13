@@ -33,12 +33,14 @@ if typing.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# How many pages of owned executions one cancel pass will drain. A bound
-# rather than a while-True: the pass runs inside a tick with a finite
-# budget, and a runaway loop there costs the build its last chance to stop
-# anything. At the server's page size this covers builds far wider than
-# anything a single reactive plan has held.
-_MAX_EXECUTION_PAGES = 20
+# A backstop on the executions drain, not a policy. The loop's real stop
+# condition is the cursor: it is keyed on the task, so every page strictly
+# advances through a finite set and the drain terminates on its own. This
+# only bounds a server that answers with a cursor going nowhere, which would
+# otherwise spin inside a tick and cost the build its last chance to stop
+# anything. Set high enough that reaching it means a bug rather than a wide
+# build — at the server's page size, tens of thousands of live executions.
+_MAX_EXECUTION_PAGES = 200
 
 
 def _format_age(seconds: float) -> str:
@@ -837,15 +839,24 @@ async def _executions_to_stop(
         for _ in range(_MAX_EXECUTION_PAGES):
             listed = await registry.build_get_executions_aio(build_id, cursor=cursor)
             executions += listed.executions
-            cursor = listed.next_cursor
-            if not listed.truncated or not cursor:
+            if not listed.truncated or not listed.next_cursor:
                 break
+            if listed.next_cursor == cursor:
+                # The cursor is keyed on the task, so a page that does not
+                # advance it cannot be the server making progress — it is a
+                # server that would hand back the same page forever.
+                logger.warning(
+                    f"Build {build_id}: the executions cursor stopped "
+                    "advancing; stopping the ones read so far."
+                )
+                break
+            cursor = listed.next_cursor
         else:
             logger.warning(
                 f"Build {build_id} has more executions to stop than "
-                f"{_MAX_EXECUTION_PAGES} pages; stopping the ones read so "
-                "far. The rest keep running until their backend times them "
-                "out."
+                f"{_MAX_EXECUTION_PAGES} pages, which should not be "
+                "reachable; stopping the ones read so far. The rest keep "
+                "running until their backend times them out."
             )
         return executions
     except NotFoundError as e:
