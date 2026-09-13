@@ -247,10 +247,11 @@ async def discover_and_register_aio(
     build_id: UUID,
     tasks: TaskStruct,
     retry_failed: bool = False,
-    cancel_conflicting: bool = False,
     _chunk_size: int = 50,
     max_concurrent_discover: int = _DEFAULT_MAX_CONCURRENT_DISCOVER,
     limit_key_selector: "Callable[[BaseTask], Sequence[str]] | None" = None,
+    *,
+    cancel_conflicting: bool = False,
 ) -> DiscoveryResult:
     """Walk ``tasks``' dependency trees, register everything, return state.
 

@@ -412,3 +412,31 @@ class TestDeclarationConflict:
                 registry, uuid4(), root, cancel_conflicting=True
             )
         assert registry.cancelled_builds == []
+
+
+def test_the_new_option_did_not_displace_a_positional_parameter():
+    """``discover_and_register_aio`` is public, and its options were
+    positional. Inserting one in the middle would silently rebind an
+    existing caller's argument — ``(registry, build_id, tasks, True, 100)``
+    would read 100 as a flag and quietly keep the default chunk size, which
+    no caller would ever see go wrong.
+    """
+    import inspect
+
+    params = list(inspect.signature(discover_and_register_aio).parameters.values())
+    positional = [
+        p.name for p in params if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ]
+    assert positional == [
+        "registry",
+        "build_id",
+        "tasks",
+        "retry_failed",
+        "_chunk_size",
+        "max_concurrent_discover",
+        "limit_key_selector",
+    ]
+    assert (
+        params[-1].name == "cancel_conflicting"
+        and params[-1].kind is inspect.Parameter.KEYWORD_ONLY
+    )
