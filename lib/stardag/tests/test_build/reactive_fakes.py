@@ -713,6 +713,8 @@ class FakeReactiveRegistry(NoOpRegistry):
         # Keyset paging, modelled because the tick has to drain it: the
         # server's answer does not shrink as executions are stopped, so a
         # caller that re-asks without the cursor gets the same page forever.
+        # Keyed on the task, like the server: the only part of a row that
+        # does not move while a caller pages through it.
         executions.sort(key=lambda e: e.task_id)
         start = 0
         if cursor is not None:

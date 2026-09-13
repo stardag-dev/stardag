@@ -7,7 +7,7 @@ from typing import Annotated, Any, Mapping, Sequence, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, func, literal, select, tuple_, update
+from sqlalchemy import delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -2442,12 +2442,19 @@ async def get_build_executions(
     touch anybody else's container, which is what makes answering from the
     past safe rather than reckless.
 
-    Newest first, paged with a keyset ``cursor``. Paging rather than a bare
-    cap, because stopping an execution records nothing — a cancel is a
-    request, not an end, which is the whole point above — so this answer
-    does not shrink as a caller works through it. Asking again without the
-    cursor would return the same page forever and a wide build's tail would
-    never be reached.
+    Paged with a keyset ``cursor`` over the **task**, not over the start
+    time. Paging at all, because stopping an execution records nothing — a
+    cancel is a request, not an end, which is the whole point above — so
+    this answer does not shrink as a caller works through it, and a bare cap
+    would hand back the same page forever.
+
+    Keyed on the task because that is the only part of a row that does not
+    move. Ordering by the start's timestamp looks natural and is a trap: a
+    task that gets a *newer* start between two page requests is re-ranked
+    onto the far side of the cursor and is then skipped entirely — on a
+    terminal build, whose drain has no second chance, that is a container
+    left running. A task's identity does not change, so a cursor over it
+    cannot skip one.
 
     Cancelling is idempotent at every backend stardag supports, so a ref
     stopped twice — or one whose execution already ended without this build
@@ -2522,18 +2529,14 @@ async def get_build_executions(
         )
         .join(latest, latest.c.task_pk == Task.id)
         .where(~ended)
-        # The same total order the cursor walks, and the same tie-break the
-        # ranking above uses.
-        .order_by(latest.c.started_at.desc(), latest.c.event_id.desc())
+        # Ordered by the task, which is what makes the cursor stable — see
+        # the docstring. UUID7, so this is still roughly registration order.
+        .order_by(Task.id.asc())
         .limit(_MAX_BUILD_EXECUTIONS + 1)
     )
     after = _parse_executions_cursor(cursor)
     if after is not None:
-        after_started_at, after_event_id = after
-        query = query.where(
-            tuple_(latest.c.started_at, latest.c.event_id)
-            < tuple_(literal(after_started_at), literal(after_event_id))
-        )
+        query = query.where(Task.id > after)
     rows = (await db.execute(query)).all()
 
     truncated = len(rows) > _MAX_BUILD_EXECUTIONS
@@ -2554,14 +2557,12 @@ async def get_build_executions(
             for task, executor, executor_ref, executor_metadata, started_at, _ in page
         ],
         truncated=truncated,
-        next_cursor=(
-            f"{page[-1][4].isoformat()}|{page[-1][5]}" if truncated and page else None
-        ),
+        next_cursor=(str(page[-1][0].id) if truncated and page else None),
     )
 
 
-def _parse_executions_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
-    """Decode a ``next_cursor`` back into the keyset it names.
+def _parse_executions_cursor(cursor: str | None) -> UUID | None:
+    """Decode a ``next_cursor`` back into the task it names.
 
     A 400 rather than a silent restart from the top: a caller handed page
     one again would loop over it, which is the failure this paging exists to
@@ -2569,9 +2570,8 @@ def _parse_executions_cursor(cursor: str | None) -> tuple[datetime, UUID] | None
     """
     if not cursor:
         return None
-    started_at, _, event_id = cursor.partition("|")
     try:
-        return datetime.fromisoformat(started_at), UUID(event_id)
+        return UUID(cursor)
     except ValueError:
         raise HTTPException(
             status_code=400,
