@@ -105,7 +105,7 @@ from stardag_api.services.build_cleanup import (
 )
 from stardag_api.services.dependencies import (
     StaticDeclarationConflict,
-    reconcile_static_declaration,
+    reconcile_static_declarations,
 )
 from stardag_api.services.claims import (
     claim_is_live,
@@ -550,28 +550,6 @@ async def _replace_limit_keys(
         else pg_insert(TaskLimitKey)
     )
     await db.execute(insert_stmt.values(rows).on_conflict_do_nothing())
-
-
-async def _resolve_task_pks(
-    db: AsyncSession, environment_id: UUID, task_ids: "Sequence[str]"
-) -> set[UUID]:
-    """Primary keys for task ids already known in this environment.
-
-    Ids with no row yet are simply absent: they are about to be created as
-    phantoms by the edge reconciliation, and an upstream that does not exist
-    cannot be one the *previous* declaration recorded, which is the only
-    question the caller is asking.
-    """
-    if not task_ids:
-        return set()
-    rows = (
-        await db.execute(
-            select(Task.id)
-            .where(Task.environment_id == environment_id)
-            .where(Task.task_id.in_(list(task_ids)))
-        )
-    ).scalars()
-    return set(rows)
 
 
 def _raise_declaration_conflict(conflict: StaticDeclarationConflict) -> None:
@@ -3256,12 +3234,9 @@ async def register_task(
     # the task that way, which is a conflict rather than something to
     # reconcile silently.
     if task.dependency_task_ids is not None:
-        conflict = await reconcile_static_declaration(
+        conflict = await reconcile_static_declarations(
             db,
-            downstream=db_task,
-            declared_upstream_pks=await _resolve_task_pks(
-                db, build.environment_id, task.dependency_task_ids
-            ),
+            declarations=[(db_task, task.dependency_task_ids)],
             build_id=build_id,
         )
         if conflict is not None:
@@ -3604,22 +3579,18 @@ async def register_tasks_bulk(
     # raises, which rolls the whole request back, so a refused chunk leaves
     # the registry exactly as it found it — no half-registered plan, and no
     # edges superseded on behalf of a build that is about to fail.
-    for t in tasks_in:
-        if t.dependency_task_ids is None:
-            continue
-        conflict = await reconcile_static_declaration(
-            db,
-            downstream=db_task_by_task_id[t.task_id],
-            declared_upstream_pks={
-                pk_by_task_id[dep]
-                for dep in t.dependency_task_ids
-                if dep in pk_by_task_id
-            },
-            build_id=build_id,
-            now=now,
-        )
-        if conflict is not None:
-            _raise_declaration_conflict(conflict)
+    conflict = await reconcile_static_declarations(
+        db,
+        declarations=[
+            (db_task_by_task_id[t.task_id], t.dependency_task_ids)
+            for t in tasks_in
+            if t.dependency_task_ids is not None
+        ],
+        build_id=build_id,
+        now=now,
+    )
+    if conflict is not None:
+        _raise_declaration_conflict(conflict)
 
     # Build edge rows for the whole batch and bulk-insert in one shot.
     edge_rows: list[dict[str, object]] = []

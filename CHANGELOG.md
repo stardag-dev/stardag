@@ -74,7 +74,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   refused with 409 `dependency_declaration_conflict` and nothing is written
   — `U1` and `U2` are different tasks with no claim between them, so nothing
   else stops two builds materialising one downstream over two upstream DAGs
-  at once.
+  at once. Any difference is a disagreement, in either direction: declaring
+  a _new_ upstream for a task a live build holds gates that build on a task
+  its plan closure never admitted, which it cannot schedule its way out of.
 - `TaskCreate.dependency_task_ids` is now `list[str] | None`. A list is a
   declaration and is authoritative; **null is not a declaration** and leaves
   recorded edges alone. An empty list cannot carry both meanings, and

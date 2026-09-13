@@ -1296,7 +1296,9 @@ class StardagApp:
         refuses the registration. By default that failure surfaces here, at
         the trigger, naming the builds in the way. Set it to cancel those
         builds (cascading, so their containers stop too) and take the tasks
-        over instead.
+        over instead. Reactive builds only — the resident path has no route
+        for the take-over answer, so it raises rather than quietly ignoring
+        the flag.
 
         Requires registry credentials in the calling process (the active
         stardag profile), in addition to Modal credentials. If no registry is
@@ -1342,6 +1344,19 @@ class StardagApp:
                 "build_kwargs must not contain 'resume_build_id'; pass "
                 "build_id=... to build_trigger instead"
             )
+        if cancel_conflicting and not reactive:
+            # Refused rather than ignored. The resident build path registers
+            # from inside the build container and has no route for the
+            # cancel-and-take-over answer, so honouring the flag there would
+            # take a change to that engine — and silently dropping it would
+            # let a caller believe they had opted out of a refusal they are
+            # still going to get.
+            raise ValueError(
+                "cancel_conflicting is only supported for reactive builds. "
+                "Pass reactive=True, or cancel the conflicting build "
+                "yourself (the refusal names it) before re-triggering."
+            )
+
         if reactive and merged_kwargs:
             raise TypeError(
                 "build_kwargs are not supported with reactive=True (there is "

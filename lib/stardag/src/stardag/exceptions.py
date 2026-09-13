@@ -290,8 +290,13 @@ class DependencyDeclarationConflictError(APIError):
         build_ids: "list[str] | None" = None,
         payload: dict | None = None,
     ) -> None:
+        # A short, generic message, with the server's own text carried in
+        # ``detail`` — ``APIError`` renders "<message> (HTTP <code>):
+        # <detail>", so passing the refusal as both printed it twice, and
+        # this is the one string a refused trigger puts in front of whoever
+        # ran it.
         super().__init__(
-            detail or "Conflicting static dependency declaration",
+            "Conflicting static dependency declaration",
             status_code=409,
             detail=detail,
             payload=payload,

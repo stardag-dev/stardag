@@ -315,3 +315,68 @@ async def test_bulk_registration_is_refused_whole(client: AsyncClient):
     assert frontier["status_counts"] == {}, (
         f"a refused batch left tasks behind: {frontier['status_counts']}"
     )
+
+
+@pytest.mark.asyncio
+async def test_an_added_upstream_is_a_conflict_too(client: AsyncClient):
+    """A declaration that only *adds* is the more dangerous direction, and
+    the one easiest to miss: it supersedes nothing, so a check that looks
+    for dropped edges sees no change at all.
+
+    It is worse than a removal. The live build's plan closure ran when it
+    registered, over the edges recorded then — so `U2` is not in its plan,
+    and it has no way to put it there. Gating it on `U2` strands it on a
+    task no build containing it can schedule.
+    """
+    first = await _new_build(client)
+    await _register_task(client, first, "U1")
+    await _register_task(client, first, "R", ["U1"])
+
+    second = await _new_build(client)
+    await _register_task(client, second, "U1")
+    await _register_task(client, second, "U2")
+    response = await _register_task(client, second, "R", ["U1", "U2"])
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["declared"] == ["U1", "U2"]
+    assert detail["recorded"] == ["U1"]
+    assert "now requires U2" in detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_an_uncontested_addition_is_just_recorded(client: AsyncClient):
+    """The same difference with nobody in the way is not a conflict — the
+    check fires on a disagreement between live builds, not on a change."""
+    first = await _new_build(client)
+    await _register_task(client, first, "U1")
+    await _register_task(client, first, "R", ["U1"])
+    await client.post(f"/api/v1/builds/{first}/complete")
+
+    second = await _new_build(client)
+    await _register_task(client, second, "U1")
+    await _register_task(client, second, "U2")
+    assert (await _register_task(client, second, "R", ["U1", "U2"])).status_code == 201
+    assert sorted(await _actionable(client, second)) == ["U1", "U2"]
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_names_an_upstream_that_has_no_row_yet(
+    client: AsyncClient,
+):
+    """An out-of-band caller may name an upstream before registering it —
+    edge reconciliation would create it as a phantom. Comparing by primary
+    key would drop it from the declared set, so the refusal would report
+    `declared: []` and the message would omit the very task the caller
+    asked for. Compare by task id."""
+    first = await _new_build(client)
+    await _register_task(client, first, "U1")
+    await _register_task(client, first, "R", ["U1"])
+
+    second = await _new_build(client)
+    response = await _register_task(client, second, "R", ["U2"])  # U2 unknown
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["declared"] == ["U2"]
+    assert "U2" in detail["message"]

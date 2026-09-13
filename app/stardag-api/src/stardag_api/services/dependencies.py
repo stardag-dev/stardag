@@ -47,6 +47,7 @@ complete on arrival, and the edge comes back with the next yield.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
@@ -189,15 +190,14 @@ class StaticDeclarationConflict:
     build_ids: list[UUID]
 
 
-async def reconcile_static_declaration(
+async def reconcile_static_declarations(
     db: AsyncSession,
     *,
-    downstream: Task,
-    declared_upstream_pks: set[UUID],
+    declarations: "Sequence[tuple[Task, Sequence[str]]]",
     build_id: UUID,
     now: datetime | None = None,
 ) -> StaticDeclarationConflict | None:
-    """Make the declared static upstream set authoritative for ``downstream``.
+    """Make each declared static upstream set authoritative for its task.
 
     A static edge is *declared*, in full, by every build that registers the
     task — so unlike a dynamic edge the server knows the current set exactly,
@@ -207,90 +207,118 @@ async def reconcile_static_declaration(
     changed.
 
     **Except when somebody else is still building it that way.** If a live
-    build holds the task, superseding would rewrite the gates under a build
-    that is running right now — so the difference is reported instead, and
-    the caller refuses the registration. Returns the conflict and writes
-    nothing; returns None (having superseded) when the change is uncontested.
+    build holds the task, acting on the declaration would rewrite the gates
+    under a build that is running right now — so the difference is reported
+    instead, and the caller refuses the registration. Returns the first
+    conflict and writes nothing; returns None (having superseded what the
+    declarations dropped) when every change is uncontested.
 
-    Nothing to drop is the overwhelmingly common case — the same code
-    registering the same task — and costs one indexed read.
+    **Any difference counts, not only a removal.** An addition is the more
+    dangerous direction, which is easy to miss because it supersedes
+    nothing: declaring a *new* upstream for a task another build is holding
+    gates that build on a task its own plan closure never admitted — and a
+    build gated outside its plan cannot schedule its way out. So the
+    comparison is set equality, in both directions.
+
+    Batched over the whole registration: three statements at most, whatever
+    the size of the chunk. Bulk registration exists to keep discovery's
+    latency off the number of tasks, and a per-task round trip here would
+    have handed that back.
+
+    Upstreams are compared by ``task_id``, not by primary key, so an
+    upstream that has no row yet — an out-of-band caller naming one ahead of
+    its registration — still appears in the declaration, and therefore in
+    the refusal that names both sets. It cannot be in the *recorded* set by
+    construction, which is exactly what makes it a difference.
     """
-    recorded = (
+    if not declarations:
+        return None
+
+    by_pk = {task.id: task for task, _ in declarations}
+    rows = (
         await db.execute(
-            select(TaskDependency.upstream_task_id, Task.task_id)
+            select(
+                TaskDependency.id,
+                TaskDependency.downstream_task_id,
+                Task.task_id,
+            )
             .join(Task, Task.id == TaskDependency.upstream_task_id)
             .where(
-                TaskDependency.downstream_task_id == downstream.id,
+                TaskDependency.downstream_task_id.in_(list(by_pk)),
                 TaskDependency.is_dynamic.is_(False),
                 TaskDependency.superseded_at.is_(None),
             )
         )
     ).all()
-    dropped = {
-        pk: task_id for pk, task_id in recorded if pk not in declared_upstream_pks
-    }
-    if not dropped:
+    recorded_by_downstream: dict[UUID, dict[str, str]] = {pk: {} for pk in by_pk}
+    for edge_pk, downstream_pk, upstream_task_id in rows:
+        recorded_by_downstream[downstream_pk][upstream_task_id] = edge_pk
+
+    # Nothing to do is the overwhelmingly common case — the same code
+    # registering the same tasks — and costs exactly the one read above.
+    changed = [
+        (task, set(declared), recorded_by_downstream[task.id])
+        for task, declared in declarations
+        if set(declared) != set(recorded_by_downstream[task.id])
+    ]
+    if not changed:
         return None
 
-    # A completed task is nobody's to build, so two declarations about it
-    # cannot both be materialised and there is nothing to refuse. Worth
-    # skipping explicitly rather than leaving to chance: discovery prunes
-    # *below* a complete task but still registers it, so every build sends a
-    # declaration for every complete task in its closure — and those are the
-    # ones most likely to have been registered long ago, under older code.
-    # Checking them would refuse triggers over a disagreement about work
-    # that is already done.
+    # A completed task is skipped here, and only here: nobody is going to
+    # build it again, so two declarations about it cannot both be
+    # materialised and there is nothing to refuse. Not a corner case —
+    # discovery prunes *below* a complete task but still registers it, so
+    # every build sends a declaration for every complete task in its
+    # closure, and those are the ones most likely to have been recorded
+    # long ago under older code. Refusing there would block triggers over a
+    # disagreement about work that is already done.
     #
-    # The edges are still brought up to date. Nothing reads them for
-    # scheduling — a complete task gates nothing, and plan closure prunes at
-    # one — so this is bookkeeping, and bookkeeping that keeps the recorded
-    # graph matching the code that last described it.
-    holders = (
-        []
-        if downstream.latest_status == TaskStatus.COMPLETED
-        else await _live_builds_holding(db, downstream, exclude=build_id)
+    # Its edges are still reconciled below, and that is not bookkeeping:
+    # plan closure expands a registered task's recorded upstreams whatever
+    # the task's own status, so leaving a dead one behind makes the next
+    # build pull it into its plan and run it.
+    contestable = [
+        task for task, _, _ in changed if task.latest_status != TaskStatus.COMPLETED
+    ]
+    holders_by_task = (
+        await _live_builds_holding(db, contestable, exclude=build_id)
+        if contestable
+        else {}
     )
-    if holders:
-        declared_ids = (
-            (
-                await db.execute(
-                    select(Task.task_id).where(Task.id.in_(declared_upstream_pks))
-                )
+    for task, declared, recorded in changed:
+        holders = holders_by_task.get(task.id)
+        if holders:
+            return StaticDeclarationConflict(
+                task_id=task.task_id,
+                declared=sorted(declared),
+                recorded=sorted(recorded),
+                build_ids=holders,
             )
-            .scalars()
-            .all()
-            if declared_upstream_pks
-            else []
-        )
-        return StaticDeclarationConflict(
-            task_id=downstream.task_id,
-            declared=sorted(declared_ids),
-            recorded=sorted(task_id for _, task_id in recorded),
-            build_ids=holders,
-        )
 
-    await db.execute(
-        update(TaskDependency)
-        .where(
-            TaskDependency.downstream_task_id == downstream.id,
-            TaskDependency.upstream_task_id.in_(list(dropped)),
-            TaskDependency.is_dynamic.is_(False),
-            TaskDependency.superseded_at.is_(None),
+    dropped_edge_pks = [
+        edge_pk
+        for _, declared, recorded in changed
+        for upstream_task_id, edge_pk in recorded.items()
+        if upstream_task_id not in declared
+    ]
+    if dropped_edge_pks:
+        await db.execute(
+            update(TaskDependency)
+            .where(TaskDependency.id.in_(dropped_edge_pks))
+            .values(superseded_at=now or utc_now())
         )
-        .values(superseded_at=now or utc_now())
-    )
-    logger.info(
-        "Task %s no longer declares %d static upstream(s); superseded.",
-        downstream.task_id,
-        len(dropped),
-    )
+        logger.info(
+            "Superseded %d static upstream(s) no longer declared, over %d task(s).",
+            len(dropped_edge_pks),
+            len(changed),
+        )
     return None
 
 
 async def _live_builds_holding(
-    db: AsyncSession, task: Task, *, exclude: UUID
-) -> list[UUID]:
-    """Builds other than ``exclude`` that are RUNNING and hold ``task``.
+    db: AsyncSession, tasks: "Sequence[Task]", *, exclude: UUID
+) -> dict[UUID, list[UUID]]:
+    """Per task, the builds other than ``exclude`` that are RUNNING and hold it.
 
     "Holds" is plan membership — an event for the task — which is the same
     relation the wake-up flag uses. That reads as wider than "declared these
@@ -300,34 +328,37 @@ async def _live_builds_holding(
     every build registers every task in its own closure with its own
     declaration. Holding a task without having declared anything about it
     therefore needs plan closure to have admitted it — which, for static
-    edges, is the very thing this function has just made current. What is
-    left is inheritance over a *dynamic* edge: another build's fan-out
-    children, which this build may still run.
+    edges, is the very thing the caller has just made current. What is left
+    is inheritance over a *dynamic* edge: another build's fan-out children,
+    which this build may still run.
 
     So the residual imprecision is one shape, it is a build that can run the
     task, and the cost of being wrong there is a refused trigger with an
     actionable message — against two builds crunching the same data over
     different upstream DAGs if it were wrong the other way.
+
+    One statement for the whole batch; only the tasks whose declaration
+    actually differs are ever passed in.
     """
-    holders = (
-        (
-            await db.execute(
-                select(Build.id)
-                .where(
-                    Build.id.in_(
-                        select(Event.build_id)
-                        .where(Event.task_id == task.id)
-                        .distinct()
-                        .scalar_subquery()
-                    ),
-                    Build.id != exclude,
-                    Build.environment_id == task.environment_id,
-                    Build.latest_status == BuildStatus.RUNNING,
-                )
-                .order_by(Build.id)
+    if not tasks:
+        return {}
+    by_pk = {task.id: task for task in tasks}
+    environment_ids = {task.environment_id for task in tasks}
+    rows = (
+        await db.execute(
+            select(Event.task_id, Build.id)
+            .join(Build, Build.id == Event.build_id)
+            .where(
+                Event.task_id.in_(list(by_pk)),
+                Build.id != exclude,
+                Build.environment_id.in_(list(environment_ids)),
+                Build.latest_status == BuildStatus.RUNNING,
             )
+            .distinct()
+            .order_by(Event.task_id, Build.id)
         )
-        .scalars()
-        .all()
-    )
-    return list(holders)
+    ).all()
+    holders: dict[UUID, list[UUID]] = {}
+    for task_pk, build_pk in rows:
+        holders.setdefault(task_pk, []).append(build_pk)
+    return holders
