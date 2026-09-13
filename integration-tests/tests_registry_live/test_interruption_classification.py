@@ -77,13 +77,35 @@ BUILD_TIMEOUT_SECONDS = 600
 RUNNING_TIMEOUT_SECONDS = 300
 
 
-def _executor_ref(task_id: str) -> str | None:
-    """The Modal call id the registry has recorded for this task, if any.
+# How many TASK_STARTED events one reactive execution records, and the
+# reason this scenario counts them.
+#
+# The ref alone is **not** a readiness signal: the tick writes it the moment
+# `submit_detached` returns, which is when Modal *accepted* the spawn, not
+# when a container exists. Cancelling then can end the input before the task
+# body ever runs, so the interruption is raised nowhere the task can catch
+# it, nothing is reported, and the scenario fails having tested nothing.
+#
+# It is a real race and it fired: passing alone, failing in the concurrent
+# run, where thirteen scenarios contend for cold containers and the window
+# between "spawn accepted" and "task body running" is at its widest.
+#
+# The third start is the worker's own self-report, from inside the
+# container — the first evidence that stardag code is executing there. The
+# reactive path records three per execution: the claiming start, the tick's
+# ref-recording start, then this one.
+_STARTS_BEFORE_THE_TASK_BODY_RUNS = 3
 
-    Two starts are recorded per execution — the claiming one, then the one
-    carrying the ref — so a task can be RUNNING for a moment with no ref to
-    cancel. Hence polling for the ref rather than for the status.
-    """
+
+def _worker_has_started(deployment: Deployment, task_id) -> bool:
+    """Whether the worker itself has reported starting — see above."""
+    events = task_events(deployment, task_id, missing_ok=True)
+    starts = [e for e in events if e["event_type"] == "task_started"]
+    return len(starts) >= _STARTS_BEFORE_THE_TASK_BODY_RUNS
+
+
+def _executor_ref(task_id: str) -> str | None:
+    """The Modal call id the registry has recorded for this task, if any."""
     row = find_task(str(task_id), task_name="Resumable")
     return row.latest_executor_ref
 
@@ -120,6 +142,17 @@ def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
         build_id=build_id,
         timeout=RUNNING_TIMEOUT_SECONDS,
         what=f"task {root.id} to record its Modal call id",
+    )
+    # ...and then for the container to be *in* the task body, which the ref
+    # does not say. See _STARTS_BEFORE_THE_TASK_BODY_RUNS.
+    wait_until(
+        lambda: _worker_has_started(deployment, root.id),
+        build_id=build_id,
+        timeout=RUNNING_TIMEOUT_SECONDS,
+        what=(
+            f"the worker for task {root.id} to report its own start, which "
+            "is the first evidence a container is running the task body"
+        ),
     )
 
     # The platform ends the execution. From inside the container this is
