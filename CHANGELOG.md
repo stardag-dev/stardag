@@ -10,8 +10,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 - `build_trigger(..., cancel_conflicting=True)` clears a declaration
   conflict instead of failing on it: the builds in the way are cancelled
-  (cascading, so their containers stop too) and this build takes the tasks
-  over. Off by default — cancelling somebody else's running build is not
+  (cascading, so their containers are stopped too) and this build takes
+  the tasks over. The stop is not synchronous — the server cannot kill
+  anything, so the cancelled build's next tick does it — and the takeover
+  does not wait for it, so a task can briefly be running twice. Same
+  window as a hand-run `builds cancel --cascade`, reached automatically. Off by default — cancelling somebody else's running build is not
   something to do unasked. The conflict surfaces as
   `DependencyDeclarationConflictError`, which carries the task, both
   declarations and the build ids.

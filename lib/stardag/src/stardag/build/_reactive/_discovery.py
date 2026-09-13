@@ -199,8 +199,17 @@ async def _register_chunk(
 
     With ``cancel_conflicting`` they asked for the other answer: cancel the
     builds in the way and take the task over. Cascading, because a cancel
-    that leaves the other build's containers running would put two
-    executions on the same tasks — the very thing being avoided.
+    that left the other build's containers alone would put two executions
+    on the same tasks — the very thing being avoided.
+
+    Cascading narrows that window rather than closing it. The server cannot
+    kill an execution, only release the claim and tell the cancelled build
+    to stop what it started, and its next tick is what does it — so this
+    retries into a build that is still draining. Nothing records a stop, so
+    there is nothing to wait on; it is the same window a hand-run
+    ``builds cancel --cascade`` leaves, made reachable automatically, and
+    closing it properly wants either a drain acknowledgment or a
+    server-side cancel-and-take-over that is one operation.
 
     **Retried until the way is clear, not once.** A refusal reports the
     first conflicting task in the chunk, so a chunk that collides with two

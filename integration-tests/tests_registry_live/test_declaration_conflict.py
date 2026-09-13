@@ -13,7 +13,9 @@ scenario covers both answers to "which one stops":
 * by default the **new** build fails, at the trigger, naming the build in
   the way — nobody's running work is cancelled without being asked;
 * with ``cancel_conflicting`` the new build cancels it and takes over,
-  cascading so the other build's containers stop too.
+  cascading so the other build's containers are stopped too — by that
+  build's own next tick, since the server can only rewrite the registry's
+  view of an execution, never kill one.
 
 The second half is only safe because a cascade now stops containers rather
 than merely releasing their claims.

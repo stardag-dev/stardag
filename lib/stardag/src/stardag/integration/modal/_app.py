@@ -1295,8 +1295,20 @@ class StardagApp:
         two upstream DAGs at once is waste nobody asked for, so the registry
         refuses the registration. By default that failure surfaces here, at
         the trigger, naming the builds in the way. Set it to cancel those
-        builds (cascading, so their containers stop too) and take the tasks
-        over instead. Reactive builds only — the resident path has no route
+        builds (cascading, so their containers are stopped too) and take
+        the tasks over instead.
+
+        **The stop is not synchronous, and the takeover does not wait for
+        it.** The server cannot kill anything — a cascade releases the
+        claims and tells the cancelled build to stop what it started, and
+        its next tick is what actually does it. Nothing records the stop, so
+        there is no drain to wait on. A task taken over in that window can
+        therefore be started again while the previous container is still
+        running: two executions writing one target, which is the outcome
+        all of this exists to avoid. The window is small and it is the same
+        one a hand-run ``builds cancel --cascade`` leaves, but this flag
+        makes it reachable automatically, so prefer the default refusal
+        unless the retrigger really is worth that. Reactive builds only — the resident path has no route
         for the take-over answer, so it raises rather than quietly ignoring
         the flag.
 
