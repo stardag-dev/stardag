@@ -160,11 +160,14 @@ class ForkingRoot(sd.Task[int]):
     dependency does, and correctly does not change the root's own id, since
     its promise has not changed.
 
-    The exclusion works here for a reason worth knowing, because it does
-    *not* work everywhere (see STA-43): a triggered root is serialized to
-    the bootstrap and its ``requires()`` is evaluated on the object that
-    arrives, so this value survives. A task rehydrated from the registry
-    would get whatever the first registration recorded instead.
+    The exclusion reaches the *declaration* and not the *execution*, and
+    the difference is STA-43 rather than a detail of this fixture. A
+    triggered root is serialized to the bootstrap, so discovery evaluates
+    ``requires()`` on the object that arrives and registers the upstream
+    this build asked for. A **worker** rehydrates the task from the
+    registry, which recorded ``task_data`` at the *first* registration and
+    never updates it — so inside ``run()`` this value is whichever build got
+    there first.
     """
 
     salt: str
@@ -176,7 +179,13 @@ class ForkingRoot(sd.Task[int]):
         )
 
     def run(self):
-        self._save(len(self.requires().load()))
+        # Deliberately does not read its upstream, for the reason above: in
+        # here ``self.requires()`` names whichever upstream was registered
+        # first, and loading it fails outright once that one has been
+        # cancelled. Measured, not guessed — it is how this scenario first
+        # failed. What the scenario is about happens before the task runs:
+        # which declaration is recorded, and what it gates.
+        self._save(int(self.upstream_seconds))
 
 
 # Modal Dict holding the fan-out each ``GenerationalParent`` should yield,

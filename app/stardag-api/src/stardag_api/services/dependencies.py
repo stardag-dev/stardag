@@ -232,7 +232,24 @@ async def reconcile_static_declaration(
     if not dropped:
         return None
 
-    holders = await _live_builds_holding(db, downstream, exclude=build_id)
+    # A completed task is nobody's to build, so two declarations about it
+    # cannot both be materialised and there is nothing to refuse. Worth
+    # skipping explicitly rather than leaving to chance: discovery prunes
+    # *below* a complete task but still registers it, so every build sends a
+    # declaration for every complete task in its closure — and those are the
+    # ones most likely to have been registered long ago, under older code.
+    # Checking them would refuse triggers over a disagreement about work
+    # that is already done.
+    #
+    # The edges are still brought up to date. Nothing reads them for
+    # scheduling — a complete task gates nothing, and plan closure prunes at
+    # one — so this is bookkeeping, and bookkeeping that keeps the recorded
+    # graph matching the code that last described it.
+    holders = (
+        []
+        if downstream.latest_status == TaskStatus.COMPLETED
+        else await _live_builds_holding(db, downstream, exclude=build_id)
+    )
     if holders:
         declared_ids = (
             (
@@ -276,12 +293,21 @@ async def _live_builds_holding(
     """Builds other than ``exclude`` that are RUNNING and hold ``task``.
 
     "Holds" is plan membership — an event for the task — which is the same
-    relation the wake-up flag uses, and deliberately wider than "declared
-    these edges". A build that only inherited the task through plan closure
-    is still a build that may run it, and the cost of being wrong in that
-    direction is a refused trigger with an actionable message, where being
-    wrong the other way is two builds crunching the same data over different
-    upstream DAGs.
+    relation the wake-up flag uses. That reads as wider than "declared these
+    edges", and is *nearly* the same thing in practice, which is worth
+    knowing before anyone tightens it: discovery walks ``requires()`` and
+    prunes only at **complete** tasks, never at already-registered ones, so
+    every build registers every task in its own closure with its own
+    declaration. Holding a task without having declared anything about it
+    therefore needs plan closure to have admitted it — which, for static
+    edges, is the very thing this function has just made current. What is
+    left is inheritance over a *dynamic* edge: another build's fan-out
+    children, which this build may still run.
+
+    So the residual imprecision is one shape, it is a build that can run the
+    task, and the cost of being wrong there is a refused trigger with an
+    actionable message — against two builds crunching the same data over
+    different upstream DAGs if it were wrong the other way.
     """
     holders = (
         (

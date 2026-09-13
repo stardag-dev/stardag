@@ -578,13 +578,52 @@ def _raise_declaration_conflict(conflict: StaticDeclarationConflict) -> None:
     """Refuse a registration that would re-point a task another build is on.
 
     The message is the product here. A build refused for this reason looks,
-    to the person who triggered it, exactly like stardag declining to run —
-    so it has to say which task, what changed, who else is on it, and both
-    ways forward, or it reads as an outage.
+    to whoever triggered it, exactly like stardag declining to run — so it
+    has to say which task, what changed, who is in the way, what to do, and
+    what that costs. The last one is the part most easily left out and the
+    most expensive to omit: cancelling the other build abandons whatever
+    *else* it was doing, which the reader needs to know before taking the
+    advice, not after.
     """
     gone = sorted(set(conflict.recorded) - set(conflict.declared))
     added = sorted(set(conflict.declared) - set(conflict.recorded))
     others = ", ".join(str(b) for b in conflict.build_ids)
+    many = len(conflict.build_ids) > 1
+    noun, verb = ("builds", "hold") if many else ("build", "holds")
+    them, have = ("those builds", "have") if many else ("that build", "has")
+    it = "them" if many else "it"
+    changed = []
+    if gone:
+        changed.append(f"no longer requires {', '.join(gone)}")
+    if added:
+        changed.append(f"now requires {', '.join(added)}")
+    cancel_commands = "; ".join(
+        f"stardag builds cancel {b} --cascade" for b in conflict.build_ids
+    )
+    message = (
+        f"Task {conflict.task_id} is declared here with different static "
+        f"dependencies than the ones recorded ({'; '.join(changed)}), and "
+        f"{noun} {others} — still running — {verb} that task.\n"
+        "\n"
+        "Both declarations are legitimate: a task's id promises its output, "
+        "not how that output was produced, so changing what it depends on "
+        "without changing its id is the ordinary way a pipeline moves on. "
+        "What cannot happen is both at once — two builds materialising one "
+        f"task over two different upstream DAGs — so this registration is "
+        "refused rather than re-pointing a running build's dependencies "
+        "underneath it.\n"
+        "\n"
+        f"To proceed, {them} {have} to be out of the way:\n"
+        f"  - let {it} finish, then trigger this build again; or\n"
+        f"  - cancel {it} ({cancel_commands}) and trigger again — or trigger "
+        "with the `cancel_conflicting` option, which does both in one "
+        "step.\n"
+        "\n"
+        f"Cancelling stops everything {them} {'were' if many else 'was'} "
+        "doing, not only the task in question. Unless this build's DAG "
+        "covers all of that work, it will need re-triggering on the new "
+        "code once this build has taken over."
+    )
     raise HTTPException(
         status_code=409,
         detail={
@@ -593,20 +632,7 @@ def _raise_declaration_conflict(conflict: StaticDeclarationConflict) -> None:
             "declared": conflict.declared,
             "recorded": conflict.recorded,
             "conflicting_build_ids": [str(b) for b in conflict.build_ids],
-            "message": (
-                f"Task {conflict.task_id} is registered here with a different "
-                f"set of static dependencies than the one recorded"
-                + (f" (no longer requires: {', '.join(gone)})" if gone else "")
-                + (f" (now requires: {', '.join(added)})" if added else "")
-                + f", and build(s) {others} are running and hold that task. "
-                "Both declarations are legitimate — a task's id promises its "
-                "output, not how it was produced — but materialising it over "
-                "two different upstream DAGs at once is wasted work, so this "
-                "registration is refused rather than rewriting a running "
-                "build's dependencies. Wait for that build, cancel it "
-                "(`stardag builds cancel <id> --cascade`), or re-trigger with "
-                "the option to cancel conflicting builds."
-            ),
+            "message": message,
         },
     )
 

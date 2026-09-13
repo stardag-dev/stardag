@@ -27,6 +27,7 @@ import pytest
 
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._wait import (
+    build_status,
     describe,
     task_status,
     wait_for_task_status,
@@ -60,6 +61,7 @@ def test_a_live_build_is_not_re_pointed_out_from_under(deployment) -> None:
         slow,
     )
 
+    registry = registry_provider.get()
     salt = uuid.uuid4().hex
     leaf = get_range(limit=1, salt=salt)
     first_upstream = slow(values=leaf, seconds=FIRST_UPSTREAM_SECONDS)
@@ -85,18 +87,33 @@ def test_a_live_build_is_not_re_pointed_out_from_under(deployment) -> None:
         timeout=STATUS_TIMEOUT_SECONDS,
     )
 
-    registry = registry_provider.get()
-
     # --- default: the newcomer fails rather than re-pointing the task ---
     build_two = app.build_trigger(
         root_two,
         reactive=True,
         tick_kwargs={"linger_seconds": 30, "poll_interval_seconds": 3},
     ).build_id
-    status_two = wait_for_terminal(build_two, timeout=BUILD_TIMEOUT_SECONDS)
+    # Waited on the build's own status, not via ``wait_for_terminal``: that
+    # helper also waits for the tick that ended the build to report, and
+    # here there is no tick and never was. A build refused at registration
+    # dies inside its bootstrap, before it is armed as reactive — which is
+    # itself worth asserting, since a half-armed build is one something
+    # might later try to schedule.
+    status_two = wait_until(
+        lambda: build_status(build_two)
+        if build_status(build_two) in ("failed", "completed", "cancelled")
+        else None,
+        build_id=build_two,
+        timeout=BUILD_TIMEOUT_SECONDS,
+        what=f"build {build_two} to be refused",
+    )
     assert status_two == "failed", (
         "the second build was allowed to re-point a task the first is "
         "building right now.\n" + describe(build_two)
+    )
+    assert registry.build_get(build_two).reactive_app_name is None, (
+        "a refused build must not be left armed as reactive: nothing should "
+        "ever tick it.\n" + describe(build_two)
     )
     message = registry.build_get_summary(build_two).latest_error_message or ""
     assert str(build_one) in message, (

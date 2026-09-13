@@ -170,9 +170,37 @@ async def test_a_live_build_on_the_task_makes_it_a_conflict(client: AsyncClient)
     assert detail["recorded"] == ["U1"]
     assert detail["conflicting_build_ids"] == [first]
     # The message is the product: it has to name the task, what changed, who
-    # else is on it, and both ways forward.
-    assert "U1" in detail["message"] and str(first) in detail["message"]
-    assert "cancel" in detail["message"]
+    # is in the way, what to do, and what that costs — the last one being
+    # the part most easily left out and the most expensive to omit, since a
+    # reader acting on "cancel it" needs to know the other build's remaining
+    # work goes with it.
+    message = detail["message"]
+    assert "U1" in message and "U2" in message
+    assert str(first) in message
+    assert f"stardag builds cancel {first} --cascade" in message
+    assert "let it finish" in message
+    assert "re-triggering on the new code" in message
+
+
+@pytest.mark.asyncio
+async def test_the_message_agrees_with_itself_about_number(client: AsyncClient):
+    """Two builds in the way read as two, not as "build(s)". Small, and the
+    reason to bother is that this message is the entire user experience of
+    the refusal."""
+    first = await _new_build(client)
+    await _register_task(client, first, "U1")
+    await _register_task(client, first, "R", ["U1"])
+    second = await _new_build(client)
+    await _register_task(client, second, "R", ["U1"])  # agrees; just holds it
+
+    third = await _new_build(client)
+    await _register_task(client, third, "U2")
+    response = await _register_task(client, third, "R", ["U2"])
+
+    message = response.json()["detail"]["message"]
+    assert "builds" in message and "hold that task" in message
+    assert "those builds have to be out of the way" in message
+    assert str(first) in message and str(second) in message
 
 
 @pytest.mark.asyncio
@@ -206,6 +234,33 @@ async def test_a_finished_build_is_not_a_conflict(client: AsyncClient):
     second = await _new_build(client)
     await _register_task(client, second, "U2")
     assert (await _register_task(client, second, "R", ["U2"])).status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_a_completed_task_is_never_a_conflict(client: AsyncClient):
+    """Nobody is going to build it again, so two declarations about it
+    cannot both be materialised — there is nothing to refuse.
+
+    Not a corner case: discovery prunes *below* a complete task but still
+    registers it, so every build sends a declaration for every complete task
+    in its closure. Those are exactly the ones most likely to have been
+    recorded long ago under older code, and refusing over them would block
+    triggers on a disagreement about work that is already done.
+    """
+    first = await _new_build(client)
+    await _register_task(client, first, "old-dep")
+    await _register_task(client, first, "done", ["old-dep"])
+    await client.post(f"/api/v1/builds/{first}/tasks/done/start")
+    await client.post(f"/api/v1/builds/{first}/tasks/done/complete")
+    # `first` stays RUNNING and still holds `done`.
+
+    second = await _new_build(client)
+    await _register_task(client, second, "new-dep")
+    response = await _register_task(client, second, "done", ["new-dep"])
+
+    assert response.status_code == 201, response.text
+    # ...and the record follows the code that last described it.
+    assert "old-dep" not in await _actionable(client, second)
 
 
 @pytest.mark.asyncio
