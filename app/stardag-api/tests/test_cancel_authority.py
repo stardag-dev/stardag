@@ -265,6 +265,38 @@ async def test_a_conditional_cancel_does_not_stamp_a_task_someone_reset(
 
 
 @pytest.mark.asyncio
+async def test_a_conditional_cancel_survives_a_worker_self_report(
+    client: AsyncClient,
+):
+    """The regression a live run caught and no unit test did.
+
+    Every TASK_STARTED sets *or clears* the task's executor columns from its
+    own metadata, so a worker self-reporting its start — which carries no
+    executor fields, because the engine already recorded them — nulls the
+    ref of the execution it is reporting. A conditional cancel compared
+    against those columns therefore refused every Modal task whose worker
+    had checked in, and left it RUNNING under a build that was gone.
+
+    The event log still knows, which is the same reason the listing reads
+    it."""
+    build = await _new_build(client)
+    await _start(client, build, "reported")
+    # The worker's own start: no executor fields, so the row's ref is gone.
+    await client.post(f"/api/v1/builds/{build}/tasks/reported/start")
+    single = (await client.get("/api/v1/tasks/reported")).json()
+    assert single["latest_executor_ref"] is None, "precondition: the row was cleared"
+
+    response = await client.post(
+        f"/api/v1/builds/{build}/tasks/reported/cancel",
+        params={"if_executor": "modal", "if_executor_ref": "fc-reported"},
+    )
+    assert response.status_code == 200, response.text
+    assert await _task_status(client, "reported") == "cancelled", (
+        "the cleanup could not revoke an execution it had just stopped"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_conditional_cancel_does_not_revoke_a_newer_execution(
     client: AsyncClient,
 ):
