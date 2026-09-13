@@ -43,7 +43,9 @@ repos:
         # docstring.
         language: python
         additional_dependencies: ["pyyaml==6.0.3"]
-        files: ^\.github/workflows/.*\.ya?ml$
+        # The checker itself is in the pattern: editing it should re-run
+        # it against the workflows, not wait for the next workflow edit.
+        files: ^(\.github/workflows/.*\.ya?ml|scripts/check-action-pins\.py)$
         pass_filenames: false
         verbose: true
       - id: pyright-stardag
