@@ -940,7 +940,7 @@ class Runner(RunFunction):
                 )
             elif function_timeout_seconds is not None:
                 detail = (
-                    f"{elapsed_seconds:.1f}s in, which is at or past its "
+                    f"{elapsed_seconds:.1f}s in, which is near or past its "
                     f"worker function's {function_timeout_seconds}s timeout"
                 )
             else:
