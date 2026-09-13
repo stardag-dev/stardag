@@ -367,6 +367,35 @@ class TestDeclarationConflict:
             )
         assert registry.cancelled_builds == [(other, True)], "cancelled once only"
 
+    async def test_one_refusal_naming_a_crowd_cancels_none_of_them(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The budget covers what a pass *would* cancel, not what it has.
+
+        A refusal names every running holder of the task, so one response
+        can exceed the limit on its own — and cancelling up to the limit
+        and then failing would be the worst answer available: work taken
+        down, way still not clear.
+        """
+        from stardag.build._reactive._discovery import _MAX_CONFLICTING_BUILDS
+
+        root = SyncOnlyTask(name="conflict-crowd-root")
+        crowd = [uuid4() for _ in range(_MAX_CONFLICTING_BUILDS + 1)]
+        registry = FakeReactiveRegistry(root_task_ids=[str(root.id)])
+        registry.declaration_conflict = DependencyDeclarationConflictError(
+            "R is declared differently",
+            task_id="R",
+            build_ids=[str(b) for b in crowd],
+        )
+
+        with pytest.raises(DependencyDeclarationConflictError):
+            await discover_and_register_aio(
+                registry, uuid4(), root, cancel_conflicting=True
+            )
+        assert registry.cancelled_builds == [], (
+            "cancelled part of the crowd and still failed"
+        )
+
     async def test_a_conflict_naming_nobody_is_not_retried(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):

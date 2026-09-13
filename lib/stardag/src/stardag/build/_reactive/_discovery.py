@@ -221,7 +221,15 @@ async def _register_chunk(
             if not cancel_conflicting or not conflict.build_ids:
                 raise
             fresh = [b for b in conflict.build_ids if b not in cancelled]
-            if not fresh or len(cancelled) >= _MAX_CONFLICTING_BUILDS:
+            # The budget is checked against what this pass *would* cancel,
+            # not against what it already has. One refusal can name every
+            # running holder of a popular task, so testing only the running
+            # total would let a single pass cancel any number of builds
+            # before anything looked at the limit again. And it is checked
+            # before cancelling any of them: stopping half way would take
+            # work down without clearing the way, which is the one outcome
+            # worse than refusing.
+            if not fresh or len(cancelled) + len(fresh) > _MAX_CONFLICTING_BUILDS:
                 raise
             logger.warning(
                 "Registration conflicts with build(s) %s over task %s; "
