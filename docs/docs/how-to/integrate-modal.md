@@ -895,8 +895,11 @@ Three things carry it:
   `from` clause at all, both keep that link — `from None` hides the
   "During handling…" preamble, it does not discard the original exception.
   (A bare `raise` is a different thing entirely: it re-raises the platform
-  exception, so stardag never sees a resumption request at all and the
-  task fails.) What loses the link is raising where the interruption is no
+  exception, so stardag never sees a resumption request and records
+  nothing — on a preemption the backend restarts the input anyway, but on
+  a timeout or a cancel the execution simply dies and a later tick records
+  a retryable failure. You keep the checkpoint you wrote and lose the
+  resumption.) What loses the link is raising where the interruption is no
   longer reachable — outside the `except` block, with no explicit
   `from err`. Then stardag falls back to comparing elapsed time against
   your worker's `timeout`, which is a guess.

@@ -844,7 +844,7 @@ class APIRegistry(RegistryABC):
         params = self._get_event_params()
         if reason:
             params["reason"] = reason
-        if executor_ref:
+        if executor_ref is not None:
             params["executor_ref"] = executor_ref
         try:
             self._request(
@@ -884,7 +884,7 @@ class APIRegistry(RegistryABC):
         params = self._get_event_params()
         if reason:
             params["reason"] = reason
-        if executor_ref:
+        if executor_ref is not None:
             params["executor_ref"] = executor_ref
         try:
             self._request(
@@ -2252,7 +2252,7 @@ class APIRegistry(RegistryABC):
         params = self._get_event_params()
         if reason:
             params["reason"] = reason
-        if executor_ref:
+        if executor_ref is not None:
             params["executor_ref"] = executor_ref
         try:
             await self._arequest(
@@ -2286,7 +2286,7 @@ class APIRegistry(RegistryABC):
         params = self._get_event_params()
         if reason:
             params["reason"] = reason
-        if executor_ref:
+        if executor_ref is not None:
             params["executor_ref"] = executor_ref
         try:
             await self._arequest(
