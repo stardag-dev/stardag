@@ -340,6 +340,97 @@ async def test_completed_stays_completed(client: AsyncClient):
     assert task["latest_status"] == "completed"
 
 
+# --- It applies only to the claim the reporting build holds -------------
+#
+# A worker cannot tell a deliberate cancel from a function timeout: the
+# execution backend delivers both as the same exception, with the same
+# message. So the worker reports either way and the registry decides —
+# it is the one that initiated the cancel, and the one that knows whose
+# claim the task is currently under.
+
+
+@pytest.mark.asyncio
+async def test_interrupt_after_a_cancel_is_a_no_op(client: AsyncClient):
+    """The cancel is usually *what* interrupted the worker. Letting the
+    report land would resurrect a task the build just cancelled — the
+    frontier lists INTERRUPTED as actionable, so a tick would start it
+    again."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/cancel")
+
+    response = await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
+        params={"reason": "Input was cancelled by user"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["latest_status"] == "cancelled"
+
+    assert (await _task(client, "t-1"))["latest_status"] == "cancelled"
+    assert (await _replayed(client, build_id, "t-1"))["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_the_no_op_still_records_the_event(client: AsyncClient):
+    """It happened, and it is the only trace that this execution ended at
+    all. Only the *status* transition is refused."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/cancel")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+
+    events = (await client.get(f"{BUILDS}/{build_id}/events")).json()
+    assert "task_interrupted" in [event["event_type"] for event in events]
+
+
+@pytest.mark.asyncio
+async def test_either_interleaving_of_cancel_and_interrupt_ends_cancelled(
+    client: AsyncClient,
+):
+    """The worker reports inside its grace window while the canceller is
+    still writing, so both orders are reachable. One is refused by the rule
+    above; the other is simply overwritten, because nothing makes
+    INTERRUPTED sticky. They must agree, or the outcome of a cancel would
+    depend on a race."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/cancel")
+
+    assert (await _task(client, "t-1"))["latest_status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_does_not_evict_another_builds_claim(client: AsyncClient):
+    """A worker whose claim lapsed and was re-taken is reporting about a
+    dead execution. Applying it would evict the live holder and hand the
+    task to a scheduler while the new execution runs on — the duplicate
+    execution claims exist to prevent."""
+    first = await _new_build(client)
+    second = await _new_build(client)
+    await _register_task(client, first, "t-1")
+    await _register_task(client, second, "t-1")
+
+    await client.post(f"{BUILDS}/{first}/tasks/t-1/start", params={"claim": True})
+    # The re-claim, expressed the way the reactive engine expresses a
+    # non-arbitrating start: the second build is now the status holder.
+    await client.post(
+        f"{BUILDS}/{second}/tasks/t-1/start",
+        params={"executor": "modal", "executor_ref": "fc-2"},
+    )
+
+    await client.post(f"{BUILDS}/{first}/tasks/t-1/interrupt")
+
+    task = await _task(client, "t-1")
+    assert task["latest_status"] == "running"
+    assert task["latest_executor_ref"] == "fc-2"
+
+
 # --- Postgres parity ----------------------------------------------------
 
 

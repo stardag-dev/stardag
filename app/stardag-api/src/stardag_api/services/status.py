@@ -552,6 +552,29 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # running, so the claim is over and its expiry is meaningless.
         task.latest_status_expires_at = None
     elif et == EventType.TASK_INTERRUPTED:
+        # An interruption is a report about *one execution*, so it applies
+        # only to the claim that execution held. Two states it must not
+        # touch, and both are reachable today:
+        #
+        #   - The task is no longer RUNNING. Usually because somebody
+        #     cancelled it — a UI cancel, a FAIL_FAST cascade — and the
+        #     cancel is what interrupted the worker in the first place.
+        #     Modal delivers a deliberate ``FunctionCall.cancel()`` and a
+        #     function timeout as the *same* exception, so the worker
+        #     cannot tell them apart and must report either way. Deciding
+        #     here is what makes that safe: the registry initiated the
+        #     cancel and knows, where the worker can only guess.
+        #   - The task is RUNNING under a *different* build. This worker's
+        #     claim lapsed and somebody else took it; its report is about a
+        #     dead execution and would otherwise evict the live holder.
+        #
+        # The event row is still written either way — it happened, and it
+        # is the only trace that this execution ended at all.
+        if (
+            task.latest_status != TaskStatus.RUNNING
+            or task.latest_status_build_id != event.build_id
+        ):
+            return
         task.latest_status = TaskStatus.INTERRUPTED
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
@@ -789,12 +812,20 @@ async def get_task_status_in_build(
             completed_at = event.created_at
             error_message = event.error_message
         elif event.event_type == EventType.TASK_INTERRUPTED:
+            # Only while this build's own view has the task running — the
+            # build-scoped half of the rule _apply_event_to_task applies
+            # globally, and for the same reason: an interruption reported
+            # after a cancel is a report about an execution the cancel
+            # already ended. The other half (ownership) is implicit here,
+            # since this replay only ever sees one build's events.
+            #
             # Not an ending, so completed_at is deliberately untouched —
             # mirrors _apply_event_to_task, including the unconditional
             # error_message write (a stale one would explain this
             # interruption with an earlier failure's text).
-            status = TaskStatus.INTERRUPTED
-            error_message = event.error_message
+            if status == TaskStatus.RUNNING:
+                status = TaskStatus.INTERRUPTED
+                error_message = event.error_message
         elif event.event_type == EventType.TASK_SKIPPED:
             status = TaskStatus.SKIPPED
             completed_at = event.created_at
@@ -867,12 +898,16 @@ async def get_all_task_statuses_in_build(
             completed_at = event.created_at
             error_message = event.error_message
         elif event.event_type == EventType.TASK_INTERRUPTED:
+            # Only while this build's own view has the task running — see
+            # get_task_status_in_build, whose rule this mirrors.
+            #
             # Not an ending, so completed_at is deliberately untouched —
             # mirrors _apply_event_to_task, including the unconditional
             # error_message write (a stale one would explain this
             # interruption with an earlier failure's text).
-            status = TaskStatus.INTERRUPTED
-            error_message = event.error_message
+            if status == TaskStatus.RUNNING:
+                status = TaskStatus.INTERRUPTED
+                error_message = event.error_message
         elif event.event_type == EventType.TASK_SKIPPED:
             status = TaskStatus.SKIPPED
             completed_at = event.created_at
