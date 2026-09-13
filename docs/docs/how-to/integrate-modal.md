@@ -890,11 +890,14 @@ Three things carry it:
   interruption you caught off the exception you raise, to tell a
   preemption (Modal restarts the _input_ on the same call id, in seconds —
   in a fresh container, so nothing in memory survives) from a timeout or a
-  cancel (nothing restarts it, so the scheduler has to). Both
-  `raise ... from None` and a plain `raise` keep that link — `from None`
-  hides the "During handling…" preamble, it does not discard the original
-  exception. What loses it is raising somewhere the interruption is no
-  longer reachable: outside the `except` block, with no explicit
+  cancel (nothing restarts it, so the scheduler has to). Writing
+  `raise sd.ResumableInterruption(...)` with `from None`, or with no
+  `from` clause at all, both keep that link — `from None` hides the
+  "During handling…" preamble, it does not discard the original exception.
+  (A bare `raise` is a different thing entirely: it re-raises the platform
+  exception, so stardag never sees a resumption request at all and the
+  task fails.) What loses the link is raising where the interruption is no
+  longer reachable — outside the `except` block, with no explicit
   `from err`. Then stardag falls back to comparing elapsed time against
   your worker's `timeout`, which is a guess.
 - **The checkpoint lives inside the task's own directory target**, and

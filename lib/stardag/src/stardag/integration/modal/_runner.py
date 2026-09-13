@@ -563,8 +563,9 @@ class _WorkerLifecycleReporter:
             label="preempt",
             what="preemption",
             consequence=(
-                "A restart that does not arrive will then be noticed only "
-                "when the full execution claim lapses."
+                "If it never lands, the claim keeps its original expiry, so "
+                "a restart that does not arrive is noticed only when that "
+                "lapses rather than within the restart grace."
             ),
         )
 
