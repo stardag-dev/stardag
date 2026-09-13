@@ -164,6 +164,25 @@ class ClaimSettings(BaseSettings):
     # what the SDK does from its executor's timeout.
     default_ttl_seconds: int = 7 * 24 * 60 * 60
 
+    # How long a claim stays believable after the platform said it was
+    # restarting the execution itself (TASK_PREEMPTED). Replaces the
+    # remaining TTL for as long as the restart is outstanding; the restarted
+    # execution's TASK_STARTED re-grants the full one.
+    #
+    # This is the one place a *short* expiry is right, and for the opposite
+    # reason to ``default_ttl_seconds`` above. There, expiring early risks
+    # handing a live task to a second claimant. Here the execution is
+    # already gone and something has promised to bring it back, so the
+    # expiry is measuring a promise rather than a task: past it, the promise
+    # was not kept. Sized well above the restart it is waiting for
+    # (measured at ~7s on Modal, whose grace ladder to a hard kill is ~60s)
+    # and well below the worker timeouts it replaces, which run to a day.
+    #
+    # Expiring early is cheap even so: a lapsed claim does not by itself
+    # start anything. A scheduler that finds one still probes the executor
+    # ref first, and leaves a ref that answers "running" alone.
+    preempt_restart_grace_seconds: int = 300
+
     model_config = SettingsConfigDict(env_prefix="STARDAG_API_CLAIM_")
 
 

@@ -251,6 +251,8 @@ async def get_task(
         latest_status=task.latest_status,
         latest_status_at=task.latest_status_at,
         latest_status_build_id=task.latest_status_build_id,
+        latest_status_expires_at=task.latest_status_expires_at,
+        latest_preempted_at=task.latest_preempted_at,
     )
 
 

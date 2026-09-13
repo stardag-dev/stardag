@@ -67,6 +67,22 @@ def claim_expires_at(granted_at: datetime, ttl_seconds: int | None) -> datetime:
     return as_utc(granted_at) + timedelta(seconds=claim_ttl(ttl_seconds))
 
 
+def preempt_restart_expires_at(preempted_at: datetime) -> datetime:
+    """When an outstanding restart stops being believable.
+
+    A preemption leaves the claim in place — the platform is restarting the
+    same execution and will need it — but replaces its remaining TTL with
+    this much shorter grace. Past it, the restart that was promised did not
+    arrive, and the claim is re-claimable like any other lapsed one.
+
+    Measured from the event, for the same replay reason as
+    :func:`claim_expires_at`.
+    """
+    return as_utc(preempted_at) + timedelta(
+        seconds=claim_settings.preempt_restart_grace_seconds
+    )
+
+
 def claim_is_live(task: Task, now: datetime | None = None) -> bool:
     """Whether ``task`` currently holds a believable execution claim.
 

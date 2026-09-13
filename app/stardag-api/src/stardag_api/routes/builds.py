@@ -2262,6 +2262,9 @@ async def get_build_frontier(
             # expiry the server itself will hand the task to the next
             # claimant, so a scheduler can stop inferring from elapsed time.
             latest_status_expires_at=t.latest_status_expires_at,
+            # ...and this says why that expiry may be unusually near: the
+            # platform said it was restarting this execution itself.
+            latest_preempted_at=t.latest_preempted_at,
             # Absent from the map = no attempt recorded in this build. A
             # root cached from an earlier build is the normal case.
             attempt_count=attempt_counts.get(t.id, 0),
@@ -3356,6 +3359,49 @@ async def interrupt_task(
         build_id,
         task_id,
         EventType.TASK_INTERRUPTED,
+        db,
+        auth,
+        reason,
+        commit_hash=commit_hash,
+    )
+
+
+@router.post("/{build_id}/tasks/{task_id}/preempt", response_model=TaskEventResponse)
+async def preempt_task(
+    build_id: UUID,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    reason: str | None = None,
+    commit_hash: str | None = None,
+):
+    """Record that the platform is restarting this execution itself.
+
+    A preemption, as distinct from ``/interrupt``. The container was taken
+    away, but the backend restarts the *same* execution — same call id,
+    same executor ref, no attempt spent — typically in seconds. So the task
+    does not change status and does **not** release its claim: releasing it
+    would invite a second, concurrent execution of a task that is about to
+    resume.
+
+    What it records is that a restart is now **due**, which is the thing
+    nothing could see before. A preempted worker used to report nothing at
+    all, on the reasoning that the restart makes the report unnecessary —
+    true right up until the restart does not come, at which point the task
+    reads as "running happily" and stays that way until its whole claim
+    lapses. Recording the preemption costs nothing, risks nothing, and
+    makes the absence detectable: the claim's expiry is pulled in to
+    ``ClaimSettings.preempt_restart_grace_seconds``, the restart's own
+    ``/start`` re-grants the full TTL, and a restart that never arrives
+    leaves an ordinary lapsed claim for the ordinary self-heal to find.
+
+    Applies only while the task is RUNNING under this build — see
+    ``services.status``.
+    """
+    return await _create_task_event(
+        build_id,
+        task_id,
+        EventType.TASK_PREEMPTED,
         db,
         auth,
         reason,

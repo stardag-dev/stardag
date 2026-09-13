@@ -8,7 +8,7 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import Build, BuildStatus, Event, EventType, Task, TaskStatus
-from stardag_api.services.claims import claim_expires_at
+from stardag_api.services.claims import claim_expires_at, preempt_restart_expires_at
 from stardag_api.services.wakeups import flag_after_task_transition
 
 # Statuses TASK_RETRIED resets to PENDING. Shared by the denormalised path
@@ -107,6 +107,12 @@ _ATTEMPT_ORDERING_EVENT_TYPES = (
 # preempted container that comes back records a second start and spends no
 # attempt. Inserting any new event type between those two starts silently
 # starts charging for it.
+#
+# Which is exactly why TASK_PREEMPTED is absent from the *ordering* tuple
+# above rather than added to the continuing one here. A preempted worker
+# now reports, so its event sits between those two starts — and being no
+# kind of status predecessor at all, it leaves them adjacent, keeps the
+# restart free, and keeps the SQL twin in agreement without a second term.
 _ATTEMPT_CONTINUING_EVENT_TYPES = (
     EventType.TASK_STARTED,
     EventType.TASK_INTERRUPTED,
@@ -602,6 +608,40 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # TASK_RETRIED clears it.
         if event_commit is not None:
             task.latest_commit_hash = event_commit
+    elif et == EventType.TASK_PREEMPTED:
+        # The platform took the container away and is restarting the *same*
+        # execution itself. Nothing about the task's status changes: it is
+        # still running, under the same claim, with the same executor ref
+        # that the restart will reuse. Moving it anywhere — INTERRUPTED
+        # included — would release a claim the restart is about to need and
+        # invite a second, concurrent execution.
+        #
+        # Subject to the same authority rule as TASK_INTERRUPTED above, for
+        # the same reasons.
+        if (
+            task.latest_status != TaskStatus.RUNNING
+            or task.latest_status_build_id != event.build_id
+        ):
+            return
+        # What this event is *for*: recording that a restart is now due.
+        # Without it the registry cannot tell "running happily since T0"
+        # from "interrupted at T0+n and never restarted" — both read as
+        # RUNNING since T0, so the absence of the restart is expected by
+        # nobody and noticed by nothing.
+        task.latest_preempted_at = event.created_at
+        # And the half that makes the absence *actionable*. The claim stays,
+        # but its expiry is pulled in from the worker's whole declared
+        # timeout (up to a day) to a grace sized for the restart. A restart
+        # that arrives re-grants the full TTL with its own TASK_STARTED; one
+        # that never arrives leaves a lapsed claim within minutes, which the
+        # ordinary self-heal path already knows what to do with.
+        task.latest_status_expires_at = preempt_restart_expires_at(event.created_at)
+        # latest_status_at, latest_status_event_id and latest_status_build_id
+        # are all deliberately untouched: the status did not move, and
+        # "a restart is outstanding" is derived as latest_preempted_at >
+        # latest_status_at — which the restart's own start then falsifies.
+        if event_commit is not None:
+            task.latest_commit_hash = event_commit
     elif et == EventType.TASK_WAITING_FOR_LOCK:
         if task.latest_status == TaskStatus.PENDING:
             task.latest_waiting_for_lock = True
@@ -826,6 +866,12 @@ async def get_task_status_in_build(
             if status == TaskStatus.RUNNING:
                 status = TaskStatus.INTERRUPTED
                 error_message = event.error_message
+        elif event.event_type == EventType.TASK_PREEMPTED:
+            # Status-neutral by design: the platform is restarting the same
+            # execution, so the task stays RUNNING under the same claim.
+            # What it records lives on the task row (latest_preempted_at and
+            # a shortened claim expiry), which a replay does not derive.
+            pass
         elif event.event_type == EventType.TASK_SKIPPED:
             status = TaskStatus.SKIPPED
             completed_at = event.created_at
@@ -908,6 +954,9 @@ async def get_all_task_statuses_in_build(
             if status == TaskStatus.RUNNING:
                 status = TaskStatus.INTERRUPTED
                 error_message = event.error_message
+        elif event.event_type == EventType.TASK_PREEMPTED:
+            # Status-neutral — see get_task_status_in_build.
+            pass
         elif event.event_type == EventType.TASK_SKIPPED:
             status = TaskStatus.SKIPPED
             completed_at = event.created_at
