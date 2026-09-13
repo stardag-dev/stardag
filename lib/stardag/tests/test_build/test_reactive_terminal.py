@@ -274,6 +274,50 @@ class TestCancelAuthority:
             f"the cancel pass stopped only the first page: {executor.cancelled_refs}"
         )
 
+    async def test_an_execution_that_appears_mid_drain_is_still_stopped(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A terminal build gets no second tick and nothing re-flags it, so
+        anything the drain misses is missed for good. The drain therefore
+        re-lists until nothing new comes back, rather than stopping what one
+        listing happened to contain."""
+        first, second = SyncOnlyTask(name="drain-a"), SyncOnlyTask(name="drain-b")
+        registry, executor, store = _setup([first, second], auto_complete=False)
+        registry.add_task(
+            str(first.id), status="running", executor="fake", executor_ref="fc-a"
+        )
+        registry.build_status = "cancelled"
+
+        # The second execution is recorded while the first listing is being
+        # acted on — the shape a mid-drain start produces.
+        original = registry.build_get_executions_aio
+
+        async def appear_after_first_call(build_id, *, cursor=None):
+            result = await original(build_id, cursor=cursor)
+            if len(registry.executions_calls) == 1:
+                registry.add_task(
+                    str(second.id),
+                    status="running",
+                    executor="fake",
+                    executor_ref="fc-b",
+                )
+            return result
+
+        registry.build_get_executions_aio = appear_after_first_call  # type: ignore[method-assign]
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert sorted(executor.cancelled_refs) == ["fc-a", "fc-b"], (
+            "an execution that appeared while the drain was running was "
+            f"never stopped: {executor.cancelled_refs}"
+        )
+
     async def test_a_transient_executions_failure_is_not_a_missing_route(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):

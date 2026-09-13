@@ -42,6 +42,12 @@ logger = logging.getLogger(__name__)
 # build — at the server's page size, tens of thousands of live executions.
 _MAX_EXECUTION_PAGES = 200
 
+# How many times the cancel drain re-lists before giving up. Two is the
+# meaningful number: one pass to stop what is there, one to confirm nothing
+# arrived while it was working. More would only matter if something were
+# racing the drain deliberately.
+_CANCEL_RECONCILE_PASSES = 2
+
 
 def _format_age(seconds: float) -> str:
     """Render an age the way an operator reads it.
@@ -769,7 +775,52 @@ async def _cancel_running(
     a ref stopped twice is harmless. What must not happen is stopping one
     this build does not own.
     """
-    for item in await _executions_to_stop(frontier, build_id, registry, summary):
+    # Re-listed until it comes back with nothing new, rather than stopped in
+    # one pass. An execution that appears *while* the drain is running would
+    # otherwise be missed for good: a terminal build gets no second tick, and
+    # nothing re-flags it. Two shapes can do that — a ref recorded between
+    # the listing and the POST, where the conditional cancel correctly
+    # declines to stamp it and correctly does not stop it either; and a first
+    # ref-bearing start committed mid-paging, which can land behind the
+    # cursor and be skipped by every later page.
+    #
+    # Neither is reachable through a writer that exists today: the scheduler
+    # lease single-flights ticks, a terminal tick spawns nothing, and a
+    # worker self-reporting its start carries no executor fields at all. The
+    # loop is here because that argument is a chain of three facts about
+    # other people's code, and re-asking costs one request on a path that
+    # runs once, at build death.
+    stopped: set[tuple[str, str]] = set()
+    for _ in range(_CANCEL_RECONCILE_PASSES):
+        listed = await _executions_to_stop(frontier, build_id, registry, summary)
+        remaining = [
+            item for item in listed if (item.executor, item.executor_ref) not in stopped
+        ]
+        if not remaining:
+            break
+        await _stop_each(
+            remaining, build_id, registry, task_executor, task_store, summary, stopped
+        )
+    else:
+        logger.warning(
+            f"Build {build_id}: executions kept appearing across "
+            f"{_CANCEL_RECONCILE_PASSES} passes of the cancel drain; the "
+            "latest arrivals keep running until their backend stops them."
+        )
+
+
+async def _stop_each(
+    items: "list[BuildExecution]",
+    build_id: UUID,
+    registry: RegistryABC,
+    task_executor: TaskExecutorABC,
+    task_store: BuildTaskStore,
+    summary: TickSummary,
+    stopped: "set[tuple[str, str]]",
+) -> None:
+    """Stop each listed execution and record the revocation. Best-effort."""
+    for item in items:
+        stopped.add((item.executor, item.executor_ref))
         task = await _load_task(item.task_id, registry, task_store, quiet=True)
         if task is None:
             continue
