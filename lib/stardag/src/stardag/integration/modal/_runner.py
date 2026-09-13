@@ -523,12 +523,14 @@ class _WorkerLifecycleReporter:
         before any scheduler can retry it. A tick gets away with
         record-then-retry only because both halves happen inside one pass.
         """
+        # Resolved here, on the container's own thread. The report runs on
+        # a separate one, and the call id is context-bound — looked up
+        # there it can come back None, which would silently drop the report
+        # back to the legacy no-ref path the server has to accept.
+        ref = self._executor_ref()
         self._report_in_grace_window(
             lambda: self.registry.task_interrupt(
-                self.build_id,
-                self.task,
-                reason=reason,
-                executor_ref=self._executor_ref(),
+                self.build_id, self.task, reason=reason, executor_ref=ref
             ),
             label="interrupt",
             what="interruption",
@@ -549,12 +551,11 @@ class _WorkerLifecycleReporter:
         that never arrives becomes an ordinary lapsed claim in minutes
         rather than being indistinguishable from a task running happily.
         """
+        # Resolved on this thread, not the report's — see ``interrupted``.
+        ref = self._executor_ref()
         self._report_in_grace_window(
             lambda: self.registry.task_preempt(
-                self.build_id,
-                self.task,
-                reason=reason,
-                executor_ref=self._executor_ref(),
+                self.build_id, self.task, reason=reason, executor_ref=ref
             ),
             label="preempt",
             what="preemption",

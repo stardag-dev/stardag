@@ -31,9 +31,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   to decide, since it issued any cancel.
 
   The signal is read off `__cause__`/`__context__` of whatever the task
-  raises, so the documented recipe keeps working unchanged: `raise ... from
-None` clears `__cause__` and suppresses the traceback preamble, not the
-  context. The elapsed-time rule remains as a fallback for a task that
+  raises, so the documented recipe keeps working unchanged. Raising
+  `from None` clears `__cause__` and suppresses the traceback preamble; it
+  does not clear the context. The elapsed-time rule remains as a fallback for a task that
   raises `ResumableInterruption` on its own initiative, where there is
   nothing on the chain to read.
 
@@ -67,9 +67,9 @@ None` clears `__cause__` and suppresses the traceback preamble, not the
   row is written either way; only the status transition is refused.
 - **`POST /builds/{id}/tasks/{id}/preempt`** and `tasks.latest_preempted_at`
   (nullable, no backfill) for the SDK change above. "A restart is
-  outstanding" is derived — `RUNNING and latest_preempted_at >
-latest_status_at` — so the restarted execution's own start falsifies it
-  with nothing to clear. `ClaimSettings.preempt_restart_grace_seconds`
+  outstanding" is derived rather than stored: RUNNING, with
+  `latest_preempted_at` later than `latest_status_at`. So the restarted
+  execution's own start falsifies it, with nothing to clear. `ClaimSettings.preempt_restart_grace_seconds`
   (default 300) sizes the shortened claim.
 - `GET /tasks` and `GET /tasks/{id}` now carry `latest_status_expires_at`
   and `latest_preempted_at` alongside the other claim fields.
