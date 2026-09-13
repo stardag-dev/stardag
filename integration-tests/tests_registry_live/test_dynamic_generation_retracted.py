@@ -22,8 +22,16 @@ would silently re-run the first generation's width. See
 ``GenerationalParent``.
 
 Against the code this fixes, build 2 resets the parent, is still gated on
-the abandoned children, resets those too and runs them -- so the assertion
-that they never left CANCELLED fails.
+the abandoned children, resets those too and runs them -- seven spawns
+instead of five.
+
+The assertion is on build 2's spawn count rather than on the abandoned
+children's statuses, and that is not a convenience. A cascade releases the
+claims a build *holds*, so which of them end up CANCELLED and which are
+left PENDING depends on how many had started when the cancel landed, and
+one can even be RUNNING afterwards from a spawn build 1's tick had already
+decided on. All of that is build 1's business and says nothing about
+whether build 2 re-ran the generation.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._wait import (
     describe,
     task_status,
+    tick_summaries,
     wait_for_task_status,
     wait_for_terminal,
 )
@@ -118,23 +127,33 @@ def test_an_abandoned_generation_is_not_re_run() -> None:
         status = wait_for_terminal(build_two, timeout=BUILD_TIMEOUT_SECONDS)
         assert status == "completed", describe(build_two)
 
-        # The point of the run. Build two never admitted the abandoned
-        # generation and never reset the parent onto it, so nothing asked
-        # for it again.
+        # The point of the run, measured on build two's own trail rather
+        # than on the children's statuses.
         #
-        # Either never-executed status is a pass, and which one appears is
-        # a detail of the cancel rather than of this fix: a cascade releases
-        # the claims the build *holds*, so a child that had started is
-        # CANCELLED and one that had not is left PENDING. The second is the
-        # more dangerous of the two and the reason closure had to learn
-        # this rule -- a pending stale child is actionable the moment it
-        # lands in a plan, and runs long before anything would retract it.
+        # Their statuses cannot carry it. A cascade releases the claims a
+        # build *holds*, so which of the abandoned children are CANCELLED
+        # and which are left PENDING depends on how many had started when
+        # the cancel landed — and one can even be RUNNING afterwards, put
+        # there by a spawn the first build's tick had already decided on
+        # when the cascade committed. All of that is the first build's
+        # business; none of it says whether the second build re-ran the
+        # generation, which is the claim under test.
+        #
+        # What does say it is how much the second build spawned. Five is its
+        # own work exactly: the parent twice (it suspends on its children
+        # and is re-spawned to finish), the two children of the *current*
+        # generation, and the root. The leaf is already complete from the
+        # first build. Against the code this fixes the count was seven —
+        # the same five plus the two abandoned children, reset to un-gate a
+        # parent that was never going to ask for them again.
+        summaries = tick_summaries(build_two)
+        spawned = sum(s.get("spawned", 0) for s in summaries)
         stale = {str(task.id): task_status(task.id) for task in first}
-        assert set(stale.values()) <= {"pending", "cancelled"}, (
-            "A build re-ran an abandoned generation of dynamic dependencies. "
-            "They gated the parent it needed, so it reset them to un-gate "
-            "it -- work its own fan-out was never going to ask for.\n"
-            f"stale children: {stale}\n" + describe(build_two)
+        assert spawned == 5, (
+            f"Build two spawned {spawned} tasks, not the 5 of its own work "
+            "(the parent twice, its two current children, and the root). "
+            "Seven means it re-ran the abandoned generation.\n"
+            f"abandoned children: {stale}\n" + describe(build_two)
         )
 
         # ...and the generation it did ask for ran.
