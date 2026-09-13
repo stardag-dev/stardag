@@ -25,9 +25,11 @@ the forms this repo happens to use today, which is a weaker claim than the one
 being made.
 
 Comments do not survive ``yaml.safe_load``, so the refs come from the parse and
-the version comment is checked against the source line the ref appears on. A
-ref the parse finds but that cannot be located in the source is reported rather
-than passed over — an unreadable pin is not a verified one.
+the version comment is checked against every source line the ref appears on —
+every one, because these SHAs repeat, and accepting a ref on the strength of a
+commented copy elsewhere would wave through each new uncommented one. A ref the
+parse finds but that cannot be located in the source is reported rather than
+passed over: an unreadable pin is not a verified one.
 
 To pin or refresh: ``pinact run`` (brew install pinact). pinact refuses to pin
 a branch ref, so ``owner/repo@some/branch`` has to be resolved by hand — look
@@ -122,8 +124,16 @@ def check(path: Path) -> list[str]:
                 "so its version comment cannot be read. Write the step in "
                 "block style."
             )
-        elif not any(VERSION_COMMENT.search(line) for _, line in located):
-            problems.append(f"NO VERSION COMMENT  {where}  {ref}")
+        else:
+            # Every occurrence, not any: these SHAs repeat — `actions/checkout`
+            # alone appears nine times — so accepting the ref because *some*
+            # line carries the comment would let each new uncommented copy in
+            # on the strength of an older one.
+            problems.extend(
+                f"NO VERSION COMMENT  {relative}:{num}  {ref}"
+                for num, line in located
+                if not VERSION_COMMENT.search(line)
+            )
 
     return problems
 
