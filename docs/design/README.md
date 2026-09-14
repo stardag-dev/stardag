@@ -13,6 +13,7 @@ A note earns its place here when a design keeps getting re-litigated, or keeps
 being misread in the same way. If you find yourself explaining the same
 subtlety a second time, write it down here instead.
 
-| Note                                                                 | Subject                                                                                       |
-| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| [execution-claims-and-liveness.md](execution-claims-and-liveness.md) | How "is this task running right now?" is modelled, and why it is a status rather than a lease |
+| Note                                                                         | Subject                                                                                       |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| [execution-claims-and-liveness.md](execution-claims-and-liveness.md)         | How "is this task running right now?" is modelled, and why it is a status rather than a lease |
+| [immutable-dependency-declarations.md](immutable-dependency-declarations.md) | Why a task id promises its upstream set, and why an edge is never retracted                   |

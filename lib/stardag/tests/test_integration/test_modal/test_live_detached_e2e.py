@@ -194,7 +194,9 @@ def test_crash_resume_reattaches_without_restarting_task(tmp_path):
     # Phase B — "resumed" orchestrator. The registry stub reports the task
     # as RUNNING with the pre-crash ref, as the API registry would.
     class ReattachRegistry(NoOpRegistry):
-        async def task_register_bulk_aio(self, build_id, tasks, *, limit_keys=None):
+        async def task_register_bulk_aio(
+            self, build_id, tasks, *, limit_keys=None, declared_dependencies=None
+        ):
             return [
                 RegisteredTaskInfo(
                     task_id=str(t.id),

@@ -22,6 +22,7 @@ from stardag.registry._http_client import (
 )
 from stardag.exceptions import (
     APIError,
+    DependencyDeclarationChangedError,
     AuthorizationError,
     EnvironmentAccessError,
     InvalidAPIKeyError,
@@ -417,6 +418,20 @@ class APIRegistry(RegistryABC):
                 raw_detail if raw_detail is not None else detail
             )
 
+        elif status_code == 409 and error_code == "dependency_declaration_changed":
+            # Registration refused because the task's declared static
+            # upstreams contradict what was recorded for it. Typed here
+            # rather than at the call site because every registration path
+            # — single, bulk, and the old-server fallback — funnels through
+            # this conversion.
+            raise DependencyDeclarationChangedError(
+                detail,
+                task_id=(raw_detail or {}).get("task_id"),
+                declared=(raw_detail or {}).get("declared"),
+                recorded=(raw_detail or {}).get("recorded"),
+                payload=raw_detail if isinstance(raw_detail, dict) else None,
+            )
+
         elif status_code == 429:
             if error_code == "RATE_LIMIT":
                 retry_after = int(response.headers.get("Retry-After", 1))
@@ -700,12 +715,18 @@ class APIRegistry(RegistryABC):
     # Sync task methods
     # -------------------------------------------------------------------------
 
-    def task_register(self, build_id: UUID, task: "BaseTask") -> None:
+    def task_register(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None" = None,
+    ) -> None:
         """Register a task within a build."""
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks",
-            json=_get_task_data_for_registration(task),
+            json=_get_task_data_for_registration(task, None, declared_dependencies),
             params=self._get_params(),
             operation=f"Register task {task.id}",
         )
@@ -716,6 +737,7 @@ class APIRegistry(RegistryABC):
         tasks: Sequence["BaseTask"],
         *,
         limit_keys: Mapping[UUID, Sequence[str]] | None = None,
+        declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None" = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Bulk-register tasks via the ``/tasks/bulk`` endpoint.
 
@@ -748,7 +770,10 @@ class APIRegistry(RegistryABC):
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
                 json={
                     "tasks": [
-                        _get_task_data_for_registration(t, limit_keys) for t in tasks
+                        _get_task_data_for_registration(
+                            t, limit_keys, declared_dependencies
+                        )
+                        for t in tasks
                     ]
                 },
                 params={**self._get_params(), "id_only": "true"},
@@ -763,7 +788,9 @@ class APIRegistry(RegistryABC):
                 "Upgrade the Registry API for batched registration."
             )
             for t in tasks:
-                self.task_register(build_id, t)
+                self.task_register(
+                    build_id, t, declared_dependencies=declared_dependencies
+                )
             return None
         return _parse_bulk_register_response(response.json())
 
@@ -2079,12 +2106,18 @@ class APIRegistry(RegistryABC):
             "version matching this SDK."
         )
 
-    async def task_register_aio(self, build_id: UUID, task: "BaseTask") -> None:
+    async def task_register_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None" = None,
+    ) -> None:
         """Async version - register a task within a build."""
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks",
-            json=_get_task_data_for_registration(task),
+            json=_get_task_data_for_registration(task, None, declared_dependencies),
             params=self._get_params(),
             operation=f"Register task {task.id}",
         )
@@ -2095,6 +2128,7 @@ class APIRegistry(RegistryABC):
         tasks: Sequence["BaseTask"],
         *,
         limit_keys: Mapping[UUID, Sequence[str]] | None = None,
+        declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None" = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Async bulk-register via ``/tasks/bulk`` (one HTTP call instead of N).
 
@@ -2125,7 +2159,10 @@ class APIRegistry(RegistryABC):
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
                 json={
                     "tasks": [
-                        _get_task_data_for_registration(t, limit_keys) for t in tasks
+                        _get_task_data_for_registration(
+                            t, limit_keys, declared_dependencies
+                        )
+                        for t in tasks
                     ]
                 },
                 params={**self._get_params(), "id_only": "true"},
@@ -2140,7 +2177,9 @@ class APIRegistry(RegistryABC):
                 "Upgrade the Registry API for batched registration."
             )
             for t in tasks:
-                await self.task_register_aio(build_id, t)
+                await self.task_register_aio(
+                    build_id, t, declared_dependencies=declared_dependencies
+                )
             return None
         return _parse_bulk_register_response(response.json())
 
@@ -2474,7 +2513,9 @@ class APIRegistry(RegistryABC):
 
 
 def _get_task_data_for_registration(
-    task: "BaseTask", limit_keys: Mapping[UUID, Sequence[str]] | None = None
+    task: "BaseTask",
+    limit_keys: Mapping[UUID, Sequence[str]] | None = None,
+    declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None" = None,
 ) -> dict:
     """Helper to serialize task data for registration API call.
 
@@ -2482,10 +2523,23 @@ def _get_task_data_for_registration(
     task runs under; when the task has an entry it is sent, so the registry
     records the keys at plan time. An absent entry sends nothing, which
     leaves any recorded keys alone.
-    """
-    # Avoid circular import:
-    from stardag._core.base_task import flatten_task_struct  # noqa: F401
 
+    ``declared_dependencies`` works the same way and matters more, because
+    the registry treats a declaration as authoritative: a task with an entry
+    sends its upstream set, and one **without** an entry sends no
+    ``dependency_task_ids`` at all, which the registry reads as "saying
+    nothing" rather than "requires nothing".
+
+    Passing ``None`` falls back to calling ``task.requires()`` here, which
+    is what any caller outside discovery gets. Discovery passes the map,
+    for two reasons. It has already walked ``requires()`` and there is no
+    reason to walk it twice — the walk is user code and need not be cheap or
+    even repeatable. And it deliberately does **not** walk it for a task it
+    found already complete, so re-deriving here would undo that prune and
+    declare an upstream set for every complete task in the closure — the
+    declarations most likely to have been recorded long ago, under code that
+    no longer exists.
+    """
     # Extract output_uri if the task has a FileSystemTarget target with a uri
     output_uri: str | None = None
     try:
@@ -2510,7 +2564,22 @@ def _get_task_data_for_registration(
             if limit_keys is not None and task.id in limit_keys
             else {}
         ),
-        "dependency_task_ids": [
-            str(dep.id) for dep in flatten_task_struct(task.requires())
-        ],
+        **(
+            {"dependency_task_ids": [str(dep.id) for dep in declared]}
+            if (declared := _declared_for(task, declared_dependencies)) is not None
+            else {}
+        ),
     }
+
+
+def _declared_for(
+    task: "BaseTask",
+    declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None",
+) -> "Sequence[BaseTask] | None":
+    """What this registration declares about ``task``'s upstreams, if anything."""
+    # Avoid circular import:
+    from stardag._core.base_task import flatten_task_struct
+
+    if declared_dependencies is None:
+        return flatten_task_struct(task.requires())
+    return declared_dependencies.get(task.id)

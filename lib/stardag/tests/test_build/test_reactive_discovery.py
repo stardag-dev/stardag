@@ -261,3 +261,54 @@ class TestConcurrentDiscovery:
 # =============================================================================
 # Bounded concurrent fan-out
 # =============================================================================
+
+
+class TestDeclaredDependencies:
+    """What a registration *declares*, as opposed to what it registers.
+
+    The registry treats a declared static set as authoritative and compares
+    it against what it already recorded, so being precise about which tasks
+    this build is speaking for is not bookkeeping — a declaration made on a
+    task's behalf that nobody asked for is a claim about its promise.
+    """
+
+    async def test_a_complete_task_declares_nothing(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Discovery prunes at a complete task without walking its
+        ``requires()``, so it has nothing to say about that task's upstreams
+        and must not say anything.
+
+        Deriving them here instead would undo the prune and assert a set for
+        every complete task in the closure — the declarations most likely to
+        have been recorded long ago, under code that no longer exists.
+        """
+        grandchild = SyncOnlyTask(name="decl-grandchild")
+        done = SyncOnlyTask(name="decl-done", deps=(grandchild,))
+        grandchild.run()
+        done.run()  # complete, and its dep is complete too
+        fresh = SyncOnlyTask(name="decl-fresh")
+        root = SyncOnlyTask(name="decl-root", deps=(done, fresh))
+
+        registry = FakeReactiveRegistry(root_task_ids=[str(root.id)])
+        await discover_and_register_aio(registry, uuid4(), root)
+
+        assert registry.declared[str(done.id)] is None, (
+            "declared an upstream set for a task it never walked"
+        )
+        # ...while the tasks it did walk are declared for, in full.
+        assert registry.declared[str(root.id)] == sorted([str(done.id), str(fresh.id)])
+        assert registry.declared[str(fresh.id)] == []
+        # The pruned task's own upstream is not registered at all.
+        assert str(grandchild.id) not in registry.declared
+
+    async def test_an_incomplete_task_with_no_deps_declares_an_empty_set(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """ "I walked it and it requires nothing" is a real declaration, and
+        distinct from saying nothing at all."""
+        leaf = SyncOnlyTask(name="decl-lonely-leaf")
+        registry = FakeReactiveRegistry(root_task_ids=[str(leaf.id)])
+        await discover_and_register_aio(registry, uuid4(), leaf)
+
+        assert registry.declared[str(leaf.id)] == []

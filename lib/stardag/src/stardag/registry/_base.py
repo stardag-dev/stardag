@@ -654,7 +654,13 @@ class RegistryABC(metaclass=abc.ABCMeta):
     # -------------------------------------------------------------------------
 
     @abc.abstractmethod
-    def task_register(self, build_id: UUID, task: "BaseTask") -> None:
+    def task_register(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None" = None,
+    ) -> None:
         """Register a task as pending/scheduled.
 
         This is called when a task is about to be executed.
@@ -662,6 +668,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
         Args:
             build_id: The build UUID returned by build_start.
             task: The task to register.
+            declared_dependencies: See ``task_register_bulk``. A missing
+                entry declares nothing about this task's upstreams; ``None``
+                means "derive them yourself".
         """
         pass
 
@@ -671,6 +680,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         tasks: Sequence["BaseTask"],
         *,
         limit_keys: Mapping[UUID, Sequence[str]] | None = None,
+        declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None" = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Register many tasks to a build in a single call.
 
@@ -698,9 +708,19 @@ class RegistryABC(metaclass=abc.ABCMeta):
         API registry does — a slot release wakes the builds queued on a key
         only if the registry knows which pending tasks want it). The
         default ignores it.
+
+        ``declared_dependencies`` maps a task id to the upstream tasks this
+        registration **declares** for it. A backend that records
+        dependencies should treat an entry as authoritative and a *missing*
+        entry as saying nothing at all — the two are different, and only the
+        first may be compared against what the backend already recorded.
+        ``None`` for the whole argument means "derive them yourself", which
+        is what a caller outside discovery gets. The default ignores it.
         """
         for task in tasks:
-            self.task_register(build_id, task)
+            self.task_register(
+                build_id, task, declared_dependencies=declared_dependencies
+            )
         return None
 
     def build_list(
@@ -1383,9 +1403,15 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of build_exit_early."""
         self.build_exit_early(build_id, reason)
 
-    async def task_register_aio(self, build_id: UUID, task: "BaseTask") -> None:
+    async def task_register_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None" = None,
+    ) -> None:
         """Async version of task_register."""
-        self.task_register(build_id, task)
+        self.task_register(build_id, task, declared_dependencies=declared_dependencies)
 
     async def task_register_bulk_aio(
         self,
@@ -1393,6 +1419,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         tasks: Sequence["BaseTask"],
         *,
         limit_keys: Mapping[UUID, Sequence[str]] | None = None,
+        declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None" = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Async version of task_register_bulk.
 
@@ -1401,7 +1428,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
         does so with the ``/tasks/bulk`` endpoint).
         """
         for task in tasks:
-            await self.task_register_aio(build_id, task)
+            await self.task_register_aio(
+                build_id, task, declared_dependencies=declared_dependencies
+            )
         return None
 
     async def task_start_claim_aio(
@@ -1578,7 +1607,13 @@ class NoOpRegistry(RegistryABC):
         """Return a placeholder build ID."""
         return UUID("00000000-0000-0000-0000-000000000000")
 
-    def task_register(self, build_id: UUID, task: "BaseTask") -> None:
+    def task_register(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        declared_dependencies: "Mapping[UUID, Sequence[BaseTask]] | None" = None,
+    ) -> None:
         pass
 
     def task_get_metadata(self, task_id: UUID) -> TaskMetadata:

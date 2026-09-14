@@ -14,6 +14,8 @@ how a scenario silently stops testing anything.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 import stardag as sd
 
 
@@ -213,3 +215,35 @@ class Resumable(sd.Task[list[int]]):
                 "interrupted mid-sleep; no checkpoint kept"
             ) from None
         self._save(self.requires().load())
+
+class ForkingRoot(sd.Task[int]):
+    """One task id, two different `requires()` — a contract violation, staged.
+
+    ``upstream_seconds`` is **excluded from the hash**, so two instances with
+    different values are the same task as far as the registry is concerned
+    while their ``requires()`` return different upstreams. That is exactly
+    the mistake the immutability rule exists to catch: the promise this id
+    stands for changed, and the id did not move with it.
+
+    Simulating it this way rather than by deploying two code versions is the
+    only option a test has, and it is faithful where it matters — the
+    registry sees one id declaring two different static sets, which is all
+    the rule looks at.
+
+    ``run()`` deliberately does **not** read its upstream. A Modal worker
+    rebuilds the task from the registry's ``task_data``, frozen at first
+    registration, so ``self.requires()`` inside a container resolves to
+    whichever version registered first rather than the one this build
+    triggered. Loading it would test that quirk instead of this rule.
+    """
+
+    salt: str
+    upstream_seconds: Annotated[int, sd.StardagField(hash_exclude=True)] = 5
+
+    def requires(self):
+        return slow(
+            values=get_range(limit=1, salt=self.salt), seconds=self.upstream_seconds
+        )
+
+    def run(self):
+        self._save(self.upstream_seconds)

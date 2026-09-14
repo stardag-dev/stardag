@@ -299,3 +299,42 @@ class QuotaExceededError(APIError):
 
     def __init__(self, detail: str | None = None):
         super().__init__("Quota exceeded", status_code=429, detail=detail)
+
+
+class DependencyDeclarationChangedError(APIError):
+    """A task declares different static dependencies than were recorded.
+
+    A task id promises the world state its completion establishes, and that
+    includes the upstream set it was built from — so changing what a task
+    requires has to change its id, through ``__version__`` or a
+    hash-significant parameter. The registry cannot check that for a task it
+    has never seen, but once one has been registered it holds the previous
+    declaration and refuses a later one that contradicts it.
+
+    Raised at registration, so it surfaces when the build is triggered
+    rather than as a DAG that quietly builds the wrong thing. ``declared``
+    and ``recorded`` carry both sets so a caller can report or diff them
+    without parsing the message.
+    """
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        task_id: str | None = None,
+        declared: "list[str] | None" = None,
+        recorded: "list[str] | None" = None,
+        payload: dict | None = None,
+    ) -> None:
+        # A short, generic message with the server's own text in ``detail``:
+        # ``APIError`` renders "<message> (HTTP <code>): <detail>", so
+        # passing the server text as both printed it twice.
+        super().__init__(
+            "Task declares different static dependencies than recorded",
+            status_code=409,
+            detail=detail,
+            payload=payload,
+        )
+        self.task_id = task_id
+        self.declared = declared or []
+        self.recorded = recorded or []

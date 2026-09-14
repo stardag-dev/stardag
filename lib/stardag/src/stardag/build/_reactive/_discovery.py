@@ -312,8 +312,19 @@ async def discover_and_register_aio(
         # registry whose bulk registration predates it is untouched unless
         # a selector is actually configured.
         keys = _limit_keys_for(chunk, limit_key_selector)
+        # ``deps_of`` has an entry only for tasks this walk actually
+        # recursed into — that is, the incomplete ones. Passing it is what
+        # makes the prune above mean something at the registry: a task that
+        # was already complete declares nothing about its upstreams, rather
+        # than having ``requires()`` re-derived on its behalf and asserted
+        # as current. It is also the set the walk already computed, and
+        # ``requires()`` is user code that nobody promised is cheap or
+        # repeatable.
         infos = await registry.task_register_bulk_aio(
-            build_id, chunk, **({"limit_keys": keys} if keys is not None else {})
+            build_id,
+            chunk,
+            declared_dependencies=deps_of,
+            **({"limit_keys": keys} if keys is not None else {}),
         )
         if not retry_failed:
             continue

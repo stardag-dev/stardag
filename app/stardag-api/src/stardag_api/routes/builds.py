@@ -94,6 +94,11 @@ from stardag_api.services.build_cleanup import (
     select_cancellable_builds,
 )
 from stardag_api.services.claims import claim_is_live, live_claim_filter
+from stardag_api.services.dependencies import (
+    DeclarationChanged,
+    declaration_changed_message,
+    find_changed_declaration,
+)
 from stardag_api.services.wakeups import (
     MAX_WAKE_CANDIDATES,
     MAX_LEASE_TTL_SECONDS,
@@ -2404,6 +2409,30 @@ async def _close_plan_over_dependencies(
     return admitted
 
 
+def _raise_declaration_changed(changed: DeclarationChanged) -> None:
+    """Refuse a registration whose declaration contradicts the record.
+
+    409 rather than 400: nothing about the request is malformed, and the
+    same request would have succeeded against a registry that had not
+    recorded a different set. It is a conflict with stored state, which is
+    what 409 is for.
+
+    The structured detail carries both sets so a caller can act on them
+    without parsing the message — ``dependency_declaration_changed`` is what
+    the SDK branches on to raise a typed error.
+    """
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error_code": "dependency_declaration_changed",
+            "message": declaration_changed_message(changed),
+            "task_id": changed.task_id,
+            "declared": changed.declared,
+            "recorded": changed.recorded,
+        },
+    )
+
+
 async def _reconcile_dependency_edges(
     *,
     db: AsyncSession,
@@ -2585,7 +2614,7 @@ async def register_task(
     )
     _raise_if_limit_exceeded(
         check_structural_limit(
-            len(task.dependency_task_ids),
+            len(task.dependency_task_ids or []),
             limits_settings.max_dependency_ids_per_task,
             ErrorCode.DEPENDENCY_COUNT_LIMIT,
             "dependency_task_ids",
@@ -2690,12 +2719,24 @@ async def register_task(
         db_task.output_uri = task.output_uri
         db_task.is_phantom = False
 
+    # A declared static set is compared against the recorded one before
+    # anything is written: a difference means this task's promise changed
+    # without its id changing, and the registration is refused whole.
+    if task.dependency_task_ids is not None:
+        changed = await find_changed_declaration(
+            db,
+            declarations=[(db_task, task.dependency_task_ids)],
+            environment_id=build.environment_id,
+        )
+        if changed is not None:
+            _raise_declaration_changed(changed)
+
     # Reconcile static dependency edges (is_dynamic=False).
     await _reconcile_dependency_edges(
         db=db,
         environment_id=build.environment_id,
         downstream_task_pk=db_task.id,
-        upstream_task_ids=task.dependency_task_ids,
+        upstream_task_ids=task.dependency_task_ids or [],
         is_dynamic=False,
     )
 
@@ -2826,7 +2867,7 @@ async def register_tasks_bulk(
         )
         _raise_if_limit_exceeded(
             check_structural_limit(
-                len(t.dependency_task_ids),
+                len(t.dependency_task_ids or []),
                 limits_settings.max_dependency_ids_per_task,
                 ErrorCode.DEPENDENCY_COUNT_LIMIT,
                 "dependency_task_ids",
@@ -3048,7 +3089,7 @@ async def register_tasks_bulk(
     # Collect all upstream task_ids referenced anywhere in the batch.
     all_upstream_ids: set[str] = set()
     for t in tasks_in:
-        all_upstream_ids.update(t.dependency_task_ids)
+        all_upstream_ids.update(t.dependency_task_ids or [])
     # Subtract task_ids already in our map (in-batch deps + pre-existing).
     unknown_upstream_ids = all_upstream_ids - set(pk_by_task_id.keys())
     if unknown_upstream_ids:
@@ -3097,6 +3138,23 @@ async def register_tasks_bulk(
             )
             for pk, t_id in refetch_result.all():
                 pk_by_task_id[t_id] = pk
+
+    # Every declaration in the batch is compared against the record before
+    # any edge or event is written. A difference raises, which rolls the
+    # whole request back — so a refused chunk leaves the registry exactly as
+    # it found it, with no half-registered plan. Tasks that declare nothing
+    # (``None``) are not compared: that is not a declaration.
+    changed = await find_changed_declaration(
+        db,
+        declarations=[
+            (db_task_by_task_id[t.task_id], t.dependency_task_ids)
+            for t in tasks_in
+            if t.dependency_task_ids is not None
+        ],
+        environment_id=build.environment_id,
+    )
+    if changed is not None:
+        _raise_declaration_changed(changed)
 
     # Build edge rows for the whole batch and bulk-insert in one shot.
     edge_rows: list[dict[str, object]] = []

@@ -41,13 +41,18 @@ BUILDS = "/api/v1/builds"
 
 
 def _register(task_id: str, deps: list[str] | None = None) -> dict:
-    return {
+    payload: dict = {
         "task_id": task_id,
         "task_namespace": "",
         "task_name": "T",
         "task_data": {},
-        "dependency_task_ids": deps or [],
     }
+    # ``deps or []`` would say "requires nothing", which is a declaration
+    # the registry compares against the record. Omitting the key says
+    # nothing at all, which is what a caller passing no deps means.
+    if deps is not None:
+        payload["dependency_task_ids"] = deps
+    return payload
 
 
 async def _new_build(client: AsyncClient, roots: list[str] | None = None) -> str:

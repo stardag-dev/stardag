@@ -26,7 +26,7 @@ def _make_task() -> BaseTask:
 class BareRegistry(RegistryABC):
     """Implements only the two abstract methods."""
 
-    def task_register(self, build_id, task) -> None:
+    def task_register(self, build_id, task, *, declared_dependencies=None) -> None:
         pass
 
     def task_get_metadata(self, task_id) -> TaskMetadata:

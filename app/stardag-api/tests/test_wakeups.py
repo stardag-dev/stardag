@@ -50,10 +50,13 @@ async def _register(
         "task_name": "T",
         "task_namespace": "",
         "task_data": {},
-        "dependency_task_ids": deps or [],
     }
     if limit_keys is not None:
         payload["limit_keys"] = limit_keys
+    # Omitted rather than sent as [], which would be a declaration the
+    # registry compares against the record.
+    if deps is not None:
+        payload["dependency_task_ids"] = deps
     response = await client.post(
         f"/api/v1/builds/{build_id}/tasks/bulk", json={"tasks": [payload]}
     )

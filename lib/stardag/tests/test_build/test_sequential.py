@@ -737,7 +737,9 @@ class TrackingRegistry(NoOpRegistry):
         self.calls: list[tuple[str, UUID]] = []
         self.dynamic_dep_edges: list[tuple[UUID, UUID]] = []
 
-    def task_register(self, build_id: UUID, task) -> None:
+    def task_register(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
         self.calls.append(("task_register", task.id))
 
     def task_start(
@@ -1071,7 +1073,9 @@ class TestSequentialDeadlockDetection:
 class FailOnTaskCompleteRegistry(NoOpRegistry):
     """Registry that fails on task_complete."""
 
-    def task_register(self, build_id: UUID, task) -> None:
+    def task_register(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
         pass
 
     def task_complete(self, build_id: UUID, task) -> None:
@@ -1132,7 +1136,9 @@ class ArtifactTrackingRegistry(NoOpRegistry):
     def __init__(self) -> None:
         self.uploaded_artifacts: list[tuple[UUID, typing.Sequence]] = []
 
-    def task_register(self, build_id: UUID, task) -> None:
+    def task_register(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
         pass
 
     def task_upload_artifacts(self, build_id: UUID, task, artifacts) -> None:
@@ -1266,7 +1272,9 @@ class OrderedTrackingRegistry(NoOpRegistry):
     def __init__(self) -> None:
         self.calls: list[tuple[str, UUID]] = []
 
-    def task_register(self, build_id: UUID, task) -> None:
+    def task_register(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
         self.calls.append(("task_register", task.id))
 
     def task_start(
@@ -1286,7 +1294,9 @@ class OrderedTrackingRegistry(NoOpRegistry):
     def task_fail(self, build_id: UUID, task, error_message=None) -> None:
         self.calls.append(("task_fail", task.id))
 
-    async def task_register_aio(self, build_id: UUID, task) -> None:
+    async def task_register_aio(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
         self.calls.append(("task_register", task.id))
 
     async def task_start_aio(
@@ -1529,17 +1539,23 @@ class BulkTrackingRegistry(NoOpRegistry):
         self.task_complete_calls: list[UUID] = []
         self.task_start_calls: list[UUID] = []
 
-    def task_register(self, build_id: UUID, task) -> None:
+    def task_register(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
         self.per_task_register_calls.append(task.id)
 
-    async def task_register_aio(self, build_id: UUID, task) -> None:
+    async def task_register_aio(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
         self.per_task_register_calls.append(task.id)
 
-    def task_register_bulk(self, build_id: UUID, tasks, *, limit_keys=None) -> None:
+    def task_register_bulk(
+        self, build_id: UUID, tasks, *, limit_keys=None, declared_dependencies=None
+    ) -> None:
         self.bulk_batches.append([t.id for t in tasks])
 
     async def task_register_bulk_aio(
-        self, build_id: UUID, tasks, *, limit_keys=None
+        self, build_id: UUID, tasks, *, limit_keys=None, declared_dependencies=None
     ) -> None:
         self.bulk_batches.append([t.id for t in tasks])
 
@@ -1813,7 +1829,9 @@ class FailOnStartRegistry(NoOpRegistry):
     def __init__(self) -> None:
         self.calls: list[tuple[str, UUID]] = []
 
-    def task_register(self, build_id: UUID, task) -> None:
+    def task_register(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
         self.calls.append(("task_register", task.id))
 
     def task_start(
@@ -1831,7 +1849,9 @@ class FailOnStartRegistry(NoOpRegistry):
     def task_complete(self, build_id: UUID, task) -> None:
         self.calls.append(("task_complete", task.id))
 
-    async def task_register_aio(self, build_id: UUID, task) -> None:
+    async def task_register_aio(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
         self.calls.append(("task_register", task.id))
 
     async def task_start_aio(
@@ -1908,7 +1928,9 @@ class TestDiscoverTimeRegistrationErrorHandling:
             def __init__(self) -> None:
                 self.calls: list[tuple[str, UUID]] = []
 
-            def task_register(self, build_id, task) -> None:
+            def task_register(
+                self, build_id, task, *, declared_dependencies=None
+            ) -> None:
                 self.calls.append(("task_register", task.id))
                 raise ConnectionError("register down")
 
@@ -1926,7 +1948,9 @@ class TestDiscoverTimeRegistrationErrorHandling:
             def task_complete(self, build_id, task) -> None:
                 self.calls.append(("task_complete", task.id))
 
-            async def task_register_aio(self, build_id, task) -> None:
+            async def task_register_aio(
+                self, build_id, task, *, declared_dependencies=None
+            ) -> None:
                 self.calls.append(("task_register", task.id))
                 raise ConnectionError("register down")
 
@@ -2000,10 +2024,10 @@ class BuildFailTrackingRegistry(NoOpRegistry):
     async def build_complete_aio(self, build_id):
         self.build_complete(build_id)
 
-    def task_register(self, build_id, task):
+    def task_register(self, build_id, task, *, declared_dependencies=None):
         pass
 
-    async def task_register_aio(self, build_id, task):
+    async def task_register_aio(self, build_id, task, *, declared_dependencies=None):
         pass
 
 

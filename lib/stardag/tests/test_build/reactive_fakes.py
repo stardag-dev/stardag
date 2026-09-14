@@ -98,6 +98,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.build_status = "running"
         self.build_error_message: str | None = None
         self.calls: list[tuple[str, str | None]] = []
+        # task_id -> the upstream ids a registration declared for it,
+        # or None when it said nothing about them. The API treats those
+        # as different and so must this.
+        self.declared: dict[str, list[str] | None] = {}
         # Named concurrency limits: key -> cap; holders tracked per task.
         self.limits: dict[str, int] = {}
         self.task_limit_keys: dict[str, set[str]] = {}
@@ -298,15 +302,35 @@ class FakeReactiveRegistry(NoOpRegistry):
 
     # --- registry surface used by the tick ---
 
-    async def task_register_bulk_aio(self, build_id, tasks, *, limit_keys=None):
+    async def task_register_bulk_aio(
+        self, build_id, tasks, *, limit_keys=None, declared_dependencies=None
+    ):
         infos = []
         for task in tasks:
             tid = str(task.id)
             self.statuses.setdefault(tid, "pending")
-            self.upstreams.setdefault(tid, set()).update(
-                str(dep.id)
-                for dep in __import__("stardag").flatten_task_struct(task.requires())
+            # Mirrors the API: a declaration is what the caller *said*, and
+            # a task absent from the map declared nothing — which is not the
+            # same as declaring no dependencies. ``declared`` records that
+            # distinction so a test can assert on it; ``upstreams`` keeps
+            # gating working for tasks nobody declared for.
+            if declared_dependencies is None:
+                declared = list(
+                    __import__("stardag").flatten_task_struct(task.requires())
+                )
+            elif task.id in declared_dependencies:
+                declared = list(declared_dependencies[task.id])
+            else:
+                declared = None
+            self.declared[tid] = (
+                None if declared is None else sorted(str(d.id) for d in declared)
             )
+            if declared is not None:
+                self.upstreams.setdefault(tid, set()).update(
+                    str(dep.id) for dep in declared
+                )
+            else:
+                self.upstreams.setdefault(tid, set())
             self.calls.append(("register", tid))
             executor, executor_ref = self.refs.get(tid, (None, None))
             infos.append(

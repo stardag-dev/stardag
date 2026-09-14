@@ -204,7 +204,19 @@ class TaskCreate(BaseModel):
     task_data: dict
     version: str | None = None
     output_uri: str | None = None  # Path to task output (if FileSystemTarget)
-    dependency_task_ids: list[str] = []  # task_ids of upstream dependencies
+    # The task's complete static upstream set, as its ``requires()`` returns
+    # it. A list is an **authoritative declaration** and is compared against
+    # what the registry already recorded for this task; a difference means
+    # the task's promise changed without its id changing, and the
+    # registration is refused.
+    #
+    # ``None`` is **not a declaration** and is compared against nothing. The
+    # two meanings cannot share one value: an out-of-band caller that does
+    # not know a task's dependencies must be able to register it without
+    # asserting that it has none, and discovery must be able to register a
+    # task it pruned at — already complete, so its ``requires()`` was never
+    # walked — without claiming to speak for its upstreams.
+    dependency_task_ids: list[str] | None = None
     # The named concurrency-limit keys this task runs under, as the
     # registering app's ``limit_key_selector`` computes them. Recorded at
     # registration so the server knows which *pending* tasks want a key —

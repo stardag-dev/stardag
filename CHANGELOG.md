@@ -85,6 +85,54 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   working from one that was taken away and never replaced. `task_preempted`
   appears in a task's event timeline.
 
+### Registry API
+
+- **A task's declared static dependencies are immutable.** A task id promises
+  the world state its completion establishes, and that includes the upstream
+  set it was built from — so changing what a task requires has to change its
+  id. Registering a task whose declared static upstreams differ from the ones
+  already recorded for it is refused with 409
+  `dependency_declaration_changed`, naming the task, both sets, and the
+  remedy: bump `__version__`, or make the difference a hash-significant
+  parameter. Nothing is written — no edge added, none removed, no
+  half-registered plan — and the refusal rolls back a whole bulk chunk.
+
+  This replaces the previous behaviour, where a re-registered task simply
+  accumulated edges and stayed gated on an upstream its `requires()` no
+  longer returned, with the only escape a version bump on the _downstream_.
+  It is deliberately stricter than arbitrating between concurrently running
+  builds: the record is what the task promised, and whether anyone is acting
+  on it right now is beside the point. See
+  `docs/design/immutable-dependency-declarations.md`, which also records the
+  retraction-based design that was tried first and why it was abandoned.
+
+- `TaskCreate.dependency_task_ids` is now `list[str] | None`. A list is an
+  authoritative declaration and is compared against the record; **`null` is
+  not a declaration** and is compared against nothing. The two meanings
+  cannot share one value — an out-of-band caller that does not know a task's
+  dependencies must be able to register it without asserting it has none.
+
+### SDK
+
+- **Breaking, for anyone implementing `RegistryABC` outside this repo:**
+  `task_register`, `task_register_aio`, `task_register_bulk` and
+  `task_register_bulk_aio` take a keyword-only `declared_dependencies`
+  mapping. An entry is what this registration declares for that task; a
+  _missing_ entry declares nothing, which a backend recording dependencies
+  must treat as different from declaring none.
+
+- **Discovery no longer declares dependencies for tasks it pruned at.** It
+  stops walking at a complete task without evaluating its `requires()`, but
+  the registration payload used to re-derive `requires()` for every task in
+  the chunk — undoing the prune and asserting a current upstream set for
+  every complete task in the closure, which are the declarations most likely
+  to have been recorded under code that no longer exists. It now sends what
+  the walk actually computed, which also stops `requires()` being evaluated
+  twice per task.
+
+- `DependencyDeclarationChangedError` carries the task id and both dependency
+  sets, so a caller can report or diff them without parsing the message.
+
 ## [0.23.0] — 2026-09-01
 
 ### SDK
