@@ -69,8 +69,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   (nullable, no backfill) for the SDK change above. "A restart is
   outstanding" is derived rather than stored: RUNNING, with
   `latest_preempted_at` later than `latest_status_at`. So the restarted
-  execution's own start falsifies it, with nothing to clear. `ClaimSettings.preempt_restart_grace_seconds`
-  (default 300) sizes the shortened claim.
+  execution's own start falsifies it, with nothing to clear.
+  `ClaimSettings.preempt_restart_grace_seconds` (default 900, matching the
+  SDK's own claim-TTL grace) sizes the shortened claim — long enough that a
+  restart the backend has merely queued cannot be mistaken for one that is
+  never coming.
 - `GET /tasks` and `GET /tasks/{id}` now carry `latest_status_expires_at`
   and `latest_preempted_at` alongside the other claim fields.
 
