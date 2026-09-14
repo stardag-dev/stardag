@@ -24,6 +24,15 @@ Two properties are load-bearing and neither is incidental:
   ``scaledown_window`` is the prevention; ``/_harness/boot`` below is the
   detection, so that if it ever does happen the harness says so in one line
   instead of leaving someone to debug a phantom.
+
+A recycle has since happened, three minutes into a run, which rules
+``scaledown_window`` out as the explanation -- it was already half an hour.
+What the resource request below addresses is the remaining plausible cause,
+and what the harness's recycle marker addresses is the rest: a run that
+loses its database is retried rather than reported as a failure of whatever
+change happened to be under test. The alternative -- PGDATA on a Modal
+Volume -- was considered and rejected; see the marker's docstring in
+``_harness``.
 """
 
 from __future__ import annotations
@@ -221,6 +230,17 @@ def build_registry_app(
         # what stands between a run and a lost database.
         min_containers=1,
         max_containers=1,
+        # Requests, not caps -- a floor the scheduler places the container
+        # against, which it may then burst above. Stated because the
+        # defaults are 0.125 cores and 128 MiB, and this container is a
+        # Postgres *and* an API serving a dozen concurrent clients: it runs
+        # an order of magnitude above that floor all run long. A container
+        # far above its request is the one a busy host squeezes first, and
+        # squeezing shows up here as five-second round trips, read timeouts
+        # and -- the failure this is really aimed at -- a replaced
+        # container, which takes the database with it.
+        cpu=2.0,
+        memory=2048,
         scaledown_window=scaledown_window,
         timeout=900,
         name="web",

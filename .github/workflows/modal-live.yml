@@ -338,10 +338,57 @@ jobs:
       # replaces tox's default posargs wholesale, so passing only `-n0`
       # would drop the path and send pytest at the project's default
       # testpaths -- the docker-compose suite, which is not this tier.
+      #
+      # Retried once, and only for a recycled registry container. The whole
+      # database lives inside that container, so losing it fails every
+      # scenario that was mid-flight -- and the failure reads as "this PR
+      # broke the reactive loop" on a PR that cannot reach a Modal worker.
+      # Ruling that out by hand cost a reviewer three runs once already.
+      #
+      # What makes this a targeted retry rather than the usual "run it
+      # again and hope": the harness *identifies* the event, by a nonce the
+      # registry container generates at boot, and writes the marker below
+      # only for that. A scenario that failed on its own merits leaves no
+      # marker and is not retried. The retry re-provisions first, because
+      # the replacement container's database is empty -- the run's
+      # workspace, target root and API key were in the one that went.
       - name: Run the registry-live scenarios
-        run: >-
-          tox -e registry-modal-live
-          ${{ inputs.serial && '-- -n0 tests_registry_live' || '' }}
+        env:
+          STARDAG_REGISTRY_LIVE_RECYCLE_MARKER: ${{ runner.temp }}/registry-recycled
+          POSARGS: ${{ inputs.serial && '-- -n0 tests_registry_live' || '' }}
+        run: |
+          set -uo pipefail
+          rm -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER"
+
+          if tox -e registry-modal-live $POSARGS; then
+            exit 0
+          fi
+
+          if [ ! -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER" ]; then
+            echo "The tier failed against the registry container it started" \
+                 "with. Not a recycle, so not retried."
+            exit 1
+          fi
+
+          echo "::warning title=Registry container recycled::$(cat \
+            "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER") -- the run's database" \
+            "went with it. Re-provisioning and running the tier once more."
+          rm -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER"
+
+          # Checked explicitly: this step runs without `errexit`, so that
+          # the first tox failure can be inspected rather than ending the
+          # step -- which also means a failed re-provision would otherwise
+          # fall through to a second run against a stack that was never
+          # rebuilt.
+          if ! uv run --project integration-tests --python 3.12 \
+                 python -m stardag_integration_tests.registry_live.provision up
+          then
+            echo "Re-provisioning failed after a recycle; not re-running" \
+                 "the tier against a stack that was not rebuilt."
+            exit 1
+          fi
+
+          tox -e registry-modal-live $POSARGS
 
       # The scheduled run provisions into the *permanent* `ci-main`, which
       # no cleanup path can name: teardown is gated on the environment being

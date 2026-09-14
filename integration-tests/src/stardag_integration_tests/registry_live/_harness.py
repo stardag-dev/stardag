@@ -22,6 +22,7 @@ inside the container in the first place.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -45,6 +46,66 @@ ADMIN_EMAIL = "harness@stardag.invalid"
 DEFAULT_WORKSPACE_NAME = "registry-live"
 DEFAULT_ENVIRONMENT_SLUG = "main"
 
+# Where a run records that the registry container was replaced under it, so
+# that whatever is driving the tier can tell that failure apart from a real
+# one. Set by CI; unset locally, where nothing is written and the assertion
+# message is the whole story.
+RECYCLE_MARKER_ENV = "STARDAG_REGISTRY_LIVE_RECYCLE_MARKER"
+
+# Reading the boot id at provisioning time waits out a cold start, so it
+# gets a long timeout and one try. The post-scenario check cannot: it runs
+# after every scenario, so its worst case has to stay small enough to sit
+# inside the job's budget even when the registry has gone for good. Six
+# tries at fifteen seconds gives a replacement a hundred seconds to
+# identify itself, which is several times what one needs, and costs under
+# two minutes when nothing ever answers.
+BOOT_READ_TIMEOUT_SECONDS = 60.0
+BOOT_READ_ATTEMPTS = 6
+
+
+def _record_recycle(previous: str, current: str) -> None:
+    """Leave the evidence of a recycle where a shell can read it.
+
+    **Why a retry, and not a database that survives the container.** The
+    obvious fix for "a recycle loses the whole database" is to put PGDATA on
+    a Modal Volume. It was considered and rejected, on three counts:
+
+    - It does not save the run. The scenarios in flight were mid-request
+      against a process that no longer exists, and the several seconds a
+      replacement spends starting Postgres and re-running Alembic are
+      several seconds of refused connections. A durable database converts
+      "every scenario fails" into "every scenario in flight fails", which
+      is still a red check.
+    - It costs the property that makes provisioning cheap. The cluster is
+      ``initdb``-ed into an image layer, so a container is serving in about
+      a second. Mounting a volume over ``/pgdata`` hides that layer, so
+      initialisation moves to first boot and needs an "is it already
+      there?" branch -- a slower start, and a new way for two runs of the
+      same environment to disagree about whose data they are looking at.
+    - ``fsync`` is off, deliberately, because the database is meant to be
+      discarded. A container killed mid-write would leave a cluster that
+      may not start at all, trading a clean "the database is gone" for a
+      corrupt one.
+
+    So a recycle is *identified* instead -- which is what the boot nonce
+    already does -- and a run that lost its database is provisioned again
+    and re-run. Keyed to the identification, so it masks nothing: with a
+    stable boot id nothing is retried, and a scenario that fails on its own
+    merits fails the check exactly as before. The marker is also the
+    measurement this decision was waiting on, since every retry is one
+    recycle, recorded where somebody will see it.
+    """
+    path = os.environ.get(RECYCLE_MARKER_ENV, "").strip()
+    if not path:
+        return
+    try:
+        Path(path).write_text(f"{previous} -> {current}\n")
+    except OSError as error:  # pragma: no cover - diagnostics only
+        print(
+            f"Could not write the recycle marker to {path!r}: {error}",
+            file=sys.stderr,
+        )
+
 
 @dataclass(frozen=True)
 class Deployment:
@@ -61,8 +122,32 @@ class Deployment:
     api_key: str
     boot_id: str
 
-    def current_boot_id(self) -> str:
-        return read_boot_id(self.api_url)
+    def current_boot_id(
+        self,
+        *,
+        attempts: int = 1,
+        retry_pause: float = 3.0,
+        timeout: float = BOOT_READ_TIMEOUT_SECONDS,
+    ) -> str:
+        """The boot id the registry answers with now.
+
+        ``attempts`` above one tolerates a boot endpoint that is briefly
+        unanswerable, which is not a hypothetical: the moment this is most
+        needed -- a container replaced mid-run -- is also the moment the
+        replacement may still be starting Postgres and running Alembic.
+        A shorter ``timeout`` goes with it, so that several attempts stay
+        bounded by something a teardown check can afford.
+        """
+        last: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return read_boot_id(self.api_url, timeout=timeout)
+            except Exception as error:
+                last = error
+                if attempt + 1 < attempts:
+                    time.sleep(retry_pause)
+        assert last is not None
+        raise last
 
     def assert_same_container(self) -> None:
         """Fail loudly if the process holding the database was replaced.
@@ -74,15 +159,26 @@ class Deployment:
         convincing impression of a stardag bug. One assertion converts that
         into a sentence.
         """
-        current = self.current_boot_id()
+        # Retried, because an unanswerable registry must not be allowed to
+        # turn a recycle into an unclassified failure: the marker below is
+        # what buys the run its one retry, and it is only written when the
+        # replacement has actually identified itself. A registry that never
+        # answers stays unclassified on purpose -- nothing was identified,
+        # so nothing is retried.
+        current = self.current_boot_id(
+            attempts=BOOT_READ_ATTEMPTS, retry_pause=3.0, timeout=15.0
+        )
         if current != self.boot_id:
+            _record_recycle(self.boot_id, current)
             raise AssertionError(
                 f"The registry container was replaced mid-run (boot id "
                 f"{self.boot_id} -> {current}). Its Postgres is inside that "
                 f"container, so the database this scenario was writing to no "
-                f"longer exists. This is a harness failure, not a scheduling "
-                f"one: raise scaledown_window, or move PGDATA onto a Modal "
-                f"Volume."
+                f"longer exists. This is a harness failure and not a "
+                f"scheduling one: provision the stack again and re-run. CI "
+                f"does that by itself, once, off the marker this just "
+                f"wrote -- see _record_recycle for why that rather than a "
+                f"database outliving the container."
             )
 
 
@@ -390,9 +486,9 @@ def wait_for_health(api_url: str, timeout: float = 300.0) -> None:
     )
 
 
-def read_boot_id(api_url: str) -> str:
+def read_boot_id(api_url: str, *, timeout: float = BOOT_READ_TIMEOUT_SECONDS) -> str:
     """The current container's boot id (see ``_registry_app``)."""
-    with httpx.Client(timeout=60.0) as client:
+    with httpx.Client(timeout=timeout) as client:
         response = client.get(f"{api_url.rstrip('/')}/_harness/boot")
         response.raise_for_status()
         return str(response.json()["boot_id"])
