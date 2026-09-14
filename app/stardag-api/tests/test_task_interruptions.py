@@ -483,8 +483,8 @@ async def test_interrupt_does_not_evict_another_builds_claim(client: AsyncClient
 # --- A preemption is not an interruption --------------------------------
 #
 # The backend restarts the same execution itself, so the task keeps its
-# status, its claim and the executor ref the restart reuses. All the event
-# records is that a restart is now *due* — which nothing could see before,
+# status, its claim and the executor ref the restart reuses. All it records
+# is that a restart is now *due* — which nothing could see before,
 # because a restart that never arrived was indistinguishable from an
 # execution running happily.
 
@@ -753,7 +753,7 @@ async def test_preempt_never_extends_a_claim(client: AsyncClient):
 
     await client.post(f"{BUILDS}/{build_id}/tasks/t-1/preempt")
 
-    # 60s is well inside the 300s grace, so the grace is the *later* of the
+    # 60s is well inside the restart grace, so the grace is the *later* of the
     # two and must lose.
     assert (await _task(client, "t-1"))["latest_status_expires_at"] == granted
 

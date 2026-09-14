@@ -178,10 +178,28 @@ class ClaimSettings(BaseSettings):
     # (measured at ~7s on Modal, whose grace ladder to a hard kill is ~60s)
     # and well below the worker timeouts it replaces, which run to a day.
     #
-    # Expiring early is cheap even so: a lapsed claim does not by itself
-    # start anything. A scheduler that finds one still probes the executor
-    # ref first, and leaves a ref that answers "running" alone.
-    preempt_restart_grace_seconds: int = 300
+    # **But expiring early is not free, which is what sets the value.** A
+    # lapsed claim does not start anything by itself — a scheduler that
+    # finds one probes the executor ref first and leaves a ref answering
+    # "running" alone. A *claiming start* from another build does not
+    # probe, though: it asks only whether the claim is live. So past this
+    # expiry a neighbour can take the task and spawn a second execution,
+    # and if the promised restart then lands, its worker's own
+    # (non-claiming) TASK_STARTED overwrites the new holder. Two
+    # executions, which is the one outcome claims exist to prevent.
+    #
+    # That is reachable only if the backend takes longer than this to
+    # restart an input — a queued GPU under capacity pressure is the
+    # realistic way — so the value is set for that, not for the ~7s a
+    # restart normally takes. 900s matches the SDK's own
+    # ``_CLAIM_TTL_GRACE_SECONDS``, which answers the same question ("how
+    # long past its deadline is an execution still plausibly alive?") and
+    # is the number this codebase already settled on for it.
+    #
+    # The cost of the larger value is only detection latency for a restart
+    # that never comes, and that is measured against the alternative this
+    # replaced: the worker's whole declared timeout, up to a day.
+    preempt_restart_grace_seconds: int = 900
 
     model_config = SettingsConfigDict(env_prefix="STARDAG_API_CLAIM_")
 
