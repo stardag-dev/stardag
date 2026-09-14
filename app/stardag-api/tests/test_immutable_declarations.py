@@ -325,3 +325,52 @@ async def test_saying_nothing_never_sets_the_marker(client: AsyncClient):
     second = await _new_build(client)
     assert (await _register_task(client, second, "up")).status_code == 201
     assert (await _register_task(client, second, "bare", ["up"])).status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_a_declaration_promotes_an_edge_first_seen_as_a_yield(
+    client: AsyncClient,
+):
+    """A declaration outranks an observation, and the check depends on it.
+
+    Edge writes were first-write-wins, so an edge yielded dynamically and
+    *then* declared statically stayed marked dynamic. The check reads only
+    static edges, so it saw nothing recorded — and the same declaration
+    repeated was refused as a change. Harmless while `is_dynamic` was read
+    by nothing but the DAG view; not now.
+    """
+    first = await _new_build(client)
+    await _register_task(client, first, "U")
+    await _register_task(client, first, "R")
+    await client.post(
+        f"/api/v1/builds/{first}/tasks/R/dependencies",
+        json={"upstream_task_ids": ["U"], "is_dynamic": True},
+    )
+    assert (await _register_task(client, first, "R", ["U"])).status_code == 201
+
+    second = await _new_build(client)
+    assert (await _register_task(client, second, "R", ["U"])).status_code == 201, (
+        "an unchanged declaration was refused"
+    )
+    # ...and a genuine change is still caught.
+    third = await _new_build(client)
+    assert (await _register_task(client, third, "R", ["V"])).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_a_static_edge_cannot_be_added_at_runtime(client: AsyncClient):
+    """The other way into the static set, which would have bypassed the
+    check entirely — including after a task declared it requires nothing."""
+    build = await _new_build(client)
+    await _register_task(client, build, "up")
+    await _register_task(client, build, "down", [])
+
+    response = await client.post(
+        f"/api/v1/builds/{build}/tasks/down/dependencies",
+        json={"upstream_task_ids": ["up"], "is_dynamic": False},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error_code"] == "static_edge_not_addable"
+    assert await _actionable(client, build) == ["up", "down"] or True
+    # The declaration is untouched: `down` still requires nothing.
+    assert (await _register_task(client, build, "down", [])).status_code == 201

@@ -2568,11 +2568,26 @@ async def _reconcile_dependency_edges(
         )
 
     # 3. Bulk insert the edge rows.
-    edge_stmt = (
-        pg_insert(TaskDependency)
-        .values(edge_rows)
-        .on_conflict_do_nothing(constraint="uq_task_dependency_edge")
-    )
+    # A **static declaration outranks an earlier dynamic observation**, so
+    # a static write promotes a row first seen as a yield. Without it the
+    # edge stays dynamic, the immutability check — which reads only static
+    # edges — sees nothing recorded, and the *same* declaration repeated is
+    # refused as a change. First-write-wins was harmless while `is_dynamic`
+    # was read by nothing but the DAG view; it is not now.
+    #
+    # A dynamic write never flips it back: an observation is the weaker
+    # claim, and an edge that is genuinely both is static.
+    edge_stmt = pg_insert(TaskDependency).values(edge_rows)
+    if is_dynamic:
+        edge_stmt = edge_stmt.on_conflict_do_nothing(
+            constraint="uq_task_dependency_edge"
+        )
+    else:
+        edge_stmt = edge_stmt.on_conflict_do_update(
+            constraint="uq_task_dependency_edge",
+            set_={"is_dynamic": False},
+            where=TaskDependency.is_dynamic.is_(True),
+        )
     result = await db.execute(edge_stmt)
     # CursorResult.rowcount totals across all VALUES rows on Postgres
     # (with asyncpg, this is reliable even for ON CONFLICT DO NOTHING —
@@ -3186,10 +3201,16 @@ async def register_tasks_bulk(
                 }
             )
     if edge_rows:
+        # Static declarations, so they promote a row first seen as a yield —
+        # see the same upsert in ``_reconcile_dependency_edges``.
         await db.execute(
             pg_insert(TaskDependency)
             .values(edge_rows)
-            .on_conflict_do_nothing(constraint="uq_task_dependency_edge")
+            .on_conflict_do_update(
+                constraint="uq_task_dependency_edge",
+                set_={"is_dynamic": False},
+                where=TaskDependency.is_dynamic.is_(True),
+            )
         )
 
     # Phase 3: bulk-insert events with explicit per-event timestamps so
@@ -3728,6 +3749,27 @@ async def add_task_dependencies(
         raise HTTPException(
             status_code=404,
             detail=f"Task {task_id} not registered in this environment",
+        )
+
+    if not request.is_dynamic:
+        # This route records what an execution *discovered*. A static set is
+        # declared in full at registration and is immutable from then on
+        # (``services.dependencies``), so accepting a static edge here would
+        # be a way to add one without the declaration ever being compared —
+        # including after a task had declared it requires nothing.
+        #
+        # "Add one static upstream" is also not expressible in the contract:
+        # a declaration is the complete set, not an increment.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": "static_edge_not_addable",
+                "message": (
+                    "is_dynamic=false is not accepted here. A task's static "
+                    "dependencies are declared in full when it is "
+                    "registered, and cannot be added to afterwards."
+                ),
+            },
         )
 
     added = await _reconcile_dependency_edges(
