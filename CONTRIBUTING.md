@@ -129,7 +129,7 @@ brew install pinact   # or see the project's install instructions
 pinact run
 ```
 
-`scripts/check-action-pins.py` runs as a pre-commit hook and fails on any
+`scripts/check_action_pins.py` runs as a pre-commit hook and fails on any
 unpinned ref or missing version comment. It parses the workflow YAML rather
 than matching lines, so it sees every `uses` — a step's, a flow-style or
 quoted one, and `jobs.<id>.uses` calling a reusable workflow. Container
@@ -144,6 +144,11 @@ Two things pinact will not do for you:
   one in this repo, and `publish.yml` explains why.
 - It does not touch `docker://` refs. Pin those with the digest from
   `docker buildx imagetools inspect <image>:<tag>`.
+
+The checker has its own tests in `scripts/test_check_action_pins.py`, run by a
+second pre-commit hook. They are not optional garnish: this code fails in the
+safe-looking direction — a bypass returns "fine" rather than raising — so if
+you change it, add the case you were worried about.
 
 ## Documentation
 
