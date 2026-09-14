@@ -255,12 +255,28 @@ def acquire_scheduler_lease(
     the dead holder's owner and expiry together. That takeover *is* the
     healing mechanism; nothing has to release the old lease first, and
     across containers there is nothing to release it with.
+
+    **Asking twice is not losing.** An acquire by the owner that already
+    holds a live lease is granted, not refused. The client retries a POST
+    whose response never arrived, so without this the second attempt is
+    refused by the lease the first one installed — and the tick concludes
+    that somebody else is driving a build it is itself holding, stops, and
+    leaves nothing driving it until the TTL lapses.
+
+    Safe because an owner id is minted per *tick*, not per process or per
+    container: "the live lease is already yours" cannot be true for two
+    different ticks, so this can never hand one lease to two drivers. It
+    is the same identity the owner-checked renew and release rest on.
     """
     now = now or utc_now()
-    if lease_is_live(build, now):
+    if lease_is_live(build, now) and build.scheduler_lease_owner != owner_id:
         # Live implies non-null; narrowed for the type checker.
         assert build.scheduler_lease_until is not None
         return False, as_utc(build.scheduler_lease_until)
+    # Free, lapsed, or already ours. The last of those extends the expiry
+    # rather than returning the old one: the caller is about to start
+    # driving, and it should get the full TTL it asked for whether or not
+    # its first attempt's answer came back.
     build.scheduler_lease_owner = owner_id
     build.scheduler_lease_until = now + timedelta(seconds=ttl_seconds)
     return True, build.scheduler_lease_until

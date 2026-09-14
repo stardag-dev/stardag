@@ -711,6 +711,53 @@ async def test_a_lapsed_lease_is_taken_over(
 
 
 @pytest.mark.asyncio
+async def test_the_holder_asking_again_is_granted_not_refused(client: AsyncClient):
+    """Asking twice is not losing.
+
+    The SDK's transport retries a POST whose response never arrived, so a
+    granted acquire can be sent twice. Refusing the second attempt tells
+    the tick that somebody else is driving a build it is itself holding --
+    on which the honest response is to stop, leaving the build with a live
+    lease, no driver, and nothing to wake it until the TTL lapses.
+
+    Safe to grant because an owner id is minted per tick: "already yours"
+    cannot be true for two different ticks, so this can never put one
+    lease behind two drivers. The refusal for a *different* owner is the
+    property that matters and is pinned above.
+    """
+    build_id = await _build(client)
+
+    first = await _lease(client, "POST", build_id, owner_id="tick-1", ttl_seconds=60)
+    again = await _lease(client, "POST", build_id, owner_id="tick-1", ttl_seconds=60)
+
+    assert first["held"] is True
+    assert again["held"] is True, (
+        "the holder was refused its own lease, so a retried acquire reads "
+        "as a lost race and the tick stops driving a build it holds"
+    )
+    # And nobody else got in between.
+    assert (await _lease(client, "POST", build_id, owner_id="tick-2", ttl_seconds=60))[
+        "held"
+    ] is False
+
+
+@pytest.mark.asyncio
+async def test_the_holder_asking_again_gets_the_full_ttl(client: AsyncClient):
+    """The repeat extends the expiry rather than returning the old one.
+
+    The caller is about to start driving and asked for a TTL; it should
+    get that TTL whether or not its first attempt's answer came back.
+    """
+    build_id = await _build(client)
+
+    first = await _lease(client, "POST", build_id, owner_id="tick-1", ttl_seconds=10)
+    again = await _lease(client, "POST", build_id, owner_id="tick-1", ttl_seconds=600)
+
+    assert again["held"] is True
+    assert again["expires_at"] > first["expires_at"]
+
+
+@pytest.mark.asyncio
 async def test_only_the_holder_can_renew_or_release(client: AsyncClient):
     """Owner-checked, and that is what makes a slow tick safe: one whose
     lease lapsed and was taken over must not extend or clear its

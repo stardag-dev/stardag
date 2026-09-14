@@ -116,7 +116,32 @@ def _latch_notify_read_missing(error: Exception) -> bool:
 _RETRY_CONFIG = Retry(
     total=3,
     backoff_factor=0.5,
-    # Also retry POST since our API calls are idempotent (task state transitions)
+    # POST included, which needs saying out loud rather than asserting that
+    # "our API calls are idempotent" -- they are not all idempotent, and a
+    # retried POST is a *second* request for a first one whose answer was
+    # lost, not a repeat of a known outcome. What that costs, per endpoint:
+    #
+    # - Task registration (``/tasks``, ``/tasks/bulk``) and the status
+    #   transitions are safe: registration inserts conflict-tolerantly and
+    #   reports a re-registration as a reference, and a transition to a
+    #   status a task already holds is a no-op.
+    # - ``/scheduler-lease`` is safe because an acquire by the owner that
+    #   already holds the lease is granted rather than refused. It was not,
+    #   and the cost of that was a tick told it had lost a race to itself,
+    #   which stopped it driving a build whose lease it held.
+    # - ``/builds/wake-candidates`` degrades rather than breaks: the builds
+    #   in a lost response were stamped as handed out and reach nobody, so
+    #   they wait one hand-out window before being offered again. The
+    #   endpoint is designed for that ("a build whose handed-out spawn
+    #   never happened is offered again once the window has passed").
+    # - ``POST /builds`` can duplicate: a retried create makes a second
+    #   build and the first is orphaned, since only the second id is ever
+    #   returned. Cheap and visible rather than harmful, and the
+    #   alternative -- not retrying it -- turns a lost response into a
+    #   failed build.
+    #
+    # The rule when adding an endpoint: decide what a second delivery does
+    # before relying on this list.
     allowed_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"],
 )
 
