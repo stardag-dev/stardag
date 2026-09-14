@@ -88,5 +88,14 @@ class EventType(str, enum.Enum):
     # Execution taken away by the platform, not by the task being wrong
     # (function timeout, container reclaimed) — see TaskStatus.INTERRUPTED.
     TASK_INTERRUPTED = "task_interrupted"
+    # The platform took the container away but is restarting the *same*
+    # execution itself — a preemption. Deliberately has no TaskStatus of its
+    # own: the task is still running, still holds its claim and still has
+    # the executor ref the restart will reuse, so moving it anywhere would
+    # release a claim the restart is about to need. What it records is that
+    # a restart is now *due*, which is the one thing nothing could see
+    # before: a restart that never arrives used to be indistinguishable
+    # from an execution running happily. See services.status for the fold.
+    TASK_PREEMPTED = "task_preempted"
     TASK_SKIPPED = "task_skipped"
     TASK_CANCELLED = "task_cancelled"  # Explicitly cancelled by user

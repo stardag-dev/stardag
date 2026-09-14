@@ -2262,6 +2262,9 @@ async def get_build_frontier(
             # expiry the server itself will hand the task to the next
             # claimant, so a scheduler can stop inferring from elapsed time.
             latest_status_expires_at=t.latest_status_expires_at,
+            # ...and this says why that expiry may be unusually near: the
+            # platform said it was restarting this execution itself.
+            latest_preempted_at=t.latest_preempted_at,
             # Absent from the map = no attempt recorded in this build. A
             # root cached from an earlier build is the normal case.
             attempt_count=attempt_counts.get(t.id, 0),
@@ -2681,6 +2684,8 @@ async def register_task(
         latest_status=db_task.latest_status,
         latest_status_at=db_task.latest_status_at,
         latest_status_build_id=db_task.latest_status_build_id,
+        latest_status_expires_at=db_task.latest_status_expires_at,
+        latest_preempted_at=db_task.latest_preempted_at,
     )
 
 
@@ -3096,6 +3101,8 @@ async def register_tasks_bulk(
                 latest_status=db_task.latest_status,
                 latest_status_at=db_task.latest_status_at,
                 latest_status_build_id=db_task.latest_status_build_id,
+                latest_status_expires_at=db_task.latest_status_expires_at,
+                latest_preempted_at=db_task.latest_preempted_at,
             )
             for t in tasks_in
         ]
@@ -3331,6 +3338,7 @@ async def interrupt_task(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     reason: str | None = None,
     commit_hash: str | None = None,
+    executor_ref: str | None = None,
 ):
     """Record that a task's execution was interrupted by the platform.
 
@@ -3351,6 +3359,12 @@ async def interrupt_task(
     ``reason`` is recorded like ``/fail``'s ``error_message`` — the same
     question gets asked of both — but does not set ``latest_completed_at``:
     an interruption is a pause, not an ending.
+
+    ``executor_ref`` names the execution being reported on. Optional, and
+    honoured only when the task still holds that ref: it is what stops a
+    report that took longer to land than its execution took to be replaced
+    from moving a *live* task to INTERRUPTED. Omitted (an older SDK), the
+    build-ownership test stands alone.
     """
     return await _create_task_event(
         build_id,
@@ -3360,6 +3374,65 @@ async def interrupt_task(
         auth,
         reason,
         commit_hash=commit_hash,
+        # ``is not None``, not truthiness, matching how ``/start``
+        # records the ref: an empty string dropped here would reach the
+        # fold as *no* ref and take the legacy accept-anything path.
+        extra_metadata=(
+            {"executor_ref": executor_ref} if executor_ref is not None else None
+        ),
+    )
+
+
+@router.post("/{build_id}/tasks/{task_id}/preempt", response_model=TaskEventResponse)
+async def preempt_task(
+    build_id: UUID,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    reason: str | None = None,
+    commit_hash: str | None = None,
+    executor_ref: str | None = None,
+):
+    """Record that the platform is restarting this execution itself.
+
+    A preemption, as distinct from ``/interrupt``. The container was taken
+    away, but the backend restarts the *same* execution — same call id,
+    same executor ref, no attempt spent — typically in seconds. So the task
+    does not change status and does **not** release its claim: releasing it
+    would invite a second, concurrent execution of a task that is about to
+    resume.
+
+    What it records is that a restart is now **due**, which is the thing
+    nothing could see before. A preempted worker used to report nothing at
+    all, on the reasoning that the restart makes the report unnecessary —
+    true right up until the restart does not come, at which point the task
+    reads as "running happily" and stays that way until its whole claim
+    lapses. Recording the preemption costs nothing, risks nothing, and
+    makes the absence detectable: the claim's expiry is pulled in to
+    ``ClaimSettings.preempt_restart_grace_seconds``, the restart's own
+    ``/start`` re-grants the full TTL, and a restart that never arrives
+    leaves an ordinary lapsed claim for the ordinary self-heal to find.
+
+    Applies only while the task is RUNNING under this build, still holds
+    the ``executor_ref`` reported, and its claim has not already lapsed —
+    see ``services.status``. The expiry only ever moves *forward*: a claim
+    shorter than the grace must not be extended by a report whose purpose
+    is to shorten it.
+    """
+    return await _create_task_event(
+        build_id,
+        task_id,
+        EventType.TASK_PREEMPTED,
+        db,
+        auth,
+        reason,
+        commit_hash=commit_hash,
+        # ``is not None``, not truthiness, matching how ``/start``
+        # records the ref: an empty string dropped here would reach the
+        # fold as *no* ref and take the legacy accept-anything path.
+        extra_metadata=(
+            {"executor_ref": executor_ref} if executor_ref is not None else None
+        ),
     )
 
 
@@ -3788,6 +3861,11 @@ async def list_tasks_in_build(
                 status_build_id=status_build_id,
                 commit_hash=commit_hash,
                 attempt_count=attempt_counts.get(task.id, 0),
+                # Off the row rather than the replay: the claim is
+                # environment-global, so "until when, and is a restart
+                # outstanding" is not a per-build question.
+                latest_status_expires_at=task.latest_status_expires_at,
+                latest_preempted_at=task.latest_preempted_at,
             )
         )
 

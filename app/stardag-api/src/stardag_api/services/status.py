@@ -4,11 +4,16 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import ColumnElement, Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import Build, BuildStatus, Event, EventType, Task, TaskStatus
-from stardag_api.services.claims import claim_expires_at
+from stardag_api.models.base import as_utc
+from stardag_api.services.claims import (
+    claim_expires_at,
+    claim_is_live,
+    preempt_restart_expires_at,
+)
 from stardag_api.services.wakeups import flag_after_task_transition
 
 # Statuses TASK_RETRIED resets to PENDING. Shared by the denormalised path
@@ -107,6 +112,12 @@ _ATTEMPT_ORDERING_EVENT_TYPES = (
 # preempted container that comes back records a second start and spends no
 # attempt. Inserting any new event type between those two starts silently
 # starts charging for it.
+#
+# Which is exactly why TASK_PREEMPTED is absent from the *ordering* tuple
+# above rather than added to the continuing one here. A preempted worker
+# now reports, so its event sits between those two starts — and being no
+# kind of status predecessor at all, it leaves them adjacent, keeps the
+# restart free, and keeps the SQL twin in agreement without a second term.
 _ATTEMPT_CONTINUING_EVENT_TYPES = (
     EventType.TASK_STARTED,
     EventType.TASK_INTERRUPTED,
@@ -128,6 +139,130 @@ def starts_new_attempt(event_type: str | None, prev_event_type: str | None) -> b
         event_type == EventType.TASK_STARTED
         and prev_event_type not in _ATTEMPT_CONTINUING_EVENT_TYPES
     )
+
+
+def _reports_on_the_current_execution(task: Task, event: Event) -> bool:
+    """Whether a worker's end-of-execution report still applies.
+
+    A worker reporting an interruption or a preemption is describing *one
+    execution*. By the time the report lands, the task may have moved on —
+    and applying a dead execution's report to a live one is how a scheduler
+    ends up starting a task that is already running. Three tests, narrowing:
+
+    - **Still RUNNING.** Usually it is not because somebody cancelled it —
+      a UI cancel, a FAIL_FAST cascade — and the cancel is what interrupted
+      the worker in the first place. Modal delivers a deliberate
+      ``FunctionCall.cancel()`` and a function timeout as the *same*
+      exception, so the worker cannot tell them apart and must report
+      either way. Deciding here is what makes that safe: the registry
+      initiated the cancel and knows, where the worker can only guess.
+    - **Still RUNNING under the reporting build.** This worker's claim
+      lapsed and somebody else took it; evicting the live holder is exactly
+      the duplicate execution claims exist to prevent.
+    - **Still the same execution.** The build can also replace its *own*
+      execution — its claim lapses, it retries, it starts again — and the
+      build id alone cannot see that. So a report may name the execution it
+      is about (``executor_ref``), and it is honoured only while the task
+      still holds that one.
+
+    The ref is optional, and **only a report that names none** falls back to
+    the first two tests: an SDK that predates this sends no ref, and
+    refusing its reports would turn a version skew into silent stalls. A
+    report that *does* name one requires a current ref equal to it —
+    treating a missing current ref as a wildcard would reopen the hole,
+    because a replacement's claiming start clears the ref before its spawn
+    records the new one, so the whole acquire→spawn gap would accept the
+    dead execution's report.
+
+    Note what the ref rightly does not separate: a backend that restarts an
+    input *under the same ref* — Modal's preemption — is by construction
+    still the same execution.
+    """
+    if (
+        task.latest_status != TaskStatus.RUNNING
+        or task.latest_status_build_id != event.build_id
+    ):
+        return False
+    reported_ref = (event.event_metadata or {}).get("executor_ref")
+    if reported_ref is None:
+        return True
+    return str(reported_ref) == str(task.latest_executor_ref)
+
+
+# Event-metadata key recording that a report was written but did not move
+# the task. Read by ``get_interrupt_counts_in_build``: a refused report is
+# not an interruption and must not spend the resumption budget. It matters
+# because a worker cannot tell a cancel from a timeout and so reports both,
+# and a cancel's report is always refused — without this, cancelling and
+# retrying a task inside one build round would eat the budget a genuine
+# interruption needs.
+#
+# Recorded on the event rather than simply not written, because the event
+# is the only trace that the execution ended at all.
+REPORT_APPLIED_KEY = "report_applied"
+
+# The event types a worker sends to describe the end of *its own*
+# execution, and therefore the ones that can be refused rather than
+# applied. Named so the refusal paths cannot drift apart.
+_END_OF_EXECUTION_REPORTS = (EventType.TASK_INTERRUPTED, EventType.TASK_PREEMPTED)
+
+
+def refused_report_filter() -> "ColumnElement[bool]":
+    """Exclude reports that were written but changed nothing.
+
+    ``is_not(False)`` rather than a truthiness test, so the key's *absence*
+    still passes: every event written before the marker existed, and every
+    applied one, carry no key at all, and ``NULL IS NOT FALSE`` is true on
+    both dialects. SQLite reads the accessor through ``JSON_EXTRACT`` and
+    Postgres through ``->``, which is why this has a Postgres test of its
+    own.
+
+    Used by **both** attempt-stream queries, and that is the point of
+    factoring it: a refused report is not an interruption *and* not a
+    predecessor. Missing the second is subtle — TASK_INTERRUPTED is
+    attempt-continuing, so a stale one standing between a retry and the
+    start that follows it stops that start counting, and the retry budget
+    silently grows.
+    """
+    return Event.event_metadata[REPORT_APPLIED_KEY].as_boolean().is_not(False)
+
+
+def _report_was_refused(event: Event) -> bool:
+    """The Python twin of :func:`refused_report_filter`, for the replays."""
+    return (event.event_metadata or {}).get(REPORT_APPLIED_KEY) is False
+
+
+def _mark_report_refused(event: Event) -> None:
+    """Record that this report was kept as audit but changed nothing.
+
+    Reassigns rather than mutating in place: ``event_metadata`` is a plain
+    ``JSON`` column, so an in-place update is not seen as a change and
+    would not be persisted.
+    """
+    event.event_metadata = {**(event.event_metadata or {}), REPORT_APPLIED_KEY: False}
+
+
+def _replay_report_applies(
+    status: TaskStatus, event: Event, current_ref: str | None
+) -> bool:
+    """The replay's twin of :func:`_reports_on_the_current_execution`.
+
+    Same rule, from what a replay can see. Build ownership is implicit —
+    each replay walks one build's events — so what is left is "still
+    running" and "still the same execution", with ``current_ref`` tracked
+    off the starts as the walk goes.
+
+    It has to be the same rule. The replays answer the per-build view that
+    the UI and the frontier read, and the row answers the environment-global
+    one; a report the row refuses but a replay applies shows the same task
+    as INTERRUPTED in one place and RUNNING in the other.
+    """
+    if status != TaskStatus.RUNNING:
+        return False
+    reported_ref = (event.event_metadata or {}).get("executor_ref")
+    if reported_ref is None:
+        return True
+    return str(reported_ref) == str(current_ref)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -268,6 +403,13 @@ async def get_attempt_counts_in_build(
             Event.build_id == build_id,
             Event.task_id.is_not(None),
             Event.event_type.in_([e.value for e in _ATTEMPT_ORDERING_EVENT_TYPES]),
+            # A refused report never moved the task, so it is not part of
+            # the ordering stream either — see REPORT_APPLIED_KEY. Leaving
+            # it in would let a stale interruption stand between a retry
+            # and the start that follows it, and TASK_INTERRUPTED is
+            # attempt-*continuing*: the start would stop counting and the
+            # retry budget would silently grow.
+            refused_report_filter(),
             # Never resumed → no cutoff → the window is the whole build.
             or_(resumed_at.is_(None), Event.created_at >= resumed_at),
         )
@@ -334,6 +476,8 @@ async def get_interrupt_counts_in_build(
                 Event.build_id == build_id,
                 Event.task_id.is_not(None),
                 Event.event_type == EventType.TASK_INTERRUPTED.value,
+                # Refused reports are audit, not interruptions.
+                refused_report_filter(),
                 or_(resumed_at.is_(None), Event.created_at >= resumed_at),
             )
             .where(
@@ -455,6 +599,13 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
 
     # All branches below are no-ops once the task is COMPLETED.
     if task.latest_status == TaskStatus.COMPLETED:
+        # A report that lands after somebody completed the task is refused
+        # like any other that cannot apply, and has to be *marked* so —
+        # this return is upstream of the branches that mark, and an
+        # unmarked report is counted against the resumption budget. Same
+        # reasoning as the authority rule; a different way to arrive.
+        if et in _END_OF_EXECUTION_REPORTS:
+            _mark_report_refused(event)
         return
 
     if et == EventType.TASK_STARTED:
@@ -552,6 +703,14 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # running, so the claim is over and its expiry is meaningless.
         task.latest_status_expires_at = None
     elif et == EventType.TASK_INTERRUPTED:
+        # An interruption is a report about *one execution*, so it applies
+        # only to the claim that execution held — see
+        # ``_reports_on_the_current_execution``. The event row is still
+        # written either way: it happened, and it is the only trace that
+        # this execution ended at all.
+        if not _reports_on_the_current_execution(task, event):
+            _mark_report_refused(event)
+            return
         task.latest_status = TaskStatus.INTERRUPTED
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
@@ -577,6 +736,58 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # scheduler needs the ref to probe for exactly that before it
         # spawns a duplicate. A TASK_STARTED will replace it; a
         # TASK_RETRIED clears it.
+        if event_commit is not None:
+            task.latest_commit_hash = event_commit
+    elif et == EventType.TASK_PREEMPTED:
+        # The platform took the container away and is restarting the *same*
+        # execution itself. Nothing about the task's status changes: it is
+        # still running, under the same claim, with the same executor ref
+        # that the restart will reuse. Moving it anywhere — INTERRUPTED
+        # included — would release a claim the restart is about to need and
+        # invite a second, concurrent execution.
+        #
+        # Subject to the same authority rule as TASK_INTERRUPTED above, for
+        # the same reasons.
+        if not _reports_on_the_current_execution(task, event):
+            _mark_report_refused(event)
+            return
+        # ...and to one more, which the interruption does not need. An
+        # interruption *ends* a claim, so applying it to a lapsed one is
+        # harmless — it releases something already released. This grants a
+        # claim a fresh window, so applying it to a lapsed one would
+        # resurrect a task the server had already made re-claimable, and a
+        # racing claimant would then be denied by a corpse.
+        if not claim_is_live(task):
+            _mark_report_refused(event)
+            return
+        # What this event is *for*: recording that a restart is now due.
+        # Without it the registry cannot tell "running happily since T0"
+        # from "interrupted at T0+n and never restarted" — both read as
+        # RUNNING since T0, so the absence of the restart is expected by
+        # nobody and noticed by nothing.
+        task.latest_preempted_at = event.created_at
+        # And the half that makes the absence *actionable*. The claim stays,
+        # but its expiry is brought forward from the worker's whole declared
+        # timeout (up to a day) to a grace sized for the restart. A restart
+        # that arrives re-grants the full TTL with its own TASK_STARTED; one
+        # that never arrives leaves a lapsed claim within minutes, which the
+        # ordinary self-heal path already knows what to do with.
+        #
+        # Strictly forward, never back: a claim shorter than the grace — a
+        # 60s worker preempted near its deadline, or any claim already most
+        # of the way through — would otherwise be *extended* by a report
+        # whose entire purpose is to shorten it.
+        grace_expiry = preempt_restart_expires_at(event.created_at)
+        current_expiry = task.latest_status_expires_at
+        task.latest_status_expires_at = (
+            grace_expiry
+            if current_expiry is None
+            else min(as_utc(current_expiry), grace_expiry)
+        )
+        # latest_status_at, latest_status_event_id and latest_status_build_id
+        # are all deliberately untouched: the status did not move, and
+        # "a restart is outstanding" is derived as latest_preempted_at >
+        # latest_status_at — which the restart's own start then falsifies.
         if event_commit is not None:
             task.latest_commit_hash = event_commit
     elif et == EventType.TASK_WAITING_FOR_LOCK:
@@ -743,6 +954,12 @@ async def get_task_status_in_build(
     error_message: str | None = None
     attempt_count = 0
     prev_ordering_type: str | None = None
+    # The ref of the most recent start, tracked so an end-of-execution
+    # report can be matched against the execution it names — see
+    # _replay_report_applies. Set *and cleared* on every start, exactly as
+    # the task row does it: a claiming start carries no ref, and treating
+    # its absence as "matches anything" is the hole this closes.
+    current_ref: str | None = None
 
     # Process events from oldest to newest to build final state
     for event in reversed(events):
@@ -750,8 +967,10 @@ async def get_task_status_in_build(
         # prev_ordering_type, so the first start of a new round still sees
         # no predecessor and counts — mirroring the SQL path, where the
         # cutoff is applied before LAG rather than after it.
-        if event.event_type in _ATTEMPT_ORDERING_EVENT_TYPES and (
-            round_start is None or _as_utc(event.created_at) >= round_start
+        if (
+            event.event_type in _ATTEMPT_ORDERING_EVENT_TYPES
+            and not _report_was_refused(event)
+            and (round_start is None or _as_utc(event.created_at) >= round_start)
         ):
             if starts_new_attempt(event.event_type, prev_ordering_type):
                 attempt_count += 1
@@ -764,6 +983,7 @@ async def get_task_status_in_build(
         elif event.event_type == EventType.TASK_STARTED:
             status = TaskStatus.RUNNING
             started_at = event.created_at
+            current_ref = (event.event_metadata or {}).get("executor_ref")
         elif event.event_type == EventType.TASK_SUSPENDED:
             status = TaskStatus.SUSPENDED
         elif event.event_type == EventType.TASK_RESUMED:
@@ -778,6 +998,9 @@ async def get_task_status_in_build(
                 status = TaskStatus.PENDING
                 completed_at = None
                 error_message = None
+                # Cleared with the status, exactly as the row fold does it —
+                # see the twin in get_all_task_statuses_in_build.
+                current_ref = None
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
             # Informational: blocked by global lock, stays PENDING
             pass
@@ -789,12 +1012,26 @@ async def get_task_status_in_build(
             completed_at = event.created_at
             error_message = event.error_message
         elif event.event_type == EventType.TASK_INTERRUPTED:
+            # Only while this build's own view has the task running — the
+            # build-scoped half of the rule _apply_event_to_task applies
+            # globally, and for the same reason: an interruption reported
+            # after a cancel is a report about an execution the cancel
+            # already ended. The other half (ownership) is implicit here,
+            # since this replay only ever sees one build's events.
+            #
             # Not an ending, so completed_at is deliberately untouched —
             # mirrors _apply_event_to_task, including the unconditional
             # error_message write (a stale one would explain this
             # interruption with an earlier failure's text).
-            status = TaskStatus.INTERRUPTED
-            error_message = event.error_message
+            if _replay_report_applies(status, event, current_ref):
+                status = TaskStatus.INTERRUPTED
+                error_message = event.error_message
+        elif event.event_type == EventType.TASK_PREEMPTED:
+            # Status-neutral by design: the platform is restarting the same
+            # execution, so the task stays RUNNING under the same claim.
+            # What it records lives on the task row (latest_preempted_at and
+            # a shortened claim expiry), which a replay does not derive.
+            pass
         elif event.event_type == EventType.TASK_SKIPPED:
             status = TaskStatus.SKIPPED
             completed_at = event.created_at
@@ -817,7 +1054,11 @@ async def get_all_task_statuses_in_build(
         select(Event)
         .where(Event.build_id == build_id)
         .where(Event.task_id.isnot(None))
-        .order_by(Event.created_at.asc())
+        # id (UUID7) breaks created_at ties, as the single-task replay
+        # does. The ref tracking below is order-dependent, so without it a
+        # replacement start and a stale report sharing a timestamp could
+        # replay either way round and refuse or apply the report at random.
+        .order_by(Event.created_at.asc(), Event.id.asc())
     )
     events = result.scalars().all()
 
@@ -825,6 +1066,9 @@ async def get_all_task_statuses_in_build(
     statuses: dict[
         UUID, tuple[TaskStatus, datetime | None, datetime | None, str | None]
     ] = {}
+    # Per task, the ref of its most recent start — see the twin in
+    # get_task_status_in_build.
+    current_refs: dict[UUID, str | None] = {}
 
     for event in events:
         if event.task_id is None:
@@ -842,6 +1086,7 @@ async def get_all_task_statuses_in_build(
         elif event.event_type == EventType.TASK_STARTED:
             status = TaskStatus.RUNNING
             started_at = event.created_at
+            current_refs[task_id] = (event.event_metadata or {}).get("executor_ref")
         elif event.event_type == EventType.TASK_SUSPENDED:
             status = TaskStatus.SUSPENDED
         elif event.event_type == EventType.TASK_RESUMED:
@@ -856,6 +1101,12 @@ async def get_all_task_statuses_in_build(
                 status = TaskStatus.PENDING
                 completed_at = None
                 error_message = None
+                # The row fold clears the executor ref here too: a retry
+                # re-runs from scratch, so the ref of the execution that
+                # will never resume must not survive it. Keeping it would
+                # let a delayed report from that execution be accepted
+                # after a later resume, by this replay but not by the row.
+                current_refs.pop(task_id, None)
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
             # Informational: blocked by global lock, stays PENDING
             pass
@@ -867,12 +1118,20 @@ async def get_all_task_statuses_in_build(
             completed_at = event.created_at
             error_message = event.error_message
         elif event.event_type == EventType.TASK_INTERRUPTED:
+            # Only while this build's own view has the task running on the
+            # execution being reported on — see get_task_status_in_build,
+            # whose rule this mirrors.
+            #
             # Not an ending, so completed_at is deliberately untouched —
             # mirrors _apply_event_to_task, including the unconditional
             # error_message write (a stale one would explain this
             # interruption with an earlier failure's text).
-            status = TaskStatus.INTERRUPTED
-            error_message = event.error_message
+            if _replay_report_applies(status, event, current_refs.get(task_id)):
+                status = TaskStatus.INTERRUPTED
+                error_message = event.error_message
+        elif event.event_type == EventType.TASK_PREEMPTED:
+            # Status-neutral — see get_task_status_in_build.
+            pass
         elif event.event_type == EventType.TASK_SKIPPED:
             status = TaskStatus.SKIPPED
             completed_at = event.created_at

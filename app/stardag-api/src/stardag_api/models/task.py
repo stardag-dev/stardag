@@ -185,6 +185,24 @@ class Task(Base, TimestampMixin):
     latest_status_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
     )
+    # When the platform last said it was restarting this task's execution
+    # itself — a preemption (TASK_PREEMPTED). Written by that event and by
+    # nothing else; never cleared.
+    #
+    # Never cleared because "a restart is still outstanding" is *derived*
+    # rather than stored: ``latest_status == RUNNING and latest_preempted_at
+    # > latest_status_at``. The restarted execution records its own
+    # TASK_STARTED, which moves ``latest_status_at`` past this, and the
+    # derived flag goes false on its own. One write site, no clear sites,
+    # and no way for the two to disagree.
+    #
+    # The preemption also brings ``latest_status_expires_at`` forward to a
+    # short restart grace, which is what makes a restart that never
+    # arrives *visible*: the claim lapses in minutes instead of at the end
+    # of the worker's whole declared timeout.
+    latest_preempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
     latest_status_event_id: Mapped[UUID | None] = mapped_column(Uuid)
     latest_status_build_id: Mapped[UUID | None] = mapped_column(
         Uuid,

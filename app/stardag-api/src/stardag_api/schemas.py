@@ -276,6 +276,19 @@ class TaskResponse(BaseModel):
     latest_status: TaskStatus | None = None
     latest_status_at: datetime | None = None
     latest_status_build_id: UUID | None = None
+    # When the claim that ``latest_status == RUNNING`` *is* stops being
+    # believable — see FrontierTaskRef.latest_status_expires_at for the
+    # full semantics, including what null means. Here so a reader looking
+    # at "who holds this claim, and since when" can also see until when.
+    latest_status_expires_at: datetime | None = None
+    # When the platform last said it was restarting this execution itself.
+    # Never cleared, because the question readers actually have —
+    # "is a restart still outstanding?" — is the comparison
+    # ``latest_status == RUNNING and latest_preempted_at > latest_status_at``:
+    # the restarted execution's own start moves latest_status_at past this
+    # and the answer becomes no, with nothing to clear and nothing that can
+    # disagree.
+    latest_preempted_at: datetime | None = None
 
 
 class TaskBulkResponse(BaseModel):
@@ -333,6 +346,14 @@ class FrontierTaskRef(BaseModel):
     # to date it). Those need an operator to release; there is no timestamp
     # that would let a client conclude anything else.
     latest_status_expires_at: datetime | None = None
+    # When the platform last said it was restarting this execution itself
+    # (a preemption). A scheduler reads it as "a restart is outstanding"
+    # only while it is later than latest_status_at — the restart records
+    # its own TASK_STARTED, which moves that past this. Mostly it needs no
+    # special handling: the shortened claim expiry above already routes an
+    # unfulfilled restart into the ordinary lapsed-claim self-heal. It is
+    # here so a reader can say *why* a claim is about to lapse early.
+    latest_preempted_at: datetime | None = None
     # How many times execution has been started for this task **since this
     # build's most recent BUILD_RESUMED event** (since the start of the
     # build if it has never been resumed) — the input to a scheduler's own

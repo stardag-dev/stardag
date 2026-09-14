@@ -340,6 +340,501 @@ async def test_completed_stays_completed(client: AsyncClient):
     assert task["latest_status"] == "completed"
 
 
+# --- It applies only to the claim the reporting build holds -------------
+#
+# A worker cannot tell a deliberate cancel from a function timeout: the
+# execution backend delivers both as the same exception, with the same
+# message. So the worker reports either way and the registry decides —
+# it is the one that initiated the cancel, and the one that knows whose
+# claim the task is currently under.
+
+
+@pytest.mark.asyncio
+async def test_interrupt_after_a_cancel_is_a_no_op(client: AsyncClient):
+    """The cancel is usually *what* interrupted the worker. Letting the
+    report land would resurrect a task the build just cancelled — the
+    frontier lists INTERRUPTED as actionable, so a tick would start it
+    again."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/cancel")
+
+    response = await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
+        params={"reason": "Input was cancelled by user"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["latest_status"] == "cancelled"
+
+    assert (await _task(client, "t-1"))["latest_status"] == "cancelled"
+    assert (await _replayed(client, build_id, "t-1"))["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_the_no_op_still_records_the_event(client: AsyncClient):
+    """It happened, and it is the only trace that this execution ended at
+    all. Only the *status* transition is refused."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/cancel")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+
+    events = (await client.get(f"{BUILDS}/{build_id}/events")).json()
+    assert "task_interrupted" in [event["event_type"] for event in events]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_report_does_not_spend_the_interruption_budget(
+    client: AsyncClient,
+):
+    """A worker cannot tell a cancel from a timeout, so it reports both —
+    and a cancel's report is always refused. Counting those would let
+    cancelling and retrying a task inside one build round eat the budget a
+    genuine interruption needs, and the task would then fail on its first
+    real one."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/cancel")
+
+    # The dying worker reports, not knowing it was cancelled.
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/retry")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+
+    assert (await _counts(client, build_id))["t-1"] == (2, 0)
+
+    # ...and a genuine one still counts.
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+    assert (await _counts(client, build_id))["t-1"] == (2, 1)
+
+
+@pytest.mark.asyncio
+async def test_a_report_after_a_completion_does_not_spend_the_budget(
+    client: AsyncClient,
+):
+    """The second way to be refused, and it arrives by a different route:
+    sticky-COMPLETED returns before the report's own branch is reached, so
+    the refusal has to be marked there too or the event is counted as a
+    real interruption.
+
+    Declared as a root so the counts stay readable: a completed task is in
+    no other frontier list."""
+    build_id = await _new_build(client, roots=["t-1"])
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/complete")
+
+    # A worker whose output another build already observed reports late.
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+
+    assert (await _task(client, "t-1"))["latest_status"] == "completed"
+    assert (await _counts(client, build_id))["t-1"] == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_report_is_not_an_attempt_predecessor_either(
+    client: AsyncClient,
+):
+    """The budget is the obvious consumer of the event stream; the attempt
+    *ordering* is the other one, and it is easier to miss.
+
+    TASK_INTERRUPTED is attempt-**continuing** — a start that follows one
+    is a resumption, not a new attempt. So a refused report standing
+    between a retry and the start after it would stop that start counting,
+    and the retry budget would silently grow. The sequence below is exactly
+    that shape."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/fail")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/retry")
+
+    # A stale report lands between the retry and the next start, and is
+    # refused: the task is PENDING, so it holds no claim to interrupt.
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+
+    second = await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True}
+    )
+
+    # Two attempts. With the refused report left in the ordering stream
+    # this reads 1, and a task gets more retries than max_attempts allows.
+    assert second.json()["attempt_count"] == 2, second.text
+    assert (await _counts(client, build_id))["t-1"] == (2, 0)
+
+
+@pytest.mark.asyncio
+async def test_either_interleaving_of_cancel_and_interrupt_ends_cancelled(
+    client: AsyncClient,
+):
+    """The worker reports inside its grace window while the canceller is
+    still writing, so both orders are reachable. One is refused by the rule
+    above; the other is simply overwritten, because nothing makes
+    INTERRUPTED sticky. They must agree, or the outcome of a cancel would
+    depend on a race."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/cancel")
+
+    assert (await _task(client, "t-1"))["latest_status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_does_not_evict_another_builds_claim(client: AsyncClient):
+    """A worker whose claim lapsed and was re-taken is reporting about a
+    dead execution. Applying it would evict the live holder and hand the
+    task to a scheduler while the new execution runs on — the duplicate
+    execution claims exist to prevent."""
+    first = await _new_build(client)
+    second = await _new_build(client)
+    await _register_task(client, first, "t-1")
+    await _register_task(client, second, "t-1")
+
+    await client.post(f"{BUILDS}/{first}/tasks/t-1/start", params={"claim": True})
+    # The re-claim, expressed the way the reactive engine expresses a
+    # non-arbitrating start: the second build is now the status holder.
+    await client.post(
+        f"{BUILDS}/{second}/tasks/t-1/start",
+        params={"executor": "modal", "executor_ref": "fc-2"},
+    )
+
+    await client.post(f"{BUILDS}/{first}/tasks/t-1/interrupt")
+
+    task = await _task(client, "t-1")
+    assert task["latest_status"] == "running"
+    assert task["latest_executor_ref"] == "fc-2"
+
+
+# --- A preemption is not an interruption --------------------------------
+#
+# The backend restarts the same execution itself, so the task keeps its
+# status, its claim and the executor ref the restart reuses. All it records
+# is that a restart is now *due* — which nothing could see before,
+# because a restart that never arrived was indistinguishable from an
+# execution running happily.
+
+
+@pytest.mark.asyncio
+async def test_preempt_leaves_the_task_running_and_claimed(client: AsyncClient):
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-1"},
+    )
+
+    response = await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/preempt",
+        params={"reason": "container reclaimed"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["latest_status"] == "running"
+    assert response.json()["status"] == "running"
+
+    task = await _task(client, "t-1")
+    assert task["latest_status"] == "running"
+    # The ref the restart will reuse, and no error text: nothing is wrong
+    # with a task whose container is coming back, so the reason stays on
+    # the event row rather than becoming the task's error message.
+    assert task["latest_executor_ref"] == "fc-1"
+    assert (await _replayed(client, build_id, "t-1"))["error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_preempt_shortens_the_claim_rather_than_releasing_it(
+    client: AsyncClient,
+):
+    """The point of the whole event. A worker timeout of a day means a
+    claim of a day, so a restart that never comes used to wedge the task
+    for that long. The claim survives — releasing it would invite a second
+    execution of a task that is about to resume — but only for as long as
+    the restart is plausible."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "claim_ttl_seconds": 86400},
+    )
+    granted = (await _task(client, "t-1"))["latest_status_expires_at"]
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/preempt")
+    task = await _task(client, "t-1")
+
+    assert task["latest_status_expires_at"] is not None
+    assert task["latest_status_expires_at"] < granted
+    assert task["latest_preempted_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_the_restart_re_grants_the_full_claim(client: AsyncClient):
+    """And with it, "a restart is outstanding" — which is derived, never
+    stored — becomes false on its own."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "claim_ttl_seconds": 86400},
+    )
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/preempt")
+    shortened = (await _task(client, "t-1"))["latest_status_expires_at"]
+
+    # Modal restarts the input on the same call id; the container reports
+    # its own start.
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={
+            "executor": "modal",
+            "executor_ref": "fc-1",
+            "claim_ttl_seconds": 86400,
+        },
+    )
+
+    task = await _task(client, "t-1")
+    assert task["latest_status_expires_at"] > shortened
+    assert task["latest_preempted_at"] < task["latest_status_at"]
+
+
+@pytest.mark.asyncio
+async def test_preemption_spends_neither_budget(client: AsyncClient):
+    """Two consecutive TASK_STARTEDs are what make the backend's own
+    restart free, and an event between them would silently start charging
+    for it. A preemption is also not a stardag resumption, so it must not
+    spend the interruption budget either."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    assert (await _counts(client, build_id))["t-1"] == (1, 0)
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/preempt")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start")
+
+    assert (await _counts(client, build_id))["t-1"] == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_report_does_not_apply_to_a_replacement_execution(
+    client: AsyncClient,
+):
+    """The build can replace its *own* execution — its claim lapses, it
+    retries, it starts again — and the build id alone cannot see that. A
+    report naming the execution it is about is only honoured while the task
+    still holds that one."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-old"},
+    )
+    # The claim lapsed and the same build started a replacement.
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"executor": "modal", "executor_ref": "fc-new"},
+    )
+
+    # The first execution's report finally lands.
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
+        params={"executor_ref": "fc-old"},
+    )
+
+    task = await _task(client, "t-1")
+    assert task["latest_status"] == "running"
+    assert task["latest_executor_ref"] == "fc-new"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_current_ref_is_not_a_wildcard(client: AsyncClient):
+    """The replacement's *claiming* start carries no ref — the spawn has not
+    happened yet — and clears the one the dead execution left. If a missing
+    current ref matched anything, the whole acquire→spawn gap would accept
+    the dead execution's report, which is precisely the window a
+    replacement is most likely to be in."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-old"},
+    )
+    # The claim lapsed; the replacement has acquired but not yet spawned.
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start")
+
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
+        params={"executor_ref": "fc-old"},
+    )
+
+    assert (await _task(client, "t-1"))["latest_status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_the_replay_agrees_with_the_row_about_a_stale_report(
+    client: AsyncClient,
+):
+    """The two derivations answer the same question for different readers —
+    the per-build view and the environment-global row. A report the row
+    refuses but a replay applies would show one task as INTERRUPTED in one
+    place and RUNNING in the other.
+
+    Read off the **event response**, which is the one thing that returns
+    ``get_task_status_in_build``'s answer: ``GET /builds/{id}/tasks`` is
+    backed by the denormalised row, so asserting there would pass with the
+    replay rule removed entirely."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-old"},
+    )
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"executor": "modal", "executor_ref": "fc-new"},
+    )
+
+    stale = await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
+        params={"executor_ref": "fc-old"},
+    )
+
+    assert stale.json()["status"] == "running", stale.text
+    assert stale.json()["latest_status"] == "running"
+    assert (await _task(client, "t-1"))["latest_status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_clears_the_ref_the_replay_matches_against(
+    client: AsyncClient,
+):
+    """A retry re-runs from scratch, so the row clears the executor ref with
+    it. The replay has to clear the ref it tracks at the same point, or a
+    delayed report from the abandoned execution is accepted there after a
+    resume while the row refuses it — the divergence the ref rule exists to
+    close, reintroduced one branch over."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-old"},
+    )
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/fail")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/retry")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/resume")
+
+    stale = await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt",
+        params={"executor_ref": "fc-old"},
+    )
+
+    assert stale.json()["status"] == "running", stale.text
+    assert stale.json()["latest_status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_report_naming_the_current_execution_still_applies(
+    client: AsyncClient,
+):
+    """The control. The ref narrows the rule; it must not disable it."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-1"},
+    )
+
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/interrupt", params={"executor_ref": "fc-1"}
+    )
+
+    assert (await _task(client, "t-1"))["latest_status"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_a_report_with_no_ref_still_applies(client: AsyncClient):
+    """An SDK predating the ref sends none. Refusing its reports would turn
+    a version skew into exactly the silent stall this whole path removes."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "executor": "modal", "executor_ref": "fc-1"},
+    )
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+
+    assert (await _task(client, "t-1"))["latest_status"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_preempt_never_extends_a_claim(client: AsyncClient):
+    """A claim shorter than the restart grace — a 60s worker preempted near
+    its deadline — must not be *extended* by a report whose entire purpose
+    is to shorten it."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "claim_ttl_seconds": 60},
+    )
+    granted = (await _task(client, "t-1"))["latest_status_expires_at"]
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/preempt")
+
+    # 60s is well inside the restart grace, so the grace is the *later* of the
+    # two and must lose.
+    assert (await _task(client, "t-1"))["latest_status_expires_at"] == granted
+
+
+@pytest.mark.asyncio
+async def test_preempt_does_not_resurrect_a_lapsed_claim(
+    client: AsyncClient, monkeypatch
+):
+    """An interruption applied to a lapsed claim merely releases something
+    already released. A preemption *grants* a window, so applying it to a
+    lapsed claim would make a task re-claimable a moment ago deniable
+    again — by a corpse."""
+    from stardag_api.services import status as status_module
+
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start",
+        params={"claim": True, "claim_ttl_seconds": 60},
+    )
+
+    # The claim lapses without anyone writing anything — which is the whole
+    # point of an expiry, and the only way to reach this state. Patched
+    # rather than waited out: the minimum TTL the server accepts is 60s.
+    monkeypatch.setattr(status_module, "claim_is_live", lambda task, now=None: False)
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/preempt")
+
+    task = await _task(client, "t-1")
+    assert task["latest_preempted_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_preempt_obeys_the_same_authority_rule(client: AsyncClient):
+    """A cancelled task must not have its claim quietly re-granted for
+    another five minutes by a worker that has not noticed yet."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/cancel")
+
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/preempt")
+
+    task = await _task(client, "t-1")
+    assert task["latest_status"] == "cancelled"
+    assert task["latest_status_expires_at"] is None
+    assert task["latest_preempted_at"] is None
+
+
 # --- Postgres parity ----------------------------------------------------
 
 
@@ -373,3 +868,79 @@ async def test_interruption_counting_on_postgres(pg_client: AsyncClient):
 
     await pg_client.post(f"{BUILDS}/{build_id}/resume")
     assert await _counts(pg_client, build_id) == {"pg-1": (0, 0)}
+
+
+@pytest.mark.asyncio
+async def test_preemption_is_invisible_to_the_sql_attempt_count(
+    pg_client: AsyncClient,
+):
+    """The SQL twin of ``starts_new_attempt`` filters on the *ordering*
+    event types before it looks at predecessors, so leaving TASK_PREEMPTED
+    out of that tuple is what keeps the backend's own restart free. That is
+    a property of a LAG over a WHERE, not of the Python rule, so it gets
+    asserted against the dialect that runs it."""
+    build_id = await _new_build(pg_client)
+    await _register_task(pg_client, build_id, "pg-1")
+
+    await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-1/start", params={"claim": True}
+    )
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/preempt")
+    restarted = await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/start")
+
+    assert restarted.json()["attempt_count"] == 1
+    assert await _counts(pg_client, build_id) == {"pg-1": (1, 0)}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_report_is_not_a_predecessor_on_postgres(
+    pg_client: AsyncClient,
+):
+    """The ordering exclusion is a JSON predicate inside the LAG subquery,
+    which is the most dialect-specific place it could live."""
+    build_id = await _new_build(pg_client)
+    await _register_task(pg_client, build_id, "pg-1")
+    await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-1/start", params={"claim": True}
+    )
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/fail")
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/retry")
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/interrupt")
+    second = await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-1/start", params={"claim": True}
+    )
+
+    assert second.json()["attempt_count"] == 2, second.text
+    assert await _counts(pg_client, build_id) == {"pg-1": (2, 0)}
+
+
+@pytest.mark.asyncio
+async def test_refused_reports_are_excluded_from_the_count_on_postgres(
+    pg_client: AsyncClient,
+):
+    """The exclusion is a JSON predicate on the event metadata, and JSON
+    accessors are the most dialect-specific thing in this query — SQLite
+    reads it through ``JSON_EXTRACT`` and Postgres through ``->``. Both
+    have to agree that a key which is *absent* still counts."""
+    build_id = await _new_build(pg_client)
+    await _register_task(pg_client, build_id, "pg-1")
+    await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-1/start", params={"claim": True}
+    )
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/cancel")
+    # The dying worker reports, not knowing it was cancelled. Refused, so
+    # audited but not counted. (Asserted after the retry below: a cancelled
+    # task is in no frontier list, so there is nothing to read counts off
+    # until it is schedulable again.)
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/interrupt")
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/retry")
+    await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-1/start", params={"claim": True}
+    )
+
+    assert await _counts(pg_client, build_id) == {"pg-1": (2, 0)}
+
+    # ...and a genuine one still counts, so the key's absence is not being
+    # read as "excluded".
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/interrupt")
+    assert await _counts(pg_client, build_id) == {"pg-1": (2, 1)}
