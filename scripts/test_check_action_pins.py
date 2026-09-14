@@ -156,7 +156,33 @@ def test_an_aliased_ref_is_refused_rather_than_checked_at_the_anchors_line():
         f"      - uses: &pin actions/checkout@{SHA} # v7.0.1\n"
         "      - uses: *pin\n",
     )
-    assert [p for p in problems if "YAML ALIAS" in p]
+    assert [p for p in problems if "UNSUPPORTED YAML" in p]
+
+
+def test_an_anchor_defined_outside_jobs_is_still_refused():
+    """The alias occurs once, so counting duplicate nodes never saw it."""
+    problems = check(
+        PATH,
+        f"defaults: &pin actions/checkout@{SHA} # v7.0.1\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - uses: *pin\n",
+    )
+    assert [p for p in problems if "UNSUPPORTED YAML" in p]
+
+
+def test_a_merge_key_is_refused():
+    """`<<: *step` leaves the step with no `uses` key of its own to find."""
+    problems = check(
+        PATH,
+        "defaults: &step {uses: actions/checkout@v7}\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - <<: *step\n",
+    )
+    assert [p for p in problems if "UNSUPPORTED YAML" in p]
 
 
 # --- container actions -----------------------------------------------------
@@ -233,33 +259,38 @@ def test_two_refs_on_one_line_are_refused():
 # --- aliases: refuse the aliased ref, not the whole workflow ----------------
 
 
-def test_an_alias_elsewhere_in_the_file_is_none_of_our_business():
-    """Rejecting every alias made an unrelated `env` anchor fail the file."""
-    assert (
-        check(
-            PATH,
-            "x: &anchor 1\n"
-            "y: *anchor\n"
-            "jobs:\n"
-            "  b:\n"
-            "    steps:\n"
-            f"      - uses: o/a@{SHA} # v1.0.0\n",
-        )
-        == []
+def test_an_alias_anywhere_is_refused_even_if_it_reaches_no_ref():
+    """The deliberate trade: a wrong refusal costs one edit to a file that
+    could not be verified anyway; a wrong acceptance is an unpinned action in
+    the job that publishes to PyPI. Narrowing this to aliases provably
+    reaching a `uses` is what let an anchor outside `jobs` through."""
+    problems = check(
+        PATH,
+        "x: &anchor 1\n"
+        "y: *anchor\n"
+        "jobs:\n"
+        "  b:\n"
+        "    steps:\n"
+        f"      - uses: o/a@{SHA} # v1.0.0\n",
     )
+    assert [p for p in problems if "UNSUPPORTED YAML" in p]
 
 
 # --- the hint matches the problem ------------------------------------------
 
 
-def test_a_branch_ref_is_told_pinact_will_not_resolve_it():
-    """`pypa/gh-action-pypi-publish@release/v1` was exactly this case."""
-    problems = run("      - uses: pypa/gh-action-pypi-publish@release/v1\n")
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "pypa/gh-action-pypi-publish@release/v1",  # a branch, with a slash
+        "actions/checkout@main",  # a branch, without one
+        "actions/checkout@v7",  # a floating tag
+    ],
+)
+def test_every_movable_ref_gets_the_same_true_remediation(ref):
+    """The string alone does not say branch from tag, so the advice must hold
+    for both — an earlier slash heuristic called `@main` a tag confidently."""
+    problems = run(f"      - uses: {ref}\n")
     assert len(problems) == 1
-    assert "pinact refuses to pin a branch ref" in problems[0]
-
-
-def test_an_ordinary_floating_tag_is_told_to_run_pinact():
-    problems = run("      - uses: actions/checkout@v7\n")
     assert "pinact run" in problems[0]
-    assert "branch ref" not in problems[0]
+    assert "for a branch ref it refuses" in problems[0]

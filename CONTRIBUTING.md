@@ -138,9 +138,17 @@ actions are held to the same standard by image digest
 being this repo's own tracked code.
 
 Two forms it refuses rather than guesses at, because it cannot attribute a
-version comment to a ref in either: **two `uses:` on one line** (put each on
-its own), and a `uses:` reached through a **YAML alias** (write the ref
-literally). An alias elsewhere in the file is fine.
+version comment to a ref in either:
+
+- **Two `uses:` on one line.** One trailing comment cannot say which release
+  it names, so put each on its own line.
+- **YAML aliases and merge keys** (`*pin`, `<<: *step`) anywhere in the file.
+  An aliased ref resolves to the anchor's node, so it would be checked at the
+  anchor's line and against the anchor's comment; a merge key leaves the step
+  with no `uses` of its own to find at all. Refused wholesale rather than
+  supported partially — the trade is deliberate and asymmetric, since a wrong
+  refusal costs one edit to a file that could not be verified anyway, while a
+  wrong acceptance is an unpinned action in the job that publishes to PyPI.
 
 Two things pinact will not do for you:
 

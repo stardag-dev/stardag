@@ -61,10 +61,14 @@ COMMIT_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 IMAGE_DIGEST = re.compile(r"^docker://[^@]+@sha256:[0-9a-f]{64}$")
 VERSION_COMMENT = re.compile(r"^#\s*v?[0-9]")
 
-PINACT_HINT = "Run `pinact run` (brew install pinact) to resolve it."
-BRANCH_HINT = (
-    "pinact refuses to pin a branch ref: look up the release tag whose commit "
-    "the branch head is at, and pin that."
+# One message for every movable ref. The string alone does not say whether
+# `@main` is a branch or `@release/v1` a tag, so an earlier version's "does it
+# contain a slash" guess told some contributors the wrong thing with
+# confidence. Say what is true of all of them instead.
+PINACT_HINT = (
+    "Run `pinact run` (brew install pinact). It resolves tags; for a branch "
+    "ref it refuses, and you pin the release tag whose commit the branch head "
+    "is at."
 )
 DIGEST_HINT = (
     "A container action needs an immutable image digest: "
@@ -104,6 +108,37 @@ def comments_by_line(text: str) -> dict[int, str]:
         if tail.startswith("#"):
             comments[number] = tail
     return comments
+
+
+def unsupported_yaml(text: str) -> list[tuple[int, str]]:
+    """(line, what) for YAML constructs this check cannot see through.
+
+    An alias resolves to the anchor's node, so an aliased ref would be checked
+    at the anchor's line and against the anchor's comment — the per-occurrence
+    guarantee, quietly lost. A merge key (`<<: *step`) is worse: the step
+    mapping has no `uses` key of its own, so an inherited unpinned ref is not
+    examined at all.
+
+    Refused wholesale rather than supported partially. An earlier version
+    narrowed this to aliases it could prove reached a `uses`, to avoid failing
+    a file whose alias was somewhere unrelated — and the narrowing is exactly
+    what let an anchor defined outside `jobs` slip through. The trade is
+    asymmetric and settles it: a wrong refusal costs one edit to a file that
+    could not be verified anyway, while a wrong acceptance is an unpinned
+    action in the job that publishes to PyPI.
+    """
+    try:
+        tokens = list(yaml.scan(text))
+    except yaml.YAMLError:
+        return []
+
+    found = []
+    for token in tokens:
+        if isinstance(token, yaml.AliasToken):
+            found.append((token.start_mark.line + 1, f"alias `*{token.value}`"))
+        elif isinstance(token, yaml.ScalarToken) and token.value == "<<":
+            found.append((token.start_mark.line + 1, "merge key `<<`"))
+    return found
 
 
 def _mapping_get(node: yaml.Node | None, key: str) -> yaml.Node | None:
@@ -149,6 +184,14 @@ def check(path: Path, text: str | None = None) -> list[str]:
         # default would raise on a checkout with a non-UTF-8 locale.
         text = path.read_text(encoding="utf-8")
 
+    if unsupported := unsupported_yaml(text):
+        return [
+            f"UNSUPPORTED YAML  {relative}:{line}  {what}\n"
+            "    A ref reached through this cannot be verified at its own "
+            "location. Write it literally."
+            for line, what in unsupported
+        ]
+
     try:
         root = yaml.compose(text)
     except yaml.YAMLError as error:
@@ -157,13 +200,6 @@ def check(path: Path, text: str | None = None) -> list[str]:
     nodes = iter_uses(root)
     comments = comments_by_line(text)
     problems = []
-
-    # An alias resolves to the anchor's node, so an aliased ref would be
-    # checked at the anchor's line and against the anchor's comment — the
-    # per-occurrence guarantee, quietly lost. Detected by node identity, so an
-    # alias somewhere unrelated (an `env` value, say) is none of our business.
-    occurrences = Counter(id(node) for node in nodes)
-    aliased = {key for key, count in occurrences.items() if count > 1}
 
     # Two refs sharing a line cannot each be attributed a comment, and one
     # trailing comment naming a single release would vouch for both.
@@ -174,16 +210,6 @@ def check(path: Path, text: str | None = None) -> list[str]:
         line = node.start_mark.line + 1
         ref = node.value
         where = f"{relative}:{line}"
-
-        if id(node) in aliased:
-            if line not in reported_lines:
-                reported_lines.add(line)
-                problems.append(
-                    f"YAML ALIAS  {where}  {ref}\n"
-                    "    An aliased ref cannot be verified at its own "
-                    "location. Write it literally."
-                )
-            continue
 
         if per_line[line] > 1:
             if line not in reported_lines:
@@ -211,8 +237,7 @@ def check(path: Path, text: str | None = None) -> list[str]:
                 problems.append(f"UNPINNED  {where}  {ref}\n    {DIGEST_HINT}")
                 continue
         elif not COMMIT_SHA.match(ref):
-            hint = BRANCH_HINT if "/" in ref.partition("@")[2] else PINACT_HINT
-            problems.append(f"UNPINNED  {where}  {ref}\n    {hint}")
+            problems.append(f"UNPINNED  {where}  {ref}\n    {PINACT_HINT}")
             continue
 
         comment = comments.get(line)
