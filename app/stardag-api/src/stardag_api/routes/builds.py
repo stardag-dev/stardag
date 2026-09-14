@@ -2654,7 +2654,16 @@ async def get_build_executions(
             ranked,
             func.row_number()
             .over(
-                partition_by=ranked.c.task_pk,
+                # By task **and** backend, which is the rule this query is
+                # supposed to express: the newest ref recorded *by the
+                # latest backend*. Partitioning by task alone ranked across
+                # backends, so a task whose starts interleave as
+                # (modal, ref), (other, ref), (modal, no-ref) put the other
+                # backend's row at rank 1 — and the join below, which
+                # requires the latest backend, then matched nothing and
+                # dropped the task entirely. The Modal container it names
+                # would have been left running.
+                partition_by=(ranked.c.task_pk, ranked.c.executor),
                 order_by=(ranked.c.started_at.desc(), ranked.c.event_id.desc()),
             )
             .label("ref_rank"),

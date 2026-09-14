@@ -89,8 +89,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `task_cancel_aio` takes keyword-only `if_executor` and `if_executor_ref`, and
   `build_get_executions` / `build_get_executions_aio` take a keyword-only
   `cursor`. Subclasses that override the old signatures raise `TypeError`
-  when the reactive tick calls them; the call sites log and continue, so the
-  symptom is a cancel that is never recorded rather than a crash.
+  when the reactive tick calls them, and **the two degrade differently**:
+  a stale `task_cancel_aio` is caught per task, so the symptom is a cancel
+  that is never recorded rather than a crash, while a stale
+  `build_get_executions` fails the tick — that call site catches only a
+  missing route, on purpose, because a cascaded build's frontier shows
+  nothing to stop and degrading quietly would report "nothing to do" and
+  leave the containers running with no second chance. **Update an external
+  execution-list implementation before running a tick against it.**
 
 - **A cancelled or failing build no longer stops other builds' executions.**
   The tick's cancel pass read the frontier's `running` list, which is every

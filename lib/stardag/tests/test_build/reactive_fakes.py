@@ -378,8 +378,22 @@ class FakeReactiveRegistry(NoOpRegistry):
         # the executions listing reads. ``refs`` alone is the *current*
         # execution, which stops being this build's the moment another one
         # takes the task over.
-        if executor is not None and executor_ref is not None:
-            self.started_by.setdefault(build_id, {})[tid] = (executor, executor_ref)
+        # The retirement rule, modelled: the latest start decides the
+        # backend, and only a ref belonging to *that* backend is still this
+        # build's to stop. Recording only when both fields are present left
+        # an old detached ref in place after a start on another backend, so
+        # the fake offered an execution the real event-log query retires —
+        # and a cleanup test would have cancelled a stale container and
+        # called it a success.
+        mine = self.started_by.setdefault(build_id, {})
+        if executor is None:
+            mine.pop(tid, None)
+        elif executor_ref is not None:
+            mine[tid] = (executor, executor_ref)
+        elif mine.get(tid, (None, None))[0] != executor:
+            # Ref-less start on a different backend: the old ref is retired
+            # and this backend has not named an execution yet.
+            mine.pop(tid, None)
         self.start_metadata[tid] = executor_metadata
         if self.auto_complete:
             # Instant worker: completes and wakes the scheduler.

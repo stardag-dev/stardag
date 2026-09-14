@@ -826,13 +826,18 @@ async def _stop_each(
 ) -> None:
     """Stop each listed execution and record the revocation. Best-effort."""
     for item in items:
-        # Marked only once this execution has actually been dealt with.
-        # Marking on arrival meant a task that failed to load, or a backend
-        # cancel that raised, was filtered out of the next reconcile pass as
-        # though it had been handled — and a terminal build gets no third
-        # chance, because nothing re-flags it. The pass exists to catch what
-        # the first one missed; treating a failure as a success is the one
-        # way to make it catch nothing.
+        # Marked only once this execution is fully dealt with — the
+        # container stopped *and* the revocation recorded.
+        #
+        # Marking on arrival filtered a failed load or a raised cancel out
+        # of the next pass as though handled. Marking after the stop alone
+        # is barely better and fails in the direction that matters: the
+        # container is gone but the claim was never released, so the task
+        # stays RUNNING forever holding a claim and a limit slot, which is
+        # the leak this whole cascade exists to prevent. A terminal build
+        # gets no third chance, so the pass has to be able to retry the
+        # half that failed. Re-stopping an already-stopped execution is
+        # cheap; a leaked claim is not.
         task = await _load_task(item.task_id, registry, task_store, quiet=True)
         if task is None:
             continue
@@ -845,7 +850,6 @@ async def _stop_each(
                 f"{item.executor_ref!r} for task {item.task_id}: {e}"
             )
             continue
-        stopped.add((item.executor, item.executor_ref))
         try:
             # The registry re-checks, on the locked row, that this build
             # still holds the task in a status with an execution to revoke
@@ -863,6 +867,7 @@ async def _stop_each(
                 if_executor=item.executor,
                 if_executor_ref=item.executor_ref,
             )
+            stopped.add((item.executor, item.executor_ref))
         except Exception as e:
             logger.warning(f"Failed to record cancellation of task {item.task_id}: {e}")
 

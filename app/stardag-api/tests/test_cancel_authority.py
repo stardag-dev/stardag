@@ -641,3 +641,32 @@ async def test_a_ref_without_its_backend_is_refused(client: AsyncClient):
     assert response.status_code == 400, response.text
     assert response.json()["detail"]["error_code"] == "incomplete_execution_identity"
     assert await _task_status(client, "half-identity") == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_detour_via_another_backend_does_not_hide_the_execution(
+    client: AsyncClient,
+):
+    """Ranking refs across backends dropped the task altogether.
+
+    Starts interleaved as (modal, ref), (other, ref), (modal, no-ref) put
+    the *other* backend's row first, and the join onto "the latest backend"
+    then matched nothing — so the Modal container the build is still
+    responsible for was never listed, and nothing stopped it.
+    """
+    build = await _new_build(client)
+    await _start(client, build, "detour")  # modal, fc-detour
+    await client.post(
+        f"/api/v1/builds/{build}/tasks/detour/start",
+        params={"executor": "other", "executor_ref": "ref-other"},
+    )
+    # ...and back to modal, self-reporting without a ref.
+    await client.post(
+        f"/api/v1/builds/{build}/tasks/detour/start",
+        params={"executor": "modal"},
+    )
+
+    listed = await _executions(client, build)
+    assert [(e["executor"], e["executor_ref"]) for e in listed["executions"]] == [
+        ("modal", "fc-detour")
+    ], "the latest backend's own execution was dropped"
