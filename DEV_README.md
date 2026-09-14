@@ -285,7 +285,7 @@ tier's runtime is the length of its slowest scenario rather than the sum of
 its parts. They share one registry container, which serves them concurrently,
 and each salts its own task ids.
 
-Measured: **~3.5 minutes** for the twelve tests, plus ~40s to provision.
+Measured: **~3.5 minutes** for the thirteen tests, plus ~40s to provision.
 The bound is `test_suspended_blocker` at ~200s — it has to hold a task
 RUNNING long enough for a second build to register against it, then
 SUSPENDED long enough for that build to tick while it is.
@@ -300,6 +300,16 @@ weaker. `_wait.wait_for_task_status` is the alternative, and where a window
 is a guess about infrastructure rather than about scheduling, the scenario
 asserts the ordering actually held and says which constant to raise if it
 did not.
+
+The rule survives even where the thing under test _is_ a clock. The scheduler
+lease expires, so `test_scheduler_lease_live` cannot avoid timing — but it
+waits on the expiry rather than asserting at an instant, and it asks anything
+that must hold _while_ a lease is live of a lease with ten minutes left, never
+of the five-second one that is about to lapse. That distinction is the
+difference between a test and a bet on latency: the earlier form asked "is a
+competitor refused?" one round trip into a five-second lease, and on a loaded
+runner the round trip outlived the lease, so a correct answer was reported as
+a failure on somebody's unrelated PR.
 
 **A scenario that needs its second build woken _twice_ should keep that
 build resident instead.** `select_wake_candidates` hands a flagged build
