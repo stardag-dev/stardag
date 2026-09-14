@@ -224,6 +224,21 @@ the target-root volume and the API-key secret in one call. Migrations run from
 scratch on every container start, which is a check the deployed path never
 performs.
 
+The price of that is that the container holding the database must not be
+replaced mid-run, because a recycle loses the whole database rather than some
+rows — and every scenario then fails in ways that read as scheduling bugs.
+`min_containers=1` and an explicit CPU/memory request are the prevention; the
+boot nonce on `/_harness/boot` is the detection, checked after every scenario,
+so a recycle is one sentence naming the cause instead of a debugging session.
+
+**A recycled container is retried, once, and nothing else is.** CI reruns the
+tier — re-provisioning first, since the replacement container's database is
+empty — when and only when that boot nonce changed. A scenario that failed on
+its own merits is never retried. Locally the marker is not written and the
+assertion message tells you to provision again. The alternative, PGDATA on a
+Modal Volume, was considered and rejected; `_record_recycle` in `_harness.py`
+carries the reasoning.
+
 ##### Running it against your own Modal account
 
 You need Modal credentials and nothing else. Everything lands in a Modal

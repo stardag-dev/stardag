@@ -22,6 +22,7 @@ inside the container in the first place.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -44,6 +45,56 @@ ADMIN_EMAIL = "harness@stardag.invalid"
 
 DEFAULT_WORKSPACE_NAME = "registry-live"
 DEFAULT_ENVIRONMENT_SLUG = "main"
+
+# Where a run records that the registry container was replaced under it, so
+# that whatever is driving the tier can tell that failure apart from a real
+# one. Set by CI; unset locally, where nothing is written and the assertion
+# message is the whole story.
+RECYCLE_MARKER_ENV = "STARDAG_REGISTRY_LIVE_RECYCLE_MARKER"
+
+
+def _record_recycle(previous: str, current: str) -> None:
+    """Leave the evidence of a recycle where a shell can read it.
+
+    **Why a retry, and not a database that survives the container.** The
+    obvious fix for "a recycle loses the whole database" is to put PGDATA on
+    a Modal Volume. It was considered and rejected, on three counts:
+
+    - It does not save the run. The scenarios in flight were mid-request
+      against a process that no longer exists, and the several seconds a
+      replacement spends starting Postgres and re-running Alembic are
+      several seconds of refused connections. A durable database converts
+      "every scenario fails" into "every scenario in flight fails", which
+      is still a red check.
+    - It costs the property that makes provisioning cheap. The cluster is
+      ``initdb``-ed into an image layer, so a container is serving in about
+      a second. Mounting a volume over ``/pgdata`` hides that layer, so
+      initialisation moves to first boot and needs an "is it already
+      there?" branch -- a slower start, and a new way for two runs of the
+      same environment to disagree about whose data they are looking at.
+    - ``fsync`` is off, deliberately, because the database is meant to be
+      discarded. A container killed mid-write would leave a cluster that
+      may not start at all, trading a clean "the database is gone" for a
+      corrupt one.
+
+    So a recycle is *identified* instead -- which is what the boot nonce
+    already does -- and a run that lost its database is provisioned again
+    and re-run. Keyed to the identification, so it masks nothing: with a
+    stable boot id nothing is retried, and a scenario that fails on its own
+    merits fails the check exactly as before. The marker is also the
+    measurement this decision was waiting on, since every retry is one
+    recycle, recorded where somebody will see it.
+    """
+    path = os.environ.get(RECYCLE_MARKER_ENV, "").strip()
+    if not path:
+        return
+    try:
+        Path(path).write_text(f"{previous} -> {current}\n")
+    except OSError as error:  # pragma: no cover - diagnostics only
+        print(
+            f"Could not write the recycle marker to {path!r}: {error}",
+            file=sys.stderr,
+        )
 
 
 @dataclass(frozen=True)
@@ -76,13 +127,16 @@ class Deployment:
         """
         current = self.current_boot_id()
         if current != self.boot_id:
+            _record_recycle(self.boot_id, current)
             raise AssertionError(
                 f"The registry container was replaced mid-run (boot id "
                 f"{self.boot_id} -> {current}). Its Postgres is inside that "
                 f"container, so the database this scenario was writing to no "
-                f"longer exists. This is a harness failure, not a scheduling "
-                f"one: raise scaledown_window, or move PGDATA onto a Modal "
-                f"Volume."
+                f"longer exists. This is a harness failure and not a "
+                f"scheduling one: provision the stack again and re-run. CI "
+                f"does that by itself, once, off the marker this just "
+                f"wrote -- see _record_recycle for why that rather than a "
+                f"database outliving the container."
             )
 
 
