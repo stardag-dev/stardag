@@ -2555,6 +2555,10 @@ async def register_task(
     If the task already exists in the environment, it will be reused and a
     TASK_REFERENCED event is created. Otherwise creates the task and a
     TASK_PENDING event.
+
+    "Already exists" includes a task another caller is creating right now:
+    two builds that share a task register it at the same moment, and the
+    one that loses that race gets a reference rather than an error.
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -2593,9 +2597,13 @@ async def register_task(
     # Check if task already exists in environment. Lock for update so the
     # phantom-upgrade path (mutating an existing row) and the transition
     # call below don't race with a concurrent event-creator on the same task.
-    # New rows go through pg_insert ON CONFLICT in the dependency reconcile
-    # loop and are race-safe via the unique constraint, so the lock is only
-    # needed when an existing row is found.
+    #
+    # A row that is *not* found here is not therefore ours to insert:
+    # ``FOR UPDATE`` locks rows, and there is no row to lock, so a second
+    # caller registering the same task at the same moment sees the same
+    # absence. An unguarded INSERT then hands one of them a unique
+    # violation and a 500 -- see the bulk endpoint, where two builds
+    # sharing a task made that ordinary rather than theoretical.
     result = await db.execute(
         select(Task)
         .where(Task.environment_id == build.environment_id)
@@ -2603,7 +2611,6 @@ async def register_task(
         .with_for_update()
     )
     db_task = result.scalar_one_or_none()
-    task_already_existed = db_task is not None
 
     if not db_task:
         # Check task creation limit only for new tasks
@@ -2612,20 +2619,56 @@ async def register_task(
                 db, auth.workspace_id, "tasks", limits_settings
             )
         )
-        # Create new task
-        db_task = Task(
-            task_id=task.task_id,
-            environment_id=build.environment_id,
-            task_namespace=task.task_namespace,
-            task_name=task.task_name,
-            task_data=task.task_data,
-            version=task.version,
-            output_uri=task.output_uri,
+        created = await db.execute(
+            pg_insert(Task)
+            .values(
+                id=generate_uuid7(),
+                task_id=task.task_id,
+                environment_id=build.environment_id,
+                task_namespace=task.task_namespace,
+                task_name=task.task_name,
+                task_data=task.task_data,
+                version=task.version,
+                output_uri=task.output_uri,
+                is_phantom=False,
+                created_at=utc_now(),
+                latest_status=TaskStatus.PENDING,
+                latest_waiting_for_lock=False,
+            )
+            .on_conflict_do_nothing(constraint="uq_task_environment_taskid")
+            .returning(Task.id)
         )
-        db.add(db_task)
-        await db.flush()  # Get the id
+        # Whether the INSERT happened is the answer to "was this task
+        # new?", and it is the only race-free one: RETURNING is empty
+        # exactly when somebody else got there first.
+        task_already_existed = created.scalar_one_or_none() is None
+        # Re-read either way. When this call created the row, the read
+        # brings it into the session as an ORM instance; when a concurrent
+        # caller did, it brings *theirs*, and locks it, which is the same
+        # position a caller arriving a moment later would have been in.
+        reread = await db.execute(
+            select(Task)
+            .where(Task.environment_id == build.environment_id)
+            .where(Task.task_id == task.task_id)
+            .with_for_update()
+        )
+        db_task = reread.scalar_one_or_none()
+        if db_task is None:
+            # See the same guard in the bulk endpoint: not known to be
+            # reachable, and here so that it would be a sentence rather
+            # than an AttributeError on ``None`` if it ever were.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Could not register task {task.task_id}: a concurrent "
+                    "registration of the same task left it neither created "
+                    "nor present. Retry the call."
+                ),
+            )
+    else:
+        task_already_existed = True
 
-    elif db_task.is_phantom:
+    if task_already_existed and db_task.is_phantom:
         # Upgrade phantom to real task
         db_task.task_namespace = task.task_namespace
         db_task.task_name = task.task_name
@@ -2722,7 +2765,9 @@ async def register_tasks_bulk(
 
     Sibling-of single-task registration: same TASK_PENDING /
     TASK_REFERENCED event semantics, same phantom-upgrade behaviour for
-    rows left over from prior failed builds.
+    rows left over from prior failed builds, and the same tolerance of a
+    concurrent registration of the same task: a task another build created
+    a moment ago is a reference, not a conflict.
     """
     raw_tasks = payload.tasks
 
@@ -2798,21 +2843,24 @@ async def register_tasks_bulk(
     # Pre-query which task_ids already exist in this environment so the
     # 24h tasks limit only counts brand-new task creations.
     #
-    # Note: this estimate is computed without ``FOR UPDATE`` and may
-    # diverge from the actual new-task count if a concurrent transaction
-    # inserts the same ``task_id`` between this SELECT and the bulk
-    # INSERT below. In that race we'd skip the limit check for what
-    # turns out to be 0 new rows — strictly an under-counting of the
-    # actual writes, never an over-counting, so the guard rail stays
-    # safe.
-    existing_tasks_result = await db.execute(
-        select(Task)
+    # An **estimate**, and only ever used as one. It is computed without
+    # ``FOR UPDATE`` and can diverge from the actual new-task count if a
+    # concurrent transaction inserts the same ``task_id`` before phase 1
+    # does — in which case the limit check covers a task that turns out
+    # not to be new. That is an under-count of the actual writes, never an
+    # over-count, so the guard rail stays safe.
+    #
+    # Nothing else may be decided from it. Whether a row was *created* is
+    # answered by the insert's own RETURNING in phase 1, because that is
+    # the only answer with no window between the asking and the acting --
+    # and getting this wrong is what used to turn a shared task into a
+    # unique violation and a 500.
+    existing_task_ids_result = await db.execute(
+        select(Task.task_id)
         .where(Task.environment_id == build.environment_id)
         .where(Task.task_id.in_([t.task_id for t in tasks_in]))
     )
-    existing_tasks: dict[str, Task] = {
-        t.task_id: t for t in existing_tasks_result.scalars().all()
-    }
+    existing_tasks: set[str] = set(existing_task_ids_result.scalars().all())
     new_task_count_estimate = sum(
         1 for t in tasks_in if t.task_id not in existing_tasks
     )
@@ -2827,85 +2875,131 @@ async def register_tasks_bulk(
             )
         )
 
-    # Lock existing rows in **sorted task_id order** so that two
-    # concurrent bulk calls hitting overlapping cached tasks acquire
-    # locks in the same order and can't deadlock on each other. We only
-    # need FOR UPDATE on rows we'll mutate (phantom upgrades) or on rows
-    # whose denormalised ``latest_*`` columns the transition
-    # touches — i.e., existing rows. Brand-new rows are inserted
-    # without a competing writer, no lock needed.
-    if existing_tasks:
-        sorted_existing_ids = sorted(existing_tasks.keys())
-        await db.execute(
-            select(Task)
-            .where(Task.environment_id == build.environment_id)
-            .where(Task.task_id.in_(sorted_existing_ids))
-            .order_by(Task.task_id.asc())
-            .with_for_update()
+    # Phase 1: create whatever is not there yet, then load and lock the
+    # whole batch.
+    #
+    # **The creation tolerates a concurrent creator, and has to.** Two
+    # builds that share a task register it at the same moment -- which is
+    # the case the claim machinery exists for, so it is ordinary rather
+    # than exotic -- and an unguarded INSERT means the loser gets a unique
+    # violation on ``uq_task_environment_taskid``, a 500, and a build that
+    # dies before it ever reaches the claim. The existence check above
+    # cannot prevent it: it is a plain SELECT, and the row it says is
+    # absent can be present by the time the INSERT lands. So the conflict
+    # is handled rather than raced for, exactly as the phantom and
+    # dependency-edge inserts below already do.
+    now = utc_now()
+
+    all_task_ids = [t.task_id for t in tasks_in]
+    by_task_id = {t.task_id: t for t in tasks_in}
+    created_task_ids: set[str] = set()
+
+    def _row(t: TaskCreate) -> dict[str, object]:
+        return {
+            "id": generate_uuid7(),
+            "task_id": t.task_id,
+            "environment_id": build.environment_id,
+            "task_namespace": t.task_namespace,
+            "task_name": t.task_name,
+            "task_data": t.task_data,
+            "version": t.version,
+            "output_uri": t.output_uri,
+            "is_phantom": False,
+            "created_at": now,
+            "latest_status": TaskStatus.PENDING,
+            "latest_waiting_for_lock": False,
+        }
+
+    to_create = sorted(
+        (t for t in tasks_in if t.task_id not in existing_tasks),
+        key=lambda t: t.task_id,
+    )
+    if to_create:
+        # Sorted, and that is load-bearing now that the insert itself can
+        # block: a conflicting row whose inserter has not committed makes
+        # this statement *wait*, so two callers inserting overlapping sets
+        # in opposite orders can wait on each other. In one agreed order
+        # they cannot. Same argument as the lock ordering below, which is
+        # where it used to be enough.
+        created = await db.execute(
+            pg_insert(Task)
+            .values([_row(t) for t in to_create])
+            .on_conflict_do_nothing(constraint="uq_task_environment_taskid")
+            .returning(Task.task_id)
+        )
+        # RETURNING after DO NOTHING names the rows this call actually
+        # created, and nothing else -- so it is the exact answer to "was
+        # this task new?", with no window for it to stop being true. The
+        # pre-query above cannot answer that; it only estimates, which is
+        # all the limit check needs.
+        created_task_ids.update(created.scalars().all())
+
+    # One statement, one order, every row in the batch: whatever was
+    # already here, whatever this call created, and whatever a racing
+    # caller created while it did. FOR UPDATE because the phantom upgrade
+    # below mutates these rows and the transition writes their
+    # denormalised ``latest_*`` columns.
+    batch_rows = await db.execute(
+        select(Task)
+        .where(Task.environment_id == build.environment_id)
+        .where(Task.task_id.in_(all_task_ids))
+        .order_by(Task.task_id.asc())
+        .with_for_update()
+    )
+    db_task_by_task_id: dict[str, Task] = {
+        row.task_id: row for row in batch_rows.scalars().all()
+    }
+    if len(db_task_by_task_id) != len(all_task_ids):
+        # Not known to be reachable: the insert above either created the
+        # row or waited for the transaction that did, and a rolled-back
+        # conflict is re-attempted rather than skipped (covered by
+        # ``test_bulk_register_survives_a_concurrent_creator_that_rolls_back``).
+        # Here so that if some conflict semantics ever do leave a row
+        # absent, this says so in a sentence instead of a KeyError twenty
+        # lines down.
+        missing = sorted(set(all_task_ids) - set(db_task_by_task_id))
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Could not register {len(missing)} task(s): a concurrent "
+                "registration of the same task(s) left them neither created "
+                f"nor present. Retry the call. First: {missing[0]}"
+            ),
         )
 
-    # Phase 1: insert new tasks + upgrade phantoms in-memory.
-    # Maintain ``pk_by_task_id`` so we can resolve dependency_task_ids
-    # in Python without per-task SELECTs, and keep ORM instances in
-    # ``db_task_by_task_id`` so we can apply events to them after
-    # flushing.
-    now = utc_now()
-    pk_by_task_id: dict[str, UUID] = {t_id: t.id for t_id, t in existing_tasks.items()}
-    db_task_by_task_id: dict[str, Task] = dict(existing_tasks)
+    pk_by_task_id: dict[str, UUID] = {
+        t_id: row.id for t_id, row in db_task_by_task_id.items()
+    }
+    new_task_count = len(created_task_ids)
 
-    new_task_count = 0
-    for t in tasks_in:
-        if t.task_id in existing_tasks:
-            db_task = existing_tasks[t.task_id]
-            if db_task.is_phantom:
-                # Phantom upgrade: real task data overrides the
-                # ``tid[:12]`` placeholder. ``latest_status_at`` and
-                # ``latest_status_event_id`` are deliberately left alone,
-                # and they stay NULL: a phantom row is in
-                # ``existing_tasks``, so the event below is
-                # TASK_REFERENCED, which ``_apply_event_to_task`` treats as
-                # purely informational and which writes no ``latest_*`` at
-                # all.
-                #
-                # (This comment used to claim a TASK_PENDING apply
-                # refreshed them. It does not — the event is never
-                # TASK_PENDING for a row that already exists — so nothing
-                # was refreshing anything. Recorded because the wrong
-                # version reads as a reason *not* to add an explicit reset,
-                # and the right version says only that nothing needs one
-                # today.)
-                db_task.task_namespace = t.task_namespace
-                db_task.task_name = t.task_name
-                db_task.task_data = t.task_data
-                db_task.version = t.version
-                db_task.output_uri = t.output_uri
-                db_task.is_phantom = False
-        else:
-            # Pre-generate the UUID7 PK so we can resolve dep edges
-            # below without an extra round-trip after flush.
-            new_pk = generate_uuid7()
-            db_task = Task(
-                id=new_pk,
-                task_id=t.task_id,
-                environment_id=build.environment_id,
-                task_namespace=t.task_namespace,
-                task_name=t.task_name,
-                task_data=t.task_data,
-                version=t.version,
-                output_uri=t.output_uri,
-            )
-            db.add(db_task)
-            pk_by_task_id[t.task_id] = new_pk
-            db_task_by_task_id[t.task_id] = db_task
-            new_task_count += 1
-
-    # Single flush: SQLAlchemy with asyncpg batches INSERTs of the same
-    # entity type into one round-trip when their primary keys are
-    # client-generated (which our UUID7 PKs are). For a 1000-task batch
-    # this is the difference between 1000 sequential round-trips and
-    # one ``executemany``.
-    if new_task_count:
-        await db.flush()
+    # Phantom upgrade, for every row this call did not create. A row that
+    # a racing caller created a moment ago is never a phantom, so this is
+    # in practice still about rows left over from earlier builds -- but it
+    # is keyed on "did not create" rather than on the pre-query, because
+    # that is the distinction that survives a concurrent creator.
+    #
+    # Real task data overrides the ``tid[:12]`` placeholder.
+    # ``latest_status_at`` and ``latest_status_event_id`` are deliberately
+    # left alone, and they stay NULL: the event below is TASK_REFERENCED
+    # for a row that already existed, which ``_apply_event_to_task``
+    # treats as purely informational and which writes no ``latest_*`` at
+    # all.
+    #
+    # (This comment used to claim a TASK_PENDING apply refreshed them. It
+    # does not — the event is never TASK_PENDING for a row that already
+    # exists — so nothing was refreshing anything. Recorded because the
+    # wrong version reads as a reason *not* to add an explicit reset, and
+    # the right version says only that nothing needs one today.)
+    for task_id, db_task in db_task_by_task_id.items():
+        if task_id in created_task_ids or not db_task.is_phantom:
+            continue
+        t = by_task_id[task_id]
+        db_task.task_namespace = t.task_namespace
+        db_task.task_name = t.task_name
+        db_task.task_data = t.task_data
+        db_task.version = t.version
+        db_task.output_uri = t.output_uri
+        db_task.is_phantom = False
 
     # Phase 2: bulk-reconcile dependency edges.
     # Collect all upstream task_ids referenced anywhere in the batch.
@@ -2999,7 +3093,11 @@ async def register_tasks_bulk(
     # earlier build.)
     events: list[Event] = []
     for i, t in enumerate(tasks_in):
-        already_existed = t.task_id in existing_tasks
+        # "Already existed" means anything this call did not create --
+        # including a row a concurrent registration created while this one
+        # was running, which is a reference for exactly the same reason a
+        # row from last week is.
+        already_existed = t.task_id not in created_task_ids
         events.append(
             Event(
                 id=generate_uuid7(),
