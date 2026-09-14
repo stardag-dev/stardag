@@ -2730,6 +2730,10 @@ async def register_task(
         )
         if changed is not None:
             _raise_declaration_changed(changed)
+        # Uncontested: record that this task now has a declaration, so an
+        # empty one is not indistinguishable from never having been
+        # declared for.
+        db_task.static_deps_declared = True
 
     # Reconcile static dependency edges (is_dynamic=False).
     await _reconcile_dependency_edges(
@@ -3155,6 +3159,9 @@ async def register_tasks_bulk(
     )
     if changed is not None:
         _raise_declaration_changed(changed)
+    for t in tasks_in:
+        if t.dependency_task_ids is not None:
+            db_task_by_task_id[t.task_id].static_deps_declared = True
 
     # Build edge rows for the whole batch and bulk-insert in one shot.
     edge_rows: list[dict[str, object]] = []

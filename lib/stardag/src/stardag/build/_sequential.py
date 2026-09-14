@@ -200,6 +200,13 @@ def build_sequential(
     # awaiting the bulk-register call. Cleared by
     # ``flush_pending_registrations()``.
     pending_registrations: list[BaseTask] = []
+    # Only tasks this walk recursed into: a task pruned because it was
+    # already complete never had its ``requires()`` walked, so this
+    # build declares nothing about its upstreams. Sending a derived set
+    # for one would undo the prune and assert a current upstream set for
+    # every complete task in the closure — and the registry treats a
+    # declaration as authoritative.
+    declared_deps: dict[UUID, list[BaseTask]] = {}
 
     # Start or resume build *before* discovery so we have a build_id to
     # register tasks against.
@@ -259,7 +266,9 @@ def build_sequential(
         for chunk_start in range(0, len(batch), _BULK_REGISTER_CHUNK_SIZE):
             chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
             try:
-                registry.task_register_bulk(build_id, chunk)
+                registry.task_register_bulk(
+                    build_id, chunk, declared_dependencies=declared_deps
+                )
             except Exception as reg_err:
                 ids_preview = ", ".join(str(t.id) for t in chunk[:5])
                 if len(chunk) > 5:
@@ -304,7 +313,9 @@ def build_sequential(
         # Task not complete (or register_all) — recurse into deps first
         # (post-order), so when we register this task its deps already
         # exist in the API.
-        for dep in flatten_task_struct(task.requires()):
+        deps = flatten_task_struct(task.requires())
+        declared_deps[task.id] = deps
+        for dep in deps:
             discover(dep)
 
         # All deps are registered. Append self after children — preserves
@@ -757,6 +768,13 @@ async def build_sequential_aio(
     # Tasks accumulated during the current discover() walk (post-order),
     # awaiting bulk registration. Cleared by flush_pending_registrations_aio.
     pending_registrations: list[BaseTask] = []
+    # Only tasks this walk recursed into: a task pruned because it was
+    # already complete never had its ``requires()`` walked, so this
+    # build declares nothing about its upstreams. Sending a derived set
+    # for one would undo the prune and assert a current upstream set for
+    # every complete task in the closure — and the registry treats a
+    # declaration as authoritative.
+    declared_deps: dict[UUID, list[BaseTask]] = {}
 
     # Start or resume build *before* discovery so we have a build_id to
     # register tasks against.
@@ -810,7 +828,9 @@ async def build_sequential_aio(
         for chunk_start in range(0, len(batch), _BULK_REGISTER_CHUNK_SIZE):
             chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
             try:
-                await registry.task_register_bulk_aio(build_id, chunk)
+                await registry.task_register_bulk_aio(
+                    build_id, chunk, declared_dependencies=declared_deps
+                )
             except Exception as reg_err:
                 ids_preview = ", ".join(str(t.id) for t in chunk[:5])
                 if len(chunk) > 5:
@@ -855,7 +875,9 @@ async def build_sequential_aio(
         # Task not complete (or register_all) — recurse into deps first
         # (post-order), so by the time the bulk register call processes
         # this task its deps are already in the array (and thus in the DB).
-        for dep in flatten_task_struct(task.requires()):
+        deps = flatten_task_struct(task.requires())
+        declared_deps[task.id] = deps
+        for dep in deps:
             await discover(dep)
 
         # Append self after children — preserves post-order within subtree.

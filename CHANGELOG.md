@@ -106,6 +106,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `docs/design/immutable-dependency-declarations.md`, which also records the
   retraction-based design that was tried first and why it was abandoned.
 
+- `tasks.static_deps_declared` (new column, one migration, no backfill)
+  records that a task has ever had its static upstreams _declared_. An empty
+  declaration writes no edges, so without it "declared to require nothing"
+  and "never declared for" are the same absence — and a leaf that later
+  gains an upstream would slip past the check as a first declaration.
+  Existing rows start `false`, so the check only ever gets stricter, and
+  only from a task's next declaration onwards.
+
 - `TaskCreate.dependency_task_ids` is now `list[str] | None`. A list is an
   authoritative declaration and is compared against the record; **`null` is
   not a declaration** and is compared against nothing. The two meanings
@@ -121,14 +129,15 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   _missing_ entry declares nothing, which a backend recording dependencies
   must treat as different from declaring none.
 
-- **Discovery no longer declares dependencies for tasks it pruned at.** It
+- **No build engine declares dependencies for tasks it pruned at.** It
   stops walking at a complete task without evaluating its `requires()`, but
   the registration payload used to re-derive `requires()` for every task in
   the chunk — undoing the prune and asserting a current upstream set for
   every complete task in the closure, which are the declarations most likely
   to have been recorded under code that no longer exists. It now sends what
   the walk actually computed, which also stops `requires()` being evaluated
-  twice per task.
+  twice per task. The resident engines prune identically and now pass the
+  same map, so the two do not disagree about where the rule applies.
 
 - `DependencyDeclarationChangedError` carries the task id and both dependency
   sets, so a caller can report or diff them without parsing the message.

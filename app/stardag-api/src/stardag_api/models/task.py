@@ -127,6 +127,24 @@ class Task(Base, TimestampMixin):
     # These are upgraded to real tasks when properly registered via the SDK.
     is_phantom: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    # Whether any registration has ever *declared* this task's static
+    # upstream set — as opposed to registering the task while saying
+    # nothing about its dependencies.
+    #
+    # Needed because an empty declaration leaves no trace otherwise. A task
+    # whose ``requires()`` returns nothing records no edges, so "declared
+    # []" and "never declared" are the same absence in
+    # ``task_dependencies`` — and without this flag a leaf that later gains
+    # an upstream would look like a first declaration and slip past the
+    # immutability check. Leaves gaining a dependency is a common shape,
+    # not a corner case.
+    #
+    # Set once, never cleared: it records that a declaration happened, not
+    # what it said.
+    static_deps_declared: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     # ------------------------------------------------------------------
     # Denormalised "latest global status" columns.
     #

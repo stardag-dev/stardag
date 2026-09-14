@@ -278,3 +278,50 @@ async def test_the_message_says_what_changed_and_what_to_do(client: AsyncClient)
     assert "now requires U2" in message
     assert "__version__" in message, "the remedy has to be named, not implied"
     assert "operator" in message, "...and so does the way out when the record is wrong"
+
+
+@pytest.mark.asyncio
+async def test_a_leaf_cannot_quietly_gain_a_dependency(client: AsyncClient):
+    """The shape an edge-only check cannot see.
+
+    A task declared to require nothing writes no edges, so "declared []"
+    and "never declared" are the same absence in `task_dependencies`.
+    Without a durable marker a leaf that later gains an upstream reads as a
+    first declaration and is accepted — and a leaf gaining a dependency is
+    a common refactor, not a corner case.
+    """
+    first = await _new_build(client)
+    await _register_task(client, first, "leaf", [])
+    await client.post(f"/api/v1/builds/{first}/complete")
+
+    second = await _new_build(client)
+    await _register_task(client, second, "new-upstream")
+    response = await _register_task(client, second, "leaf", ["new-upstream"])
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["recorded"] == []
+    assert detail["declared"] == ["new-upstream"]
+    assert "now requires new-upstream" in detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_leaf_that_stays_a_leaf_is_fine(client: AsyncClient):
+    """...and re-declaring the same empty set is not a change."""
+    first = await _new_build(client)
+    await _register_task(client, first, "still-leaf", [])
+    second = await _new_build(client)
+    assert (await _register_task(client, second, "still-leaf", [])).status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_saying_nothing_never_sets_the_marker(client: AsyncClient):
+    """Registering without declaring must not start the clock — otherwise
+    an out-of-band caller would silently commit a task to requiring
+    nothing."""
+    first = await _new_build(client)
+    await _register_task(client, first, "bare")  # no key at all
+
+    second = await _new_build(client)
+    assert (await _register_task(client, second, "up")).status_code == 201
+    assert (await _register_task(client, second, "bare", ["up"])).status_code == 201

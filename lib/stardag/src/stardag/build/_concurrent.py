@@ -663,6 +663,13 @@ async def build_aio(
     # before it — which is all the API needs to avoid phantom-creation.
     # Cleared by ``flush_pending_registrations`` after each bulk call.
     pending_registrations: list[BaseTask] = []
+    # Only tasks this walk recursed into: a task pruned because it was
+    # already complete never had its ``requires()`` walked, so this
+    # build declares nothing about its upstreams. Sending a derived set
+    # for one would undo the prune and assert a current upstream set for
+    # every complete task in the closure — and the registry treats a
+    # declaration as authoritative.
+    declared_deps: dict[UUID, list[BaseTask]] = {}
     # Per-task event signalling that this task's discover() has finished
     # appending it to pending_registrations. The fast-path
     # ``if task.id in task_states: return`` would otherwise let a sibling
@@ -776,6 +783,7 @@ async def build_aio(
             # first (post-order). TaskGroup waits for all children to
             # finish before this body continues, so all child appends to
             # pending_registrations land before our own append below.
+            declared_deps[task.id] = list(static_deps)
             async with asyncio.TaskGroup() as tg:
                 for dep in static_deps:
                     tg.create_task(discover(dep))
@@ -813,7 +821,7 @@ async def build_aio(
             chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
             try:
                 registered_infos = await registry.task_register_bulk_aio(
-                    build_id, chunk
+                    build_id, chunk, declared_dependencies=declared_deps
                 )
             except Exception as reg_err:
                 # Include up to 5 task IDs in the warning so debugging is

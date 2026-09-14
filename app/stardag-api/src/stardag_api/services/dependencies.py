@@ -76,11 +76,17 @@ async def find_changed_declaration(
     the refusal. It cannot be in the *recorded* set by construction, which
     is exactly what makes it a difference.
 
-    A task with no recorded static edges never conflicts: there is no
+    A task **nobody has declared for** never conflicts: there is no
     previous declaration to contradict, so the first one is simply
     recorded. That covers every task the environment has not seen before,
     which is the overwhelmingly common case and the one this must stay
     cheap for — it costs the single indexed read below and nothing else.
+
+    "Nobody has declared for it" is ``Task.static_deps_declared``, not "it
+    has no recorded edges". The two differ for exactly one shape and it is
+    a common one: a task that was declared to require *nothing* writes no
+    edges, so without the flag a leaf that later gains an upstream would
+    read as a first declaration and be accepted.
 
     Returns None when every declaration agrees.
     """
@@ -104,10 +110,13 @@ async def find_changed_declaration(
 
     for task, declared in declarations:
         recorded = recorded_by_downstream[task.id]
-        # Nothing recorded is not a disagreement — it is a task being
-        # declared for the first time. Only a *contradiction* of an existing
-        # record is refused.
-        if not recorded:
+        # A task nobody has declared for is being declared for the first
+        # time, which contradicts nothing. The flag is what makes that
+        # different from "declared to require nothing": an empty
+        # declaration writes no edges, so without it a leaf that later
+        # gains an upstream would read as a first declaration and slip
+        # past — and leaves gaining a dependency is a common shape.
+        if not recorded and not task.static_deps_declared:
             continue
         if set(declared) != recorded:
             logger.info(
