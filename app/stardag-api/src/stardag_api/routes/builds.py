@@ -2486,7 +2486,12 @@ async def _reconcile_dependency_edges(
                 "latest_status": TaskStatus.PENDING,
                 "latest_waiting_for_lock": False,
             }
-            for tid in missing_ids
+            # Sorted for the same reason as every other multi-row insert
+            # here: a conflicting row whose inserter has not committed
+            # makes this statement wait, so two callers creating
+            # overlapping phantoms in opposite orders could wait on each
+            # other. ``requested_ids`` comes from a caller-supplied list.
+            for tid in sorted(missing_ids)
         ]
         await db.execute(
             pg_insert(Task)
@@ -2910,6 +2915,28 @@ async def register_tasks_bulk(
             "latest_waiting_for_lock": False,
         }
 
+    # Lock the rows that already exist, **before** inserting anything, in
+    # sorted task_id order.
+    #
+    # Both halves matter, and the first one is not merely inherited. Every
+    # writer in this file takes the same two steps in the same order --
+    # lock what exists, then create what does not -- and that shared order
+    # is what keeps them from waiting on each other. Locking after the
+    # insert would invert it against ``register_task``, which locks its
+    # task and only then reaches ``_reconcile_dependency_edges`` to create
+    # missing upstreams: this call would hold a row that one is waiting to
+    # create while waiting for a row it holds. Two transactions, opposite
+    # order, and Postgres resolves it by killing one -- a 500, which is
+    # the failure this endpoint is being fixed for.
+    if existing_tasks:
+        await db.execute(
+            select(Task.id)
+            .where(Task.environment_id == build.environment_id)
+            .where(Task.task_id.in_(sorted(existing_tasks)))
+            .order_by(Task.task_id.asc())
+            .with_for_update()
+        )
+
     to_create = sorted(
         (t for t in tasks_in if t.task_id not in existing_tasks),
         key=lambda t: t.task_id,
@@ -2934,17 +2961,23 @@ async def register_tasks_bulk(
         # all the limit check needs.
         created_task_ids.update(created.scalars().all())
 
-    # One statement, one order, every row in the batch: whatever was
-    # already here, whatever this call created, and whatever a racing
-    # caller created while it did. FOR UPDATE because the phantom upgrade
-    # below mutates these rows and the transition writes their
-    # denormalised ``latest_*`` columns.
+    # Now read the batch back as ORM rows: whatever was already here,
+    # whatever this call created, and whatever a racing caller created
+    # while it did.
+    #
+    # No ``FOR UPDATE`` here, and that is the point of the lock above
+    # rather than an omission. The rows that needed locking were locked
+    # before anything was inserted; the rest are rows this call created
+    # (already held, by having inserted them) or rows a racing caller
+    # created a moment ago. The only mutation the latter can attract is a
+    # phantom upgrade, which writes the same task data derived from the
+    # same task_id whoever gets there first -- so two callers racing it
+    # write the same thing, and the UPDATE takes its own row lock anyway.
     batch_rows = await db.execute(
         select(Task)
         .where(Task.environment_id == build.environment_id)
         .where(Task.task_id.in_(all_task_ids))
         .order_by(Task.task_id.asc())
-        .with_for_update()
     )
     db_task_by_task_id: dict[str, Task] = {
         row.task_id: row for row in batch_rows.scalars().all()
@@ -3037,7 +3070,7 @@ async def register_tasks_bulk(
                     "latest_status": TaskStatus.PENDING,
                     "latest_waiting_for_lock": False,
                 }
-                for tid in still_unknown
+                for tid in sorted(still_unknown)
             ]
             await db.execute(
                 pg_insert(Task)

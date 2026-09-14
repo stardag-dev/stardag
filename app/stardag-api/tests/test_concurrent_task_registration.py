@@ -276,3 +276,80 @@ async def test_single_register_survives_a_concurrent_creator_that_rolls_back(
         assert rows[0].task_data == {}
         types = await _event_types_for(check, rows[0].id)
         assert types == [EventType.TASK_PENDING.value], types
+
+
+async def test_bulk_register_keeps_the_lock_order_the_other_writers_use(
+    pg_engine, pg_client
+) -> None:
+    """Lock what exists, then create what does not -- in that order.
+
+    Every writer here takes those two steps, and the shared order is the
+    only reason they do not wait on each other. ``register_task`` locks
+    its own task and only then reaches ``_reconcile_dependency_edges`` to
+    create missing upstreams; a bulk call that inserted first and locked
+    afterwards would hold a row that one is waiting to create while
+    waiting for a row it holds.
+
+    Two transactions, opposite order, and Postgres breaks the tie by
+    killing one of them -- an HTTP 500, which is the failure this module
+    exists to rule out. So the order is pinned here rather than left to
+    whoever next finds the post-insert lock tidier.
+
+    The other writer is simulated rather than driven through the
+    endpoint, because what has to be true is a property of the lock
+    graph: hold the existing row, then ask for the new one.
+    """
+    existing = "already-here"
+    fresh = "brand-new"
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as setup:
+        await _insert_row_uncommitted(setup, existing)
+        await setup.commit()
+
+    build_id = await _new_build(pg_client)
+
+    async with maker() as other_writer:
+        # Step one of the shared order: hold the row that exists.
+        held = await other_writer.execute(
+            select(Task)
+            .where(Task.environment_id == DEFAULT_ENVIRONMENT_ID)
+            .where(Task.task_id == existing)
+            .with_for_update()
+        )
+        assert held.scalar_one() is not None
+
+        call = asyncio.create_task(
+            pg_client.post(
+                f"/api/v1/builds/{build_id}/tasks/bulk",
+                json={"tasks": [_task(existing), _task(fresh)]},
+            )
+        )
+        await asyncio.sleep(SETTLE_SECONDS)
+        assert not call.done(), (
+            "the bulk call did not wait for the held row, so it is not "
+            "taking the lock before it inserts and this test is not "
+            "exercising the ordering it exists to pin"
+        )
+
+        # Step two: create the row that does not exist. This must not
+        # block -- the bulk call cannot have inserted it, because it is
+        # still waiting for the lock above. If it did insert first, the
+        # two are now waiting on each other and Postgres kills one.
+        try:
+            await asyncio.wait_for(
+                _insert_row_uncommitted(other_writer, fresh),
+                timeout=CALL_TIMEOUT_SECONDS,
+            )
+        except Exception as error:  # pragma: no cover - the failure path
+            raise AssertionError(
+                "creating a new row deadlocked against the bulk call, which "
+                "means the bulk call inserted before taking its locks: it "
+                f"holds what this writer needs and vice versa ({error!r})"
+            ) from error
+
+        await other_writer.commit()
+
+        response = await asyncio.wait_for(call, timeout=CALL_TIMEOUT_SECONDS)
+
+    assert response.status_code == 201, f"{response.status_code} {response.text}"
