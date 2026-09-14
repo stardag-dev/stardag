@@ -3156,10 +3156,18 @@ async def register_tasks_bulk(
     # created a moment ago is neither -- it is read without a lock, so the
     # PENDING it reports can already be stale, and replacing the keys of a
     # task somebody else has since started is precisely what the RUNNING
-    # check exists to prevent. Skipping leaves that task's keys alone,
-    # which is the same answer the RUNNING check gives and the safe
-    # direction: the caller that created the row registered its keys with
-    # it, and they are derived from the same task.
+    # check exists to prevent.
+    #
+    # **This is a trade, and it is worth naming.** Skipping means that if
+    # the creator registered the row without keys and this caller supplies
+    # some, the task ends up unkeyed and is not counted against its
+    # concurrency limit. The alternative -- locking the raced row here to
+    # get a trustworthy status -- would make this call hold rows it
+    # inserted while waiting on a row another registration holds, which is
+    # a deadlock, which is a 500. A fix for 500s does not get to introduce
+    # a new way to produce one, so the key is dropped rather than the
+    # request. Both cases need a caller to lose the insert race *and* the
+    # two callers to disagree about the task's keys.
     await _replace_limit_keys(
         db,
         {
