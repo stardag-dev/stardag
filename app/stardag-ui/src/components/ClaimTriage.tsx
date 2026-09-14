@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cancelTask, fetchTasks } from "../api/tasks";
 import { useEnvironment } from "../context/EnvironmentContext";
 import type { Task, TaskStatus } from "../types/task";
-import { CLAIM_HOLDING_STATUSES } from "../utils/claims";
+import { CLAIM_HOLDING_STATUSES, restartExpected } from "../utils/claims";
 import { formatAbsoluteTime, formatDuration } from "../utils/time";
 import { useRowSelection } from "../hooks/useRowSelection";
 import { StatusBadge } from "./StatusBadge";
@@ -419,7 +419,26 @@ export function ClaimTriage({
                       {task.task_namespace || "—"}
                     </td>
                     <td className="whitespace-nowrap px-3 py-1.5">
-                      <StatusBadge status={status} />
+                      <div className="flex items-center gap-1.5">
+                        <StatusBadge status={status} />
+                        {/* RUNNING alone cannot distinguish a container
+                            that is working from one that was taken away and
+                            never replaced. This is the only place that
+                            difference is visible — and it is the reason a
+                            claim in this table may lapse minutes from now
+                            rather than at the end of the worker's timeout. */}
+                        {restartExpected(task) && (
+                          <span
+                            className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-medium text-orange-800 dark:bg-orange-900/30 dark:text-orange-300"
+                            title={`Preempted ${formatDuration(
+                              task.latest_preempted_at!,
+                              null,
+                            )} ago; the platform said it would restart this execution and it has not reported back yet.`}
+                          >
+                            restart expected
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td
                       className="whitespace-nowrap px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300"

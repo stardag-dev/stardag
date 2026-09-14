@@ -175,11 +175,29 @@ this, or by not raising it.
 you raise it from inside your own error handling, where a `BaseException`
 subclass would be one more thing slipping past your control flow.
 
-What happens next depends on whether a restart is still possible. Raised
-before the function timeout, the Modal runner re-raises an interrupt in its
-place so the backend sees a crashed container and restarts the input on the
-same call id. Raised at or after the timeout — when no restart is coming —
-it records the interruption for a scheduler tick to act on.
+What happens next depends on whether a restart is still possible, which the
+Modal runner reads off **the interruption you caught** — it is still on the
+exception you raise, and `raise ... from None` keeps it there (that form
+hides the "During handling…" preamble; it does not discard the original).
+
+Caught a preemption, the runner re-raises an interrupt in its place so the
+backend sees a crashed container and restarts the input on the same call
+id, and records the preemption so a restart that never arrives is visible.
+Caught a function timeout or a cancel — when no restart is coming — it
+records an interruption for a scheduler tick to act on instead.
+
+So raise it **from inside the `except` block**. `raise
+sd.ResumableInterruption(...) from None` keeps the link, so does the same
+statement with no `from` clause, and so does an explicit `from err` on a
+saved exception. (A bare `raise` is not one of these: it re-raises the
+platform exception, so the runner never sees a resumption request and
+records nothing — on a preemption the backend restarts the input anyway,
+but on a timeout or a cancel the execution dies and a later tick records a
+retryable failure.) What loses the link is raising where the interruption is no
+longer reachable — outside the block with no explicit cause, or on a
+condition of your own. Then stardag falls back to comparing elapsed time
+against the worker's declared `timeout`, which is a guess on a clock that
+starts after the container does.
 
 Resumption is bounded by `TickConfig.max_interruptions` (default 20), a
 budget separate from `max_attempts` — see

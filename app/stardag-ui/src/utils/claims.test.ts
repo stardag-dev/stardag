@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { BuildFrontier, FrontierTaskRef } from "../types/task";
-import { rootsSatisfied, rootsSatisfiedFrom, schedulingPanelForm } from "./claims";
+import {
+  restartExpected,
+  rootsSatisfied,
+  rootsSatisfiedFrom,
+  schedulingPanelForm,
+} from "./claims";
 
 function ref(
   taskId: string,
@@ -130,5 +135,55 @@ describe("schedulingPanelForm", () => {
         "failed",
       ),
     ).toBe("stalled");
+  });
+});
+
+describe("restartExpected", () => {
+  const preempted = "2026-09-13T10:05:00Z";
+
+  it("is true while the preemption is newer than the running status", () => {
+    expect(
+      restartExpected({
+        latest_status: "running",
+        latest_status_at: "2026-09-13T10:00:00Z",
+        latest_preempted_at: preempted,
+      }),
+    ).toBe(true);
+  });
+
+  it("goes false on its own once the restart reports its start", () => {
+    // Nothing clears the preemption timestamp; the restarted execution
+    // simply moves latest_status_at past it. That is the whole design —
+    // one write site, and no way for a stored flag to go stale.
+    expect(
+      restartExpected({
+        latest_status: "running",
+        latest_status_at: "2026-09-13T10:05:07Z",
+        latest_preempted_at: preempted,
+      }),
+    ).toBe(false);
+  });
+
+  it("is false for a task that is not running", () => {
+    // A task the scheduler has since failed and retried is not waiting for
+    // anything, however recently it was preempted.
+    expect(
+      restartExpected({
+        latest_status: "pending",
+        latest_status_at: "2026-09-13T10:00:00Z",
+        latest_preempted_at: preempted,
+      }),
+    ).toBe(false);
+  });
+
+  it("is false when no preemption was ever recorded", () => {
+    // Also the old-server case: the field is absent, so every task reads
+    // as it did before preemptions were reported at all.
+    expect(
+      restartExpected({
+        latest_status: "running",
+        latest_status_at: "2026-09-13T10:00:00Z",
+      }),
+    ).toBe(false);
   });
 });

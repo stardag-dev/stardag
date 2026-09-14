@@ -6,6 +6,85 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **An interruption is classified by the exception it was raised from, not
+  by a stopwatch.** A detached task hit its 86400s function timeout,
+  measured 86392.0s elapsed, and `elapsed >= timeout - 5.0` called it a
+  preemption — so the worker reported nothing and re-raised, expecting the
+  backend to restart the input. Modal does not restart a timed-out input,
+  and the task sat `RUNNING` in the registry for over a day.
+
+  The clock cannot answer that question: `time.monotonic()` starts inside
+  the runner, after container boot, image load and input deserialisation —
+  all inside the backend's window and outside ours — so elapsed
+  systematically under-reads, by however long the container took to start.
+  No fixed tolerance bounds that.
+
+  But the question never needed a clock. What the worker needs to know is
+  whether the backend will restart this input, and only a preemption will —
+  which is the one case with a distinct exception type. A function timeout
+  and an explicit `FunctionCall.cancel()` are indistinguishable from each
+  other and both mean "nothing is coming", so both report. That harder
+  distinction was the only thing the timing was there for, and it turns out
+  never to have been needed: whether a report _applies_ is the registry's
+  to decide, since it issued any cancel.
+
+  The signal is read off `__cause__`/`__context__` of whatever the task
+  raises, so the documented recipe keeps working unchanged. Raising
+  `from None` clears `__cause__` and suppresses the traceback preamble; it
+  does not clear the context. The elapsed-time rule remains as a fallback for a task that
+  raises `ResumableInterruption` on its own initiative, where there is
+  nothing on the chain to read.
+
+- **A preemption is now recorded** (`TASK_PREEMPTED`), without changing the
+  task's status and without releasing its claim — the backend is restarting
+  the same call id and will need it. Previously a preempted worker reported
+  nothing at all, on the reasoning that the restart makes the report
+  unnecessary; that holds right up until the restart does not come, at
+  which point the task is indistinguishable from one running happily.
+  Recording it costs neither an attempt nor an interruption budget, and
+  shortens the claim's expiry to a restart-sized grace, so an unfulfilled
+  restart becomes an ordinary lapsed claim in minutes rather than after the
+  worker's whole declared timeout.
+- Docs: the watchdog section now says plainly that a deployment running
+  long detached tasks wants `watchdog_period_minutes` set. Every other
+  wake-up rides on a write; a claim expiring is not one, and Modal has no
+  way to schedule a single wake-up for the moment it does (a schedule is
+  `Cron` or `Period`, fixed at deploy time, and `spawn()` takes no start
+  time).
+
+### Registry API
+
+- **`TASK_INTERRUPTED` applies only while the task is `RUNNING` under the
+  reporting build.** A worker cannot tell a deliberate cancel from a
+  function timeout, so it reports either way and the registry decides — it
+  issued any cancel, and it knows whose claim the task is under. Without
+  this, an interruption reported after a cancel would flip the task back to
+  `INTERRUPTED`, which the frontier lists as actionable, and a tick would
+  start a task the build had just cancelled. It also stops a worker whose
+  claim lapsed and was re-taken from evicting the live holder. The event
+  row is written either way; only the status transition is refused.
+- **`POST /builds/{id}/tasks/{id}/preempt`** and `tasks.latest_preempted_at`
+  (nullable, no backfill) for the SDK change above. "A restart is
+  outstanding" is derived rather than stored: RUNNING, with
+  `latest_preempted_at` later than `latest_status_at`. So the restarted
+  execution's own start falsifies it, with nothing to clear.
+  `ClaimSettings.preempt_restart_grace_seconds` (default 900, matching the
+  SDK's own claim-TTL grace) sizes the shortened claim — long enough that a
+  restart the backend has merely queued cannot be mistaken for one that is
+  never coming.
+- `GET /tasks` and `GET /tasks/{id}` now carry `latest_status_expires_at`
+  and `latest_preempted_at` alongside the other claim fields.
+
+### UI
+
+- Claim triage marks a held claim "restart expected" when the platform said
+  it was restarting that execution and the restart has not reported back —
+  the one place `RUNNING` alone cannot distinguish a container that is
+  working from one that was taken away and never replaced. `task_preempted`
+  appears in a task's event timeline.
+
 ## [0.23.0] — 2026-09-01
 
 ### SDK

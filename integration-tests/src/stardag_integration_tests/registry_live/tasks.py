@@ -171,3 +171,45 @@ class FanIn(sd.Task[int]):
 
     def run(self):
         self._save(sum(len(leaf.load()) for leaf in self.requires()))
+
+
+class Resumable(sd.Task[list[int]]):
+    """Catches a platform interruption and asks to be resumed.
+
+    The documented checkpoint recipe, minus the checkpoint: this task
+    restarts its sleep from zero when it is resumed, because what the
+    scenario is about is *classification and recovery*, not checkpoint
+    storage. Keeping real state here would add a target root write to the
+    part of the run that has to be fast and deterministic, and would prove
+    nothing the unit tests do not already pin.
+
+    What matters is the shape of the raise. ``except MODAL_INTERRUPTIONS``
+    then ``raise ... from None`` is what the docs tell people to write, and
+    it is the form whose ``__context__`` the runner reads to decide whether
+    the backend is going to restart this input. A scenario that raised
+    ``ResumableInterruption`` bare would exercise the fallback instead --
+    the opposite of the path under test.
+
+    ``seconds`` has to outlast a cold container start plus the harness
+    noticing the task is RUNNING, since the interruption is delivered from
+    outside while it sleeps.
+    """
+
+    salt: str
+    seconds: int = 120
+
+    def requires(self):
+        return get_range(limit=2, salt=self.salt)
+
+    def run(self):
+        import time
+
+        from stardag.integration.modal import MODAL_INTERRUPTIONS
+
+        try:
+            time.sleep(self.seconds)
+        except MODAL_INTERRUPTIONS:
+            raise sd.ResumableInterruption(
+                "interrupted mid-sleep; no checkpoint kept"
+            ) from None
+        self._save(self.requires().load())

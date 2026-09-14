@@ -318,6 +318,14 @@ export interface Task {
   latest_status?: TaskStatus | null;
   latest_status_at?: string | null;
   latest_status_build_id?: string | null;
+  // When the claim lapses, and — if the platform said it was restarting
+  // this execution itself — when it said so. A preemption shortens the
+  // expiry to a restart-sized grace, so the pair reads as "a restart is
+  // due by then". `latest_preempted_at > latest_status_at` is the test
+  // for "still outstanding": the restart records its own start, which
+  // moves `latest_status_at` past it. See restartExpected in utils/claims.
+  latest_status_expires_at?: string | null;
+  latest_preempted_at?: string | null;
 }
 
 export interface TaskListResponse {
@@ -410,6 +418,7 @@ export type EventType =
   | "task_started"
   | "task_suspended"
   | "task_interrupted"
+  | "task_preempted"
   | "task_resumed"
   | "task_waiting_for_lock"
   | "task_completed"

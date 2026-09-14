@@ -497,6 +497,16 @@ unacceptable; a standing sweep keeps a scale-to-zero registry database
 awake. Without a period, a full sweep is one click away in the Modal UI
 (`tick_watchdog`).
 
+**Set a period if your tasks run for hours.** Every other wake-up rides on
+a write — a status changes, the registry flags the builds it concerns. A
+claim expiring is not a write, so a worker that dies without reporting is
+found only by a sweep, and the claim is sized from your worker's `timeout`.
+Modal cannot schedule a one-off wake-up at the moment a claim lapses
+(schedules are `Cron`/`Period`, fixed at deploy time), so a period is the
+only thing standing between a silently-dead worker and a task that is
+unschedulable for as long as its timeout allows. See
+[the watchdog](../concepts/modal-orchestration.md#the-watchdog).
+
 **Local discovery.** `StardagApp(reactive_discovery="local")` runs the
 bootstrap in the triggering process — for an app deployed before the
 `bootstrap` function existed, or a target root reachable from your machine
@@ -876,6 +886,23 @@ Three things carry it:
 - **`sd.ResumableInterruption` is the whole request.** Raising it is how a
   task says "I saved my progress, run me again", and it is the only way a
   task gets resumed.
+- **Raise it from inside the `except` block.** Stardag reads the
+  interruption you caught off the exception you raise, to tell a
+  preemption (Modal restarts the _input_ on the same call id, in seconds —
+  in a fresh container, so nothing in memory survives) from a timeout or a
+  cancel (nothing restarts it, so the scheduler has to). Writing
+  `raise sd.ResumableInterruption(...)` with `from None`, or with no
+  `from` clause at all, both keep that link — `from None` hides the
+  "During handling…" preamble, it does not discard the original exception.
+  (A bare `raise` is a different thing entirely: it re-raises the platform
+  exception, so stardag never sees a resumption request and records
+  nothing — on a preemption the backend restarts the input anyway, but on
+  a timeout or a cancel the execution simply dies and a later tick records
+  a retryable failure. You keep the checkpoint you wrote and lose the
+  resumption.) What loses the link is raising where the interruption is no
+  longer reachable — outside the `except` block, with no explicit
+  `from err`. Then stardag falls back to comparing elapsed time against
+  your worker's `timeout`, which is a guess.
 - **The checkpoint lives inside the task's own directory target**, and
   `mark_done()` is what makes the task complete. Writing a checkpoint does
   not — `DirectoryTarget.exists()` is backed by a `._DONE` flag file — so
@@ -916,12 +943,15 @@ failures and fail the build for the one reason it was built to survive.
 
 !!! note "One path that budget does not cover"
 
-    A resumption request raised **before** the function timeout is handled
-    by Modal restarting the input, not by the scheduler — no event, no
-    attempt, no `interrupt_count`, and that restart is ungated by
-    `retries`. It is what makes preemption recovery fast, and preemption is
-    rare. But a task that raises `ResumableInterruption` on a condition
-    that is *always* true would loop at full container cost with
+    A resumption request raised in response to a **preemption** is handled
+    by Modal restarting the input, not by the scheduler — no attempt, no
+    `interrupt_count`, and that restart is ungated by `retries`. It is what
+    makes preemption recovery fast, and preemption is rare. Stardag records
+    the preemption so an expected restart that never arrives is visible,
+    but that record spends no budget either.
+
+    So a task that raises `ResumableInterruption` on a condition that is
+    *always* true would loop at full container cost with
     `max_interruptions` never consulted. Raise it only for interruptions
     you did not choose.
 
