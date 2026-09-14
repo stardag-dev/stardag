@@ -28,6 +28,40 @@ repos:
         files: (^|/)(pyproject\.toml|uv\.lock)$
         pass_filenames: false
         verbose: true
+      # Action pins. The workflows reference every action by commit SHA; this
+      # asserts that they still all do. A single unpinned `uses:` added later
+      # — in, say, the job that publishes to PyPI — would otherwise undo the
+      # property silently, since nothing about a workflow file makes a
+      # movable ref look wrong.
+      - id: check-action-pins
+        name: actions pinned to commit SHAs
+        entry: scripts/check_action_pins.py
+        # `python` rather than `system`: pre-commit builds the hook its own
+        # env, so pyyaml is guaranteed without asking every contributor (or
+        # the CI runner) to have it. The check parses the workflows because
+        # `uses` is a mapping key, not a line format — see the module
+        # docstring.
+        language: python
+        additional_dependencies: ["pyyaml==6.0.3"]
+        # The checker and this config are in the pattern too. Editing either
+        # should re-verify: a change to the thing that does the verifying, or
+        # to the entry/deps/filter that decide whether it runs at all, would
+        # otherwise land without anything checking the workflows.
+        files: ^(\.github/workflows/.*\.ya?ml|scripts/check_action_pins\.py|\.pre-commit-config\.yaml)$
+        pass_filenames: false
+        verbose: true
+      # The checker's own tests. It fails in the safe-looking direction — a
+      # bypass returns "fine" rather than raising — so the hook staying green
+      # is not evidence on its own. Four bypasses were found by review; these
+      # are what stop a later edit reopening one.
+      - id: check-action-pins-tests
+        name: actions pinned to commit SHAs (tests)
+        entry: python -m pytest scripts/test_check_action_pins.py --noconftest -q
+        language: python
+        additional_dependencies: ["pyyaml==6.0.3", "pytest==9.1.1"]
+        files: ^(scripts/(check_action_pins|test_check_action_pins)\.py|\.pre-commit-config\.yaml)$
+        pass_filenames: false
+        verbose: true
       - id: pyright-stardag
         name: pyright (lib/stardag)
         entry: bash -c 'cd lib/stardag && uv sync --all-extras && uv run pyright src tests'

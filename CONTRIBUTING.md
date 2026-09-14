@@ -107,6 +107,64 @@ uv run pre-commit run --all-files
 - **Integration tests**: In `integration-tests/` directory
 - **E2E tests**: Run with `./scripts/e2e-test.sh`
 
+## GitHub Actions
+
+Every action in `.github/workflows/` is referenced by a full commit SHA, with
+the release it corresponds to in a trailing comment:
+
+```yaml
+uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+```
+
+A tag is a movable label, not an address — whoever controls the action's
+repository can repoint `v7` at different code at any time, and the next run
+would execute it with no commit or diff here to review. A commit ID is a
+fingerprint of the code, so changing what runs means changing a tracked file.
+
+If you add or change a `uses:` line, run [`pinact`](https://github.com/suzuki-shunsuke/pinact)
+to resolve it:
+
+```bash
+brew install pinact   # or see the project's install instructions
+pinact run
+```
+
+`scripts/check_action_pins.py` runs as a pre-commit hook and fails on any
+unpinned ref or missing version comment. It parses the workflow YAML rather
+than matching lines, so it sees every `uses` — a step's, a flow-style or
+quoted one, and `jobs.<id>.uses` calling a reusable workflow. Container
+actions are held to the same standard by image digest
+(`docker://<image>@sha256:<digest>`); only a local `./…` action is exempt,
+being this repo's own tracked code.
+
+Two forms it refuses rather than guesses at, because it cannot attribute a
+version comment to a ref in either:
+
+- **Two `uses:` on one line.** One trailing comment cannot say which release
+  it names, so put each on its own line.
+- **A repeated mapping key.** `uses:` twice in one step would be read as the
+  first by this check and the last by GitHub; neither is safe to report on.
+- **YAML aliases and merge keys** (`*pin`, `<<: *step`) anywhere in the file.
+  An aliased ref resolves to the anchor's node, so it would be checked at the
+  anchor's line and against the anchor's comment; a merge key leaves the step
+  with no `uses` of its own to find at all. Refused wholesale rather than
+  supported partially — the trade is deliberate and asymmetric, since a wrong
+  refusal costs one edit to a file that could not be verified anyway, while a
+  wrong acceptance is an unpinned action in the job that publishes to PyPI.
+
+Two things pinact will not do for you:
+
+- It refuses to pin a **branch** ref. Resolve those by hand to the release tag
+  whose commit the branch head is at — `pypa/gh-action-pypi-publish` is the
+  one in this repo, and `publish.yml` explains why.
+- It does not touch `docker://` refs. Pin those with the digest from
+  `docker buildx imagetools inspect <image>:<tag>`.
+
+The checker has its own tests in `scripts/test_check_action_pins.py`, run by a
+second pre-commit hook. They are not optional garnish: this code fails in the
+safe-looking direction — a bypass returns "fine" rather than raising — so if
+you change it, add the case you were worried about.
+
 ## Documentation
 
 - Documentation source is in `docs/`

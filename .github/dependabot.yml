@@ -107,9 +107,20 @@ updates:
           - "minor"
           - "patch"
 
-  # Deliberately left as one all-update-types group. Action pins are written
-  # `@v7`, so almost every bump reads as a major — a minor/patch split here
+  # Deliberately left as one all-update-types group: a minor/patch split here
   # would turn one tidy PR into a stream of individual ones for no benefit.
+  #
+  # The pins are full commit SHAs with the version in a trailing comment, which
+  # is the form dependabot reads to know which release a SHA is. That is what
+  # makes this entry do real work. A floating `@v7` only produces a PR when a
+  # new major ships, and it does not even manage that reliably: astral-sh
+  # stopped publishing a moving major tag after `v7`, so `astral-sh/setup-uv@v7`
+  # was a ref that could no longer move, three majors behind v10, with nothing
+  # to propose and therefore nothing to notice. A SHA pin has no such blind
+  # spot — it is compared against the latest release.
+  #
+  # The flip side is a PR per release rather than per major, and the pins are
+  # only worth anything if those PRs are read rather than rubber-stamped.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
