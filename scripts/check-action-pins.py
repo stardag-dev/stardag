@@ -53,7 +53,30 @@ ROOT = Path(__file__).resolve().parent.parent
 COMMIT_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 # Container actions pin by image digest, which is the same guarantee.
 IMAGE_DIGEST = re.compile(r"^docker://[^@]+@sha256:[0-9a-f]{64}$")
-VERSION_COMMENT = re.compile(r"#\s*v?[0-9]")
+VERSION_COMMENT = re.compile(r"^#\s*v?[0-9]")
+
+
+def comment_of(line: str) -> str | None:
+    """Return the line's YAML comment, or None.
+
+    Searching the raw line for `#` would accept a `#` inside a quoted scalar —
+    `- {uses: owner/repo@<sha>, with: {name: '# v1'}}` has no comment at all,
+    but reads as one to a plain regex, which is the missing-comment check
+    letting itself be bypassed. A comment starts at an unquoted `#` that
+    begins the line or follows whitespace.
+    """
+    quote = None
+    for index, char in enumerate(line):
+        if quote:
+            if char == "\\" and quote == '"':
+                continue  # Escapes only exist in double-quoted scalars.
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[index:]
+    return None
 
 
 def iter_uses(node):
@@ -79,6 +102,11 @@ def source_lines(text: str, ref: str) -> list[tuple[int, str]]:
         for num, line in enumerate(text.splitlines(), start=1)
         if ref in line and not line.lstrip().startswith("#")
     ]
+
+
+def _has_version_comment(line: str) -> bool:
+    comment = comment_of(line)
+    return comment is not None and VERSION_COMMENT.search(comment) is not None
 
 
 def check(path: Path) -> list[str]:
@@ -132,7 +160,7 @@ def check(path: Path) -> list[str]:
             problems.extend(
                 f"NO VERSION COMMENT  {relative}:{num}  {ref}"
                 for num, line in located
-                if not VERSION_COMMENT.search(line)
+                if not _has_version_comment(line)
             )
 
     return problems
