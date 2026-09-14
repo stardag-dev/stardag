@@ -520,8 +520,14 @@ class FakeReactiveRegistry(NoOpRegistry):
         self, build_id, task, *, if_executor=None, if_executor_ref=None
     ):
         tid = str(task.id)
+        # Ownership as well as identity, which is what the API's locked
+        # ``held`` check tests. Without the owner comparison the fake would
+        # happily record a cancel against a task a *successor* build now
+        # holds — so a regression that stamps the successor's claim dead
+        # would pass every test here.
         if if_executor_ref is not None and (
             self.statuses.get(tid) not in ("running", "interrupted")
+            or self.status_build_id.get(tid, build_id) != build_id
             or self.refs.get(tid, (None, None)) != (if_executor, if_executor_ref)
         ):
             # The server's rule, on the locked row: nothing to revoke under
@@ -748,9 +754,13 @@ class FakeReactiveRegistry(NoOpRegistry):
             # FastAPI's own unknown-path 404, which is how the SDK tells
             # "this server is too old" from "no such build".
             raise NotFoundError("Not Found", detail="Not Found")
-        statuses = {"running", "interrupted"}
-        if self.build_status == "cancelled":
-            statuses.add("cancelled")
+        # CANCELLED is listed whatever the *build's* status, because the
+        # API does: TASK_CANCELLED is not an execution-end report, so a
+        # task this build cancelled still has a container to stop. Gating
+        # it on the build being cancelled made the fake miss exactly the
+        # state ``test_a_task_this_build_cancelled_is_still_its_to_stop``
+        # is about.
+        statuses = {"running", "interrupted", "cancelled"}
         executions = []
         started = {**self.staged_starts, **self.started_by.get(build_id, {})}
         for tid, (executor, executor_ref) in started.items():

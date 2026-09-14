@@ -670,3 +670,23 @@ async def test_a_detour_via_another_backend_does_not_hide_the_execution(
     assert [(e["executor"], e["executor_ref"]) for e in listed["executions"]] == [
         ("modal", "fc-detour")
     ], "the latest backend's own execution was dropped"
+
+
+@pytest.mark.asyncio
+async def test_a_backend_without_its_ref_is_refused_too(client: AsyncClient):
+    """The mirror of the ref-without-backend case, and it failed the other
+    way: gating the conditional path on the ref alone meant `if_executor`
+    by itself skipped the identity check entirely and fell through to the
+    unconditional authority path."""
+    build = await _new_build(client)
+    await _start(client, build, "backend-only")
+
+    response = await client.post(
+        f"/api/v1/builds/{build}/tasks/backend-only/cancel",
+        params={"if_executor": "modal"},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error_code"] == "incomplete_execution_identity"
+    assert await _task_status(client, "backend-only") == "running", (
+        "an incomplete identity was silently honoured"
+    )

@@ -682,7 +682,14 @@ async def _create_task_event(
                 detail={"error_code": "task_already_completed"},
             )
 
-    if event_type == EventType.TASK_CANCELLED and if_executor_ref is not None:
+    if event_type == EventType.TASK_CANCELLED and (
+        # *Either* half enters the conditional path. Gating on the ref
+        # alone let a caller pass `if_executor` by itself, skip the identity
+        # check entirely, and fall through to the unconditional authority
+        # path — so an incomplete pair was rejected in one direction and
+        # silently ignored in the other.
+        if_executor_ref is not None or if_executor is not None
+    ):
         # Evaluated on the FOR-UPDATE-locked row, which is the whole point:
         # a cleanup pass decides what to cancel from a listing it read a
         # moment ago, and the row can have moved since in two ways that both
@@ -724,16 +731,17 @@ async def _create_task_event(
         # matched any backend that had minted the same string, so a caller
         # naming a ref without its backend could stop one execution and
         # stamp a different one cancelled.
-        if if_executor is None:
+        if if_executor is None or if_executor_ref is None:
             raise HTTPException(
                 status_code=400,
                 detail={
                     "error_code": "incomplete_execution_identity",
                     "message": (
-                        "if_executor_ref identifies an execution only "
-                        "together with if_executor: a ref is "
-                        "backend-specific, so two backends can mint the "
-                        "same string. Pass both."
+                        "if_executor and if_executor_ref identify an "
+                        "execution only together: a ref is backend-specific, "
+                        "so two backends can mint the same string, and a "
+                        "backend alone names no execution at all. Pass both "
+                        "or neither."
                     ),
                 },
             )
@@ -1502,8 +1510,9 @@ async def cancel_build(
         Query(
             description=(
                 "Also cancel the claims this build holds: emit TASK_CANCELLED "
-                "for its RUNNING/SUSPENDED tasks, freeing their execution "
-                "claims and concurrency-limit slots. Off by default."
+                "for its RUNNING, SUSPENDED and INTERRUPTED tasks, freeing "
+                "their execution claims and concurrency-limit slots. Off by "
+                "default."
             ),
         ),
     ] = False,
@@ -1519,8 +1528,9 @@ async def cancel_build(
     long after the build itself is gone.
 
     ``cascade=true`` releases those: TASK_CANCELLED for every task of this
-    build that is RUNNING or SUSPENDED **and whose current status this build
-    produced**. Both restrictions matter —
+    build that is RUNNING, SUSPENDED or INTERRUPTED **and whose current
+    status this build produced** — the build-owned statuses, shared with the
+    revoke check so the two cannot drift (``services.claims``). Both restrictions matter —
 
     - PENDING tasks are left alone. They hold no claim, and cancelling one
       would reach into other builds: a task this build registered may be
@@ -1886,7 +1896,12 @@ async def notify_build(
     flag once more after it releases the lease.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    build = await _get_build_checked(build_id, db, auth)
+    # Locked, because the status decides whether to flag and the two must
+    # not be read and written across a gap: a terminal transition
+    # committing in between would leave this flagging a finished build and
+    # answering needs_tick=True, which is the spawn the status check exists
+    # to prevent.
+    build = await _get_build_for_update(build_id, db, auth)
     now = utc_now()
     # Only a RUNNING build can act on a wake-up, so only a RUNNING build is
     # flagged here. This is the same restriction ``_flag_builds`` applies to
