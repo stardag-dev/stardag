@@ -411,7 +411,7 @@ class TestReactiveWorkerBehavior:
         registered_bulk: list[str] = []
         added_edges: list[tuple[str, list[str]]] = []
 
-        async def record_bulk(b, tasks, *, limit_keys=None):
+        async def record_bulk(b, tasks, *, limit_keys=None, declared_dependencies=None):
             registered_bulk.extend(str(t.id) for t in tasks)
             return None
 
