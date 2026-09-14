@@ -436,6 +436,38 @@ async def test_a_report_after_a_completion_does_not_spend_the_budget(
 
 
 @pytest.mark.asyncio
+async def test_a_refused_report_is_not_an_attempt_predecessor_either(
+    client: AsyncClient,
+):
+    """The budget is the obvious consumer of the event stream; the attempt
+    *ordering* is the other one, and it is easier to miss.
+
+    TASK_INTERRUPTED is attempt-**continuing** — a start that follows one
+    is a resumption, not a new attempt. So a refused report standing
+    between a retry and the start after it would stop that start counting,
+    and the retry budget would silently grow. The sequence below is exactly
+    that shape."""
+    build_id = await _new_build(client)
+    await _register_task(client, build_id, "t-1")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True})
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/fail")
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/retry")
+
+    # A stale report lands between the retry and the next start, and is
+    # refused: the task is PENDING, so it holds no claim to interrupt.
+    await client.post(f"{BUILDS}/{build_id}/tasks/t-1/interrupt")
+
+    second = await client.post(
+        f"{BUILDS}/{build_id}/tasks/t-1/start", params={"claim": True}
+    )
+
+    # Two attempts. With the refused report left in the ordering stream
+    # this reads 1, and a task gets more retries than max_attempts allows.
+    assert second.json()["attempt_count"] == 2, second.text
+    assert (await _counts(client, build_id))["t-1"] == (2, 0)
+
+
+@pytest.mark.asyncio
 async def test_either_interleaving_of_cancel_and_interrupt_ends_cancelled(
     client: AsyncClient,
 ):
@@ -858,6 +890,28 @@ async def test_preemption_is_invisible_to_the_sql_attempt_count(
 
     assert restarted.json()["attempt_count"] == 1
     assert await _counts(pg_client, build_id) == {"pg-1": (1, 0)}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_report_is_not_a_predecessor_on_postgres(
+    pg_client: AsyncClient,
+):
+    """The ordering exclusion is a JSON predicate inside the LAG subquery,
+    which is the most dialect-specific place it could live."""
+    build_id = await _new_build(pg_client)
+    await _register_task(pg_client, build_id, "pg-1")
+    await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-1/start", params={"claim": True}
+    )
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/fail")
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/retry")
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks/pg-1/interrupt")
+    second = await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-1/start", params={"claim": True}
+    )
+
+    assert second.json()["attempt_count"] == 2, second.text
+    assert await _counts(pg_client, build_id) == {"pg-1": (2, 0)}
 
 
 @pytest.mark.asyncio

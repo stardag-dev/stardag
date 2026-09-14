@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import ColumnElement, Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import Build, BuildStatus, Event, EventType, Task, TaskStatus
@@ -207,6 +207,31 @@ REPORT_APPLIED_KEY = "report_applied"
 _END_OF_EXECUTION_REPORTS = (EventType.TASK_INTERRUPTED, EventType.TASK_PREEMPTED)
 
 
+def refused_report_filter() -> "ColumnElement[bool]":
+    """Exclude reports that were written but changed nothing.
+
+    ``is_not(False)`` rather than a truthiness test, so the key's *absence*
+    still passes: every event written before the marker existed, and every
+    applied one, carry no key at all, and ``NULL IS NOT FALSE`` is true on
+    both dialects. SQLite reads the accessor through ``JSON_EXTRACT`` and
+    Postgres through ``->``, which is why this has a Postgres test of its
+    own.
+
+    Used by **both** attempt-stream queries, and that is the point of
+    factoring it: a refused report is not an interruption *and* not a
+    predecessor. Missing the second is subtle — TASK_INTERRUPTED is
+    attempt-continuing, so a stale one standing between a retry and the
+    start that follows it stops that start counting, and the retry budget
+    silently grows.
+    """
+    return Event.event_metadata[REPORT_APPLIED_KEY].as_boolean().is_not(False)
+
+
+def _report_was_refused(event: Event) -> bool:
+    """The Python twin of :func:`refused_report_filter`, for the replays."""
+    return (event.event_metadata or {}).get(REPORT_APPLIED_KEY) is False
+
+
 def _mark_report_refused(event: Event) -> None:
     """Record that this report was kept as audit but changed nothing.
 
@@ -378,6 +403,13 @@ async def get_attempt_counts_in_build(
             Event.build_id == build_id,
             Event.task_id.is_not(None),
             Event.event_type.in_([e.value for e in _ATTEMPT_ORDERING_EVENT_TYPES]),
+            # A refused report never moved the task, so it is not part of
+            # the ordering stream either — see REPORT_APPLIED_KEY. Leaving
+            # it in would let a stale interruption stand between a retry
+            # and the start that follows it, and TASK_INTERRUPTED is
+            # attempt-*continuing*: the start would stop counting and the
+            # retry budget would silently grow.
+            refused_report_filter(),
             # Never resumed → no cutoff → the window is the whole build.
             or_(resumed_at.is_(None), Event.created_at >= resumed_at),
         )
@@ -444,12 +476,8 @@ async def get_interrupt_counts_in_build(
                 Event.build_id == build_id,
                 Event.task_id.is_not(None),
                 Event.event_type == EventType.TASK_INTERRUPTED.value,
-                # Refused reports are audit, not interruptions — see
-                # REPORT_APPLIED_KEY. ``is_not(False)`` rather than a
-                # truthiness test so the key's *absence* (every event
-                # written before this existed, and every applied one)
-                # still counts: NULL IS NOT FALSE is true on both dialects.
-                Event.event_metadata[REPORT_APPLIED_KEY].as_boolean().is_not(False),
+                # Refused reports are audit, not interruptions.
+                refused_report_filter(),
                 or_(resumed_at.is_(None), Event.created_at >= resumed_at),
             )
             .where(
@@ -939,8 +967,10 @@ async def get_task_status_in_build(
         # prev_ordering_type, so the first start of a new round still sees
         # no predecessor and counts — mirroring the SQL path, where the
         # cutoff is applied before LAG rather than after it.
-        if event.event_type in _ATTEMPT_ORDERING_EVENT_TYPES and (
-            round_start is None or _as_utc(event.created_at) >= round_start
+        if (
+            event.event_type in _ATTEMPT_ORDERING_EVENT_TYPES
+            and not _report_was_refused(event)
+            and (round_start is None or _as_utc(event.created_at) >= round_start)
         ):
             if starts_new_attempt(event.event_type, prev_ordering_type):
                 attempt_count += 1
