@@ -120,21 +120,27 @@ async def _wait_for(
 
 
 class _CountingTransport(httpx.AsyncBaseTransport):
-    """Pass requests through, and count them.
+    """Pass requests through, and count the ones that came back.
 
     Used to wait for the renewal loop to have *received real answers*,
     rather than sleeping for about as long as that usually takes. A sleep
     there does not risk a false failure -- it risks the quieter one, of
     passing before the code under test had done anything at all.
+
+    Counted after the response, which is the only count that means what
+    the wait says it means: incrementing on dispatch would let the wait
+    finish while the answer was still on the wire, so "the loop has its
+    refusal in hand" would again be a guess about timing.
     """
 
     def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
         self._inner = inner
-        self.requests = 0
+        self.responses = 0
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        self.requests += 1
-        return await self._inner.handle_async_request(request)
+        response = await self._inner.handle_async_request(request)
+        self.responses += 1
+        return response
 
 
 def test_concurrent_acquires_grant_exactly_one() -> None:
@@ -385,7 +391,23 @@ def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
             live_transport, swallowed = _cut_wire(registry)
             counted = _CountingTransport(live_transport)
             try:
-                # (1) Past the TTL with the registry still unreachable, the
+                # (1a) The renewal loop is alive and getting nowhere.
+                # Waited for separately, and first, because an acquire slow
+                # enough to outlive this short TTL -- the exact condition
+                # this tier has already seen -- enters the block with the
+                # lease *already* given up. Asserting on the renewal count
+                # after the deadline wait would then read zero and fail a
+                # perfectly valid slow run.
+                await _wait_for(
+                    lambda: swallowed() > 0,
+                    what=(
+                        "the renewal loop to attempt a renewal against the "
+                        "cut wire: nothing else here evidences that it is "
+                        "running at all"
+                    ),
+                )
+
+                # (1b) Past the TTL with the registry still unreachable, the
                 # client-side deadline is the only thing that can stop the
                 # tick -- and it must.
                 await _wait_for(
@@ -397,10 +419,6 @@ def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
                         "client-side deadline is all there is to stop the "
                         "tick driving a build it can no longer claim"
                     ),
-                )
-                assert swallowed() > 0, (
-                    "the lease expired without a single renewal having been "
-                    "attempted; the renewal loop is not running"
                 )
 
                 # (2) The server agrees it lapsed: somebody else can have
@@ -437,7 +455,7 @@ def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
             # it) -- two requests, and the lease must still be lost when
             # they have both been answered.
             await _wait_for(
-                lambda: counted.requests >= 2,
+                lambda: counted.responses >= 2,
                 what=(
                     "the renewal loop to have its refusal in hand: a renew "
                     "and the re-acquire behind it, both against a live "

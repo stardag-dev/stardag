@@ -52,6 +52,16 @@ DEFAULT_ENVIRONMENT_SLUG = "main"
 # message is the whole story.
 RECYCLE_MARKER_ENV = "STARDAG_REGISTRY_LIVE_RECYCLE_MARKER"
 
+# Reading the boot id at provisioning time waits out a cold start, so it
+# gets a long timeout and one try. The post-scenario check cannot: it runs
+# after every scenario, so its worst case has to stay small enough to sit
+# inside the job's budget even when the registry has gone for good. Six
+# tries at fifteen seconds gives a replacement a hundred seconds to
+# identify itself, which is several times what one needs, and costs under
+# two minutes when nothing ever answers.
+BOOT_READ_TIMEOUT_SECONDS = 60.0
+BOOT_READ_ATTEMPTS = 6
+
 
 def _record_recycle(previous: str, current: str) -> None:
     """Leave the evidence of a recycle where a shell can read it.
@@ -112,8 +122,32 @@ class Deployment:
     api_key: str
     boot_id: str
 
-    def current_boot_id(self) -> str:
-        return read_boot_id(self.api_url)
+    def current_boot_id(
+        self,
+        *,
+        attempts: int = 1,
+        retry_pause: float = 3.0,
+        timeout: float = BOOT_READ_TIMEOUT_SECONDS,
+    ) -> str:
+        """The boot id the registry answers with now.
+
+        ``attempts`` above one tolerates a boot endpoint that is briefly
+        unanswerable, which is not a hypothetical: the moment this is most
+        needed -- a container replaced mid-run -- is also the moment the
+        replacement may still be starting Postgres and running Alembic.
+        A shorter ``timeout`` goes with it, so that several attempts stay
+        bounded by something a teardown check can afford.
+        """
+        last: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return read_boot_id(self.api_url, timeout=timeout)
+            except Exception as error:
+                last = error
+                if attempt + 1 < attempts:
+                    time.sleep(retry_pause)
+        assert last is not None
+        raise last
 
     def assert_same_container(self) -> None:
         """Fail loudly if the process holding the database was replaced.
@@ -125,7 +159,15 @@ class Deployment:
         convincing impression of a stardag bug. One assertion converts that
         into a sentence.
         """
-        current = self.current_boot_id()
+        # Retried, because an unanswerable registry must not be allowed to
+        # turn a recycle into an unclassified failure: the marker below is
+        # what buys the run its one retry, and it is only written when the
+        # replacement has actually identified itself. A registry that never
+        # answers stays unclassified on purpose -- nothing was identified,
+        # so nothing is retried.
+        current = self.current_boot_id(
+            attempts=BOOT_READ_ATTEMPTS, retry_pause=3.0, timeout=15.0
+        )
         if current != self.boot_id:
             _record_recycle(self.boot_id, current)
             raise AssertionError(
@@ -444,9 +486,9 @@ def wait_for_health(api_url: str, timeout: float = 300.0) -> None:
     )
 
 
-def read_boot_id(api_url: str) -> str:
+def read_boot_id(api_url: str, *, timeout: float = BOOT_READ_TIMEOUT_SECONDS) -> str:
     """The current container's boot id (see ``_registry_app``)."""
-    with httpx.Client(timeout=60.0) as client:
+    with httpx.Client(timeout=timeout) as client:
         response = client.get(f"{api_url.rstrip('/')}/_harness/boot")
         response.raise_for_status()
         return str(response.json()["boot_id"])

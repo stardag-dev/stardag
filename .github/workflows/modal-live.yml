@@ -375,8 +375,19 @@ jobs:
             "went with it. Re-provisioning and running the tier once more."
           rm -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER"
 
-          uv run --project integration-tests --python 3.12 \
-            python -m stardag_integration_tests.registry_live.provision up
+          # Checked explicitly: this step runs without `errexit`, so that
+          # the first tox failure can be inspected rather than ending the
+          # step -- which also means a failed re-provision would otherwise
+          # fall through to a second run against a stack that was never
+          # rebuilt.
+          if ! uv run --project integration-tests --python 3.12 \
+                 python -m stardag_integration_tests.registry_live.provision up
+          then
+            echo "Re-provisioning failed after a recycle; not re-running" \
+                 "the tier against a stack that was not rebuilt."
+            exit 1
+          fi
+
           tox -e registry-modal-live $POSARGS
 
       # The scheduled run provisions into the *permanent* `ci-main`, which
