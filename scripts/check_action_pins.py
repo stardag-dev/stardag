@@ -43,6 +43,7 @@ failure message says which applies.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -141,6 +142,30 @@ def unsupported_yaml(text: str) -> list[tuple[int, str]]:
     return found
 
 
+def duplicate_keys(node: yaml.Node | None) -> list[tuple[int, str]]:
+    """(line, key) for every mapping key that appears more than once.
+
+    `_mapping_get` returns the first match, so a step carrying a pinned `uses`
+    and then a second unpinned one would be read as pinned while GitHub reads
+    the last. Anywhere this check silently sees a different document than the
+    runner does, it has to stop rather than report on the wrong one — and a
+    duplicate key in a workflow is a bug in its own right.
+    """
+    found: list[tuple[int, str]] = []
+    if isinstance(node, yaml.MappingNode):
+        seen: set[str] = set()
+        for key_node, value_node in node.value:
+            if isinstance(key_node, yaml.ScalarNode):
+                if key_node.value in seen:
+                    found.append((key_node.start_mark.line + 1, key_node.value))
+                seen.add(key_node.value)
+            found.extend(duplicate_keys(value_node))
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            found.extend(duplicate_keys(item))
+    return found
+
+
 def _mapping_get(node: yaml.Node | None, key: str) -> yaml.Node | None:
     if not isinstance(node, yaml.MappingNode):
         return None
@@ -197,6 +222,14 @@ def check(path: Path, text: str | None = None) -> list[str]:
     except yaml.YAMLError as error:
         return [f"{relative}: could not be parsed as YAML: {error}"]
 
+    if duplicates := duplicate_keys(root):
+        return [
+            f"DUPLICATE KEY  {relative}:{line}  `{key}`\n"
+            "    A repeated key hides one of its values from this check, and "
+            "GitHub reads the other. Remove it."
+            for line, key in duplicates
+        ]
+
     nodes = iter_uses(root)
     comments = comments_by_line(text)
     problems = []
@@ -251,9 +284,19 @@ def check(path: Path, text: str | None = None) -> list[str]:
 
 
 def main() -> int:
+    # `GIT_*` is scrubbed so discovery always describes ROOT. This hook runs
+    # from a git hook, where `GIT_DIR` and `GIT_INDEX_FILE` are set and would
+    # otherwise be inherited — and in a worktree or a submodule they point
+    # somewhere other than the directory being listed, so `git ls-files` would
+    # answer for a different repository than the one whose workflows we are
+    # about to read.
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
     listed = subprocess.run(
         ["git", "ls-files", ".github/workflows/*.yml", ".github/workflows/*.yaml"],
         cwd=ROOT,
+        env=env,
         capture_output=True,
         text=True,
         check=True,

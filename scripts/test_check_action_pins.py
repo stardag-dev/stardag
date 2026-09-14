@@ -20,6 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import check_action_pins  # noqa: E402
 from check_action_pins import check, comments_by_line  # noqa: E402
 
 SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
@@ -294,3 +295,89 @@ def test_every_movable_ref_gets_the_same_true_remediation(ref):
     assert len(problems) == 1
     assert "pinact run" in problems[0]
     assert "for a branch ref it refuses" in problems[0]
+
+
+# --- duplicate keys: stop rather than read a different document ------------
+
+
+def test_a_duplicated_uses_key_is_refused():
+    """`_mapping_get` takes the first; GitHub takes the last. Neither is safe
+    to report on, so the check stops instead."""
+    problems = run(
+        f"      - uses: actions/checkout@{SHA} # v7.0.1\n"
+        "        uses: evil/unpinned@v1\n"
+    )
+    assert len(problems) == 1
+    assert "DUPLICATE KEY" in problems[0]
+
+
+def test_a_duplicated_key_anywhere_is_refused():
+    problems = check(
+        PATH,
+        "jobs:\n  b:\n    steps: []\njobs:\n  c:\n    steps: []\n",
+    )
+    assert [p for p in problems if "DUPLICATE KEY" in p]
+
+
+# --- main(): the discovery the parser tests never touch ---------------------
+
+
+def _workflow_repo(tmp_path: Path, files: dict[str, str]) -> Path:
+    """A throwaway git repo holding `files`, since discovery is `git ls-files`.
+
+    The environment is scrubbed of `GIT_*` deliberately. Run from a git hook —
+    which is exactly where this hook runs — `GIT_INDEX_FILE` and `GIT_DIR` are
+    set and inherited, so `git add` here would write into *this* repository's
+    index while reading the temporary worktree, staging the whole checkout as
+    deleted. That is not hypothetical; it happened once while writing these.
+    """
+    import os
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    for name, content in files.items():
+        path = tmp_path / ".github" / "workflows" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, env=env)
+    return tmp_path
+
+
+PINNED = f"jobs:\n  b:\n    steps:\n      - uses: actions/checkout@{SHA} # v7.0.1\n"
+UNPINNED = "jobs:\n  b:\n    steps:\n      - uses: actions/checkout@v7\n"
+
+
+def test_main_passes_when_every_discovered_workflow_is_pinned(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        check_action_pins, "ROOT", _workflow_repo(tmp_path, {"a.yml": PINNED})
+    )
+    assert check_action_pins.main() == 0
+
+
+def test_main_finds_both_yml_and_yaml(tmp_path, monkeypatch):
+    """Two pathspecs, and a regression in either would silently inspect less."""
+    monkeypatch.setattr(
+        check_action_pins,
+        "ROOT",
+        _workflow_repo(tmp_path, {"a.yml": PINNED, "b.yaml": UNPINNED}),
+    )
+    assert check_action_pins.main() == 1
+
+
+def test_main_fails_on_an_unpinned_workflow(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        check_action_pins, "ROOT", _workflow_repo(tmp_path, {"a.yml": UNPINNED})
+    )
+    assert check_action_pins.main() == 1
+    assert "UNPINNED" in capsys.readouterr().err
+
+
+def test_main_ignores_an_untracked_workflow(tmp_path, monkeypatch):
+    """Discovery is `git ls-files`, so an unstaged file is not yet ours."""
+    root = _workflow_repo(tmp_path, {"a.yml": PINNED})
+    (root / ".github" / "workflows" / "scratch.yml").write_text(
+        UNPINNED, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_action_pins, "ROOT", root)
+    assert check_action_pins.main() == 0

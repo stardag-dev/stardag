@@ -142,6 +142,8 @@ version comment to a ref in either:
 
 - **Two `uses:` on one line.** One trailing comment cannot say which release
   it names, so put each on its own line.
+- **A repeated mapping key.** `uses:` twice in one step would be read as the
+  first by this check and the last by GitHub; neither is safe to report on.
 - **YAML aliases and merge keys** (`*pin`, `<<: *step`) anywhere in the file.
   An aliased ref resolves to the anchor's node, so it would be checked at the
   anchor's line and against the anchor's comment; a merge key leaves the step
