@@ -554,23 +554,45 @@ async def _latest_started_execution(
     """
     ref_column = Event.event_metadata["executor_ref"].as_string()
     executor_column = Event.event_metadata["executor"].as_string()
-    row = (
-        await db.execute(
-            select(executor_column, ref_column)
-            .where(
-                Event.build_id == build_id,
-                Event.task_id == task_pk,
-                Event.event_type == EventType.TASK_STARTED,
-                ref_column.is_not(None),
-            )
-            # id (UUID7) breaks created_at ties, as everywhere else here.
-            .order_by(Event.created_at.desc(), Event.id.desc())
-            .limit(1)
+    starts = (
+        select(executor_column.label("executor"), ref_column.label("ref"))
+        .where(
+            Event.build_id == build_id,
+            Event.task_id == task_pk,
+            Event.event_type == EventType.TASK_STARTED,
         )
-    ).first()
-    if row is None:
+        # id (UUID7) breaks created_at ties, as everywhere else here.
+        .order_by(Event.created_at.desc(), Event.id.desc())
+    )
+    # The latest start decides which **backend** is running the task; the
+    # newest ref recorded *by that backend* identifies the execution.
+    #
+    # Neither half alone is right, and the two failures pull opposite ways.
+    # Taking the newest ref outright ignores a later start that moved the
+    # task to another backend, and a conditional cancel matching that stale
+    # ref stamps the current run CANCELLED. Taking the latest start outright
+    # loses the ref whenever a worker self-reports without one — Modal's
+    # reporter names its executor but leaves the ref None when
+    # ``current_function_call_id()`` is unavailable — and that refused every
+    # cancel whose worker had checked in, which is the live regression this
+    # endpoint was built to fix.
+    #
+    # Keying on the backend separates them: a ref-less start from the same
+    # backend is that backend still running the task, while a start naming a
+    # different backend (or none) is a different execution and the old ref
+    # stops being an answer.
+    rows = (await db.execute(starts)).all()
+    if not rows:
         return None
-    return row[0], cast(str, row[1])
+    executor = rows[0][0]
+    if executor is None:
+        return None
+    for row_executor, ref in rows:
+        if row_executor != executor:
+            break
+        if ref is not None:
+            return executor, cast(str, ref)
+    return None
 
 
 async def _create_task_event(
@@ -696,13 +718,32 @@ async def _create_task_event(
         # The pair, not the ref alone: a ref is backend-specific by contract
         # — ``cancel_detached`` takes ``(executor, ref)`` — so two backends
         # can mint the same string, and half an identity is not one.
+        #
+        # Both halves are required, and this used to accept the ref alone —
+        # which contradicted the paragraph above it. ``if_executor is None``
+        # matched any backend that had minted the same string, so a caller
+        # naming a ref without its backend could stop one execution and
+        # stamp a different one cancelled.
+        if if_executor is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error_code": "incomplete_execution_identity",
+                    "message": (
+                        "if_executor_ref identifies an execution only "
+                        "together with if_executor: a ref is "
+                        "backend-specific, so two backends can mint the "
+                        "same string. Pass both."
+                    ),
+                },
+            )
         started = await _latest_started_execution(db, build_id, db_task.id)
         held = (
             db_task.latest_status in (TaskStatus.RUNNING, TaskStatus.INTERRUPTED)
             and db_task.latest_status_build_id == build_id
             and started is not None
             and started[1] == if_executor_ref
-            and (if_executor is None or started[0] == if_executor)
+            and started[0] == if_executor
         )
         if not held:
             status, _, _, _, attempt_count = await get_task_status_in_build(
@@ -1861,7 +1902,19 @@ async def notify_build(
     # flag, later notifies report False and nobody spawns again.
     if build.latest_status == BuildStatus.RUNNING:
         build.needs_tick_at = now
-    needs_tick = build.needs_tick_at is not None
+    # A flag set while the build was RUNNING outlives the transition to a
+    # terminal status, because completing or failing does not clear it. So
+    # reporting "is there a flag" would answer True to a straggler notify
+    # long after the build ended, and the worker would spawn a tick on a
+    # build with nothing to do.
+    #
+    # CANCELLED is the deliberate exception and the reason this is not
+    # simply "RUNNING only": its own cancel sets the flag precisely so one
+    # more tick runs and stops the containers it left behind.
+    needs_tick = build.needs_tick_at is not None and build.latest_status in (
+        BuildStatus.RUNNING,
+        BuildStatus.CANCELLED,
+    )
     # Stamp the hand-out mark in the SAME transaction as the flag, on the
     # assumption that the caller will spawn: a concurrent
     # ``POST /builds/wake-candidates`` must never see this build flagged
@@ -2565,16 +2618,65 @@ async def get_build_executions(
             Event.build_id == build_id,
             Event.event_type == EventType.TASK_STARTED,
             Event.task_id.is_not(None),
-            # A claiming start records no ref — the spawn has not happened
-            # yet — and there is nothing to stop until the one that does.
-            ref_column.is_not(None),
-            # ...and no backend name is an execution nobody can address, so
-            # it is not reported rather than reported half-identified.
-            executor_column.is_not(None),
+            # The cursor, pushed in before the window rather than applied
+            # to its output. Both window functions partition by task, so
+            # restricting the input is equivalence-preserving — and without
+            # it each of up to _MAX_EXECUTION_PAGES requests re-ranks every
+            # start the build ever recorded, which is the one way this
+            # once-per-build-death query gets expensive on a wide build.
+            *(
+                [Event.task_id > after]
+                if (after := _parse_executions_cursor(cursor))
+                else []
+            ),
         )
         .subquery()
     )
-    latest = select(ranked).where(ranked.c.rank == 1).subquery()
+    # Two questions, and they are not the same one. The latest start says
+    # which **backend** is running the task; the newest ref recorded by
+    # that backend says which execution. ``_latest_started_execution`` keys
+    # on the backend for the same reason and must agree with this, since
+    # the drain stops what this lists and the conditional cancel re-asks
+    # there before recording anything.
+    #
+    # Ranking only ref-bearing starts would ignore a later start that moved
+    # the task to another backend and hand back a ref that no longer names
+    # the running execution. Ranking every start and demanding a ref on the
+    # winner would drop the execution whenever a worker self-reports
+    # without one — Modal's reporter names its executor but leaves the ref
+    # None when ``current_function_call_id()`` is unavailable — which is
+    # the live regression this endpoint exists to fix.
+    latest_backend = (
+        select(ranked.c.task_pk, ranked.c.executor).where(ranked.c.rank == 1).subquery()
+    )
+    with_ref = (
+        select(
+            ranked,
+            func.row_number()
+            .over(
+                partition_by=ranked.c.task_pk,
+                order_by=(ranked.c.started_at.desc(), ranked.c.event_id.desc()),
+            )
+            .label("ref_rank"),
+        )
+        .where(
+            ranked.c.executor_ref.is_not(None),
+            # No backend name is an execution nobody can address, so it is
+            # not reported rather than reported half-identified.
+            ranked.c.executor.is_not(None),
+        )
+        .subquery()
+    )
+    latest = (
+        select(with_ref)
+        .join(
+            latest_backend,
+            (latest_backend.c.task_pk == with_ref.c.task_pk)
+            & (latest_backend.c.executor == with_ref.c.executor),
+        )
+        .where(with_ref.c.ref_rank == 1)
+        .subquery()
+    )
     ended = (
         select(Event.id)
         .where(
@@ -2605,7 +2707,9 @@ async def get_build_executions(
         .order_by(Task.id.asc())
         .limit(_MAX_BUILD_EXECUTIONS + 1)
     )
-    after = _parse_executions_cursor(cursor)
+    # Also applied on the outer join: the push-down above narrows the
+    # events, this narrows the tasks, and a task with no start at all must
+    # not slip back in behind the cursor.
     if after is not None:
         query = query.where(Task.id > after)
     rows = (await db.execute(query)).all()
@@ -2623,7 +2727,15 @@ async def get_build_executions(
                 executor=cast(str, executor),
                 executor_ref=cast(str, executor_ref),
                 executor_metadata=executor_metadata,
-                latest_status_at=started_at,
+                # The task's own status timestamp, not the start event's.
+                # The field is named for the current status and the
+                # fallback path fills it from the frontier's task ref, so
+                # returning the historical start here paired a current
+                # status with an old time — and a client applying any
+                # staleness rule to it would be reading a number that means
+                # something else. ``started_at`` stays what it was added
+                # for: ordering starts, and the ended-event comparison.
+                latest_status_at=task.latest_status_at,
             )
             for task, executor, executor_ref, executor_metadata, started_at, _ in page
         ],

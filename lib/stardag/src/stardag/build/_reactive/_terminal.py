@@ -802,10 +802,16 @@ async def _cancel_running(
             remaining, build_id, registry, task_executor, task_store, summary, stopped
         )
     else:
+        # Reached when the final pass still found work — which it then
+        # stopped. So this is not "they are still running": it is "they
+        # were still arriving when we ran out of passes", and anything that
+        # appeared after that last stop has nothing left to stop it, since
+        # a terminal build gets no further tick.
         logger.warning(
-            f"Build {build_id}: executions kept appearing across "
-            f"{_CANCEL_RECONCILE_PASSES} passes of the cancel drain; the "
-            "latest arrivals keep running until their backend stops them."
+            f"Build {build_id}: executions were still arriving on the last "
+            f"of {_CANCEL_RECONCILE_PASSES} cancel-drain passes. Those found "
+            "were stopped; any that appeared after it keep running until "
+            "their backend stops them."
         )
 
 
@@ -820,7 +826,13 @@ async def _stop_each(
 ) -> None:
     """Stop each listed execution and record the revocation. Best-effort."""
     for item in items:
-        stopped.add((item.executor, item.executor_ref))
+        # Marked only once this execution has actually been dealt with.
+        # Marking on arrival meant a task that failed to load, or a backend
+        # cancel that raised, was filtered out of the next reconcile pass as
+        # though it had been handled — and a terminal build gets no third
+        # chance, because nothing re-flags it. The pass exists to catch what
+        # the first one missed; treating a failure as a success is the one
+        # way to make it catch nothing.
         task = await _load_task(item.task_id, registry, task_store, quiet=True)
         if task is None:
             continue
@@ -833,6 +845,7 @@ async def _stop_each(
                 f"{item.executor_ref!r} for task {item.task_id}: {e}"
             )
             continue
+        stopped.add((item.executor, item.executor_ref))
         try:
             # The registry re-checks, on the locked row, that this build
             # still holds the task in a status with an execution to revoke

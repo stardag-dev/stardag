@@ -188,10 +188,18 @@ class TestCancelAuthority:
         worker and release a claim this build never held."""
         (root,) = _chain("shared-root")
         registry, executor, store = _setup([root], auto_complete=False)
+        neighbour = uuid4()
+        # Started by the neighbour, not by us: the execution is theirs, and
+        # the listing has to attribute it to them rather than to whoever
+        # happens to ask.
         registry.add_task(
-            str(root.id), status="running", executor="fake", executor_ref="fc-theirs"
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-theirs",
+            started_by_build=neighbour,
         )
-        registry.status_build_id[str(root.id)] = uuid4()
+        registry.status_build_id[str(root.id)] = neighbour
         registry.build_status = "cancelled"
 
         summary = await run_tick_aio(
@@ -207,6 +215,52 @@ class TestCancelAuthority:
         assert executor.cancelled_refs == []
         assert registry.statuses[str(root.id)] == "running"
         assert ("cancel", str(root.id)) not in registry.calls
+
+    async def test_a_taken_over_task_is_still_this_builds_to_stop(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The state the executions endpoint exists for, reachable here at
+        last.
+
+        A cascading cancel releases this build's claims so the next build
+        can take those tasks over — and it can, within seconds, long before
+        this build's tick runs. From then on the task row names somebody
+        else while the container this build started is still going. Stopping
+        by current ownership would either miss it or kill the successor.
+
+        Until now the fake filtered its listing on current ownership, so it
+        returned nothing in exactly this state and only the live tier could
+        catch it. That is why this test is here and not only there.
+        """
+        (root,) = _chain("taken-over-root")
+        registry, executor, store = _setup([root], auto_complete=False)
+        mine = uuid4()
+        successor = uuid4()
+        # I started it...
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-mine",
+            started_by_build=mine,
+        )
+        # ...and somebody else now holds the task.
+        registry.status_build_id[str(root.id)] = successor
+        registry.build_status = "cancelled"
+
+        summary = await run_tick_aio(
+            mine,
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert executor.cancelled_refs == ["fc-mine"], (
+            "the container this build started was left running because the "
+            "task now belongs to someone else"
+        )
+        assert summary.cancelled_refs == 1
 
     async def test_a_cascaded_cancel_still_stops_its_own_containers(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]

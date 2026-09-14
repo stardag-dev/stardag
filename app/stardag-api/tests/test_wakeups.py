@@ -878,3 +878,45 @@ async def test_lease_ttl_is_bounded(client: AsyncClient):
             LEASE.format(build_id), params={"owner_id": "t", "ttl_seconds": 99999}
         )
     ).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_a_completed_builds_leftover_flag_does_not_spawn_a_tick(
+    client: AsyncClient,
+):
+    """Completing a build does not clear its wake flag, so a straggler
+    notify used to find one still set and report ``needs_tick=True`` — and
+    the worker would spawn a tick on a build with nothing to do.
+
+    CANCELLED is the one terminal status that legitimately keeps its flag:
+    its own cancel sets it so a final tick can stop the containers it left
+    behind. That case is asserted below it.
+    """
+    # Reactive: only a reactive build is ever flagged for a tick.
+    build = await _build(client)
+    await _register(client, build, "straggler")
+    await _start(client, build, "straggler")
+    # A wake-up arrives while the build is live, then the build finishes.
+    await client.post(f"/api/v1/builds/{build}/notify")
+    await client.post(f"/api/v1/builds/{build}/complete")
+
+    response = await client.post(f"/api/v1/builds/{build}/notify")
+    assert response.json()["needs_tick"] is False, (
+        "a finished build asked for a tick it has no use for"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_build_keeps_its_one_cleanup_tick(client: AsyncClient):
+    """The exception that stops the rule above being "RUNNING only"."""
+    # Reactive: only a reactive build is ever flagged for a tick.
+    build = await _build(client)
+    await _register(client, build, "cascaded")
+    await _start(client, build, "cascaded")
+    await client.post(f"/api/v1/builds/{build}/cancel", params={"cascade": "true"})
+
+    response = await client.post(f"/api/v1/builds/{build}/notify")
+    assert response.json()["needs_tick"] is True, (
+        "the cancel's own flag must survive: nothing else will stop the "
+        "containers this build left running"
+    )

@@ -158,6 +158,13 @@ class FakeReactiveRegistry(NoOpRegistry):
         # row predating status denormalisation — not this build's doing
         # either, and with no build to ask about it.
         self.status_build_id: dict[str, UUID | None] = {}
+        # build_id -> task_id -> (executor, ref): the starts each build
+        # recorded, which outlive that build losing the task.
+        self.started_by: dict[UUID, dict[str, tuple[str, str]]] = {}
+        # Starts staged by ``add_task`` rather than simulated call-by-call.
+        # Attributed to whichever build asks, since a test staging a ref is
+        # setting up that build's own past.
+        self.staged_starts: dict[str, tuple[str, str]] = {}
         # task_id -> (namespace, name), echoed on blocker entries.
         self.task_names: dict[str, tuple[str, str]] = {}
         self.blocked_by_external_truncated = False
@@ -208,11 +215,26 @@ class FakeReactiveRegistry(NoOpRegistry):
         expires_at: "datetime | None" = None,
         attempt_count: int | None = None,
         interrupt_count: int = 0,
+        started_by_build: "UUID | None" = None,
     ) -> None:
         self.statuses[task_id] = status
         self.upstreams.setdefault(task_id, set()).update(upstreams or set())
         if executor or executor_ref:
             self.refs[task_id] = (executor, executor_ref)
+        if executor is not None and executor_ref is not None:
+            # Which build *started* this execution, which is a different
+            # question from who holds the task now — and the one the
+            # executions listing answers. ``started_by_build`` names it
+            # explicitly for a neighbour's execution; without it the start
+            # is attributed to whichever build asks, since a test staging a
+            # ref is usually setting up that build's own past.
+            if started_by_build is not None:
+                self.started_by.setdefault(started_by_build, {})[task_id] = (
+                    executor,
+                    executor_ref,
+                )
+            else:
+                self.staged_starts[task_id] = (executor, executor_ref)
         if status_at is not None:
             self.status_at[task_id] = status_at
         if expires_at is not None:
@@ -352,6 +374,12 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.sent_claim_ttls.setdefault(tid, []).append(claim_ttl_seconds)
         self.statuses[tid] = "running"
         self.refs[tid] = (executor, executor_ref)
+        # Per build, because that is what the event log records and what
+        # the executions listing reads. ``refs`` alone is the *current*
+        # execution, which stops being this build's the moment another one
+        # takes the task over.
+        if executor is not None and executor_ref is not None:
+            self.started_by.setdefault(build_id, {})[tid] = (executor, executor_ref)
         self.start_metadata[tid] = executor_metadata
         if self.auto_complete:
             # Instant worker: completes and wakes the scheduler.
@@ -679,12 +707,25 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def build_get_executions_aio(
         self, build_id, *, cursor=None
     ) -> BuildExecutions:
-        """Mirrors the API: this build's own executions, with a ref.
+        """Mirrors the API: the executions **this build started**, with a ref.
 
-        Ownership is ``status_build_id`` being absent (this build put the
-        task where it is). CANCELLED joins the live statuses only when the
-        build itself is cancelled — for a running build a cancelled task is
-        an attempt it already abandoned, not a container to chase.
+        Read from a per-build record of starts rather than from who holds
+        the task now, because that difference is the entire reason the
+        endpoint exists. A cascading cancel releases the claims this build
+        held so the next build can take those tasks over — and the next
+        build can claim one within seconds, before this build's tick runs.
+        From then on the task row names somebody else, while the container
+        this build started is still going.
+
+        An earlier version of this fake filtered on current ownership
+        (``status_build_id``), which meant it returned *nothing* in exactly
+        that state — so the unit tests could not reach the case the
+        endpoint was built for, and only the live tier caught it. Do not
+        reintroduce that filter.
+
+        CANCELLED joins the live statuses only when the build itself is
+        cancelled — for a running build a cancelled task is an attempt it
+        already abandoned, not a container to chase.
         """
         self.executions_calls.append(build_id)
         if self.executions_error is not None:
@@ -697,11 +738,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         if self.build_status == "cancelled":
             statuses.add("cancelled")
         executions = []
-        for tid, status in self.statuses.items():
-            if status not in statuses or tid in self.status_build_id:
-                continue
-            executor, executor_ref = self.refs.get(tid, (None, None))
-            if executor is None or executor_ref is None:
+        started = {**self.staged_starts, **self.started_by.get(build_id, {})}
+        for tid, (executor, executor_ref) in started.items():
+            status = self.statuses.get(tid)
+            if status not in statuses:
                 continue
             executions.append(
                 BuildExecution(

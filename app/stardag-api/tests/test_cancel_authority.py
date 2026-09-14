@@ -256,7 +256,7 @@ async def test_a_conditional_cancel_does_not_stamp_a_task_someone_reset(
 
     response = await client.post(
         f"/api/v1/builds/{owner}/tasks/shared/cancel",
-        params={"if_executor_ref": "fc-shared"},
+        params={"if_executor": "modal", "if_executor_ref": "fc-shared"},
     )
     assert response.status_code == 200, response.text
     assert await _task_status(client, "shared") == "pending", (
@@ -281,8 +281,17 @@ async def test_a_conditional_cancel_survives_a_worker_self_report(
     it."""
     build = await _new_build(client)
     await _start(client, build, "reported")
-    # The worker's own start: no executor fields, so the row's ref is gone.
-    await client.post(f"/api/v1/builds/{build}/tasks/reported/start")
+    # The worker's own start, shaped as the Modal reporter actually sends
+    # it: it always names its executor and leaves the *ref* None when
+    # ``current_function_call_id()`` is unavailable
+    # (``integration/modal/_runner.py``). Sending no executor either would
+    # model a different event — a start on some other backend — which is
+    # the case the test below covers and which must NOT resolve to this
+    # ref.
+    await client.post(
+        f"/api/v1/builds/{build}/tasks/reported/start",
+        params={"executor": "modal"},
+    )
     single = (await client.get("/api/v1/tasks/reported")).json()
     assert single["latest_executor_ref"] is None, "precondition: the row was cleared"
 
@@ -316,7 +325,7 @@ async def test_a_conditional_cancel_does_not_revoke_a_newer_execution(
 
     response = await client.post(
         f"/api/v1/builds/{build}/tasks/restarted/cancel",
-        params={"if_executor_ref": "fc-restarted"},
+        params={"if_executor": "modal", "if_executor_ref": "fc-restarted"},
     )
     assert response.status_code == 200, response.text
     assert await _task_status(client, "restarted") == "running", (
@@ -336,7 +345,7 @@ async def test_a_conditional_cancel_still_revokes_what_this_build_holds(
 
     response = await client.post(
         f"/api/v1/builds/{build}/tasks/mine/cancel",
-        params={"if_executor_ref": "fc-mine"},
+        params={"if_executor": "modal", "if_executor_ref": "fc-mine"},
     )
     assert response.status_code == 200, response.text
     assert await _task_status(client, "mine") == "cancelled"
@@ -355,7 +364,7 @@ async def test_a_conditional_cancel_of_an_already_cancelled_task_is_a_no_op(
     before = (await client.get("/api/v1/tasks/revoked")).json()["latest_status_at"]
     response = await client.post(
         f"/api/v1/builds/{build}/tasks/revoked/cancel",
-        params={"if_executor_ref": "fc-revoked"},
+        params={"if_executor": "modal", "if_executor_ref": "fc-revoked"},
     )
     assert response.status_code == 200, response.text
     after = (await client.get("/api/v1/tasks/revoked")).json()["latest_status_at"]
@@ -538,3 +547,97 @@ async def test_executions_skips_a_task_with_no_recorded_ref(client: AsyncClient)
     )
     assert await _task_status(client, "claimed") == "running"
     assert (await _executions(client, build))["executions"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_start_on_another_backend_retires_the_old_ref(
+    client: AsyncClient,
+):
+    """The other side of the same question, and the reason the lookup keys
+    on the backend rather than simply taking the newest ref.
+
+    A later start that names a *different* executor — or none — is a
+    different execution. Answering with the previous backend's ref would
+    let a cleanup stop one backend's container and then stamp the run that
+    replaced it CANCELLED, revoking a claim nobody released.
+    """
+    build = await _new_build(client)
+    await _start(client, build, "moved")
+    # Re-started in-process: no detached handle, and a different executor.
+    await client.post(
+        f"/api/v1/builds/{build}/tasks/moved/start",
+        params={"executor": "local"},
+    )
+
+    response = await client.post(
+        f"/api/v1/builds/{build}/tasks/moved/cancel",
+        params={"if_executor": "modal", "if_executor_ref": "fc-moved"},
+    )
+    assert response.status_code == 200, response.text
+    assert await _task_status(client, "moved") == "running", (
+        "cancelled a run that the named execution had already been replaced by"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_listing_survives_a_ref_less_self_report(client: AsyncClient):
+    """The listing keys on the backend for the same reason the conditional
+    cancel does, and the two have to agree: the drain stops what this lists
+    and then asks the cancel to record it.
+
+    A worker self-reporting without a ref is that backend still running the
+    task. Dropping the execution here would leave a live container with
+    nothing left to stop it.
+    """
+    build = await _new_build(client)
+    await _start(client, build, "reported-listing")
+    await client.post(
+        f"/api/v1/builds/{build}/tasks/reported-listing/start",
+        params={"executor": "modal"},
+    )
+
+    listed = await _executions(client, build)
+    assert [e["executor_ref"] for e in listed["executions"]] == [
+        "fc-reported-listing"
+    ], "the self-report hid the execution it was reporting"
+
+
+@pytest.mark.asyncio
+async def test_the_listing_retires_a_ref_from_a_replaced_backend(
+    client: AsyncClient,
+):
+    """...and the mirror case: once the task is running on a different
+    backend, the old ref names nothing the drain should stop."""
+    build = await _new_build(client)
+    await _start(client, build, "moved-listing")
+    await client.post(
+        f"/api/v1/builds/{build}/tasks/moved-listing/start",
+        params={"executor": "local"},
+    )
+
+    listed = await _executions(client, build)
+    assert listed["executions"] == [], (
+        "offered a ref for a backend that no longer runs the task"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_ref_without_its_backend_is_refused(client: AsyncClient):
+    """A ref is backend-specific by contract — ``cancel_detached`` takes
+    ``(executor, ref)`` — so two backends can mint the same string.
+
+    Accepting the ref alone let a caller stop one backend's execution and
+    then stamp a different backend's run cancelled. Refused rather than
+    quietly matched, because a caller that does not know its own backend is
+    not doing best-effort cleanup, it is confused.
+    """
+    build = await _new_build(client)
+    await _start(client, build, "half-identity")
+
+    response = await client.post(
+        f"/api/v1/builds/{build}/tasks/half-identity/cancel",
+        params={"if_executor_ref": "fc-half-identity"},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error_code"] == "incomplete_execution_identity"
+    assert await _task_status(client, "half-identity") == "running"
