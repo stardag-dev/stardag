@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from check_action_pins import check, comment_of, has_version_comment  # noqa: E402
+from check_action_pins import check, comments_by_line  # noqa: E402
 
 SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 DIGEST = "sha256:" + "a" * 64
@@ -147,7 +147,7 @@ def test_a_repeated_sha_must_carry_the_comment_every_time():
     assert f"{PATH}:5" in problems[0]
 
 
-def test_an_alias_is_refused_rather_than_checked_at_the_anchors_line():
+def test_an_aliased_ref_is_refused_rather_than_checked_at_the_anchors_line():
     problems = check(
         PATH,
         "jobs:\n"
@@ -156,8 +156,7 @@ def test_an_alias_is_refused_rather_than_checked_at_the_anchors_line():
         f"      - uses: &pin actions/checkout@{SHA} # v7.0.1\n"
         "      - uses: *pin\n",
     )
-    assert len(problems) == 1
-    assert "YAML ALIAS" in problems[0]
+    assert [p for p in problems if "YAML ALIAS" in p]
 
 
 # --- container actions -----------------------------------------------------
@@ -183,7 +182,12 @@ def test_an_expression_ref_is_reported_rather_than_assumed_fine():
     assert "UNVERIFIABLE" in problems[0]
 
 
-# --- comment_of: a `#` is only a comment when it is one ---------------------
+# --- comments come from the scanner, not from counting quotes ---------------
+
+
+def comment_on(fragment: str) -> str | None:
+    """The comment on the single line of `fragment`, as the checker sees it."""
+    return comments_by_line(fragment).get(1)
 
 
 @pytest.mark.parametrize(
@@ -194,22 +198,68 @@ def test_an_expression_ref_is_reported_rather_than_assumed_fine():
         ("# a whole-line comment", "# a whole-line comment"),
         ("uses: a/b@x", None),
         # A `#` inside a quoted scalar is not a comment.
-        ("- {uses: a/b@x, with: {n: '# v1'}}", None),
-        ('- {uses: a/b@x, with: {n: "# v1"}}', None),
+        ("{uses: a/b@x, with: {n: '# v1'}}", None),
+        ('{uses: a/b@x, with: {n: "# v1"}}', None),
         # An escaped quote does not end the scalar, so the `#` is still inside.
-        ('- {uses: a/b@x, with: {n: "it\\" # v1"}}', None),
+        ('{uses: a/b@x, with: {n: "it\\" # v1"}}', None),
         # YAML's doubled single quote is an escaped quote too.
-        ("- {uses: a/b@x, with: {n: 'it'' # v1'}}", None),
+        ("{uses: a/b@x, with: {n: 'it'' # v1'}}", None),
+        # An apostrophe in a *plain* scalar opens no scalar at all, so the
+        # real comment after it must still be found.
+        ("{uses: a/b@x, with: {n: O'Reilly}} # v7.0.1", "# v7.0.1"),
         # A real comment after a flow mapping closes.
-        ("- {uses: a/b@x, with: {n: 'q'}} # v1.0.0", "# v1.0.0"),
+        ("{uses: a/b@x, with: {n: 'q'}} # v1.0.0", "# v1.0.0"),
         # A `#` that does not follow whitespace is part of the token.
         ("uses: a/b@x#notacomment", None),
     ],
 )
-def test_comment_of(line, expected):
-    assert comment_of(line) == expected
+def test_comments_by_line(line, expected):
+    assert comment_on(line) == expected
 
 
-def test_has_version_comment_requires_the_version_at_the_comment_start():
-    assert has_version_comment("uses: a/b@x # v7.0.1")
-    assert not has_version_comment("uses: a/b@x # see v7.0.1 notes")
+# --- one ref per line, so a comment names one release ----------------------
+
+
+def test_two_refs_on_one_line_are_refused():
+    """A single trailing comment cannot say which release it names."""
+    problems = check(
+        PATH,
+        f"jobs:\n  b:\n    steps: [{{uses: o/a@{SHA}}}, {{uses: o/b@{SHA}}}] # v1.0.0\n",
+    )
+    assert len(problems) == 1
+    assert "MULTIPLE REFS ON ONE LINE" in problems[0]
+
+
+# --- aliases: refuse the aliased ref, not the whole workflow ----------------
+
+
+def test_an_alias_elsewhere_in_the_file_is_none_of_our_business():
+    """Rejecting every alias made an unrelated `env` anchor fail the file."""
+    assert (
+        check(
+            PATH,
+            "x: &anchor 1\n"
+            "y: *anchor\n"
+            "jobs:\n"
+            "  b:\n"
+            "    steps:\n"
+            f"      - uses: o/a@{SHA} # v1.0.0\n",
+        )
+        == []
+    )
+
+
+# --- the hint matches the problem ------------------------------------------
+
+
+def test_a_branch_ref_is_told_pinact_will_not_resolve_it():
+    """`pypa/gh-action-pypi-publish@release/v1` was exactly this case."""
+    problems = run("      - uses: pypa/gh-action-pypi-publish@release/v1\n")
+    assert len(problems) == 1
+    assert "pinact refuses to pin a branch ref" in problems[0]
+
+
+def test_an_ordinary_floating_tag_is_told_to_run_pinact():
+    problems = run("      - uses: actions/checkout@v7\n")
+    assert "pinact run" in problems[0]
+    assert "branch ref" not in problems[0]

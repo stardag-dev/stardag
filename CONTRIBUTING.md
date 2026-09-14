@@ -137,6 +137,11 @@ actions are held to the same standard by image digest
 (`docker://<image>@sha256:<digest>`); only a local `./…` action is exempt,
 being this repo's own tracked code.
 
+Two forms it refuses rather than guesses at, because it cannot attribute a
+version comment to a ref in either: **two `uses:` on one line** (put each on
+its own), and a `uses:` reached through a **YAML alias** (write the ref
+literally). An alias elsewhere in the file is fine.
+
 Two things pinact will not do for you:
 
 - It refuses to pin a **branch** ref. Resolve those by hand to the release tag

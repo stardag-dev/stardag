@@ -43,9 +43,11 @@ repos:
         # docstring.
         language: python
         additional_dependencies: ["pyyaml==6.0.3"]
-        # The checker itself is in the pattern: editing it should re-run
-        # it against the workflows, not wait for the next workflow edit.
-        files: ^(\.github/workflows/.*\.ya?ml|scripts/check_action_pins\.py)$
+        # The checker and this config are in the pattern too. Editing either
+        # should re-verify: a change to the thing that does the verifying, or
+        # to the entry/deps/filter that decide whether it runs at all, would
+        # otherwise land without anything checking the workflows.
+        files: ^(\.github/workflows/.*\.ya?ml|scripts/check_action_pins\.py|\.pre-commit-config\.yaml)$
         pass_filenames: false
         verbose: true
       # The checker's own tests. It fails in the safe-looking direction — a
@@ -57,7 +59,7 @@ repos:
         entry: python -m pytest scripts/test_check_action_pins.py --noconftest -q
         language: python
         additional_dependencies: ["pyyaml==6.0.3", "pytest==9.1.1"]
-        files: ^scripts/(check_action_pins|test_check_action_pins)\.py$
+        files: ^(scripts/(check_action_pins|test_check_action_pins)\.py|\.pre-commit-config\.yaml)$
         pass_filenames: false
         verbose: true
       - id: pyright-stardag
