@@ -102,19 +102,39 @@ async def _wait_for(
     reason: the alternative is a sleep sized for how long something ought
     to take, which is both slower than necessary when the stack is warm and
     a false failure when it is not.
+
+    A poll that could not reach the registry is a **failed poll, not a
+    failed scenario**: several of these predicates are real requests, and
+    letting one timeout escape would put the latency failure straight back
+    where this module is trying to take it out of. Transport errors are
+    therefore treated as "no answer yet" until the deadline, and reported
+    with it. Only transport errors: a refusal the server actually returned
+    -- a 401 from a replaced container, a 500 -- still fails immediately
+    and in its own words, which is what the harness needs it to do.
     """
     loop = asyncio.get_running_loop()
     started = loop.time()
     deadline = started + timeout
+    last_error: Exception | None = None
     while True:
-        result = condition()
-        if asyncio.iscoroutine(result):
-            result = await result
+        try:
+            result = condition()
+            if asyncio.iscoroutine(result):
+                result = await result
+        except httpx.TransportError as error:
+            last_error = error
+            result = None
         if result:
             return result
         if loop.time() >= deadline:
+            unreachable = (
+                f" The last poll raised {type(last_error).__name__}: {last_error}"
+                if last_error is not None
+                else ""
+            )
             raise AssertionError(
-                f"Waited {loop.time() - started:.1f}s for {what} and it did not happen."
+                f"Waited {loop.time() - started:.1f}s for {what} and it did "
+                f"not happen.{unreachable}"
             )
         await asyncio.sleep(poll_interval)
 
