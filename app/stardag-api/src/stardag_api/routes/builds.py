@@ -3150,12 +3150,23 @@ async def register_tasks_bulk(
     # joins them to ``live_claim_filter()``. Replace semantics, per task,
     # only when the caller supplied keys; a RUNNING task keeps the keys it
     # was started under, since those are what it currently occupies.
+    #
+    # Only for rows whose status this call can trust: ones it created, and
+    # ones it locked before inserting. A row a concurrent registration
+    # created a moment ago is neither -- it is read without a lock, so the
+    # PENDING it reports can already be stale, and replacing the keys of a
+    # task somebody else has since started is precisely what the RUNNING
+    # check exists to prevent. Skipping leaves that task's keys alone,
+    # which is the same answer the RUNNING check gives and the safe
+    # direction: the caller that created the row registered its keys with
+    # it, and they are derived from the same task.
     await _replace_limit_keys(
         db,
         {
             pk_by_task_id[t.task_id]: t.limit_keys or []
             for t in tasks_in
             if t.limit_keys is not None
+            and (t.task_id in created_task_ids or t.task_id in existing_tasks)
             and db_task_by_task_id[t.task_id].latest_status != TaskStatus.RUNNING
         },
     )
