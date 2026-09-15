@@ -126,10 +126,21 @@ _RETRY_CONFIG = Retry(
     # **It can be refused by state its own first attempt created.** This
     # is the harmful kind, because the refusal is indistinguishable from
     # losing a race to somebody else, and standing down is the right
-    # response to that. Two known instances: the scheduler lease, where an
-    # acquire by the owner that already holds it is now granted rather
-    # than refused, and ``/tasks/{id}/start?claim=true``, where a retry is
-    # still refused 409 by its own claim -- tracked, not fixed here.
+    # response to that. One instance is answered and one is half-answered:
+    #
+    # The scheduler lease grants an acquire by the owner already holding
+    # it, and that covers every caller, because a tick's owner id travels
+    # on the request.
+    #
+    # ``/tasks/{id}/start?claim=true`` grants one by the execution already
+    # holding the claim -- same build *and* same ``executor_ref`` -- so a
+    # genuine second attempt of the same build is still refused. But **the
+    # claim this SDK takes carries no ref**: it is taken before the worker
+    # is spawned, and the ref is the spawn's own id, so the reactive
+    # engine's claim is exactly the ref-less case the server still refuses.
+    # A retried claim from here therefore still reports a loss to the
+    # worker that won it. Tracked; the fix wants an identity the claim can
+    # carry before it has an execution to name.
     #
     # **It can append a second record.** The event log is append-only and
     # a retried transition writes another row. Mostly visible rather than
@@ -141,10 +152,10 @@ _RETRY_CONFIG = Retry(
     # This is not a complete per-endpoint audit -- there are POSTs here
     # nobody has asked the question of, which is its own open item. The
     # rule for a new one: decide what a second delivery does before
-    # relying on this transport. The entry above that says "still refused"
-    # exists because that question was answered with an assumption the
-    # first time, and the endpoints the assumption was most wrong about
-    # were the ones nobody re-examined.
+    # relying on this transport. Both entries above were found by
+    # accident rather than by asking -- this comment once read "our API
+    # calls are idempotent", and the endpoints that claim was most wrong
+    # about were the ones nobody re-examined.
     allowed_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"],
 )
 
