@@ -595,6 +595,56 @@ async def _latest_started_execution(
     return None
 
 
+def _claim_is_this_same_execution(
+    db_task: Task, *, build_id: UUID, extra_metadata: dict | None
+) -> bool:
+    """Whether the live claim is the one *this exact request* already took.
+
+    A claiming start can be delivered twice: the registry client retries a
+    POST whose response never arrived. Refusing the second delivery tells
+    the caller that another build is running the task -- which is a
+    correct reason to stand down, and it does, while holding the claim
+    itself. The task is then claimed and not running until the claim
+    expires, which is the worst outcome available here.
+
+    So the question is not "is this task claimed" but "is it claimed by
+    the execution now asking", and that needs a finer identity than the
+    build. Two attempts *of the same build* are legitimately distinct --
+    a retried task gets a new container -- so comparing build ids alone
+    would start granting real double-claims, which is the thing the claim
+    exists to prevent.
+
+    ``(executor, executor_ref)`` is what separates them: a retry repeats
+    the pair (same request, same payload), a genuine second attempt
+    carries the new execution's own. So all of build, executor and ref
+    must match, and **a request without a ref is always refused** -- with
+    nothing to compare, a retry and a second attempt are
+    indistinguishable, and the safe answer to "I cannot tell" is the one
+    that never double-claims.
+
+    **The pair, not the ref.** A ref is backend-specific -- a Modal
+    function call id, a pod name, a local run counter -- so two backends
+    can mint the same string without it meaning the same execution.
+    Comparing the ref alone would let a start from a *different* executor
+    that happened to reuse the string be read as the holder and granted a
+    second claim, which is the one thing this endpoint exists to prevent.
+    The pair is also how the rest of the system reads these columns:
+    ``DetachedHandle`` records both so "a ref is only handed back to the
+    backend that created it", and ``_latest_started_execution`` above
+    keys on the backend for the same reason.
+    """
+    if db_task.latest_status_build_id != build_id:
+        return False
+    asking = extra_metadata or {}
+    asking_ref = asking.get("executor_ref")
+    if asking_ref is None:
+        return False
+    return (
+        db_task.latest_executor_ref == asking_ref
+        and db_task.latest_executor == asking.get("executor")
+    )
+
+
 async def _create_task_event(
     build_id: UUID,
     task_id: str,
@@ -653,7 +703,9 @@ async def _create_task_event(
         # re-claim IS the healing mechanism (see services.claims); nothing
         # has to release the old claim first, and there is nothing to
         # release it *with* across builds.
-        if claim_is_live(db_task):
+        if claim_is_live(db_task) and not _claim_is_this_same_execution(
+            db_task, build_id=build_id, extra_metadata=extra_metadata
+        ):
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -3811,8 +3863,9 @@ async def start_task(
             environment's limit rows are locked for the duration of the
             check, serializing concurrent acquires.
         claim: Atomic per-task execution claim: reject the start with
-            **409** when the task already holds a *live* claim (error code
-            ``task_already_running``, echoing the running execution's
+            **409** when *another* execution already holds a live claim
+            (error code ``task_already_running``, echoing the running
+            execution's
             ``executor``/``executor_ref`` so the caller can re-attach, and
             its ``latest_status_expires_at``) or is already COMPLETED
             (``task_already_completed``). The check runs on the
@@ -3822,6 +3875,14 @@ async def start_task(
             slots). A claim whose expiry has passed denies nothing: this
             start takes it over, replacing the previous holder's build,
             executor fields and expiry together.
+
+            Neither does a claim this same execution already holds --
+            same build, same ``executor_ref``. The client retries a POST
+            whose answer was lost, and refusing the second delivery would
+            tell a worker that somebody else is running the task it is
+            itself holding. A start with no ``executor_ref`` is refused
+            as before: with nothing to compare, a retry and a second
+            attempt of the same build cannot be told apart.
         claim_ttl_seconds: Lifetime of the claim this start grants, from
             the event's timestamp. Written to
             ``tasks.latest_status_expires_at`` and echoed in the event

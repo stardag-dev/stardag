@@ -127,10 +127,14 @@ _RETRY_CONFIG = Retry(
     # **It can be refused by state its own first attempt created.** This
     # is the harmful kind, because the refusal is indistinguishable from
     # losing a race to somebody else, and standing down is the right
-    # response to that. Two known instances: the scheduler lease, where an
-    # acquire by the owner that already holds it is now granted rather
-    # than refused, and ``/tasks/{id}/start?claim=true``, where a retry is
-    # still refused 409 by its own claim -- tracked, not fixed here.
+    # response to that. Both known instances are now answered: the
+    # scheduler lease grants an acquire by the owner already holding it,
+    # and ``/tasks/{id}/start?claim=true`` grants one by the execution
+    # already holding the claim -- same build *and* same ``executor_ref``,
+    # so a genuine second attempt of the same build is still refused. A
+    # start that sends no ``executor_ref`` is refused as before: with
+    # nothing to compare, a retry and a second attempt are the same
+    # request.
     #
     # **It can append a second record.** The event log is append-only and
     # a retried transition writes another row. Mostly visible rather than
@@ -142,10 +146,10 @@ _RETRY_CONFIG = Retry(
     # This is not a complete per-endpoint audit -- there are POSTs here
     # nobody has asked the question of, which is its own open item. The
     # rule for a new one: decide what a second delivery does before
-    # relying on this transport. The entry above that says "still refused"
-    # exists because that question was answered with an assumption the
-    # first time, and the endpoints the assumption was most wrong about
-    # were the ones nobody re-examined.
+    # relying on this transport. Both entries above were found by
+    # accident rather than by asking -- this comment once read "our API
+    # calls are idempotent", and the endpoints that claim was most wrong
+    # about were the ones nobody re-examined.
     allowed_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"],
 )
 
