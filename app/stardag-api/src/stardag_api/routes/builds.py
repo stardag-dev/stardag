@@ -1626,6 +1626,11 @@ async def acquire_build_scheduler_lease(
     the dead holder's owner and expiry together. That takeover is the
     healing mechanism — a tick whose container vanished releases nothing,
     and across containers there is nothing to release it with.
+
+    Nor does a lease the caller already holds: repeating this call is a
+    success, so a client that retried a request whose answer was lost is
+    told the truth rather than that it lost a race to itself. The owner id
+    is per tick, so the grant can never reach a second driver.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     build = await _get_build_for_update(build_id, db, auth)

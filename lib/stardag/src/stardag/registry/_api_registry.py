@@ -116,7 +116,35 @@ def _latch_notify_read_missing(error: Exception) -> bool:
 _RETRY_CONFIG = Retry(
     total=3,
     backoff_factor=0.5,
-    # Also retry POST since our API calls are idempotent (task state transitions)
+    # POST included, and this transport is client-wide, so it covers
+    # *every* POST the registry client makes rather than a chosen few.
+    # That needs saying out loud rather than asserting that "our API calls
+    # are idempotent": they are not, and a retried POST is a second
+    # request for a first one whose answer was lost, not a repeat of a
+    # known outcome. It costs one of two things.
+    #
+    # **It can be refused by state its own first attempt created.** This
+    # is the harmful kind, because the refusal is indistinguishable from
+    # losing a race to somebody else, and standing down is the right
+    # response to that. Two known instances: the scheduler lease, where an
+    # acquire by the owner that already holds it is now granted rather
+    # than refused, and ``/tasks/{id}/start?claim=true``, where a retry is
+    # still refused 409 by its own claim -- tracked, not fixed here.
+    #
+    # **It can append a second record.** The event log is append-only and
+    # a retried transition writes another row. Mostly visible rather than
+    # harmful: the attempt counter that a retry budget spends is computed
+    # over *transitions* (``lag(event_type)`` per task), so a duplicate
+    # consecutive event does not inflate it. Worth knowing when reading a
+    # trail, and worth checking for any new reader that counts rows.
+    #
+    # This is not a complete per-endpoint audit -- there are POSTs here
+    # nobody has asked the question of, which is its own open item. The
+    # rule for a new one: decide what a second delivery does before
+    # relying on this transport. The entry above that says "still refused"
+    # exists because that question was answered with an assumption the
+    # first time, and the endpoints the assumption was most wrong about
+    # were the ones nobody re-examined.
     allowed_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"],
 )
 
