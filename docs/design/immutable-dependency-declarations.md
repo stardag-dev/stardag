@@ -26,6 +26,25 @@ The first two look like the registry failing to keep up with the code. They
 are better understood as the registry correctly recording a promise the user
 broke.
 
+## Why refusal is forced, before any argument about contracts
+
+The rule below is often explained by the contract in the next section. That
+is the wrong order, and it matters: **the refusal follows from append-only
+edges alone.**
+
+Edges are environment-global and nothing removes them. So if a task's
+declared upstreams change and the registry accepts the change, one of two
+things happens, and both are bad: the old edge survives and gates the task
+on an upstream nothing will produce again — the reported bug — or the
+registry retracts it, which deletes the gate a _concurrent_ build was
+relying on and lets that build run the task before its own declared
+upstream is complete. Wrong output. There is no third option, and neither
+needs a claim about what an id means.
+
+So: given append-only, a changed declaration must be refused. Everything
+else here is about making that refusal _right_ rather than merely
+necessary.
+
 ## The contract
 
 > **A task id promises the world state its completion establishes, and that
@@ -54,6 +73,26 @@ _would_ have declared last week. But where a task **has** been registered,
 the registry holds the previous declaration, and it can check.
 
 That is the whole design. Everything below follows.
+
+**Two places where the contract and the mechanism do not line up**, worth
+stating rather than discovering:
+
+- **R5 is a general bypass.** An operator can delete the recorded edges and
+  the same code then registers without a bump, so a task keeps an id that
+  promises state it was not built from. That is defensible as a deliberate
+  human override of a record believed wrong — it is not something a build
+  can do — but it is not something the contract _alone_ would permit.
+- **The check fires only where nothing has been promised.** R4 stops at
+  complete tasks, so the comparison never examines a task whose completion
+  actually established anything; it examines the ones still to be built.
+  Operationally that is the right boundary — the gate only matters for an
+  incomplete task — but it is the opposite of what the contract predicts,
+  and anyone reasoning from the contract will expect the reverse.
+
+If the contract were to be enforced rather than asked for, the honest
+mechanism is to fold the declared upstream ids into the hash, so the id
+moves by construction and the refusal can never fire. That is what
+content-addressed build systems do, and it is filed rather than built here.
 
 ## The rules
 
@@ -103,6 +142,15 @@ If a later build's code _can_ run the inherited set but would not have
 chosen it, the set is run anyway. That is wasted work, silent, and bounded
 by the size of the divergence. There is no cheap defence against it and it
 does not fail the build.
+
+**The one shape where that is not merely wasteful**: if a member of the
+inherited set can no longer be built at all — its source is gone, or it
+fails deterministically — the parent stays gated on it, because nothing
+retracts it and re-yielding does not remove it. The escape is a version
+bump on the parent, which moves every id below it. This is the lenient half
+of the design failing worse than the strict half: a refused static
+declaration gives you a 409 and a remedy at trigger time, while this gives
+you a build that stops. Filed rather than solved.
 
 ### R4 — the comparison stops at completeness
 
@@ -204,15 +252,15 @@ Set against the abandoned design below, the concrete wins:
 
 ## Consequences for the user
 
-| You did this                                    | What happens                                                                                                     |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Changed `requires()`, bumped the version        | Works. New id, new DAG below it, previous assets still loadable by explicit reference.                           |
-| Changed `requires()`, did not bump              | Build rejected at trigger, naming the task, both sets, and the remedy. Nothing is written.                       |
-| Fixed a crash in a task                         | No bump needed — a task that failed produced no target and promised nothing. Redeploy, re-trigger, it completes. |
-| Fixed a task that succeeded with wrong output   | Bump. That is exactly how the bad target and everything downstream of it are invalidated.                        |
-| Changed a dynamic fan-out without bumping       | The previously registered set is inherited and completed; your new set is appended. Wasted work, no failure.     |
-| Registered a DAG you did not want, never ran it | Operator delete (R5), or bump.                                                                                   |
-| Two builds, same code, sharing tasks            | Nothing happens. Identical declarations never differ, and the claim serialises execution as always.              |
+| You did this                                    | What happens                                                                                                                                                                                                                                     |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Changed `requires()`, bumped the version        | Works. New id, new DAG below it, previous assets still loadable by explicit reference.                                                                                                                                                           |
+| Changed `requires()`, did not bump              | Build rejected at trigger, naming the task, both sets, and the remedy. Nothing is written.                                                                                                                                                       |
+| Fixed a crash in a task                         | No bump needed — a task that failed produced no target and promised nothing. Redeploy, re-trigger, it completes.                                                                                                                                 |
+| Fixed a task that succeeded with wrong output   | Bump. That is exactly how the bad target and everything downstream of it are invalidated.                                                                                                                                                        |
+| Changed a dynamic fan-out without bumping       | The previously registered set is inherited and completed; your new set is appended. Usually just wasted work — but if a member of the old set can no longer be built at all, the parent stays gated on it and the only escape is a version bump. |
+| Registered a DAG you did not want, never ran it | Operator delete (R5), or bump.                                                                                                                                                                                                                   |
+| Two builds, same code, sharing tasks            | Nothing happens. Identical declarations never differ, and the claim serialises execution as always.                                                                                                                                              |
 
 ## Compatibility with the claims design
 

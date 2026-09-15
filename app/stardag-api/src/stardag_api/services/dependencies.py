@@ -28,7 +28,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import Task, TaskDependency
+from stardag_api.models import Task, TaskDependency, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,10 @@ class DeclarationChanged:
     """
 
     task_id: str
+    # ``namespace.name`` where the registry knows it. A task id is an opaque
+    # content hash, and a refusal that offers only hashes tells the reader
+    # nothing about which *class* to go and look at.
+    task_label: str | None
     declared: list[str]
     recorded: list[str]
 
@@ -109,6 +113,24 @@ async def find_changed_declaration(
         recorded_by_downstream[downstream_pk].add(upstream_task_id)
 
     for task, declared in declarations:
+        # A completed task is never compared, and this is a *server-side*
+        # rule rather than something the caller can be trusted to observe.
+        #
+        # Every engine here already declines to declare for a task it
+        # pruned at, so in principle this is unreachable. In practice the
+        # compatibility case that actually occurs is an **old SDK against a
+        # new API** (``sdk_compat``): the hosted service upgrades first, and
+        # an older SDK re-derives ``requires()`` for every task in the
+        # chunk, complete ones included. Without this skip, upgrading the
+        # server would start refusing those callers' builds over tasks
+        # nobody is going to build — with a remedy (bump the version) that
+        # rebuilds the whole downstream cone.
+        #
+        # It is also right on its own terms. A complete task gates nothing,
+        # plan closure prunes at one, and nothing will schedule it; there is
+        # no work for a refusal to protect.
+        if task.latest_status == TaskStatus.COMPLETED:
+            continue
         recorded = recorded_by_downstream[task.id]
         # A task nobody has declared for is being declared for the first
         # time, which contradicts nothing. The flag is what makes that
@@ -127,10 +149,17 @@ async def find_changed_declaration(
             )
             return DeclarationChanged(
                 task_id=task.task_id,
+                task_label=_label(task),
                 declared=sorted(set(declared)),
                 recorded=sorted(recorded),
             )
     return None
+
+
+def _label(task: Task) -> str | None:
+    """``namespace.name``, or None for a row that carries neither."""
+    parts = [p for p in (task.task_namespace, task.task_name) if p]
+    return ".".join(parts) or None
 
 
 def declaration_changed_message(changed: DeclarationChanged) -> str:
@@ -146,8 +175,13 @@ def declaration_changed_message(changed: DeclarationChanged) -> str:
         changes.append(f"no longer requires {', '.join(changed.dropped)}")
     if changed.added:
         changes.append(f"now requires {', '.join(changed.added)}")
+    named = (
+        f"Task {changed.task_label} ({changed.task_id})"
+        if changed.task_label
+        else f"Task {changed.task_id}"
+    )
     return (
-        f"Task {changed.task_id} declares different static dependencies than "
+        f"{named} declares different static dependencies than "
         f"the ones recorded for it: it {' and '.join(changes)}.\n"
         f"\n"
         f"  recorded: {', '.join(changed.recorded) or '(none)'}\n"
@@ -158,8 +192,4 @@ def declaration_changed_message(changed: DeclarationChanged) -> str:
         f"requires has to change its id. Bump the task's __version__, or "
         f"make the difference a parameter that counts towards the hash, and "
         f"trigger again.\n"
-        f"\n"
-        f"If the recorded dependencies are the ones that are wrong — a DAG "
-        f"registered by mistake, or by code that no longer exists — an "
-        f"operator can delete the recorded tasks and edges instead."
     )

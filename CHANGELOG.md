@@ -114,6 +114,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   Existing rows start `false`, so the check only ever gets stricter, and
   only from a task's next declaration onwards.
 
+- **Breaking:** `POST /builds/{id}/tasks/{task_id}/dependencies` no longer
+  accepts `is_dynamic=false`, and returns 400 `static_edge_not_addable`.
+  That route records what an execution _discovered_; a static set is
+  declared in full at registration and is not something to add to — and
+  accepting one here was a way into the static edge set with no declaration
+  ever compared. Every in-repo caller already passes `is_dynamic=true`.
+
 - `TaskCreate.dependency_task_ids` is now `list[str] | None`. A list is an
   authoritative declaration and is compared against the record; **`null` is
   not a declaration** and is compared against nothing. The two meanings

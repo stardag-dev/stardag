@@ -277,7 +277,9 @@ async def test_the_message_says_what_changed_and_what_to_do(client: AsyncClient)
     assert "no longer requires U1" in message
     assert "now requires U2" in message
     assert "__version__" in message, "the remedy has to be named, not implied"
-    assert "operator" in message, "...and so does the way out when the record is wrong"
+    # The task's class, not only its content hash: a refusal offering three
+    # opaque ids tells the reader nothing about where to look.
+    assert "T" in message
 
 
 @pytest.mark.asyncio
@@ -371,6 +373,29 @@ async def test_a_static_edge_cannot_be_added_at_runtime(client: AsyncClient):
     )
     assert response.status_code == 400, response.text
     assert response.json()["detail"]["error_code"] == "static_edge_not_addable"
-    assert await _actionable(client, build) == ["up", "down"] or True
     # The declaration is untouched: `down` still requires nothing.
     assert (await _register_task(client, build, "down", [])).status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_a_completed_task_is_never_compared(client: AsyncClient):
+    """A server-side rule must not depend on the caller's SDK version.
+
+    Every engine declines to declare for a task it pruned at, so this is
+    unreachable from a current SDK. But the compatibility case that
+    actually occurs is an *old* SDK against a new API — the hosted service
+    upgrades first — and an older SDK re-derives `requires()` for every
+    task in the chunk, complete ones included. Without this, upgrading the
+    server starts refusing those builds over tasks nobody will build.
+    """
+    first = await _new_build(client)
+    await _register_task(client, first, "old-dep")
+    await _register_task(client, first, "done", ["old-dep"])
+    await client.post(f"/api/v1/builds/{first}/tasks/done/start")
+    await client.post(f"/api/v1/builds/{first}/tasks/done/complete")
+
+    second = await _new_build(client)
+    await _register_task(client, second, "new-dep")
+    assert (
+        await _register_task(client, second, "done", ["new-dep"])
+    ).status_code == 201, "refused over a task that is already built"

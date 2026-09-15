@@ -2070,3 +2070,101 @@ class TestDiscoveryFailureBuildFail:
         assert registry.build_started_with is not None
         assert registry.build_failed_with == registry.build_started_with
         assert registry.build_completed_with is None
+
+
+class DeclarationRecordingRegistry(NoOpRegistry):
+    """Records what each registration *declared*, per task.
+
+    ``None`` means the registration said nothing about that task's
+    upstreams, which the registry treats as different from declaring it has
+    none — so a test has to be able to tell them apart.
+    """
+
+    def __init__(self) -> None:
+        self.declared: dict[UUID, "list[UUID] | None"] = {}
+
+    def _record(self, tasks, declared_dependencies) -> None:
+        for task in tasks:
+            if declared_dependencies is None:
+                self.declared[task.id] = None
+            elif task.id in declared_dependencies:
+                self.declared[task.id] = [d.id for d in declared_dependencies[task.id]]
+            else:
+                self.declared[task.id] = None
+
+    def task_register(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
+        self._record([task], declared_dependencies)
+
+    def task_register_bulk(
+        self, build_id: UUID, tasks, *, limit_keys=None, declared_dependencies=None
+    ):
+        self._record(tasks, declared_dependencies)
+        return None
+
+    async def task_register_bulk_aio(
+        self, build_id: UUID, tasks, *, limit_keys=None, declared_dependencies=None
+    ):
+        self._record(tasks, declared_dependencies)
+        return None
+
+
+class TestResidentEngineDeclarations:
+    """The resident engines must draw the declaration boundary where the
+    reactive one does.
+
+    The registry treats a declared static set as authoritative and compares
+    it against the record, so "which tasks is this build speaking for?" is
+    not bookkeeping. If the engines disagree, the same DAG under the same
+    code is refused by one and accepted by another.
+    """
+
+    def test_a_complete_task_declares_nothing(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        leaf = SyncOnlyTask(name="seq-decl-leaf")
+        root = SyncOnlyTask(name="seq-decl-root", deps=(leaf,))
+        build_sequential([root], registry=NoOpRegistry())  # make both complete
+
+        registry = DeclarationRecordingRegistry()
+        build_sequential([root], registry=registry)
+
+        assert registry.declared[root.id] is None, (
+            "declared an upstream set for a task it never walked"
+        )
+
+    def test_register_all_walks_a_complete_task_without_declaring_for_it(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """``register_all`` recurses into a complete task's dependencies, so
+        it is the one mode where the prune does not do the work. Walking is
+        still not declaring: the task's promise was kept and this build did
+        not build it."""
+        leaf = SyncOnlyTask(name="seq-regall-leaf")
+        root = SyncOnlyTask(name="seq-regall-root", deps=(leaf,))
+        build_sequential([root], registry=NoOpRegistry())
+
+        registry = DeclarationRecordingRegistry()
+        build_sequential([root], registry=registry, register_all=True)
+
+        assert registry.declared[leaf.id] is None
+        assert registry.declared[root.id] is None, (
+            "register_all declared for a complete task, so the same DAG "
+            "would be refused here and accepted by a reactive build"
+        )
+
+    def test_an_incomplete_task_declares_what_it_requires(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        leaf = SyncOnlyTask(name="seq-decl-fresh-leaf")
+        root = SyncOnlyTask(name="seq-decl-fresh-root", deps=(leaf,))
+
+        registry = DeclarationRecordingRegistry()
+        build_sequential([root], registry=registry)
+
+        assert registry.declared[root.id] == [leaf.id]
+        assert registry.declared[leaf.id] == []

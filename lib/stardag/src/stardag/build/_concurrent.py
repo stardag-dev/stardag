@@ -783,7 +783,13 @@ async def build_aio(
             # first (post-order). TaskGroup waits for all children to
             # finish before this body continues, so all child appends to
             # pending_registrations land before our own append below.
-            declared_deps[task.id] = list(static_deps)
+            # ``register_all`` walks a complete task's dependencies too, but
+            # walking is not declaring. A complete task's promise has been kept;
+            # this build did not build it and has nothing to say about how, in
+            # either mode. Declaring here made the same DAG 409 in a resident
+            # build and pass in a reactive one.
+            if not is_complete:
+                declared_deps[task.id] = list(static_deps)
             async with asyncio.TaskGroup() as tg:
                 for dep in static_deps:
                     tg.create_task(discover(dep))

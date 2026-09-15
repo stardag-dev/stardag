@@ -2427,6 +2427,7 @@ def _raise_declaration_changed(changed: DeclarationChanged) -> None:
             "error_code": "dependency_declaration_changed",
             "message": declaration_changed_message(changed),
             "task_id": changed.task_id,
+            "task_label": changed.task_label,
             "declared": changed.declared,
             "recorded": changed.recorded,
         },
@@ -2472,8 +2473,11 @@ async def _reconcile_dependency_edges(
       4. INSERT ... VALUES (...) ON CONFLICT DO NOTHING — bulk edge insert.
 
     Idempotent: ``ON CONFLICT DO NOTHING`` handles concurrent registrations.
-    An edge's ``is_dynamic`` value is set from the *first* successful insert;
-    a later call with a different ``is_dynamic`` value does not overwrite the
+    An edge's ``is_dynamic`` value is set from the first successful insert,
+    **except that a static declaration promotes a row first seen as a
+    yield** — a declaration is the stronger claim, and the immutability
+    check reads only static edges, so leaving it dynamic makes the same
+    declaration read as a change next time. A dynamic call does not overwrite the
     existing row. That's intentional — if a dep is both static and yielded
     dynamically (unusual) we record the first observation as authoritative.
 
@@ -3160,9 +3164,15 @@ async def register_tasks_bulk(
 
     # Every declaration in the batch is compared against the record before
     # any edge or event is written. A difference raises, which rolls the
-    # whole request back — so a refused chunk leaves the registry exactly as
-    # it found it, with no half-registered plan. Tasks that declare nothing
-    # (``None``) are not compared: that is not a declaration.
+    # whole *request* back — so a refused chunk leaves nothing of itself
+    # behind. Note the scope, which is the chunk and not the build:
+    # discovery registers a large DAG in several of these, and chunks
+    # committed before the offending one stay committed. What they left is a
+    # correct record either way — they were uncontested by construction —
+    # but a build refused part-way has registered part of its plan.
+    #
+    # Tasks that declare nothing (``None``) are not compared: that is not a
+    # declaration.
     changed = await find_changed_declaration(
         db,
         declarations=[
@@ -3712,7 +3722,9 @@ async def add_task_dependencies(
 
     Creates phantom upstream tasks for unknown ``upstream_task_ids`` and
     inserts edges idempotently (``ON CONFLICT DO NOTHING``). The first write
-    of a given edge sets ``is_dynamic``; subsequent writes do not overwrite.
+    of a given edge sets ``is_dynamic``; a later *dynamic* write does not
+    overwrite it, while a static declaration promotes it (see
+    ``TaskDependency.is_dynamic``). This route only records dynamic edges.
 
     Returns:
         ``{"added": <new edges>, "total": <upstream_task_ids length>}``.

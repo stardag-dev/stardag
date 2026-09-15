@@ -57,9 +57,14 @@ class TaskDependency(Base, TimestampMixin):
     # True when this edge was added at runtime because the downstream task
     # yielded the upstream as a dynamic dep. False for edges coming from a
     # task's static ``requires()`` at registration time. An edge that exists
-    # as both static and dynamic (unusual but possible) is stored once with
-    # the FIRST observation; we don't flip from False -> True on later writes
-    # because the initial registration is authoritative.
+    # as both static and dynamic (unusual but possible) resolves to
+    # **static**, whichever was seen first: a static write promotes a row
+    # first recorded as a yield, and a dynamic write never flips it back.
+    #
+    # A declaration is the stronger of the two claims — and the immutability
+    # check in ``services.dependencies`` reads only static edges, so a
+    # declared edge left marked dynamic is invisible to it and the very
+    # same declaration reads as a change on its next registration.
     is_dynamic: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

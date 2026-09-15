@@ -300,7 +300,8 @@ def build_sequential(
         task_count.discovered += 1
 
         # Check if this task is already complete
-        if task.complete():
+        is_done = task.complete()
+        if is_done:
             completion_cache.add(task.id)
             task_count.previously_completed += 1
             previously_completed_tasks.append(task)
@@ -314,7 +315,13 @@ def build_sequential(
         # (post-order), so when we register this task its deps already
         # exist in the API.
         deps = flatten_task_struct(task.requires())
-        declared_deps[task.id] = deps
+        # ``register_all`` walks a complete task's dependencies too, but
+        # walking is not declaring. A complete task's promise has been kept;
+        # this build did not build it and has nothing to say about how, in
+        # either mode. Declaring here made the same DAG 409 in a resident
+        # build and pass in a reactive one.
+        if not is_done:
+            declared_deps[task.id] = deps
         for dep in deps:
             discover(dep)
 
@@ -862,7 +869,8 @@ async def build_sequential_aio(
         task_count.discovered += 1
 
         # Check if this task is already complete
-        if await task.complete_aio():
+        is_done = await task.complete_aio()
+        if is_done:
             completion_cache.add(task.id)
             task_count.previously_completed += 1
             previously_completed_tasks.append(task)
@@ -876,7 +884,13 @@ async def build_sequential_aio(
         # (post-order), so by the time the bulk register call processes
         # this task its deps are already in the array (and thus in the DB).
         deps = flatten_task_struct(task.requires())
-        declared_deps[task.id] = deps
+        # ``register_all`` walks a complete task's dependencies too, but
+        # walking is not declaring. A complete task's promise has been kept;
+        # this build did not build it and has nothing to say about how, in
+        # either mode. Declaring here made the same DAG 409 in a resident
+        # build and pass in a reactive one.
+        if not is_done:
+            declared_deps[task.id] = deps
         for dep in deps:
             await discover(dep)
 
