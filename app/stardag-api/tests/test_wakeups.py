@@ -750,11 +750,23 @@ async def test_the_holder_asking_again_gets_the_full_ttl(client: AsyncClient):
     """
     build_id = await _build(client)
 
-    first = await _lease(client, "POST", build_id, owner_id="tick-1", ttl_seconds=10)
+    await _lease(client, "POST", build_id, owner_id="tick-1", ttl_seconds=10)
+    # Read before the repeat, so the assertion is "at least the full TTL
+    # measured from *before* the server saw the request" -- which the
+    # server's own ``now + ttl`` always satisfies. Asserting only that the
+    # expiry moved forward would pass on an implementation that added a
+    # second and ignored the 600 asked for, which is the behaviour under
+    # test.
+    before = datetime.now(timezone.utc)
     again = await _lease(client, "POST", build_id, owner_id="tick-1", ttl_seconds=600)
 
     assert again["held"] is True
-    assert again["expires_at"] > first["expires_at"]
+    assert datetime.fromisoformat(again["expires_at"]) >= before + timedelta(
+        seconds=600
+    ), (
+        f"the repeat expires at {again['expires_at']}, less than the 600s it "
+        f"asked for measured from {before.isoformat()}"
+    )
 
 
 @pytest.mark.asyncio

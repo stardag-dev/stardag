@@ -116,48 +116,35 @@ def _latch_notify_read_missing(error: Exception) -> bool:
 _RETRY_CONFIG = Retry(
     total=3,
     backoff_factor=0.5,
-    # POST included, which needs saying out loud rather than asserting that
-    # "our API calls are idempotent" -- they are not all idempotent, and a
-    # retried POST is a *second* request for a first one whose answer was
-    # lost, not a repeat of a known outcome. What that costs, per endpoint:
+    # POST included, and this transport is client-wide, so it covers
+    # *every* POST the registry client makes rather than a chosen few.
+    # That needs saying out loud rather than asserting that "our API calls
+    # are idempotent": they are not, and a retried POST is a second
+    # request for a first one whose answer was lost, not a repeat of a
+    # known outcome. It costs one of two things.
     #
-    # - Task registration (``/tasks``, ``/tasks/bulk``) is safe: it
-    #   inserts conflict-tolerantly and reports a re-registration as a
-    #   reference rather than a conflict.
-    # - ``/tasks/{id}/start`` is **not** safe, in two different ways, and
-    #   is the open one. With ``claim=true`` a retry that follows a
-    #   committed first attempt is refused **409 task_already_running** by
-    #   the claim its own first attempt took -- the same shape as the
-    #   lease bug below, and with the worse consequence, since the caller
-    #   concludes another build is running the task and stands down while
-    #   holding the claim itself. Without ``claim`` it is not a no-op
-    #   either: it records a second TASK_STARTED event and refreshes the
-    #   status metadata. Tracked separately; the fix wants a finer
-    #   identity than "the same build" (a retry carries the same
-    #   ``executor_ref``, a genuine second attempt does not).
-    # - The terminal transitions (``/complete``, ``/fail``) are safe: the
-    #   second delivery writes the status the task already holds.
-    # - ``/scheduler-lease`` is safe because an acquire by the owner that
-    #   already holds the lease is granted rather than refused. It was not,
-    #   and the cost of that was a tick told it had lost a race to itself,
-    #   which stopped it driving a build whose lease it held.
-    # - ``/builds/wake-candidates`` degrades rather than breaks: the builds
-    #   in a lost response were stamped as handed out and reach nobody, so
-    #   they wait one hand-out window before being offered again. The
-    #   endpoint is designed for that ("a build whose handed-out spawn
-    #   never happened is offered again once the window has passed").
-    # - ``POST /builds`` can duplicate: a retried create makes a second
-    #   build and the first is orphaned, since only the second id is ever
-    #   returned. Cheap and visible rather than harmful, and the
-    #   alternative -- not retrying it -- turns a lost response into a
-    #   failed build.
+    # **It can be refused by state its own first attempt created.** This
+    # is the harmful kind, because the refusal is indistinguishable from
+    # losing a race to somebody else, and standing down is the right
+    # response to that. Two known instances: the scheduler lease, where an
+    # acquire by the owner that already holds it is now granted rather
+    # than refused, and ``/tasks/{id}/start?claim=true``, where a retry is
+    # still refused 409 by its own claim -- tracked, not fixed here.
     #
-    # The rule when adding an endpoint: decide what a second delivery does
-    # before relying on this list. The entry above that says "not safe" is
-    # there because that question was answered with an assumption the
-    # first time -- this comment used to read "our API calls are
-    # idempotent", and the endpoints it was most wrong about were the ones
-    # nobody re-examined.
+    # **It can append a second record.** The event log is append-only and
+    # a retried transition writes another row. Mostly visible rather than
+    # harmful: the attempt counter that a retry budget spends is computed
+    # over *transitions* (``lag(event_type)`` per task), so a duplicate
+    # consecutive event does not inflate it. Worth knowing when reading a
+    # trail, and worth checking for any new reader that counts rows.
+    #
+    # This is not a complete per-endpoint audit -- there are POSTs here
+    # nobody has asked the question of, which is its own open item. The
+    # rule for a new one: decide what a second delivery does before
+    # relying on this transport. The entry above that says "still refused"
+    # exists because that question was answered with an assumption the
+    # first time, and the endpoints the assumption was most wrong about
+    # were the ones nobody re-examined.
     allowed_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"],
 )
 
