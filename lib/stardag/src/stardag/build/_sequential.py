@@ -238,7 +238,11 @@ def build_sequential(
         if task.id in registered_tasks:
             return
         try:
-            registry.task_register(build_id, task)
+            # Carries the same declaration the walk computed. Re-deriving
+            # ``requires()`` here would let the fallback declare something the
+            # bulk path did not — a different answer for the same task,
+            # depending only on which path registered it.
+            registry.task_register(build_id, task, declared_dependencies=declared_deps)
             registered_tasks.add(task.id)
         except Exception as reg_err:
             handle_registry_error(
@@ -810,7 +814,13 @@ async def build_sequential_aio(
         if task.id in registered_tasks:
             return
         try:
-            await registry.task_register_aio(build_id, task)
+            # Carries the same declaration the walk computed. Re-deriving
+            # ``requires()`` here would let the fallback declare something the
+            # bulk path did not — a different answer for the same task,
+            # depending only on which path registered it.
+            await registry.task_register_aio(
+                build_id, task, declared_dependencies=declared_deps
+            )
             registered_tasks.add(task.id)
         except Exception as reg_err:
             handle_registry_error(

@@ -28,6 +28,7 @@ from typing import (
 from uuid import UUID
 
 from stardag import BaseTask, TaskStruct
+from stardag.exceptions import DependencyDeclarationChangedError
 
 logger = logging.getLogger(__name__)
 
@@ -796,6 +797,11 @@ class DefaultGlobalLockSelector:
 # =============================================================================
 
 
+# Refusals, as opposed to failures: the registry worked and said no. These
+# are never downgraded to a warning — see ``handle_registry_error``.
+_NEVER_WARN = (DependencyDeclarationChangedError,)
+
+
 def handle_registry_error(
     error: Exception,
     message: str,
@@ -803,11 +809,24 @@ def handle_registry_error(
 ) -> None:
     """Handle a registry call failure based on the configured mode.
 
+    **"warn" means "the registry is having trouble", not "the registry said
+    no".** The mode exists so a transient outage does not lose a build that
+    is otherwise fine: the work is real, the bookkeeping can catch up. A
+    refusal is the opposite — the registry is working, it has understood the
+    request, and it has answered. Continuing past one runs the task anyway
+    and materialises output the registry has just said should not be
+    produced under that id.
+
+    So a refusal propagates whatever the mode. There is exactly one today
+    (a changed static dependency declaration) and the list is explicit
+    rather than "any 4xx", because most 4xx from a registry really are
+    bookkeeping the caller can survive without.
+
     Args:
         error: The exception that occurred.
         message: A human-readable message describing what failed.
         on_registry_failure: "warn" to log and continue, "raise" to propagate.
     """
-    if on_registry_failure == "raise":
+    if on_registry_failure == "raise" or isinstance(error, _NEVER_WARN):
         raise error.with_traceback(error.__traceback__)
     logger.warning(f"{message}: {error}")

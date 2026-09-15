@@ -1538,7 +1538,12 @@ async def build_aio(
                 # The claim start 404s on unregistered tasks — retry the
                 # registration first (same warn-mode protection as below).
                 try:
-                    await registry.task_register_aio(build_id, task)
+                    # The declaration the walk computed, not a fresh
+                    # ``requires()``: a retry must not declare something
+                    # the discover-time registration did not.
+                    await registry.task_register_aio(
+                        build_id, task, declared_dependencies=declared_deps
+                    )
                     state.registered = True
                 except Exception as reg_err:
                     handle_registry_error(
@@ -1625,7 +1630,10 @@ async def build_aio(
             if not state.started:
                 if not state.registered:
                     try:
-                        await registry.task_register_aio(build_id, task)
+                        # See above: the walk's declaration, not a fresh one.
+                        await registry.task_register_aio(
+                            build_id, task, declared_dependencies=declared_deps
+                        )
                         state.registered = True
                     except Exception as reg_err:
                         handle_registry_error(

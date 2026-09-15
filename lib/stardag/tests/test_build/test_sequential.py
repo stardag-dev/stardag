@@ -22,6 +22,7 @@ from uuid import UUID
 
 from stardag.artifact import Artifact, MarkdownArtifact
 from stardag.registry import NoOpRegistry, registry_provider
+from stardag.exceptions import DependencyDeclarationChangedError
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.dynamic_deps_dag import (
     DynamicDepsTask,
@@ -2168,3 +2169,48 @@ class TestResidentEngineDeclarations:
 
         assert registry.declared[root.id] == [leaf.id]
         assert registry.declared[leaf.id] == []
+
+
+class RefusingRegistry(NoOpRegistry):
+    """Refuses every registration the way the API refuses a changed
+    declaration."""
+
+    def __init__(self) -> None:
+        self.ran: list[UUID] = []
+
+    def task_register(
+        self, build_id: UUID, task, *, declared_dependencies=None
+    ) -> None:
+        raise DependencyDeclarationChangedError(
+            "declares different static dependencies",
+            task_id=str(task.id),
+            declared=["b"],
+            recorded=["a"],
+        )
+
+    def task_register_bulk(
+        self, build_id: UUID, tasks, *, limit_keys=None, declared_dependencies=None
+    ):
+        self.task_register(build_id, tasks[0])
+
+
+class TestARefusalIsNotAWarning:
+    def test_warn_mode_does_not_swallow_a_declaration_refusal(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """``warn`` exists so a registry *outage* does not lose a build that
+        is otherwise fine. A refusal is the opposite: the registry worked,
+        understood the request and said no.
+
+        Continuing past one runs the task anyway and materialises output
+        under an id the registry has just said must not carry it — which is
+        the contract failing silently, in the mode people run in production
+        precisely because they do not want registry trouble to stop work.
+        """
+        task = SyncOnlyTask(name="refused-under-warn")
+        registry = RefusingRegistry()
+
+        with pytest.raises(DependencyDeclarationChangedError):
+            build_sequential([task], registry=registry, on_registry_failure="warn")
+        assert not task.complete(), "the task ran despite the refusal"
