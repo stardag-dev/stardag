@@ -3344,12 +3344,21 @@ async def register_tasks_bulk(
 ):
     """Register multiple tasks to a build in a single transaction.
 
-    Tasks are processed in array order. With the SDK's post-order discover
-    walk, deps appear earlier in the array than their parents — so when a
-    parent's ``dependency_task_ids`` resolves the API finds existing rows
-    (no phantom-creation in ``_reconcile_dependency_edges``). Within the
-    same transaction ``db.flush()`` makes earlier tasks visible to later
-    SELECTs, so the in-batch ordering carries through correctly.
+    **Rows are created in sorted ``task_id`` order, not array order**, and
+    in one statement: the batch's own tasks together with any upstream
+    they name that nobody has registered yet. Both halves matter. The sort
+    is what lets two callers with overlapping batches wait for each other
+    in one direction only; creating the named upstreams here rather than
+    later is what stops this endpoint holding its batch while it waits for
+    a row another registration is holding. The single-task endpoint
+    follows the same order, and so does the dependency-edge path, which
+    takes its downstream row before it creates anything.
+
+    Array order still decides everything the caller reads back: the
+    per-event timestamps that give ``list_tasks_in_build`` its ordering,
+    and the response list. The SDK's post-order discover walk means deps
+    appear before their parents there, which is why a parent's
+    ``dependency_task_ids`` resolves against rows this call already has.
 
     Sibling-of single-task registration: same TASK_PENDING /
     TASK_REFERENCED event semantics, same phantom-upgrade behaviour for
@@ -3446,9 +3455,16 @@ async def register_tasks_bulk(
     #
     # The upstreams the batch *references* are looked up here too, because
     # anything missing among them has to be created in phase 1's statement
-    # rather than after it -- see the phantom rows below. They are kept out
-    # of the limit estimate: a phantom is a placeholder an edge forced,
-    # not a task anybody registered.
+    # rather than after it -- see the phantom rows below.
+    #
+    # They are kept out of this estimate, which is a statement about the
+    # *pre-check* and not about the quota: a caller is not refused up
+    # front for placeholders an edge forced on it. It is not a claim that
+    # phantoms are free -- the periodic recount behind this limit counts
+    # every task row, ``is_phantom`` included, so they are charged once
+    # the cache refreshes. That inconsistency predates this change (the
+    # reconcile path created phantoms uncounted too) and is tracked
+    # separately; what is new here is only *when* the rows are created.
     batch_ids = [t.task_id for t in tasks_in]
     referenced_upstreams: set[str] = set()
     for t in tasks_in:
