@@ -353,3 +353,89 @@ async def test_bulk_register_keeps_the_lock_order_the_other_writers_use(
         response = await asyncio.wait_for(call, timeout=CALL_TIMEOUT_SECONDS)
 
     assert response.status_code == 201, f"{response.status_code} {response.text}"
+
+
+async def test_the_two_endpoints_create_new_tasks_in_one_order(
+    pg_engine, pg_client
+) -> None:
+    """A dependency and its parent, both new, registered from both sides.
+
+    The endpoints have to agree on the order they create rows in, or they
+    wait on each other. Bulk creates every missing task in sorted
+    ``task_id`` order; the single path used to create *its own* task first
+    and reach the missing upstreams afterwards, through
+    ``_reconcile_dependency_edges``. With a dependency whose id sorts
+    before its parent's, that is a cycle -- bulk holding the dependency
+    and waiting for the parent, the single path holding the parent and
+    waiting for the dependency -- and Postgres resolves it by killing one,
+    which is a 500 on a registration that did nothing wrong.
+
+    **The middle row is what makes this deterministic.** Bulk inserts its
+    rows in one statement, so the window between "holds the dependency"
+    and "wants the parent" is microseconds wide and cannot be aimed at
+    from outside. A third task whose id sorts between the two, held
+    uncommitted by another transaction, parks bulk exactly there: it has
+    the dependency and is waiting, and stays waiting until this test says
+    otherwise. Everything after that is the real interleaving, driven
+    through both real endpoints.
+    """
+    dep = "aaa-dependency"
+    middle = "mmm-parks-the-bulk-call"
+    parent = "zzz-parent"
+
+    build_id = await _new_build(pg_client)
+    other_build_id = await _new_build(pg_client)
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as blocker:
+        await _insert_row_uncommitted(blocker, middle)
+
+        # Parks with the dependency inserted and held, waiting on `middle`.
+        bulk = asyncio.create_task(
+            pg_client.post(
+                f"/api/v1/builds/{build_id}/tasks/bulk",
+                json={
+                    "tasks": [
+                        _task(dep),
+                        _task(middle),
+                        _task(parent, dependency_task_ids=[dep]),
+                    ]
+                },
+            )
+        )
+        await asyncio.sleep(SETTLE_SECONDS)
+        assert not bulk.done(), "the bulk call did not park on the held row"
+
+        # The single path, for the parent, naming the same dependency. It
+        # must not end up holding the parent while waiting for a
+        # dependency the bulk call holds.
+        single = asyncio.create_task(
+            pg_client.post(
+                f"/api/v1/builds/{other_build_id}/tasks",
+                json=_task(parent, dependency_task_ids=[dep]),
+            )
+        )
+        await asyncio.sleep(SETTLE_SECONDS)
+
+        # Release the parking row. Both calls are now free to finish --
+        # unless they are waiting on each other.
+        await blocker.commit()
+
+        single_response = await asyncio.wait_for(single, timeout=CALL_TIMEOUT_SECONDS)
+        bulk_response = await asyncio.wait_for(bulk, timeout=CALL_TIMEOUT_SECONDS)
+
+    assert bulk_response.status_code == 201, (
+        f"bulk: {bulk_response.status_code} {bulk_response.text} -- a "
+        "deadlock here means the two endpoints create rows in orders that "
+        "disagree"
+    )
+    assert single_response.status_code == 201, (
+        f"single: {single_response.status_code} {single_response.text} -- a "
+        "deadlock here means the two endpoints create rows in orders that "
+        "disagree"
+    )
+
+    async with maker() as check:
+        for task_id in (dep, middle, parent):
+            rows = await _rows_for(check, task_id)
+            assert len(rows) == 1, f"{len(rows)} rows for {task_id}"
