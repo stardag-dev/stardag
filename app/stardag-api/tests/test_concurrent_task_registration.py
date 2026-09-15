@@ -416,6 +416,11 @@ async def test_the_two_endpoints_create_new_tasks_in_one_order(
             )
         )
         await asyncio.sleep(SETTLE_SECONDS)
+        assert not single.done(), (
+            "the single call finished before the bulk call was released, so "
+            "the two never overlapped and this test would pass against the "
+            "very ordering it exists to rule out"
+        )
 
         # Release the parking row. Both calls are now free to finish --
         # unless they are waiting on each other.
@@ -439,3 +444,157 @@ async def test_the_two_endpoints_create_new_tasks_in_one_order(
         for task_id in (dep, middle, parent):
             rows = await _rows_for(check, task_id)
             assert len(rows) == 1, f"{len(rows)} rows for {task_id}"
+
+
+async def test_bulk_creates_an_omitted_upstream_with_its_batch_not_after_it(
+    pg_engine, pg_client
+) -> None:
+    """The batch names a dependency it does not carry.
+
+    Bulk used to create such an upstream in the reconcile step's safety
+    hatch, *after* its batch was already inserted and held -- a second
+    creation, later, in an order nothing else shares. That is the same
+    cycle as the single path's, from the other side: bulk holding the
+    parent and waiting for the dependency, the single path holding the
+    dependency and waiting for the parent.
+
+    The parking row sorts *after* the parent here, so bulk gets as far as
+    inserting and holding the parent before it stops. That is what makes
+    the old ordering reachable: with the batch in hand, the only thing
+    left for it to create is the dependency somebody else now holds.
+    """
+    dep = "aaa-omitted-upstream"
+    parent = "zzz-parent"
+    park = "zzzz-parks-the-bulk-call"
+
+    build_id = await _new_build(pg_client)
+    other_build_id = await _new_build(pg_client)
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as blocker:
+        await _insert_row_uncommitted(blocker, park)
+
+        # The dependency is named but not carried by the batch.
+        bulk = asyncio.create_task(
+            pg_client.post(
+                f"/api/v1/builds/{build_id}/tasks/bulk",
+                json={
+                    "tasks": [
+                        _task(parent, dependency_task_ids=[dep]),
+                        _task(park),
+                    ]
+                },
+            )
+        )
+        await asyncio.sleep(SETTLE_SECONDS)
+        assert not bulk.done(), "the bulk call did not park on the held row"
+
+        single = asyncio.create_task(
+            pg_client.post(
+                f"/api/v1/builds/{other_build_id}/tasks",
+                json=_task(parent, dependency_task_ids=[dep]),
+            )
+        )
+        await asyncio.sleep(SETTLE_SECONDS)
+        assert not single.done(), (
+            "the single call finished before the bulk call was released, so "
+            "the two never overlapped"
+        )
+
+        await blocker.commit()
+
+        single_response = await asyncio.wait_for(single, timeout=CALL_TIMEOUT_SECONDS)
+        bulk_response = await asyncio.wait_for(bulk, timeout=CALL_TIMEOUT_SECONDS)
+
+    assert bulk_response.status_code == 201, (
+        f"bulk: {bulk_response.status_code} {bulk_response.text} -- a "
+        "deadlock here means the batch's omitted upstream is still being "
+        "created after the batch rather than with it"
+    )
+    assert single_response.status_code == 201, (
+        f"single: {single_response.status_code} {single_response.text}"
+    )
+
+    async with maker() as check:
+        for task_id in (dep, parent, park):
+            rows = await _rows_for(check, task_id)
+            assert len(rows) == 1, f"{len(rows)} rows for {task_id}"
+
+
+async def test_adding_dependencies_takes_the_downstream_before_it_creates(
+    pg_engine, pg_client
+) -> None:
+    """The third writer, and the one whose cycle runs through a key lock.
+
+    ``POST /tasks/{id}/dependencies`` creates missing upstreams as
+    phantoms and then inserts the edges. The edge insert takes an implicit
+    ``FOR KEY SHARE`` on the downstream row for its foreign key, and that
+    conflicts with a ``FOR UPDATE`` a registration holds -- so this writer
+    could end up holding a phantom while waiting on the downstream, while
+    the registration held the downstream and waited to create that same
+    phantom.
+
+    Nothing about sorting prevents that: the lock it waits on is not a row
+    it names, it is one the foreign key names for it. What prevents it is
+    taking the downstream *first*, which is the order the registration
+    endpoints already follow.
+
+    The parking row sorts before the upstream, so the registration stops
+    with the downstream held and the upstream not yet created -- which is
+    precisely the window this writer used to walk into.
+    """
+    downstream = "ddd-downstream"
+    park = "aaa-parks-the-registration"
+    upstream = "xxx-upstream"
+
+    build_id = await _new_build(pg_client)
+    other_build_id = await _new_build(pg_client)
+
+    # The downstream exists and is committed, so the registration below
+    # locks it rather than creating it.
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as setup:
+        await _insert_row_uncommitted(setup, downstream)
+        await setup.commit()
+
+    async with maker() as blocker:
+        await _insert_row_uncommitted(blocker, park)
+
+        registration = asyncio.create_task(
+            pg_client.post(
+                f"/api/v1/builds/{build_id}/tasks",
+                json=_task(downstream, dependency_task_ids=[park, upstream]),
+            )
+        )
+        await asyncio.sleep(SETTLE_SECONDS)
+        assert not registration.done(), "the registration did not park on the held row"
+
+        adding = asyncio.create_task(
+            pg_client.post(
+                f"/api/v1/builds/{other_build_id}/tasks/{downstream}/dependencies",
+                json={"upstream_task_ids": [upstream], "is_dynamic": True},
+            )
+        )
+        await asyncio.sleep(SETTLE_SECONDS)
+
+        await blocker.commit()
+
+        adding_response = await asyncio.wait_for(adding, timeout=CALL_TIMEOUT_SECONDS)
+        registration_response = await asyncio.wait_for(
+            registration, timeout=CALL_TIMEOUT_SECONDS
+        )
+
+    assert registration_response.status_code == 201, (
+        f"registration: {registration_response.status_code} "
+        f"{registration_response.text}"
+    )
+    assert adding_response.status_code == 200, (
+        f"adding dependencies: {adding_response.status_code} "
+        f"{adding_response.text} -- a deadlock here means this writer "
+        "creates rows before taking the downstream it is about to "
+        "reference"
+    )
+
+    async with maker() as check:
+        rows = await _rows_for(check, upstream)
+        assert len(rows) == 1, f"{len(rows)} rows for {upstream}"

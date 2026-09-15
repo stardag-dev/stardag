@@ -2511,6 +2511,21 @@ async def _reconcile_dependency_edges(
     # keeps us idempotent under concurrent registrations of the same id.
     missing_ids = [tid for tid in requested_ids if tid not in task_pk_by_task_id]
     if missing_ids:
+        # Lock the downstream row before creating anything, which is the
+        # order every writer here follows: lock what exists, then create
+        # what does not.
+        #
+        # Not decoration. The edge insert at the end takes an implicit
+        # ``FOR KEY SHARE`` on this row for its foreign key, and that
+        # conflicts with a ``FOR UPDATE`` somebody else may hold. Without
+        # this, a caller could insert a phantom, hold it, and then block on
+        # the downstream's key lock -- while the writer holding that row
+        # waits to create the same phantom. Two transactions, opposite
+        # order. Taking the row here means this call is waiting for it
+        # before it holds anything anyone else wants.
+        await db.execute(
+            select(Task.id).where(Task.id == downstream_task_pk).with_for_update()
+        )
         # Sorted for the same reason as every other multi-row insert here:
         # a conflicting row whose inserter has not committed makes this
         # statement wait, so two callers creating overlapping phantoms in
@@ -2714,6 +2729,18 @@ async def register_task(
     # exactly when somebody else got there first.
     task_already_existed = task.task_id not in created_ids
 
+    # Not ``FOR UPDATE``, and the same reasoning as the bulk endpoint:
+    # this row is either one this call created (held by having inserted
+    # it) or one that already existed and was locked above. The remaining
+    # case is a row a concurrent registration created in between, which is
+    # deliberately left unlocked -- taking it here would mean holding the
+    # rows this call inserted while waiting on a row another registration
+    # holds, which is the deadlock this whole change is about.
+    #
+    # What that costs: two callers can race the phantom upgrade below and
+    # the later writer wins. Both write data derived from the same task
+    # id, so they write the same thing; a caller that genuinely disagreed
+    # about a task id's contents would be a different problem than a race.
     result = await db.execute(
         select(Task)
         .where(Task.environment_id == build.environment_id)
@@ -2922,12 +2949,26 @@ async def register_tasks_bulk(
     # the only answer with no window between the asking and the acting --
     # and getting this wrong is what used to turn a shared task into a
     # unique violation and a 500.
+    #
+    # The upstreams the batch *references* are looked up here too, because
+    # anything missing among them has to be created in phase 1's statement
+    # rather than after it -- see the phantom rows below. They are kept out
+    # of the limit estimate: a phantom is a placeholder an edge forced,
+    # not a task anybody registered.
+    batch_ids = [t.task_id for t in tasks_in]
+    referenced_upstreams: set[str] = set()
+    for t in tasks_in:
+        referenced_upstreams.update(t.dependency_task_ids)
+    referenced_upstreams -= set(batch_ids)
+
     existing_task_ids_result = await db.execute(
         select(Task.task_id)
         .where(Task.environment_id == build.environment_id)
-        .where(Task.task_id.in_([t.task_id for t in tasks_in]))
+        .where(Task.task_id.in_([*batch_ids, *referenced_upstreams]))
     )
-    existing_tasks: set[str] = set(existing_task_ids_result.scalars().all())
+    existing_here: set[str] = set(existing_task_ids_result.scalars().all())
+    existing_tasks: set[str] = existing_here & set(batch_ids)
+    missing_upstreams: set[str] = referenced_upstreams - existing_here
     new_task_count_estimate = sum(
         1 for t in tasks_in if t.task_id not in existing_tasks
     )
@@ -2990,18 +3031,26 @@ async def register_tasks_bulk(
     # create while waiting for a row it holds. Two transactions, opposite
     # order, and Postgres resolves it by killing one -- a 500, which is
     # the failure this endpoint is being fixed for.
-    if existing_tasks:
+    if existing_here:
         await db.execute(
             select(Task.id)
             .where(Task.environment_id == build.environment_id)
-            .where(Task.task_id.in_(sorted(existing_tasks)))
+            .where(Task.task_id.in_(sorted(existing_here)))
             .order_by(Task.task_id.asc())
             .with_for_update()
         )
 
+    # Everything this call may have to create, in one statement: the batch
+    # tasks that are not here yet, and any upstream they name that nobody
+    # has registered. The upstreams used to be created *after* the batch,
+    # in the reconcile step's safety hatch -- which is a second, later
+    # creation in an order nothing else shares, and that is precisely the
+    # cycle this change exists to remove. One statement, one order, both
+    # kinds of row.
+    by_id = {t.task_id: t for t in tasks_in}
     to_create = sorted(
-        (t for t in tasks_in if t.task_id not in existing_tasks),
-        key=lambda t: t.task_id,
+        [t.task_id for t in tasks_in if t.task_id not in existing_tasks]
+        + sorted(missing_upstreams)
     )
     if to_create:
         # Sorted, and that is load-bearing now that the insert itself can
@@ -3012,7 +3061,16 @@ async def register_tasks_bulk(
         # where it used to be enough.
         created = await db.execute(
             pg_insert(Task)
-            .values([_row(t) for t in to_create])
+            .values(
+                [
+                    _row(by_id[tid])
+                    if tid in by_id
+                    else phantom_task_row(
+                        tid, environment_id=build.environment_id, now=now
+                    )
+                    for tid in to_create
+                ]
+            )
             .on_conflict_do_nothing(constraint="uq_task_environment_taskid")
             .returning(Task.task_id)
         )
