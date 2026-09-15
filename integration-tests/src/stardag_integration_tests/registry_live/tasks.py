@@ -216,6 +216,7 @@ class Resumable(sd.Task[list[int]]):
             ) from None
         self._save(self.requires().load())
 
+
 class ForkingRoot(sd.Task[int]):
     """One task id, two different `requires()` — a contract violation, staged.
 
