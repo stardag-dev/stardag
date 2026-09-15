@@ -126,14 +126,21 @@ _RETRY_CONFIG = Retry(
     # **It can be refused by state its own first attempt created.** This
     # is the harmful kind, because the refusal is indistinguishable from
     # losing a race to somebody else, and standing down is the right
-    # response to that. Both known instances are now answered: the
-    # scheduler lease grants an acquire by the owner already holding it,
-    # and ``/tasks/{id}/start?claim=true`` grants one by the execution
-    # already holding the claim -- same build *and* same ``executor_ref``,
-    # so a genuine second attempt of the same build is still refused. A
-    # start that sends no ``executor_ref`` is refused as before: with
-    # nothing to compare, a retry and a second attempt are the same
-    # request.
+    # response to that. One instance is answered and one is half-answered:
+    #
+    # The scheduler lease grants an acquire by the owner already holding
+    # it, and that covers every caller, because a tick's owner id travels
+    # on the request.
+    #
+    # ``/tasks/{id}/start?claim=true`` grants one by the execution already
+    # holding the claim -- same build *and* same ``executor_ref`` -- so a
+    # genuine second attempt of the same build is still refused. But **the
+    # claim this SDK takes carries no ref**: it is taken before the worker
+    # is spawned, and the ref is the spawn's own id, so the reactive
+    # engine's claim is exactly the ref-less case the server still refuses.
+    # A retried claim from here therefore still reports a loss to the
+    # worker that won it. Tracked; the fix wants an identity the claim can
+    # carry before it has an execution to name.
     #
     # **It can append a second record.** The event log is append-only and
     # a retried transition writes another row. Mostly visible rather than
