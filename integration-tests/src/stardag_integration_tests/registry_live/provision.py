@@ -354,9 +354,19 @@ def _ensure_modal_environment(name: str) -> None:
     # Losing a race to create it is success, not failure. In CI the two
     # tiers run in parallel and share one environment, so both can find it
     # missing and both try to create it; whichever loses would otherwise
-    # abort a job for having got what it wanted.
+    # abort a job for having got what it wanted. Two pushes to one PR in
+    # quick succession do the same thing, with the second run arriving
+    # while the first is still tearing its environment down.
+    #
+    # Decided by asking again rather than by reading the message. This used
+    # to match the substring "already exists", which Modal does not say —
+    # its wording is "Can not create an environment with the same name or
+    # web label suffix as an existing one" — so the guard did not fire for
+    # the case it was written for, and the job died holding exactly what it
+    # had asked for. An existence check cannot go stale the way a message
+    # can.
     output = ((created.stderr or "") + (created.stdout or "")).strip()
-    if "already exists" in output.lower():
+    if _environment_exists(name):
         print(f"[provision] Modal environment {name!r} was created concurrently")
         return
 

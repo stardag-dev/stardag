@@ -34,6 +34,8 @@ from stardag.build._reactive import (
 from stardag.exceptions import NotFoundError
 from stardag.registry import (
     SchedulerLeaseResult,
+    BuildExecution,
+    BuildExecutions,
     BuildFrontier,
     BuildNotifyResult,
     FrontierExternalBlocker,
@@ -156,6 +158,13 @@ class FakeReactiveRegistry(NoOpRegistry):
         # row predating status denormalisation — not this build's doing
         # either, and with no build to ask about it.
         self.status_build_id: dict[str, UUID | None] = {}
+        # build_id -> task_id -> (executor, ref): the starts each build
+        # recorded, which outlive that build losing the task.
+        self.started_by: dict[UUID, dict[str, tuple[str, str]]] = {}
+        # Starts staged by ``add_task`` rather than simulated call-by-call.
+        # Attributed to whichever build asks, since a test staging a ref is
+        # setting up that build's own past.
+        self.staged_starts: dict[str, tuple[str, str]] = {}
         # task_id -> (namespace, name), echoed on blocker entries.
         self.task_names: dict[str, tuple[str, str]] = {}
         self.blocked_by_external_truncated = False
@@ -176,6 +185,22 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.tick_summary_error: Exception | None = None
         # Set to make the frontier fetch blow up, i.e. crash the tick itself.
         self.frontier_error: Exception | None = None
+        # Set to make every id-based retry fail — a transient registry
+        # error, or a route an older server does not serve.
+        self.retry_by_id_error: Exception | None = None
+        # Set False to emulate a server predating the executions route: the
+        # tick falls back to filtering the frontier itself.
+        self.serves_executions = True
+        # ...and False to emulate one predating the owner on frontier refs,
+        # where the fallback cannot filter by ownership either.
+        self.serves_status_build_id = True
+        self.executions_calls: list[UUID] = []
+        # A transient failure of the executions listing — distinct from
+        # ``serves_executions``, which models a server that lacks the route.
+        self.executions_error: Exception | None = None
+        # Page size of the executions listing, so a test can force the
+        # drain loop the real server's cap makes reachable.
+        self.executions_page_size = 100
 
     # --- test setup helpers ---
 
@@ -190,11 +215,26 @@ class FakeReactiveRegistry(NoOpRegistry):
         expires_at: "datetime | None" = None,
         attempt_count: int | None = None,
         interrupt_count: int = 0,
+        started_by_build: "UUID | None" = None,
     ) -> None:
         self.statuses[task_id] = status
         self.upstreams.setdefault(task_id, set()).update(upstreams or set())
         if executor or executor_ref:
             self.refs[task_id] = (executor, executor_ref)
+        if executor is not None and executor_ref is not None:
+            # Which build *started* this execution, which is a different
+            # question from who holds the task now — and the one the
+            # executions listing answers. ``started_by_build`` names it
+            # explicitly for a neighbour's execution; without it the start
+            # is attributed to whichever build asks, since a test staging a
+            # ref is usually setting up that build's own past.
+            if started_by_build is not None:
+                self.started_by.setdefault(started_by_build, {})[task_id] = (
+                    executor,
+                    executor_ref,
+                )
+            else:
+                self.staged_starts[task_id] = (executor, executor_ref)
         if status_at is not None:
             self.status_at[task_id] = status_at
         if expires_at is not None:
@@ -334,6 +374,26 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.sent_claim_ttls.setdefault(tid, []).append(claim_ttl_seconds)
         self.statuses[tid] = "running"
         self.refs[tid] = (executor, executor_ref)
+        # Per build, because that is what the event log records and what
+        # the executions listing reads. ``refs`` alone is the *current*
+        # execution, which stops being this build's the moment another one
+        # takes the task over.
+        # The retirement rule, modelled: the latest start decides the
+        # backend, and only a ref belonging to *that* backend is still this
+        # build's to stop. Recording only when both fields are present left
+        # an old detached ref in place after a start on another backend, so
+        # the fake offered an execution the real event-log query retires —
+        # and a cleanup test would have cancelled a stale container and
+        # called it a success.
+        mine = self.started_by.setdefault(build_id, {})
+        if executor is None:
+            mine.pop(tid, None)
+        elif executor_ref is not None:
+            mine[tid] = (executor, executor_ref)
+        elif mine.get(tid, (None, None))[0] != executor:
+            # Ref-less start on a different backend: the old ref is retired
+            # and this backend has not named an execution yet.
+            mine.pop(tid, None)
         self.start_metadata[tid] = executor_metadata
         if self.auto_complete:
             # Instant worker: completes and wakes the scheduler.
@@ -433,6 +493,9 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def task_retry_by_id_aio(self, build_id, task_id):
         """Id-based retry — what a tick uses for a blocker it cannot
         reconstruct (it has the id off the frontier, not the object)."""
+        if self.retry_by_id_error is not None:
+            self.calls.append(("retry-failed", task_id))
+            raise self.retry_by_id_error
         self.calls.append(("retry", task_id))
         self._count_event(task_id, kind="other")
         if self.statuses.get(task_id) in _RETRYABLE_STATUSES:
@@ -453,8 +516,27 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.calls.append(("add_roots", ",".join(root_task_ids)))
         self.root_task_ids += [t for t in root_task_ids if t not in self.root_task_ids]
 
-    async def task_cancel_aio(self, build_id, task):
+    async def task_cancel_aio(
+        self, build_id, task, *, if_executor=None, if_executor_ref=None
+    ):
         tid = str(task.id)
+        # Ownership as well as identity, which is what the API's locked
+        # ``held`` check tests. Without the owner comparison the fake would
+        # happily record a cancel against a task a *successor* build now
+        # holds — so a regression that stamps the successor's claim dead
+        # would pass every test here.
+        if if_executor_ref is not None and (
+            self.statuses.get(tid) not in ("running", "interrupted")
+            or self.status_build_id.get(tid, build_id) != build_id
+            or self.refs.get(tid, (None, None)) != (if_executor, if_executor_ref)
+        ):
+            # The server's rule, on the locked row: nothing to revoke under
+            # that execution, so nothing is recorded. Modelled because the
+            # tick's cleanup pass relies on it -- to not stamp a task another
+            # build has since reset, and to not revoke an execution this
+            # build started after the listing was read.
+            self.calls.append(("cancel-skipped", tid))
+            return
         self.calls.append(("cancel", tid))
         self._count_event(tid, kind="other")
         self.statuses[tid] = "cancelled"
@@ -642,6 +724,80 @@ class FakeReactiveRegistry(NoOpRegistry):
             self.lease_on_release()
         return SchedulerLeaseResult(build_id=build_id, held=held)
 
+    async def build_get_executions_aio(
+        self, build_id, *, cursor=None
+    ) -> BuildExecutions:
+        """Mirrors the API: the executions **this build started**, with a ref.
+
+        Read from a per-build record of starts rather than from who holds
+        the task now, because that difference is the entire reason the
+        endpoint exists. A cascading cancel releases the claims this build
+        held so the next build can take those tasks over — and the next
+        build can claim one within seconds, before this build's tick runs.
+        From then on the task row names somebody else, while the container
+        this build started is still going.
+
+        An earlier version of this fake filtered on current ownership
+        (``status_build_id``), which meant it returned *nothing* in exactly
+        that state — so the unit tests could not reach the case the
+        endpoint was built for, and only the live tier caught it. Do not
+        reintroduce that filter.
+
+        CANCELLED joins the live statuses only when the build itself is
+        cancelled — for a running build a cancelled task is an attempt it
+        already abandoned, not a container to chase.
+        """
+        self.executions_calls.append(build_id)
+        if self.executions_error is not None:
+            raise self.executions_error
+        if not self.serves_executions:
+            # FastAPI's own unknown-path 404, which is how the SDK tells
+            # "this server is too old" from "no such build".
+            raise NotFoundError("Not Found", detail="Not Found")
+        # CANCELLED is listed whatever the *build's* status, because the
+        # API does: TASK_CANCELLED is not an execution-end report, so a
+        # task this build cancelled still has a container to stop. Gating
+        # it on the build being cancelled made the fake miss exactly the
+        # state ``test_a_task_this_build_cancelled_is_still_its_to_stop``
+        # is about.
+        statuses = {"running", "interrupted", "cancelled"}
+        executions = []
+        started = {**self.staged_starts, **self.started_by.get(build_id, {})}
+        for tid, (executor, executor_ref) in started.items():
+            status = self.statuses.get(tid)
+            if status not in statuses:
+                continue
+            executions.append(
+                BuildExecution(
+                    task_id=tid,
+                    latest_status=status,
+                    executor=executor,
+                    executor_ref=executor_ref,
+                    latest_status_at=self.status_at.get(tid),
+                )
+            )
+        # Keyset paging, modelled because the tick has to drain it: the
+        # server's answer does not shrink as executions are stopped, so a
+        # caller that re-asks without the cursor gets the same page forever.
+        # Keyed on the task, like the server: the only part of a row that
+        # does not move while a caller pages through it.
+        executions.sort(key=lambda e: e.task_id)
+        start = 0
+        if cursor is not None:
+            start = next(
+                (i + 1 for i, e in enumerate(executions) if e.task_id == cursor),
+                len(executions),
+            )
+        page = executions[start : start + self.executions_page_size]
+        truncated = start + len(page) < len(executions)
+        return BuildExecutions(
+            build_id=build_id,
+            build_status=self.build_status,
+            executions=page,
+            truncated=truncated,
+            next_cursor=page[-1].task_id if truncated and page else None,
+        )
+
     async def build_get_frontier_aio(self, build_id) -> BuildFrontier:
         if self.frontier_error is not None:
             raise self.frontier_error
@@ -654,6 +810,15 @@ class FakeReactiveRegistry(NoOpRegistry):
                 latest_executor=executor,
                 latest_executor_ref=executor_ref,
                 latest_status_at=self.status_at.get(tid),
+                # Absent from status_build_id = this build's own doing,
+                # which is what the API reports for a task this build
+                # started. An explicit None is a row whose owning build is
+                # gone (or a server predating the field).
+                latest_status_build_id=(
+                    self.status_build_id.get(tid, build_id)
+                    if self.serves_status_build_id
+                    else None
+                ),
                 latest_status_expires_at=self.expires_at.get(tid),
                 attempt_count=(
                     self.attempt_count(tid) if self.serves_attempt_counts else None

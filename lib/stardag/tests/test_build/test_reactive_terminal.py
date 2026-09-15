@@ -21,6 +21,7 @@ from stardag.build._reactive import (
     TickSummary,
     _skip_blocked,
 )
+from stardag import BaseTask
 from stardag.exceptions import NotFoundError
 from stardag.registry import (
     NoOpRegistry,
@@ -168,6 +169,293 @@ class TestCancelDynamicDepWindow:
 
         assert summary.terminal_status == "cancelled"
         assert executor.cancelled_refs == ["fc-window"]
+
+
+class TestCancelAuthority:
+    """Whose executions a dying build may stop.
+
+    Authority to revoke is build-scoped. The frontier cannot express that —
+    ``running`` is every RUNNING task in the *plan*, which after plan
+    closure includes tasks another build claimed — so the tick asks the
+    registry which executions are its own.
+    """
+
+    async def test_a_neighbours_execution_is_left_alone(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The reported bug. The shared task is in this build's plan and
+        RUNNING, but under another build: killing it would take out a live
+        worker and release a claim this build never held."""
+        (root,) = _chain("shared-root")
+        registry, executor, store = _setup([root], auto_complete=False)
+        neighbour = uuid4()
+        # Started by the neighbour, not by us: the execution is theirs, and
+        # the listing has to attribute it to them rather than to whoever
+        # happens to ask.
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-theirs",
+            started_by_build=neighbour,
+        )
+        registry.status_build_id[str(root.id)] = neighbour
+        registry.build_status = "cancelled"
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "cancelled"
+        assert summary.cancelled_refs == 0
+        assert executor.cancelled_refs == []
+        assert registry.statuses[str(root.id)] == "running"
+        assert ("cancel", str(root.id)) not in registry.calls
+
+    async def test_a_taken_over_task_is_still_this_builds_to_stop(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The state the executions endpoint exists for, reachable here at
+        last.
+
+        A cascading cancel releases this build's claims so the next build
+        can take those tasks over — and it can, within seconds, long before
+        this build's tick runs. From then on the task row names somebody
+        else while the container this build started is still going. Stopping
+        by current ownership would either miss it or kill the successor.
+
+        Until now the fake filtered its listing on current ownership, so it
+        returned nothing in exactly this state and only the live tier could
+        catch it. That is why this test is here and not only there.
+        """
+        (root,) = _chain("taken-over-root")
+        registry, executor, store = _setup([root], auto_complete=False)
+        mine = uuid4()
+        successor = uuid4()
+        # I started it...
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-mine",
+            started_by_build=mine,
+        )
+        # ...and somebody else now holds the task.
+        registry.status_build_id[str(root.id)] = successor
+        registry.build_status = "cancelled"
+
+        summary = await run_tick_aio(
+            mine,
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert executor.cancelled_refs == ["fc-mine"], (
+            "the container this build started was left running because the "
+            "task now belongs to someone else"
+        )
+        assert summary.cancelled_refs == 1
+
+    async def test_a_cascaded_cancel_still_stops_its_own_containers(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """``builds cancel --cascade`` releases the claims server-side, which
+        takes the task out of both ``running`` and ``actionable`` while its
+        container keeps going. Nothing reached it before this, so the claim
+        was released and the execution was not stopped — which is what let a
+        second build run the same task concurrently."""
+        (root,) = _chain("cascaded-root")
+        registry, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id), status="cancelled", executor="fake", executor_ref="fc-mine"
+        )
+        registry.build_status = "cancelled"
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "cancelled"
+        assert executor.cancelled_refs == ["fc-mine"]
+        # Already CANCELLED in the registry: a second event would say
+        # nothing the cascade has not already recorded.
+        assert ("cancel", str(root.id)) not in registry.calls
+
+    async def test_every_page_of_executions_is_drained(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """One page is not enough, and there is no second chance.
+
+        Stopping an execution records nothing — a cancel is a request, not
+        an end — so the listing does not shrink as this pass works through
+        it. A single call would leave a wide build's tail running with
+        nothing to come back for: a terminal tick does not run again, and a
+        build that is no longer RUNNING is not re-flagged.
+        """
+        tasks: list[BaseTask] = [
+            SyncOnlyTask(name=f"wide-{index}") for index in range(5)
+        ]
+        registry, executor, store = _setup(tasks, auto_complete=False)
+        registry.executions_page_size = 2
+        for index, task in enumerate(tasks):
+            registry.add_task(
+                str(task.id),
+                status="running",
+                executor="fake",
+                executor_ref=f"fc-{index}",
+            )
+        registry.build_status = "cancelled"
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert sorted(executor.cancelled_refs) == [f"fc-{i}" for i in range(5)], (
+            f"the cancel pass stopped only the first page: {executor.cancelled_refs}"
+        )
+
+    async def test_an_execution_that_appears_mid_drain_is_still_stopped(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A terminal build gets no second tick and nothing re-flags it, so
+        anything the drain misses is missed for good. The drain therefore
+        re-lists until nothing new comes back, rather than stopping what one
+        listing happened to contain."""
+        first, second = SyncOnlyTask(name="drain-a"), SyncOnlyTask(name="drain-b")
+        registry, executor, store = _setup([first, second], auto_complete=False)
+        registry.add_task(
+            str(first.id), status="running", executor="fake", executor_ref="fc-a"
+        )
+        registry.build_status = "cancelled"
+
+        # The second execution is recorded while the first listing is being
+        # acted on — the shape a mid-drain start produces.
+        original = registry.build_get_executions_aio
+
+        async def appear_after_first_call(build_id, *, cursor=None):
+            result = await original(build_id, cursor=cursor)
+            if len(registry.executions_calls) == 1:
+                registry.add_task(
+                    str(second.id),
+                    status="running",
+                    executor="fake",
+                    executor_ref="fc-b",
+                )
+            return result
+
+        registry.build_get_executions_aio = appear_after_first_call  # type: ignore[method-assign]
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert sorted(executor.cancelled_refs) == ["fc-a", "fc-b"], (
+            "an execution that appeared while the drain was running was "
+            f"never stopped: {executor.cancelled_refs}"
+        )
+
+    async def test_a_transient_executions_failure_is_not_a_missing_route(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Degrading to the frontier here would be silent and total.
+
+        For a cascaded build the frontier sees CANCELLED tasks and therefore
+        nothing at all — so a transient failure treated as "this server is
+        old" would report nothing to stop, let the tick exit, and leave the
+        containers running with no second chance. It errors out instead,
+        where it is visible and the cancel can be re-issued.
+        """
+        (root,) = _chain("transient-root")
+        registry, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id), status="cancelled", executor="fake", executor_ref="fc-mine"
+        )
+        registry.build_status = "cancelled"
+        registry.executions_error = RuntimeError("registry unavailable")
+
+        with pytest.raises(RuntimeError, match="registry unavailable"):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                task_store=store,
+                config=FAST_TICK,
+            )
+
+        assert executor.cancelled_refs == []
+        # Reported before it propagates, so the failure is on the build's
+        # trail rather than only in a container log.
+        assert registry.reported_tick_summaries[-1]["outcome"] == "error"
+
+    async def test_an_old_server_is_filtered_on_the_frontiers_owner_field(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """No executions route, but the frontier does report who holds each
+        task — so the tick filters it itself rather than giving up."""
+        mine, theirs = SyncOnlyTask(name="mine"), SyncOnlyTask(name="theirs")
+        registry, executor, store = _setup([mine, theirs], auto_complete=False)
+        registry.serves_executions = False
+        for task, ref in ((mine, "fc-mine"), (theirs, "fc-theirs")):
+            registry.add_task(
+                str(task.id), status="running", executor="fake", executor_ref=ref
+            )
+        registry.status_build_id[str(theirs.id)] = uuid4()
+        registry.build_status = "cancelled"
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert executor.cancelled_refs == ["fc-mine"]
+        assert registry.statuses[str(theirs.id)] == "running"
+
+    async def test_a_server_that_cannot_say_who_owns_keeps_the_old_behaviour(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Neither the route nor the owner field. None means "this server
+        cannot say", not "not mine" — reading it as the latter would leave a
+        build against an old registry unable to stop anything at all, which
+        is strictly worse than what it does today."""
+        (root,) = _chain("unknowable-root")
+        registry, executor, store = _setup([root], auto_complete=False)
+        registry.serves_executions = False
+        registry.serves_status_build_id = False
+        registry.add_task(
+            str(root.id), status="running", executor="fake", executor_ref="fc-run"
+        )
+        registry.build_status = "cancelled"
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert executor.cancelled_refs == ["fc-run"]
 
 
 class TestSkipBlockedOnFailure:
@@ -709,11 +997,101 @@ class TestExternalBlockers:
             ),
         )
 
-        # Reset, not failed: the next tick finds it actionable.
+        # Reset, not failed; see ``test_a_reset_blocker_runs_in_the_same_tick``
+        # for the follow-through.
         assert summary.terminal_status is None
         assert ("retry", self.BLOCKER_ID) in registry.calls
         assert registry.statuses[self.BLOCKER_ID] == "pending"
         assert registry.build_error_message is None
+
+    async def test_a_reset_blocker_runs_in_the_same_tick(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Resetting a blocker must not end the pass.
+
+        There is no later tick to pick it up. The registry's wake-up flag
+        deliberately skips the build whose own event caused a change — it is
+        the one that already knows — so a tick that reset a blocker and then
+        lingered would be waiting for news it had already heard, exit on its
+        deadline, and leave the build with nothing running, nothing
+        scheduled, and no flag to be handed out on. Until the watchdog, if
+        one is even deployed.
+
+        Not a theoretical path. It is what a build does whenever a shared
+        task is genuinely left CANCELLED — which only became the common
+        outcome once cancelling a build started stopping its containers
+        instead of letting them run on and complete the task anyway.
+
+        This fixture uses a *real* blocking task, unlike the classification
+        tests above: the point here is that the tick goes on to run it.
+        """
+        blocker, root = _chain("reset-blocker", "reset-blocked-root")
+        registry, executor, store = _setup([blocker, root], auto_complete=False)
+        registry.add_blocking_task(
+            str(blocker.id),
+            blocks={str(root.id)},
+            status="cancelled",
+            in_build=True,
+            attempt_count=0,
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.CONTINUE,
+            ),
+        )
+
+        assert summary.in_build_blockers_reset == 1
+        assert executor.spawned == [blocker.id], (
+            "the reset blocker must be spawned by the pass that reset it: "
+            f"{executor.spawned}"
+        )
+        assert summary.iterations >= 2, (
+            "the tick must re-read the frontier after resetting a blocker, "
+            "not linger on a snapshot it has already invalidated"
+        )
+
+    async def test_a_reset_that_fails_does_not_count_as_progress(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The counter is read as "the frontier changed, act again now".
+
+        So a reset that raised must not increment it. If it did, the tick
+        would loop straight back, re-read the same blocker, fail the same
+        reset and refresh its own linger deadline — spinning for as long as
+        the retry keeps failing, which one transient registry error is
+        enough to start.
+        """
+        _, registry, executor, store = self._blocked_build(
+            blocker_status="cancelled", in_build=True
+        )
+        registry.retry_by_id_error = RuntimeError("registry unavailable")
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.CONTINUE,
+            ),
+        )
+
+        assert summary.in_build_blockers_reset == 0
+        assert ("retry-failed", self.BLOCKER_ID) in registry.calls
+        # One pass, then the linger — not a spin.
+        assert summary.iterations == 1, (
+            "a failed reset sent the tick round the loop again: "
+            f"{summary.iterations} iterations"
+        )
 
     async def test_a_shared_cancelled_blocker_is_reset_once_per_task(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
