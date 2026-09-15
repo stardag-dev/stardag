@@ -121,10 +121,22 @@ _RETRY_CONFIG = Retry(
     # retried POST is a *second* request for a first one whose answer was
     # lost, not a repeat of a known outcome. What that costs, per endpoint:
     #
-    # - Task registration (``/tasks``, ``/tasks/bulk``) and the status
-    #   transitions are safe: registration inserts conflict-tolerantly and
-    #   reports a re-registration as a reference, and a transition to a
-    #   status a task already holds is a no-op.
+    # - Task registration (``/tasks``, ``/tasks/bulk``) is safe: it
+    #   inserts conflict-tolerantly and reports a re-registration as a
+    #   reference rather than a conflict.
+    # - ``/tasks/{id}/start`` is **not** safe, in two different ways, and
+    #   is the open one. With ``claim=true`` a retry that follows a
+    #   committed first attempt is refused **409 task_already_running** by
+    #   the claim its own first attempt took -- the same shape as the
+    #   lease bug below, and with the worse consequence, since the caller
+    #   concludes another build is running the task and stands down while
+    #   holding the claim itself. Without ``claim`` it is not a no-op
+    #   either: it records a second TASK_STARTED event and refreshes the
+    #   status metadata. Tracked separately; the fix wants a finer
+    #   identity than "the same build" (a retry carries the same
+    #   ``executor_ref``, a genuine second attempt does not).
+    # - The terminal transitions (``/complete``, ``/fail``) are safe: the
+    #   second delivery writes the status the task already holds.
     # - ``/scheduler-lease`` is safe because an acquire by the owner that
     #   already holds the lease is granted rather than refused. It was not,
     #   and the cost of that was a tick told it had lost a race to itself,
@@ -141,7 +153,11 @@ _RETRY_CONFIG = Retry(
     #   failed build.
     #
     # The rule when adding an endpoint: decide what a second delivery does
-    # before relying on this list.
+    # before relying on this list. The entry above that says "not safe" is
+    # there because that question was answered with an assumption the
+    # first time -- this comment used to read "our API calls are
+    # idempotent", and the endpoints it was most wrong about were the ones
+    # nobody re-examined.
     allowed_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"],
 )
 
