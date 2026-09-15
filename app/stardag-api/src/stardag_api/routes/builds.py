@@ -2464,17 +2464,21 @@ async def _reconcile_dependency_edges(
     placeholder rows and the next register-with-real-data call upgrades
     them in place.
 
-    Issues two statements when every upstream task already exists, or four
+    Issues two statements when every upstream task already exists, or five
     when missing upstream ids must be created as phantoms — independent of
     N otherwise:
       1. SELECT existing tasks WHERE task_id IN (...).
-      2. (only if any upstream ids were missing) INSERT ... VALUES (...)
+      2. (only if any upstream ids were missing) SELECT the downstream row
+         FOR UPDATE, before creating anything — the lock order every writer
+         here shares, and what stands between this path and a deadlock with
+         a concurrent registration. See the comment at that statement.
+      3. (only if any upstream ids were missing) INSERT ... VALUES (...)
          ON CONFLICT DO NOTHING — bulk phantom insert.
-      3. (only if any upstream ids were missing) SELECT to re-fetch PKs.
+      4. (only if any upstream ids were missing) SELECT to re-fetch PKs.
          Required because ON CONFLICT DO NOTHING + RETURNING only returns
          our own inserted rows; a concurrent caller may have created the
          row first and we still need its PK.
-      4. INSERT ... VALUES (...) ON CONFLICT DO NOTHING — bulk edge insert.
+      5. INSERT ... VALUES (...) ON CONFLICT DO NOTHING — bulk edge insert.
 
     Idempotent: ``ON CONFLICT DO NOTHING`` handles concurrent registrations.
     An edge's ``is_dynamic`` value is set from the *first* successful insert;
@@ -2796,7 +2800,15 @@ async def register_task(
     await db.refresh(db_task)
 
     record_entity_created(auth.workspace_id, "events")
-    if not task_already_existed:
+    # Every row this call inserted, phantoms included -- the same count
+    # the bulk endpoint records, and the same one the periodic recount
+    # behind the limit will find, since that counts task rows without
+    # asking whether they are placeholders. The pre-check estimate
+    # deliberately does not charge for phantoms (see the note there);
+    # this is the cache catching up with what was written, not a second
+    # opinion about the policy. Whether the policy should charge for them
+    # at all is STA-55.
+    for _ in range(len(created_ids)):
         record_entity_created(auth.workspace_id, "tasks")
 
     return TaskResponse(

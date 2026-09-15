@@ -576,6 +576,13 @@ async def test_adding_dependencies_takes_the_downstream_before_it_creates(
             )
         )
         await asyncio.sleep(SETTLE_SECONDS)
+        assert not adding.done(), (
+            "the dependency call finished before the registration was "
+            "released, so it never contended for the downstream and this "
+            "test would pass against the very ordering it exists to rule "
+            "out -- an implementation that creates the phantom first can "
+            "finish early here and still satisfy the 200 below"
+        )
 
         await blocker.commit()
 
