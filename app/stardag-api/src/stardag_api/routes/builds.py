@@ -2478,8 +2478,9 @@ async def _reconcile_dependency_edges(
     yield** — a declaration is the stronger claim, and the immutability
     check reads only static edges, so leaving it dynamic makes the same
     declaration read as a change next time. A dynamic call does not overwrite the
-    existing row. That's intentional — if a dep is both static and yielded
-    dynamically (unusual) we record the first observation as authoritative.
+    existing row. So an edge that is both statically declared and
+    dynamically yielded (unusual) ends up recorded as **static**, whichever
+    was seen first.
 
     Returns the number of edges inserted by this call. On Postgres the
     asyncpg cursor reports an accurate rowcount; on dialects that don't
@@ -3039,19 +3040,29 @@ async def register_tasks_bulk(
     # whatever this call created, and whatever a racing caller created
     # while it did.
     #
-    # No ``FOR UPDATE`` here, and that is the point of the lock above
-    # rather than an omission. The rows that needed locking were locked
-    # before anything was inserted; the rest are rows this call created
-    # (already held, by having inserted them) or rows a racing caller
-    # created a moment ago. The only mutation the latter can attract is a
-    # phantom upgrade, which writes the same task data derived from the
-    # same task_id whoever gets there first -- so two callers racing it
-    # write the same thing, and the UPDATE takes its own row lock anyway.
+    # ``FOR UPDATE``, and it has to be. This read used to need no lock: the
+    # rows that mattered were locked before anything was inserted, and the
+    # only mutation a racing caller's row could attract was a phantom
+    # upgrade, which writes the same task data derived from the same
+    # task_id whoever gets there first — so two callers racing it wrote the
+    # same thing.
+    #
+    # That stopped being true when declarations became immutable. The
+    # comparison below reads ``static_deps_declared`` and the recorded edge
+    # set and then *writes* the flag, so two callers first-registering the
+    # same task can otherwise both observe "never declared for", accept two
+    # different first declarations, and commit the union of their edges —
+    # which is precisely the state the check exists to make impossible.
+    #
+    # Ordered by ``task_id`` like every other multi-row lock here, so it
+    # composes with the pre-insert lock above and with the sorted insert
+    # between them: one order throughout, no cycle.
     batch_rows = await db.execute(
         select(Task)
         .where(Task.environment_id == build.environment_id)
         .where(Task.task_id.in_(all_task_ids))
         .order_by(Task.task_id.asc())
+        .with_for_update()
     )
     db_task_by_task_id: dict[str, Task] = {
         row.task_id: row for row in batch_rows.scalars().all()

@@ -126,9 +126,25 @@ async def find_changed_declaration(
         # nobody is going to build — with a remedy (bump the version) that
         # rebuilds the whole downstream cone.
         #
-        # It is also right on its own terms. A complete task gates nothing,
-        # plan closure prunes at one, and nothing will schedule it; there is
-        # no work for a refusal to protect.
+        # It is also right on its own terms *for a task that really is
+        # complete*: one gates nothing, plan closure prunes at one, and
+        # nothing will schedule it, so there is no work for a refusal to
+        # protect.
+        #
+        # **Known gap, because this reads a sticky status and completeness
+        # is a property of the world.** Delete a target and the row still
+        # says COMPLETED, while discovery — which asks the target — walks
+        # the task and declares for it. The comparison is skipped, so a
+        # changed set is appended and the old edge stays: the task ends up
+        # gated on the union, which is the over-approximation this rule
+        # exists to remove. Not wrong output, but not the self-heal the
+        # design note promises either.
+        #
+        # The clean fix is to gate this shim on the caller's SDK version —
+        # a current SDK never sends a declaration for a task it pruned at,
+        # so it needs no shim, and only an older one does. That needs the
+        # version this behaviour ships in, which is not known while it is
+        # unreleased. Tracked rather than guessed.
         if task.latest_status == TaskStatus.COMPLETED:
             continue
         recorded = recorded_by_downstream[task.id]

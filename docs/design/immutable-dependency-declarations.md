@@ -165,6 +165,16 @@ overlooked. It also self-corrects where it matters — if the task ever
 becomes incomplete again (a retry, a deleted target), the next build walks
 into it and the comparison happens then.
 
+**With one exception, worth knowing before relying on that.** The server
+skips the comparison for a task whose recorded status is COMPLETED, as a
+shim for older SDKs that re-derive `requires()` for tasks they pruned at.
+That status is sticky, while completeness is a property of the world — so
+for a task whose _target_ was deleted, discovery walks it and declares,
+and the server still skips. The result is the accumulated union rather
+than a refusal or a clean replacement. See the comment in
+`services/dependencies.py`; the fix is to gate the shim on the caller's
+SDK version.
+
 ### R5 — retraction is an operator action, never a build's
 
 R2 says no _build_ retracts an edge. There still has to be a way out, for
@@ -172,8 +182,8 @@ the cases where the record is simply wrong: an experiment that registered a
 DAG nobody wants, a `requires()` that was buggy and never ran, an
 environment carrying edges from code that no longer exists.
 
-That is an **explicit operator action**, available from the CLI and the UI,
-taken outside any build: delete registered tasks and edges — optionally only
+That is an **explicit operator action** — _designed here, not yet built_ —
+to be exposed from the CLI and the UI and taken outside any build: delete registered tasks and edges — optionally only
 the incomplete ones, optionally the whole upstream tree of a task. It
 refuses while a live build would be affected, and it is recorded as an event
 so the act is auditable.
@@ -239,8 +249,10 @@ Set against the abandoned design below, the concrete wins:
 - **No temporal reasoning anywhere in the rule.** No "is that build still
   alive", no "has it drained", no "was this edge current when that was
   read". The check compares two sets.
-- **No schema change.** No `superseded_at`, no migration, no partial index,
-  no second predicate on the frontier's hot path.
+- **No _retraction_ machinery.** No `superseded_at`, no partial index,
+  no second predicate on the frontier's hot path. The one column it does
+  add — `tasks.static_deps_declared` — records only _that_ a declaration
+  happened, so an empty one is distinguishable from silence.
 - **Plan closure is unchanged**, and the dynamic half of the design is
   already the behaviour on `main` — append-only edges, closure admitting
   incomplete upstreams into a later build's plan, gating on all recorded
