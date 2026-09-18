@@ -52,6 +52,7 @@ import pytest
 
 from stardag_integration_tests.registry_live._events import (
     describe_events,
+    events_by,
     first_event_at,
     resets_by,
     task_events,
@@ -238,23 +239,21 @@ def test_a_suspended_blocker_is_waited_on_rather_than_reset(
     summaries_b = tick_summaries(build_b)
     assert_trail_complete(build_b, summaries_b)
 
-    # The same conclusion from the ticks' own account of themselves, which
-    # is what an operator would read. Summed over the whole trail rather
-    # than pinned to one tick: the claim is that *no* tick of B ever reset
-    # the blocker, which is both stronger and independent of how many
-    # wake-ups B happened to get.
-    reset_count = sum(s.get("in_build_blockers_reset", 0) for s in summaries_b)
-    assert reset_count == 0, (
-        f"Build B's ticks reset a blocker in its own plan {reset_count} "
-        "time(s). The shared task is the only blocker there, and it was "
-        "not B's to take.\n" + describe(build_b)
-    )
-    waited = sum(s.get("external_blockers_waited", 0) for s in summaries_b)
-    assert waited >= 1, (
-        "No tick of build B ever reported waiting on an external blocker, "
-        "so B never met the shared task as one -- it may have raced past "
-        "the window and scheduled work of its own instead. Nothing above "
-        "this line is meaningful in that case.\n" + describe(build_b)
+    # How B got past the suspended task without resetting it: the edges
+    # A's worker wrote live in the scope both builds share, so when B
+    # stalled it closed its plan over them and admitted the children —
+    # which then appear in its own event log as referenced tasks. That is
+    # the mechanism under test, observed where it leaves a mark.
+    children_seen_by_b = 0
+    for child in shared.children_tasks():
+        child_events = task_events(deployment, child.id, missing_ok=True)
+        if events_by(child_events, build_b):
+            children_seen_by_b += 1
+    assert children_seen_by_b >= 1, (
+        "Build B never admitted any of the suspended task's children into "
+        "its plan, so it did not follow the scope's dynamic edges when it "
+        "stalled -- and if it completed anyway it did so by re-running the "
+        "parent.\n" + describe(build_b)
     )
     # The other half of the precondition, from the registry's clock: the
     # task really did sit suspended for long enough that a build polling
@@ -278,19 +277,18 @@ def test_a_suspended_blocker_is_waited_on_rather_than_reset(
         f"{describe_events(events, A=build_a, B=build_b)}"
     )
 
-    fatal = sum(s.get("external_blockers_fatal", 0) for s in summaries_b)
-    assert fatal == 0, (
-        "Build B treated the suspended task as a fatal blocker. A task "
-        "mid-flight in another build is a wait, not a failure.\n" + describe(build_b)
-    )
-
-    # B never ran a second copy: it waited for A's, then used the output.
-    # Its own spawns are its root alone.
-    spawned_b = sum(s.get("spawned", 0) for s in summaries_b)
-    assert spawned_b == 1, (
-        f"Build B spawned {spawned_b} task(s); it should have spawned only "
-        "its own root, having waited for the suspended task rather than "
-        "starting a second copy of it.\n" + describe(build_b)
+    # B never ran a second copy of the parent: every start recorded on it
+    # is A's. (B may legitimately have started a *child* it admitted, since
+    # the children are in its plan too and the claim decides who runs
+    # them -- that is collaboration, not a re-run of the pre-yield work.)
+    starts_by_b = [
+        e for e in events_by(events, build_b) if e.get("event_type") == "task_started"
+    ]
+    assert not starts_by_b, (
+        "Build B started the suspended parent itself, re-running its "
+        "pre-yield work while build A was progressing the children.\n"
+        f"--- events on the shared task ---\n"
+        f"{describe_events(events, A=build_a, B=build_b)}"
     )
 
 

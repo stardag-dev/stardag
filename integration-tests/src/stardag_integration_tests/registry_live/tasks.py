@@ -122,6 +122,18 @@ class SuspendingParent(sd.Task[list[int]]):
     def requires(self):
         return get_range(limit=self.children, salt=self.salt)
 
+    def children_tasks(self) -> list:
+        """The children ``run`` will yield, computable without running it.
+
+        The indices are ``range(children)`` by construction of the leaf, so
+        a scenario can name the children before the parent has yielded them
+        -- to ask the event log which build touched them.
+        """
+        return [
+            slow(values=self.requires(), seconds=self.child_seconds + index)
+            for index in range(self.children)
+        ]
+
     def run(self):
         import time
 
