@@ -3,7 +3,7 @@
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Annotated, Any, Mapping, Sequence, cast
+from typing import Annotated, Mapping, Sequence, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -68,6 +68,7 @@ from stardag_api.schemas import (
     FrontierExternalBlocker,
     FrontierTaskRef,
     EventResponse,
+    SetBuildScopeRequest,
     SetReactiveMetaRequest,
     StatusTriggeredByUser,
     BulkTaskIdRef,
@@ -150,9 +151,9 @@ def _raise_if_limit_exceeded(error: LimitExceededError | None) -> None:
 # build resume) and the build-create body path.
 _MAX_EXECUTOR_METADATA_BYTES = 2048
 
-# Task statuses the build frontier considers still in play: neither
-# COMPLETED nor a failure terminal, so the build either can act on them or
-# is waiting for someone who can.
+# Task statuses the build frontier reports as actionable when gated open
+# (every upstream in the build's scope complete): the build either can act
+# on them or is waiting for someone who can.
 _FRONTIER_NON_TERMINAL_STATUSES = (
     TaskStatus.PENDING,
     TaskStatus.SUSPENDED,
@@ -162,6 +163,22 @@ _FRONTIER_NON_TERMINAL_STATUSES = (
     # will pick it up. Listed here for the same reason SUSPENDED is: leave
     # it out and the build looks finished while a task still needs running.
     TaskStatus.INTERRUPTED,
+    # A cancelled task is a *revocation*, not a verdict: the cancel released
+    # its claim and left it in a status nothing schedules. A task in this
+    # build's plan is this build's to run whatever build last touched it, so
+    # a cancelled one whose upstreams are all complete is reported here for
+    # the scheduler to reset within its attempt budget. It used to reach the
+    # scheduler only through the external-blocker diagnostic, which was
+    # computed only once the build had already stalled.
+    TaskStatus.CANCELLED,
+    # A skip is *derived*: it marks a task downstream of something that
+    # failed or was cancelled. Gated open — every upstream complete — the
+    # reason for the skip is gone, and leaving it would wedge the build until
+    # a re-trigger. "Skipped because an upstream will never complete" and
+    # "gated open" are disjoint at any instant, so this cannot oscillate
+    # with the skip-blocked pass. FAILED stays out: a failure is a result,
+    # and results belong to the build's fail_mode.
+    TaskStatus.SKIPPED,
 )
 
 # Cap on BuildFrontierResponse.blocked_by_external. A wide DAG stalled
@@ -381,6 +398,8 @@ async def _build_to_response(
         executor_metadata=build.executor_metadata,
         reactive_app_name=build.reactive_app_name,
         reactive_tick_kwargs=build.reactive_tick_kwargs,
+        scope_key=build.scope_key,
+        build_config=build.build_config,
         status=build.latest_status,
         started_at=build.latest_started_at,
         completed_at=build.latest_completed_at,
@@ -910,8 +929,14 @@ async def create_build(
     # Generate memorable slug
     name = generate_build_slug()
 
-    # Use environment from auth context (API key determines environment)
+    # Use environment from auth context (API key determines environment).
+    # The id is minted here rather than by the flush so the synthetic scope
+    # key can name it — a build that never sets a real scope (an older SDK,
+    # or a reactive build before its bootstrap runs) gets per-build edges
+    # under ``build:<id>``, which nobody else shares.
+    build_pk = generate_uuid7()
     db_build = Build(
+        id=build_pk,
         environment_id=auth.environment_id,
         user_id=auth.user.id if auth.user else None,
         name=name,
@@ -919,9 +944,11 @@ async def create_build(
         commit_hash=build.commit_hash,
         root_task_ids=build.root_task_ids,
         executor_metadata=build.executor_metadata,
+        scope_key=build.scope_key or synthetic_scope_key(build_pk),
+        build_config=build.build_config,
     )
     db.add(db_build)
-    await db.flush()  # Get the build ID
+    await db.flush()
 
     # Create BUILD_STARTED event, and fold it — this is what puts the fresh
     # build in RUNNING with a started_at. No row lock: the build row is not
@@ -1712,8 +1739,16 @@ async def resume_build(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     commit_hash: str | None = None,
     executor_metadata: str | None = None,
+    scope_key: str | None = None,
+    build_config: str | None = None,
 ):
     """Mark an existing build as resumed.
+
+    ``scope_key`` / ``build_config``, when given, must agree with the
+    build's — a resume under other code or other structure config is a new
+    build, not this one, and is refused with 409 ``scope_mismatch``. A
+    build still on its synthetic scope adopts them (see
+    :func:`set_build_scope`).
 
     Called by the SDK when ``sd.build(resume_build_id=...)`` reuses an
     existing build that may have already terminated. Emits a
@@ -1736,6 +1771,7 @@ async def resume_build(
             would lose it.
     """
     parsed_executor_metadata = _parse_executor_metadata_param(executor_metadata)
+    parsed_build_config = _parse_executor_metadata_param(build_config)
 
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -1747,6 +1783,13 @@ async def resume_build(
 
     build = await _get_build_for_update(build_id, db, auth)
 
+    needs_commit = False
+    if scope_key is not None:
+        needs_commit = (
+            _apply_scope(build, scope_key=scope_key, build_config=parsed_build_config)
+            or needs_commit
+        )
+
     has_activity = (
         await db.execute(
             select(Event.id)
@@ -1756,7 +1799,6 @@ async def resume_build(
         )
     ).first() is not None
 
-    needs_commit = False
     if parsed_executor_metadata is not None:
         # Replace the stored trigger metadata even on the no-activity path
         # below, where no BUILD_RESUMED event is recorded (a fresh build
@@ -2123,6 +2165,102 @@ async def set_build_reactive_meta(
     return await _build_to_response(db, build)
 
 
+def synthetic_scope_key(build_id: UUID) -> str:
+    """The scope a build has until something sets a real one: its own id.
+
+    Nobody else shares it, so a build that never sets a scope — an older
+    SDK, a reactive build whose bootstrap has not run yet — gets per-build
+    edges: no caching, always correct.
+    """
+    return f"build:{build_id}"
+
+
+def _is_synthetic_scope(build: Build) -> bool:
+    return build.scope_key == synthetic_scope_key(build.id)
+
+
+def _apply_scope(build: Build, *, scope_key: str, build_config: dict | None) -> bool:
+    """Fix ``build``'s structure scope, set-once. Returns whether it changed.
+
+    Three cases, and the middle one is the whole reason this is not a plain
+    assignment: a synthetic scope is replaced; the *same* real scope is a
+    no-op (an idempotent re-trigger); a *different* real scope is refused,
+    because the edges recorded under the old one were evaluated by other
+    code or other structure config and a build carries one scope for its
+    life. The answer to "I want to run this build under new code" is a new
+    build. ``build_config`` follows the same rule, compared as a whole.
+    """
+    if not _is_synthetic_scope(build) and build.scope_key != scope_key:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "scope_mismatch",
+                "build_id": str(build.id),
+                "scope_key": build.scope_key,
+                "requested_scope_key": scope_key,
+                "message": (
+                    f"Build {build.id} runs under structure scope "
+                    f"{build.scope_key!r}; a resume under {scope_key!r} would "
+                    "mix dependency edges evaluated by different code or "
+                    "different structure config. Start a new build instead."
+                ),
+            },
+        )
+    if (
+        not _is_synthetic_scope(build)
+        and build_config is not None
+        and build.build_config is not None
+        and build.build_config != build_config
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "scope_mismatch",
+                "build_id": str(build.id),
+                "scope_key": build.scope_key,
+                "requested_scope_key": scope_key,
+                "message": (
+                    f"Build {build.id} was triggered with a different "
+                    "build_config; a build has one config for its life. "
+                    "Start a new build instead."
+                ),
+            },
+        )
+    changed = False
+    if build.scope_key != scope_key:
+        build.scope_key = scope_key
+        changed = True
+    if build_config is not None and build.build_config != build_config:
+        build.build_config = build_config
+        changed = True
+    return changed
+
+
+@router.put("/{build_id}/scope", response_model=BuildResponse)
+async def set_build_scope(
+    build_id: UUID,
+    payload: SetBuildScopeRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Fix the build's structure scope and build config, set-once.
+
+    Called by whoever runs discovery — the reactive bootstrap inside the
+    deployment, or the local process of a resident build — **before it
+    registers any edge**, so every edge the build writes carries the scope
+    of the code and config that evaluated it. Idempotent for the same
+    scope; 409 ``scope_mismatch`` for a different one. See
+    :class:`SetBuildScopeRequest`.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    build = await _get_build_for_update(build_id, db, auth)
+    if _apply_scope(
+        build, scope_key=payload.scope_key, build_config=payload.build_config
+    ):
+        await db.commit()
+    return await _build_to_response(db, build)
+
+
 @router.post("/{build_id}/skip-blocked", response_model=SkipBlockedResponse)
 async def skip_blocked_tasks(
     build_id: UUID,
@@ -2140,7 +2278,7 @@ async def skip_blocked_tasks(
     mirroring the resident engine's skip emission.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    await _get_build_checked(build_id, db, auth)
+    build = await _get_build_checked(build_id, db, auth)
 
     build_task_pks = (
         select(Event.task_id)
@@ -2181,7 +2319,12 @@ async def skip_blocked_tasks(
         select(TaskDependency.downstream_task_id.label("id"))
         .join(seeds, TaskDependency.upstream_task_id == seeds.c.id)
         .join(Task, Task.id == seeds.c.id)
-        .where(Task.latest_status.in_(_propagating_statuses))
+        .where(
+            Task.latest_status.in_(_propagating_statuses),
+            # Blockage propagates along the edges this build evaluates its
+            # readiness over — its own scope — and no others.
+            TaskDependency.scope_key == build.scope_key,
+        )
     )
     closure = seeds.union(downstream)
 
@@ -2253,10 +2396,12 @@ async def get_build_frontier(
     counts as such here too (which is exactly what a scheduler wants:
     don't re-run what's done, re-attach to what's running).
 
-    ``blocked_by_external`` reconciles the two scopes this endpoint mixes:
-    dependency gating is environment-global, while ``running`` and
-    ``status_counts`` cover only tasks this build has events for. See
-    :class:`FrontierExternalBlocker`.
+    Dependency gating reads the edges in this build's **structure scope**
+    only; ``running`` and ``status_counts`` cover the tasks this build has
+    events for. When the build looks stalled the plan is re-closed over the
+    scope's edges first, so a gate can never point outside the plan and
+    ``blocked_by_external`` is always empty (kept on the wire for older
+    SDKs).
 
     ``attempt_count`` on every task ref is the one field here that is
     scoped to **this build**, and to its current round, rather than to the
@@ -2295,129 +2440,109 @@ async def get_build_frontier(
     }
 
     upstream = aliased(Task)
+    # Gating reads the edges in THIS build's structure scope only: the
+    # edges evaluated by the code and config this build runs under. An
+    # edge another scope recorded for the same task is invisible here,
+    # which is what lets two code versions run side by side in one
+    # environment without one's structure gating the other. Legacy rows
+    # (NULL scope, predating scopes) gate nothing.
     has_incomplete_upstream = (
         select(TaskDependency.id)
         .join(upstream, TaskDependency.upstream_task_id == upstream.id)
         .where(
             TaskDependency.downstream_task_id == Task.id,
+            TaskDependency.scope_key == build.scope_key,
             upstream.latest_status != TaskStatus.COMPLETED,
         )
         .exists()
     )
-    actionable_tasks = (
-        (
-            await db.execute(
-                select(Task)
-                .where(
-                    Task.id.in_(build_task_ids),
-                    Task.latest_status.in_(_FRONTIER_NON_TERMINAL_STATUSES),
-                    ~has_incomplete_upstream,
-                )
-                .order_by(Task.created_at)
-            )
-        )
-        .scalars()
-        .all()
-    )
 
-    # ALL running tasks in the build (not just actionable ones): a RUNNING
-    # task whose freshly-registered dynamic-dep edges are incomplete drops
-    # out of `actionable` — but cancellation (fail-fast / externally
-    # cancelled build) must still reach it.
-    running_tasks = (
-        (
-            await db.execute(
-                select(Task).where(
-                    Task.id.in_(build_task_ids),
-                    Task.latest_status == TaskStatus.RUNNING,
+    async def _actionable() -> Sequence[Task]:
+        return (
+            (
+                await db.execute(
+                    select(Task)
+                    .where(
+                        Task.id.in_(build_task_ids),
+                        Task.latest_status.in_(_FRONTIER_NON_TERMINAL_STATUSES),
+                        ~has_incomplete_upstream,
+                    )
+                    .order_by(Task.created_at)
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
 
-    # Why a build with nothing actionable and nothing running can still be
-    # perfectly healthy: `has_incomplete_upstream` above joins Task
-    # *globally* (task rows and dependency edges are per-environment), while
-    # `running` / `status_counts` are scoped to this build's task set. An
-    # upstream that some other build left RUNNING therefore gates this
-    # build's downstream tasks while contributing nothing this build can
-    # see — and it need not be in this build's task set at all (a dynamic
-    # dependency registered under an earlier build is the usual case).
-    # Reported explicitly rather than folded into `running`, which must keep
-    # meaning "RUNNING tasks of *this* build" (it is the cancellation
-    # target list).
-    #
-    # Computed ONLY when this build has nothing actionable and nothing
-    # running — i.e. exactly when it looks stuck, which is the only state in
-    # which either consumer asks the question. That is not an optimisation
-    # detail to gloss over: the frontier is re-read on every linger poll
-    # (~3 s per active build), and this query sorts over the build's
-    # dependency edges, so computing it unconditionally would put a
-    # per-edge sort on the hot path of every healthy build. A build that is
-    # visibly progressing does not need to be told what it is waiting on.
-    #
-    # The gate mirrors the SDK's own stuck check (`not actionable and
-    # running == 0`) so the two cannot disagree about when the diagnostic
-    # is meaningful. Consequence for consumers: an EMPTY list means "not
-    # blocked externally, or not stalled" — never read it as proof that no
-    # external blocker exists while the build is still making progress.
-    #
-    # One flat (blocked, blocker) query — resolving blockers per blocked
-    # task would be N+1. It mirrors the join `actionable` already performs,
-    # so the added cost is ~one more pass over this build's dependency
-    # edges (ix_task_dep_downstream), bounded by LIMIT.
+    async def _running() -> Sequence[Task]:
+        # ALL running tasks in the build (not just actionable ones): a
+        # RUNNING task whose freshly-registered dynamic-dep edges are
+        # incomplete drops out of `actionable` — but cancellation (fail-fast
+        # / externally cancelled build) must still reach it.
+        return (
+            (
+                await db.execute(
+                    select(Task).where(
+                        Task.id.in_(build_task_ids),
+                        Task.latest_status == TaskStatus.RUNNING,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    actionable_tasks = await _actionable()
+    running_tasks = await _running()
+
+    if not actionable_tasks and not running_tasks:
+        # The build looks stalled. Before believing it, re-close the plan:
+        # closure runs at registration, and an edge a scope-mate's worker
+        # wrote *after* that — a shared task yielding dynamic children while
+        # this build was already registered — gates a task of this build on
+        # children this build has never admitted. Admitting them now makes
+        # them this build's to run or wait on, through the ordinary
+        # frontier, instead of a diagnostic about a neighbour. Only on the
+        # stalled path, so a healthy build's linger polls pay nothing.
+        admitted = await _close_plan_over_dependencies(
+            db,
+            build_id=build_id,
+            scope_key=build.scope_key,
+            task_pks=list(
+                (
+                    await db.execute(
+                        select(Task.id).where(
+                            Task.id.in_(build_task_ids),
+                            Task.latest_status.in_(_FRONTIER_NON_TERMINAL_STATUSES),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            ),
+        )
+        if admitted:
+            await db.commit()
+            counts_rows = (
+                await db.execute(
+                    select(Task.latest_status, func.count())
+                    .where(Task.id.in_(build_task_ids))
+                    .group_by(Task.latest_status)
+                )
+            ).all()
+            status_counts = {
+                (status.value if isinstance(status, TaskStatus) else str(status)): count
+                for status, count in counts_rows
+            }
+            actionable_tasks = await _actionable()
+            running_tasks = await _running()
+
+    # Always empty since edges became scoped: a gate cannot point outside
+    # the plan (see the stall-time closure above), so a build with nothing
+    # actionable and nothing running is genuinely finished or genuinely
+    # failed. Kept on the wire, empty, for one release — older SDKs read it.
     blocked_by_external: list[FrontierExternalBlocker] = []
     blocked_by_external_truncated = False
-    blocker_rows: Sequence[Any] = []
-    if not actionable_tasks and not running_tasks:
-        blocked = aliased(Task)
-        blocker = aliased(Task)
-        blocker_rows = (
-            await db.execute(
-                select(
-                    blocked.task_id,
-                    blocker.task_id,
-                    blocker.task_namespace,
-                    blocker.task_name,
-                    blocker.latest_status,
-                    blocker.latest_status_at,
-                    blocker.latest_status_expires_at,
-                    blocker.latest_status_build_id,
-                    # Labelled, because these two are the ones read by name
-                    # before the row is destructured below — and a positional
-                    # index into a ten-column select is a silent breakage
-                    # waiting for someone to reorder it.
-                    blocker.id.in_(build_task_ids).label("blocking_in_build"),
-                    blocker.id.label("blocker_pk"),
-                )
-                .select_from(TaskDependency)
-                .join(blocked, TaskDependency.downstream_task_id == blocked.id)
-                .join(blocker, TaskDependency.upstream_task_id == blocker.id)
-                .where(
-                    blocked.id.in_(build_task_ids),
-                    blocked.latest_status.in_(_FRONTIER_NON_TERMINAL_STATUSES),
-                    blocker.latest_status != TaskStatus.COMPLETED,
-                    # Null-safe inequality (renders IS DISTINCT FROM on
-                    # Postgres, IS NOT on SQLite): a blocker with no recorded
-                    # status build — a pre-denormalisation row — is likewise
-                    # not something this build put there.
-                    blocker.latest_status_build_id.is_distinct_from(build_id),
-                )
-                # Registration order, matching `actionable`. Deterministic,
-                # so a truncated list is stable across the polls of one tick.
-                .order_by(blocked.created_at, blocker.created_at)
-                .limit(_MAX_FRONTIER_EXTERNAL_BLOCKERS + 1)
-            )
-        ).all()
-        blocked_by_external_truncated = (
-            len(blocker_rows) > _MAX_FRONTIER_EXTERNAL_BLOCKERS
-        )
-        # Response objects are built lower down, once attempt counts are
-        # known: an in-plan blocker carries its attempts so a scheduler can
-        # apply the same retry budget it applies to anything else.
-        blocker_rows = blocker_rows[:_MAX_FRONTIER_EXTERNAL_BLOCKERS]
 
     root_task_ids: list[str] = list(build.root_task_ids or [])
     roots: list[Task] = []
@@ -2452,12 +2577,6 @@ async def get_build_frontier(
     attempt_task_pks = {t.id for t in actionable_tasks}
     attempt_task_pks.update(t.id for t in running_tasks)
     attempt_task_pks.update(t.id for t in roots)
-    # In-plan blockers too — a scheduler may reset one, and it needs the
-    # budget to decide. Out-of-plan blockers are skipped: they have no
-    # attempts in this build by definition.
-    attempt_task_pks.update(
-        row.blocker_pk for row in blocker_rows if row.blocking_in_build
-    )
     attempt_counts = await get_attempt_counts_in_build(
         db, build_id, list(attempt_task_pks)
     )
@@ -2470,41 +2589,6 @@ async def get_build_frontier(
     interrupt_counts = await get_interrupt_counts_in_build(
         db, build_id, list(attempt_task_pks)
     )
-
-    blocked_by_external = [
-        FrontierExternalBlocker(
-            task_id=blocked_task_id,
-            blocking_task_id=blocking_task_id,
-            blocking_task_namespace=blocking_namespace,
-            blocking_task_name=blocking_name,
-            blocking_status=blocking_status,
-            blocking_status_at=blocking_status_at,
-            # The point of the whole entry: a blocker RUNNING under a build
-            # that died used to be indistinguishable from one running
-            # normally, leaving the consumer to guess from elapsed time.
-            # Past this instant it is provably gone.
-            blocking_status_expires_at=blocking_status_expires_at,
-            blocking_status_build_id=blocking_status_build_id,
-            blocking_in_build=bool(blocking_in_build),
-            # Only meaningful for a blocker in this build's plan; a task
-            # outside it has spent no attempts here.
-            blocking_attempt_count=(
-                attempt_counts.get(blocker_pk, 0) if blocking_in_build else None
-            ),
-        )
-        for (
-            blocked_task_id,
-            blocking_task_id,
-            blocking_namespace,
-            blocking_name,
-            blocking_status,
-            blocking_status_at,
-            blocking_status_expires_at,
-            blocking_status_build_id,
-            blocking_in_build,
-            blocker_pk,
-        ) in blocker_rows
-    ]
 
     def _ref(t: Task) -> FrontierTaskRef:
         return FrontierTaskRef(
@@ -2547,6 +2631,8 @@ async def get_build_frontier(
         blocked_by_external_truncated=blocked_by_external_truncated,
         reactive_app_name=build.reactive_app_name,
         reactive_tick_kwargs=build.reactive_tick_kwargs,
+        scope_key=build.scope_key,
+        build_config=build.build_config,
     )
 
 
@@ -2845,6 +2931,7 @@ async def _close_plan_over_dependencies(
     db: AsyncSession,
     *,
     build_id: UUID,
+    scope_key: str,
     task_pks: Sequence[UUID],
 ) -> int:
     """Admit incomplete upstreams of ``task_pks`` into this build's plan.
@@ -2855,13 +2942,18 @@ async def _close_plan_over_dependencies(
     discovery does when it walks ``task.requires()``.
 
     The gap is that discovery walks *static* edges while gating consults
-    every recorded edge, dynamic ones included. A dynamic edge is written by
-    whichever build first ran the task and then outlives it, environment
-    -global and permanent. A later build that statically discovers the same
-    task therefore inherits the dependency without inheriting the task, and
-    is gated on an upstream it never registered — which no build containing
-    it can schedule, because the only thing that would produce it is the
-    very task being gated. A permanent deadlock.
+    every recorded edge **in the build's structure scope**, dynamic ones
+    included. A dynamic edge is written by whichever scope-mate first ran
+    the task. A later build in the same scope that statically discovers the
+    same task therefore inherits the dependency without inheriting the task,
+    and is gated on an upstream it never registered — which no build
+    containing it can schedule, because the only thing that would produce
+    it is the very task being gated. A permanent deadlock.
+
+    Following those edges is unconditionally correct *because* they are in
+    the same scope: the same code and structure config evaluated them, so
+    they are exactly what this build would have discovered itself. Edges in
+    other scopes are not followed — they belong to other code.
 
     Admitting an upstream is a status-neutral TASK_REFERENCED: nothing about
     the upstream's own state changes, it simply becomes part of this build's
@@ -2908,6 +3000,7 @@ async def _close_plan_over_dependencies(
                     .join(TaskDependency, TaskDependency.upstream_task_id == Task.id)
                     .where(
                         TaskDependency.downstream_task_id.in_(frontier_pks),
+                        TaskDependency.scope_key == scope_key,
                         Task.latest_status != TaskStatus.COMPLETED,
                         Task.id.not_in(in_plan),
                     )
@@ -2984,16 +3077,18 @@ def take_task_rows(rows: list[dict[str, object]]):
     )
 
 
-def phantom_task_row(
+def _lock_probe_row(
     task_id: str, *, environment_id: UUID, now: datetime
 ) -> dict[str, object]:
-    """One placeholder row for a task an edge names but nobody registered.
+    """A row shaped to *conflict* with ``task_id``'s existing row.
 
-    Shared by every writer that may have to create one, so the shape
-    cannot drift between them -- which matters more than it looks, since
-    a phantom is upgraded in place by whatever registers the task for
-    real, and a column one creator sets and another does not is a
-    difference that only shows up in the upgraded row.
+    ``take_task_rows`` locks a row by inserting one that conflicts with it
+    (see there). Every caller has already established that the row exists,
+    so this is never actually inserted; the placeholder values are what the
+    statement needs to be well-formed, nothing more. It replaces the
+    phantom-row shape that used to double as a real placeholder task — a
+    concept that no longer exists: an edge may only name a registered
+    task, and an unknown id is a 400.
     """
     return {
         "id": generate_uuid7(),
@@ -3002,72 +3097,83 @@ def phantom_task_row(
         "task_namespace": "",
         "task_name": task_id[:12],
         "task_data": {},
-        # Spelled out rather than left to the column defaults: a phantom
-        # can share a multi-row INSERT with a real task (``register_task``
-        # creates both in one statement), and such an insert needs every
-        # row to carry the same keys.
         "version": None,
         "output_uri": None,
-        "is_phantom": True,
+        "is_phantom": False,
         "created_at": now,
-        # Match the historical "task with no events shows as PENDING"
-        # semantic so phantoms appear consistently in the UI; the
-        # is_phantom column distinguishes them for consumers that care.
         "latest_status": TaskStatus.PENDING,
         "latest_waiting_for_lock": False,
     }
+
+
+def _refuse_unknown_upstreams(downstream_task_id: str, unknown: set[str]) -> None:
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error_code": "unknown_upstream_task_ids",
+            "task_id": downstream_task_id,
+            "unknown_upstream_task_ids": sorted(unknown),
+            "message": (
+                f"Task {downstream_task_id} declares {len(unknown)} upstream "
+                "dependency(ies) that are not registered in this "
+                "environment. Register dependencies before the tasks that "
+                "declare them (every stardag build engine does), or omit "
+                "dependency_task_ids for a task whose dependencies were not "
+                f"evaluated. First unknown: {sorted(unknown)[0]}"
+            ),
+        },
+    )
 
 
 async def _reconcile_dependency_edges(
     *,
     db: AsyncSession,
     environment_id: UUID,
+    scope_key: str,
     downstream_task_pk: UUID,
     downstream_task_id: str,
     upstream_task_ids: list[str],
     is_dynamic: bool,
 ) -> int:
-    """Create any missing upstream tasks (as phantoms) and dependency edges.
+    """Record dependency edges for ``downstream`` in ``scope_key``.
 
-    **Phantom-creation is a safety hatch, not the happy path.** With the
-    SDK's post-order discover walk (every dep registers before its
-    parent) and within-batch ordering of the bulk-register endpoint, the
-    upstream ``task_id`` lookup at step 1 always finds existing rows in
-    normal operation, so steps 2 + 3 are skipped. Phantoms only appear
-    when:
-      - A build crashes between registering a parent and registering
-        its deps (orphan rows from the failed build).
-      - An out-of-band caller registers edges via the
-        ``/dependencies`` endpoint pointing at not-yet-registered task
-        ids.
-      - A future caller registers in pre-order again.
-    The rest of the system (UI list, DAG view) treats phantoms as
-    placeholder rows and the next register-with-real-data call upgrades
-    them in place.
+    Every upstream must already be registered in the environment; an id
+    with no row is a 400 (``unknown_upstream_task_ids``). It used to become
+    a placeholder row instead, and the placeholder hid the bug: every
+    stardag build engine registers dependencies before the tasks that
+    declare them, so in normal operation this lookup finds every row, and a
+    caller that reaches here with an unknown id has registered out of
+    order. See ``docs/design/scope-keyed-dependency-structure.md``.
 
-    Issues three statements when every upstream task already exists, or
-    five when missing upstream ids must be created as phantoms —
-    independent of N otherwise:
+    Issues three statements, independent of N:
       1. SELECT existing tasks WHERE task_id IN (...).
-      2. SELECT the rows this call will touch FOR UPDATE, in ``task_id``
-         order, before creating or linking anything — the order every
-         writer here shares, and what stands between this path and a
-         deadlock with a concurrent registration. Unconditional, because
-         the edge insert takes foreign-key locks on those rows whether or
-         not a phantom was needed. See the comment at that statement.
-      3. (only if any upstream ids were missing) INSERT ... VALUES (...)
-         ON CONFLICT DO NOTHING — bulk phantom insert.
-      4. (only if any upstream ids were missing) SELECT to re-fetch PKs.
-         Required because ON CONFLICT DO NOTHING + RETURNING only returns
-         our own inserted rows; a concurrent caller may have created the
-         row first and we still need its PK.
-      5. INSERT ... VALUES (...) ON CONFLICT DO NOTHING — bulk edge insert.
+      2. Take the rows this call will touch FOR UPDATE, in ``task_id``
+         order, before linking anything — the order every writer here
+         shares, and what stands between this path and a deadlock with a
+         concurrent registration: the edge insert takes foreign-key locks
+         on both endpoints whether or not this asks for them, in constraint
+         order, while a registration takes them in ``task_id`` order. See
+         ``take_task_rows``.
+      3. INSERT ... VALUES (...) ON CONFLICT DO NOTHING — bulk edge insert.
 
-    Idempotent: ``ON CONFLICT DO NOTHING`` handles concurrent registrations.
-    An edge's ``is_dynamic`` value is set from the *first* successful insert;
-    a later call with a different ``is_dynamic`` value does not overwrite the
-    existing row. That's intentional — if a dep is both static and yielded
-    dynamically (unusual) we record the first observation as authoritative.
+    Idempotent within a scope: the conflict target is
+    ``(scope_key, upstream, downstream)``, so a repeated or concurrent
+    registration of the same edge in the same scope writes nothing. An
+    edge's ``is_dynamic`` is set from the *first* successful insert and
+    never flipped — if a dep is both static and yielded dynamically
+    (unusual) the first observation is authoritative.
+
+    **The impure-structure warning.** Within one scope a task's yielded set
+    is a function of code and config by contract, so a dynamic write that
+    *partially overlaps* what the scope already holds for the task — the
+    same stage of the fan-out, with different membership — means something
+    outside code and config is steering it: an environment variable, the
+    clock, an unsnapshotted table, a field marked ``execution_only`` that is
+    not. The union is recorded anyway (over-gating, never under-gating; the
+    parent stays gated on every child ever recorded until the scope is
+    retired) and the contract is named in the log. A disjoint write is a
+    later yield stage and a subset is a re-yield of a known one; neither is
+    evidence of anything, so neither warns.
 
     Returns the number of edges inserted by this call. On Postgres the
     asyncpg cursor reports an accurate rowcount; on dialects that don't
@@ -3079,12 +3185,9 @@ async def _reconcile_dependency_edges(
 
     # Deduplicate upstream ids so we don't propose the same row twice.
     requested_ids = list(dict.fromkeys(upstream_task_ids))
-    # Single timestamp for every row this call writes — phantoms and edges
-    # share it, which keeps the audit log self-consistent. UUID7 PKs encode
-    # time, so per-row order is still preserved within the batch.
     now = utc_now()
 
-    # 1. Find existing tasks for these task_ids in one round-trip.
+    # 1. Resolve every upstream id to a row — or refuse.
     existing_result = await db.execute(
         select(Task.id, Task.task_id)
         .where(Task.environment_id == environment_id)
@@ -3093,69 +3196,75 @@ async def _reconcile_dependency_edges(
     task_pk_by_task_id: dict[str, UUID] = {
         task_id: pk for pk, task_id in existing_result.all()
     }
+    unknown = set(requested_ids) - set(task_pk_by_task_id)
+    if unknown:
+        _refuse_unknown_upstreams(downstream_task_id, unknown)
 
-    # 2. Take every row this call will touch, in one sorted statement: the
-    # downstream, and each upstream -- created if it is not here, locked if
-    # it is. See ``take_task_rows``.
-    #
-    # **The edge insert takes locks whether or not this asks for them.**
-    # Its foreign keys mean an implicit ``FOR KEY SHARE`` on both endpoints
-    # of every edge, and that conflicts with a ``FOR UPDATE`` a
-    # registration holds. So without this they are still taken, just in an
-    # order nobody chose -- the constraint order -- while a registration
-    # takes them in ``task_id`` order. Pick two ids where those disagree
-    # and each transaction holds one row and waits for the other.
-    #
-    # The downstream rides along as a phantom row it will never become: it
-    # always exists (its caller has already resolved it), so it always
-    # conflicts, and conflicting is how this statement locks it -- in the
-    # same sorted pass as everything else, rather than in a separate
-    # acquisition that could sort after a row this call had already taken.
+    if is_dynamic:
+        recorded = set(
+            (
+                await db.execute(
+                    select(Task.task_id)
+                    .join(TaskDependency, TaskDependency.upstream_task_id == Task.id)
+                    .where(
+                        TaskDependency.downstream_task_id == downstream_task_pk,
+                        TaskDependency.scope_key == scope_key,
+                        TaskDependency.is_dynamic.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        requested = set(requested_ids)
+        if recorded & requested and requested - recorded:
+            logger.warning(
+                "Task %s yielded a dynamic dependency set that differs from "
+                "the one already recorded in structure scope %s (%d "
+                "recorded, %d requested, %d new). Within one scope a task's "
+                "structure must be a function of its parameters, its code "
+                "and its dependencies_only config only; an environment "
+                "variable, the clock or unsnapshotted data steering a "
+                "fan-out breaks that contract. The union is recorded, so "
+                "the task stays gated on every child ever yielded here.",
+                downstream_task_id,
+                scope_key,
+                len(recorded),
+                len(requested),
+                len(requested - recorded),
+            )
+
+    # 2. Take every row this call will touch, in one sorted statement. All
+    # of them exist (step 1 refused otherwise), so every probe conflicts,
+    # and conflicting is how the statement locks a row — in the same sorted
+    # pass as everything else, rather than in a separate acquisition that
+    # could sort after a row this call had already taken.
     await db.execute(
         take_task_rows(
             [
-                phantom_task_row(tid, environment_id=environment_id, now=now)
+                _lock_probe_row(tid, environment_id=environment_id, now=now)
                 for tid in sorted({downstream_task_id, *requested_ids})
             ]
         )
     )
 
-    # 3. Re-read the pks, which now exist for every requested id.
-    missing_ids = [tid for tid in requested_ids if tid not in task_pk_by_task_id]
-    if missing_ids:
-        refetch_result = await db.execute(
-            select(Task.id, Task.task_id)
-            .where(Task.environment_id == environment_id)
-            .where(Task.task_id.in_(missing_ids))
-        )
-        for pk, task_id in refetch_result.all():
-            task_pk_by_task_id[task_id] = pk
-
-    # Every requested id must now resolve to a PK. The KeyError below is
-    # essentially unreachable in practice — under READ COMMITTED the
-    # ON CONFLICT DO NOTHING + re-fetch resolves to a row in every
-    # realistic ordering. The realistic concurrent-delete failure mode is
-    # an FK violation on the edge insert below, not this lookup. The lookup
-    # exists as a defence-in-depth tripwire so a future regression would
-    # surface a clear error rather than silently dropping a dep.
-    edge_rows = []
-    for tid in requested_ids:
-        upstream_pk = task_pk_by_task_id[tid]
-        edge_rows.append(
-            {
-                "id": generate_uuid7(),
-                "upstream_task_id": upstream_pk,
-                "downstream_task_id": downstream_task_pk,
-                "is_dynamic": is_dynamic,
-                "created_at": now,
-            }
-        )
+    edge_rows = [
+        {
+            "id": generate_uuid7(),
+            "upstream_task_id": task_pk_by_task_id[tid],
+            "downstream_task_id": downstream_task_pk,
+            "scope_key": scope_key,
+            "is_dynamic": is_dynamic,
+            "created_at": now,
+        }
+        for tid in requested_ids
+    ]
 
     # 3. Bulk insert the edge rows.
     edge_stmt = (
         pg_insert(TaskDependency)
         .values(edge_rows)
-        .on_conflict_do_nothing(constraint="uq_task_dependency_edge")
+        .on_conflict_do_nothing(constraint="uq_task_dependency_scope_edge")
     )
     result = await db.execute(edge_stmt)
     # CursorResult.rowcount totals across all VALUES rows on Postgres
@@ -3167,6 +3276,68 @@ async def _reconcile_dependency_edges(
     if inserted is None or inserted < 0:
         inserted = 0
     return inserted
+
+
+async def _declared_upstreams(
+    db: AsyncSession,
+    *,
+    environment_id: UUID,
+    tasks: Sequence[TaskCreate],
+    known_task_ids: set[str],
+) -> dict[str, list[str]]:
+    """The upstream ids each task in ``tasks`` declares, all resolvable.
+
+    ``None`` on the wire is "not declaring" and contributes nothing. An id
+    that is neither in ``known_task_ids`` (the batch) nor registered in the
+    environment is a 400 — with one tolerance: unknown upstreams of a task
+    whose *recorded* status is COMPLETED are dropped. Nothing schedules
+    above a complete task, so such an edge would gate nothing; and an SDK
+    predating ``None`` re-derives ``requires()`` for the complete tasks it
+    pruned at, whose upstreams it never registered. Refusing there would
+    break every older client over work that is already done.
+    """
+    declared = {t.task_id: list(t.dependency_task_ids or []) for t in tasks}
+    referenced: set[str] = set()
+    for ids in declared.values():
+        referenced.update(ids)
+    referenced -= known_task_ids
+    if not referenced:
+        return declared
+    found = set(
+        (
+            await db.execute(
+                select(Task.task_id)
+                .where(Task.environment_id == environment_id)
+                .where(Task.task_id.in_(referenced))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    unknown = referenced - found
+    if not unknown:
+        return declared
+    completed = set(
+        (
+            await db.execute(
+                select(Task.task_id)
+                .where(Task.environment_id == environment_id)
+                .where(Task.task_id.in_(list(declared)))
+                .where(Task.latest_status == TaskStatus.COMPLETED)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for task_id, ids in declared.items():
+        missing = set(ids) & unknown
+        if not missing:
+            continue
+        if task_id in completed:
+            declared[task_id] = [i for i in ids if i not in missing]
+            continue
+        _refuse_unknown_upstreams(task_id, missing)
+    return declared
 
 
 @router.post("/{build_id}/tasks", response_model=TaskResponse, status_code=201)
@@ -3185,6 +3356,9 @@ async def register_task(
     "Already exists" includes a task another caller is creating right now:
     two builds that share a task register it at the same moment, and the
     one that loses that race gets a reference rather than an error.
+
+    Every declared upstream must already be registered; see
+    :class:`TaskCreate`. Edges are written in the build's structure scope.
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -3198,7 +3372,7 @@ async def register_task(
     )
     _raise_if_limit_exceeded(
         check_structural_limit(
-            len(task.dependency_task_ids),
+            len(task.dependency_task_ids or []),
             limits_settings.max_dependency_ids_per_task,
             ErrorCode.DEPENDENCY_COUNT_LIMIT,
             "dependency_task_ids",
@@ -3220,37 +3394,23 @@ async def register_task(
             status_code=403, detail="Build does not belong to this environment"
         )
 
-    # Everything this call may have to create: its own task, and any
-    # upstream it names that nobody has registered yet.
-    #
-    # **Created together, in one sorted statement, and that is the point.**
-    # The two registration endpoints have to agree on the order they take
-    # rows in, or they wait on each other: this path used to insert its own
-    # task first and reach the missing upstreams afterwards, through
-    # ``_reconcile_dependency_edges``, while the bulk endpoint inserts
-    # everything in sorted ``task_id`` order. With a dependency whose id
-    # sorts *before* its parent's, that is a cycle -- bulk holding the dep
-    # and waiting for the parent, this call holding the parent and waiting
-    # for the dep -- and Postgres resolves it by killing one, which is a
-    # 500 on a registration that did nothing wrong.
-    #
-    # So this path now does what bulk does: lock what exists, then create
-    # what does not, in sorted id order. ``_reconcile_dependency_edges``
-    # below then finds every upstream present and only writes edges; its
-    # phantom-creation stays as the safety hatch it was, for the callers
-    # that reach it with unknown ids.
-    wanted_ids = {task.task_id, *task.dependency_task_ids}
     existing_result = await db.execute(
         select(Task.task_id)
         .where(Task.environment_id == build.environment_id)
-        .where(Task.task_id.in_(wanted_ids))
+        .where(Task.task_id == task.task_id)
     )
-    existing_ids: set[str] = set(existing_result.scalars().all())
+    task_exists = existing_result.scalar_one_or_none() is not None
+    # Resolve (or refuse) the declared upstreams before touching any row.
+    upstream_ids = (
+        await _declared_upstreams(
+            db,
+            environment_id=build.environment_id,
+            tasks=[task],
+            known_task_ids={task.task_id},
+        )
+    )[task.task_id]
 
-    if task.task_id not in existing_ids:
-        # Check task creation limit only for new tasks. The phantoms below
-        # are deliberately not counted: they are placeholders this call was
-        # forced into by an edge, not tasks anybody registered.
+    if not task_exists:
         _raise_if_limit_exceeded(
             await check_entity_creation_limit(
                 db, auth.workspace_id, "tasks", limits_settings
@@ -3258,11 +3418,14 @@ async def register_task(
         )
 
     now = utc_now()
-    # One statement over everything this call may touch, sorted: the rows
-    # that are not here yet are created, the ones that are are locked. See
-    # ``take_task_rows`` -- doing this as a lock pass followed by a create
-    # pass is two acquisitions, and the second can want a row that sorts
-    # before one the first already took.
+    # One statement over everything this call may touch, sorted: the task's
+    # own row is created if absent and locked if present; every upstream it
+    # names exists (resolved above) and is locked. See ``take_task_rows`` --
+    # doing this as a lock pass followed by a create pass is two
+    # acquisitions, and the second can want a row that sorts before one the
+    # first already took. The bulk endpoint and the dependency-edge path take
+    # rows in the same order, which is what keeps the three from waiting on
+    # each other.
     created = await db.execute(
         take_task_rows(
             [
@@ -3281,8 +3444,8 @@ async def register_task(
                     "latest_waiting_for_lock": False,
                 }
                 if tid == task.task_id
-                else phantom_task_row(tid, environment_id=build.environment_id, now=now)
-                for tid in sorted(wanted_ids)
+                else _lock_probe_row(tid, environment_id=build.environment_id, now=now)
+                for tid in sorted({task.task_id, *upstream_ids})
             ]
         )
     )
@@ -3299,12 +3462,8 @@ async def register_task(
     # case is a row a concurrent registration created in between, which is
     # deliberately left unlocked -- taking it here would mean holding the
     # rows this call inserted while waiting on a row another registration
-    # holds, which is the deadlock this whole change is about.
-    #
-    # What that costs: two callers can race the phantom upgrade below and
-    # the later writer wins. Both write data derived from the same task
-    # id, so they write the same thing; a caller that genuinely disagreed
-    # about a task id's contents would be a different problem than a race.
+    # holds, which is the deadlock this whole change is about. Nothing
+    # below mutates the row, so nothing is lost by not holding it.
     result = await db.execute(
         select(Task)
         .where(Task.environment_id == build.environment_id)
@@ -3324,22 +3483,14 @@ async def register_task(
             ),
         )
 
-    if task_already_existed and db_task.is_phantom:
-        # Upgrade phantom to real task
-        db_task.task_namespace = task.task_namespace
-        db_task.task_name = task.task_name
-        db_task.task_data = task.task_data
-        db_task.version = task.version
-        db_task.output_uri = task.output_uri
-        db_task.is_phantom = False
-
-    # Reconcile static dependency edges (is_dynamic=False).
+    # Static dependency edges (is_dynamic=False), in this build's scope.
     await _reconcile_dependency_edges(
         db=db,
         environment_id=build.environment_id,
+        scope_key=build.scope_key,
         downstream_task_pk=db_task.id,
         downstream_task_id=task.task_id,
-        upstream_task_ids=task.dependency_task_ids,
+        upstream_task_ids=upstream_ids,
         is_dynamic=False,
     )
 
@@ -3355,20 +3506,14 @@ async def register_task(
     )
     await transition_task(db, db_task, event)
 
-    await _close_plan_over_dependencies(db, build_id=build_id, task_pks=[db_task.id])
+    await _close_plan_over_dependencies(
+        db, build_id=build_id, scope_key=build.scope_key, task_pks=[db_task.id]
+    )
 
     await db.commit()
     await db.refresh(db_task)
 
     record_entity_created(auth.workspace_id, "events")
-    # Every row this call inserted, phantoms included -- the same count
-    # the bulk endpoint records, and the same one the periodic recount
-    # behind the limit will find, since that counts task rows without
-    # asking whether they are placeholders. The pre-check estimate
-    # deliberately does not charge for phantoms (see the note there);
-    # this is the cache catching up with what was written, not a second
-    # opinion about the policy. Whether the policy should charge for them
-    # at all is STA-55.
     for _ in range(len(created_ids)):
         record_entity_created(auth.workspace_id, "tasks")
 
@@ -3423,15 +3568,14 @@ async def register_tasks_bulk(
 ):
     """Register multiple tasks to a build in a single transaction.
 
-    **Rows are created in sorted ``task_id`` order, not array order**, and
-    in one statement: the batch's own tasks together with any upstream
-    they name that nobody has registered yet. Both halves matter. The sort
-    is what lets two callers with overlapping batches wait for each other
-    in one direction only; creating the named upstreams here rather than
-    later is what stops this endpoint holding its batch while it waits for
-    a row another registration is holding. The single-task endpoint
-    follows the same order, and so does the dependency-edge path, which
-    takes its downstream row before it creates anything.
+    **Rows are taken in sorted ``task_id`` order, not array order**, and in
+    one statement: the batch's own tasks (created if absent, locked if
+    present) together with every upstream they name (locked; all of them
+    exist, or the call is refused before it writes anything). The sort is
+    what lets two callers with overlapping batches wait for each other in
+    one direction only. The single-task endpoint follows the same order,
+    and so does the dependency-edge path, which takes its downstream row
+    before it links anything.
 
     Array order still decides everything the caller reads back: the
     per-event timestamps that give ``list_tasks_in_build`` its ordering,
@@ -3440,10 +3584,11 @@ async def register_tasks_bulk(
     ``dependency_task_ids`` resolves against rows this call already has.
 
     Sibling-of single-task registration: same TASK_PENDING /
-    TASK_REFERENCED event semantics, same phantom-upgrade behaviour for
-    rows left over from prior failed builds, and the same tolerance of a
-    concurrent registration of the same task: a task another build created
-    a moment ago is a reference, not a conflict.
+    TASK_REFERENCED event semantics, and the same tolerance of a concurrent
+    registration of the same task: a task another build created a moment
+    ago is a reference, not a conflict. Edges are written in the build's
+    structure scope; every declared upstream must be registered (see
+    :class:`TaskCreate`).
     """
     raw_tasks = payload.tasks
 
@@ -3487,7 +3632,7 @@ async def register_tasks_bulk(
         )
         _raise_if_limit_exceeded(
             check_structural_limit(
-                len(t.dependency_task_ids),
+                len(t.dependency_task_ids or []),
                 limits_settings.max_dependency_ids_per_task,
                 ErrorCode.DEPENDENCY_COUNT_LIMIT,
                 "dependency_task_ids",
@@ -3516,6 +3661,21 @@ async def register_tasks_bulk(
         )
     )
 
+    batch_ids = [t.task_id for t in tasks_in]
+    # Resolve (or refuse) every declared upstream before touching a row:
+    # anything the batch names that is neither in the batch nor registered
+    # is a 400, except for complete downstreams (see the helper).
+    declared = await _declared_upstreams(
+        db,
+        environment_id=build.environment_id,
+        tasks=tasks_in,
+        known_task_ids=set(batch_ids),
+    )
+    referenced_upstreams: set[str] = set()
+    for ids in declared.values():
+        referenced_upstreams.update(ids)
+    referenced_upstreams -= set(batch_ids)
+
     # Pre-query which task_ids already exist in this environment so the
     # 24h tasks limit only counts brand-new task creations.
     #
@@ -3531,33 +3691,12 @@ async def register_tasks_bulk(
     # the only answer with no window between the asking and the acting --
     # and getting this wrong is what used to turn a shared task into a
     # unique violation and a 500.
-    #
-    # The upstreams the batch *references* are looked up here too, because
-    # anything missing among them has to be created in phase 1's statement
-    # rather than after it -- see the phantom rows below.
-    #
-    # They are kept out of this estimate, which is a statement about the
-    # *pre-check* and not about the quota: a caller is not refused up
-    # front for placeholders an edge forced on it. It is not a claim that
-    # phantoms are free -- the periodic recount behind this limit counts
-    # every task row, ``is_phantom`` included, so they are charged once
-    # the cache refreshes. That inconsistency predates this change (the
-    # reconcile path created phantoms uncounted too) and is tracked
-    # separately; what is new here is only *when* the rows are created.
-    batch_ids = [t.task_id for t in tasks_in]
-    referenced_upstreams: set[str] = set()
-    for t in tasks_in:
-        referenced_upstreams.update(t.dependency_task_ids)
-    referenced_upstreams -= set(batch_ids)
-
     existing_task_ids_result = await db.execute(
         select(Task.task_id)
         .where(Task.environment_id == build.environment_id)
-        .where(Task.task_id.in_([*batch_ids, *referenced_upstreams]))
+        .where(Task.task_id.in_(batch_ids))
     )
-    existing_tasks: set[str] = set(existing_task_ids_result.scalars().all()) & set(
-        batch_ids
-    )
+    existing_tasks: set[str] = set(existing_task_ids_result.scalars().all())
     new_task_count_estimate = sum(
         1 for t in tasks_in if t.task_id not in existing_tasks
     )
@@ -3572,8 +3711,7 @@ async def register_tasks_bulk(
             )
         )
 
-    # Phase 1: create whatever is not there yet, then load and lock the
-    # whole batch.
+    # Phase 1: create whatever is not there yet, then load the batch.
     #
     # **The creation tolerates a concurrent creator, and has to.** Two
     # builds that share a task register it at the same moment -- which is
@@ -3583,12 +3721,11 @@ async def register_tasks_bulk(
     # dies before it ever reaches the claim. The existence check above
     # cannot prevent it: it is a plain SELECT, and the row it says is
     # absent can be present by the time the INSERT lands. So the conflict
-    # is handled rather than raced for, exactly as the phantom and
-    # dependency-edge inserts below already do.
+    # is handled rather than raced for, exactly as the dependency-edge
+    # insert below already does.
     now = utc_now()
 
     all_task_ids = [t.task_id for t in tasks_in]
-    by_task_id = {t.task_id: t for t in tasks_in}
     created_task_ids: set[str] = set()
 
     def _row(t: TaskCreate) -> dict[str, object]:
@@ -3607,30 +3744,12 @@ async def register_tasks_bulk(
             "latest_waiting_for_lock": False,
         }
 
-    # Lock the rows that already exist, **before** inserting anything, in
-    # sorted task_id order.
-    #
-    # Both halves matter, and the first one is not merely inherited. Every
-    # writer in this file takes the same two steps in the same order --
-    # lock what exists, then create what does not -- and that shared order
-    # is what keeps them from waiting on each other. Locking after the
-    # insert would invert it against ``register_task``, which locks its
-    # task and only then reaches ``_reconcile_dependency_edges`` to create
-    # missing upstreams: this call would hold a row that one is waiting to
-    # create while waiting for a row it holds. Two transactions, opposite
-    # order, and Postgres resolves it by killing one -- a 500, which is
-    # the failure this endpoint is being fixed for.
-
-    # Everything this call may have to create, in one statement: the batch
-    # tasks that are not here yet, and any upstream they name that nobody
-    # has registered. The upstreams used to be created *after* the batch,
-    # in the reconcile step's safety hatch -- which is a second, later
-    # creation in an order nothing else shares, and that is precisely the
-    # cycle this change exists to remove. One statement, one order, both
-    # kinds of row.
+    # Every id this call touches, sorted -- the batch's own rows created if
+    # absent and locked if present, the upstreams it names locked (they all
+    # exist; the resolution above refused otherwise). One statement, one
+    # order, shared with every other writer in this file. See
+    # ``take_task_rows``.
     by_id = {t.task_id: t for t in tasks_in}
-    # Every id this call touches, sorted -- created if absent, locked if
-    # present. See ``take_task_rows``.
     to_take = sorted({*batch_ids, *referenced_upstreams})
     if to_take:
         created = await db.execute(
@@ -3638,7 +3757,7 @@ async def register_tasks_bulk(
                 [
                     _row(by_id[tid])
                     if tid in by_id
-                    else phantom_task_row(
+                    else _lock_probe_row(
                         tid, environment_id=build.environment_id, now=now
                     )
                     for tid in to_take
@@ -3660,10 +3779,7 @@ async def register_tasks_bulk(
     # rather than an omission. The rows that needed locking were locked
     # before anything was inserted; the rest are rows this call created
     # (already held, by having inserted them) or rows a racing caller
-    # created a moment ago. The only mutation the latter can attract is a
-    # phantom upgrade, which writes the same task data derived from the
-    # same task_id whoever gets there first -- so two callers racing it
-    # write the same thing, and the UPDATE takes its own row lock anyway.
+    # created a moment ago. Nothing below mutates a task row.
     batch_rows = await db.execute(
         select(Task)
         .where(Task.environment_id == build.environment_id)
@@ -3696,96 +3812,31 @@ async def register_tasks_bulk(
     }
     new_task_count = len(created_task_ids)
 
-    # Phantom upgrade, for every row this call did not create. A row that
-    # a racing caller created a moment ago is never a phantom, so this is
-    # in practice still about rows left over from earlier builds -- but it
-    # is keyed on "did not create" rather than on the pre-query, because
-    # that is the distinction that survives a concurrent creator.
-    #
-    # Real task data overrides the ``tid[:12]`` placeholder.
-    # ``latest_status_at`` and ``latest_status_event_id`` are deliberately
-    # left alone, and they stay NULL: the event below is TASK_REFERENCED
-    # for a row that already existed, which ``_apply_event_to_task``
-    # treats as purely informational and which writes no ``latest_*`` at
-    # all.
-    #
-    # (This comment used to claim a TASK_PENDING apply refreshed them. It
-    # does not — the event is never TASK_PENDING for a row that already
-    # exists — so nothing was refreshing anything. Recorded because the
-    # wrong version reads as a reason *not* to add an explicit reset, and
-    # the right version says only that nothing needs one today.)
-    for task_id, db_task in db_task_by_task_id.items():
-        if task_id in created_task_ids or not db_task.is_phantom:
-            continue
-        t = by_task_id[task_id]
-        db_task.task_namespace = t.task_namespace
-        db_task.task_name = t.task_name
-        db_task.task_data = t.task_data
-        db_task.version = t.version
-        db_task.output_uri = t.output_uri
-        db_task.is_phantom = False
-
-    # Phase 2: bulk-reconcile dependency edges.
-    # Collect all upstream task_ids referenced anywhere in the batch.
-    all_upstream_ids: set[str] = set()
-    for t in tasks_in:
-        all_upstream_ids.update(t.dependency_task_ids)
-    # Subtract task_ids already in our map (in-batch deps + pre-existing).
-    unknown_upstream_ids = all_upstream_ids - set(pk_by_task_id.keys())
-    if unknown_upstream_ids:
-        # Look up unknown upstreams in DB — they may be tasks that
-        # exist in the env but weren't part of this batch.
-        unknown_lookup_result = await db.execute(
+    # Phase 2: bulk-insert dependency edges, in this build's scope.
+    if referenced_upstreams:
+        upstream_lookup = await db.execute(
             select(Task.id, Task.task_id)
             .where(Task.environment_id == build.environment_id)
-            .where(Task.task_id.in_(unknown_upstream_ids))
+            .where(Task.task_id.in_(referenced_upstreams))
         )
-        for pk, t_id in unknown_lookup_result.all():
+        for pk, t_id in upstream_lookup.all():
             pk_by_task_id[t_id] = pk
-        still_unknown = unknown_upstream_ids - set(pk_by_task_id.keys())
-        if still_unknown:
-            # Safety hatch: edges referencing a task not in the batch
-            # *and* not in the DB. Phantom-create. With the SDK's
-            # post-order discover walk this should not happen in normal
-            # operation; documented in ``_reconcile_dependency_edges``.
-            phantom_rows = [
-                phantom_task_row(tid, environment_id=build.environment_id, now=now)
-                for tid in sorted(still_unknown)
-            ]
-            await db.execute(
-                pg_insert(Task)
-                .values(phantom_rows)
-                .on_conflict_do_nothing(constraint="uq_task_environment_taskid")
-            )
-            # Re-fetch (ON CONFLICT DO NOTHING + RETURNING only returns
-            # rows we inserted; a concurrent writer may have created
-            # the row first and we still need its PK).
-            refetch_result = await db.execute(
-                select(Task.id, Task.task_id)
-                .where(Task.environment_id == build.environment_id)
-                .where(Task.task_id.in_(still_unknown))
-            )
-            for pk, t_id in refetch_result.all():
-                pk_by_task_id[t_id] = pk
 
-    # Build edge rows for the whole batch and bulk-insert in one shot.
     edge_rows: list[dict[str, object]] = []
     for t in tasks_in:
-        if not t.dependency_task_ids:
+        upstream_ids = declared[t.task_id]
+        if not upstream_ids:
             continue
         downstream_pk = pk_by_task_id[t.task_id]
         # Deduplicate within a single task's dep list (the schema
         # constraint allows it, but emitting duplicates is wasteful).
-        seen_in_task: set[str] = set()
-        for upstream_id in t.dependency_task_ids:
-            if upstream_id in seen_in_task:
-                continue
-            seen_in_task.add(upstream_id)
+        for upstream_id in dict.fromkeys(upstream_ids):
             edge_rows.append(
                 {
                     "id": generate_uuid7(),
                     "upstream_task_id": pk_by_task_id[upstream_id],
                     "downstream_task_id": downstream_pk,
+                    "scope_key": build.scope_key,
                     "is_dynamic": False,
                     "created_at": now,
                 }
@@ -3794,7 +3845,7 @@ async def register_tasks_bulk(
         await db.execute(
             pg_insert(TaskDependency)
             .values(edge_rows)
-            .on_conflict_do_nothing(constraint="uq_task_dependency_edge")
+            .on_conflict_do_nothing(constraint="uq_task_dependency_scope_edge")
         )
 
     # Phase 3: bulk-insert events with explicit per-event timestamps so
@@ -3872,6 +3923,7 @@ async def register_tasks_bulk(
     await _close_plan_over_dependencies(
         db,
         build_id=build_id,
+        scope_key=build.scope_key,
         task_pks=[t.id for t in db_task_by_task_id.values()],
     )
 
@@ -4306,8 +4358,9 @@ async def add_task_dependencies(
     ``requires()`` are registered in :func:`register_task` and don't use
     this endpoint.
 
-    Creates phantom upstream tasks for unknown ``upstream_task_ids`` and
-    inserts edges idempotently (``ON CONFLICT DO NOTHING``). The first write
+    Every upstream must already be registered (an unknown id is a 400 —
+    the SDK registers yielded dependencies before it posts the edges).
+    Edges land in the build's structure scope, idempotently. The first write
     of a given edge sets ``is_dynamic``; subsequent writes do not overwrite.
 
     Returns:
@@ -4350,6 +4403,7 @@ async def add_task_dependencies(
     added = await _reconcile_dependency_edges(
         db=db,
         environment_id=build.environment_id,
+        scope_key=build.scope_key,
         downstream_task_pk=db_task.id,
         downstream_task_id=task_id,
         upstream_task_ids=request.upstream_task_ids,
@@ -4855,4 +4909,6 @@ async def get_build_graph(
         downstream_depth=downstream_depth,
         max_per_type_per_level=max_per_type_per_level,
         max_total_nodes=max_total_nodes,
+        # A build's graph is unambiguous: the edges in its own scope.
+        scope_key=build.scope_key,
     )

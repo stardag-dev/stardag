@@ -3,6 +3,7 @@ from stardag_api.routes.builds import router as builds_router
 from stardag_api.routes.concurrency_limits import (
     router as concurrency_limits_router,
 )
+from stardag_api.routes.deployments import router as deployments_router
 from stardag_api.routes.locks import router as locks_router
 from stardag_api.routes.workspaces import router as workspaces_router
 from stardag_api.routes.search import router as search_router
@@ -15,6 +16,7 @@ __all__ = [
     "auth_router",
     "builds_router",
     "concurrency_limits_router",
+    "deployments_router",
     "locks_router",
     "workspaces_router",
     "search_router",

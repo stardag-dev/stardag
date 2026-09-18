@@ -4,6 +4,7 @@ from stardag_api.models.api_key import ApiKey
 from stardag_api.models.base import Base, TimestampMixin
 from stardag_api.models.build import Build
 from stardag_api.models.build_tick_summary import BuildTickSummary
+from stardag_api.models.deployment import Deployment
 from stardag_api.models.enums import (
     BuildStatus,
     EventType,
@@ -33,6 +34,7 @@ __all__ = [
     "Build",
     "BuildStatus",
     "BuildTickSummary",
+    "Deployment",
     "DistributedLock",
     "EnvironmentConcurrencyLimit",
     "TaskLimitKey",

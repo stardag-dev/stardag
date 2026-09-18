@@ -499,3 +499,60 @@ async def test_graph_group_edge_static_only(client: AsyncClient):
     group_edges = [e for e in data["edges"] if e["source"] == group_id]
     assert len(group_edges) == 1
     assert group_edges[0]["is_dynamic"] is False
+
+
+# --- Provenance: which scope's edges a graph shows ---
+
+
+async def _complete(client: AsyncClient, build_id: str, task_id: str) -> None:
+    await client.post(f"/api/v1/builds/{build_id}/tasks/{task_id}/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/{task_id}/complete")
+
+
+@pytest.mark.asyncio
+async def test_environment_graph_follows_each_nodes_provenance(client: AsyncClient):
+    """A task's edges can exist under several structure scopes. The
+    environment-wide view shows, per node, the edges of the scope of the
+    build that produced its current status — how it was actually built —
+    and a build's own view adds its own scope's edges on top, marking the
+    hops between scopes."""
+    build1 = (await client.post("/api/v1/builds", json={"scope_key": "s1"})).json()[
+        "id"
+    ]
+    await register_task(client, build1, "up1", "Up1")
+    await register_task(client, build1, "down", "Down", dependency_task_ids=["up1"])
+    await _complete(client, build1, "up1")
+    await _complete(client, build1, "down")
+
+    # New code declares another upstream for the (complete) task.
+    build2 = (await client.post("/api/v1/builds", json={"scope_key": "s2"})).json()[
+        "id"
+    ]
+    await register_task(client, build2, "up2", "Up2")
+    await register_task(client, build2, "down", "Down", dependency_task_ids=["up2"])
+
+    # Environment view: provenance is build1, so up1 and not up2.
+    response = await client.post(
+        "/api/v1/tasks/graph", json={"task_ids": ["down"], "upstream_depth": 1}
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    names = {n["task_name"]: n for n in data["nodes"]}
+    assert set(names) == {"Down", "Up1"}, names
+    assert names["Down"]["scope_key"] == "s1"
+    assert len(data["edges"]) == 1
+    assert data["edges"][0]["scope_key"] == "s1"
+    assert data["edges"][0]["is_cross_scope"] is False
+
+    # Build 2's view: its own edge to up2, plus the context edge to up1 read
+    # by provenance — a hop out of the build's scope, and marked as one.
+    response = await client.get(f"/api/v1/builds/{build2}/graph?upstream_depth=1")
+    data = response.json()
+    names = {n["task_name"]: n for n in data["nodes"]}
+    assert set(names) == {"Down", "Up1", "Up2"}, names
+    names_by_id = {n["id"]: n["task_name"] for n in data["nodes"]}
+    by_source = {names_by_id[e["source"]]: e for e in data["edges"]}
+    assert by_source["Up2"]["scope_key"] == "s2"
+    assert by_source["Up2"]["is_cross_scope"] is False
+    assert by_source["Up1"]["scope_key"] == "s1"
+    assert by_source["Up1"]["is_cross_scope"] is True
