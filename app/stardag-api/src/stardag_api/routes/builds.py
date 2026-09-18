@@ -7,7 +7,7 @@ from typing import Annotated, Any, Mapping, Sequence, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, func, select, tuple_, update
+from sqlalchemy import delete, false, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -2898,6 +2898,40 @@ async def _close_plan_over_dependencies(
     return admitted
 
 
+def take_task_rows(rows: list[dict[str, object]]):
+    """Insert what is missing and lock what is not, in one statement.
+
+    Every writer here has to end up holding the rows it is about to touch,
+    and they have to acquire them in one agreed order or they wait on each
+    other. Doing that as "lock what exists, then create what does not" is
+    two acquisitions, and the second can want a row that sorts before one
+    the first already took -- which is a cycle, and it is the one this
+    endpoint kept producing.
+
+    ``ON CONFLICT DO UPDATE ... WHERE false`` collapses the two into one.
+    It is not a no-op update dressed up: the row lock is taken when the
+    conflict is resolved, before the ``WHERE`` is evaluated, so a
+    conflicting row ends up **locked and not rewritten** -- verified, and
+    the reason plain ``DO NOTHING`` cannot be used here, since that skips a
+    conflicting row without locking it at all. ``RETURNING`` still names
+    only the rows actually inserted, which is what tells a caller what it
+    created.
+
+    Caller sorts ``rows`` by ``task_id``. That is the agreed order, and it
+    is the whole mechanism.
+    """
+    return (
+        pg_insert(Task)
+        .values(rows)
+        .on_conflict_do_update(
+            constraint="uq_task_environment_taskid",
+            set_={"task_id": Task.task_id},
+            where=false(),
+        )
+        .returning(Task.task_id)
+    )
+
+
 def phantom_task_row(
     task_id: str, *, environment_id: UUID, now: datetime
 ) -> dict[str, object]:
@@ -2937,6 +2971,7 @@ async def _reconcile_dependency_edges(
     db: AsyncSession,
     environment_id: UUID,
     downstream_task_pk: UUID,
+    downstream_task_id: str,
     upstream_task_ids: list[str],
     is_dynamic: bool,
 ) -> int:
@@ -3007,55 +3042,35 @@ async def _reconcile_dependency_edges(
         task_id: pk for pk, task_id in existing_result.all()
     }
 
-    # 2. Lock every existing row this call will touch -- the downstream and
-    # the upstreams that are already here -- in sorted ``task_id`` order,
-    # before creating or linking anything.
+    # 2. Take every row this call will touch, in one sorted statement: the
+    # downstream, and each upstream -- created if it is not here, locked if
+    # it is. See ``take_task_rows``.
     #
     # **The edge insert takes locks whether or not this asks for them.**
     # Its foreign keys mean an implicit ``FOR KEY SHARE`` on both endpoints
     # of every edge, and that conflicts with a ``FOR UPDATE`` a
-    # registration holds. So without this the locks are still taken, just
-    # in an order nobody chose: the constraint order for these rows, while
-    # a registration takes them in ``task_id`` order. Pick two ids where
-    # those disagree and each transaction ends up holding one row and
-    # waiting for the other.
+    # registration holds. So without this they are still taken, just in an
+    # order nobody chose -- the constraint order -- while a registration
+    # takes them in ``task_id`` order. Pick two ids where those disagree
+    # and each transaction holds one row and waits for the other.
     #
-    # Taking them here, in the order every other writer here uses, is what
-    # makes that impossible. It covers the phantom case too, which is the
-    # narrower one: a caller that inserted a phantom and then blocked on
-    # the downstream's key lock, while the writer holding that row waited
-    # to create the same phantom.
-    #
-    # Rows created below need no entry here -- inserting them holds them.
+    # The downstream rides along as a phantom row it will never become: it
+    # always exists (its caller has already resolved it), so it always
+    # conflicts, and conflicting is how this statement locks it -- in the
+    # same sorted pass as everything else, rather than in a separate
+    # acquisition that could sort after a row this call had already taken.
     await db.execute(
-        select(Task.id)
-        .where(Task.id.in_({downstream_task_pk, *task_pk_by_task_id.values()}))
-        .order_by(Task.task_id.asc())
-        .with_for_update()
+        take_task_rows(
+            [
+                phantom_task_row(tid, environment_id=environment_id, now=now)
+                for tid in sorted({downstream_task_id, *requested_ids})
+            ]
+        )
     )
 
-    # 3. For any missing ids, batch-insert phantoms. ON CONFLICT DO NOTHING
-    # keeps us idempotent under concurrent registrations of the same id.
+    # 3. Re-read the pks, which now exist for every requested id.
     missing_ids = [tid for tid in requested_ids if tid not in task_pk_by_task_id]
     if missing_ids:
-        # Sorted for the same reason as every other multi-row insert here:
-        # a conflicting row whose inserter has not committed makes this
-        # statement wait, so two callers creating overlapping phantoms in
-        # opposite orders could wait on each other. ``requested_ids`` comes
-        # from a caller-supplied list.
-        phantom_rows = [
-            phantom_task_row(tid, environment_id=environment_id, now=now)
-            for tid in sorted(missing_ids)
-        ]
-        await db.execute(
-            pg_insert(Task)
-            .values(phantom_rows)
-            .on_conflict_do_nothing(constraint="uq_task_environment_taskid")
-        )
-        # Re-fetch all missing rows in one go (catches both rows we inserted
-        # and rows a concurrent writer beat us to). This is required because
-        # ``RETURNING`` would only give us our own inserted rows, not the
-        # ones we lost the race on.
         refetch_result = await db.execute(
             select(Task.id, Task.task_id)
             .where(Task.environment_id == environment_id)
@@ -3190,51 +3205,36 @@ async def register_task(
             )
         )
 
-    # Lock what exists first, in sorted order, so the phantom upgrade below
-    # and the transition that follows do not race a concurrent writer on
-    # the same rows.
-    if existing_ids:
-        await db.execute(
-            select(Task.id)
-            .where(Task.environment_id == build.environment_id)
-            .where(Task.task_id.in_(sorted(existing_ids)))
-            .order_by(Task.task_id.asc())
-            .with_for_update()
-        )
-
     now = utc_now()
-    to_create = sorted(wanted_ids - existing_ids)
-    created_ids: set[str] = set()
-    if to_create:
-        created = await db.execute(
-            pg_insert(Task)
-            .values(
-                [
-                    {
-                        "id": generate_uuid7(),
-                        "task_id": task.task_id,
-                        "environment_id": build.environment_id,
-                        "task_namespace": task.task_namespace,
-                        "task_name": task.task_name,
-                        "task_data": task.task_data,
-                        "version": task.version,
-                        "output_uri": task.output_uri,
-                        "is_phantom": False,
-                        "created_at": now,
-                        "latest_status": TaskStatus.PENDING,
-                        "latest_waiting_for_lock": False,
-                    }
-                    if tid == task.task_id
-                    else phantom_task_row(
-                        tid, environment_id=build.environment_id, now=now
-                    )
-                    for tid in to_create
-                ]
-            )
-            .on_conflict_do_nothing(constraint="uq_task_environment_taskid")
-            .returning(Task.task_id)
+    # One statement over everything this call may touch, sorted: the rows
+    # that are not here yet are created, the ones that are are locked. See
+    # ``take_task_rows`` -- doing this as a lock pass followed by a create
+    # pass is two acquisitions, and the second can want a row that sorts
+    # before one the first already took.
+    created = await db.execute(
+        take_task_rows(
+            [
+                {
+                    "id": generate_uuid7(),
+                    "task_id": task.task_id,
+                    "environment_id": build.environment_id,
+                    "task_namespace": task.task_namespace,
+                    "task_name": task.task_name,
+                    "task_data": task.task_data,
+                    "version": task.version,
+                    "output_uri": task.output_uri,
+                    "is_phantom": False,
+                    "created_at": now,
+                    "latest_status": TaskStatus.PENDING,
+                    "latest_waiting_for_lock": False,
+                }
+                if tid == task.task_id
+                else phantom_task_row(tid, environment_id=build.environment_id, now=now)
+                for tid in sorted(wanted_ids)
+            ]
         )
-        created_ids = set(created.scalars().all())
+    )
+    created_ids: set[str] = set(created.scalars().all())
 
     # Whether the INSERT happened is the answer to "was this task new?",
     # and it is the only race-free one: the id is absent from RETURNING
@@ -3286,6 +3286,7 @@ async def register_task(
         db=db,
         environment_id=build.environment_id,
         downstream_task_pk=db_task.id,
+        downstream_task_id=task.task_id,
         upstream_task_ids=task.dependency_task_ids,
         is_dynamic=False,
     )
@@ -3502,9 +3503,9 @@ async def register_tasks_bulk(
         .where(Task.environment_id == build.environment_id)
         .where(Task.task_id.in_([*batch_ids, *referenced_upstreams]))
     )
-    existing_here: set[str] = set(existing_task_ids_result.scalars().all())
-    existing_tasks: set[str] = existing_here & set(batch_ids)
-    missing_upstreams: set[str] = referenced_upstreams - existing_here
+    existing_tasks: set[str] = set(existing_task_ids_result.scalars().all()) & set(
+        batch_ids
+    )
     new_task_count_estimate = sum(
         1 for t in tasks_in if t.task_id not in existing_tasks
     )
@@ -3567,14 +3568,6 @@ async def register_tasks_bulk(
     # create while waiting for a row it holds. Two transactions, opposite
     # order, and Postgres resolves it by killing one -- a 500, which is
     # the failure this endpoint is being fixed for.
-    if existing_here:
-        await db.execute(
-            select(Task.id)
-            .where(Task.environment_id == build.environment_id)
-            .where(Task.task_id.in_(sorted(existing_here)))
-            .order_by(Task.task_id.asc())
-            .with_for_update()
-        )
 
     # Everything this call may have to create, in one statement: the batch
     # tasks that are not here yet, and any upstream they name that nobody
@@ -3584,31 +3577,21 @@ async def register_tasks_bulk(
     # cycle this change exists to remove. One statement, one order, both
     # kinds of row.
     by_id = {t.task_id: t for t in tasks_in}
-    to_create = sorted(
-        [t.task_id for t in tasks_in if t.task_id not in existing_tasks]
-        + sorted(missing_upstreams)
-    )
-    if to_create:
-        # Sorted, and that is load-bearing now that the insert itself can
-        # block: a conflicting row whose inserter has not committed makes
-        # this statement *wait*, so two callers inserting overlapping sets
-        # in opposite orders can wait on each other. In one agreed order
-        # they cannot. Same argument as the lock ordering below, which is
-        # where it used to be enough.
+    # Every id this call touches, sorted -- created if absent, locked if
+    # present. See ``take_task_rows``.
+    to_take = sorted({*batch_ids, *referenced_upstreams})
+    if to_take:
         created = await db.execute(
-            pg_insert(Task)
-            .values(
+            take_task_rows(
                 [
                     _row(by_id[tid])
                     if tid in by_id
                     else phantom_task_row(
                         tid, environment_id=build.environment_id, now=now
                     )
-                    for tid in to_create
+                    for tid in to_take
                 ]
             )
-            .on_conflict_do_nothing(constraint="uq_task_environment_taskid")
-            .returning(Task.task_id)
         )
         # RETURNING after DO NOTHING names the rows this call actually
         # created, and nothing else -- so it is the exact answer to "was
@@ -4304,6 +4287,7 @@ async def add_task_dependencies(
         db=db,
         environment_id=build.environment_id,
         downstream_task_pk=db_task.id,
+        downstream_task_id=task_id,
         upstream_task_ids=request.upstream_task_ids,
         is_dynamic=request.is_dynamic,
     )

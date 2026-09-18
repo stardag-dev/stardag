@@ -546,12 +546,18 @@ async def test_adding_dependencies_takes_the_downstream_before_it_creates(
     taking the downstream *first*, which is the order the registration
     endpoints already follow.
 
-    The parking row sorts before the upstream, so the registration stops
-    with the downstream held and the upstream not yet created -- which is
-    precisely the window this writer used to walk into.
+    The parking row sorts between the downstream and the upstream, so the
+    registration stops with the downstream held and the upstream not yet
+    created -- precisely the window this writer used to walk into.
     """
     downstream = "ddd-downstream"
-    park = "aaa-parks-the-registration"
+    # Sorts *between* the downstream and the upstream, so the registration
+    # stops with the downstream taken and the upstream not yet created --
+    # the window this writer used to walk into. A parking row that sorted
+    # first would stop it before it had taken anything, which is a
+    # different (and uninteresting) state now that every writer acquires
+    # in one sorted pass.
+    park = "mmm-parks-the-registration"
     upstream = "xxx-upstream"
 
     build_id = await _new_build(pg_client)

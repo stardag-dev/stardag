@@ -62,6 +62,7 @@ async def test_creates_phantoms_and_edges_in_one_call(
         db=pg_session,
         environment_id=DEFAULT_ENVIRONMENT_ID,
         downstream_task_pk=downstream.id,
+        downstream_task_id=downstream.task_id,
         upstream_task_ids=["dep-1", "dep-2", "dep-3"],
         is_dynamic=False,
     )
@@ -94,6 +95,7 @@ async def test_mixed_existing_and_missing_upstreams(
         db=pg_session,
         environment_id=DEFAULT_ENVIRONMENT_ID,
         downstream_task_pk=downstream.id,
+        downstream_task_id=downstream.task_id,
         upstream_task_ids=["real-up", "missing-up"],
         is_dynamic=False,
     )
@@ -129,6 +131,7 @@ async def test_idempotent_under_repeated_calls(
         db=pg_session,
         environment_id=DEFAULT_ENVIRONMENT_ID,
         downstream_task_pk=downstream.id,
+        downstream_task_id=downstream.task_id,
         upstream_task_ids=upstream_ids,
         is_dynamic=False,
     )
@@ -139,6 +142,7 @@ async def test_idempotent_under_repeated_calls(
         db=pg_session,
         environment_id=DEFAULT_ENVIRONMENT_ID,
         downstream_task_pk=downstream.id,
+        downstream_task_id=downstream.task_id,
         upstream_task_ids=upstream_ids,
         is_dynamic=True,  # different is_dynamic value: should NOT update
     )
@@ -166,6 +170,7 @@ async def test_empty_upstream_list_is_a_noop(
         db=pg_session,
         environment_id=DEFAULT_ENVIRONMENT_ID,
         downstream_task_pk=downstream.id,
+        downstream_task_id=downstream.task_id,
         upstream_task_ids=[],
         is_dynamic=False,
     )
@@ -184,6 +189,7 @@ async def test_duplicate_ids_in_input_are_deduplicated(
         db=pg_session,
         environment_id=DEFAULT_ENVIRONMENT_ID,
         downstream_task_pk=downstream.id,
+        downstream_task_id=downstream.task_id,
         upstream_task_ids=["dup-up", "dup-up", "dup-up"],
         is_dynamic=False,
     )
@@ -246,18 +252,21 @@ async def test_concurrent_reconcile_overlapping_upstreams_resolves_safely(
 
     shared_upstreams = ["conc-up-1", "conc-up-2", "conc-up-3"]
 
-    async def reconcile(downstream_pk):
+    async def reconcile(downstream_pk, downstream_task_id):
         async with sm() as s:
             await _reconcile_dependency_edges(
                 db=s,
                 environment_id=DEFAULT_ENVIRONMENT_ID,
                 downstream_task_pk=downstream_pk,
+                downstream_task_id=downstream_task_id,
                 upstream_task_ids=shared_upstreams,
                 is_dynamic=False,
             )
             await s.commit()
 
-    await asyncio.gather(reconcile(d_a_pk), reconcile(d_b_pk))
+    await asyncio.gather(
+        reconcile(d_a_pk, "conc-down-a"), reconcile(d_b_pk, "conc-down-b")
+    )
 
     # Exactly 3 phantoms, regardless of which transaction won the inserts.
     async with sm() as final:
