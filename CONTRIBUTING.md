@@ -37,7 +37,8 @@ See [CLA.md](app/CLA.md) for the full agreement. By submitting a PR to `app/`, y
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- Node.js 18+ (for UI development)
+- Node.js 22+ (for UI development — CI runs 22, and vite, vitest and
+  jsdom each declare a floor at or above 22.12)
 
 ### Development Setup
 
