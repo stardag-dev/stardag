@@ -872,7 +872,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "modal" },
-    { name = "stardag", extras = ["modal"], specifier = ">=0.20.1" },
+    { name = "stardag", extras = ["modal"], specifier = ">=0.23.0" },
 ]
 
 [[package]]
