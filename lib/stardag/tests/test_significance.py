@@ -17,6 +17,7 @@ from stardag.build._scope import (
     _reset_for_tests,
     code_id,
     is_synthetic_scope,
+    scope_code_id,
     structure_scope_key,
 )
 from stardag.build_config import (
@@ -182,6 +183,14 @@ class TestScopeKey:
         assert not is_synthetic_scope(structure_scope_key("abc123", None))
         assert is_synthetic_scope(f"build:{uuid4()}")
         assert is_synthetic_scope(None)
+
+    def test_the_code_id_half_is_what_a_container_compares(self):
+        """A tick or worker checks only the code half of a scope: the config
+        half is derived from the build's own config, so recomputing it would
+        verify nothing and would need every configured class importable."""
+        key = structure_scope_key("abc123", None)
+        assert scope_code_id(key) == "abc123"
+        assert scope_code_id("abc123:" + "f" * 16) == "abc123"
 
     def test_code_id_is_stable_within_a_process(self, monkeypatch: pytest.MonkeyPatch):
         _reset_for_tests()

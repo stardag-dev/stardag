@@ -472,3 +472,66 @@ class TestReactiveWorkerBehavior:
         Runner()(make_range(limit=3), env_overrides=_env(uuid4()))
 
         assert tick_spawn_stub == {}  # no tick spawn without reactive flag
+
+
+class TestForeignScopeRefusal:
+    """A worker refuses a task whose build was planned by other code, and
+    decides that from the code id half of the forwarded scope alone."""
+
+    @pytest.fixture(autouse=True)
+    def _own_code(self, monkeypatch):
+        from stardag.build._scope import STARDAG_CODE_ID_ENV
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+
+    @staticmethod
+    def _scoped_env(build_id: UUID, scope_key: str, build_config: str | None = None):
+        from stardag.integration.modal._metadata import (
+            STARDAG_BUILD_CONFIG_ENV,
+            STARDAG_SCOPE_KEY_ENV,
+        )
+
+        env = {**_env(build_id), STARDAG_SCOPE_KEY_ENV: scope_key}
+        if build_config is not None:
+            env[STARDAG_BUILD_CONFIG_ENV] = build_config
+        return env
+
+    def test_other_code_is_refused_before_the_task_starts(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        task = make_range(limit=3)
+        env = self._scoped_env(uuid4(), "beef" * 10 + ":0123456789abcdef")
+
+        with pytest.raises(RuntimeError, match="planned by other code"):
+            Runner()(task, env_overrides=env)
+
+        assert not task.complete()
+        assert recording_registry.methods() == []
+
+    def test_own_code_runs_whatever_the_config_names(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        """The config half is not recomputed: a config naming a task class
+        this container never imported (a worker rehydrates one task, not the
+        whole DAG) must not stop the task, and the hash on the wire is not
+        second-guessed."""
+        task = make_range(limit=3)
+        env = self._scoped_env(
+            uuid4(),
+            "cafe" * 10 + ":ffffffffffffffff",
+            build_config='{"never.Imported": {"width": 7}}',
+        )
+
+        assert Runner()(task, env_overrides=env) is None
+        assert task.complete()
+        assert recording_registry.methods() == ["task_start", "task_complete"]
+
+    def test_a_synthetic_scope_is_driven_by_anyone(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        task = make_range(limit=3)
+        build_id = uuid4()
+
+        Runner()(task, env_overrides=self._scoped_env(build_id, f"build:{build_id}"))
+
+        assert task.complete()

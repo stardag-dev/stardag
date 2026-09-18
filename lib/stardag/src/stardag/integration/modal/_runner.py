@@ -33,7 +33,7 @@ from stardag.build._task_modules import (
 )
 from stardag.integration.modal._limit_keys import deployed_limit_key_selector
 from stardag.integration.modal._logging import _setup_logging
-from stardag.build._scope import code_id, is_synthetic_scope, structure_scope_key
+from stardag.build._scope import code_id, is_synthetic_scope, scope_code_id
 from stardag.build_config import build_config_scope
 from stardag.integration.modal._metadata import (
     STARDAG_BUILD_CONFIG_ENV,
@@ -357,24 +357,28 @@ def _refuse_foreign_scope(env_overrides: dict[str, str] | None) -> None:
     """Refuse to run a task whose build lives in another structure scope.
 
     The orchestrator forwards the build's scope (see
-    ``STARDAG_SCOPE_KEY_ENV``); this worker recomputes it from its own code
-    id and the forwarded config. A mismatch means this container runs other
-    code than the one that planned the build — a stale wake-up reaching a
-    newer deployment, typically — and the dependencies it would yield
-    belong to a structure the build's edges do not describe. Raising here
-    fails the task loudly instead of quietly mixing two code versions in
-    one build.
+    ``STARDAG_SCOPE_KEY_ENV``); this worker compares the scope's code id
+    with its own. A mismatch means this container runs other code than the
+    one that planned the build — a stale wake-up reaching a newer
+    deployment, typically — and the dependencies it would yield belong to a
+    structure the build's edges do not describe. Raising here fails the
+    task loudly instead of quietly mixing two code versions in one build.
+
+    Only the code id is compared, deliberately: the config half of the
+    scope is derived from the build's own config, which this worker
+    installs as forwarded, so recomputing it here would verify nothing and
+    would need every task class the config names to be importable in this
+    container (see ``stardag.build._scope.scope_code_id``).
     """
     scope_key = (env_overrides or {}).get(STARDAG_SCOPE_KEY_ENV) or os.environ.get(
         STARDAG_SCOPE_KEY_ENV
     )
-    if is_synthetic_scope(scope_key):
+    if scope_key is None or is_synthetic_scope(scope_key):
         return
-    expected = structure_scope_key(code_id(), _build_config_from_env(env_overrides))
-    if scope_key != expected:
+    if scope_code_id(scope_key) != code_id():
         raise RuntimeError(
-            f"This worker runs code {code_id()!r}, giving structure scope "
-            f"{expected!r}, but the build runs under {scope_key!r}. A build "
+            f"This worker runs code {code_id()!r}, but the build runs under "
+            f"structure scope {scope_key!r}, planned by other code. A build "
             "carries one scope for its life; a redeploy under new code needs "
             "a new build."
         )

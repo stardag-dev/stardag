@@ -28,7 +28,7 @@ from stardag.build import (
     TickConfig,
     run_tick_aio,
 )
-from stardag.build._scope import code_id, is_synthetic_scope, structure_scope_key
+from stardag.build._scope import code_id, is_synthetic_scope, scope_code_id
 from stardag.build._wakeups import SpawnTick
 from stardag.build_config import set_build_config
 from stardag.build._task_modules import (
@@ -369,26 +369,29 @@ async def _run_deployed_tick_aio(
             "forwarded": forwarded,
         }
     # The structure scope. Every edge of this build was evaluated by the
-    # code and config its scope names; a tick from other code would plan
-    # with a structure the edges do not describe, so it refuses rather than
-    # drive the build. The server's synthetic ``build:<id>`` scope (a build
-    # nothing fixed a scope for — an older SDK) is driven by anyone.
-    expected_scope = structure_scope_key(code_id(), build_info.build_config)
-    if not is_synthetic_scope(build_info.scope_key) and (
-        build_info.scope_key != expected_scope
+    # code its scope names; a tick from other code would plan with a
+    # structure the edges do not describe, so it refuses rather than drive
+    # the build. Only the code id half is compared — the config half is a
+    # function of the build's own config, installed below (see
+    # ``scope_code_id``). The server's synthetic ``build:<id>`` scope (a
+    # build nothing fixed a scope for — an older SDK) is driven by anyone.
+    own_code_id = code_id()
+    if build_info.scope_key is not None and (
+        not is_synthetic_scope(build_info.scope_key)
+        and scope_code_id(build_info.scope_key) != own_code_id
     ):
         logger.error(
             f"Tick for build {build_id}: the build runs under structure scope "
-            f"{build_info.scope_key!r}, but this deployment's code and the "
-            f"build's config give {expected_scope!r}. Refusing to drive it: a "
-            "build carries one scope for its life, and a redeploy under new "
-            "code needs a new build. (Is a stale wake-up reaching a newer "
-            "deployment of this app? Then this is expected and harmless.)"
+            f"{build_info.scope_key!r}, but this deployment runs code "
+            f"{own_code_id!r}. Refusing to drive it: a build carries one scope "
+            "for its life, and a redeploy under new code needs a new build. "
+            "(Is a stale wake-up reaching a newer deployment of this app? "
+            "Then this is expected and harmless.)"
         )
         return {
             "outcome": "scope_mismatch",
             "scope_key": build_info.scope_key,
-            "expected_scope_key": expected_scope,
+            "code_id": own_code_id,
         }
     # The build's config, installed before anything is rehydrated: a task
     # rebuilt from registry data resolves its dependencies_only /

@@ -2473,6 +2473,78 @@ class TestTickAppOwnership:
         assert modal_function_stub["kwargs"] == {"build_id": str(build_id)}
         tick_aio.assert_not_called()
 
+    def test_a_build_planned_by_other_code_is_refused_not_driven(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        """The tick compares the code id half of the build's scope with its
+        own and refuses a mismatch. The config half is not recomputed: the
+        build's config may name task classes this container has not imported,
+        and the hash is a function of that config anyway."""
+        from uuid import uuid4
+
+        from stardag.build._scope import STARDAG_CODE_ID_ENV
+        from stardag.registry import BuildInfo
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        tick = self._capture_tick("app-a")
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get_aio = AsyncMock(
+            return_value=BuildInfo(
+                id=build_id,
+                reactive_app_name="app-a",
+                scope_key="beef" * 10 + ":0123456789abcdef",
+                build_config={"never.Imported": {"width": 3}},
+            )
+        )
+        with (
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
+        ):
+            rp.get.return_value = registry
+            result = _invoke(tick, str(build_id))
+
+        assert result == {
+            "outcome": "scope_mismatch",
+            "scope_key": "beef" * 10 + ":0123456789abcdef",
+            "code_id": "cafe" * 10,
+        }
+        tick_aio.assert_not_called()
+
+    def test_own_code_drives_a_build_whose_config_names_unknown_classes(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        """Same code id, any config hash: the tick proceeds to the loop
+        without importing anything the config names."""
+        from uuid import uuid4
+
+        from stardag.build import TickSummary
+        from stardag.build._scope import STARDAG_CODE_ID_ENV
+        from stardag.registry import BuildInfo
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        tick = self._capture_tick("app-a")
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get_aio = AsyncMock(
+            return_value=BuildInfo(
+                id=build_id,
+                reactive_app_name="app-a",
+                scope_key="cafe" * 10 + ":ffffffffffffffff",
+                build_config={"never.Imported": {"width": 3}},
+            )
+        )
+        with (
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
+        ):
+            rp.get.return_value = registry
+            tick_aio.return_value = TickSummary(outcome="terminal")
+            result = _invoke(tick, str(build_id))
+
+        tick_aio.assert_called_once()
+        assert result["outcome"] == "terminal"
+
     def test_foreign_app_forward_failure_tolerated(self, default_in_memory_fs_target):
         """Owner app deleted (orphaned build): the forward fails, the tick
         still no-ops cleanly — logged, never raised."""

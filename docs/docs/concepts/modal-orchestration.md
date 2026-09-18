@@ -233,9 +233,9 @@ code other than the code that planned it.
 
 A build's dependency edges belong to the code that evaluated them — its
 [structure scope](build-execution.md#structure-scope). The bootstrap fixes
-the scope from the deployment's code id, and every tick and worker of that
-deployment recomputes it and compares before acting. A mismatch is a
-refusal, not a forward.
+the scope from the deployment's code id, and every tick and worker compares
+the scope's code id with its own before acting. A mismatch is a refusal,
+not a forward.
 
 Modal has one live deployment per app name and no addressable versions:
 after `stardag modal deploy` under the same name, in-flight inputs finish

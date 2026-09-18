@@ -141,8 +141,12 @@ Environment _variables_ are not in the key either, by contract (below).
 the deployment, for a reactive build; the local process for a resident one.
 The bootstrap writes the scope onto the build before registering any edge.
 Every scheduler tick and worker derives its own code id the same way and
-compares; a mismatch is a refusal with a message naming both, never a silent
-hand-off. A laptop whose clean tree is at the deployment's SHA shares the
+compares it with the code id half of the build's scope; a mismatch is a
+refusal with a message naming both, never a silent hand-off. Only that half
+is compared: the config half is a function of the build's own config, which
+the tick or worker installs, so recomputing it would verify nothing — and
+would require every task class the config names to be importable in a
+container that may have rehydrated a single task. A laptop whose clean tree is at the deployment's SHA shares the
 deployment's scope; a dirty laptop gets a private scope per process, always
 correct and never cached.
 

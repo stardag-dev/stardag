@@ -77,11 +77,12 @@ use. Transported like ``STARDAG_BUILD_ID``; absent means ``{}``.
 STARDAG_SCOPE_KEY_ENV = "STARDAG_SCOPE_KEY"
 """Env var carrying the build's structure scope key to workers.
 
-A worker recomputes the scope from its own code id and the build config
-and refuses to run a task whose build lives in another scope: its code
-would evaluate ``requires()`` and yield dependencies under a structure the
-build's edges do not describe. Absent, or the server's synthetic
-``build:<id>``, means no check.
+A worker compares the scope's code id with its own and refuses to run a
+task whose build was planned by other code: its code would evaluate
+``requires()`` and yield dependencies under a structure the build's edges
+do not describe. Only the code id is compared — the config half follows
+from ``STARDAG_BUILD_CONFIG``, which the worker installs as forwarded.
+Absent, or the server's synthetic ``build:<id>``, means no check.
 """
 
 STARDAG_MODAL_FUNCTION_TIMEOUT_ENV = "STARDAG_MODAL_FUNCTION_TIMEOUT"

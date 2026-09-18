@@ -96,6 +96,22 @@ def structure_scope_key(
     return f"{code}:{structure_config_hash(build_config)}"
 
 
+def scope_code_id(scope_key: str) -> str:
+    """The code id half of a structure scope key.
+
+    A tick or worker that has to decide whether it may act on a build
+    compares this against its own :func:`code_id`, and nothing more. The
+    config half is a function of the build's own config — the same config
+    that container installs — so recomputing it there would verify nothing,
+    and it would need every task class the config names to be importable in
+    that container, which a worker rehydrating one task has no reason to
+    guarantee. Two containers of one code id agree on the config hash by
+    construction; two of different code ids are told apart by this half.
+    """
+    code, _, _ = scope_key.partition(":")
+    return code
+
+
 def is_synthetic_scope(scope_key: str | None) -> bool:
     """Whether ``scope_key`` is the server's per-build placeholder — a build
     that never set a real scope, which every current tick may drive."""
