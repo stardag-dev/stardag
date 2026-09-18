@@ -73,8 +73,10 @@ trigger (cheap, no target I/O):
   mint or resume the build; register the roots; spawn bootstrap
 
 bootstrap (one container, once per trigger):
-  discover the DAG next to the target root; register it, closed over
-  dependencies; persist task objects; arm the build; spawn the first tick
+  fix the build's structure scope (this deployment's code id + the
+  dependencies_only config) and install the build config; discover the
+  DAG next to the target root; register it; persist task objects; arm
+  the build; spawn the first tick
 
 tick (short-lived, single-flighted per build):
   acquire the build's scheduler lease (held → exit)
@@ -222,9 +224,37 @@ looked.
 Each reactive build is owned by the app that triggered it (recorded in the
 registry). Only the owner's ticks drive it — a tick that reaches another
 app forwards the wake-up to the owner rather than running the build with
-the wrong code — and each app's watchdog sweeps only its own builds.
-Re-triggering a build from another app moves ownership, and re-persists
-the task objects under the new app's code.
+the wrong code — and each app's watchdog sweeps only its own builds. A
+tick of the owning app additionally refuses a build whose structure scope
+its own code does not produce (see below); nothing drives a build with
+code other than the code that planned it.
+
+### Deployments and code versions
+
+A build's dependency edges belong to the code that evaluated them — its
+[structure scope](build-execution.md#structure-scope). The bootstrap fixes
+the scope from the deployment's code id, and every tick and worker of that
+deployment recomputes it and compares before acting. A mismatch is a
+refusal, not a forward.
+
+Modal has one live deployment per app name and no addressable versions:
+after `stardag modal deploy` under the same name, in-flight inputs finish
+on the old code but every _new_ spawn lands on the new one. A reactive
+build progresses by new spawns, so a running build's next tick meets a
+scope mismatch and the build stalls until re-triggered as a new build.
+Safe, and not always what you want.
+
+`StardagApp(..., versioned_deployments=True)` deploys each code version
+under its own app instead: the name you wrote is the **family**, the
+deployed app is the **handle** `<family>--<code id>`, and the registry
+records which code id runs under which handle. A build then keeps ticking
+on the code it started with while newer code deploys beside it, and
+`build_trigger(deployment=...)` picks the deployment: the newest recorded
+one by default, `"local"` for this process's own code, or an explicit
+handle or code id. `stardag modal deployments` lists them;
+`stardag modal gc <family>` stops and retires the ones no running build
+still needs. The naming convention lives in one place in the SDK — the
+registry record is the identity, and nothing else parses a handle.
 
 ## Choosing
 

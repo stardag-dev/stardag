@@ -56,6 +56,78 @@ Parameter hashing solves several problems:
 3. **Caching**: Re-running with same parameters reuses existing outputs
 4. **Composition**: Upstream task IDs are included in downstream hashes
 
+## Three levels of significance
+
+Not every parameter is part of what a task _promises_. Stardag
+distinguishes three levels, declared per field with
+`sd.StardagField(significance=...)`:
+
+| Level          | `significance`         | Affects                                                      | Comes from                                  |
+| -------------- | ---------------------- | ------------------------------------------------------------ | ------------------------------------------- |
+| 1 Identity     | `"identity"` (default) | the output — what the task promises; part of the task ID     | the constructor, like any parameter         |
+| 2 Dependencies | `"dependencies_only"`  | which upstream tasks are required or yielded, not the output | the **build config**, never the constructor |
+| 3 Execution    | `"execution_only"`     | neither output nor structure — only how the work is done     | the **build config**, never the constructor |
+
+```{.python notest}
+from typing import Annotated
+
+class Aggregate(sd.Task[Summary]):
+    __namespace__ = "reports"
+    period: str                                                             # identity
+    partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
+    num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
+
+    def run(self):
+        # partition_size decides how many chunk tasks are yielded; the
+        # output is the same however it is chunked.
+        chunks = [Chunk(period=self.period, index=i) for i in range(self.partition_size)]
+        yield chunks
+        self._save(merge(c.load() for c in chunks), threads=self.num_threads)
+```
+
+A level 2 or 3 field is **never passed at init** — `Aggregate(period="2026-01",
+num_threads=2)` raises. It is read from the **build config**, one mapping per
+build keyed by `namespace.Name`:
+
+```{.python notest}
+sd.build(root, build_config={"reports.Aggregate": {"partition_size": 500, "num_threads": 8}})
+
+# On Modal, the same argument on the trigger:
+app.build_trigger(root, reactive=True, build_config={...})
+
+# In tests, or anywhere no build is running:
+with sd.build_config_scope({"reports.Aggregate": {"num_threads": 2}}):
+    task = Aggregate(period="2026-01")  # num_threads == 2
+```
+
+Why one mechanism and not two: if one downstream could pass a partition
+size to its upstream while another let the upstream read the config, there
+would be two versions of one upstream in one build with one task ID. The
+registry stores only identity parameters with a task; the build config is
+stored with the build, and every worker installs it before it constructs or
+rebuilds a task, so the two always agree.
+
+The registry keys a build's dependency edges by a _structure scope_ — the
+code version plus the `dependencies_only` config — which is what lets a
+changed partition size or a changed `requires()` run without a version bump
+and without disturbing builds already running. See
+[Build & Execution](build-execution.md#structure-scope).
+
+**Environment variables must not affect a task's output or its
+dependency structure.** They may affect execution (a thread count read
+from the environment is fine). Anything that changes what a task yields or
+writes is a parameter or a `dependencies_only` config value; reading it from
+the environment breaks the contract the shared structure relies on, and the
+registry warns when it notices.
+
+!!! note "`hash_exclude` is deprecated"
+
+    `sd.StardagField(hash_exclude=True)` did what `significance="execution_only"`
+    does — dropped the field from the hash — but allowed the value at init,
+    which is exactly what the build config exists to prevent. It keeps working
+    for one release with a `DeprecationWarning`; move the value to the build
+    config and change the annotation.
+
 ## The Task ID
 
 Every task has an `id` property:

@@ -6,6 +6,90 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## Unreleased — Dependency structure belongs to the code, not the task id
+
+Three related changes, one idea: **a task id promises the world state its
+completion establishes, not the upstream set it was built from.** The
+registry now keys a build's dependency edges by a _structure scope_ — the
+code version plus the build's `dependencies_only` config — instead of by
+task id. Changing `requires()` or a fan-out width no longer needs a version
+bump, no longer gates a task on upstreams nothing will produce again, and
+no longer re-runs a stale generation; a build already running keeps its
+own structure while the new code runs beside it.
+
+**Upgrade the registry server before the SDK.** A new SDK against an older
+server degrades (the scope endpoint is missing, so the build runs on a
+per-build scope — always correct, never shared). An older SDK against the
+new server keeps working the same way. A reactive build running across the
+server deploy keeps its gates: the migration copies its edges into its own
+scope. Modal apps deployed with an older SDK keep working under per-build
+scopes until redeployed.
+
+### Three levels of significance, and the build config
+
+`sd.StardagField(significance=...)` replaces the ad-hoc `hash_exclude`:
+
+| level                 | affects                     | comes from       |
+| --------------------- | --------------------------- | ---------------- |
+| `"identity"`          | the output, the task id     | the constructor  |
+| `"dependencies_only"` | what is required or yielded | the build config |
+| `"execution_only"`    | how the work is done        | the build config |
+
+Levels 2 and 3 are **never passed at init** — that is what keeps one task
+id to one structure within a build. They come from `build_config=` on
+`sd.build` / `sd.build_aio` / `sd.build_sequential` /
+`StardagApp.build_trigger`, stored with the build and installed by every
+worker before it constructs a task; `sd.build_config_scope(...)` sets it in
+tests. The registry stores identity parameters only, so a task rebuilt from
+registry data and one unpickled from the build store now agree.
+
+### Migration
+
+- **If you used `hash_exclude=True` for runtime knobs** (a thread count, a
+  partition size): change the annotation to
+  `significance="execution_only"` (or `"dependencies_only"` if the value
+  changes what the task requires or yields), delete the argument from
+  every constructor call, and pass the value in `build_config` keyed by
+  `"<namespace>.<Name>"`. Until you do, `hash_exclude` still works with a
+  `DeprecationWarning`. `AliasTask` is unaffected.
+- **If a task reads a fan-out width or partitioning from an environment
+  variable**, move it to a `dependencies_only` field: environment variables
+  must not affect output or dependency structure (execution is fine). The
+  registry warns when a yield differs from the one recorded in the same
+  scope.
+- **Custom `RegistryABC` implementations**: the four registration methods
+  take a keyword-only `declared_dependencies`; `build_start(_aio)` and
+  `build_resume(_aio)` take keyword-only `scope_key` / `build_config`;
+  `build_set_scope(_aio)` and `deployment_*` are new with no-op defaults.
+- **Re-triggering a build after a code change now refuses** with
+  `ScopeMismatchError`. Start a new build; it shares nothing with the old
+  one and the old one keeps running.
+
+### What you will see in the UI
+
+- The Task Explorer's graph follows each task's _provenance_: the edges
+  from the scope of the build that produced its current status. A hop
+  between code versions is marked. A task no build has touched shows no
+  edges.
+- Placeholder ("phantom") nodes for never-registered upstreams are gone;
+  an unknown upstream is now a 400 at registration.
+- A build's scheduling panel no longer lists "external blockers"; a
+  cancelled or skipped task in the plan is reset and run by the frontier
+  pass instead.
+
+### Versioned deployments (opt-in)
+
+`StardagApp(versioned_deployments=True)` deploys each code version under
+its own Modal app (`<family>--<code id>`) and records it in the registry,
+so a running build keeps ticking on the code it started with while newer
+code deploys beside it. `build_trigger(deployment=...)` resolves the newest,
+`"local"` or an explicit one; `stardag modal deployments` lists them and
+`stardag modal gc <family>` retires the idle ones. Without the flag the
+app deploys under its own name as before, and a tick from a redeploy
+refuses a build planned by other code rather than driving it.
+
+---
+
 ## v0.23.0 — Ten lingering builds per container, not one
 
 The headline is two changes, both about what reactive scheduling costs to

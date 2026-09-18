@@ -113,8 +113,11 @@ that, and nothing else does.
   execution may run (Modal's worker `timeout`), the TTL is derived from it
   plus a grace margin, so a live execution's claim cannot be taken while
   the backend would still let it run.
-- **A build's plan is closed under dependencies.** Discovery registers
-  every incomplete dependency of the roots, so a build is never gated by a
+- **A build's plan is closed under dependencies, within its structure
+  scope.** Discovery registers every incomplete dependency of the roots,
+  and the registry admits into the plan every incomplete upstream a
+  recorded edge in the build's scope points at — at registration, and
+  again whenever the build looks stalled — so a build is never gated by a
   task it could not run itself. **A build acts on everything in its
   plan**, whichever build last touched it — a shared task another build
   _cancelled_ is reset and run; a shared task another build _failed_ is a
@@ -129,26 +132,57 @@ granted.
 
 Design record: [`docs/design/execution-claims-and-liveness.md`](https://github.com/stardag-dev/stardag/blob/main/docs/design/execution-claims-and-liveness.md).
 
-### Cross-build blocking
+### Structure scope
 
-Because task state is environment-global, a build can have nothing to run
-and nothing running _of its own_ and still be healthy: an upstream some
-other build is executing gates it. A build in that state asks the registry
-which upstreams gate it and who owns them, then decides per blocker:
+A task id promises the world state its completion establishes. It does
+**not** promise the set of upstream tasks it was built from: a downstream
+asks for its upstream's output, not for how the upstream got there. So the
+registry keeps a task's dependency edges — static `requires()` and yielded
+dynamic ones — per **structure scope** rather than per task id. The scope
+key is the **code id** (the git SHA of a clean tree; a one-off id for a
+dirty one) plus a hash of the build's `dependencies_only` config (see
+[Three levels of significance](parameters.md#three-levels-of-significance)).
 
-| the blocker is…                                                           | the build…                                                           |
-| ------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `RUNNING` under a **live** claim                                          | waits — the blocker's completion wakes it                            |
-| `RUNNING` under a **lapsed** claim                                        | fails, naming the abandoned claim                                    |
-| `PENDING` / `SUSPENDED` / `INTERRUPTED` under a build that is still live  | waits — that build will move it                                      |
-| `PENDING` / `SUSPENDED` / `INTERRUPTED` under a terminal or unknown build | fails, naming the task, its owner and why the owner will not move it |
-| `CANCELLED`, with attempt budget left                                     | resets it and runs it — a revocation, not a verdict                  |
-| `FAILED` / `SKIPPED`                                                      | leaves it; `fail_mode` owns results                                  |
+- A build carries one scope for its life. Readiness — "are all my
+  upstreams complete?" — is evaluated over the edges in the build's own
+  scope only. Edges another code version recorded are invisible to it.
+- Builds under the same code and config share what they discovered: a
+  fan-out's expensive pre-yield section runs once per scope, not once per
+  build.
+- Within a scope, edges only grow and nothing retracts them, so gating can
+  only over-approximate — never run a task before an upstream its code
+  reads is complete.
+- A resume or re-trigger under other code or another `dependencies_only`
+  config is refused: **start a new build.** Changing `requires()` or a
+  fan-out therefore needs no version bump, and a build already running
+  keeps its own structure while the new one runs beside it.
 
-`stardag builds frontier <build-id>` shows this directly. To recover a
-build blocked on an abandoned task: `stardag tasks retry <owning-build-id>
-<task-id>` (or `cancel` for one stuck `RUNNING`), then re-trigger your
-build; `stardag builds cleanup` is the bulk recovery for abandoned builds.
+Design record:
+[`docs/design/scope-keyed-dependency-structure.md`](https://github.com/stardag-dev/stardag/blob/main/docs/design/scope-keyed-dependency-structure.md).
+
+### Shared tasks
+
+Because task state is environment-global, a build routinely finds tasks in
+its plan whose status another build produced. The task's status alone
+decides what the build does with it, once it is gated open — every upstream
+in the build's scope complete:
+
+| the task is…                       | the build…                                                             |
+| ---------------------------------- | ---------------------------------------------------------------------- |
+| `PENDING`                          | runs it                                                                |
+| `RUNNING` under a **live** claim   | waits — the task's completion wakes it                                 |
+| `RUNNING` under a **lapsed** claim | takes it over                                                          |
+| `SUSPENDED`                        | runs it — a resume from scratch, idempotent by contract                |
+| `INTERRUPTED`                      | starts it again, within its own budget                                 |
+| `CANCELLED`                        | resets it and runs it, within the attempt budget — a revocation        |
+| `SKIPPED`                          | resets it and runs it, within the budget — a skip whose reason is gone |
+| `FAILED`                           | leaves it; `fail_mode` owns results                                    |
+
+Nothing in that table asks whether another build is alive. A gate can no
+longer point outside a build's plan, so a build with nothing to run and
+nothing running is genuinely finished or genuinely failed.
+`stardag builds frontier <build-id>` shows the frontier directly;
+`stardag builds cleanup` is the bulk recovery for abandoned builds.
 
 ### Concurrency limits across builds
 

@@ -54,8 +54,87 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `Cron` or `Period`, fixed at deploy time, and `spawn()` takes no start
   time).
 
+- **Dependency edges are scoped to the code and config that evaluated
+  them, not to the task id.** A build's readiness is evaluated over the
+  edges in its own _structure scope_ — the deployment's (or local
+  process's) code id plus a hash of its `dependencies_only` config — so a
+  changed `requires()` or a changed fan-out needs no version bump, and a
+  build already running keeps its own structure while new code runs beside
+  it. A resume or re-trigger under other code is refused
+  (`ScopeMismatchError`): start a new build. Builds under the same code and
+  config share what they discovered, so a fan-out's pre-yield section runs
+  once per scope. Design record:
+  `docs/design/scope-keyed-dependency-structure.md`.
+- **Three levels of parameter significance.**
+  `sd.StardagField(significance="identity" | "dependencies_only" |
+"execution_only")`. Levels 2 and 3 are read only from the **build
+  config** (`build_config=` on `sd.build`, `sd.build_aio`,
+  `sd.build_sequential` and `StardagApp.build_trigger`;
+  `sd.build_config_scope(...)` for tests) and **can no longer be passed at
+  init** — that is what keeps one task id to one structure within a build.
+  The registry stores only identity-level `task_data`, so a task rebuilt
+  from registry data and one unpickled from the build store agree by
+  construction (closes the "frozen at first registration" inconsistency).
+- **`hash_exclude=True` is deprecated** in favour of
+  `significance="execution_only"`. It keeps working for one release with a
+  `DeprecationWarning`; the difference is that the old option allowed the
+  value at init and the new levels do not.
+- **A cancelled or skipped task in a build's plan is reset and run** (within
+  the attempt budget) by the ordinary frontier pass, as soon as every
+  upstream in the build's scope is complete. It used to be reached only
+  through the external-blocker diagnostic, once the build had already
+  stalled. `FAILED` is unchanged: a result, owned by `fail_mode`.
+- **`StardagApp(versioned_deployments=True)`** deploys each code version
+  under its own Modal app, `<family>--<code id>`, and records it in the
+  registry; `build_trigger(deployment=...)` resolves the newest, `"local"`
+  or an explicit one. New CLI: `stardag modal deployments`,
+  `stardag modal gc <family>`. `stardag modal deploy` records every
+  deployment (best-effort). Off by default.
+- Registration sends the dependency sets discovery actually computed, and
+  declares nothing for a task it pruned at, instead of re-evaluating
+  `requires()` for every task in the payload.
+- **Breaking for `RegistryABC` implementers outside this repo:**
+  `task_register`, `task_register_aio`, `task_register_bulk` and
+  `task_register_bulk_aio` take a keyword-only `declared_dependencies`;
+  `build_start(_aio)` and `build_resume(_aio)` take keyword-only
+  `scope_key` / `build_config`; new `build_set_scope(_aio)`,
+  `deployment_record`, `deployment_list`, `deployment_retire`
+  (no-op defaults). `BuildInfo` gains `scope_key` and `build_config`.
+  The frontier's `blocked_by_external` is no longer read.
+
 ### Registry API
 
+- **Dependency edges carry a `scope_key`** (`task_dependencies.scope_key`,
+  `builds.scope_key`, `builds.build_config`), unique on
+  `(scope_key, upstream, downstream)`; gating, plan closure and skip-blocked
+  read the build's scope only. New `PUT /builds/{id}/scope` (set-once, 409
+  `scope_mismatch`); `POST /builds/{id}/resume` accepts `scope_key` /
+  `build_config` and refuses a mismatch. `POST /builds` accepts them too.
+  A build that never sets a scope runs under a synthetic per-build one, so
+  older SDKs keep working with per-build edges.
+- **Phantom placeholder rows are gone.** Every declared upstream must be
+  registered; an unknown id is a 400 `unknown_upstream_task_ids` on both
+  registration endpoints and on `/dependencies`. The one tolerance: unknown
+  upstreams of a task whose recorded status is COMPLETED are dropped, for
+  SDKs that re-derive `requires()` for pruned tasks. The migration deletes
+  existing phantom rows and their edges.
+- `TaskCreate.dependency_task_ids` is `list[str] | None`: a list declares,
+  `null` declares nothing.
+- **Plan closure re-runs when a build stalls**, so an edge a scope-mate's
+  worker wrote after registration is picked up. `blocked_by_external` is
+  therefore always empty (kept on the wire for one release).
+- **CANCELLED and SKIPPED tasks are actionable** when gated open.
+- **The graph reads by provenance.** The environment-wide graph shows each
+  node's edges from the scope of the build that produced its current
+  status; a build's graph adds its own scope. Edges carry `scope_key` and
+  `is_cross_scope`; nodes carry `scope_key`.
+- New `deployments` table and routes: `POST /deployments` (idempotent on
+  handle), `GET /deployments`, `POST /deployments/{id}/retire` (409
+  `deployment_in_use` while a RUNNING build references it, unless `force`).
+- **Migration** `690e61e0c920`: adds the columns and table, backfills every
+  build's synthetic scope, deletes phantoms, and **copies legacy edges into
+  the scope of every RUNNING build** so a reactive build in flight across
+  the deploy keeps its gates.
 - **`TASK_INTERRUPTED` applies only while the task is `RUNNING` under the
   reporting build.** A worker cannot tell a deliberate cancel from a
   function timeout, so it reports either way and the registry decides — it

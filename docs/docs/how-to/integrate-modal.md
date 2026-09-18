@@ -789,6 +789,49 @@ re-trigger, and fails the task again rather than leaving it pending and
 inert. See
 [Retries and interruptions](../concepts/modal-orchestration.md#retries-and-interruptions).
 
+### Build config: per-build knobs without touching the task id
+
+Parameters declared `significance="dependencies_only"` or
+`"execution_only"` (see [Three levels of
+significance](../concepts/parameters.md#three-levels-of-significance))
+are never passed at init. Give them values per build on the trigger:
+
+```{.python notest}
+result = app.build_trigger(
+    root_task,
+    reactive=True,
+    build_config={
+        "reports.Aggregate": {"partition_size": 500, "num_threads": 8},
+    },
+)
+```
+
+The config is stored with the build and installed by the bootstrap, every
+tick and every worker before any task is constructed, so a yielded
+dependency sees the same values the scheduler planned with. A re-trigger of
+the same build must carry the same config; a different one is a new build.
+
+### Versioned deployments
+
+```{.python notest}
+app = sd_modal.StardagApp("stardag-poc", versioned_deployments=True, ...)
+```
+
+```bash
+stardag modal deploy app.py          # deploys stardag-poc--<code id>, records it
+stardag modal deployments --family stardag-poc
+stardag modal gc stardag-poc --keep 1   # stop deployments no running build needs
+```
+
+```{.python notest}
+app.build_trigger(root_task, reactive=True)                      # newest recorded
+app.build_trigger(root_task, reactive=True, deployment="local")  # this checkout's code
+app.build_trigger(root_task, reactive=True, deployment="3f9c1a2b7e01")  # a code id
+```
+
+Deploy from a clean checkout: a dirty tree gets a one-off code id, so every
+deploy of it is a new app that only `gc` cleans up.
+
 ### Preemption and timeouts
 
 Two things routinely kill a Modal container without the task being wrong:

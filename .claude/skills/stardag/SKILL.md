@@ -121,7 +121,8 @@ sd.auto_namespace(scope=__name__)  # Auto namespace from module
 sd.flatten_task_struct()           # Flatten nested task structures
 sd.get_default_relpath(task)       # Construct default task output relpath
 sd.HashableSet[T]                  # Hashable frozenset for parameters
-sd.StardagField(...)               # Field annotation (hash_exclude, etc.)
+sd.StardagField(...)               # Field annotation (significance, compat_default)
+sd.build_config_scope({...})       # Install a build config (levels 2/3 values) in a block
 sd.StardagBaseModel                # Base Pydantic model
 sd.task_from_registry_data(data)   # Rebuild a task from registry task_data (pickle-free)
 sd.TaskRehydrationError            # Raised when reconstruction fails
