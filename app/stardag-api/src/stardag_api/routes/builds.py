@@ -2958,14 +2958,16 @@ async def _reconcile_dependency_edges(
     placeholder rows and the next register-with-real-data call upgrades
     them in place.
 
-    Issues two statements when every upstream task already exists, or five
-    when missing upstream ids must be created as phantoms — independent of
-    N otherwise:
+    Issues three statements when every upstream task already exists, or
+    five when missing upstream ids must be created as phantoms —
+    independent of N otherwise:
       1. SELECT existing tasks WHERE task_id IN (...).
-      2. (only if any upstream ids were missing) SELECT the downstream row
-         FOR UPDATE, before creating anything — the lock order every writer
-         here shares, and what stands between this path and a deadlock with
-         a concurrent registration. See the comment at that statement.
+      2. SELECT the rows this call will touch FOR UPDATE, in ``task_id``
+         order, before creating or linking anything — the order every
+         writer here shares, and what stands between this path and a
+         deadlock with a concurrent registration. Unconditional, because
+         the edge insert takes foreign-key locks on those rows whether or
+         not a phantom was needed. See the comment at that statement.
       3. (only if any upstream ids were missing) INSERT ... VALUES (...)
          ON CONFLICT DO NOTHING — bulk phantom insert.
       4. (only if any upstream ids were missing) SELECT to re-fetch PKs.
@@ -3005,25 +3007,37 @@ async def _reconcile_dependency_edges(
         task_id: pk for pk, task_id in existing_result.all()
     }
 
-    # 2. For any missing ids, batch-insert phantoms. ON CONFLICT DO NOTHING
+    # 2. Lock every existing row this call will touch -- the downstream and
+    # the upstreams that are already here -- in sorted ``task_id`` order,
+    # before creating or linking anything.
+    #
+    # **The edge insert takes locks whether or not this asks for them.**
+    # Its foreign keys mean an implicit ``FOR KEY SHARE`` on both endpoints
+    # of every edge, and that conflicts with a ``FOR UPDATE`` a
+    # registration holds. So without this the locks are still taken, just
+    # in an order nobody chose: the constraint order for these rows, while
+    # a registration takes them in ``task_id`` order. Pick two ids where
+    # those disagree and each transaction ends up holding one row and
+    # waiting for the other.
+    #
+    # Taking them here, in the order every other writer here uses, is what
+    # makes that impossible. It covers the phantom case too, which is the
+    # narrower one: a caller that inserted a phantom and then blocked on
+    # the downstream's key lock, while the writer holding that row waited
+    # to create the same phantom.
+    #
+    # Rows created below need no entry here -- inserting them holds them.
+    await db.execute(
+        select(Task.id)
+        .where(Task.id.in_({downstream_task_pk, *task_pk_by_task_id.values()}))
+        .order_by(Task.task_id.asc())
+        .with_for_update()
+    )
+
+    # 3. For any missing ids, batch-insert phantoms. ON CONFLICT DO NOTHING
     # keeps us idempotent under concurrent registrations of the same id.
     missing_ids = [tid for tid in requested_ids if tid not in task_pk_by_task_id]
     if missing_ids:
-        # Lock the downstream row before creating anything, which is the
-        # order every writer here follows: lock what exists, then create
-        # what does not.
-        #
-        # Not decoration. The edge insert at the end takes an implicit
-        # ``FOR KEY SHARE`` on this row for its foreign key, and that
-        # conflicts with a ``FOR UPDATE`` somebody else may hold. Without
-        # this, a caller could insert a phantom, hold it, and then block on
-        # the downstream's key lock -- while the writer holding that row
-        # waits to create the same phantom. Two transactions, opposite
-        # order. Taking the row here means this call is waiting for it
-        # before it holds anything anyone else wants.
-        await db.execute(
-            select(Task.id).where(Task.id == downstream_task_pk).with_for_update()
-        )
         # Sorted for the same reason as every other multi-row insert here:
         # a conflicting row whose inserter has not committed makes this
         # statement wait, so two callers creating overlapping phantoms in

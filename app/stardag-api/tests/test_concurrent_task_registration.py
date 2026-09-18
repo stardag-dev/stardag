@@ -489,10 +489,17 @@ async def test_bulk_creates_an_omitted_upstream_with_its_batch_not_after_it(
         await asyncio.sleep(SETTLE_SECONDS)
         assert not bulk.done(), "the bulk call did not park on the held row"
 
+        # Registers the *dependency*, naming the parent as its own
+        # upstream. That direction is what builds the cycle against the
+        # original code: the old single path inserted its own task first,
+        # so it takes `dep` and then waits for `parent` -- which the bulk
+        # call is holding. Registering `parent` here instead would have it
+        # block on the parent insert while holding nothing, and the test
+        # would pass against the very implementation it exists to reject.
         single = asyncio.create_task(
             pg_client.post(
                 f"/api/v1/builds/{other_build_id}/tasks",
-                json=_task(parent, dependency_task_ids=[dep]),
+                json=_task(dep, dependency_task_ids=[parent]),
             )
         )
         await asyncio.sleep(SETTLE_SECONDS)
