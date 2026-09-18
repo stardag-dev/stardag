@@ -134,9 +134,12 @@ _RETRY_CONFIG = Retry(
     # on the request.
     #
     # ``/tasks/{id}/start?claim=true`` grants one by the execution already
-    # holding the claim -- same build *and* same ``executor_ref`` -- so a
-    # genuine second attempt of the same build is still refused. But **the
-    # claim this SDK takes carries no ref**: it is taken before the worker
+    # holding the claim -- same build, and the same ``(executor,
+    # executor_ref)`` pair -- so a genuine second attempt of the same
+    # build is still refused, and so is a start from a different backend
+    # that happened to reuse the ref string, since a ref only names an
+    # execution alongside the executor that minted it. But **the claim
+    # this SDK takes carries no ref**: it is taken before the worker
     # is spawned, and the ref is the spawn's own id, so the reactive
     # engine's claim is exactly the ref-less case the server still refuses.
     # A retried claim from here therefore still reports a loss to the

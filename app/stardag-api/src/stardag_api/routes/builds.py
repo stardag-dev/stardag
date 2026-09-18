@@ -3877,12 +3877,15 @@ async def start_task(
             executor fields and expiry together.
 
             Neither does a claim this same execution already holds --
-            same build, same ``executor_ref``. The client retries a POST
-            whose answer was lost, and refusing the second delivery would
-            tell a worker that somebody else is running the task it is
-            itself holding. A start with no ``executor_ref`` is refused
-            as before: with nothing to compare, a retry and a second
-            attempt of the same build cannot be told apart.
+            same build, same ``executor`` *and* same ``executor_ref``. The
+            client retries a POST whose answer was lost, and refusing the
+            second delivery would tell a worker that somebody else is
+            running the task it is itself holding. The pair rather than
+            the ref alone, because refs are backend-specific: a start from
+            a different executor that reused the string is a different
+            execution and is refused. So is a start with no
+            ``executor_ref`` -- with nothing to compare, a retry and a
+            second attempt of the same build cannot be told apart.
         claim_ttl_seconds: Lifetime of the claim this start grants, from
             the event's timestamp. Written to
             ``tasks.latest_status_expires_at`` and echoed in the event

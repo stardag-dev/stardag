@@ -8,8 +8,12 @@ itself. The task is then claimed and not running until the claim expires.
 
 The identity that settles it is not the build: two attempts of one build
 are legitimately distinct, and granting on the build alone would start
-handing out real double-claims. It is the build *and* the
-``executor_ref`` -- which a retry repeats and a new attempt replaces.
+handing out real double-claims. It is the build *and the whole
+execution*: ``(executor, executor_ref)``, which a retry repeats and a new
+attempt replaces. Both halves of that pair, because a ref is
+backend-specific and two backends can mint the same string without it
+naming the same execution -- see
+``test_the_same_ref_from_a_different_executor_is_refused``.
 """
 
 from __future__ import annotations
