@@ -37,7 +37,10 @@ See [CLA.md](app/CLA.md) for the full agreement. By submitting a PR to `app/`, y
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- Node.js 18+ (for UI development)
+- Node.js 22.22.2+ (for UI development). CI runs the latest 22.x. The
+  floor is the highest one the lockfile declares — `jsdom` 30's
+  `^22.22.2 || ^24.15.0 || >=26.0.0`; `vitest` 5 and `vite` 8 sit just
+  below it. 24.15+ and 26+ work too.
 
 ### Development Setup
 
