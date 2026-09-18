@@ -6,7 +6,7 @@ import subprocess
 from datetime import datetime
 from functools import lru_cache
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 from uuid import UUID
 
 from stardag.base_model import StardagBaseModel
@@ -329,6 +329,49 @@ class BuildInfo(StardagBaseModel):
     reactive_app_name: str | None = None
     # Reactive-scheduler tick configuration; None/absent treated as ``{}``.
     reactive_tick_kwargs: dict[str, Any] | None = None
+    # The structure scope the build's dependency edges live in
+    # (``<code_id>:<config_hash>``, or the server's synthetic ``build:<id>``
+    # for a build that never set one). A tick compares it with the scope
+    # its own code and the build's config produce, and refuses to drive a
+    # build under other code. None on servers predating scopes.
+    scope_key: str | None = None
+    # The build config levels 2 and 3 parameters are read from; None = {}.
+    build_config: dict[str, Any] | None = None
+
+
+class DeploymentInfo(StardagBaseModel):
+    """A deployed code version of an app family, as the registry records it.
+
+    The record — not the app name — is the identity of a deployment: the
+    trigger's default resolver asks for the newest live one of a family, and
+    the garbage collector asks which ones no running build still needs.
+    """
+
+    id: UUID
+    family: str
+    handle: str
+    code_id: str
+    created_at: datetime | None = None
+    retired_at: datetime | None = None
+    running_builds: int = 0
+
+
+class _DeriveDependencies:
+    """Sentinel type for :data:`DERIVE_DEPENDENCIES`."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "DERIVE_DEPENDENCIES"
+
+
+DERIVE_DEPENDENCIES = _DeriveDependencies()
+"""Default for a single registration's ``declared_dependencies``: evaluate
+``task.requires()`` here. The two other values mean different things — a
+sequence declares exactly that set, ``None`` declares nothing (the task was
+pruned at, so its dependencies were never evaluated) — and one of them had
+to be the default; this sentinel keeps the legacy behaviour for callers
+that predate the distinction."""
+
+DeclaredDependencies: TypeAlias = "Sequence[BaseTask] | None | _DeriveDependencies"
 
 
 class SchedulerLeaseResult(StardagBaseModel):
@@ -605,6 +648,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> UUID:
         """Start a new build session.
 
@@ -617,18 +663,59 @@ class RegistryABC(metaclass=abc.ABCMeta):
                 build is executed (e.g. the Modal app/workspace/environment
                 for a triggered build). Backends that don't track it may
                 ignore it.
+            scope_key: The structure scope the build's dependency edges live
+                in, when the caller runs discovery itself (a local build). A
+                reactive trigger leaves it out and the bootstrap sets it via
+                :meth:`build_set_scope` before registering any edge.
+            build_config: The build config levels 2 and 3 parameters are
+                read from; fixed for the build's life.
 
         Returns:
             Build ID (UUID) for the new build session.
         """
         return UUID("00000000-0000-0000-0000-000000000000")
 
+    def build_set_scope(
+        self,
+        build_id: UUID,
+        *,
+        scope_key: str,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
+        """Fix the build's structure scope and build config, set-once.
+
+        Called by whoever runs discovery — the reactive bootstrap inside the
+        deployment, or a local build — **before it registers any edge**.
+        Idempotent for the same scope; a different scope on a build that
+        already has a real one raises :class:`ScopeMismatchError`, since
+        that build's edges were evaluated by other code. Default: no-op.
+        """
+        pass
+
+    async def build_set_scope_aio(
+        self,
+        build_id: UUID,
+        *,
+        scope_key: str,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
+        """Async version of build_set_scope."""
+        self.build_set_scope(build_id, scope_key=scope_key, build_config=build_config)
+
     def build_resume(
         self,
         build_id: UUID,
         executor_metadata: dict[str, Any] | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         """Mark an existing build as resumed.
+
+        ``scope_key`` / ``build_config``, when given, must agree with the
+        build's (a build still on its synthetic scope adopts them); a
+        mismatch raises :class:`ScopeMismatchError` — a resume under other
+        code is a new build.
 
         Called when ``sd.build(resume_build_id=...)`` reuses an existing
         build (potentially in a terminal state) instead of starting a new
@@ -703,7 +790,13 @@ class RegistryABC(metaclass=abc.ABCMeta):
     # -------------------------------------------------------------------------
 
     @abc.abstractmethod
-    def task_register(self, build_id: UUID, task: "BaseTask") -> None:
+    def task_register(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
+    ) -> None:
         """Register a task as pending/scheduled.
 
         This is called when a task is about to be executed.
@@ -711,6 +804,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
         Args:
             build_id: The build UUID returned by build_start.
             task: The task to register.
+            declared_dependencies: The task's static upstreams **as
+                discovery computed them**. A sequence declares exactly that
+                set; ``None`` declares nothing — the task was pruned at
+                because it was already complete, so its ``requires()`` was
+                never evaluated and must not be evaluated here; the default
+                sentinel evaluates ``task.requires()`` (legacy callers).
         """
         pass
 
@@ -720,6 +819,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         tasks: Sequence["BaseTask"],
         *,
         limit_keys: Mapping[UUID, Sequence[str]] | None = None,
+        declared_dependencies: Mapping[UUID, "Sequence[BaseTask] | None"] | None = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Register many tasks to a build in a single call.
 
@@ -747,9 +847,18 @@ class RegistryABC(metaclass=abc.ABCMeta):
         API registry does — a slot release wakes the builds queued on a key
         only if the registry knows which pending tasks want it). The
         default ignores it.
+
+        ``declared_dependencies`` maps task ids to the static upstreams
+        discovery computed for them; a task absent from the map declares
+        nothing (it was pruned at). ``None`` for the whole mapping keeps the
+        legacy behaviour of evaluating ``requires()`` per task.
         """
         for task in tasks:
-            self.task_register(build_id, task)
+            self.task_register(
+                build_id,
+                task,
+                declared_dependencies=_declared_for(task, declared_dependencies),
+            )
         return None
 
     def build_list(
@@ -1171,6 +1280,36 @@ class RegistryABC(metaclass=abc.ABCMeta):
             build_id, app_name=app_name, tick_kwargs=tick_kwargs
         )
 
+    # -------------------------------------------------------------------------
+    # Deployments
+    # -------------------------------------------------------------------------
+
+    def deployment_record(
+        self, *, family: str, handle: str, code_id: str
+    ) -> DeploymentInfo | None:
+        """Record a deployed code version (idempotent on ``handle``).
+
+        See :class:`DeploymentInfo`. Default: no-op returning None, for
+        backends that do not track deployments.
+        """
+        return None
+
+    def deployment_list(
+        self, *, family: str | None = None, include_retired: bool = False
+    ) -> list[DeploymentInfo]:
+        """The environment's deployments, newest first. Default: none."""
+        return []
+
+    def deployment_retire(
+        self, deployment_id: UUID, *, force: bool = False
+    ) -> DeploymentInfo | None:
+        """Retire a deployment so the resolver stops handing it out.
+
+        Refused while a RUNNING build still references its handle unless
+        ``force``. Default: no-op returning None.
+        """
+        return None
+
     def task_start(
         self,
         build_id: UUID,
@@ -1415,6 +1554,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> UUID:
         """Async version of build_start."""
         return self.build_start(
@@ -1425,6 +1567,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
         self,
         build_id: UUID,
         executor_metadata: dict[str, Any] | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         """Async version of build_resume."""
         self.build_resume(build_id, executor_metadata=executor_metadata)
@@ -1451,9 +1596,15 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of build_exit_early."""
         self.build_exit_early(build_id, reason)
 
-    async def task_register_aio(self, build_id: UUID, task: "BaseTask") -> None:
+    async def task_register_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
+    ) -> None:
         """Async version of task_register."""
-        self.task_register(build_id, task)
+        self.task_register(build_id, task, declared_dependencies=declared_dependencies)
 
     async def task_register_bulk_aio(
         self,
@@ -1461,6 +1612,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         tasks: Sequence["BaseTask"],
         *,
         limit_keys: Mapping[UUID, Sequence[str]] | None = None,
+        declared_dependencies: Mapping[UUID, "Sequence[BaseTask] | None"] | None = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Async version of task_register_bulk.
 
@@ -1469,7 +1621,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
         does so with the ``/tasks/bulk`` endpoint).
         """
         for task in tasks:
-            await self.task_register_aio(build_id, task)
+            await self.task_register_aio(
+                build_id,
+                task,
+                declared_dependencies=_declared_for(task, declared_dependencies),
+            )
         return None
 
     async def task_start_claim_aio(
@@ -1662,11 +1818,20 @@ class NoOpRegistry(RegistryABC):
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> UUID:
         """Return a placeholder build ID."""
         return UUID("00000000-0000-0000-0000-000000000000")
 
-    def task_register(self, build_id: UUID, task: "BaseTask") -> None:
+    def task_register(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
+    ) -> None:
         pass
 
     def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
@@ -1694,6 +1859,17 @@ class NoOpRegistry(RegistryABC):
         real backend was expected to provide).
         """
         return StartClaimResult(started=True)
+
+
+def _declared_for(
+    task: "BaseTask",
+    declared: Mapping[UUID, "Sequence[BaseTask] | None"] | None,
+) -> "DeclaredDependencies":
+    """Per-task declaration from a bulk mapping: absent map → derive (legacy);
+    absent task → declares nothing."""
+    if declared is None:
+        return DERIVE_DEPENDENCIES
+    return declared.get(task.id)
 
 
 def init_registry() -> RegistryABC:

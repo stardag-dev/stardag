@@ -21,7 +21,7 @@ import inspect
 import logging
 import time
 from collections.abc import Awaitable, Sequence
-from typing import Any, AsyncIterator, Callable, Literal
+from typing import Any, AsyncIterator, Callable, Literal, Mapping
 from uuid import UUID
 
 from stardag import (
@@ -46,6 +46,9 @@ from stardag.build._base import (
     TaskCount,
     handle_registry_error,
 )
+from stardag.build._scope import code_id, structure_scope_key
+from stardag.build_config import build_config_scope, rebind_to_build_config
+from stardag.exceptions import ScopeMismatchError
 from stardag.registry import RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
@@ -137,6 +140,7 @@ def build_sequential(
     global_lock_config: GlobalLockConfig | None = None,
     register_all: bool = False,
     on_registry_failure: OnRegistryFailure = "raise",
+    build_config: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> BuildSummary:
     """Sync API for building tasks sequentially.
 
@@ -171,11 +175,22 @@ def build_sequential(
             for performance — skipping complete subgraphs avoids unnecessary I/O.
         on_registry_failure: How to handle registry call failures. "raise" (default)
             propagates the exception; "warn" logs a warning and continues.
+        build_config: ``{"<namespace>.<Name>": {"<field>": value}}`` — the one
+            source of every ``dependencies_only`` / ``execution_only`` task
+            parameter for this build (see ``stardag.build_config``). Installed
+            for the whole build; the roots are re-bound to it. Its
+            ``dependencies_only`` part, with this process's code id, is the
+            structure scope the build's dependency edges are recorded under.
 
     Returns:
         BuildSummary with status, task counts, and build_id
     """
     tasks_list = _validate_tasks(tasks)
+    _build_config_cm = build_config_scope(build_config)
+    _build_config_cm.__enter__()
+    if build_config:
+        tasks_list = [rebind_to_build_config(t) for t in tasks_list]
+    scope_key = structure_scope_key(code_id(), build_config)
 
     if registry is None:
         registry = registry_provider.get()
@@ -200,6 +215,10 @@ def build_sequential(
     # awaiting the bulk-register call. Cleared by
     # ``flush_pending_registrations()``.
     pending_registrations: list[BaseTask] = []
+    # The static dependencies the walk computed, per task it expanded. A
+    # task absent from it was pruned at (complete): it declares nothing,
+    # and its ``requires()`` is never evaluated for the registry's sake.
+    declared_deps: dict[UUID, list[BaseTask]] = {}
 
     # Start or resume build *before* discovery so we have a build_id to
     # register tasks against.
@@ -209,7 +228,14 @@ def build_sequential(
         # terminal build back to RUNNING. On older registry servers this
         # is a no-op (the endpoint 404s and APIRegistry swallows it).
         try:
-            registry.build_resume(build_id)
+            registry.build_resume(
+                build_id, scope_key=scope_key, build_config=build_config
+            )
+        except ScopeMismatchError:
+            # The registry understood and refused: this build's edges were
+            # evaluated by other code or other structure config. New build.
+            _build_config_cm.__exit__(None, None, None)
+            raise
         except Exception as reg_err:
             handle_registry_error(
                 reg_err,
@@ -217,7 +243,9 @@ def build_sequential(
                 on_registry_failure,
             )
     else:
-        build_id = registry.build_start(root_tasks=tasks_list)
+        build_id = registry.build_start(
+            root_tasks=tasks_list, scope_key=scope_key, build_config=build_config
+        )
 
     def register_task_once(task: BaseTask) -> None:
         """Register a single task (used as a fallback retry path).
@@ -231,7 +259,9 @@ def build_sequential(
         if task.id in registered_tasks:
             return
         try:
-            registry.task_register(build_id, task)
+            registry.task_register(
+                build_id, task, declared_dependencies=declared_deps.get(task.id)
+            )
             registered_tasks.add(task.id)
         except Exception as reg_err:
             handle_registry_error(
@@ -259,7 +289,15 @@ def build_sequential(
         for chunk_start in range(0, len(batch), _BULK_REGISTER_CHUNK_SIZE):
             chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
             try:
-                registry.task_register_bulk(build_id, chunk)
+                registry.task_register_bulk(
+                    build_id,
+                    chunk,
+                    declared_dependencies={
+                        t.id: declared_deps[t.id]
+                        for t in chunk
+                        if t.id in declared_deps
+                    },
+                )
             except Exception as reg_err:
                 ids_preview = ", ".join(str(t.id) for t in chunk[:5])
                 if len(chunk) > 5:
@@ -303,8 +341,11 @@ def build_sequential(
 
         # Task not complete (or register_all) — recurse into deps first
         # (post-order), so when we register this task its deps already
-        # exist in the API.
-        for dep in flatten_task_struct(task.requires()):
+        # exist in the API. What the walk computes here is what the
+        # registry is told for this task.
+        static_deps = flatten_task_struct(task.requires())
+        declared_deps[task.id] = static_deps
+        for dep in static_deps:
             discover(dep)
 
         # All deps are registered. Append self after children — preserves
@@ -536,6 +577,8 @@ def build_sequential(
             build_id=build_id,
             error=e,
         )
+    finally:
+        _build_config_cm.__exit__(None, None, None)
 
 
 def _run_task_sequential(
@@ -696,6 +739,7 @@ async def build_sequential_aio(
     global_lock_config: GlobalLockConfig | None = None,
     register_all: bool = False,
     on_registry_failure: OnRegistryFailure = "raise",
+    build_config: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> BuildSummary:
     """Async API for building tasks sequentially.
 
@@ -730,11 +774,22 @@ async def build_sequential_aio(
             for performance — skipping complete subgraphs avoids unnecessary I/O.
         on_registry_failure: How to handle registry call failures. "raise" (default)
             propagates the exception; "warn" logs a warning and continues.
+        build_config: ``{"<namespace>.<Name>": {"<field>": value}}`` — the one
+            source of every ``dependencies_only`` / ``execution_only`` task
+            parameter for this build (see ``stardag.build_config``). Installed
+            for the whole build; the roots are re-bound to it. Its
+            ``dependencies_only`` part, with this process's code id, is the
+            structure scope the build's dependency edges are recorded under.
 
     Returns:
         BuildSummary with status, task counts, and build_id
     """
     tasks_list = _validate_tasks(tasks)
+    _build_config_cm = build_config_scope(build_config)
+    _build_config_cm.__enter__()
+    if build_config:
+        tasks_list = [rebind_to_build_config(t) for t in tasks_list]
+    scope_key = structure_scope_key(code_id(), build_config)
 
     if registry is None:
         registry = registry_provider.get()
@@ -757,6 +812,8 @@ async def build_sequential_aio(
     # Tasks accumulated during the current discover() walk (post-order),
     # awaiting bulk registration. Cleared by flush_pending_registrations_aio.
     pending_registrations: list[BaseTask] = []
+    # See the sync engine: the declaration per expanded task.
+    declared_deps: dict[UUID, list[BaseTask]] = {}
 
     # Start or resume build *before* discovery so we have a build_id to
     # register tasks against.
@@ -766,7 +823,12 @@ async def build_sequential_aio(
         # terminal build back to RUNNING. On older registry servers this
         # is a no-op (the endpoint 404s and APIRegistry swallows it).
         try:
-            await registry.build_resume_aio(build_id)
+            await registry.build_resume_aio(
+                build_id, scope_key=scope_key, build_config=build_config
+            )
+        except ScopeMismatchError:
+            _build_config_cm.__exit__(None, None, None)
+            raise
         except Exception as reg_err:
             handle_registry_error(
                 reg_err,
@@ -774,7 +836,9 @@ async def build_sequential_aio(
                 on_registry_failure,
             )
     else:
-        build_id = await registry.build_start_aio(root_tasks=tasks_list)
+        build_id = await registry.build_start_aio(
+            root_tasks=tasks_list, scope_key=scope_key, build_config=build_config
+        )
 
     async def register_task_once_aio(task: BaseTask) -> None:
         """Register a single task (per-task fallback retry path).
@@ -785,7 +849,9 @@ async def build_sequential_aio(
         if task.id in registered_tasks:
             return
         try:
-            await registry.task_register_aio(build_id, task)
+            await registry.task_register_aio(
+                build_id, task, declared_dependencies=declared_deps.get(task.id)
+            )
             registered_tasks.add(task.id)
         except Exception as reg_err:
             handle_registry_error(
@@ -810,7 +876,15 @@ async def build_sequential_aio(
         for chunk_start in range(0, len(batch), _BULK_REGISTER_CHUNK_SIZE):
             chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
             try:
-                await registry.task_register_bulk_aio(build_id, chunk)
+                await registry.task_register_bulk_aio(
+                    build_id,
+                    chunk,
+                    declared_dependencies={
+                        t.id: declared_deps[t.id]
+                        for t in chunk
+                        if t.id in declared_deps
+                    },
+                )
             except Exception as reg_err:
                 ids_preview = ", ".join(str(t.id) for t in chunk[:5])
                 if len(chunk) > 5:
@@ -855,7 +929,10 @@ async def build_sequential_aio(
         # Task not complete (or register_all) — recurse into deps first
         # (post-order), so by the time the bulk register call processes
         # this task its deps are already in the array (and thus in the DB).
-        for dep in flatten_task_struct(task.requires()):
+        # What the walk computes here is what the registry is told.
+        static_deps = flatten_task_struct(task.requires())
+        declared_deps[task.id] = static_deps
+        for dep in static_deps:
             await discover(dep)
 
         # Append self after children — preserves post-order within subtree.
@@ -1083,6 +1160,8 @@ async def build_sequential_aio(
             build_id=build_id,
             error=e,
         )
+    finally:
+        _build_config_cm.__exit__(None, None, None)
 
 
 async def _iter_dynamic_deps(result: Any) -> AsyncIterator[Any]:

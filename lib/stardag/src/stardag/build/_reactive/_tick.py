@@ -434,26 +434,17 @@ class TickSummary:
     # spawning here would duplicate the execution. Not an error — it is the
     # guard working.
     interruptions_backend_retrying: int = 0
-    # Cross-build blocking, summed over the terminal evaluations of this
-    # tick (like limit_denied, these are counts of observations, not of
-    # distinct tasks — one blocker seen on three linger passes counts
-    # three times).
-    #
-    # ``external_blockers`` is every entry the frontier reported while the
-    # build looked stalled; ``waited`` and ``fatal`` cover only the entries
-    # that drove the wait-or-fail decision, so the three do not add up —
-    # a blocker whose status is a result influences neither (see
-    # ``_ExternalBlockers.inert``). A tick with waited > 0 and fatal == 0 is
-    # the healthy "waiting on another build" state; fatal > 0 always
-    # accompanies a failed build.
-    external_blockers: int = 0
-    external_blockers_waited: int = 0
-    external_blockers_fatal: int = 0
-    # Blockers this build reset so it could run them itself (the
-    # collaboration path: a shared task another build cancelled is still this
-    # build's to run). Only ever a task in this build's plan — the attempt
-    # budget the reset is bounded by does not exist for anything else.
+    # Cancelled or skipped tasks in this build's plan that this tick reset so
+    # it could run them itself (the collaboration path: a shared task another
+    # build cancelled is still this build's to run, and a skip whose upstreams
+    # have since completed has lost its reason). The frontier lists them as
+    # actionable once every upstream in the build's scope is complete; the
+    # reset is bounded by the attempt budget like any retry. Name kept from
+    # when these arrived as "in-plan blockers" through a stall diagnostic.
     in_build_blockers_reset: int = 0
+    # Cancelled or skipped tasks this tick left alone because the attempt
+    # budget for them was spent; ``fail_mode`` owns them from there.
+    revoked_budget_spent: int = 0
     # --- exit handshake (see ``_hand_off_if_needed``) ---
     # Times the linger deadline expired with the wake-up flag set, so the
     # tick kept the lease and re-acted instead of exiting. The fast half of
@@ -913,7 +904,6 @@ async def _run_tick_body_aio(
                         config=config,
                         summary=summary,
                     )
-                    blockers_reset_before = summary.in_build_blockers_reset
                     terminal = await _handle_terminal(
                         frontier,
                         build_id=build_id,
@@ -928,18 +918,6 @@ async def _run_tick_body_aio(
                         summary.outcome = "terminal"
                         summary.terminal_status = terminal
                         return
-                    if summary.in_build_blockers_reset > blockers_reset_before:
-                        # Resetting a cancelled blocker made a task runnable,
-                        # and this tick is the only thing that knows. The
-                        # registry's wake-up flag deliberately skips the build
-                        # whose own event caused the change — it is the one
-                        # that already knows — so lingering here waits for
-                        # news that cannot arrive, and the build stalls until
-                        # the watchdog with nothing running and nothing to
-                        # report. Counts as having acted, because it is:
-                        # terminal handling is the only phase that changes
-                        # the frontier without going through the action pass.
-                        acted = True
                     if acted:
                         # The tick's own actions (spawns recorded as started,
                         # self-healed completions, recorded failures) changed the

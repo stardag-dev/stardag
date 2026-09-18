@@ -312,8 +312,19 @@ async def discover_and_register_aio(
         # registry whose bulk registration predates it is untouched unless
         # a selector is actually configured.
         keys = _limit_keys_for(chunk, limit_key_selector)
+        # What the walk computed, and nothing else: a task it expanded
+        # declares exactly the static set it walked; a task it pruned at
+        # (complete) is absent from the map and declares nothing — its
+        # ``requires()`` was never evaluated, and the upstreams it would
+        # name may never have been registered. See
+        # ``RegistryABC.task_register_bulk``.
         infos = await registry.task_register_bulk_aio(
-            build_id, chunk, **({"limit_keys": keys} if keys is not None else {})
+            build_id,
+            chunk,
+            declared_dependencies={
+                task.id: deps_of[task.id] for task in chunk if task.id in deps_of
+            },
+            **({"limit_keys": keys} if keys is not None else {}),
         )
         if not retry_failed:
             continue

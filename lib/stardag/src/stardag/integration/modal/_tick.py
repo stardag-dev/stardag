@@ -28,7 +28,9 @@ from stardag.build import (
     TickConfig,
     run_tick_aio,
 )
+from stardag.build._scope import code_id, is_synthetic_scope, structure_scope_key
 from stardag.build._wakeups import SpawnTick
+from stardag.build_config import set_build_config
 from stardag.build._task_modules import (
     import_task_modules,
     set_declared_task_module_patterns,
@@ -366,6 +368,33 @@ async def _run_deployed_tick_aio(
             "owner_app": owner_app,
             "forwarded": forwarded,
         }
+    # The structure scope. Every edge of this build was evaluated by the
+    # code and config its scope names; a tick from other code would plan
+    # with a structure the edges do not describe, so it refuses rather than
+    # drive the build. The server's synthetic ``build:<id>`` scope (a build
+    # nothing fixed a scope for — an older SDK) is driven by anyone.
+    expected_scope = structure_scope_key(code_id(), build_info.build_config)
+    if not is_synthetic_scope(build_info.scope_key) and (
+        build_info.scope_key != expected_scope
+    ):
+        logger.error(
+            f"Tick for build {build_id}: the build runs under structure scope "
+            f"{build_info.scope_key!r}, but this deployment's code and the "
+            f"build's config give {expected_scope!r}. Refusing to drive it: a "
+            "build carries one scope for its life, and a redeploy under new "
+            "code needs a new build. (Is a stale wake-up reaching a newer "
+            "deployment of this app? Then this is expected and harmless.)"
+        )
+        return {
+            "outcome": "scope_mismatch",
+            "scope_key": build_info.scope_key,
+            "expected_scope_key": expected_scope,
+        }
+    # The build's config, installed before anything is rehydrated: a task
+    # rebuilt from registry data resolves its dependencies_only /
+    # execution_only fields from it, exactly as the bootstrap did.
+    set_build_config(build_info.build_config)
+
     # Per-build tick configuration persisted at trigger time in the
     # registry — every tick (worker wake-ups and watchdog sweeps
     # spawn with only the build id) runs with the same settings.
@@ -415,6 +444,8 @@ async def _run_deployed_tick_aio(
         reactive=True,
         modal_workspace=deployment.modal_workspace,
         worker_timeouts=deployment.worker_timeouts,
+        build_config=build_info.build_config,
+        scope_key=build_info.scope_key,
     )
     summary = await run_tick_aio(
         build_uuid,

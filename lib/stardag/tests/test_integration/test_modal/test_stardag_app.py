@@ -739,6 +739,7 @@ class TestStardagAppBuildTrigger:
                 "workspace": "test-workspace",
                 "environment": "test-env",
             },
+            build_config=None,
         )
         assert result.build_id == build_id
         assert result.function_call == "spawn-handle"
@@ -2597,6 +2598,7 @@ class TestReactiveRetrigger:
                 "workspace": "test-workspace",
                 "environment": "test-env",
             },
+            build_config=None,
         )
         registry.build_set_reactive_meta.assert_called_once_with(
             build_id, app_name=app.name, tick_kwargs={"fail_mode": "continue"}

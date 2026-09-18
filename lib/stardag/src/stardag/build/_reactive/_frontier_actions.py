@@ -25,6 +25,7 @@ from stardag.registry import (
 )
 
 from stardag.build._reactive._budgets import (
+    _retry_allowed,
     _attempts_phrase,
     _record_task_failure,
     _start_denied_by_budget,
@@ -64,6 +65,17 @@ _INTERRUPTED_STATUS = "interrupted"
 # its own cancel through the server needs the executions route to find the
 # containers it is still responsible for stopping.
 _CANCELLED_STATUS = "cancelled"
+
+# Statuses the frontier reports as actionable once every upstream in the
+# build's structure scope is complete, and that this build may *reset* and
+# run: a cancel is a revocation of permission to run, not a verdict on the
+# task, and a skip is derived from an upstream that was going to fail — so
+# a skipped task whose upstreams are now all complete is a skip whose reason
+# no longer holds. FAILED is deliberately absent: a failure is a result, and
+# results belong to the build's ``fail_mode``. Bounded by the attempt
+# budget like any retry, so a task that is cancelled every time cannot
+# loop here.
+_REVOKED_STATUSES = ("cancelled", "skipped")
 
 
 # Slack added to an executor's own timeout when deriving a claim TTL. It
@@ -367,9 +379,10 @@ async def _act_on_frontier(
     terminal detection — a cumulative count would keep suppressing the
     stuck-build check long after the denied tasks have run).
 
-    **Three phases, each bounded by ``max_concurrent_actions``.** Resolve
-    every actionable task's object; probe the ones already RUNNING; spawn
-    the rest. Phases exist because the spawn cap has to be sized against
+    **Phases, each bounded by ``max_concurrent_actions``.** Resolve every
+    actionable task's object; probe the ones already RUNNING; decide what an
+    interruption meant; reset the cancelled and skipped ones this build may
+    run (``_REVOKED_STATUSES``); spawn the rest. Phases exist because the spawn cap has to be sized against
     the tasks that are actually spawn candidates, which is not knowable
     until the objects are loaded. Within a phase the work is independent
     per task; between phases nothing is.
@@ -522,11 +535,16 @@ async def _act_on_frontier(
     spawn_candidates: list[BaseTask] = []
     budget_denied: list[tuple[FrontierTaskRef, BaseTask]] = []
     interrupted_items: list[tuple[FrontierTaskRef, BaseTask]] = []
+    revoked_items: list[tuple[FrontierTaskRef, BaseTask]] = []
     for item, task in zip(frontier.actionable, resolved):
         if task is None:
             continue
         if item.latest_status in _RUNNING_STATUSES:
             running_items.append((item, task))
+        elif item.latest_status in _REVOKED_STATUSES:
+            # Its own phase: a reset within budget, then an ordinary spawn
+            # in the same pass. See ``_act_on_revoked``.
+            revoked_items.append((item, task))
         elif item.latest_status == _INTERRUPTED_STATUS:
             # Its own phase, not a spawn candidate: what happens to an
             # interrupted task depends on a policy, on a separate budget,
@@ -754,6 +772,48 @@ async def _act_on_frontier(
 
     await _run_bounded(
         [partial(act_on_interrupted, item, task) for item, task in interrupted_items],
+        semaphore,
+    )
+
+    # --- phase 2d: reset revoked tasks this build may run -------------
+    async def act_on_revoked(item: FrontierTaskRef, task: BaseTask) -> None:
+        nonlocal acted
+        # A cancelled or skipped task in this build's plan, gated open. It
+        # is this build's to run whatever build last touched it (builds
+        # collaborate; the claim is the only cross-build coordination), and
+        # the reset is bounded by the same budget an ordinary retry obeys —
+        # a task cancelled on every attempt must not loop here.
+        if not _retry_allowed(item.attempt_count, config.max_attempts):
+            summary.revoked_budget_spent += 1
+            logger.info(
+                f"Task {task.id} of build {build_id} is {item.latest_status} "
+                "with every upstream complete, but this build's attempt "
+                f"budget for it is spent ({item.attempt_count} of "
+                f"{config.max_attempts}); leaving it to fail_mode rather "
+                "than resetting it again. Re-trigger the build to start a "
+                "new round."
+            )
+            return
+        try:
+            await registry.task_retry_aio(build_id, task)
+        except Exception as e:
+            # Best-effort: another build may have reset it — or completed
+            # it — a moment ago. The next frontier read tells the truth,
+            # and a failed reset must not count as progress, or the tick
+            # loops straight back to re-read the same task and fail the
+            # same reset.
+            logger.warning(f"Could not reset {item.latest_status} task {task.id}: {e}")
+            return
+        summary.in_build_blockers_reset += 1
+        logger.info(
+            f"Build {build_id}: reset {item.latest_status} task {task.id} so "
+            "this build can run it (a revocation, not a verdict)."
+        )
+        spawn_candidates.append(task)
+        acted = True
+
+    await _run_bounded(
+        [partial(act_on_revoked, item, task) for item, task in revoked_items],
         semaphore,
     )
 

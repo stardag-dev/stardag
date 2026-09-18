@@ -14,6 +14,8 @@ how a scenario silently stops testing anything.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 import stardag as sd
 
 
@@ -213,3 +215,64 @@ class Resumable(sd.Task[list[int]]):
                 "interrupted mid-sleep; no checkpoint kept"
             ) from None
         self._save(self.requires().load())
+
+
+class ConfiguredChain(sd.Task[int]):
+    """A root whose *upstream* is chosen by a ``dependencies_only`` field.
+
+    The shape behind the "changed ``requires()``" incident, reproducible
+    from one deployment: two builds with different ``build_config`` give
+    this task the same id — ``upstream_seconds`` is not part of it — and a
+    different upstream, since ``seconds`` *is* part of ``Slow``'s id. The
+    second build's structure scope differs from the first's, so its edges
+    live apart and the first build's abandoned upstream never gates it.
+    """
+
+    salt: str
+    upstream_seconds: Annotated[
+        int, sd.StardagField(significance="dependencies_only")
+    ] = 90
+
+    def requires(self):
+        return slow(
+            values=get_range(limit=3, salt=self.salt), seconds=self.upstream_seconds
+        )
+
+    def run(self):
+        self._save(sum(self.requires().load()))
+
+
+class ConfiguredFanOut(sd.Task[list[int]]):
+    """``SuspendingParent`` with its width read from the build config.
+
+    ``children`` is ``dependencies_only``: the number of dynamic children
+    changes the structure, not the output. Two builds with different widths
+    have different scopes, so an abandoned wide generation from one build
+    is never inherited by a narrower build of the same task id — and two
+    builds with the *same* width share a scope, so the second trusts the
+    first's edges and never re-runs the pre-yield section.
+
+    Child ids overlap between widths on purpose (index 0 and 1 exist for
+    both), which is what lets a scenario tell "shared and re-run because it
+    is in my plan too" from "inherited from an abandoned generation".
+    """
+
+    salt: str
+    children: Annotated[int, sd.StardagField(significance="dependencies_only")] = 4
+    child_seconds: int = 30
+    pre_yield_seconds: int = 20
+
+    def requires(self):
+        return get_range(limit=self.children, salt=self.salt)
+
+    def run(self):
+        import time
+
+        indices = self.requires().load()
+        time.sleep(self.pre_yield_seconds)
+        kids = [
+            slow(values=self.requires(), seconds=self.child_seconds + index)
+            for index in indices
+        ]
+        yield kids
+        self._save([len(kid.load()) for kid in kids])

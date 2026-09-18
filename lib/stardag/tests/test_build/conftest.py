@@ -59,24 +59,53 @@ class RecordingRegistry(NoOpRegistry):
         root_tasks: list[BaseTask] | None = None,
         description: str | None = None,
         executor_metadata: dict | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config=None,
     ) -> UUID:
         bid = await super().build_start_aio(
-            root_tasks, description, executor_metadata=executor_metadata
+            root_tasks,
+            description,
+            executor_metadata=executor_metadata,
+            scope_key=scope_key,
+            build_config=build_config,
         )
-        self._record("build_start_aio")
+        self._record(
+            "build_start_aio", None, scope_key=scope_key, build_config=build_config
+        )
         return bid
 
     async def build_resume_aio(
-        self, build_id: UUID, executor_metadata: dict | None = None
+        self,
+        build_id: UUID,
+        executor_metadata: dict | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config=None,
     ) -> None:
-        self._record("build_resume_aio")
-        await super().build_resume_aio(build_id, executor_metadata=executor_metadata)
+        self._record("build_resume_aio", None, scope_key=scope_key)
+        await super().build_resume_aio(
+            build_id,
+            executor_metadata=executor_metadata,
+            scope_key=scope_key,
+            build_config=build_config,
+        )
 
     def build_resume(
-        self, build_id: UUID, executor_metadata: dict | None = None
+        self,
+        build_id: UUID,
+        executor_metadata: dict | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config=None,
     ) -> None:
-        self._record("build_resume")
-        super().build_resume(build_id, executor_metadata=executor_metadata)
+        self._record("build_resume", None, scope_key=scope_key)
+        super().build_resume(
+            build_id,
+            executor_metadata=executor_metadata,
+            scope_key=scope_key,
+            build_config=build_config,
+        )
 
     async def build_complete_aio(self, build_id: UUID) -> None:
         self._record("build_complete_aio")
@@ -88,15 +117,30 @@ class RecordingRegistry(NoOpRegistry):
         self._record("build_fail_aio", None, error_message=error_message)
         await super().build_fail_aio(build_id, error_message)
 
-    async def task_register_aio(self, build_id: UUID, task: BaseTask) -> None:
-        self._record("task_register_aio", task.id)
-        await super().task_register_aio(build_id, task)
+    async def task_register_aio(
+        self, build_id: UUID, task: BaseTask, *, declared_dependencies=None
+    ) -> None:
+        self._record(
+            "task_register_aio", task.id, declared_dependencies=declared_dependencies
+        )
+        await super().task_register_aio(
+            build_id, task, declared_dependencies=declared_dependencies
+        )
 
     async def task_register_bulk_aio(
-        self, build_id: UUID, tasks, *, limit_keys=None
+        self, build_id: UUID, tasks, *, limit_keys=None, declared_dependencies=None
     ) -> list[RegisteredTaskInfo] | None:
         for t in tasks:
-            self._record("task_register_aio", t.id, bulk=True)
+            self._record(
+                "task_register_aio",
+                t.id,
+                bulk=True,
+                declared_dependencies=(
+                    None
+                    if declared_dependencies is None
+                    else declared_dependencies.get(t.id)
+                ),
+            )
         # Skip super (would emit per-task again).
         return self.bulk_register_response
 

@@ -82,19 +82,18 @@ budget — which is exactly the trap the second exhaustion message exists to
 name, because from the operator's side the retry succeeds and then nothing
 happens.
 
-A build with nothing actionable and nothing running is *not* automatically
-stuck. Task rows and dependency edges are per environment, so an upstream
-that some other build left non-COMPLETED gates this build's tasks while
-contributing nothing to the counts this build can see. Terminal detection
-therefore consults the frontier's ``blocked_by_external`` before declaring
-a build dead. For a RUNNING blocker the answer is *read*, not inferred:
-the execution claim carries an expiry, so a live claim means wait and a
-lapsed one means fail. For every other blocker status no claim is held and
-no expiry exists, so the question "is anyone going to move it?" is put to
-the build that owns the blocker's status. Either way a fatal blocker fails
-the build with a message naming the task, the build that owns it and why
-that owner will not move it. Against servers predating those fields the
-list is always empty and detection degrades to its pre-fix behaviour.
+A build with nothing actionable and nothing running is genuinely stuck, and
+fails rather than idling. That is a stronger statement than it used to be,
+and it rests on the registry: dependency edges are scoped to a build's own
+*structure scope* (the code and structure config that evaluated them — see
+``docs/design/scope-keyed-dependency-structure.md``), the server re-closes
+the plan over that scope before reporting a stalled frontier, so every
+gating upstream is in the plan. A shared upstream another build is running
+shows up in ``running`` and is probed like this build's own; one another
+build cancelled — or one skipped because of an upstream that has since
+completed — is listed as actionable and is reset and run by the pass that
+sees it, within the same attempt budget as any retry. What is left when
+nothing is actionable is a result, which ``fail_mode`` owns.
 
 Every start this tick records carries a claim TTL derived from the
 executor's own timeout (see :func:`claim_ttl_seconds`), so the expiry other
@@ -151,8 +150,6 @@ from stardag.build._reactive._frontier_actions import (
     claim_ttl_seconds as claim_ttl_seconds,
 )
 from stardag.build._reactive._terminal import (
-    _classify_external_blockers as _classify_external_blockers,
-    _format_age as _format_age,
     _handle_terminal as _handle_terminal,
     _skip_blocked as _skip_blocked,
 )

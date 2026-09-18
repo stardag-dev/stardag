@@ -23,6 +23,8 @@ import modal
 
 from stardag import BaseTask
 from stardag.build import BuildTaskStore, discover_and_register_aio
+from stardag.build._scope import code_id, structure_scope_key
+from stardag.build_config import rebind_to_build_config, set_build_config
 from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.build._task_modules import (
     PickleElisionPlan,
@@ -246,8 +248,23 @@ def run_reactive_bootstrap(
     elide_pickles: bool,
     require_pickle_free: bool,
     limit_key_selector: LimitKeySelector | None = None,
+    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None = None,
 ) -> ReactiveBootstrapResult:
     """Discover the DAG, persist it, arm the build, spawn the first tick.
+
+    **First, the structure scope.** The bootstrap runs inside the
+    deployment, so it knows the code id every tick and worker of this
+    deployment will answer, and it holds the build config; it fixes the
+    build's scope from the two *before* registering any edge, so every
+    edge the build writes carries the scope of the code and config that
+    evaluated it. A build already fixed to another scope (a re-trigger
+    from other code) is refused by the registry and this raises — the
+    caller fails the build with that message. The config is installed
+    for this process, and the roots — constructed on the triggering
+    machine, before any config existed — are re-created under it, so
+    their ``dependencies_only`` / ``execution_only`` fields, and those of
+    every task ``requires()`` constructs from here on, come from the
+    build config. See ``docs/design/scope-keyed-dependency-structure.md``.
 
     Everything a reactive build needs before it can be scheduled, except
     minting the build and registering its roots — those cost no target
@@ -287,6 +304,19 @@ def run_reactive_bootstrap(
     # plan-time keys to wake the builds queued on a key when a slot frees —
     # it can learn them nowhere else, since the selector is deployed-app
     # code.
+    scope_key = structure_scope_key(code_id(), build_config)
+    registry.build_set_scope(build_id, scope_key=scope_key, build_config=build_config)
+    set_build_config(build_config)
+    if build_config:
+        # Only with a config to resolve: the roots arrived by value from the
+        # trigger, constructed before any config existed, so their
+        # non-identity fields are the defaults. Re-creating them here is
+        # what makes the config reach them. Without a config there is
+        # nothing to resolve and the objects stay exactly as sent — which
+        # also keeps a dynamically parametrised class (``AliasTask[int]``)
+        # pickleable, since a re-validated instance may resolve to a class
+        # pickle cannot find by name.
+        task_list = [rebind_to_build_config(task) for task in task_list]
     discovery = asyncio.run(
         discover_and_register_aio(
             registry,
@@ -319,6 +349,7 @@ def run_reactive_bootstrap(
     tick_call = tick_function.spawn(build_id=str(build_id))
     summary = {
         "build_id": str(build_id),
+        "scope_key": scope_key,
         "roots": len(task_list),
         "incomplete": len(discovery.incomplete),
         "previously_completed": len(discovery.previously_completed),

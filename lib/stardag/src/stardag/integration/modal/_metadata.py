@@ -65,6 +65,25 @@ the expiry is re-based off the real start rather than off the pre-spawn
 claim, which absorbed however long the call sat queued.
 """
 
+STARDAG_BUILD_CONFIG_ENV = "STARDAG_BUILD_CONFIG"
+"""Env var carrying the build's ``build_config`` (compact JSON) to workers.
+
+A worker installs it before the task runs, so tasks the task constructs —
+its dynamic dependencies — resolve their ``dependencies_only`` and
+``execution_only`` fields from the same config the bootstrap and the ticks
+use. Transported like ``STARDAG_BUILD_ID``; absent means ``{}``.
+"""
+
+STARDAG_SCOPE_KEY_ENV = "STARDAG_SCOPE_KEY"
+"""Env var carrying the build's structure scope key to workers.
+
+A worker recomputes the scope from its own code id and the build config
+and refuses to run a task whose build lives in another scope: its code
+would evaluate ``requires()`` and yield dependencies under a structure the
+build's edges do not describe. Absent, or the server's synthetic
+``build:<id>``, means no check.
+"""
+
 STARDAG_MODAL_FUNCTION_TIMEOUT_ENV = "STARDAG_MODAL_FUNCTION_TIMEOUT"
 """Env var carrying the worker function's declared ``timeout``, in seconds.
 

@@ -21,6 +21,8 @@ from stardag.registry._http_client import (
     sdk_version_unsupported_from_detail,
 )
 from stardag.exceptions import (
+    BuildConfigMismatchError,
+    ScopeMismatchError,
     APIError,
     AuthorizationError,
     EnvironmentAccessError,
@@ -34,6 +36,10 @@ from stardag.exceptions import (
     is_missing_route_error,
 )
 from stardag.registry._base import (
+    DERIVE_DEPENDENCIES,
+    DeclaredDependencies,
+    DeploymentInfo,
+    _declared_for,
     SchedulerLeaseResult,
     StartClaimResult,
     BuildCancelResult,
@@ -586,6 +592,9 @@ class APIRegistry(RegistryABC):
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> UUID:
         """Start a new build and return its ID."""
         build_data: dict[str, Any] = {
@@ -597,6 +606,10 @@ class APIRegistry(RegistryABC):
             # Only included when present — older servers ignore unknown
             # body fields anyway, but this keeps the payload minimal.
             build_data["executor_metadata"] = executor_metadata
+        if scope_key is not None:
+            build_data["scope_key"] = scope_key
+        if build_config is not None:
+            build_data["build_config"] = dict(build_config)
 
         response = self._request(
             "POST",
@@ -614,6 +627,9 @@ class APIRegistry(RegistryABC):
         self,
         build_id: UUID,
         executor_metadata: dict[str, Any] | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         """Mark an existing build as resumed.
 
@@ -630,6 +646,7 @@ class APIRegistry(RegistryABC):
             params["executor_metadata"] = _json.dumps(
                 executor_metadata, separators=(",", ":")
             )
+        _add_scope_params(params, scope_key, build_config)
         try:
             self._request(
                 "POST",
@@ -637,7 +654,10 @@ class APIRegistry(RegistryABC):
                 params=params,
                 operation="Resume build",
             )
-        except NotFoundError as e:
+        except APIError as e:
+            _raise_if_scope_mismatch(e)
+            if not isinstance(e, NotFoundError):
+                raise
             if not is_missing_route_error(e):
                 raise
             logger.warning(
@@ -715,12 +735,20 @@ class APIRegistry(RegistryABC):
     # Sync task methods
     # -------------------------------------------------------------------------
 
-    def task_register(self, build_id: UUID, task: "BaseTask") -> None:
+    def task_register(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
+    ) -> None:
         """Register a task within a build."""
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks",
-            json=_get_task_data_for_registration(task),
+            json=_get_task_data_for_registration(
+                task, declared_dependencies=declared_dependencies
+            ),
             params=self._get_params(),
             operation=f"Register task {task.id}",
         )
@@ -731,6 +759,7 @@ class APIRegistry(RegistryABC):
         tasks: Sequence["BaseTask"],
         *,
         limit_keys: Mapping[UUID, Sequence[str]] | None = None,
+        declared_dependencies: Mapping[UUID, "Sequence[BaseTask] | None"] | None = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Bulk-register tasks via the ``/tasks/bulk`` endpoint.
 
@@ -763,7 +792,10 @@ class APIRegistry(RegistryABC):
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
                 json={
                     "tasks": [
-                        _get_task_data_for_registration(t, limit_keys) for t in tasks
+                        _get_task_data_for_registration(
+                            t, limit_keys, _declared_for(t, declared_dependencies)
+                        )
+                        for t in tasks
                     ]
                 },
                 params={**self._get_params(), "id_only": "true"},
@@ -778,7 +810,11 @@ class APIRegistry(RegistryABC):
                 "Upgrade the Registry API for batched registration."
             )
             for t in tasks:
-                self.task_register(build_id, t)
+                self.task_register(
+                    build_id,
+                    t,
+                    declared_dependencies=_declared_for(t, declared_dependencies),
+                )
             return None
         return _parse_bulk_register_response(response.json())
 
@@ -1263,6 +1299,9 @@ class APIRegistry(RegistryABC):
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> UUID:
         """Async version - start a new build and return its ID."""
         build_data: dict[str, Any] = {
@@ -1272,6 +1311,10 @@ class APIRegistry(RegistryABC):
         }
         if executor_metadata is not None:
             build_data["executor_metadata"] = executor_metadata
+        if scope_key is not None:
+            build_data["scope_key"] = scope_key
+        if build_config is not None:
+            build_data["build_config"] = dict(build_config)
 
         response = await self._arequest(
             "POST",
@@ -1289,6 +1332,9 @@ class APIRegistry(RegistryABC):
         self,
         build_id: UUID,
         executor_metadata: dict[str, Any] | None = None,
+        *,
+        scope_key: str | None = None,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         """Async version - mark an existing build as resumed.
 
@@ -1299,6 +1345,7 @@ class APIRegistry(RegistryABC):
             params["executor_metadata"] = _json.dumps(
                 executor_metadata, separators=(",", ":")
             )
+        _add_scope_params(params, scope_key, build_config)
         try:
             await self._arequest(
                 "POST",
@@ -1306,7 +1353,10 @@ class APIRegistry(RegistryABC):
                 params=params,
                 operation="Resume build",
             )
-        except NotFoundError as e:
+        except APIError as e:
+            _raise_if_scope_mismatch(e)
+            if not isinstance(e, NotFoundError):
+                raise
             if not is_missing_route_error(e):
                 raise
             logger.warning(
@@ -2091,6 +2141,150 @@ class APIRegistry(RegistryABC):
         except NotFoundError as e:
             raise self._reactive_meta_unsupported_error(e)
 
+    # -------------------------------------------------------------------------
+    # Structure scope + deployments
+    # -------------------------------------------------------------------------
+
+    def build_set_scope(
+        self,
+        build_id: UUID,
+        *,
+        scope_key: str,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
+        """Fix the build's structure scope, set-once (``PUT /builds/{id}/scope``).
+
+        A 409 ``scope_mismatch`` is a :class:`ScopeMismatchError`. Against a
+        server predating scopes the route is missing; the build then runs on
+        the server's own per-build scope, which is always correct and never
+        shared, so this is a warning rather than a failure.
+        """
+        body: dict[str, Any] = {"scope_key": scope_key}
+        if build_config is not None:
+            body["build_config"] = dict(build_config)
+        try:
+            self._request(
+                "PUT",
+                f"{self.api_url}/api/v1/builds/{build_id}/scope",
+                json=body,
+                params=self._get_params(),
+                operation=f"Set structure scope of build {build_id}",
+            )
+        except APIError as e:
+            _raise_if_scope_mismatch(e)
+            if isinstance(e, NotFoundError) and is_missing_route_error(e):
+                logger.warning(
+                    "Registry API does not support PUT /builds/%s/scope; the "
+                    "build keeps its per-build scope, so its dependency edges "
+                    "are shared with no other build. Upgrade the Registry API "
+                    "for structure-scope sharing.",
+                    build_id,
+                )
+                return
+            raise
+
+    async def build_set_scope_aio(
+        self,
+        build_id: UUID,
+        *,
+        scope_key: str,
+        build_config: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
+        """Async version of :meth:`build_set_scope`."""
+        body: dict[str, Any] = {"scope_key": scope_key}
+        if build_config is not None:
+            body["build_config"] = dict(build_config)
+        try:
+            await self._arequest(
+                "PUT",
+                f"{self.api_url}/api/v1/builds/{build_id}/scope",
+                json=body,
+                params=self._get_params(),
+                operation=f"Set structure scope of build {build_id}",
+            )
+        except APIError as e:
+            _raise_if_scope_mismatch(e)
+            if isinstance(e, NotFoundError) and is_missing_route_error(e):
+                logger.warning(
+                    "Registry API does not support PUT /builds/%s/scope; the "
+                    "build keeps its per-build scope, so its dependency edges "
+                    "are shared with no other build. Upgrade the Registry API "
+                    "for structure-scope sharing.",
+                    build_id,
+                )
+                return
+            raise
+
+    def deployment_record(
+        self, *, family: str, handle: str, code_id: str
+    ) -> DeploymentInfo | None:
+        """Record a deployed code version (``POST /deployments``).
+
+        Idempotent on the handle. Against a server predating deployments
+        the route is missing: the deploy still works, the record is simply
+        not kept, and the trigger's default resolver has nothing to resolve
+        from — logged, not raised.
+        """
+        try:
+            response = self._request(
+                "POST",
+                f"{self.api_url}/api/v1/deployments",
+                json={"family": family, "handle": handle, "code_id": code_id},
+                params=self._get_params(),
+                operation=f"Record deployment {handle}",
+            )
+        except NotFoundError as e:
+            if not is_missing_route_error(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /deployments; deployment "
+                "%s is not recorded. Upgrade the Registry API to resolve "
+                "deployments at trigger time.",
+                handle,
+            )
+            return None
+        return DeploymentInfo.model_validate(response.json())
+
+    def deployment_list(
+        self, *, family: str | None = None, include_retired: bool = False
+    ) -> list[DeploymentInfo]:
+        """The environment's deployments, newest first (``GET /deployments``)."""
+        params: dict[str, Any] = dict(self._get_params())
+        if family is not None:
+            params["family"] = family
+        if include_retired:
+            params["include_retired"] = "true"
+        try:
+            response = self._request(
+                "GET",
+                f"{self.api_url}/api/v1/deployments",
+                params=params,
+                operation="List deployments",
+            )
+        except NotFoundError as e:
+            if not is_missing_route_error(e):
+                raise
+            return []
+        return [
+            DeploymentInfo.model_validate(item)
+            for item in response.json().get("deployments", [])
+        ]
+
+    def deployment_retire(
+        self, deployment_id: UUID, *, force: bool = False
+    ) -> DeploymentInfo | None:
+        """Retire a deployment (``POST /deployments/{id}/retire``)."""
+        params: dict[str, Any] = dict(self._get_params())
+        if force:
+            params["force"] = "true"
+        response = self._request(
+            "POST",
+            f"{self.api_url}/api/v1/deployments/{deployment_id}/retire",
+            params=params,
+            operation=f"Retire deployment {deployment_id}",
+        )
+        return DeploymentInfo.model_validate(response.json())
+
     @staticmethod
     def _reactive_meta_body(
         app_name: str, tick_kwargs: dict[str, Any] | None
@@ -2124,12 +2318,20 @@ class APIRegistry(RegistryABC):
             "version matching this SDK."
         )
 
-    async def task_register_aio(self, build_id: UUID, task: "BaseTask") -> None:
+    async def task_register_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        *,
+        declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
+    ) -> None:
         """Async version - register a task within a build."""
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks",
-            json=_get_task_data_for_registration(task),
+            json=_get_task_data_for_registration(
+                task, declared_dependencies=declared_dependencies
+            ),
             params=self._get_params(),
             operation=f"Register task {task.id}",
         )
@@ -2140,6 +2342,7 @@ class APIRegistry(RegistryABC):
         tasks: Sequence["BaseTask"],
         *,
         limit_keys: Mapping[UUID, Sequence[str]] | None = None,
+        declared_dependencies: Mapping[UUID, "Sequence[BaseTask] | None"] | None = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Async bulk-register via ``/tasks/bulk`` (one HTTP call instead of N).
 
@@ -2170,7 +2373,10 @@ class APIRegistry(RegistryABC):
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
                 json={
                     "tasks": [
-                        _get_task_data_for_registration(t, limit_keys) for t in tasks
+                        _get_task_data_for_registration(
+                            t, limit_keys, _declared_for(t, declared_dependencies)
+                        )
+                        for t in tasks
                     ]
                 },
                 params={**self._get_params(), "id_only": "true"},
@@ -2185,7 +2391,11 @@ class APIRegistry(RegistryABC):
                 "Upgrade the Registry API for batched registration."
             )
             for t in tasks:
-                await self.task_register_aio(build_id, t)
+                await self.task_register_aio(
+                    build_id,
+                    t,
+                    declared_dependencies=_declared_for(t, declared_dependencies),
+                )
             return None
         return _parse_bulk_register_response(response.json())
 
@@ -2542,18 +2752,63 @@ class APIRegistry(RegistryABC):
         return TaskMetadata.model_validate(data)
 
 
+def _add_scope_params(
+    params: dict[str, Any],
+    scope_key: str | None,
+    build_config: Mapping[str, Mapping[str, Any]] | None,
+) -> None:
+    """Query parameters carrying a resume's scope claim, when it makes one."""
+    if scope_key is not None:
+        params["scope_key"] = scope_key
+    if build_config is not None:
+        params["build_config"] = _json.dumps(
+            dict(build_config), separators=(",", ":"), sort_keys=True
+        )
+
+
+def _raise_if_scope_mismatch(error: APIError) -> None:
+    """Turn the server's 409 ``scope_mismatch`` into the typed exception."""
+    payload = error.payload or {}
+    if error.status_code != 409 or payload.get("error_code") != "scope_mismatch":
+        return
+    message = payload.get("message") or "structure scope mismatch"
+    cls = BuildConfigMismatchError if "build_config" in message else ScopeMismatchError
+    raise cls(
+        message,
+        status_code=409,
+        detail=str(payload.get("scope_key")),
+        payload=payload,
+    ) from error
+
+
 def _get_task_data_for_registration(
-    task: "BaseTask", limit_keys: Mapping[UUID, Sequence[str]] | None = None
+    task: "BaseTask",
+    limit_keys: Mapping[UUID, Sequence[str]] | None = None,
+    declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
 ) -> dict:
     """Helper to serialize task data for registration API call.
+
+    ``task_data`` is the task's **registry-mode** dump: every identity
+    parameter, none of the ``dependencies_only`` / ``execution_only`` ones.
+    It is therefore a pure function of the task id, and a rehydrated task
+    reads its non-identity values from the build config wherever it is
+    rehydrated — which is what makes the pickle and registry-data paths
+    agree.
 
     ``limit_keys`` maps task ids to the named concurrency-limit keys the
     task runs under; when the task has an entry it is sent, so the registry
     records the keys at plan time. An absent entry sends nothing, which
     leaves any recorded keys alone.
+
+    ``declared_dependencies``: a sequence declares exactly that static
+    upstream set; ``None`` sends no ``dependency_task_ids`` at all (the task
+    was pruned at, its ``requires()`` never evaluated — and the server would
+    refuse upstreams that were never registered); the default sentinel
+    evaluates ``task.requires()`` here, for callers predating the map.
     """
     # Avoid circular import:
     from stardag._core.base_task import flatten_task_struct  # noqa: F401
+    from stardag.base_model import CONTEXT_MODE_KEY
 
     # Extract output_uri if the task has a FileSystemTarget target with a uri
     output_uri: str | None = None
@@ -2567,11 +2822,13 @@ def _get_task_data_for_registration(
         # Log but don't fail - task may not have target() or it may fail
         logger.debug(f"Could not extract output_uri for task {task.id}: {e}")
 
-    return {
+    payload: dict[str, Any] = {
         "task_id": str(task.id),
         "task_namespace": task.get_namespace(),
         "task_name": task.get_name(),
-        "task_data": task.model_dump(mode="json"),
+        "task_data": task.model_dump(
+            mode="json", context={CONTEXT_MODE_KEY: "registry"}
+        ),
         "version": task.version,
         "output_uri": output_uri,
         **(
@@ -2579,7 +2836,14 @@ def _get_task_data_for_registration(
             if limit_keys is not None and task.id in limit_keys
             else {}
         ),
-        "dependency_task_ids": [
-            str(dep.id) for dep in flatten_task_struct(task.requires())
-        ],
     }
+    if declared_dependencies is DERIVE_DEPENDENCIES:
+        payload["dependency_task_ids"] = [
+            str(dep.id) for dep in flatten_task_struct(task.requires())
+        ]
+    elif declared_dependencies is not None:
+        payload["dependency_task_ids"] = [
+            str(dep.id)
+            for dep in declared_dependencies  # type: ignore[union-attr]
+        ]
+    return payload

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import threading
@@ -32,7 +33,11 @@ from stardag.build._task_modules import (
 )
 from stardag.integration.modal._limit_keys import deployed_limit_key_selector
 from stardag.integration.modal._logging import _setup_logging
+from stardag.build._scope import code_id, is_synthetic_scope, structure_scope_key
+from stardag.build_config import build_config_scope
 from stardag.integration.modal._metadata import (
+    STARDAG_BUILD_CONFIG_ENV,
+    STARDAG_SCOPE_KEY_ENV,
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
@@ -329,6 +334,50 @@ def _classify_interruption(
     if _InputCancellation is not None and isinstance(exception, _InputCancellation):
         return _CANCELLATION
     return None
+
+
+def _build_config_from_env(
+    env_overrides: dict[str, str] | None,
+) -> dict[str, typing.Any] | None:
+    """The build config the orchestrator forwarded (see
+    ``STARDAG_BUILD_CONFIG_ENV``), or None."""
+    raw = (env_overrides or {}).get(STARDAG_BUILD_CONFIG_ENV) or os.environ.get(
+        STARDAG_BUILD_CONFIG_ENV
+    )
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        logger.warning(f"Invalid {STARDAG_BUILD_CONFIG_ENV}; running without it.")
+        return None
+
+
+def _refuse_foreign_scope(env_overrides: dict[str, str] | None) -> None:
+    """Refuse to run a task whose build lives in another structure scope.
+
+    The orchestrator forwards the build's scope (see
+    ``STARDAG_SCOPE_KEY_ENV``); this worker recomputes it from its own code
+    id and the forwarded config. A mismatch means this container runs other
+    code than the one that planned the build — a stale wake-up reaching a
+    newer deployment, typically — and the dependencies it would yield
+    belong to a structure the build's edges do not describe. Raising here
+    fails the task loudly instead of quietly mixing two code versions in
+    one build.
+    """
+    scope_key = (env_overrides or {}).get(STARDAG_SCOPE_KEY_ENV) or os.environ.get(
+        STARDAG_SCOPE_KEY_ENV
+    )
+    if is_synthetic_scope(scope_key):
+        return
+    expected = structure_scope_key(code_id(), _build_config_from_env(env_overrides))
+    if scope_key != expected:
+        raise RuntimeError(
+            f"This worker runs code {code_id()!r}, giving structure scope "
+            f"{expected!r}, but the build runs under {scope_key!r}. A build "
+            "carries one scope for its life; a redeploy under new code needs "
+            "a new build."
+        )
 
 
 class _WorkerLifecycleReporter:
@@ -822,7 +871,11 @@ class Runner(RunFunction):
             # stardag's config/registry providers cache on first access —
             # registry connection settings should come from the container's
             # process environment, i.e. deployment secrets, not overrides.)
-            with temp_env_vars(env_overrides or {}):
+            with (
+                temp_env_vars(env_overrides or {}),
+                build_config_scope(_build_config_from_env(env_overrides)),
+            ):
+                _refuse_foreign_scope(env_overrides)
                 # getattr: tolerate subclasses overriding __init__ w/o super()
                 reporter: _WorkerLifecycleReporter | None = None
                 if getattr(self, "report_lifecycle", True):

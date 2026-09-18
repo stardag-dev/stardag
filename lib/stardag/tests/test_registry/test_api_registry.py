@@ -178,7 +178,7 @@ class TestAPIRegistryGzipsWireFormat:
             def get_name(self):
                 return "FakeTask"
 
-            def model_dump(self, mode="json"):
+            def model_dump(self, mode="json", **kwargs):
                 return self._td
 
             def requires(self):

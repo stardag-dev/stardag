@@ -551,6 +551,125 @@ def _report_task_modules(
             )
 
 
+def _record_deployment(stardag_app_instance: StardagApp, handle: str) -> None:
+    from stardag.registry import NoOpRegistry, registry_provider
+
+    try:
+        registry = registry_provider.get()
+        if type(registry) is NoOpRegistry:
+            console.print(
+                "[dim]No registry configured; deployment not recorded "
+                "(triggers cannot resolve it by family).[/dim]"
+            )
+            return
+        info = registry.deployment_record(
+            family=stardag_app_instance.family,
+            handle=handle,
+            code_id=stardag_app_instance.code_id,
+        )
+    except Exception as e:  # pragma: no cover - network
+        console.print(f"[yellow]Could not record the deployment: {e}[/yellow]")
+        return
+    if info is not None:
+        console.print(
+            f"[cyan]Recorded deployment[/cyan] {info.handle} "
+            f"(family {info.family}, code {info.code_id[:12]})"
+        )
+
+
+@app.command("deployments")
+def deployments(
+    family: Optional[str] = typer.Option(
+        None, "--family", help="Only this app family."
+    ),
+    include_retired: bool = typer.Option(
+        False, "--include-retired", help="Also list retired deployments."
+    ),
+) -> None:
+    """List the deployments recorded in the registry, newest first."""
+    from rich.table import Table
+
+    from stardag.registry import registry_provider
+
+    rows = registry_provider.get().deployment_list(
+        family=family, include_retired=include_retired
+    )
+    table = Table(title="Deployments")
+    for col in ("Family", "Handle", "Code id", "Running builds", "Created", "Retired"):
+        table.add_column(col)
+    for d in rows:
+        table.add_row(
+            d.family,
+            d.handle,
+            d.code_id[:12],
+            str(d.running_builds),
+            d.created_at.isoformat(timespec="seconds") if d.created_at else "-",
+            d.retired_at.isoformat(timespec="seconds") if d.retired_at else "-",
+        )
+    console.print(table)
+
+
+@app.command("gc")
+def gc(
+    family: str = typer.Argument(..., help="The app family to collect."),
+    keep: int = typer.Option(
+        1, "--keep", min=0, help="Keep this many of the newest idle deployments."
+    ),
+    env: Optional[str] = typer.Option(
+        None, "-e", "--env", help="Modal environment the apps are deployed in."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be stopped without doing it."
+    ),
+) -> None:
+    """Stop and retire deployments of a family no running build still needs.
+
+    A deployment is retirable when no RUNNING build references its handle.
+    The newest ``--keep`` retirable ones are kept so a trigger with no
+    explicit deployment still has something to resolve to. Stopping the
+    Modal app is done here; the registry record is retired alongside.
+    """
+    import subprocess
+
+    from stardag.registry import registry_provider
+
+    registry = registry_provider.get()
+    live = registry.deployment_list(family=family)
+    if not live:
+        console.print(f"No live deployments recorded for family {family!r}.")
+        return
+    idle = [d for d in live if d.running_builds == 0]
+    victims = idle[keep:]
+    busy = [d for d in live if d.running_builds]
+    for d in busy:
+        console.print(
+            f"[dim]keep {d.handle}: {d.running_builds} running build(s)[/dim]"
+        )
+    for d in idle[:keep]:
+        console.print(f"[dim]keep {d.handle}: among the {keep} newest idle[/dim]")
+    if not victims:
+        console.print("Nothing to collect.")
+        return
+    modal_cli = Path(sys.executable).with_name("modal")
+    for d in victims:
+        if dry_run:
+            console.print(f"would stop and retire {d.handle} (code {d.code_id[:12]})")
+            continue
+        cmd = [str(modal_cli), "app", "stop", d.handle, "--yes"]
+        if env:
+            cmd += ["-e", env]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            output = ((result.stderr or "") + (result.stdout or "")).strip()
+            if "not found" not in output.lower() and "no app" not in output.lower():
+                error_console.print(
+                    f"[yellow]Could not stop {d.handle}: {output}[/yellow]"
+                )
+                continue
+        registry.deployment_retire(d.id)
+        console.print(f"[green]stopped and retired {d.handle}[/green]")
+
+
 @app.command("deploy")
 def deploy(
     app_ref: str = typer.Argument(
@@ -730,6 +849,12 @@ def deploy(
         )
 
     console.print(f"[green]Deployed {deployment_name}[/green]")
+
+    # Record the deployment in the registry: which code version now runs
+    # under this handle. The record — not the app name — is what a trigger
+    # resolves and what `stardag modal gc` reads. Best-effort: a deploy
+    # without registry credentials still deploys.
+    _record_deployment(stardag_app_instance, deployment_name)
 
     if stream_logs:
         # stream_app_logs is wrapped with @synchronizer.create_blocking, making it sync

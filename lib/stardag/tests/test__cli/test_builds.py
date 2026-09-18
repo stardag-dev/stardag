@@ -318,8 +318,9 @@ class TestFrontier:
         assert result.exit_code == 0, result.output
         assert "truncated" in result.output
 
-    def test_empty_list_on_a_progressing_build_does_not_claim_no_blockers(self):
-        """The server only computes blockers for a stalled build."""
+    def test_empty_list_on_a_progressing_build_says_none(self):
+        """Every gate is inside the plan now, so an empty list on a
+        progressing build is simply "none", said with the reason."""
         registry = _mock_registry(
             build_get_frontier=_frontier(
                 actionable=[
@@ -331,16 +332,19 @@ class TestFrontier:
         with _patch_resolve(registry):
             result = runner.invoke(app, ["frontier", BUILD_ID])
         assert result.exit_code == 0, result.output
-        assert "not evaluated" in result.output
-        assert "progressing" in result.output
+        output = " ".join(result.output.split())
+        assert "Blockers: none" in output
+        assert "part of its plan" in output
 
-    def test_empty_list_on_a_stalled_build_says_genuinely_stuck(self):
+    def test_empty_list_on_a_stalled_build_points_at_its_own_tasks(self):
         registry = _mock_registry(build_get_frontier=_frontier())
         with _patch_resolve(registry):
             result = runner.invoke(app, ["frontier", BUILD_ID])
         assert result.exit_code == 0, result.output
-        assert "No external blockers reported" in result.output
-        assert "genuinely stuck" in result.output
+        output = " ".join(result.output.split())
+        assert "Nothing actionable and nothing running" in output
+        assert "tasks of its own" in output
+        assert "re-trigger" in output
 
     def test_json(self):
         registry = _mock_registry(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 import traceback as tb_module
 import typing
 from uuid import UUID
@@ -27,8 +28,10 @@ from stardag.build import (
 from stardag.build._reactive import claim_ttl_seconds
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
+    STARDAG_BUILD_CONFIG_ENV,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
+    STARDAG_SCOPE_KEY_ENV,
     STARDAG_MODAL_APP_ID_ENV,
     STARDAG_MODAL_APP_NAME_ENV,
     STARDAG_MODAL_ENVIRONMENT_ENV,
@@ -105,6 +108,9 @@ class ModalTaskExecutor(TaskExecutorABC):
         reactive: bool = False,
         modal_workspace: str | None = None,
         worker_timeouts: dict[str, int] | None = None,
+        build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]]
+        | None = None,
+        scope_key: str | None = None,
     ):
         """Initialize Modal executor.
 
@@ -137,6 +143,11 @@ class ModalTaskExecutor(TaskExecutorABC):
         self.worker_selector = worker_selector
         self.detached = detached
         self.worker_timeouts = dict(worker_timeouts or {})
+        # The build's config and structure scope, forwarded to every worker
+        # this executor spawns (see STARDAG_BUILD_CONFIG_ENV /
+        # STARDAG_SCOPE_KEY_ENV). None when the caller has none to forward.
+        self.build_config = build_config
+        self.scope_key = scope_key
         self.worker_reports_lifecycle = worker_reports_lifecycle
         # Reactive scheduling: forward the app name + reactive flag so
         # workers register their dynamic deps and wake the scheduler tick.
@@ -339,6 +350,15 @@ class ModalTaskExecutor(TaskExecutorABC):
                             env_overrides[env_name] = value
                 if self.reactive:
                     env_overrides[STARDAG_REACTIVE_ENV] = "1"
+                # The build's config and scope, so the worker resolves the
+                # dynamic dependencies it yields under the same config the
+                # scheduler plans with, and refuses to run under other code.
+                if self.build_config:
+                    env_overrides[STARDAG_BUILD_CONFIG_ENV] = json.dumps(
+                        dict(self.build_config), separators=(",", ":"), sort_keys=True
+                    )
+                if self.scope_key is not None:
+                    env_overrides[STARDAG_SCOPE_KEY_ENV] = self.scope_key
         return worker_function, env_overrides, executor_metadata
 
     def reports_lifecycle(self, task: BaseTask) -> bool:
