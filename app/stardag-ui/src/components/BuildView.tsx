@@ -346,9 +346,10 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     return () => setBreadcrumb([]);
   }, [build, buildId, selectedTask, onBack, setBreadcrumb]);
 
-  // Placeholder ("phantom") rows no longer exist — an edge may only name a
-  // registered task — so every task the build has is a real one.
-  const realTasks = allTasks;
+  // Placeholder ("phantom") rows no longer exist on a current server — an
+  // edge may only name a registered task — but an older Registry API still
+  // returns them, so the flag is still honoured for that case only.
+  const realTasks = useMemo(() => allTasks.filter((t) => !t.is_phantom), [allTasks]);
 
   // Whether every root has since completed — see `rootsSatisfiedFrom`. Computed
   // from the task list this view already fetched rather than from the frontier,

@@ -132,6 +132,48 @@ class TestSignificanceOnTheModel:
         )
 
 
+class TestLegacyHashExcludeInPayloads:
+    """A deprecated ``hash_exclude=True`` field may still be passed at init,
+    so a task registered with a non-default value must rehydrate with it:
+    dropped from the hash, kept in the registry payload. An explicit
+    ``execution_only`` field is in neither — its value lives in the build
+    config."""
+
+    @pytest.fixture
+    def legacy(self):
+        with pytest.warns(DeprecationWarning):
+
+            class Legacy(sd.Task[int]):
+                __namespace__ = "sig_legacy"
+                key: str
+                knob: Annotated[int, StardagField(hash_exclude=True)] = 1
+                threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+                def run(self):
+                    return None
+
+        return Legacy
+
+    def test_hash_excluded_value_is_stored_but_not_hashed(self, legacy):
+        task = legacy(key="a", knob=7)
+        registry_data = task.model_dump(
+            mode="json", context={CONTEXT_MODE_KEY: "registry"}
+        )
+        hash_data = task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "hash"})
+        assert registry_data["knob"] == 7
+        assert "knob" not in hash_data
+        assert "threads" not in registry_data and "threads" not in hash_data
+        # And the id does not move with the knob.
+        assert legacy(key="a", knob=7).id == legacy(key="a").id
+
+    def test_a_stored_value_rehydrates(self, legacy):
+        data = legacy(key="a", knob=7).model_dump(
+            mode="json", context={CONTEXT_MODE_KEY: "registry"}
+        )
+        rebuilt = legacy.model_validate(data, context={CONTEXT_MODE_KEY: "compat"})
+        assert rebuilt.knob == 7
+
+
 class TestSignificanceIsChecked:
     def test_a_typo_is_refused_at_field_creation(self):
         """A Literal is a hint; an unchecked typo would read as non-identity

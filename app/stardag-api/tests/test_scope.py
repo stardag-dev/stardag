@@ -132,8 +132,7 @@ async def test_set_scope_replaces_the_synthetic_one_and_is_then_fixed(
 @pytest.mark.asyncio
 async def test_resume_checks_the_scope(client: AsyncClient):
     """A re-trigger under another scope is refused; under the same one it
-    proceeds. Without a scope on the query the check is skipped (older
-    SDKs)."""
+    proceeds; without a scope it is refused too, since this build has one."""
     build_id = (await _build(client, "code-1:cfg-a"))["id"]
     await _register_task(client, build_id, "t")
 
@@ -149,8 +148,58 @@ async def test_resume_checks_the_scope(client: AsyncClient):
     assert same.status_code == 200, same.text
     assert same.json()["scope_key"] == "code-1:cfg-a"
 
+    # Without a scope on the query the resume is refused: this build was
+    # planned under a structure scope, and an unscoped resumer (a client
+    # predating scopes) would register its own structure into it.
+    bare = await client.post(f"{BUILDS}/{build_id}/resume")
+    assert bare.status_code == 409, bare.text
+    assert bare.json()["detail"]["error_code"] == "scope_required"
+    assert bare.json()["detail"]["scope_key"] == "code-1:cfg-a"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_resume_of_a_synthetic_build_is_the_older_sdk_path(
+    client: AsyncClient,
+):
+    """A build nothing scoped has no structure to protect; an older SDK
+    re-triggers it as it always did."""
+    build_id = (await _build(client))["id"]
+    await _register_task(client, build_id, "t")
     bare = await client.post(f"{BUILDS}/{build_id}/resume")
     assert bare.status_code == 200, bare.text
+    assert bare.json()["scope_key"] == f"build:{build_id}"
+
+
+@pytest.mark.asyncio
+async def test_a_stored_config_is_fixed_before_the_scope_is(client: AsyncClient):
+    """A reactive trigger stores the config at POST /builds while the scope
+    is still synthetic; the bootstrap's later scope claim may confirm that
+    config but not rewrite it."""
+    build_id = (await _build(client, build_config={"ns.T": {"width": 3}}))["id"]
+
+    other = await client.put(
+        f"{BUILDS}/{build_id}/scope",
+        json={"scope_key": "code-1:cfg-b", "build_config": {"ns.T": {"width": 5}}},
+    )
+    assert other.status_code == 409, other.text
+    assert other.json()["detail"]["error_code"] == "scope_mismatch"
+
+    info = (await client.get(f"{BUILDS}/{build_id}")).json()
+    assert info["scope_key"] == f"build:{build_id}"
+    assert info["build_config"] == {"ns.T": {"width": 3}}
+
+    same = await client.put(
+        f"{BUILDS}/{build_id}/scope",
+        json={"scope_key": "code-1:cfg-a", "build_config": {"ns.T": {"width": 3}}},
+    )
+    assert same.status_code == 200, same.text
+    assert same.json()["build_config"] == {"ns.T": {"width": 3}}
+
+    unspecified = await client.put(
+        f"{BUILDS}/{build_id}/scope", json={"scope_key": "code-1:cfg-a"}
+    )
+    assert unspecified.status_code == 200, unspecified.text
+    assert unspecified.json()["build_config"] == {"ns.T": {"width": 3}}
 
 
 @pytest.mark.asyncio

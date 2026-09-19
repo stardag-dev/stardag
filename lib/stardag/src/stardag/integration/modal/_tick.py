@@ -377,7 +377,20 @@ async def _run_deployed_tick_aio(
     # scope (a build nothing fixed a scope for — an older SDK) is driven by
     # anyone; bound to the id, so a claimed ``build:<other id>`` is foreign.
     own_code_id = code_id()
-    if build_info.scope_key is not None and (
+    if build_info.scope_key is None:
+        # A server that knows scopes assigns every build one — at least its
+        # own ``build:<id>`` placeholder. None means the server predates
+        # them, and such a server gates over environment-global edges,
+        # which this SDK refuses (see ``RegistryTooOldError``): driving the
+        # build would mix structures evaluated by different code.
+        logger.error(
+            f"Tick for build {build_id}: the registry reports no structure "
+            "scope for it, so it predates structure scopes. Refusing to drive "
+            "the build: upgrade the Registry API to a version matching this "
+            "SDK first."
+        )
+        return {"outcome": "registry_too_old", "build_id": str(build_id)}
+    if (
         not is_synthetic_scope(build_info.scope_key, build_id=build_id)
         and scope_code_id(build_info.scope_key) != own_code_id
     ):

@@ -65,8 +65,10 @@ Anything that changes what a task writes or yields is a parameter or a
 This SDK requires a Registry API at this release or later. Against an older
 server a build refuses to start, or to fix its scope, with
 `RegistryTooOldError` rather than run over environment-global edges. An
-older SDK against the new server keeps working on a per-build scope the
-server assigns. A reactive build running across the server deploy keeps
+older SDK against the new server keeps working for the builds it creates,
+on a per-build scope the server assigns; it cannot resume a build this
+release planned under a structure scope — the server refuses that with
+`scope_required`. A reactive build running across the server deploy keeps
 its gates: the migration copies its edges into its own scope.
 
 ### Migration checklist

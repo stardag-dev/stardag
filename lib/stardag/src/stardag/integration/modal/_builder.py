@@ -20,6 +20,7 @@ from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.integration.modal._logging import _setup_logging
 from stardag.integration.modal._protocols import BuildFunction
 from stardag.integration.modal._selector import WorkerSelector
+from stardag.integration.modal._bootstrap import _fail_build_best_effort
 from stardag.registry import NoOpRegistry, registry_provider
 
 try:
@@ -131,26 +132,36 @@ class Builder(BuildFunction):
         # exactly as a reactive build's worker does.
         build_config = (build_kwargs or {}).get("build_config")
         resume_build_id = (build_kwargs or {}).get("resume_build_id")
-        if build_config is None and resume_build_id is not None:
-            # A resume with no config means the build's own. The engine
-            # adopts it too, but the executor is constructed first and is
-            # what forwards it to the workers, so it has to know here.
-            registry = registry_provider.get()
-            if type(registry) is not NoOpRegistry:
-                build_config = registry.build_get(resume_build_id).build_config
-                if build_config:
-                    build_kwargs = {
-                        **(build_kwargs or {}),
-                        "build_config": build_config,
-                    }
-        scope_key = structure_scope_key(code_id(), build_config)
-        modal_executor = ModalTaskExecutor(
-            modal_app_name=app_name,
-            worker_selector=worker_selector,
-            detached=getattr(self, "detached", True),
-            build_config=build_config,
-            scope_key=scope_key,
-        )
+        try:
+            if build_config is None and resume_build_id is not None:
+                # A resume with no config means the build's own. The engine
+                # adopts it too, but the executor is constructed first and
+                # is what forwards it to the workers, so it has to know here.
+                registry = registry_provider.get()
+                if type(registry) is not NoOpRegistry:
+                    build_config = registry.build_get(resume_build_id).build_config
+                    if build_config:
+                        build_kwargs = {
+                            **(build_kwargs or {}),
+                            "build_config": build_config,
+                        }
+            scope_key = structure_scope_key(code_id(), build_config)
+            modal_executor = ModalTaskExecutor(
+                modal_app_name=app_name,
+                worker_selector=worker_selector,
+                detached=getattr(self, "detached", True),
+                build_config=build_config,
+                scope_key=scope_key,
+            )
+        except BaseException as e:
+            # A trigger-created build is RUNNING from the moment it was
+            # minted, and nothing but this function will drive it. A
+            # registry hiccup or a misconfigured build here must therefore
+            # not leave it RUNNING with no driver: record the failure (best
+            # effort) and let the exception surface.
+            if resume_build_id is not None:
+                _fail_build_best_effort(registry_provider.get(), resume_build_id, e)
+            raise
         summary_or_exception: BuildSummary | None | Exception = BuildFailedError(
             "Unknown error during build"
         )  # Placeholder for type checking, this should never be raised

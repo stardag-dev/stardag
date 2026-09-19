@@ -24,7 +24,7 @@ import modal
 from stardag import BaseTask
 from stardag.build import BuildTaskStore, discover_and_register_aio
 from stardag.build._scope import code_id, structure_scope_key
-from stardag.build_config import rebind_to_build_config, set_build_config
+from stardag.build_config import build_config_scope, rebind_to_build_config
 from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.build._task_modules import (
     PickleElisionPlan,
@@ -304,9 +304,41 @@ def run_reactive_bootstrap(
     # plan-time keys to wake the builds queued on a key when a slot frees —
     # it can learn them nowhere else, since the selector is deployed-app
     # code.
+    # The config is installed for the duration of the bootstrap only: the
+    # ``reactive_discovery="local"`` path runs this in the trigger's own
+    # process, and a completed build's level 2/3 values must not linger in
+    # the caller's context for the next task it constructs.
+    with build_config_scope(build_config):
+        return _run_reactive_bootstrap_scoped(
+            build_id,
+            task_list,
+            registry=registry,
+            app_name=app_name,
+            tick_kwargs=tick_kwargs,
+            task_module_patterns=task_module_patterns,
+            elide_pickles=elide_pickles,
+            require_pickle_free=require_pickle_free,
+            limit_key_selector=limit_key_selector,
+            build_config=build_config,
+        )
+
+
+def _run_reactive_bootstrap_scoped(
+    build_id: UUID,
+    task_list: list[BaseTask],
+    *,
+    registry: typing.Any,
+    app_name: str,
+    tick_kwargs: dict[str, typing.Any] | None,
+    task_module_patterns: typing.Sequence[str],
+    elide_pickles: bool,
+    require_pickle_free: bool,
+    limit_key_selector: LimitKeySelector | None,
+    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None,
+) -> ReactiveBootstrapResult:
+    """:func:`run_reactive_bootstrap` with the build config already installed."""
     scope_key = structure_scope_key(code_id(), build_config)
     registry.build_set_scope(build_id, scope_key=scope_key, build_config=build_config)
-    set_build_config(build_config)
     if build_config:
         # Only with a config to resolve: the roots arrived by value from the
         # trigger, constructed before any config existed, so their

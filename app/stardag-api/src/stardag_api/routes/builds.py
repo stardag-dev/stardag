@@ -1793,6 +1793,26 @@ async def resume_build(
             _apply_scope(build, scope_key=scope_key, build_config=parsed_build_config)
             or needs_commit
         )
+    elif not _is_synthetic_scope(build):
+        # A build planned under a structure scope is resumed by naming that
+        # scope: the resumer's code and config are what the edges then get
+        # recorded under, so an unscoped resume — a client predating scopes
+        # — would register its structure into a scope that says otherwise.
+        # A synthetic scope is nobody's structure and stays open to anyone.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "scope_required",
+                "build_id": str(build.id),
+                "scope_key": build.scope_key,
+                "message": (
+                    f"Build {build.id} was planned under structure scope "
+                    f"{build.scope_key!r}; a resume must name it. A client that "
+                    "cannot compute a structure scope may only re-trigger the "
+                    "builds it created. Start a new build instead."
+                ),
+            },
+        )
 
     has_activity = (
         await db.execute(
@@ -2231,11 +2251,13 @@ def _apply_scope(build: Build, *, scope_key: str, build_config: dict | None) -> 
     because the edges recorded under the old one were evaluated by other
     code or other structure config and a build carries one scope for its
     life. The answer to "I want to run this build under new code" is a new
-    build. ``build_config`` follows the same rule, compared as a whole: on a
-    build with a real scope, a supplied config must equal the stored one,
-    where "nothing stored" and ``{}`` are the same config. ``None`` is not
-    a config but "unspecified" — an older SDK or a bare re-trigger — and
-    keeps whatever is stored.
+    build. ``build_config`` follows the same rule, compared as a whole: a
+    supplied config must equal the stored one whenever one is stored — a
+    reactive trigger stores it at ``POST /builds`` while the scope is still
+    synthetic, and a later scope claim may not rewrite it — and, on a build
+    with a real scope, also when nothing is stored, where "nothing" and
+    ``{}`` are the same config. ``None`` is not a config but "unspecified"
+    — an older SDK or a bare re-trigger — and keeps whatever is stored.
     """
     if not _is_synthetic_scope(build) and build.scope_key != scope_key:
         raise HTTPException(
@@ -2253,10 +2275,12 @@ def _apply_scope(build: Build, *, scope_key: str, build_config: dict | None) -> 
                 ),
             },
         )
-    if (
-        not _is_synthetic_scope(build)
-        and build_config is not None
-        and (build.build_config or {}) != build_config
+    if build_config is not None and (
+        (build.build_config and build.build_config != build_config)
+        or (
+            not _is_synthetic_scope(build)
+            and (build.build_config or {}) != build_config
+        )
     ):
         raise HTTPException(
             status_code=409,

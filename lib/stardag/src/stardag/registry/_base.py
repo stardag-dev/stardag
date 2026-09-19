@@ -1560,7 +1560,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
     ) -> UUID:
         """Async version of build_start."""
         return self.build_start(
-            root_tasks, description, executor_metadata=executor_metadata
+            root_tasks,
+            description,
+            executor_metadata=executor_metadata,
+            scope_key=scope_key,
+            build_config=build_config,
         )
 
     async def build_resume_aio(
@@ -1572,7 +1576,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
         build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         """Async version of build_resume."""
-        self.build_resume(build_id, executor_metadata=executor_metadata)
+        self.build_resume(
+            build_id,
+            executor_metadata=executor_metadata,
+            scope_key=scope_key,
+            build_config=build_config,
+        )
 
     async def build_complete_aio(self, build_id: UUID) -> None:
         """Async version of build_complete."""

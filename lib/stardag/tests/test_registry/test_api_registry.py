@@ -1787,6 +1787,61 @@ class TestScopeRequiresANewServer:
         with pytest.raises(RegistryTooOldError, match="POST /builds"):
             registry.build_start(root_tasks=[], scope_key="code:cfg")
 
+    def test_build_start_refused_for_no_echo_fails_the_committed_build(self):
+        """The server has committed the build by the time its echo is
+        checked; a refusal must not leave it RUNNING with no driver."""
+        from stardag.exceptions import RegistryTooOldError
+
+        build_id = uuid4()
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(f"{request.method} {request.url.path}")
+            if request.url.path.endswith("/fail"):
+                return httpx.Response(200, json={"id": str(build_id)})
+            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
+
+        registry = self._registry(handler)
+        with pytest.raises(RegistryTooOldError):
+            registry.build_start(root_tasks=[], scope_key="code:cfg")
+        assert seen == [
+            "POST /api/v1/builds",
+            f"POST /api/v1/builds/{build_id}/fail",
+        ]
+
+    def test_build_start_refusal_survives_a_failing_fail_call(self):
+        from stardag.exceptions import RegistryTooOldError
+
+        build_id = uuid4()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/fail"):
+                return httpx.Response(500, json={"detail": "boom"})
+            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
+
+        registry = self._registry(handler)
+        with pytest.raises(RegistryTooOldError):
+            registry.build_start(root_tasks=[], scope_key="code:cfg")
+
+    @pytest.mark.asyncio
+    async def test_build_start_aio_refused_for_no_echo_fails_the_committed_build(self):
+        from stardag.exceptions import RegistryTooOldError
+
+        build_id = uuid4()
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(f"{request.method} {request.url.path}")
+            if request.url.path.endswith("/fail"):
+                return httpx.Response(200, json={"id": str(build_id)})
+            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
+
+        registry = self._registry(handler)
+        self._inject_async(registry, handler)
+        with pytest.raises(RegistryTooOldError):
+            await registry.build_start_aio(root_tasks=[], scope_key="code:cfg")
+        assert seen[-1] == f"POST /api/v1/builds/{build_id}/fail"
+
     def test_build_start_echoing_another_scope_is_refused(self):
         """A server that knows the field adopts it or 409s; one that answers
         some other scope would gate the build under a scope this SDK never

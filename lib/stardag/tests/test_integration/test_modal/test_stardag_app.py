@@ -80,6 +80,17 @@ def _stub_modal_concurrent():
     _CONCURRENCY_REQUESTS.clear()
 
 
+class ConfiguredForLocalBootstrap(_sd.Task[int]):
+    """A task with a level-2 field, at module level so the build task store
+    can pickle it by reference (see the local-bootstrap config test)."""
+
+    __namespace__ = "test_stardag_app"
+    width: typing.Annotated[int, _sd.StardagField(significance="dependencies_only")] = 2
+
+    def run(self):
+        return None
+
+
 def _invoke(fn, *args, **kwargs):
     """Call a registered wrapper, driving it to completion if it is async.
 
@@ -584,6 +595,29 @@ class TestBuilderOrchestration:
             "resume_build_id": build_id,
             "build_config": stored,
         }
+
+    def test_a_failing_config_lookup_fails_the_resumed_build(self):
+        """The lookup runs before the engine, so nothing else would report
+        the failure: a trigger-created build must not be left RUNNING with
+        no driver when the registry hiccups here."""
+        from stardag.exceptions import APIError
+
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get.side_effect = APIError("registry down", status_code=503)
+
+        with registry_provider.override(registry):
+            with pytest.raises(APIError, match="registry down"):
+                Builder()(
+                    MagicMock(),
+                    MagicMock(),
+                    "app",
+                    build_kwargs={"resume_build_id": build_id},
+                )
+
+        registry.build_fail.assert_called_once()
+        assert registry.build_fail.call_args.args[0] == build_id
+        assert "APIError" in registry.build_fail.call_args.kwargs["error_message"]
 
     def test_executor_without_a_config_has_the_bare_scope(self):
         captured: dict = {}
@@ -1519,6 +1553,34 @@ class TestReactiveDiscoveryPlacement:
         }
         assert result.function_call == "spawn-handle"
 
+    def test_local_bootstrap_does_not_leak_the_config_into_the_caller(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """``reactive_discovery="local"`` runs the bootstrap in this process;
+        the build's level 2/3 values must not linger in the caller's context
+        once it returns."""
+        from stardag.build_config import get_build_config, task_config_key
+
+        key = task_config_key(
+            ConfiguredForLocalBootstrap.get_namespace(),
+            ConfiguredForLocalBootstrap.get_name(),
+        )
+        app = self._make_app(reactive_discovery="local")
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        registry.task_register_bulk_aio.return_value = None
+
+        assert get_build_config() is None
+        with registry_provider.override(registry):
+            app.build_trigger(
+                ConfiguredForLocalBootstrap(),
+                reactive=True,
+                build_config={key: {"width": 5}},
+            )
+        assert get_build_config() is None
+        assert ConfiguredForLocalBootstrap().width == 2
+
     def test_local_failure_also_leaves_no_orphan_build(
         self, modal_function_stub, default_in_memory_fs_target
     ):
@@ -1752,7 +1814,10 @@ class TestFinalizeBakesTaskModules:
         registry = MagicMock(spec=RegistryABC)
         registry.build_get_aio = AsyncMock(
             return_value=BuildInfo(
-                id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+                id=build_id,
+                reactive_app_name="tm-finalize",
+                reactive_tick_kwargs=None,
+                scope_key=f"build:{build_id}",
             )
         )
 
@@ -1791,7 +1856,10 @@ class TestFinalizeBakesTaskModules:
         # because the tick never got as far as importing anything.
         registry.build_get_aio = AsyncMock(
             return_value=BuildInfo(
-                id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+                id=build_id,
+                reactive_app_name="tm-finalize",
+                reactive_tick_kwargs=None,
+                scope_key=f"build:{build_id}",
             )
         )
 
@@ -2577,7 +2645,10 @@ class TestDeployedFunctionsAreSerializable:
         registry = MagicMock(spec=RegistryABC)
         registry.build_get_aio = AsyncMock(
             return_value=BuildInfo(
-                id=build_id, reactive_app_name="another-app", reactive_tick_kwargs=None
+                id=build_id,
+                reactive_app_name="another-app",
+                reactive_tick_kwargs=None,
+                scope_key=f"build:{build_id}",
             )
         )
         with (
@@ -2635,6 +2706,9 @@ class TestTickAppOwnership:
                 id=build_id,
                 reactive_app_name=reactive_app_name,
                 reactive_tick_kwargs=tick_kwargs,
+                # What a server that knows scopes gives a build nothing
+                # fixed a scope for: its own placeholder.
+                scope_key=f"build:{build_id}",
             )
         )
         return registry
@@ -2754,6 +2828,36 @@ class TestTickAppOwnership:
             "scope_key": "beef" * 10 + ":0123456789abcdef",
             "code_id": "cafe" * 10,
         }
+        tick_aio.assert_not_called()
+
+    def test_a_build_with_no_scope_at_all_is_an_old_server(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        """A server that knows scopes gives every build at least its own
+        placeholder; ``None`` means the server predates them and would gate
+        the build over environment-global edges, which the SDK refuses."""
+        from uuid import uuid4
+
+        from stardag.build._scope import STARDAG_CODE_ID_ENV
+        from stardag.registry import BuildInfo
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        tick = self._capture_tick("app-a")
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get_aio = AsyncMock(
+            return_value=BuildInfo(
+                id=build_id, reactive_app_name="app-a", scope_key=None
+            )
+        )
+        with (
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
+        ):
+            rp.get.return_value = registry
+            result = _invoke(tick, str(build_id))
+
+        assert result == {"outcome": "registry_too_old", "build_id": str(build_id)}
         tick_aio.assert_not_called()
 
     def test_another_builds_placeholder_scope_is_refused(
@@ -2951,6 +3055,7 @@ class TestReactiveRetrigger:
                 "workspace": "test-workspace",
                 "environment": "test-env",
             },
+            scope_key=None,
             build_config=None,
         )
         registry.build_set_reactive_meta.assert_called_once_with(
@@ -2986,6 +3091,42 @@ class TestReactiveRetrigger:
         registry.build_set_reactive_meta.assert_called_once_with(
             build_id, app_name=app.name, tick_kwargs=None
         )
+
+    def test_retrigger_of_a_scoped_build_resumes_under_its_own_scope(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """The server refuses an unscoped resume of a real-scoped build (an
+        older SDK's), so this SDK's re-trigger names the build's stored
+        scope; the bootstrap then checks the deployment's code against it.
+        The server's own placeholder is not a scope to claim."""
+        from stardag.registry import BuildInfo
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        real = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get.return_value = BuildInfo(
+            id=real, scope_key="cafe" * 10 + ":0123456789abcdef"
+        )
+        with registry_provider.override(registry):
+            app.build_trigger(
+                SyncOnlyTask(name="rt-scoped"), build_id=real, reactive=True
+            )
+        assert (
+            registry.build_resume.call_args.kwargs["scope_key"]
+            == "cafe" * 10 + ":0123456789abcdef"
+        )
+
+        placeholder = uuid4()
+        registry.reset_mock()
+        registry.build_get.return_value = BuildInfo(
+            id=placeholder, scope_key=f"build:{placeholder}"
+        )
+        with registry_provider.override(registry):
+            app.build_trigger(
+                SyncOnlyTask(name="rt-placeholder"), build_id=placeholder, reactive=True
+            )
+        assert registry.build_resume.call_args.kwargs["scope_key"] is None
 
 
 class TestWatchdogSweep:
@@ -3757,6 +3898,7 @@ class TestConcurrentTicksInOneContainer:
                 id=build_id,
                 reactive_app_name=app_name,
                 reactive_tick_kwargs=None,
+                scope_key=f"build:{build_id}",
             )
 
         registry.build_get_aio = build_get_aio
@@ -3873,6 +4015,7 @@ class TestConcurrentTicksInOneContainer:
                 id=build_id,
                 reactive_app_name="app-a" if build_id == forwarding_build else "app-b",
                 reactive_tick_kwargs=None,
+                scope_key=f"build:{build_id}",
             )
 
         registry.build_get_aio = build_get_aio

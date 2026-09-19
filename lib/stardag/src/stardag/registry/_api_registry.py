@@ -620,10 +620,30 @@ class APIRegistry(RegistryABC):
             operation="Start build",
         )
         data = response.json()
-        _require_scope_support(data, scope_key, "POST /builds", build_config)
         build_id = UUID(data["id"])
+        try:
+            _require_scope_support(data, scope_key, "POST /builds", build_config)
+        except RegistryTooOldError as e:
+            # The server has already committed the build. Left alone it
+            # would sit RUNNING with nothing driving it; mark it failed
+            # (best effort — the refusal is the outcome that matters).
+            self._fail_orphaned_build(build_id, e)
+            raise
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
+
+    def _fail_orphaned_build(self, build_id: UUID, error: Exception) -> None:
+        """Best-effort ``POST /builds/{id}/fail`` for a build a refusal
+        orphaned; never raises, logs the failure to fail."""
+        try:
+            self.build_fail(build_id, error_message=f"{type(error).__name__}: {error}")
+        except Exception:
+            logger.warning(
+                "Could not mark build %s failed after refusing it; it may be "
+                "left RUNNING on the registry.",
+                build_id,
+                exc_info=True,
+            )
 
     def build_resume(
         self,
@@ -645,7 +665,11 @@ class APIRegistry(RegistryABC):
         server predating structure scopes ignores the parameter silently and
         answers without one, and that is a :class:`RegistryTooOldError` — a
         build resumed on such a server would be gated over
-        environment-global edges this SDK does not tolerate.
+        environment-global edges this SDK does not tolerate. There is
+        nothing to undo in that case: the server has flipped the build back
+        to RUNNING and nothing here will drive it, so the caller's
+        ``RegistryTooOldError`` is also the operator's cue to cancel it (or
+        upgrade the server and re-trigger).
         """
         params = self._get_event_params()
         if executor_metadata is not None:
@@ -1338,8 +1362,23 @@ class APIRegistry(RegistryABC):
             operation="Start build",
         )
         data = response.json()
-        _require_scope_support(data, scope_key, "POST /builds", build_config)
         build_id = UUID(data["id"])
+        try:
+            _require_scope_support(data, scope_key, "POST /builds", build_config)
+        except RegistryTooOldError as e:
+            # See ``build_start``: the build is committed; do not orphan it.
+            try:
+                await self.build_fail_aio(
+                    build_id, error_message=f"{type(e).__name__}: {e}"
+                )
+            except Exception:
+                logger.warning(
+                    "Could not mark build %s failed after refusing it; it may "
+                    "be left RUNNING on the registry.",
+                    build_id,
+                    exc_info=True,
+                )
+            raise
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
 

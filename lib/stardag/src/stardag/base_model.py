@@ -8,7 +8,9 @@ Implements a base model with advanced polymorphic serialization + validation fea
 2) Context-based custom serialization + validation modes (mode in context):
    - mode="hash": drop fields annotated BackwardCompat(default=...) when value == default,
      and every field whose significance is not "identity"
-   - mode="registry": drop every field whose significance is not "identity", keep
+   - mode="registry": drop every field with an explicit non-identity
+     significance (a legacy ``hash_exclude=True`` field is kept: it may still
+     be passed at init, so its value must survive a round trip), keep
      everything else (the payload the registry stores — a pure function of the
      task id)
    - mode="compat": if a BackwardCompat field is missing, populate it with the compat
@@ -294,10 +296,19 @@ class StardagBaseModel(BaseModel):
             maybe_stardag_field = _get_annotation(field, StardagField)
             if maybe_stardag_field is not None:
                 stardag_field: StardagField = maybe_stardag_field
-                # A non-identity field is neither hashed nor stored: it is
-                # not part of what the task promises. Checked first to
-                # short-circuit before the attribute read.
-                if not stardag_field.is_identity:
+                # A field with an explicit non-identity significance is
+                # neither hashed nor stored: it is not part of what the task
+                # promises, and its value comes from the build config, never
+                # from the payload. Checked first to short-circuit before
+                # the attribute read.
+                if stardag_field.significance != "identity":
+                    continue
+                # A legacy ``hash_exclude=True`` field is dropped from the
+                # hash but KEPT in the registry payload: it may still be
+                # passed at init for one release, so a task registered with
+                # a non-default value must rehydrate with that value, not
+                # the default.
+                if stardag_field.hash_exclude and mode == "hash":
                     continue
                 # Compare the *raw* Python value (not the already-serialized
                 # `value`) against compat_default. The serialized form differs

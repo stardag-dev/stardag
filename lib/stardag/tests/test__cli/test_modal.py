@@ -34,6 +34,38 @@ def test_deploy_reaches_module_import():
     assert "Error importing module" in result.output
 
 
+class TestRecordDeployment:
+    """A record binds a handle to one code id, which only a versioned
+    deployment has; an unversioned app redeploys under the same handle with
+    new code and must leave no record to go stale."""
+
+    def _run(self, versioned: bool):
+        from unittest.mock import MagicMock
+
+        from stardag._cli.modal import _record_deployment
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        recorded: list[tuple[str, str, str]] = []
+
+        class FakeRegistry(NoOpRegistry):
+            def deployment_record(self, *, family, handle, code_id):
+                recorded.append((family, handle, code_id))
+                return None
+
+        stardag_app = MagicMock(
+            versioned_deployments=versioned, family="fam", code_id="c" * 40
+        )
+        with registry_provider.override(FakeRegistry()):
+            _record_deployment(stardag_app, "fam--cccccccccccc" if versioned else "fam")
+        return recorded
+
+    def test_an_unversioned_app_is_not_recorded(self):
+        assert self._run(versioned=False) == []
+
+    def test_a_versioned_app_is_recorded(self):
+        assert self._run(versioned=True) == [("fam", "fam--cccccccccccc", "c" * 40)]
+
+
 class TestGcRetiresBeforeStopping:
     """``gc`` retires the registry record first and stops the app only once
     the registry agreed; a 409 means a build took the deployment since the

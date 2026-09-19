@@ -24,7 +24,11 @@ from modal.exception import NotFoundError as ModalNotFoundError
 
 from stardag import BaseTask
 from stardag.build import BuildSummary
-from stardag.build._scope import STARDAG_CODE_ID_ENV, code_id as _process_code_id
+from stardag.build._scope import (
+    STARDAG_CODE_ID_ENV,
+    code_id as _process_code_id,
+    is_synthetic_scope,
+)
 from stardag.build._task_modules import (
     TaskModulesError,
     expand_task_module_patterns,
@@ -1480,18 +1484,25 @@ class StardagApp:
             )
         task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
         explicit_build_id = build_id is not None
-        if (
-            explicit_build_id
-            and build_config is None
-            and not isinstance(registry, NoOpRegistry)
-        ):
-            # A re-trigger by id without a config means "the build's own":
-            # the registry keeps a build's config for its life, and the
-            # bootstrap or resident build would otherwise hash the bare
-            # scope and be refused for a build that was configured.
-            stored = registry.build_get(build_id).build_config
-            if stored:
-                build_config = stored
+        resume_scope_key: str | None = None
+        if explicit_build_id and not isinstance(registry, NoOpRegistry):
+            assert build_id is not None
+            info = registry.build_get(build_id)
+            if build_config is None and info.build_config:
+                # A re-trigger by id without a config means "the build's
+                # own": the registry keeps a build's config for its life,
+                # and the bootstrap or resident build would otherwise hash
+                # the bare scope and be refused for a build that was
+                # configured.
+                build_config = info.build_config
+            if info.scope_key is not None and not is_synthetic_scope(
+                info.scope_key, build_id=build_id
+            ):
+                # The resume names the build's real scope, so the server
+                # can tell this re-trigger from an older SDK's unscoped one
+                # (which it refuses for a real-scoped build) and the
+                # bootstrap's later scope claim is compared against it.
+                resume_scope_key = info.scope_key
         app_name = self._resolve_deployment(registry, deployment)
         executor_metadata = self._build_executor_metadata(
             reactive=reactive, app_name=app_name
@@ -1514,6 +1525,7 @@ class StardagApp:
                 executor_metadata=executor_metadata,
                 build_config=build_config,
                 app_name=app_name,
+                scope_key=resume_scope_key,
             )
 
         merged_kwargs["resume_build_id"] = build_id
@@ -1626,6 +1638,7 @@ class StardagApp:
         build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]]
         | None = None,
         app_name: str | None = None,
+        scope_key: str | None = None,
     ) -> BuildTriggerResult:
         """Reactive trigger: register the roots, then spawn ``bootstrap``.
 
@@ -1697,11 +1710,14 @@ class StardagApp:
             #
             # A re-trigger carries the same build config; a different one
             # is a different scope and the registry refuses it. The scope
-            # itself is checked by the bootstrap, which is the one that
-            # knows the deployment's code id.
+            # named here is the build's own stored one (None while the
+            # build is still on the server's placeholder); whether this
+            # deployment's code matches it is checked by the bootstrap,
+            # which is the one that knows the code id.
             registry.build_resume(
                 build_id,
                 executor_metadata=executor_metadata,
+                scope_key=scope_key,
                 build_config=build_config,
             )
         # From here the build is RUNNING (fresh builds since build_start,

@@ -20,6 +20,7 @@ import importlib
 import importlib.util
 import inspect
 import os
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
@@ -54,6 +55,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+logger = logging.getLogger(__name__)
 console = Console()
 error_console = Console(stderr=True)
 
@@ -554,6 +556,17 @@ def _report_task_modules(
 def _record_deployment(stardag_app_instance: StardagApp, handle: str) -> None:
     from stardag.registry import NoOpRegistry, registry_provider
 
+    if not stardag_app_instance.versioned_deployments:
+        # An unversioned app deploys under one stable handle for every code
+        # version. A record binds a handle to ONE code id, so recording it
+        # would leave a stale record after the next redeploy (and a
+        # ``deployment_handle_taken`` refusal). Nothing resolves such an
+        # app by record — triggers use the family name directly.
+        logger.debug(
+            "Deployment %s not recorded: the app does not use versioned_deployments.",
+            handle,
+        )
+        return
     try:
         registry = registry_provider.get()
         if type(registry) is NoOpRegistry:
