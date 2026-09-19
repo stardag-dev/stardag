@@ -306,6 +306,34 @@ class TestBuildIdInjection:
         _, env_overrides = worker.spawn_calls[0]
         assert env_overrides is None or STARDAG_BUILD_ID_ENV not in env_overrides
 
+    async def test_config_and_scope_are_forwarded_without_lifecycle_reporting(self):
+        """A worker that does not self-report still constructs tasks, so a
+        configured build's config and scope reach it regardless: the
+        structure of a build must not depend on how its workers report."""
+        from stardag.integration.modal._metadata import (
+            STARDAG_BUILD_CONFIG_ENV,
+            STARDAG_BUILD_ID_ENV,
+            STARDAG_SCOPE_KEY_ENV,
+        )
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = ModalTaskExecutor(
+            modal_app_name="test-app",
+            worker_selector=lambda task: "default",
+            worker_reports_lifecycle=False,
+            build_config={"ns.T": {"width": 3}},
+            scope_key="cafe:0123456789abcdef",
+        )
+        executor._worker_functions["default"] = worker  # pyright: ignore[reportArgumentType]
+
+        await executor.submit_detached(_make_task())
+
+        _, env_overrides = worker.spawn_calls[0]
+        assert env_overrides is not None
+        assert env_overrides[STARDAG_BUILD_CONFIG_ENV] == '{"ns.T":{"width":3}}'
+        assert env_overrides[STARDAG_SCOPE_KEY_ENV] == "cafe:0123456789abcdef"
+        assert STARDAG_BUILD_ID_ENV not in env_overrides
+
     async def test_reports_lifecycle_requires_build_context(self):
         executor = _make_executor(FakeWorkerFunction(FakeFunctionCall()))
         assert executor.reports_lifecycle(_make_task()) is False

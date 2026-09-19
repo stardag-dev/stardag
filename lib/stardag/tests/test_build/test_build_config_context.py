@@ -36,7 +36,7 @@ from stardag.build import (
 )
 from stardag.build._concurrent import _run_task_in_process
 from stardag.build_config import get_build_config, task_config_key
-from stardag.registry import NoOpRegistry
+from stardag.registry import BuildInfo, NoOpRegistry
 from stardag.target import InMemoryTarget
 
 NAMESPACE = "cfg_ctx_tests"
@@ -260,3 +260,76 @@ class TestConfigReachesTheWorkerPools:
         assert installed == config
         # Nothing leaked into the caller's own context.
         assert get_build_config() is None
+
+
+class _MarkedRegistry(NoOpRegistry):
+    """Stores one build's config and records the resume. A *subclass* of
+    NoOpRegistry: the engine skips the lookup only for the bare class."""
+
+    def __init__(self, build_id: UUID, build_config: dict) -> None:
+        self.build_id = build_id
+        self.stored = build_config
+        self.resumed_with: list[dict | None] = []
+
+    def build_get(self, build_id: UUID) -> BuildInfo:
+        assert build_id == self.build_id
+        return BuildInfo(id=build_id, build_config=self.stored)
+
+    async def build_get_aio(self, build_id: UUID) -> BuildInfo:
+        return self.build_get(build_id)
+
+    def build_resume(self, build_id: UUID, executor_metadata=None, **kwargs) -> None:
+        self.resumed_with.append(kwargs.get("build_config"))
+
+    async def build_resume_aio(
+        self, build_id: UUID, executor_metadata=None, **kwargs
+    ) -> None:
+        self.build_resume(build_id, executor_metadata, **kwargs)
+
+
+class TestABareResumeAdoptsTheStoredConfig:
+    """``resume_build_id`` without a config means the build's own config: an
+    ``execution_only`` override shares the scope hash, so hashing the bare
+    scope would silently run the build at the class defaults."""
+
+    def test_build_sequential(self, default_in_memory_fs_target):
+        build_id = UUID(int=1)
+        registry = _MarkedRegistry(build_id, {GENERATION_KEY: {"width": 3}})
+        probe = Probe(salt="resume-seq")
+
+        summary = build_sequential([probe], registry=registry, resume_build_id=build_id)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert probe.target().load() == 3
+        assert registry.resumed_with == [{GENERATION_KEY: {"width": 3}}]
+        assert get_build_config() is None  # released with the build
+
+    @pytest.mark.asyncio
+    async def test_build_aio(self, default_in_memory_fs_target):
+        build_id = UUID(int=2)
+        registry = _MarkedRegistry(build_id, {GENERATION_KEY: {"width": 3}})
+        probe = Probe(salt="resume-aio")
+
+        summary = await build_aio([probe], registry=registry, resume_build_id=build_id)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert probe.target().load() == 3
+        assert registry.resumed_with == [{GENERATION_KEY: {"width": 3}}]
+        assert get_build_config() is None
+
+    def test_a_given_config_wins_over_the_stored_one(self, default_in_memory_fs_target):
+        """The lookup is for the bare case only; an explicit config is the
+        caller's claim and the registry decides whether it matches."""
+        build_id = UUID(int=3)
+        registry = _MarkedRegistry(build_id, {GENERATION_KEY: {"width": 3}})
+        probe = Probe(salt="resume-given")
+
+        build_sequential(
+            [probe],
+            registry=registry,
+            resume_build_id=build_id,
+            build_config={GENERATION_KEY: {"width": 2}},
+        )
+
+        assert probe.target().load() == 2
+        assert registry.resumed_with == [{GENERATION_KEY: {"width": 2}}]

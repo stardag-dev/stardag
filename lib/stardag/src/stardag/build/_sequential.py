@@ -56,9 +56,14 @@ from stardag.build._base import (
     handle_registry_error,
 )
 from stardag.build._scope import code_id, structure_scope_key
-from stardag.build_config import build_config_scope, rebind_to_build_config
+from stardag.build_config import (
+    BuildConfig,
+    build_config_scope,
+    rebind_to_build_config,
+    set_build_config,
+)
 from stardag.exceptions import ScopeMismatchError
-from stardag.registry import RegistryABC, registry_provider
+from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +111,75 @@ def installs_build_config_aio(
             return await fn(*args, **kwargs)
 
     return wrapper
+
+
+def _stored_build_config_or_given(
+    registry: RegistryABC,
+    resume_build_id: UUID | None,
+    build_config: BuildConfig | None,
+    on_registry_failure: OnRegistryFailure,
+) -> BuildConfig | None:
+    """The config a resumed build runs under: the one given, else its own.
+
+    A build keeps one config for its life, and a resume that names none
+    means "the build's" — not "none": hashing the bare scope would either
+    refuse a build with ``dependencies_only`` overrides or, worse, silently
+    run one with ``execution_only`` overrides at the class defaults, since
+    those share the scope hash. The adopted config is installed into the
+    context the caller (``installs_build_config``) opened, so its reset on
+    exit still restores what the caller had.
+
+    Skipped for a bare ``NoOpRegistry`` (nothing stored anywhere; a subclass
+    that answers ``build_get`` is a real registry) and for a registry that
+    does not implement ``build_get`` (it cannot know).
+    """
+    if resume_build_id is None or build_config is not None:
+        return build_config
+    if type(registry) is NoOpRegistry:
+        return None
+    try:
+        stored = registry.build_get(resume_build_id).build_config
+    except NotImplementedError:
+        return None
+    except Exception as reg_err:
+        handle_registry_error(
+            reg_err,
+            f"Failed to read the stored build config of build {resume_build_id}",
+            on_registry_failure,
+        )
+        return None
+    if stored:
+        set_build_config(stored)
+        return stored
+    return None
+
+
+async def _stored_build_config_or_given_aio(
+    registry: RegistryABC,
+    resume_build_id: UUID | None,
+    build_config: BuildConfig | None,
+    on_registry_failure: OnRegistryFailure,
+) -> BuildConfig | None:
+    """Async twin of :func:`_stored_build_config_or_given`."""
+    if resume_build_id is None or build_config is not None:
+        return build_config
+    if type(registry) is NoOpRegistry:
+        return None
+    try:
+        stored = (await registry.build_get_aio(resume_build_id)).build_config
+    except NotImplementedError:
+        return None
+    except Exception as reg_err:
+        handle_registry_error(
+            reg_err,
+            f"Failed to read the stored build config of build {resume_build_id}",
+            on_registry_failure,
+        )
+        return None
+    if stored:
+        set_build_config(stored)
+        return stored
+    return None
 
 
 # Number of tasks the build engine sends per ``task_register_bulk[_aio]``
@@ -241,15 +315,19 @@ def build_sequential(
         BuildSummary with status, task counts, and build_id
     """
     tasks_list = _validate_tasks(tasks)
+    if registry is None:
+        registry = registry_provider.get()
     # The config is installed around this whole function (see
-    # ``installs_build_config``); the roots are re-created under it, since
-    # the caller constructed them before it existed.
+    # ``installs_build_config``); a bare resume adopts the build's own; the
+    # roots are re-created under it, since the caller constructed them
+    # before it existed.
+    build_config = _stored_build_config_or_given(
+        registry, resume_build_id, build_config, on_registry_failure
+    )
     if build_config:
         tasks_list = [rebind_to_build_config(t) for t in tasks_list]
     scope_key = structure_scope_key(code_id(), build_config)
 
-    if registry is None:
-        registry = registry_provider.get()
     if global_lock_config is None:
         global_lock_config = GlobalLockConfig()
     lock_selector: GlobalLockSelector = DefaultGlobalLockSelector(global_lock_config)
@@ -839,15 +917,19 @@ async def build_sequential_aio(
         BuildSummary with status, task counts, and build_id
     """
     tasks_list = _validate_tasks(tasks)
+    if registry is None:
+        registry = registry_provider.get()
     # The config is installed around this whole function (see
-    # ``installs_build_config``); the roots are re-created under it, since
-    # the caller constructed them before it existed.
+    # ``installs_build_config``); a bare resume adopts the build's own; the
+    # roots are re-created under it, since the caller constructed them
+    # before it existed.
+    build_config = await _stored_build_config_or_given_aio(
+        registry, resume_build_id, build_config, on_registry_failure
+    )
     if build_config:
         tasks_list = [rebind_to_build_config(t) for t in tasks_list]
     scope_key = structure_scope_key(code_id(), build_config)
 
-    if registry is None:
-        registry = registry_provider.get()
     if global_lock_config is None:
         global_lock_config = GlobalLockConfig()
     lock_selector: GlobalLockSelector = DefaultGlobalLockSelector(global_lock_config)

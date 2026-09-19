@@ -132,6 +132,16 @@ class TestSignificanceOnTheModel:
         )
 
 
+class TestSignificanceIsChecked:
+    def test_a_typo_is_refused_at_field_creation(self):
+        """A Literal is a hint; an unchecked typo would read as non-identity
+        on the model and as execution-only in the structure hash."""
+        with pytest.raises(ValueError, match="dependencies_only") as excinfo:
+            StardagField(significance="dependencies-only")  # type: ignore[arg-type]
+        assert "identity" in str(excinfo.value)
+        assert "execution_only" in str(excinfo.value)
+
+
 class TestStructureConfigHash:
     def test_empty_and_none_hash_alike(self):
         assert structure_config_hash(None) == structure_config_hash({})
@@ -191,6 +201,25 @@ class TestScopeKey:
         key = structure_scope_key("abc123", None)
         assert scope_code_id(key) == "abc123"
         assert scope_code_id("abc123:" + "f" * 16) == "abc123"
+
+    def test_only_the_servers_exact_shape_is_synthetic(self):
+        """A prefix test would call a real scope of code id ``build``
+        synthetic — the one case that skips the code-id check."""
+        assert is_synthetic_scope(f"build:{uuid4()}")
+        assert is_synthetic_scope(f"build:{uuid4()}".upper())
+        assert not is_synthetic_scope("build:" + "f" * 16)
+        assert not is_synthetic_scope("build:")
+        assert not is_synthetic_scope("build:not-a-uuid")
+
+    def test_an_env_code_id_must_be_usable(self, monkeypatch: pytest.MonkeyPatch):
+        _reset_for_tests()
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "a:b")
+        with pytest.raises(ValueError, match=STARDAG_CODE_ID_ENV):
+            code_id()
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "  ")
+        with pytest.raises(ValueError, match=STARDAG_CODE_ID_ENV):
+            code_id()
+        _reset_for_tests()
 
     def test_code_id_is_stable_within_a_process(self, monkeypatch: pytest.MonkeyPatch):
         _reset_for_tests()

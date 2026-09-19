@@ -265,6 +265,49 @@ class TestStardagAppCustomFunctions:
         assert calls == [("build", "task", "app")]
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
+    def test_finalize_build_wrapper_imports_the_task_modules_first(self, mock_volumes):
+        """The resident builder hashes the build's structure scope before
+        discovery, and that hash validates every class the build config
+        names — a configured upstream may live in a module the roots never
+        import. So the deployed wrapper imports the declared modules before
+        the builder runs, exactly as the tick does."""
+        mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
+        order: list = []
+
+        def my_build(tasks, worker_selector, app_name, build_kwargs=None):
+            order.append("build")
+
+        app = StardagApp(
+            "test-app",
+            build_function=my_build,
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+            task_modules=["stardag.testing.modal._tasks"],
+        )
+
+        registered_fns: dict = {}
+
+        def capture_function(**kwargs):
+            name = kwargs.get("name", "unknown")
+
+            def decorator(fn):
+                registered_fns[name] = fn
+                return fn
+
+            return decorator
+
+        app.modal_app.function = capture_function  # type: ignore[assignment]
+        app.finalize()
+
+        with patch(
+            "stardag.integration.modal._app.import_task_modules",
+            side_effect=lambda modules: order.append(("import", tuple(modules))),
+        ):
+            registered_fns["build"]("task", "selector", "app", None)
+
+        assert order == [("import", ("stardag.testing.modal._tasks",)), "build"]
+
+    @patch("stardag.integration.modal._app.get_target_roots_volumes")
     def test_finalize_wrapper_forwards_build_kwargs_as_keyword(self, mock_volumes):
         """The Modal wrapper forwards ``build_kwargs`` to the user's build_fn
         as a keyword arg, so custom functions with keyword-only build_kwargs

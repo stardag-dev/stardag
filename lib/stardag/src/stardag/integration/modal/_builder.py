@@ -112,7 +112,13 @@ class Builder(BuildFunction):
         app_name: str,
         build_kwargs: dict[str, typing.Any] | None = None,
     ) -> BuildSummary | None:
-        """Core build logic to orchestrate the DAG build."""
+        """Core build logic to orchestrate the DAG build.
+
+        The deployed ``build`` wrapper imports the app's declared task
+        modules before calling this, so the structure scope computed below
+        — which validates every class the build config names — sees the
+        same classes a tick or the bootstrap would.
+        """
         # The build's config and structure scope are the engine's to install
         # and compute (``stardag.build(..., build_config=...)``), but the
         # executor is constructed here, before the engine runs, and it is

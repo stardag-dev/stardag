@@ -1822,6 +1822,138 @@ class TestScopeRequiresANewServer:
         registry = self._registry(handler)
         assert registry.build_start(root_tasks=[], scope_key="code:cfg") == build_id
 
+    def test_scope_put_echoing_another_scope_is_refused(self):
+        """The route exists, but the answer is not the scope just sent: the
+        bootstrap would register edges in a scope the server does not gate
+        on, so the build must not proceed."""
+        from stardag.exceptions import RegistryTooOldError
+
+        build_id = uuid4()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"id": str(build_id), "scope_key": f"build:{build_id}"}
+            )
+
+        registry = self._registry(handler)
+        with pytest.raises(RegistryTooOldError, match="answered structure scope"):
+            registry.build_set_scope(build_id, scope_key="code:cfg")
+
+    def test_scope_put_that_drops_the_config_is_refused(self):
+        """Scope echoed, config not: every later tick reads the config from
+        the server, so this build would run at the defaults."""
+        from stardag.exceptions import RegistryTooOldError
+
+        build_id = uuid4()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert body["build_config"] == {"ns.T": {"width": 3}}
+            return httpx.Response(
+                200, json={"id": str(build_id), "scope_key": "code:cfg"}
+            )
+
+        registry = self._registry(handler)
+        with pytest.raises(RegistryTooOldError, match="did not keep the build config"):
+            registry.build_set_scope(
+                build_id, scope_key="code:cfg", build_config={"ns.T": {"width": 3}}
+            )
+
+    def test_scope_put_echoing_scope_and_config_proceeds(self):
+        build_id = uuid4()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "id": str(build_id),
+                    "scope_key": "code:cfg",
+                    "build_config": {"ns.T": {"width": 3}},
+                },
+            )
+
+        registry = self._registry(handler)
+        registry.build_set_scope(
+            build_id, scope_key="code:cfg", build_config={"ns.T": {"width": 3}}
+        )
+
+    @pytest.mark.asyncio
+    async def test_scope_put_aio_that_drops_the_config_is_refused(self):
+        from stardag.exceptions import RegistryTooOldError
+
+        build_id = uuid4()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"id": str(build_id), "scope_key": "code:cfg"}
+            )
+
+        registry = self._registry(handler)
+        self._inject_async(registry, handler)
+        with pytest.raises(RegistryTooOldError, match="did not keep the build config"):
+            await registry.build_set_scope_aio(
+                build_id, scope_key="code:cfg", build_config={"ns.T": {"width": 3}}
+            )
+
+    def test_build_start_echoing_scope_and_config_proceeds(self):
+        build_id = uuid4()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                201,
+                json={
+                    "id": str(build_id),
+                    "name": "b",
+                    "scope_key": "code:cfg",
+                    "build_config": {"ns.T": {"width": 3}},
+                },
+            )
+
+        registry = self._registry(handler)
+        assert (
+            registry.build_start(
+                root_tasks=[], scope_key="code:cfg", build_config={"ns.T": {"width": 3}}
+            )
+            == build_id
+        )
+
+    @pytest.mark.parametrize("echo", [{}, None, "missing"])
+    def test_build_start_that_drops_a_claimed_config_is_refused(self, echo):
+        from stardag.exceptions import RegistryTooOldError
+
+        build_id = uuid4()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            data = {"id": str(build_id), "name": "b", "scope_key": "code:cfg"}
+            if echo != "missing":
+                data["build_config"] = echo
+            return httpx.Response(201, json=data)
+
+        registry = self._registry(handler)
+        with pytest.raises(RegistryTooOldError, match="did not keep the build config"):
+            registry.build_start(
+                root_tasks=[], scope_key="code:cfg", build_config={"ns.T": {"width": 3}}
+            )
+
+    def test_build_start_without_a_config_claim_checks_no_config(self):
+        """No config sent: whatever the server echoes for it is not judged.
+        ``None`` and ``{}`` are one config, so an empty claim is not a claim."""
+        build_id = uuid4()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                201,
+                json={
+                    "id": str(build_id),
+                    "name": "b",
+                    "scope_key": "code:cfg",
+                    "build_config": {"whatever": {"x": 1}},
+                },
+            )
+
+        registry = self._registry(handler)
+        assert registry.build_start(root_tasks=[], scope_key="code:cfg") == build_id
+
     def test_build_start_without_a_scope_claim_asks_nothing_of_the_server(self):
         """No scope sent, nothing to echo: the check applies only to a
         claim that was actually made."""

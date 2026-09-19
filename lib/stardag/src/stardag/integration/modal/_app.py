@@ -28,6 +28,7 @@ from stardag.build._scope import STARDAG_CODE_ID_ENV, code_id as _process_code_i
 from stardag.build._task_modules import (
     TaskModulesError,
     expand_task_module_patterns,
+    import_task_modules,
     set_declared_task_module_patterns,
     validate_task_module_patterns,
 )
@@ -1117,6 +1118,14 @@ class StardagApp:
             build_kwargs: dict[str, typing.Any] | None = None,
         ) -> BuildSummary | None:
             _run_container_setup(container_setup)
+            # The deployed module list, imported before the builder hashes
+            # the build's structure scope: that hash validates every class
+            # the build config names, and a configured upstream discovered
+            # dynamically may live in a module the roots (which arrive by
+            # value) never import. Same list and same reasons as the tick.
+            if task_modules:
+                set_declared_task_module_patterns(task_module_patterns)
+                import_task_modules(task_modules)
             return build_fn(tasks, worker_selector, app_name, build_kwargs=build_kwargs)
 
         run_fn = self._run_function

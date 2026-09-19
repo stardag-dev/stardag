@@ -67,7 +67,10 @@ from stardag.build._concurrency import (
     build_concurrency_limiter,
 )
 from stardag.build._scope import code_id, structure_scope_key
-from stardag.build._sequential import installs_build_config_aio
+from stardag.build._sequential import (
+    _stored_build_config_or_given_aio,
+    installs_build_config_aio,
+)
 from stardag.build._wakeups import drain_wake_candidates
 from stardag.build_config import (
     BuildConfig,
@@ -622,17 +625,21 @@ async def build_aio(
                 raise ValueError(
                     f"Invalid task at index {idx}: {task} (must be BaseTask)"
                 )
+    # Determine registry: explicit > registry_provider
+    if registry is None:
+        registry = registry_provider.get()
     # The config is installed around this whole function (see
-    # ``installs_build_config_aio``) and the roots are re-created under it:
-    # they were constructed by the caller before it existed, so they carry
-    # whatever level 2/3 values were resolvable there.
+    # ``installs_build_config_aio``); a bare resume adopts the build's own;
+    # the roots are re-created under it: they were constructed by the
+    # caller before it existed, so they carry whatever level 2/3 values were
+    # resolvable there.
+    build_config = await _stored_build_config_or_given_aio(
+        registry, resume_build_id, build_config, on_registry_failure
+    )
     if build_config:
         tasks = [rebind_to_build_config(t) for t in tasks]
     scope_key = structure_scope_key(code_id(), build_config)
 
-    # Determine registry: explicit > registry_provider
-    if registry is None:
-        registry = registry_provider.get()
     logger.info(f"Using registry: {type(registry).__name__}")
     is_noop_registry = type(registry) is NoOpRegistry
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import uuid
 from collections.abc import Mapping
@@ -40,6 +41,11 @@ STARDAG_CODE_ID_ENV = "STARDAG_CODE_ID"
 SYNTHETIC_SCOPE_PREFIX = "build:"
 """Prefix of the scope a build has until something sets a real one (the
 server assigns ``build:<build id>``). Nobody else shares it."""
+
+_SYNTHETIC_SCOPE_RE = re.compile(
+    r"^build:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 _process_code_id: str | None = None
 
@@ -60,7 +66,13 @@ def code_id() -> str:
     docstring for where it comes from."""
     global _process_code_id
     env = os.environ.get(STARDAG_CODE_ID_ENV)
-    if env:
+    if env is not None:
+        if not env.strip() or ":" in env:
+            raise ValueError(
+                f"{STARDAG_CODE_ID_ENV}={env!r} is not a usable code id: it must "
+                "be non-empty and must not contain ':', the scope key's "
+                "separator between the code id and the config hash."
+            )
         return env
     if _process_code_id is not None:
         return _process_code_id
@@ -114,8 +126,13 @@ def scope_code_id(scope_key: str) -> str:
 
 def is_synthetic_scope(scope_key: str | None) -> bool:
     """Whether ``scope_key`` is the server's per-build placeholder — a build
-    that never set a real scope, which every current tick may drive."""
-    return scope_key is None or scope_key.startswith(SYNTHETIC_SCOPE_PREFIX)
+    that never set a real scope, which every current tick may drive.
+
+    Exactly ``build:<uuid>``, the shape the server writes; a prefix test
+    would also match a real scope whose code id happens to be ``build``,
+    and a synthetic scope is the one case that skips the code-id check.
+    """
+    return scope_key is None or _SYNTHETIC_SCOPE_RE.match(scope_key) is not None
 
 
 def _reset_for_tests() -> None:

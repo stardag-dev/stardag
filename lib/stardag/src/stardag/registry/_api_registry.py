@@ -620,7 +620,7 @@ class APIRegistry(RegistryABC):
             operation="Start build",
         )
         data = response.json()
-        _require_scope_support(data, scope_key, "POST /builds")
+        _require_scope_support(data, scope_key, "POST /builds", build_config)
         build_id = UUID(data["id"])
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
@@ -677,7 +677,10 @@ class APIRegistry(RegistryABC):
             )
             return
         _require_scope_support(
-            _json_or_empty(response), scope_key, f"POST /builds/{build_id}/resume"
+            _json_or_empty(response),
+            scope_key,
+            f"POST /builds/{build_id}/resume",
+            build_config,
         )
         logger.info(f"Resumed build: {build_id}")
 
@@ -1335,7 +1338,7 @@ class APIRegistry(RegistryABC):
             operation="Start build",
         )
         data = response.json()
-        _require_scope_support(data, scope_key, "POST /builds")
+        _require_scope_support(data, scope_key, "POST /builds", build_config)
         build_id = UUID(data["id"])
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
@@ -1382,7 +1385,10 @@ class APIRegistry(RegistryABC):
             )
             return
         _require_scope_support(
-            _json_or_empty(response), scope_key, f"POST /builds/{build_id}/resume"
+            _json_or_empty(response),
+            scope_key,
+            f"POST /builds/{build_id}/resume",
+            build_config,
         )
         logger.info(f"Resumed build: {build_id}")
 
@@ -2181,7 +2187,7 @@ class APIRegistry(RegistryABC):
         if build_config is not None:
             body["build_config"] = dict(build_config)
         try:
-            self._request(
+            response = self._request(
                 "PUT",
                 f"{self.api_url}/api/v1/builds/{build_id}/scope",
                 json=body,
@@ -2193,6 +2199,15 @@ class APIRegistry(RegistryABC):
             if isinstance(e, NotFoundError) and is_missing_route_error(e):
                 raise _registry_too_old(f"PUT /builds/{build_id}/scope") from e
             raise
+        # The route exists, so the answer is what the build now runs under:
+        # anything but the scope and config just sent means the bootstrap
+        # would register edges in a scope the server does not gate on.
+        _require_scope_support(
+            _json_or_empty(response),
+            scope_key,
+            f"PUT /builds/{build_id}/scope",
+            build_config,
+        )
 
     async def build_set_scope_aio(
         self,
@@ -2206,7 +2221,7 @@ class APIRegistry(RegistryABC):
         if build_config is not None:
             body["build_config"] = dict(build_config)
         try:
-            await self._arequest(
+            response = await self._arequest(
                 "PUT",
                 f"{self.api_url}/api/v1/builds/{build_id}/scope",
                 json=body,
@@ -2218,6 +2233,15 @@ class APIRegistry(RegistryABC):
             if isinstance(e, NotFoundError) and is_missing_route_error(e):
                 raise _registry_too_old(f"PUT /builds/{build_id}/scope") from e
             raise
+        # The route exists, so the answer is what the build now runs under:
+        # anything but the scope and config just sent means the bootstrap
+        # would register edges in a scope the server does not gate on.
+        _require_scope_support(
+            _json_or_empty(response),
+            scope_key,
+            f"PUT /builds/{build_id}/scope",
+            build_config,
+        )
 
     def deployment_record(
         self, *, family: str, handle: str, code_id: str
@@ -2782,7 +2806,10 @@ def _registry_too_old(operation: str) -> RegistryTooOldError:
 
 
 def _require_scope_support(
-    data: Mapping[str, Any], scope_key: str | None, operation: str
+    data: Mapping[str, Any],
+    scope_key: str | None,
+    operation: str,
+    build_config: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     """A server that knows scopes echoes the build's ``scope_key`` back.
 
@@ -2792,6 +2819,11 @@ def _require_scope_support(
     that knows the field either adopts the one it was sent or refuses with
     a 409, so any other answer means the build is gated under a scope this
     SDK will not register edges in. Checked only when a scope was claimed.
+
+    The same goes for ``build_config`` when one was claimed: every later
+    tick and worker rehydrates level 2 and 3 fields from what the server
+    kept, so a server that echoes the scope but not the config would have
+    them silently run at the defaults. ``None`` and ``{}`` are one config.
     """
     if scope_key is None:
         return
@@ -2804,6 +2836,18 @@ def _require_scope_support(
             "A server that supports scopes adopts the requested scope or "
             "refuses with scope_mismatch; this one did neither, so this SDK "
             "cannot drive the build. Upgrade the Registry API.",
+            operation=operation,
+        )
+    if build_config is None:
+        return
+    echoed = data.get("build_config") or {}
+    if echoed != (dict(build_config) or {}):
+        raise RegistryTooOldError(
+            f"{operation}: the Registry API did not keep the build config it "
+            f"was sent (echoed {echoed!r}). Every later tick and worker reads "
+            "the build's dependencies_only and execution_only parameters from "
+            "what the server stores, so this build would run at the field "
+            "defaults. Upgrade the Registry API.",
             operation=operation,
         )
 

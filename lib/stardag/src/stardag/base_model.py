@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Any, Literal, Type, TypeVar
+from typing import Any, Literal, Type, TypeVar, get_args
 
 from pydantic import (
     BaseModel,
@@ -97,6 +97,14 @@ class StardagField:
     """What the parameter is significant for; see :data:`Significance`."""
 
     def __post_init__(self) -> None:
+        if self.significance not in get_args(Significance):
+            # A Literal is a hint, not a check; an unchecked typo would read
+            # as non-identity here and as execution-only in the structure
+            # hash, so two different dependency configs could share a scope.
+            raise ValueError(
+                f"StardagField(significance={self.significance!r}): expected one "
+                f"of {', '.join(repr(v) for v in get_args(Significance))}."
+            )
         if self.hash_exclude:
             warnings.warn(
                 "StardagField(hash_exclude=True) is deprecated; use "

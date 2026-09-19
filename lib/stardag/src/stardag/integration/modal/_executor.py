@@ -350,15 +350,24 @@ class ModalTaskExecutor(TaskExecutorABC):
                             env_overrides[env_name] = value
                 if self.reactive:
                     env_overrides[STARDAG_REACTIVE_ENV] = "1"
-                # The build's config and scope, so the worker resolves the
-                # dynamic dependencies it yields under the same config the
-                # scheduler plans with, and refuses to run under other code.
-                if self.build_config:
-                    env_overrides[STARDAG_BUILD_CONFIG_ENV] = json.dumps(
-                        dict(self.build_config), separators=(",", ":"), sort_keys=True
-                    )
-                if self.scope_key is not None:
-                    env_overrides[STARDAG_SCOPE_KEY_ENV] = self.scope_key
+        # The build's config and scope, so the worker resolves the dynamic
+        # dependencies it yields under the same config the scheduler plans
+        # with, and refuses to run under other code. Outside the lifecycle
+        # branch on purpose: a worker that does not self-report (a custom or
+        # legacy run function) still constructs tasks, and a configured
+        # build's structure must not depend on how its workers report.
+        if self.build_config:
+            env_overrides = {
+                **(env_overrides or {}),
+                STARDAG_BUILD_CONFIG_ENV: json.dumps(
+                    dict(self.build_config), separators=(",", ":"), sort_keys=True
+                ),
+            }
+        if self.scope_key is not None:
+            env_overrides = {
+                **(env_overrides or {}),
+                STARDAG_SCOPE_KEY_ENV: self.scope_key,
+            }
         return worker_function, env_overrides, executor_metadata
 
     def reports_lifecycle(self, task: BaseTask) -> bool:
