@@ -266,7 +266,10 @@ class ConfiguredFanOut(sd.Task[list[int]]):
 
     Child ids overlap between widths on purpose (index 0 and 1 exist for
     both), which is what lets a scenario tell "shared and re-run because it
-    is in my plan too" from "inherited from an abandoned generation".
+    is in my plan too" from "inherited from an abandoned generation". That
+    is why every child reads the same one-element ``Range`` rather than the
+    width-sized one this task itself requires: a child's id must not carry
+    the width, only its index.
     """
 
     salt: str
@@ -277,14 +280,22 @@ class ConfiguredFanOut(sd.Task[list[int]]):
     def requires(self):
         return get_range(limit=self.children, salt=self.salt)
 
+    def child_tasks(self) -> list:
+        """The children this width yields, computable without running."""
+        return [
+            slow(
+                values=get_range(limit=1, salt=self.salt),
+                seconds=self.child_seconds + index,
+            )
+            for index in range(self.children)
+        ]
+
     def run(self):
         import time
 
         indices = self.requires().load()
         time.sleep(self.pre_yield_seconds)
-        kids = [
-            slow(values=self.requires(), seconds=self.child_seconds + index)
-            for index in indices
-        ]
+        kids = self.child_tasks()
+        assert len(kids) == len(indices)
         yield kids
         self._save([len(kid.load()) for kid in kids])

@@ -65,12 +65,11 @@ def _config_key(cls) -> str:
 def test_a_narrower_build_never_runs_the_abandoned_wide_generation(
     deployment: Deployment,
 ) -> None:
+    from stardag.build_config import build_config_scope
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.tasks import (
         ConfiguredFanOut,
-        get_range,
         get_sum,
-        slow,
         square,
     )
     from stardag_integration_tests.registry_live.dag_app import app
@@ -80,11 +79,18 @@ def test_a_narrower_build_never_runs_the_abandoned_wide_generation(
     parent = ConfiguredFanOut(
         salt=salt, child_seconds=CHILD_SECONDS, pre_yield_seconds=PRE_YIELD_SECONDS
     )
-    # The children the wide generation yields, by construction of the task.
-    wide_leaf = get_range(limit=WIDE, salt=salt)
-    wide_children = [
-        slow(values=wide_leaf, seconds=CHILD_SECONDS + index) for index in range(WIDE)
-    ]
+    # The children the wide generation yields, by construction of the task;
+    # the first NARROW of them are exactly the narrow generation's.
+    with build_config_scope({key: {"children": WIDE}}):
+        wide_children = ConfiguredFanOut(
+            salt=salt, child_seconds=CHILD_SECONDS, pre_yield_seconds=PRE_YIELD_SECONDS
+        ).child_tasks()
+    with build_config_scope({key: {"children": NARROW}}):
+        narrow_children = ConfiguredFanOut(
+            salt=salt, child_seconds=CHILD_SECONDS, pre_yield_seconds=PRE_YIELD_SECONDS
+        ).child_tasks()
+    assert len(wide_children) == WIDE and len(narrow_children) == NARROW
+    assert [c.id for c in wide_children[:NARROW]] == [c.id for c in narrow_children]
     only_wide = wide_children[NARROW:]
 
     build_1 = app.build_trigger(

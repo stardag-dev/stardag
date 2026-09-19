@@ -277,16 +277,27 @@ def test_a_suspended_blocker_is_waited_on_rather_than_reset(
         f"{describe_events(events, A=build_a, B=build_b)}"
     )
 
-    # B never ran a second copy of the parent: every start recorded on it
-    # is A's. (B may legitimately have started a *child* it admitted, since
-    # the children are in its plan too and the claim decides who runs
-    # them -- that is collaboration, not a re-run of the pre-yield work.)
-    starts_by_b = [
-        e for e in events_by(events, build_b) if e.get("event_type") == "task_started"
+    # B never started the parent while a child was still incomplete. Once
+    # every child is complete the parent is gated open for both builds and
+    # the claim decides who resumes it -- B doing so is collaboration, the
+    # same as B running a child it admitted, not a re-run of pre-yield work
+    # A was still waiting on. There is no owner to defer to: a suspended
+    # task holds no claim, and the build that suspended it has no standing
+    # over the scope-mates that share its edges.
+    children_complete_at = max(
+        _completed_at(task_events(deployment, child.id, missing_ok=True))
+        for child in shared.children_tasks()
+    )
+    early_starts_by_b = [
+        e
+        for e in events_by(events, build_b)
+        if e.get("event_type") == "task_started"
+        and datetime.fromisoformat(str(e["created_at"])) < children_complete_at
     ]
-    assert not starts_by_b, (
-        "Build B started the suspended parent itself, re-running its "
-        "pre-yield work while build A was progressing the children.\n"
+    assert not early_starts_by_b, (
+        "Build B started the suspended parent while its children were still "
+        "running, re-running its pre-yield work while build A was progressing "
+        "the children.\n"
         f"--- events on the shared task ---\n"
         f"{describe_events(events, A=build_a, B=build_b)}"
     )
@@ -321,6 +332,14 @@ def _report_margin(deployment: Deployment, *, shared_id, build_id) -> None:
         f"started, leaving {PRE_YIELD_SECONDS - elapsed:.0f}s of the "
         f"{PRE_YIELD_SECONDS}s pre-yield window"
     )
+
+
+def _completed_at(events) -> datetime:
+    """When the task's (first) completion was recorded, by the registry's clock."""
+    for event in events:
+        if event.get("event_type") == "task_completed":
+            return datetime.fromisoformat(str(event["created_at"]))
+    raise AssertionError("no task_completed event on a child that must have completed")
 
 
 def _suspended_window_seconds(events) -> float | None:
