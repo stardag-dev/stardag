@@ -189,6 +189,32 @@ class TestRollOverHook:
         assert summary.terminal_status == "completed"
         assert executor.spawned == [dep.id, root.id]
 
+    async def test_a_build_this_code_planned_needs_no_rollover(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The frontier the hook is judged on is read after the lease is
+        held: a scope this tick's own code planned — including one a
+        competing tick moved just before the lease changed hands — calls no
+        hook, and the tick simply drives the build."""
+        dep, root = _chain("ro-own-dep", "ro-own-root")
+        registry, executor, store = _setup([dep, root])
+        registry.scope_key = "cafe" * 10 + ":0123456789abcdef"
+        calls: list = []
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+            roll_over=self._hook(registry, calls),
+        )
+
+        assert calls == []
+        assert summary.rolled_over == 0
+        assert summary.outcome == "terminal"
+        assert executor.spawned == [dep.id, root.id]
+
     async def test_no_hook_without_the_lease(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):

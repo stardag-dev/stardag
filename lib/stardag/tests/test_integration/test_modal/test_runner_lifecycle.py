@@ -513,6 +513,59 @@ class TestWorkerScope:
         with pytest.raises(RuntimeError, match="another build's placeholder"):
             worker_scope_key(f"build:{uuid4()}", build_id)
 
+    def test_another_builds_placeholder_is_refused_before_setup_when_not_reporting(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        """A non-reporting worker builds no reporter, so the refusal cannot
+        live there: it is a preflight, and it fires in this mode too."""
+        from stardag.integration.modal._metadata import (
+            STARDAG_SCOPE_KEY_ENV,
+            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
+        )
+
+        task = make_range(limit=3)
+        env = {
+            **_env(uuid4()),
+            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV: "0",
+            STARDAG_SCOPE_KEY_ENV: f"build:{uuid4()}",
+        }
+
+        with pytest.raises(RuntimeError, match="another build's placeholder"):
+            Runner()(task, env_overrides=env)
+
+        assert not task.complete()
+        assert recording_registry.methods() == []
+
+    def test_another_builds_placeholder_is_not_swallowed_by_reporter_creation(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        """Reporter creation is best-effort and logs its failures; the scope
+        refusal is decided before it, so it propagates rather than leaving
+        the task to run without a reporter."""
+        from stardag.integration.modal._metadata import STARDAG_SCOPE_KEY_ENV
+
+        task = make_range(limit=3)
+        env = {**_env(uuid4()), STARDAG_SCOPE_KEY_ENV: f"build:{uuid4()}"}
+
+        with pytest.raises(RuntimeError, match="another build's placeholder"):
+            Runner()(task, env_overrides=env)
+
+        assert not task.complete()
+        assert recording_registry.methods() == []
+
+    def test_the_builds_own_placeholder_runs(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        from stardag.integration.modal._metadata import STARDAG_SCOPE_KEY_ENV
+
+        build_id = uuid4()
+        task = make_range(limit=3)
+        env = {**_env(build_id), STARDAG_SCOPE_KEY_ENV: f"build:{build_id}"}
+
+        assert Runner()(task, env_overrides=env) is None
+        assert task.complete()
+        assert recording_registry.methods() == ["task_start", "task_complete"]
+
     def test_a_task_planned_by_other_code_runs_here(
         self, recording_registry, fake_call_id, default_in_memory_fs_target
     ):

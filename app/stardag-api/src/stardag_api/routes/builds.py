@@ -1749,9 +1749,13 @@ async def resume_build(
 
     ``scope_key``, when given, sets or moves the build's scope exactly as
     :func:`set_build_scope` does — a resume from new code re-plans the build
-    under that code. ``build_config``, when given, must equal the stored one
-    (409 ``scope_mismatch`` otherwise). Neither is required: an older SDK
-    resumes without them and the build keeps its current scope.
+    under that code. ``build_config``, when given, is checked whether or not
+    a scope comes with it: it must equal the stored one (409
+    ``scope_mismatch`` otherwise), and a build with no config yet adopts it.
+    Without a scope the check runs against the build's current scope, so a
+    resume that names only a config cannot slip a different one past the
+    rule. Neither is required: an older SDK resumes without them and the
+    build keeps its current scope and config.
 
     Called by the SDK when ``sd.build(resume_build_id=...)`` reuses an
     existing build that may have already terminated. Emits a
@@ -1789,8 +1793,15 @@ async def resume_build(
     needs_commit = False
     if scope_key is not None:
         _refuse_synthetic_claim(scope_key)
+    if scope_key is not None or parsed_build_config is not None:
+        # A config without a scope is checked against the build's current
+        # scope: the scope stays, the config rule still applies.
         needs_commit = (
-            _apply_scope(build, scope_key=scope_key, build_config=parsed_build_config)
+            _apply_scope(
+                build,
+                scope_key=scope_key if scope_key is not None else build.scope_key,
+                build_config=parsed_build_config,
+            )
             or needs_commit
         )
 

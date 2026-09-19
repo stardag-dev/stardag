@@ -1325,6 +1325,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
         per app marked ``current``. Default: none."""
         return []
 
+    async def deployment_list_aio(
+        self, *, app_name: str | None = None
+    ) -> list[DeploymentInfo]:
+        """Async version of :meth:`deployment_list`."""
+        return self.deployment_list(app_name=app_name)
+
     def task_start(
         self,
         build_id: UUID,

@@ -405,6 +405,31 @@ def worker_scope_key(forwarded: str | None, build_id: UUID) -> str | None:
     return f"{code_id()}:{scope_config_hash(forwarded)}"
 
 
+def _worker_scope_preflight(env_overrides: dict[str, str] | None) -> str | None:
+    """The worker's scope, decided before any user code runs.
+
+    :func:`worker_scope_key` refuses a misrouted spawn (another build's
+    placeholder) by raising. That refusal has to happen here, ahead of
+    ``setup`` and outside the best-effort reporter creation — a reporter that
+    fails to build is logged and the task still runs, and a non-reporting
+    worker builds no reporter at all — or a misrouted task would run anyway
+    in both of those modes. No forwarded build id means nothing to bind to,
+    and the server decides.
+    """
+
+    def _get(key: str) -> str | None:
+        return (env_overrides or {}).get(key) or os.environ.get(key)
+
+    raw_build_id = _get(STARDAG_BUILD_ID_ENV)
+    if not raw_build_id:
+        return None
+    try:
+        build_id = UUID(raw_build_id)
+    except ValueError:
+        return None
+    return worker_scope_key(_get(STARDAG_SCOPE_KEY_ENV), build_id)
+
+
 class _WorkerLifecycleReporter:
     """Reports a task's lifecycle events from inside a Modal worker.
 
@@ -447,8 +472,16 @@ class _WorkerLifecycleReporter:
 
     @classmethod
     def create(
-        cls, task: BaseTask, env_overrides: dict[str, str] | None
+        cls,
+        task: BaseTask,
+        env_overrides: dict[str, str] | None,
+        *,
+        scope_key: str | None = None,
     ) -> "_WorkerLifecycleReporter | None":
+        """``scope_key`` is the worker's scope as :func:`_worker_scope_preflight`
+        decided it — decided *before* this, so a refusal is never swallowed
+        by the best-effort creation this runs under."""
+
         def _get(key: str) -> str | None:
             return (env_overrides or {}).get(key) or os.environ.get(key)
 
@@ -515,7 +548,7 @@ class _WorkerLifecycleReporter:
             app_name=app_name,
             executor_metadata=executor_metadata,
             claim_ttl_seconds=ttl_seconds,
-            scope_key=worker_scope_key(_get(STARDAG_SCOPE_KEY_ENV), build_id),
+            scope_key=scope_key,
         )
 
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
@@ -904,6 +937,11 @@ class Runner(RunFunction):
         # understating elapsed time makes a real timeout read as a
         # preemption.
         started_at = time.monotonic()
+        # Refuse a misrouted spawn before any user code runs: raises for
+        # another build's placeholder, in every reporting mode (see
+        # ``_worker_scope_preflight``). The attempt fails here; the tick
+        # that spawned it records the failure when it probes the call.
+        worker_scope = _worker_scope_preflight(env_overrides)
         try:
             self.setup(task)
             # All lifecycle reporting happens inside the env-overrides
@@ -920,7 +958,9 @@ class Runner(RunFunction):
                 reporter: _WorkerLifecycleReporter | None = None
                 if getattr(self, "report_lifecycle", True):
                     try:
-                        reporter = _WorkerLifecycleReporter.create(task, env_overrides)
+                        reporter = _WorkerLifecycleReporter.create(
+                            task, env_overrides, scope_key=worker_scope
+                        )
                     except Exception:
                         # Best-effort contract covers creation too: a broken
                         # registry config must not fail a task before it runs.

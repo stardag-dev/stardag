@@ -471,7 +471,12 @@ async def _run_deployed_tick_aio(
             frontier=frontier,
             deployment=deployment,
             own_code_id=own_code_id,
+            app_name=app_name,
         )
+        if rolled is None:
+            # Not the current deployment: the loop sees the foreign scope
+            # again and ends this tick as superseded.
+            return None
         if isinstance(rolled, dict):
             rollover_details.update(rolled)
             raise RollOverFailed(rolled["error"], rolled)
@@ -513,8 +518,22 @@ async def _roll_over_build_aio(
     frontier: BuildFrontier,
     deployment: _TickDeployment,
     own_code_id: str,
-) -> str | dict[str, typing.Any]:
+    app_name: str,
+) -> str | dict[str, typing.Any] | None:
     """Re-plan a build the live deployment inherited from other code.
+
+    **Forward only.** A tick of an *older* deployment can win the lease after
+    a newer one already moved the build — its container was mid-flight when
+    the redeploy landed — and would otherwise re-plan the build backward,
+    under code that is no longer live, with the two deployments moving it
+    back and forth. So before planning anything this asks the registry which
+    code is current for the app (the record ``stardag modal deploy`` writes,
+    newest first) and rolls over only when that is this tick's own code.
+    Any other answer returns ``None``: nothing is moved, and the loop ends
+    the tick as superseded; the current deployment's tick re-plans when it
+    is woken, which the registry's wake-up path does. An app with no
+    deployment on record at all (deployed without a registry) has nothing to
+    check against, so the rollover is allowed and said so in the log.
 
     The build's edges were evaluated by the code its scope names; this
     deployment runs other code, so it plans the build again under its own
@@ -569,6 +588,31 @@ async def _roll_over_build_aio(
             "error": f"{type(exc).__name__}: {exc}",
         }
 
+    try:
+        recorded = await registry.deployment_list_aio(app_name=app_name)
+    except Exception as e:
+        logger.warning(
+            f"Tick for build {build_id}: could not read the deployments on "
+            f"record for app {app_name!r} ({type(e).__name__}: {e}); not "
+            "rolling the build over from this tick."
+        )
+        return None
+    if recorded:
+        current = next((d for d in recorded if d.current), recorded[0])
+        if current.code_id != own_code_id:
+            logger.info(
+                f"Tick for build {build_id}: planned by other code, but this "
+                f"tick runs {own_code_id[:12]} and the current deployment of "
+                f"{app_name!r} is {current.code_id[:12]}; leaving the rollover "
+                "to the current deployment's tick."
+            )
+            return None
+    else:
+        logger.info(
+            f"Tick for build {build_id}: no deployment of {app_name!r} is on "
+            "record, so this tick cannot tell whether it is the current one; "
+            "rolling over as the live code."
+        )
     try:
         new_scope = structure_scope_key(own_code_id, build_info.build_config)
     except Exception as e:

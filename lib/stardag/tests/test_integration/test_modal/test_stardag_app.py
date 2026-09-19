@@ -2834,14 +2834,20 @@ class TestTickAppOwnership:
         tick_aio.assert_not_called()
 
     @staticmethod
-    def _registry_for_rollover(build_id, root, *, scope_key, metadata_error=None):
+    def _registry_for_rollover(
+        build_id, root, *, scope_key, metadata_error=None, deployments=None
+    ):
         """A registry holding a build planned by another code id, whose one
-        root can (or cannot) be rehydrated from registry data."""
+        root can (or cannot) be rehydrated from registry data.
+
+        ``deployments`` is what ``deployment_list_aio`` answers for the app:
+        none on record by default, which lets the rollover proceed."""
         from stardag.base_model import CONTEXT_MODE_KEY
         from stardag.registry import BuildFrontier, BuildInfo
         from stardag.registry._base import TaskMetadata
 
         registry = MagicMock(spec=RegistryABC)
+        registry.deployment_list_aio = AsyncMock(return_value=list(deployments or []))
         registry.build_get_aio = AsyncMock(
             return_value=BuildInfo(
                 id=build_id, reactive_app_name="app-a", scope_key=scope_key
@@ -3000,6 +3006,96 @@ class TestTickAppOwnership:
             in registry.build_fail.call_args.kwargs["error_message"]
         )
         registry.build_set_scope_aio.assert_not_awaited()
+
+    @staticmethod
+    def _deployment(code: str, *, current: bool):
+        from uuid import uuid4
+
+        from stardag.registry import DeploymentInfo
+
+        return DeploymentInfo(
+            id=uuid4(), app_name="app-a", code_id=code, current=current
+        )
+
+    def test_a_tick_that_is_not_the_current_deployment_does_not_roll_over(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        """Forward only: an older deployment's tick that wins the lease after
+        a newer one moved the build must not move it back. The registry's
+        deployment record says which code is current; when that is not this
+        tick's, the hook returns None, nothing is planned or moved, and the
+        loop ends the tick as superseded."""
+        from uuid import uuid4
+
+        from stardag.build import TickSummary
+        from stardag.build._scope import STARDAG_CODE_ID_ENV
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        tick = self._capture_tick("app-a")
+        build_id = uuid4()
+        root = SyncOnlyTask(name="rollover-stale-root")
+        registry = self._registry_for_rollover(
+            build_id,
+            root,
+            scope_key="beef" * 10 + ":0123456789abcdef",
+            deployments=[
+                self._deployment("f00d" * 10, current=True),
+                self._deployment("cafe" * 10, current=False),
+            ],
+        )
+        with (
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
+        ):
+            rp.get.return_value = registry
+            tick_aio.return_value = TickSummary(outcome="superseded")
+            _invoke(tick, str(build_id))
+            moved_to = self._run_hook(
+                tick_aio, registry.build_get_frontier_aio.return_value
+            )
+
+        assert moved_to is None
+        registry.deployment_list_aio.assert_awaited_once_with(app_name="app-a")
+        registry.task_register_bulk_aio.assert_not_awaited()
+        registry.build_set_scope_aio.assert_not_awaited()
+        registry.task_get_metadata_aio.assert_not_awaited()
+
+    def test_the_current_deployments_tick_rolls_over(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        from uuid import uuid4
+
+        from stardag.build import TickSummary
+        from stardag.build._scope import STARDAG_CODE_ID_ENV, structure_scope_key
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        tick = self._capture_tick("app-a")
+        build_id = uuid4()
+        root = SyncOnlyTask(name="rollover-current-root")
+        registry = self._registry_for_rollover(
+            build_id,
+            root,
+            scope_key="beef" * 10 + ":0123456789abcdef",
+            deployments=[
+                self._deployment("cafe" * 10, current=True),
+                self._deployment("beef" * 10, current=False),
+            ],
+        )
+        with (
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
+        ):
+            rp.get.return_value = registry
+            tick_aio.return_value = TickSummary(outcome="terminal", rolled_over=1)
+            _invoke(tick, str(build_id))
+            moved_to = self._run_hook(
+                tick_aio, registry.build_get_frontier_aio.return_value
+            )
+
+        assert moved_to == structure_scope_key("cafe" * 10, None)
+        registry.build_set_scope_aio.assert_awaited_once()
 
     def test_the_tick_gets_no_hook_for_a_placeholder_scoped_build(
         self, default_in_memory_fs_target, monkeypatch

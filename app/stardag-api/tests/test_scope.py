@@ -262,6 +262,42 @@ async def test_resume_compares_the_config_against_nothing_stored(
 
 
 @pytest.mark.asyncio
+async def test_resume_checks_a_config_given_without_a_scope(client: AsyncClient):
+    """The config rule does not hide behind the scope parameter: a resume
+    that names only a config is compared against the stored one under the
+    build's current scope, and a build with no config yet adopts it."""
+    build_id = (await _build(client, "code-1:cfg-a", build_config={"ns.T": {"n": 1}}))[
+        "id"
+    ]
+    await _register_task(client, build_id, "t")
+
+    changed = await client.post(
+        f"{BUILDS}/{build_id}/resume", params={"build_config": '{"ns.T": {"n": 2}}'}
+    )
+    assert changed.status_code == 409, changed.text
+    assert changed.json()["detail"]["error_code"] == "scope_mismatch"
+
+    same = await client.post(
+        f"{BUILDS}/{build_id}/resume", params={"build_config": '{"ns.T": {"n": 1}}'}
+    )
+    assert same.status_code == 200, same.text
+    assert same.json()["scope_key"] == "code-1:cfg-a"
+    assert same.json()["build_config"] == {"ns.T": {"n": 1}}
+
+    # NULL stored (no config given at create, synthetic scope): the first
+    # config a resume brings is adopted, scope untouched.
+    fresh_id = (await _build(client))["id"]
+    adopted = await client.post(
+        f"{BUILDS}/{fresh_id}/resume", params={"build_config": '{"ns.T": {"n": 5}}'}
+    )
+    assert adopted.status_code == 200, adopted.text
+    assert adopted.json()["scope_key"] == f"build:{fresh_id}"
+    assert adopted.json()["build_config"] == {"ns.T": {"n": 5}}
+    stored = (await client.get(f"{BUILDS}/{fresh_id}")).json()
+    assert stored["build_config"] == {"ns.T": {"n": 5}}
+
+
+@pytest.mark.asyncio
 async def test_resume_adopts_a_scope_onto_a_synthetic_build(client: AsyncClient):
     build_id = (await _build(client))["id"]
     response = await client.post(

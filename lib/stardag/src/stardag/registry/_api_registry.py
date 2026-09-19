@@ -2355,6 +2355,29 @@ class APIRegistry(RegistryABC):
             for item in response.json().get("deployments", [])
         ]
 
+    async def deployment_list_aio(
+        self, *, app_name: str | None = None
+    ) -> list[DeploymentInfo]:
+        """Async version of :meth:`deployment_list`."""
+        params: dict[str, Any] = dict(self._get_params())
+        if app_name is not None:
+            params["app_name"] = app_name
+        try:
+            response = await self._arequest(
+                "GET",
+                f"{self.api_url}/api/v1/deployments",
+                params=params,
+                operation="List deployments",
+            )
+        except NotFoundError as e:
+            if not is_missing_route_error(e):
+                raise
+            return []
+        return [
+            DeploymentInfo.model_validate(item)
+            for item in response.json().get("deployments", [])
+        ]
+
     @staticmethod
     def _reactive_meta_body(
         app_name: str, tick_kwargs: dict[str, Any] | None
