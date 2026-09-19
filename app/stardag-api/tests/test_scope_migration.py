@@ -143,6 +143,18 @@ async def test_migration_scopes_running_builds_and_drops_phantoms(
         )
         assert scope == f"build:{build_id}"
 
+    # Every pre-migration registration event was made under its build's
+    # (now synthetic) scope, which is what plan membership reads.
+    for build_id in (running_build, done_build):
+        scopes = await _scalar(
+            pg_session,
+            "SELECT count(DISTINCT scope_key) FROM events WHERE build_id = :b "
+            "AND event_type = 'task_pending' AND scope_key = :scope",
+            b=build_id,
+            scope=f"build:{build_id}",
+        )
+        assert scopes == 1, (build_id, scopes)
+
     # The running build's edge was copied into its scope; the legacy row
     # stays as history.
     copied = await _scalar(

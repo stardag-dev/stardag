@@ -35,6 +35,9 @@ class Event(Base):
         Index("ix_events_task_created", "task_id", "created_at"),
         Index("ix_events_type_created", "event_type", "created_at"),
         Index("ix_events_build_task_type", "build_id", "task_id", "event_type"),
+        # Plan membership per scope: "which tasks did this build register
+        # under the scope it is currently planned under" is a seek here.
+        Index("ix_events_build_scope", "build_id", "scope_key"),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -72,6 +75,15 @@ class Event(Base):
         nullable=False,
         index=True,
     )
+
+    # The structure scope a registration event (TASK_PENDING /
+    # TASK_REFERENCED) was made under. A build's plan under its current
+    # scope is the set of tasks registered into it under that scope, and
+    # nothing else: a task the build registered under an earlier scope has
+    # its gating edges in that scope only, so counting it in the current
+    # plan would let it run ungated. Lifecycle events leave this NULL; they
+    # are global facts about the task, not about a plan.
+    scope_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
 
     # Optional error message for failure events
     error_message: Mapped[str | None] = mapped_column(Text)

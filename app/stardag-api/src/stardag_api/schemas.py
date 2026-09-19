@@ -994,6 +994,9 @@ class EventResponse(BaseModel):
     created_at: datetime
     error_message: str | None
     event_metadata: dict | None
+    # On registration events: the structure scope the task was registered
+    # into the build under (plan membership is per scope). None otherwise.
+    scope_key: str | None = None
 
 
 class EventListResponse(BaseModel):

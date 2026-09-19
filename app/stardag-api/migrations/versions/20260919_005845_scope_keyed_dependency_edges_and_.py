@@ -11,6 +11,8 @@ See ``docs/design/scope-keyed-dependency-structure.md``.
 Schema:
 
 - ``builds.scope_key`` (non-null) and ``builds.build_config``.
+- ``events.scope_key`` (nullable) on registration events: the scope a task
+  was registered into the build under, which is what plan membership reads.
 - ``task_dependencies.scope_key`` (nullable — NULL marks a row written before
   scopes existed; such rows gate nothing and count everywhere in the graph
   view). The unique edge becomes ``(scope_key, upstream, downstream)``, with
@@ -118,6 +120,21 @@ def upgrade() -> None:
         ),
     )
 
+    # 2b. Registration events carry the scope they were made under: a
+    # build's plan under its current scope is exactly those events. Every
+    # pre-migration registration was made under the build's (synthetic)
+    # scope, which is what the backfill says.
+    op.add_column("events", sa.Column("scope_key", sa.String(length=96), nullable=True))
+    op.create_index("ix_events_build_scope", "events", ["build_id", "scope_key"])
+    op.execute(
+        """
+        UPDATE events SET scope_key = b.scope_key
+        FROM builds b
+        WHERE events.build_id = b.id
+          AND events.event_type IN ('task_pending', 'task_referenced')
+        """
+    )
+
     # 3. Edges: the column, the constraint swap, then the copies for builds
     # in flight. The old unique constraint has to go before the copies land,
     # since a copy duplicates a legacy row on (upstream, downstream).
@@ -188,6 +205,8 @@ def downgrade() -> None:
         postgresql_nulls_not_distinct=False,
     )
     op.drop_column("task_dependencies", "scope_key")
+    op.drop_index("ix_events_build_scope", table_name="events")
+    op.drop_column("events", "scope_key")
     op.drop_column("builds", "build_config")
     op.drop_column("builds", "scope_key")
     op.drop_index(op.f("ix_deployments_environment_id"), table_name="deployments")

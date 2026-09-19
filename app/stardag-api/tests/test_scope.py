@@ -271,9 +271,12 @@ async def test_a_rollover_gates_over_the_new_scope_and_keeps_the_old_edges(
 
     frontier = await _frontier(client, build_id)
     assert frontier["scope_key"] == "code-2:cfg"
-    # u1 no longer gates t: only u2 does. u1 is still in the plan (its
-    # registration is this build's), just no longer anything's upstream here.
-    assert set(_actionable(frontier)) == {"u1", "u2"}, frontier
+    # u1 no longer gates t: only u2 does. And u1 is no longer in the plan at
+    # all: it was registered under code 1, whose edges the build no longer
+    # reads, so counting it here would let a task run without its gates.
+    # The re-plan under code 2 did not register it, so it is not code 2's.
+    assert set(_actionable(frontier)) == {"u2"}, frontier
+    assert frontier["status_counts"] == {"pending": 2}, frontier
     await client.post(f"{BUILDS}/{build_id}/tasks/u2/start")
     await client.post(f"{BUILDS}/{build_id}/tasks/u2/complete")
     assert "t" in _actionable(await _frontier(client, build_id))
@@ -620,3 +623,133 @@ async def test_stall_time_closure_is_charged_against_the_event_quota(
     assert set(_actionable(frontier_b)) == {"c1", "c2", "c3"}, frontier_b
     events = (await client.get(f"{BUILDS}/{build_b}/events")).json()
     assert referenced(events) == 4, events
+
+
+# --- Plan membership is per scope -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tasks_registered_under_an_earlier_scope_leave_the_plan(
+    client: AsyncClient,
+):
+    """The incident the rule comes from. A build planned under code A had a
+    worker, still on code A, yield children and register them (edges under
+    A) seconds before a tick on code B re-planned the build under B. With
+    membership read as "any event of this build" the children were in B's
+    plan with no edges in B, looked ready, ran before their input existed and
+    failed. Membership is per scope: only what was registered under the
+    current scope is in the plan."""
+    build_id = (await _build(client, "code-a:cfg"))["id"]
+    await _register_task(client, build_id, "r")
+    await client.post(f"{BUILDS}/{build_id}/tasks/r/start")
+    await client.post(f"{BUILDS}/{build_id}/tasks/r/complete")
+    await _register_task(client, build_id, "p", ["r"])
+
+    # The old worker's yield, under A: children gated on a pending r2.
+    bulk = await client.post(
+        f"{BUILDS}/{build_id}/tasks/bulk",
+        json={
+            "tasks": [
+                _register("r2"),
+                _register("c1", ["r2"]),
+                _register("c2", ["r2"]),
+            ],
+            "scope_key": "code-a:cfg",
+        },
+    )
+    assert bulk.status_code == 201, bulk.text
+    edges = await client.post(
+        f"{BUILDS}/{build_id}/tasks/p/dependencies",
+        json={
+            "upstream_task_ids": ["c1", "c2"],
+            "is_dynamic": True,
+            "scope_key": "code-a:cfg",
+        },
+    )
+    assert edges.status_code == 200, edges.text
+
+    # Code B re-plans: p under B, no children yet; then the scope moves.
+    response = await client.post(
+        f"{BUILDS}/{build_id}/tasks",
+        json={**_register("p", ["r"]), "scope_key": "code-b:cfg"},
+    )
+    assert response.status_code == 201, response.text
+    moved = await client.put(
+        f"{BUILDS}/{build_id}/scope", json={"scope_key": "code-b:cfg"}
+    )
+    assert moved.status_code == 200, moved.text
+
+    frontier = await _frontier(client, build_id)
+    assert frontier["scope_key"] == "code-b:cfg"
+    # Not c1, c2 or r2: registered under A, edges under A, not B's plan.
+    assert set(_actionable(frontier)) == {"p"}, frontier
+    assert frontier["status_counts"] == {"pending": 1}, frontier
+
+    # B's worker yields its own generation, with its gates, under B.
+    bulk = await client.post(
+        f"{BUILDS}/{build_id}/tasks/bulk",
+        json={
+            "tasks": [_register("r2"), _register("c1", ["r2"])],
+            "scope_key": "code-b:cfg",
+        },
+    )
+    assert bulk.status_code == 201, bulk.text
+    edges = await client.post(
+        f"{BUILDS}/{build_id}/tasks/p/dependencies",
+        json={
+            "upstream_task_ids": ["c1"],
+            "is_dynamic": True,
+            "scope_key": "code-b:cfg",
+        },
+    )
+    assert edges.status_code == 200, edges.text
+    frontier = await _frontier(client, build_id)
+    # c1 is in the plan now and gated on r2; p is gated on c1; c2 stays out.
+    assert set(_actionable(frontier)) == {"r2"}, frontier
+    assert frontier["status_counts"] == {"pending": 3}, frontier
+
+
+@pytest.mark.asyncio
+async def test_registration_events_carry_the_scope_they_were_made_under(
+    client: AsyncClient,
+):
+    """What membership reads: TASK_PENDING / TASK_REFERENCED events carry the
+    registration scope, closure's admissions carry the scope it closed
+    over, and lifecycle events carry none."""
+    build_id = (await _build(client, "code-1:cfg"))["id"]
+    await _register_task(client, build_id, "u")
+    await _register_task(client, build_id, "t", ["u"])
+    # An old worker under code 0 registers a task into this build.
+    response = await client.post(
+        f"{BUILDS}/{build_id}/tasks",
+        json={**_register("w"), "scope_key": "code-0:cfg"},
+    )
+    assert response.status_code == 201, response.text
+    await client.post(f"{BUILDS}/{build_id}/tasks/u/start")
+
+    events = (await client.get(f"{BUILDS}/{build_id}/events")).json()
+    by_type = {}
+    for e in events:
+        by_type.setdefault(e["event_type"], []).append(e["scope_key"])
+    assert by_type["task_pending"].count("code-1:cfg") == 2
+    assert "code-0:cfg" in by_type["task_pending"]
+    assert by_type["task_started"] == [None]
+
+    # Stall-time closure admits under the scope it closes over.
+    mate = (await _build(client, "code-1:cfg"))["id"]
+    await _register_task(client, mate, "v")
+    edges = await client.post(
+        f"{BUILDS}/{mate}/tasks/v/dependencies",
+        json={"upstream_task_ids": ["t"], "is_dynamic": True},
+    )
+    assert edges.status_code == 200, edges.text
+    # The dependencies route records the edge; the plan closes over it when
+    # the build next looks stalled, which the frontier read is.
+    stalled = await _frontier(client, mate)
+    assert stalled["scope_key"] == "code-1:cfg"
+    admitted = [
+        e
+        for e in (await client.get(f"{BUILDS}/{mate}/events")).json()
+        if e["event_type"] == "task_referenced"
+    ]
+    assert admitted and all(e["scope_key"] == "code-1:cfg" for e in admitted), admitted

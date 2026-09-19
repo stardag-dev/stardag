@@ -2222,6 +2222,37 @@ def _refuse_synthetic_claim(scope_key: str) -> None:
         )
 
 
+_PLAN_MEMBERSHIP_EVENTS = (
+    EventType.TASK_PENDING.value,
+    EventType.TASK_REFERENCED.value,
+)
+
+
+def _plan_task_ids(build_id: UUID, scope_key: str):
+    """The tasks in ``build_id``'s plan under ``scope_key``, as a scalar subquery.
+
+    Plan membership is per scope: a task is in the plan under a scope when
+    its registration into this build (``TASK_PENDING``, or ``TASK_REFERENCED``
+    for a task that already existed or was admitted by closure) was made
+    under that scope. A task the build registered under an *earlier* scope
+    has its gating edges in that scope only; counting it here would let it
+    run ungated — the one thing the design forbids. It is re-admitted, with
+    its edges, when the build is re-planned under the current scope. Served
+    by ``ix_events_build_scope``.
+    """
+    return (
+        select(Event.task_id)
+        .where(
+            Event.build_id == build_id,
+            Event.task_id.is_not(None),
+            Event.event_type.in_(_PLAN_MEMBERSHIP_EVENTS),
+            Event.scope_key == scope_key,
+        )
+        .distinct()
+        .scalar_subquery()
+    )
+
+
 def _registration_scope(build: Build, requested: str | None) -> str:
     """The scope a registration's edges are written under.
 
@@ -2338,12 +2369,7 @@ async def skip_blocked_tasks(
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     build = await _get_build_checked(build_id, db, auth)
 
-    build_task_pks = (
-        select(Event.task_id)
-        .where(Event.build_id == build_id, Event.task_id.is_not(None))
-        .distinct()
-        .scalar_subquery()
-    )
+    build_task_pks = _plan_task_ids(build_id, build.scope_key)
 
     # Transitive closure downward from terminal-blocking seeds. Blockage
     # only propagates through nodes that will themselves never complete:
@@ -2473,14 +2499,10 @@ async def get_build_frontier(
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     build = await _get_build_checked(build_id, db, auth)
 
-    # All tasks referenced by this build (registration/lifecycle events
-    # carry build_id; ix_events_build_task_type serves this).
-    build_task_ids = (
-        select(Event.task_id)
-        .where(Event.build_id == build_id, Event.task_id.is_not(None))
-        .distinct()
-        .scalar_subquery()
-    )
+    # The build's plan under its current scope: the tasks registered into it
+    # under that scope (see ``_plan_task_ids``). Tasks it registered under an
+    # earlier scope are not in it — their edges live there.
+    build_task_ids = _plan_task_ids(build_id, build.scope_key)
 
     counts_rows = (
         await db.execute(
@@ -3059,12 +3081,7 @@ async def _close_plan_over_dependencies(
     seen: set[UUID] = set(task_pks)
     downstream = aliased(Task)
     while frontier_pks:
-        in_plan = (
-            select(Event.task_id)
-            .where(Event.build_id == build_id, Event.task_id.is_not(None))
-            .distinct()
-            .scalar_subquery()
-        )
+        in_plan = _plan_task_ids(build_id, scope_key)
         rows = (
             (
                 await db.execute(
@@ -3113,6 +3130,7 @@ async def _close_plan_over_dependencies(
                     build_id=build_id,
                     task_id=upstream.id,
                     event_type=EventType.TASK_REFERENCED,
+                    scope_key=scope_key,
                 )
             )
             record_entity_created(workspace_id, "events")
@@ -3613,6 +3631,9 @@ async def register_task(
         event_type=EventType.TASK_REFERENCED
         if task_already_existed
         else EventType.TASK_PENDING,
+        # The scope this registration was made under: what puts the task in
+        # the build's plan under that scope, and no other.
+        scope_key=edge_scope,
     )
     await transition_task(db, db_task, event)
 
@@ -3987,6 +4008,7 @@ async def register_tasks_bulk(
                 if already_existed
                 else EventType.TASK_PENDING,
                 created_at=now + timedelta(microseconds=i),
+                scope_key=edge_scope,
             )
         )
     # Plan-time concurrency-limit keys (STA-14). Recorded here so the
@@ -4965,6 +4987,7 @@ async def list_build_events(
             created_at=e.created_at,
             error_message=e.error_message,
             event_metadata=e.event_metadata,
+            scope_key=e.scope_key,
         )
         for e in events
     ]
