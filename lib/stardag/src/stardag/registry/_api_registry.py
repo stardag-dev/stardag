@@ -2784,14 +2784,28 @@ def _registry_too_old(operation: str) -> RegistryTooOldError:
 def _require_scope_support(
     data: Mapping[str, Any], scope_key: str | None, operation: str
 ) -> None:
-    """A server that knows scopes echoes the build's ``scope_key``.
+    """A server that knows scopes echoes the build's ``scope_key`` back.
 
     One that predates them ignores the field silently — an unknown body
     field or query parameter is not an error to it — so its silence is the
-    only evidence there is. Checked only when a scope was actually claimed.
+    only evidence there is. And the echo has to be *the* scope: a server
+    that knows the field either adopts the one it was sent or refuses with
+    a 409, so any other answer means the build is gated under a scope this
+    SDK will not register edges in. Checked only when a scope was claimed.
     """
-    if scope_key is not None and "scope_key" not in data:
+    if scope_key is None:
+        return
+    if "scope_key" not in data:
         raise _registry_too_old(operation)
+    if data["scope_key"] != scope_key:
+        raise RegistryTooOldError(
+            f"{operation}: the Registry API answered structure scope "
+            f"{data['scope_key']!r} for a build claimed under {scope_key!r}. "
+            "A server that supports scopes adopts the requested scope or "
+            "refuses with scope_mismatch; this one did neither, so this SDK "
+            "cannot drive the build. Upgrade the Registry API.",
+            operation=operation,
+        )
 
 
 def _json_or_empty(response: Any) -> Mapping[str, Any]:

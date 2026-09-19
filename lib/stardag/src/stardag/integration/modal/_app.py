@@ -1471,6 +1471,18 @@ class StardagApp:
             )
         task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
         explicit_build_id = build_id is not None
+        if (
+            explicit_build_id
+            and build_config is None
+            and not isinstance(registry, NoOpRegistry)
+        ):
+            # A re-trigger by id without a config means "the build's own":
+            # the registry keeps a build's config for its life, and the
+            # bootstrap or resident build would otherwise hash the bare
+            # scope and be refused for a build that was configured.
+            stored = registry.build_get(build_id).build_config
+            if stored:
+                build_config = stored
         app_name = self._resolve_deployment(registry, deployment)
         executor_metadata = self._build_executor_metadata(
             reactive=reactive, app_name=app_name

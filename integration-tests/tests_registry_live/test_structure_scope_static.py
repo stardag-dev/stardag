@@ -135,14 +135,16 @@ def test_a_changed_static_upstream_does_not_gate_the_next_build(
         f"the server's synthetic one ({info_1.scope_key!r})."
     )
 
-    # The decisive observables. The old upstream stayed cancelled: nothing
-    # reset it, nothing ran it, and in particular build 2 never touched it.
-    assert task_status(old_upstream.id) == "cancelled", describe(build_2)
+    # The decisive observable: build 2 never touched the old upstream. Its
+    # *status* is not asserted — that is build 1's cancel at work (a worker
+    # whose start lands after the cascade can leave it RUNNING for a while;
+    # test_cancel_authority owns that mechanism), and it says nothing about
+    # what build 2 planned. Build 2's event log on it does.
     old_events = task_events(deployment, old_upstream.id)
     assert not events_by(old_events, build_2), (
         "Build 2 has events on the first build's upstream, so the old edge "
         "reached its plan — the structure scope did not isolate it.\n"
-        f"--- events on U1 ---\n"
+        f"--- events on U1 (status now {task_status(old_upstream.id)!r}) ---\n"
         f"{describe_events(old_events, one=build_1, two=build_2)}"
     )
     assert task_status(new_upstream.id) == "completed", describe(build_2)

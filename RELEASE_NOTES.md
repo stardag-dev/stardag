@@ -18,12 +18,13 @@ no longer re-runs a stale generation; a build already running keeps its
 own structure while the new code runs beside it.
 
 **Upgrade the registry server before the SDK.** A new SDK against an older
-server degrades (the scope endpoint is missing, so the build runs on a
-per-build scope — always correct, never shared). An older SDK against the
-new server keeps working the same way. A reactive build running across the
-server deploy keeps its gates: the migration copies its edges into its own
-scope. Modal apps deployed with an older SDK keep working under per-build
-scopes until redeployed.
+server does not degrade: a build refuses to start, or to fix its scope, with
+`RegistryTooOldError`, because the server could neither key its edges nor
+keep its config. An older SDK against the new server keeps working, on a
+per-build scope the server assigns — always correct, never shared. A
+reactive build running across the server deploy keeps its gates: the
+migration copies its edges into its own scope. Modal apps deployed with an
+older SDK keep working under per-build scopes until redeployed.
 
 ### Three levels of significance, and the build config
 

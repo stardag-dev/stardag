@@ -809,6 +809,30 @@ class TestStardagAppBuildTrigger:
         assert captured["kwargs"]["tasks"] is root
         assert captured["kwargs"]["build_kwargs"] == {"resume_build_id": build_id}
 
+    def test_a_bare_retrigger_reuses_the_builds_stored_config(
+        self, modal_function_stub
+    ):
+        """``build_trigger(build_id=...)`` without a config means the build's
+        own: the registry keeps it for the build's life, and re-hashing the
+        bare scope would have the resident build refused for a configured
+        build."""
+        from stardag.registry import BuildInfo
+
+        app = self._make_app()
+        build_id = uuid4()
+        stored = {"ns.T": {"width": 3}}
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get.return_value = BuildInfo(id=build_id, build_config=stored)
+
+        with registry_provider.override(registry):
+            app.build_trigger(MagicMock(spec=BaseTask), build_id=build_id)
+
+        registry.build_start.assert_not_called()
+        assert modal_function_stub["kwargs"]["build_kwargs"] == {
+            "resume_build_id": build_id,
+            "build_config": stored,
+        }
+
     def test_a_misconfigured_build_config_fails_before_a_build_is_minted(
         self, modal_function_stub
     ):
@@ -2763,6 +2787,10 @@ class TestReactiveRetrigger:
         build_id = uuid4()
         registry = MagicMock(spec=RegistryABC)
         registry.task_register_bulk_aio.return_value = None
+        # A build with no stored config: the re-trigger looks it up.
+        from stardag.registry import BuildInfo
+
+        registry.build_get.return_value = BuildInfo(id=build_id)
         original_root = SyncOnlyTask(name="rt-orig")
         new_root = SyncOnlyTask(name="rt-new")
         bootstrap = _finalize_capturing_functions(app)["bootstrap"]

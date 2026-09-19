@@ -1787,6 +1787,28 @@ class TestScopeRequiresANewServer:
         with pytest.raises(RegistryTooOldError, match="POST /builds"):
             registry.build_start(root_tasks=[], scope_key="code:cfg")
 
+    def test_build_start_echoing_another_scope_is_refused(self):
+        """A server that knows the field adopts it or 409s; one that answers
+        some other scope would gate the build under a scope this SDK never
+        registers edges in, so the build must not proceed."""
+        from stardag.exceptions import RegistryTooOldError
+
+        build_id = uuid4()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                201,
+                json={
+                    "id": str(build_id),
+                    "name": "b",
+                    "scope_key": f"build:{build_id}",
+                },
+            )
+
+        registry = self._registry(handler)
+        with pytest.raises(RegistryTooOldError, match="answered structure scope"):
+            registry.build_start(root_tasks=[], scope_key="code:cfg")
+
     def test_build_start_with_the_scope_echoed_proceeds(self):
         build_id = uuid4()
 
