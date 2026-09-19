@@ -507,7 +507,10 @@ class TestWorkerScope:
         # Nothing forwarded, or the build's own placeholder: the server
         # decides (the build's current scope).
         assert worker_scope_key(None, build_id) is None
-        assert worker_scope_key(f"build:{build_id}", build_id) is None
+        # The build's own placeholder is sent back as is, never as "the
+        # default": the build may since have moved to a real scope, and a
+        # late yield of this worker must stay out of that plan.
+        assert worker_scope_key(f"build:{build_id}", build_id) == f"build:{build_id}"
         # Another build's placeholder is a misrouted spawn: it carries no
         # config half and must not fall back to this build's current scope.
         with pytest.raises(RuntimeError, match="another build's placeholder"):

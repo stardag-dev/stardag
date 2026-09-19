@@ -139,7 +139,13 @@ class Builder(BuildFunction):
                 # is what forwards it to the workers, so it has to know here.
                 registry = registry_provider.get()
                 if type(registry) is not NoOpRegistry:
-                    build_config = registry.build_get(resume_build_id).build_config
+                    try:
+                        build_config = registry.build_get(resume_build_id).build_config
+                    except NotImplementedError:
+                        # ``build_get`` is optional on RegistryABC; a custom
+                        # registry without it has no stored config to offer,
+                        # which the engines treat the same way.
+                        build_config = None
                     if build_config:
                         build_kwargs = {
                             **(build_kwargs or {}),

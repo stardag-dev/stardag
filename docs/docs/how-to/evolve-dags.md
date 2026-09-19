@@ -140,9 +140,21 @@ What happens to work in flight:
   is content-addressed, so it harms nothing.
 - A tick that was still lingering on the old code exits with `superseded`.
 
-The one thing that cannot roll over is a root whose _identity_ parameters
-you changed: the registry cannot rebuild it, and the build fails with
-`rollover_failed`. Re-trigger it as a new build.
+Two preconditions, both checked by the tick before it re-plans:
+
+- **The deployment must be recorded.** `stardag modal deploy` records each
+  deploy in the registry; if it cannot (the registry was unreachable), the
+  app is live but the command exits non-zero and says so, and no build
+  rolls over to that code until you re-run the deploy — it is idempotent.
+- **The task store must be pickle-free.** Declare `task_modules` on the
+  `StardagApp` (or set `require_pickle_free=True`): a pickle carries the
+  code it was written by, and a rollover cannot refresh it. A deployment
+  that may store pickles fails the build with `rollover_failed` and a
+  message saying exactly this.
+
+Two things cannot roll over at all: a root whose _identity_ parameters you
+changed (the registry cannot rebuild it), and a build on a deployment that
+stores pickles. Both fail with `rollover_failed`; re-trigger as a new build.
 
 **Branches.** A branch that should run beside production is another app
 with its own name and its own single live version. A convention, not a

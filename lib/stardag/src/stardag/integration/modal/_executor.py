@@ -152,6 +152,20 @@ class ModalTaskExecutor(TaskExecutorABC):
         self.worker_reports_lifecycle = worker_reports_lifecycle
         # Reactive scheduling: forward the app name + reactive flag so
         # workers register their dynamic deps and wake the scheduler tick.
+        # That is the whole reactive protocol — a worker that does not
+        # report cannot register the dependencies it yields, cannot record
+        # its own suspension and wakes no tick, so a reactive build with
+        # non-reporting workers would sit RUNNING forever on its first
+        # dynamic yield. Refuse the combination here rather than there.
+        if reactive and not worker_reports_lifecycle:
+            raise ValueError(
+                "ModalTaskExecutor(reactive=True) needs self-reporting workers: "
+                "reactive scheduling has no resident orchestrator, so the "
+                "worker itself registers the dependencies it yields and wakes "
+                "the scheduler. Deploy the app with stardag's default Runner "
+                "(worker_reports_lifecycle=True), or drive the build with a "
+                "resident builder instead."
+            )
         self.reactive = reactive
         self.modal_workspace = modal_workspace
         # Executor metadata shared by every start this executor records

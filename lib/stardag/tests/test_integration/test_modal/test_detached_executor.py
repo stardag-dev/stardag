@@ -376,3 +376,26 @@ class TestBuildIdInjection:
     async def test_reports_lifecycle_requires_build_context(self):
         executor = _make_executor(FakeWorkerFunction(FakeFunctionCall()))
         assert executor.reports_lifecycle(_make_task()) is False
+
+
+def test_reactive_scheduling_needs_self_reporting_workers():
+    """A reactive build has no resident orchestrator: the worker registers
+    the dependencies it yields and wakes the tick. A worker that does not
+    report can do neither, so the combination would stall on the first
+    dynamic yield; it is refused at construction."""
+    with pytest.raises(ValueError, match="self-reporting workers"):
+        ModalTaskExecutor(
+            modal_app_name="app",
+            worker_selector=lambda task: "default",
+            reactive=True,
+            worker_reports_lifecycle=False,
+        )
+    # Either alone is fine.
+    ModalTaskExecutor(
+        modal_app_name="app", worker_selector=lambda task: "default", reactive=True
+    )
+    ModalTaskExecutor(
+        modal_app_name="app",
+        worker_selector=lambda task: "default",
+        worker_reports_lifecycle=False,
+    )

@@ -532,8 +532,21 @@ async def _roll_over_build_aio(
     Any other answer returns ``None``: nothing is moved, and the loop ends
     the tick as superseded; the current deployment's tick re-plans when it
     is woken, which the registry's wake-up path does. An app with no
-    deployment on record at all (deployed without a registry) has nothing to
-    check against, so the rollover is allowed and said so in the log.
+    deployment on record at all is treated the same way: nothing says this
+    code is current, so nothing is moved. That is what makes the record
+    written by ``stardag modal deploy`` load-bearing, and why that command
+    fails rather than shrugs when it cannot record — the remedy is in the
+    log line here and in the command's error.
+
+    **A rollover needs a pickle-free task store.** The store is write-once
+    and a pickle carries the code it was written by: a by-value class is the
+    old code entire, and no rollover can refresh it. A deployment that
+    declared ``task_modules`` (or ``require_pickle_free``) stores registry
+    data instead, which this code rebuilds from; one that may hold pickles
+    would run old code for every non-root task the new plan re-uses. So the
+    rollover is refused for such a deployment, with the remedy in the
+    message, and the build is failed like any other rollover that cannot
+    happen.
 
     The build's edges were evaluated by the code its scope names; this
     deployment runs other code, so it plans the build again under its own
@@ -608,11 +621,32 @@ async def _roll_over_build_aio(
             )
             return None
     else:
-        logger.info(
-            f"Tick for build {build_id}: no deployment of {app_name!r} is on "
-            "record, so this tick cannot tell whether it is the current one; "
-            "rolling over as the live code."
+        logger.warning(
+            f"Tick for build {build_id}: planned by other code, and no "
+            f"deployment of {app_name!r} is on record, so nothing says this "
+            f"tick's code ({own_code_id[:12]}) is the current one; not rolling "
+            "the build over. `stardag modal deploy` records the deployment; "
+            "re-run it if the last deploy could not reach the registry."
         )
+        return None
+    if not deployment.task_module_patterns and not deployment.require_pickle_free:
+        message = (
+            f"Rollover of build {build_id} to code {own_code_id!r} refused: "
+            "this deployment stores task pickles, which a rollover cannot "
+            "refresh (a pickle carries the code it was written by). Declare "
+            "task_modules on the StardagApp, or set require_pickle_free=True, "
+            "to make builds follow redeploys; or re-trigger this build as a "
+            "new build."
+        )
+        logger.error(message)
+        _fail_build_best_effort(registry, build_id, RuntimeError(message))
+        return {
+            "outcome": "rollover_failed",
+            "build_id": str(build_id),
+            "from_scope_key": build_info.scope_key,
+            "code_id": own_code_id,
+            "error": message,
+        }
     try:
         new_scope = structure_scope_key(own_code_id, build_info.build_config)
     except Exception as e:

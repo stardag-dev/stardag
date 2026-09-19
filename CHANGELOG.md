@@ -71,9 +71,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   build's scope moved — and reports `rolled_over` in its summary; a tick
   still lingering on the old code exits `superseded`. Workers register the
   dynamic dependencies they yield under their own code's scope, so an old
-  container's late yield never reaches a re-planned build. A root whose
-  identity parameters changed cannot be re-planned: the build fails with
-  `rollover_failed` — re-trigger it as a new build.
+  container's late yield never reaches a re-planned build. A rollover moves
+  forward only (the tick re-plans only if the registry's current deployment
+  of its app is its own code) and requires a pickle-free task store
+  (`task_modules` or `require_pickle_free=True`). A root whose identity
+  parameters changed, or a deployment that may store pickles, cannot be
+  re-planned: the build fails with `rollover_failed` — re-trigger it as a
+  new build. `stardag modal deploy` exits non-zero when it cannot record
+  the deployment, since no build rolls over to unrecorded code.
 - **Three levels of parameter significance.**
   `sd.StardagField(significance="identity" | "dependencies_only" |
 "execution_only")`. Levels 2 and 3 are read only from the **build

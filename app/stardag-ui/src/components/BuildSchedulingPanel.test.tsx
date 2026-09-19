@@ -337,10 +337,11 @@ describe("BuildSchedulingPanel", () => {
     expect(screen.getAllByText(/reset pending/)).toHaveLength(2);
   });
 
-  it("never labels a legacy blocker as outside the build", async () => {
-    // A current server lists no external blockers at all; an older one
-    // still might. Either way the "outside this build" chip is gone: a gate
-    // cannot point outside a build's plan any more.
+  it("keeps the legacy wording for a blocker an older server still sends", async () => {
+    // A current server lists no external blockers: a gate cannot point
+    // outside a build's plan any more. An older server still may, and for
+    // it the stalled headline keeps saying so — that is the compatibility
+    // path, and this test pins it rather than pretending it is gone.
     vi.mocked(fetchBuildFrontier).mockResolvedValue(
       makeFrontier({
         blocked_by_external: [makeBlocker({ blocking_in_build: false })],
@@ -348,8 +349,16 @@ describe("BuildSchedulingPanel", () => {
     );
     renderPanel();
     expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
-    expect(screen.queryByText("outside this build")).toBeNull();
-    expect(screen.queryByText(/not part of it/)).toBeNull();
+    expect(screen.getByText(/held outside this build/)).toBeInTheDocument();
+  });
+
+  it("shows no outside-the-build wording for a scoped frontier", async () => {
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(
+      makeFrontier({ blocked_by_external: [], actionable: [], running: [] }),
+    );
+    renderPanel();
+    await screen.findByText(/Nothing runnable/);
+    expect(screen.queryByText(/outside this build/)).toBeNull();
   });
 
   it("says so when the blocker list was truncated", async () => {

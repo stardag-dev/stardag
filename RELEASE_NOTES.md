@@ -163,9 +163,14 @@ summary). Containers already running finish on the old code and report as
 usual; a dynamic dependency one of them yields late lands in the old code's
 scope, so the re-planned build never sees it and the new code decides its
 own structure. An execution the new plan no longer needs finishes on its
-own; its output is content-addressed and harms nothing. The one case that
-cannot roll over is a root whose _identity_ parameters you changed: the
-build fails with `rollover_failed` — re-trigger it as a new build.
+own; its output is content-addressed and harms nothing. Two preconditions:
+the deployment must be **recorded** (`stardag modal deploy` does that, and
+exits non-zero if the registry cannot be reached — re-run it, it is
+idempotent), and the task store must be **pickle-free** (`task_modules` or
+`require_pickle_free=True`), because a pickle carries the code it was
+written by. What cannot roll over — a root whose _identity_ parameters you
+changed, or a deployment that may store pickles — fails the build with
+`rollover_failed`; re-trigger it as a new build.
 
 A branch that should run beside production is another app with its own
 name and its own single live version. A convention, not a feature:

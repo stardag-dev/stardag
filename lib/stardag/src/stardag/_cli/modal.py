@@ -559,25 +559,44 @@ def _record_deployment(
     """Record in the registry that this code id now runs as ``app_name``.
 
     One row per deploy, exactly Modal's notion of a deployment: the newest
-    row for an app is the current one. Best-effort — a deploy without
-    registry credentials still deploys, it is just not listed by
-    ``stardag modal deployments``.
+    row for an app is the current one, and it is what a scheduler tick
+    consults before rolling a running build over to its code. That makes
+    the record load-bearing, not bookkeeping: a live deployment the
+    registry does not know about is one no build will follow — a tick that
+    finds no current record for its app refuses to roll over (see
+    ``_roll_over_build_aio``), so the build stays on the code that planned
+    it until the record exists. A recording failure is therefore reported
+    as an error and fails the command, with the remedy: re-run the deploy,
+    which is idempotent on Modal's side and records the same code id.
+
+    Without a registry configured there is nothing to record into and no
+    reactive build that could depend on it, so that case is a notice, not
+    an error.
     """
     from stardag.registry import NoOpRegistry, registry_provider
 
+    registry = registry_provider.get()
+    if type(registry) is NoOpRegistry:
+        console.print("[dim]No registry configured; deployment not recorded.[/dim]")
+        return
     try:
-        registry = registry_provider.get()
-        if type(registry) is NoOpRegistry:
-            console.print("[dim]No registry configured; deployment not recorded.[/dim]")
-            return
         info = registry.deployment_record(
             app_name=app_name,
             code_id=stardag_app_instance.code_id,
             modal_app_id=modal_app_id,
         )
-    except Exception as e:  # pragma: no cover - network
-        console.print(f"[yellow]Could not record the deployment: {e}[/yellow]")
-        return
+    except Exception as e:
+        error_console.print(
+            f"[bold red]Deployed {app_name} (code "
+            f"{stardag_app_instance.code_id[:12]}) but could not record it in "
+            f"the registry:[/bold red] {type(e).__name__}: {e}\n"
+            "The deployment is live, but running reactive builds will not roll "
+            "over to it until it is recorded — their scheduler ticks refuse a "
+            "rollover to code the registry has no current deployment for. "
+            "Re-run `stardag modal deploy` once the registry is reachable; the "
+            "deploy is idempotent and records the same code id."
+        )
+        raise typer.Exit(1)
     if info is not None:
         console.print(
             f"[cyan]Recorded deployment[/cyan] {info.app_name} "
@@ -800,8 +819,9 @@ def deploy(
     console.print(f"[green]Deployed {deployment_name}[/green]")
 
     # Record the deployment in the registry: which code version now runs
-    # as this app. Best-effort: a deploy without registry credentials
-    # still deploys.
+    # as this app. Load-bearing for rollover (a tick only follows a code
+    # the registry knows is current), so a failure fails the command; a
+    # deploy without any registry configured still deploys.
     _record_deployment(
         stardag_app_instance,
         deployment_name,

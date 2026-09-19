@@ -619,6 +619,34 @@ class TestBuilderOrchestration:
         assert registry.build_fail.call_args.args[0] == build_id
         assert "APIError" in registry.build_fail.call_args.kwargs["error_message"]
 
+    def test_a_registry_without_build_get_still_runs_a_bare_resume(self):
+        """``build_get`` is optional on RegistryABC; a custom registry without
+        it has no stored config to offer, which is not a failure."""
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get.side_effect = NotImplementedError
+        captured: dict = {}
+        mock_summary = MagicMock()
+        mock_summary.status = MagicMock(value="SUCCESS")
+
+        class CapturingBuilder(Builder):
+            def build(self, tasks, task_executor, build_kwargs=None):
+                captured["executor"] = task_executor
+                captured["build_kwargs"] = build_kwargs
+                return mock_summary
+
+        with registry_provider.override(registry):
+            CapturingBuilder()(
+                MagicMock(),
+                MagicMock(),
+                "app",
+                build_kwargs={"resume_build_id": build_id},
+            )
+
+        assert captured["executor"].build_config is None
+        assert "build_config" not in captured["build_kwargs"]
+        registry.build_fail.assert_not_called()
+
     def test_executor_without_a_config_has_the_bare_scope(self):
         captured: dict = {}
         mock_summary = MagicMock()
@@ -2712,11 +2740,12 @@ class TestTickAppOwnership:
     """Only the app recorded as the build's reactive_app_name (in the
     registry) may drive its ticks — read via the lighter build_get_aio."""
 
-    def _capture_tick(self, app_name: str):
+    def _capture_tick(self, app_name: str, **app_kwargs):
         app = StardagApp(
             app_name,
             builder_settings=FunctionSettings(image=MagicMock()),
             worker_settings={"default": FunctionSettings(image=MagicMock())},
+            **app_kwargs,
         )
         captured: dict = {}
 
@@ -2840,14 +2869,23 @@ class TestTickAppOwnership:
         """A registry holding a build planned by another code id, whose one
         root can (or cannot) be rehydrated from registry data.
 
-        ``deployments`` is what ``deployment_list_aio`` answers for the app:
-        none on record by default, which lets the rollover proceed."""
+        ``deployments`` is what ``deployment_list_aio`` answers for the app.
+        By default this tick's own code (``cafe`` * 10) is on record as the
+        current deployment, which is what lets a rollover proceed: with no
+        record at all nothing says this code is current, and no rollover
+        happens."""
         from stardag.base_model import CONTEXT_MODE_KEY
-        from stardag.registry import BuildFrontier, BuildInfo
+        from stardag.registry import BuildFrontier, BuildInfo, DeploymentInfo
         from stardag.registry._base import TaskMetadata
 
+        if deployments is None:
+            deployments = [
+                DeploymentInfo(
+                    id=uuid4(), app_name="app-a", code_id="cafe" * 10, current=True
+                )
+            ]
         registry = MagicMock(spec=RegistryABC)
-        registry.deployment_list_aio = AsyncMock(return_value=list(deployments or []))
+        registry.deployment_list_aio = AsyncMock(return_value=list(deployments))
         registry.build_get_aio = AsyncMock(
             return_value=BuildInfo(
                 id=build_id, reactive_app_name="app-a", scope_key=scope_key
@@ -2915,7 +2953,11 @@ class TestTickAppOwnership:
         from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
         monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
-        tick = self._capture_tick("app-a")
+        tick = self._capture_tick(
+            "app-a",
+            task_modules=["stardag.utils.testing.helper_tasks"],
+            require_pickle_free=True,
+        )
         build_id = uuid4()
         root = SyncOnlyTask(name="rollover-root")
         old_scope = "beef" * 10 + ":0123456789abcdef"
@@ -2969,7 +3011,11 @@ class TestTickAppOwnership:
         from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
         monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
-        tick = self._capture_tick("app-a")
+        tick = self._capture_tick(
+            "app-a",
+            task_modules=["stardag.utils.testing.helper_tasks"],
+            require_pickle_free=True,
+        )
         build_id = uuid4()
         root = SyncOnlyTask(name="rollover-lost-root")
         old_scope = "beef" * 10 + ":0123456789abcdef"
@@ -3071,7 +3117,11 @@ class TestTickAppOwnership:
         from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
         monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
-        tick = self._capture_tick("app-a")
+        tick = self._capture_tick(
+            "app-a",
+            task_modules=["stardag.utils.testing.helper_tasks"],
+            require_pickle_free=True,
+        )
         build_id = uuid4()
         root = SyncOnlyTask(name="rollover-current-root")
         registry = self._registry_for_rollover(
@@ -3096,6 +3146,92 @@ class TestTickAppOwnership:
 
         assert moved_to == structure_scope_key("cafe" * 10, None)
         registry.build_set_scope_aio.assert_awaited_once()
+
+    def test_no_deployment_on_record_means_no_rollover(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        """The record ``stardag modal deploy`` writes is what says a code is
+        current. With none for the app, nothing says this tick's code is,
+        so nothing is planned or moved and the tick ends superseded — which
+        is also why the deploy command fails when it cannot record."""
+        from uuid import uuid4
+
+        from stardag.build import TickSummary
+        from stardag.build._scope import STARDAG_CODE_ID_ENV
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        tick = self._capture_tick(
+            "app-a",
+            task_modules=["stardag.utils.testing.helper_tasks"],
+            require_pickle_free=True,
+        )
+        build_id = uuid4()
+        root = SyncOnlyTask(name="rollover-unrecorded-root")
+        registry = self._registry_for_rollover(
+            build_id, root, scope_key="beef" * 10 + ":0123456789abcdef", deployments=[]
+        )
+        with (
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
+        ):
+            rp.get.return_value = registry
+            tick_aio.return_value = TickSummary(outcome="superseded")
+            _invoke(tick, str(build_id))
+            moved_to = self._run_hook(
+                tick_aio, registry.build_get_frontier_aio.return_value
+            )
+
+        assert moved_to is None
+        registry.task_get_metadata_aio.assert_not_awaited()
+        registry.task_register_bulk_aio.assert_not_awaited()
+        registry.build_set_scope_aio.assert_not_awaited()
+
+    def test_a_deployment_that_may_store_pickles_cannot_roll_over(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        """A pickle carries the code it was written by and the store is
+        write-once, so a rollover on a deployment without task_modules would
+        run old code for every non-root task it re-uses. Refused, with the
+        remedy, and the build is failed like any rollover that cannot
+        happen."""
+        from uuid import uuid4
+
+        from stardag.build import TickSummary
+        from stardag.build._scope import STARDAG_CODE_ID_ENV
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        tick = self._capture_tick("app-a")  # no task_modules: pickles possible
+        build_id = uuid4()
+        root = SyncOnlyTask(name="rollover-pickled-root")
+        registry = self._registry_for_rollover(
+            build_id, root, scope_key="beef" * 10 + ":0123456789abcdef"
+        )
+        with (
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
+        ):
+            rp.get.return_value = registry
+            tick_aio.return_value = TickSummary(outcome="rollover_failed")
+            _invoke(tick, str(build_id))
+            hook = tick_aio.call_args.kwargs["roll_over"]
+            import asyncio
+
+            from stardag.build import RollOverFailed
+
+            with pytest.raises(RollOverFailed) as excinfo:
+                asyncio.run(hook(registry.build_get_frontier_aio.return_value))
+
+        assert "stores task pickles" in str(excinfo.value)
+        assert "task_modules" in str(excinfo.value)
+        registry.build_fail.assert_called_once()
+        assert (
+            "stores task pickles"
+            in registry.build_fail.call_args.kwargs["error_message"]
+        )
+        registry.task_get_metadata_aio.assert_not_awaited()
+        registry.build_set_scope_aio.assert_not_awaited()
 
     def test_the_tick_gets_no_hook_for_a_placeholder_scoped_build(
         self, default_in_memory_fs_target, monkeypatch
@@ -3171,7 +3307,11 @@ class TestTickAppOwnership:
         from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
         monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
-        tick = self._capture_tick("app-a")
+        tick = self._capture_tick(
+            "app-a",
+            task_modules=["stardag.utils.testing.helper_tasks"],
+            require_pickle_free=True,
+        )
         build_id = uuid4()
         root = SyncOnlyTask(name="rollover-placeholder-root")
         registry = self._registry_for_rollover(

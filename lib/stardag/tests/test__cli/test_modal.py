@@ -63,6 +63,38 @@ class TestRecordDeployment:
     def test_without_a_modal_app_id_the_record_still_lands(self):
         assert self._run(None) == [("myapp", "c" * 40, None)]
 
+    def test_a_recording_failure_fails_the_deploy(self):
+        """The record is what a tick consults before rolling a build over,
+        so a deploy that could not record is a deploy no build will follow:
+        the command says so and exits 1, with the remedy (re-run, it is
+        idempotent)."""
+        from unittest.mock import MagicMock
+
+        import typer
+
+        from stardag._cli.modal import _record_deployment
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        class FailingRegistry(NoOpRegistry):
+            def deployment_record(self, *, app_name, code_id, modal_app_id=None):
+                raise ConnectionError("registry unreachable")
+
+        with registry_provider.override(FailingRegistry()):
+            with pytest.raises(typer.Exit) as excinfo:
+                _record_deployment(
+                    MagicMock(code_id="c" * 40), "myapp", modal_app_id="ap-1"
+                )
+        assert excinfo.value.exit_code == 1
+
+    def test_without_a_registry_nothing_is_recorded_and_nothing_fails(self):
+        from unittest.mock import MagicMock
+
+        from stardag._cli.modal import _record_deployment
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        with registry_provider.override(NoOpRegistry()):
+            _record_deployment(MagicMock(code_id="c" * 40), "myapp", modal_app_id=None)
+
 
 class TestDeploymentsListing:
     """``stardag modal deployments`` lists what the registry recorded, newest

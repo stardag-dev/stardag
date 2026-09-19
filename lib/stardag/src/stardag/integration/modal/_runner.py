@@ -384,17 +384,25 @@ def worker_scope_key(forwarded: str | None, build_id: UUID) -> str | None:
     here would need every configured class importable). A build that has
     since rolled over to a newer deployment therefore never inherits an old
     worker's late yield — it lands in the old code's scope and the new plan
-    re-runs the parent. No forwarded scope, or this build's own placeholder
-    (``build:<build_id>``, a build nothing fixed a scope for), means the
-    server's default — the build's current scope. Another build's
-    placeholder is a misrouted spawn: the scheduler forwards the scope of
-    the build it drives, so a placeholder naming some other build cannot be
-    honoured (it carries no config half) and must not fall back to writing
-    into this build's current scope either. It is refused, and the attempt
-    fails before the task runs.
+    re-runs the parent. No forwarded scope at all means the server's
+    default — the build's current scope. This build's own placeholder
+    (``build:<build_id>``, a build nothing had fixed a scope for when this
+    worker was spawned) is sent back **as is**, not as "the default": the
+    build may since have been re-triggered by a newer SDK and moved to a
+    real scope, and the default would then be that new scope — exactly the
+    plan a late yield of this older worker must stay out of. Named
+    explicitly, the yield lands in the placeholder scope, which the moved
+    build no longer reads. Another build's placeholder is a misrouted
+    spawn: the scheduler forwards the scope of the build it drives, so a
+    placeholder naming some other build cannot be honoured (it carries no
+    config half) and must not fall back to writing into this build's
+    current scope either. It is refused, and the attempt fails before the
+    task runs.
     """
-    if forwarded is None or is_synthetic_scope(forwarded, build_id=build_id):
+    if forwarded is None:
         return None
+    if is_synthetic_scope(forwarded, build_id=build_id):
+        return forwarded
     if is_synthetic_scope(forwarded):
         raise RuntimeError(
             f"Worker for build {build_id} was handed structure scope "
