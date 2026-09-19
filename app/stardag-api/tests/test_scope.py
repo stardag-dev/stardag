@@ -165,6 +165,38 @@ async def test_a_bare_resume_of_a_synthetic_build_is_the_older_sdk_path(
 
 
 @pytest.mark.asyncio
+async def test_an_explicit_empty_config_is_a_config(client: AsyncClient):
+    """``{}`` stored at POST /builds means "no overrides", and it is fixed
+    like any other config: a later scope claim may not bring overrides in.
+    Only a build created with no config at all adopts the first claim's."""
+    build_id = (await _build(client, build_config={}))["id"]
+
+    overrides = await client.put(
+        f"{BUILDS}/{build_id}/scope",
+        json={"scope_key": "code-1:cfg-b", "build_config": {"ns.T": {"n": 1}}},
+    )
+    assert overrides.status_code == 409, overrides.text
+    assert overrides.json()["detail"]["error_code"] == "scope_mismatch"
+    assert (await client.get(f"{BUILDS}/{build_id}")).json()["build_config"] == {}
+
+    same = await client.put(
+        f"{BUILDS}/{build_id}/scope",
+        json={"scope_key": "code-1:cfg-a", "build_config": {}},
+    )
+    assert same.status_code == 200, same.text
+    assert same.json()["build_config"] == {}
+
+    # No config at all at creation: the first claim's config is adopted.
+    bare_id = (await _build(client))["id"]
+    adopted = await client.put(
+        f"{BUILDS}/{bare_id}/scope",
+        json={"scope_key": "code-1:cfg-b", "build_config": {"ns.T": {"n": 1}}},
+    )
+    assert adopted.status_code == 200, adopted.text
+    assert adopted.json()["build_config"] == {"ns.T": {"n": 1}}
+
+
+@pytest.mark.asyncio
 async def test_a_stored_config_is_fixed_before_the_scope_is(client: AsyncClient):
     """A reactive trigger stores the config at POST /builds while the scope
     is still synthetic; the bootstrap's later scope claim may confirm that

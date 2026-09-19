@@ -384,12 +384,24 @@ def worker_scope_key(forwarded: str | None, build_id: UUID) -> str | None:
     here would need every configured class importable). A build that has
     since rolled over to a newer deployment therefore never inherits an old
     worker's late yield — it lands in the old code's scope and the new plan
-    re-runs the parent. No forwarded scope, or a placeholder (this build's
-    or, oddly, another's — a placeholder carries no config half to reuse),
-    means the server's default (the build's current scope).
+    re-runs the parent. No forwarded scope, or this build's own placeholder
+    (``build:<build_id>``, a build nothing fixed a scope for), means the
+    server's default — the build's current scope. Another build's
+    placeholder is a misrouted spawn: the scheduler forwards the scope of
+    the build it drives, so a placeholder naming some other build cannot be
+    honoured (it carries no config half) and must not fall back to writing
+    into this build's current scope either. It is refused, and the attempt
+    fails before the task runs.
     """
-    if forwarded is None or is_synthetic_scope(forwarded):
+    if forwarded is None or is_synthetic_scope(forwarded, build_id=build_id):
         return None
+    if is_synthetic_scope(forwarded):
+        raise RuntimeError(
+            f"Worker for build {build_id} was handed structure scope "
+            f"{forwarded!r}, another build's placeholder. A placeholder names "
+            "no code and no config, so this worker's yields could only be "
+            "misattributed; refusing to run the task."
+        )
     return f"{code_id()}:{scope_config_hash(forwarded)}"
 
 

@@ -2285,15 +2285,19 @@ def _apply_scope(build: Build, *, scope_key: str, build_config: dict | None) -> 
     What may not change is ``build_config``, compared as a whole: a supplied
     config must equal the stored one whenever one is stored — a reactive
     trigger stores it at ``POST /builds`` while the scope is still synthetic,
-    and a later scope claim may not rewrite it — and, on a build with a real
-    scope, also when nothing is stored, where "nothing" and ``{}`` are the
-    same config. ``None`` is not a config but "unspecified" — an older SDK or
-    a bare re-trigger — and keeps whatever is stored. A build has one config
-    for its life because the config is what the scope's second half is a
-    function of; new code re-plans under the same config, never another.
+    and a later scope claim may not rewrite it. "Stored" means not NULL: an
+    explicit ``{}`` is a config (no overrides) and is fixed like any other;
+    only a NULL — a build created with no config at all, by an older SDK or a
+    trigger that gave none — is adopted by the first claim that brings one.
+    On a build with a real scope a supplied config is compared even against
+    NULL, where NULL and ``{}`` are the same config. ``None`` supplied is not
+    a config but "unspecified" — an older SDK or a bare re-trigger — and
+    keeps whatever is stored. A build has one config for its life because
+    the config is what the scope's second half is a function of; new code
+    re-plans under the same config, never another.
     """
     if build_config is not None and (
-        (build.build_config and build.build_config != build_config)
+        (build.build_config is not None and build.build_config != build_config)
         or (
             not _is_synthetic_scope(build)
             and (build.build_config or {}) != build_config

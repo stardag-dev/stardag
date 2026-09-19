@@ -25,12 +25,13 @@ from uuid import UUID
 from stardag.build import (
     BuildTaskStore,
     FailMode,
+    RollOverFailed,
     TickConfig,
     run_tick_aio,
 )
-from stardag.build._scope import code_id, is_synthetic_scope, scope_code_id
+from stardag.build._scope import code_id, is_synthetic_scope
 from stardag.build._wakeups import SpawnTick
-from stardag.build_config import set_build_config
+from stardag.build_config import rebind_to_build_config, set_build_config
 from stardag.build._task_modules import (
     import_task_modules,
     set_declared_task_module_patterns,
@@ -43,7 +44,12 @@ from stardag.integration.modal._selector import WorkerSelector
 from stardag.integration.modal._spawn import spawn_tick
 from stardag.integration.modal._settings import FunctionSettings
 from stardag._core.base_task import BaseTask
-from stardag.registry._base import BuildInfo, NoOpRegistry, registry_provider
+from stardag.registry._base import (
+    BuildFrontier,
+    BuildInfo,
+    NoOpRegistry,
+    registry_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -390,10 +396,7 @@ async def _run_deployed_tick_aio(
             "SDK first."
         )
         return {"outcome": "registry_too_old", "build_id": str(build_id)}
-    needs_rollover = (
-        not is_synthetic_scope(build_info.scope_key, build_id=build_id)
-        and scope_code_id(build_info.scope_key) != own_code_id
-    )
+    may_roll_over = not is_synthetic_scope(build_info.scope_key, build_id=build_id)
     # The build's config, installed before anything is rehydrated: a task
     # rebuilt from registry data resolves its dependencies_only /
     # execution_only fields from it, exactly as the bootstrap did.
@@ -442,20 +445,6 @@ async def _run_deployed_tick_aio(
         # per-module-list cache means later ticks return immediately.
         import_task_modules(deployment.task_modules)
 
-    scope_key = build_info.scope_key
-    if needs_rollover:
-        rolled = await _roll_over_build_aio(
-            registry,
-            build_uuid,
-            build_info,
-            deployment=deployment,
-            task_store=task_store,
-            own_code_id=own_code_id,
-        )
-        if isinstance(rolled, dict):
-            return rolled
-        scope_key = rolled
-
     executor = ModalTaskExecutor(
         modal_app_name=app_name,
         worker_selector=deployment.worker_selector,
@@ -463,15 +452,41 @@ async def _run_deployed_tick_aio(
         modal_workspace=deployment.modal_workspace,
         worker_timeouts=deployment.worker_timeouts,
         build_config=build_info.build_config,
-        scope_key=scope_key,
+        scope_key=build_info.scope_key,
     )
+    # A build planned by other code is re-planned under this deployment's
+    # — by the tick itself, once it holds the build's lease and has seen a
+    # RUNNING frontier (see ``RollOver``), never before: two deployments
+    # must not plan one build at once, and a late tick on a finished build
+    # must rewrite nothing. The hook does the work and updates the
+    # executor's scope so the workers it spawns are told the new one; a
+    # failure carries its report out through ``rollover_details``.
+    rollover_details: dict[str, typing.Any] = {}
+
+    async def _roll_over(frontier: BuildFrontier) -> str | None:
+        rolled = await _roll_over_build_aio(
+            registry,
+            build_uuid,
+            build_info,
+            frontier=frontier,
+            deployment=deployment,
+            own_code_id=own_code_id,
+        )
+        if isinstance(rolled, dict):
+            rollover_details.update(rolled)
+            raise RollOverFailed(rolled["error"], rolled)
+        executor.scope_key = rolled
+        return rolled
+
     summary = await run_tick_aio(
         build_uuid,
         registry=registry,
         task_executor=executor,
         task_store=task_store,
         config=config,
-        rolled_over=needs_rollover,
+        # Only a build with a real scope can be planned by other code; the
+        # server's placeholder (an older SDK's build) is driven as it is.
+        roll_over=_roll_over if may_roll_over else None,
     )
     # The container id is in the line because ticks now share containers
     # (``_TICK_CONCURRENCY``), and "how well are they packing?" is otherwise
@@ -484,7 +499,10 @@ async def _run_deployed_tick_aio(
         f"Tick for build {build_id} (container "
         f"{os.environ.get('MODAL_TASK_ID', 'unknown')}): {summary}"
     )
-    return dataclasses.asdict(summary)
+    result = dataclasses.asdict(summary)
+    if summary.outcome == "rollover_failed":
+        result.update(rollover_details)
+    return result
 
 
 async def _roll_over_build_aio(
@@ -492,8 +510,8 @@ async def _roll_over_build_aio(
     build_id: UUID,
     build_info: BuildInfo,
     *,
+    frontier: BuildFrontier,
     deployment: _TickDeployment,
-    task_store: BuildTaskStore,
     own_code_id: str,
 ) -> str | dict[str, typing.Any]:
     """Re-plan a build the live deployment inherited from other code.
@@ -506,6 +524,21 @@ async def _roll_over_build_aio(
     own step). Completed tasks stay completed; executions the old plan
     started finish on their own; a tick still lingering on the old code
     exits as superseded when it sees the scope move.
+
+    **Roots come from the registry, never from the build's task store.**
+    The store holds pickles the old code wrote, write-once, and a pickle
+    carries the object it was made from: a by-value class is the old code
+    entire, and even a by-reference one restores the level 2/3 values the
+    old code resolved. Registry data is identity parameters only; rebuilt
+    here, under this code with the build's config installed, a root is
+    exactly what this deployment would construct. The same holds for every
+    task the tick loads afterwards: a pickle it does find is re-bound to the
+    installed config (see ``_frontier_actions._load_task``), and a
+    deployment that declared its task modules stores no pickles at all —
+    which is what makes a rollover fully code-safe; a by-value pickle is the
+    one payload no rollover can refresh, as the store's own contract says.
+
+    Runs inside the tick, under the build's lease, once (see ``RollOver``).
 
     Returns the new scope key, or the tick's outcome dict when the build
     cannot roll over. The one such case is a root the new code cannot
@@ -541,13 +574,12 @@ async def _roll_over_build_aio(
     except Exception as e:
         return _failed("the stored build config does not fit this code", e)
     try:
-        frontier = await registry.build_get_frontier_aio(build_id)
         roots: list[BaseTask] = []
         for root_id in frontier.root_task_ids:
-            task = await task_store.load_task_aio(root_id)
-            if task is None:
-                metadata = await registry.task_get_metadata_aio(UUID(root_id))
-                task = task_from_registry_data(metadata.body, expected_task_id=root_id)
+            metadata = await registry.task_get_metadata_aio(UUID(root_id))
+            task = task_from_registry_data(metadata.body, expected_task_id=root_id)
+            if build_info.build_config:
+                task = rebind_to_build_config(task)
             roots.append(task)
     except Exception as e:
         return _failed("a root could not be rehydrated under this code", e)

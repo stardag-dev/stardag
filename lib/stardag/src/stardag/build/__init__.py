@@ -59,6 +59,8 @@ from stardag.build._reactive import (
     DiscoveryResult,
     TickConfig,
     TickSummary,
+    RollOver,
+    RollOverFailed,
     discover_and_register_aio,
     run_tick_aio,
 )
@@ -146,6 +148,8 @@ __all__ = [
     "DiscoveryResult",
     "TickConfig",
     "TickSummary",
+    "RollOver",
+    "RollOverFailed",
     "discover_and_register_aio",
     "run_tick_aio",
     "RegistryConcurrencyLimiter",

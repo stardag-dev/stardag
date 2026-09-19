@@ -117,3 +117,59 @@ async def test_there_is_nothing_to_retire(client: AsyncClient):
     recorded = (await client.post(DEPLOYMENTS, json=_record("myapp", "abc"))).json()
     gone = await client.post(f"{DEPLOYMENTS}/{recorded['id']}/retire")
     assert gone.status_code in (404, 405), gone.text
+
+
+# --- The record is one upsert, not a read and a write ----------------------
+
+
+def test_the_upsert_compiles_for_both_dialects():
+    """Two deploys of one code racing each other must both succeed, so the
+    insert-or-refresh is decided by the database in one statement."""
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    from stardag_api.routes.deployments import upsert_deployment_stmt
+
+    values = {
+        "id": "00000000-0000-7000-8000-000000000001",
+        "environment_id": "00000000-0000-7000-8000-000000000002",
+        "app_name": "myapp",
+        "code_id": "abc",
+        "deployed_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "modal_app_id": None,
+        "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+    }
+    pg = str(
+        upsert_deployment_stmt("postgresql", values).compile(
+            dialect=postgresql.dialect()
+        )
+    )
+    assert "ON CONFLICT (environment_id, app_name, code_id) DO UPDATE" in pg
+    assert "coalesce(excluded.modal_app_id, deployments.modal_app_id)" in pg
+    lite = str(
+        upsert_deployment_stmt("sqlite", values).compile(dialect=sqlite.dialect())
+    )
+    assert "ON CONFLICT (environment_id, app_name, code_id) DO UPDATE" in lite
+    assert "excluded.deployed_at" in lite
+
+
+@pytest.mark.asyncio
+async def test_a_record_over_an_existing_row_refreshes_it_in_one_statement(
+    client: AsyncClient,
+):
+    """The functional half of the same guarantee, on the shared session: a
+    second record of the same code does not error on the unique constraint
+    and comes back as one row with a newer ``deployed_at`` and the Modal app
+    id kept when the second deploy did not name one."""
+    first = (
+        await client.post(
+            DEPLOYMENTS, json={**_record("racer", "c0de"), "modal_app_id": "ap-1"}
+        )
+    ).json()
+    again = await client.post(DEPLOYMENTS, json=_record("racer", "c0de"))
+    assert again.status_code == 201, again.text
+    body = again.json()
+    assert body["id"] == first["id"]
+    assert body["modal_app_id"] == "ap-1"
+    assert _instant(body["deployed_at"]) >= _instant(first["deployed_at"])
+    listed = (await client.get(DEPLOYMENTS, params={"app_name": "racer"})).json()
+    assert len(listed["deployments"]) == 1

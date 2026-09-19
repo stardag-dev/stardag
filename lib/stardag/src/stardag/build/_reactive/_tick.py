@@ -20,6 +20,7 @@ from stardag.build._task_store import BuildTaskStore
 from stardag.build._wakeups import SpawnTick, drain_wake_candidates
 from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.registry import (
+    BuildFrontier,
     RegistryABC,
 )
 
@@ -739,6 +740,29 @@ def _planned_by_other_code(scope_key: str | None, build_id: UUID) -> bool:
     return scope_code_id(scope_key) != code_id()
 
 
+RollOver = Callable[[BuildFrontier], typing.Awaitable[str | None]]
+"""A tick's rollover hook: re-plan the build under this process's code.
+
+Called by the tick **after** it holds the build's scheduler lease and has
+read a frontier whose scope names other code, and only while the build is
+RUNNING — so two deployments cannot re-plan one build at once, and a late
+tick on a finished build cannot rewrite its plan. Returns the new scope
+key when it rolled the build over, ``None`` when it decided not to; raises
+:class:`RollOverFailed` when the build cannot follow this code.
+"""
+
+
+class RollOverFailed(Exception):
+    """The build cannot be re-planned under this code (a root it cannot
+    rehydrate, a config that does not fit). ``payload`` is what the caller
+    wants reported beside the summary; the build has already been failed
+    by the hook that raised this."""
+
+    def __init__(self, message: str, payload: dict[str, typing.Any]):
+        super().__init__(message)
+        self.payload = payload
+
+
 async def run_tick_aio(
     build_id: UUID,
     *,
@@ -746,14 +770,14 @@ async def run_tick_aio(
     task_executor: TaskExecutorABC,
     task_store: BuildTaskStore | None = None,
     config: TickConfig | None = None,
-    rolled_over: bool = False,
+    roll_over: RollOver | None = None,
 ) -> TickSummary:
     """Run one reactive scheduler tick for ``build_id`` (see module docs).
 
-    ``rolled_over`` records in the summary that the caller re-planned the
-    build under its own code before this tick (the deployed tick does, when
-    the build was planned by another code version); the summary is the one
-    place that fact is reported.
+    ``roll_over`` is the deployed tick's hook for a build planned by other
+    code (see :data:`RollOver`): the tick calls it once, under the lease,
+    before acting, and records the rollover in the summary. Without it a
+    frontier planned by other code ends the tick as ``superseded``.
 
     Idempotent and safe to invoke at any time from anywhere (worker
     wake-ups, periodic watchdog, manual): single-flighted per build via the
@@ -787,7 +811,7 @@ async def run_tick_aio(
     """
     config = config or TickConfig()
     task_store = task_store or BuildTaskStore(build_id)
-    summary = TickSummary(outcome="lingered_out", rolled_over=int(rolled_over))
+    summary = TickSummary(outcome="lingered_out")
     try:
         await _run_tick_body_aio(
             build_id,
@@ -796,6 +820,7 @@ async def run_tick_aio(
             task_store=task_store,
             config=config,
             summary=summary,
+            roll_over=roll_over,
         )
     except Exception as e:
         summary.outcome = "error"
@@ -818,6 +843,7 @@ async def _run_tick_body_aio(
     task_store: BuildTaskStore,
     config: TickConfig,
     summary: TickSummary,
+    roll_over: RollOver | None = None,
 ) -> None:
     """The tick proper — see :func:`run_tick_aio`. Mutates ``summary``.
 
@@ -869,6 +895,7 @@ async def _run_tick_body_aio(
     # responsibility for a wake-up at all. Gates the hand-off; see the
     # ``finally`` below for why that matters.
     cleared_a_wakeup = False
+    rollover_attempted = False
     try:
         async with lease:
             if not lease.acquired:
@@ -917,6 +944,41 @@ async def _run_tick_body_aio(
                         # safe to re-evaluate each iteration.
                         summary.outcome = "not_reactive"
                         return
+                    if (
+                        roll_over is not None
+                        and not rollover_attempted
+                        and _planned_by_other_code(frontier.scope_key, build_id)
+                    ):
+                        # The build was planned by other code and this tick
+                        # is the live deployment's: re-plan it under this
+                        # code, here and only here — under the lease, so no
+                        # two deployments plan one build at once, and only
+                        # for a RUNNING build, so a late tick on a finished
+                        # one rewrites nothing. One attempt per tick: if the
+                        # scope is other code again afterwards, someone newer
+                        # took over and this tick is superseded below.
+                        rollover_attempted = True
+                        if frontier.build_status != "running":
+                            logger.info(
+                                f"Tick for build {build_id}: planned by other "
+                                f"code but {frontier.build_status!r}; not "
+                                "re-planning a finished build."
+                            )
+                        else:
+                            try:
+                                moved_to = await roll_over(frontier)
+                            except RollOverFailed as e:
+                                summary.outcome = "rollover_failed"
+                                summary.error_type = type(e).__name__
+                                summary.error_message = str(e)[:500]
+                                return
+                            if moved_to is not None:
+                                summary.rolled_over += 1
+                                # The plan changed under this scope: read it
+                                # again before acting on anything.
+                                frontier = await registry.build_get_frontier_aio(
+                                    build_id
+                                )
                     if _planned_by_other_code(frontier.scope_key, build_id):
                         # The build's scope moved under us: a tick on a newer
                         # deployment took the lease after this one's lapsed

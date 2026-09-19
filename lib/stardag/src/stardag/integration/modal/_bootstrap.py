@@ -30,6 +30,8 @@ from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.build._task_modules import (
     PickleElisionPlan,
     TaskModulesError,
+    expand_task_module_patterns,
+    import_task_modules,
     format_uncovered_message,
     plan_pickle_elision,
     uncovered_task_classes,
@@ -393,6 +395,14 @@ def _run_reactive_bootstrap_scoped(
     build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None,
 ) -> ReactiveBootstrapResult:
     """:func:`run_reactive_bootstrap` with the build config already installed."""
+    # The scope hash validates every class the build config names, and a
+    # configured class need not be one the roots import — a dynamic
+    # upstream three yields down is the typical case. Register the app's
+    # declared task modules first, exactly as the deployed ``build`` and
+    # ``tick`` wrappers do; cached per module list, so a warm container
+    # pays nothing.
+    if task_module_patterns:
+        import_task_modules(expand_task_module_patterns(task_module_patterns))
     scope_key = structure_scope_key(code_id(), build_config)
     if build_config:
         # Only with a config to resolve: the roots arrived by value from the

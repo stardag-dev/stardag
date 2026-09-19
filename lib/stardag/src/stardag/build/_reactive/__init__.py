@@ -161,6 +161,8 @@ from stardag.build._reactive._tick import (
     SchedulerLease as SchedulerLease,
     TickConfig as TickConfig,
     TickSummary as TickSummary,
+    RollOver as RollOver,
+    RollOverFailed as RollOverFailed,
     run_tick_aio as run_tick_aio,
 )
 
@@ -169,6 +171,8 @@ __all__ = [
     "SchedulerLease",
     "TickConfig",
     "TickSummary",
+    "RollOver",
+    "RollOverFailed",
     "claim_ttl_seconds",
     "discover_and_register_aio",
     "run_tick_aio",

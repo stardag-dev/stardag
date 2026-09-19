@@ -508,8 +508,10 @@ class TestWorkerScope:
         # decides (the build's current scope).
         assert worker_scope_key(None, build_id) is None
         assert worker_scope_key(f"build:{build_id}", build_id) is None
-        # Another build's placeholder carries no config half either.
-        assert worker_scope_key(f"build:{uuid4()}", build_id) is None
+        # Another build's placeholder is a misrouted spawn: it carries no
+        # config half and must not fall back to this build's current scope.
+        with pytest.raises(RuntimeError, match="another build's placeholder"):
+            worker_scope_key(f"build:{uuid4()}", build_id)
 
     def test_a_task_planned_by_other_code_runs_here(
         self, recording_registry, fake_call_id, default_in_memory_fs_target

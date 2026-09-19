@@ -17,6 +17,7 @@ from stardag.build._base import (
     TaskExecutorABC,
 )
 from stardag.build._task_modules import import_failure_note
+from stardag.build_config import get_build_config, rebind_to_build_config
 from stardag.build._task_store import BuildTaskStore
 from stardag.registry import (
     BuildFrontier,
@@ -227,6 +228,14 @@ async def _load_task(
     """
     task = await task_store.load_task_aio(task_id)
     if task is not None:
+        # A pickle restores the level 2/3 values the writer's code resolved,
+        # not this process's. Re-binding re-validates the identity data
+        # under the installed build config and this code, so a build that
+        # rolled over to a newer deployment does not schedule tasks carrying
+        # the old code's defaults. Only with a config to resolve — the same
+        # rule as the bootstrap's, for the same pickle-safety reason.
+        if get_build_config():
+            task = rebind_to_build_config(task)
         return task
     try:
         metadata = await registry.task_get_metadata_aio(UUID(task_id))
