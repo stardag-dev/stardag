@@ -1789,14 +1789,14 @@ class FailOnRegisterRegistry(NoOpRegistry):
         self.register_calls: list[UUID] = []
         self.complete_calls: list[UUID] = []
 
-    def task_register(self, build_id: UUID, task) -> None:
+    def task_register(self, build_id: UUID, task, **kwargs) -> None:
         self.register_calls.append(task.id)
         raise ConnectionError("Registry register unavailable")
 
     def task_complete(self, build_id: UUID, task) -> None:
         self.complete_calls.append(task.id)
 
-    async def task_register_aio(self, build_id: UUID, task) -> None:
+    async def task_register_aio(self, build_id: UUID, task, **kwargs) -> None:
         self.register_calls.append(task.id)
         raise ConnectionError("Registry register unavailable")
 

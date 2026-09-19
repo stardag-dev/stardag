@@ -99,10 +99,13 @@ def _backfill_build_status(connection: sa.engine.Connection) -> None:
             connection.execute(update_stmt, pending_updates)
             pending_updates.clear()
 
-    # Statement-level, NOT `connection.execution_options(...)`: that mutates
-    # the connection Alembic is running the whole migration on, and a
-    # streaming connection reports rowcount -1 — which Alembic reads as "the
-    # version-table update matched no row" and aborts every upgrade.
+    # Buffered, deliberately. This read used to stream (a server-side
+    # cursor), but an asyncpg cursor is a portal bound to the transaction:
+    # nothing closes it before the transaction ends, and every migration in
+    # an upgrade runs in ONE transaction, so any later migration that alters
+    # ``events`` failed with "being used by active queries in this session".
+    # Build-level events (``task_id IS NULL``) are a handful per build, so
+    # buffering them is cheap.
     events = connection.execute(
         sa.text(
             """
@@ -111,8 +114,8 @@ def _backfill_build_status(connection: sa.engine.Connection) -> None:
             WHERE task_id IS NULL
             ORDER BY build_id ASC, created_at ASC, id ASC
             """
-        ).execution_options(stream_results=True)
-    )
+        )
+    ).fetchall()
 
     current_id: str | None = None
     state = _fresh_state()

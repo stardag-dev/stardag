@@ -358,19 +358,18 @@ async def test_bulk_register_keeps_the_lock_order_the_other_writers_use(
 async def test_the_two_endpoints_create_new_tasks_in_one_order(
     pg_engine, pg_client
 ) -> None:
-    """A dependency and its parent, both new, registered from both sides.
+    """A parent, new on both sides, naming a dependency that already exists.
 
-    The endpoints have to agree on the order they create rows in, or they
-    wait on each other. Bulk creates every missing task in sorted
+    The endpoints have to agree on the order they take rows in, or they
+    wait on each other. Bulk takes every row it touches in sorted
     ``task_id`` order; the single path used to create *its own* task first
-    and reach the missing upstreams afterwards, through
-    ``_reconcile_dependency_edges``. With a dependency whose id sorts
+    and reach the upstreams afterwards. With a dependency whose id sorts
     before its parent's, that is a cycle -- bulk holding the dependency
     and waiting for the parent, the single path holding the parent and
     waiting for the dependency -- and Postgres resolves it by killing one,
     which is a 500 on a registration that did nothing wrong.
 
-    **The middle row is what makes this deterministic.** Bulk inserts its
+    **The middle row is what makes this deterministic.** Bulk takes its
     rows in one statement, so the window between "holds the dependency"
     and "wants the parent" is microseconds wide and cannot be aimed at
     from outside. A third task whose id sorts between the two, held
@@ -378,6 +377,10 @@ async def test_the_two_endpoints_create_new_tasks_in_one_order(
     the dependency and is waiting, and stays waiting until this test says
     otherwise. Everything after that is the real interleaving, driven
     through both real endpoints.
+
+    The dependency is registered and committed beforehand: an edge may
+    only name a registered task now, so both callers lock it rather than
+    create it -- which is still the first row in their shared order.
     """
     dep = "aaa-dependency"
     middle = "mmm-parks-the-bulk-call"
@@ -387,16 +390,19 @@ async def test_the_two_endpoints_create_new_tasks_in_one_order(
     other_build_id = await _new_build(pg_client)
 
     maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as setup:
+        await _insert_row_uncommitted(setup, dep)
+        await setup.commit()
+
     async with maker() as blocker:
         await _insert_row_uncommitted(blocker, middle)
 
-        # Parks with the dependency inserted and held, waiting on `middle`.
+        # Parks with the dependency locked, waiting on `middle`.
         bulk = asyncio.create_task(
             pg_client.post(
                 f"/api/v1/builds/{build_id}/tasks/bulk",
                 json={
                     "tasks": [
-                        _task(dep),
                         _task(middle),
                         _task(parent, dependency_task_ids=[dep]),
                     ]
@@ -431,12 +437,12 @@ async def test_the_two_endpoints_create_new_tasks_in_one_order(
 
     assert bulk_response.status_code == 201, (
         f"bulk: {bulk_response.status_code} {bulk_response.text} -- a "
-        "deadlock here means the two endpoints create rows in orders that "
+        "deadlock here means the two endpoints take rows in orders that "
         "disagree"
     )
     assert single_response.status_code == 201, (
         f"single: {single_response.status_code} {single_response.text} -- a "
-        "deadlock here means the two endpoints create rows in orders that "
+        "deadlock here means the two endpoints take rows in orders that "
         "disagree"
     )
 
@@ -446,35 +452,28 @@ async def test_the_two_endpoints_create_new_tasks_in_one_order(
             assert len(rows) == 1, f"{len(rows)} rows for {task_id}"
 
 
-async def test_bulk_creates_an_omitted_upstream_with_its_batch_not_after_it(
+async def test_bulk_refuses_an_unregistered_upstream_before_taking_any_row(
     pg_engine, pg_client
 ) -> None:
-    """The batch names a dependency it does not carry.
+    """The batch names a dependency nobody registered.
 
-    Bulk used to create such an upstream in the reconcile step's safety
-    hatch, *after* its batch was already inserted and held -- a second
-    creation, later, in an order nothing else shares. That is the same
-    cycle as the single path's, from the other side: bulk holding the
-    parent and waiting for the dependency, the single path holding the
-    dependency and waiting for the parent.
-
-    The parking row sorts *after* the parent here, so bulk gets as far as
-    inserting and holding the parent before it stops. That is what makes
-    the old ordering reachable: with the batch in hand, the only thing
-    left for it to create is the dependency somebody else now holds.
+    That used to be created for it, *after* its batch was already inserted
+    and held -- a second creation, later, in an order nothing else shares,
+    and the other side of the cycle the test above pins. Now it is a 400,
+    and the refusal happens before the sorted take: the call answers
+    promptly even while a row it would otherwise have to wait for is held
+    uncommitted by someone else, and creates nothing.
     """
     dep = "aaa-omitted-upstream"
     parent = "zzz-parent"
-    park = "zzzz-parks-the-bulk-call"
+    park = "zzzz-would-park-the-bulk-call"
 
     build_id = await _new_build(pg_client)
-    other_build_id = await _new_build(pg_client)
 
     maker = async_sessionmaker(pg_engine, expire_on_commit=False)
     async with maker() as blocker:
         await _insert_row_uncommitted(blocker, park)
 
-        # The dependency is named but not carried by the batch.
         bulk = asyncio.create_task(
             pg_client.post(
                 f"/api/v1/builds/{build_id}/tasks/bulk",
@@ -487,91 +486,61 @@ async def test_bulk_creates_an_omitted_upstream_with_its_batch_not_after_it(
             )
         )
         await asyncio.sleep(SETTLE_SECONDS)
-        assert not bulk.done(), "the bulk call did not park on the held row"
-
-        # Registers the *dependency*, naming the parent as its own
-        # upstream. That direction is what builds the cycle against the
-        # original code: the old single path inserted its own task first,
-        # so it takes `dep` and then waits for `parent` -- which the bulk
-        # call is holding. Registering `parent` here instead would have it
-        # block on the parent insert while holding nothing, and the test
-        # would pass against the very implementation it exists to reject.
-        single = asyncio.create_task(
-            pg_client.post(
-                f"/api/v1/builds/{other_build_id}/tasks",
-                json=_task(dep, dependency_task_ids=[parent]),
-            )
+        assert bulk.done(), (
+            "the bulk call parked on the held row, so it took rows before "
+            "refusing the unknown upstream"
         )
-        await asyncio.sleep(SETTLE_SECONDS)
-        assert not single.done(), (
-            "the single call finished before the bulk call was released, so "
-            "the two never overlapped"
-        )
+        response = bulk.result()
+        await blocker.rollback()
 
-        await blocker.commit()
-
-        single_response = await asyncio.wait_for(single, timeout=CALL_TIMEOUT_SECONDS)
-        bulk_response = await asyncio.wait_for(bulk, timeout=CALL_TIMEOUT_SECONDS)
-
-    assert bulk_response.status_code == 201, (
-        f"bulk: {bulk_response.status_code} {bulk_response.text} -- a "
-        "deadlock here means the batch's omitted upstream is still being "
-        "created after the batch rather than with it"
-    )
-    assert single_response.status_code == 201, (
-        f"single: {single_response.status_code} {single_response.text}"
-    )
+    assert response.status_code == 400, f"{response.status_code} {response.text}"
+    assert response.json()["detail"]["error_code"] == "unknown_upstream_task_ids"
 
     async with maker() as check:
         for task_id in (dep, parent, park):
-            rows = await _rows_for(check, task_id)
-            assert len(rows) == 1, f"{len(rows)} rows for {task_id}"
+            assert await _rows_for(check, task_id) == [], f"rows for {task_id}"
 
 
-async def test_adding_dependencies_takes_the_downstream_before_it_creates(
+async def test_adding_dependencies_takes_the_downstream_before_linking(
     pg_engine, pg_client
 ) -> None:
     """The third writer, and the one whose cycle runs through a key lock.
 
-    ``POST /tasks/{id}/dependencies`` creates missing upstreams as
-    phantoms and then inserts the edges. The edge insert takes an implicit
-    ``FOR KEY SHARE`` on the downstream row for its foreign key, and that
-    conflicts with a ``FOR UPDATE`` a registration holds -- so this writer
-    could end up holding a phantom while waiting on the downstream, while
-    the registration held the downstream and waited to create that same
-    phantom.
-
-    Nothing about sorting prevents that: the lock it waits on is not a row
-    it names, it is one the foreign key names for it. What prevents it is
-    taking the downstream *first*, which is the order the registration
+    The edge insert of ``POST /tasks/{id}/dependencies`` takes an implicit
+    ``FOR KEY SHARE`` on both endpoints of every edge for its foreign keys,
+    and that conflicts with a ``FOR UPDATE`` a registration holds. Nothing
+    about sorting prevents a cycle there: the lock it waits on is not a
+    row it names, it is one the foreign key names for it. What prevents it
+    is taking the endpoints *first*, in the order the registration
     endpoints already follow.
 
     The parking row sorts between the downstream and the upstream, so the
     registration stops with the downstream held and the upstream not yet
-    created -- precisely the window this writer used to walk into.
+    taken -- the window this writer used to walk into. It is a committed
+    row locked ``FOR UPDATE`` by another transaction, since a dependency
+    has to exist to be named at all now.
     """
     downstream = "ddd-downstream"
-    # Sorts *between* the downstream and the upstream, so the registration
-    # stops with the downstream taken and the upstream not yet created --
-    # the window this writer used to walk into. A parking row that sorted
-    # first would stop it before it had taken anything, which is a
-    # different (and uninteresting) state now that every writer acquires
-    # in one sorted pass.
     park = "mmm-parks-the-registration"
     upstream = "xxx-upstream"
 
     build_id = await _new_build(pg_client)
     other_build_id = await _new_build(pg_client)
 
-    # The downstream exists and is committed, so the registration below
-    # locks it rather than creating it.
     maker = async_sessionmaker(pg_engine, expire_on_commit=False)
     async with maker() as setup:
-        await _insert_row_uncommitted(setup, downstream)
+        for task_id in (downstream, park, upstream):
+            await _insert_row_uncommitted(setup, task_id)
         await setup.commit()
 
     async with maker() as blocker:
-        await _insert_row_uncommitted(blocker, park)
+        held = await blocker.execute(
+            select(Task)
+            .where(Task.environment_id == DEFAULT_ENVIRONMENT_ID)
+            .where(Task.task_id == park)
+            .with_for_update()
+        )
+        assert held.scalar_one() is not None
 
         registration = asyncio.create_task(
             pg_client.post(
@@ -593,8 +562,8 @@ async def test_adding_dependencies_takes_the_downstream_before_it_creates(
             "the dependency call finished before the registration was "
             "released, so it never contended for the downstream and this "
             "test would pass against the very ordering it exists to rule "
-            "out -- an implementation that creates the phantom first can "
-            "finish early here and still satisfy the 200 below"
+            "out -- an implementation that links before taking the "
+            "downstream can finish early here and still satisfy the 200 below"
         )
 
         await blocker.commit()
@@ -611,8 +580,7 @@ async def test_adding_dependencies_takes_the_downstream_before_it_creates(
     assert adding_response.status_code == 200, (
         f"adding dependencies: {adding_response.status_code} "
         f"{adding_response.text} -- a deadlock here means this writer "
-        "creates rows before taking the downstream it is about to "
-        "reference"
+        "links before taking the downstream it is about to reference"
     )
 
     async with maker() as check:

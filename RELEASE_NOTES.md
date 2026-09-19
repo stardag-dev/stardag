@@ -6,6 +6,185 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## Unreleased — Dependency structure belongs to the code, not the task id
+
+### The idea in one paragraph
+
+A task id is a promise about **output**: the same parameters give the same
+result at the same location. It was never meant to be a promise about the
+_upstream set_ the task was built from — a downstream asks for its input's
+output, not for how the input got there. Until now the registry stored a
+task's dependency edges as if they were part of that promise, globally and
+forever, so changing a `requires()` or a fan-out width without bumping the
+version left later builds gated on upstreams nothing would ever produce
+again, or re-running a stale generation. This release moves the edges to
+where they belong: **with the code that evaluated them.**
+
+### What changes for you
+
+- **Change `requires()` or a fan-out freely.** No version bump. Deploy the
+  new code: new builds plan with the new structure, and a build already
+  running **rolls over** to it at its next scheduler pass.
+- **Runtime knobs get a proper home.** A partition size, a thread count, a
+  batch width are declared with a _significance_ and given a value **per
+  build** through one `build_config`, never in a constructor. The task id
+  stays the same, the whole build agrees on the value, and the registry
+  records identity parameters only. `hash_exclude=True` still works with
+  a `DeprecationWarning`.
+- **Builds that share code share discovery.** Two builds under the same
+  code and config trust each other's yielded dependencies, so an expensive
+  pre-yield section runs once per code version, not once per build.
+- **Fewer surprises in the scheduler.** A cancelled or skipped task in a
+  build's plan is simply reset and run; there are no "external blockers"
+  and no phantom placeholder tasks any more. A build has one config for its
+  life: re-triggering it with a different `dependencies_only` config is
+  refused with `BuildConfigMismatchError` — start a new one.
+- **One live deployment per app, as on Modal.** A _deployment_ in stardag
+  is exactly Modal's: one code version of one app, recorded in the
+  registry at `stardag modal deploy` and listed by
+  `stardag modal deployments`. Redeploy under the same name and running
+  builds follow; a branch that should run beside production is another
+  app name.
+
+### How it works, briefly
+
+Every build carries a **structure scope**: the deployment's _code id_ (the
+git SHA of a clean tree) plus a hash of the build's `dependencies_only`
+config. Dependency edges are recorded under that scope, and "are all my
+upstreams complete?" is answered over the scope the build is _currently
+planned under_. Task _completion_ and the _execution claim_ stay global,
+keyed on the task id, so caching and exactly-once execution are unchanged.
+Within a scope edges only grow, so a build can wait on an upstream it no
+longer needs but can never run before one it does. When the app is
+redeployed, the next scheduler pass re-plans each running build under the
+new code and moves its scope; workers register the dependencies they yield
+under their own code's scope, so an old container's late yield never
+reaches a re-planned build. The full reasoning is in
+[`docs/design/scope-keyed-dependency-structure.md`](docs/design/scope-keyed-dependency-structure.md).
+
+One contract makes the sharing sound: **environment variables may affect
+how a task executes, never its output or its dependency structure.**
+Anything that changes what a task writes or yields is a parameter or a
+`dependencies_only` value.
+
+### Upgrade order: server first, then SDK
+
+This SDK requires a Registry API at this release or later. Against an older
+server a build refuses to start, or to fix its scope, with
+`RegistryTooOldError` rather than run over environment-global edges. An
+older SDK against the new server keeps working for the builds it creates,
+on a per-build scope the server assigns. A reactive build running across
+the server deploy keeps its gates: the migration copies its edges into its
+own scope.
+
+An older SDK may also drive a build this release planned: its ticks and
+workers know nothing about scopes, so the edges they register land in the
+build's current scope. That can only add gates, never remove one, so the
+build stays correct; if the old code declares an upstream the new code
+dropped, the build waits on it until re-triggered. Avoid mixing SDK versions
+on one build; finish the rollout and re-trigger instead.
+
+### Migration checklist
+
+- `hash_exclude=True` → `significance="execution_only"` (or
+  `"dependencies_only"` if the value changes what is required or yielded),
+  delete the argument from every constructor call, pass the value in
+  `build_config` keyed `"<namespace>.<Name>"`. `AliasTask` is unaffected.
+- A fan-out width or partitioning read from an environment variable → a
+  `dependencies_only` field.
+- Custom `RegistryABC` implementations: the four registration methods take
+  keyword-only `declared_dependencies` and `scope_key`; `build_start(_aio)`
+  and `build_resume(_aio)` take keyword-only `scope_key` / `build_config`;
+  `build_set_scope(_aio)`, `deployment_record` and `deployment_list` are
+  new with no-op defaults.
+- In the UI, the Task Explorer graph follows each task's provenance (a hop
+  between code versions is marked), phantom nodes are gone, and the build
+  panel no longer lists external blockers.
+
+### In practice
+
+**Declare what each parameter is for.** Only identity parameters are passed
+at init; the other two are read from the build config.
+
+```python
+from typing import Annotated
+import stardag as sd
+
+class Aggregate(sd.Task[Summary]):
+    __namespace__ = "reports"
+    period: str                                                                      # identity: part of the id
+    partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
+    num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
+
+    def run(self):
+        chunks = [Chunk(period=self.period, index=i) for i in range(self.partition_size)]
+        yield chunks                       # structure depends on partition_size, output does not
+        self._save(merge(c.load() for c in chunks), threads=self.num_threads)
+
+Aggregate(period="2026-01")                 # fine
+Aggregate(period="2026-01", num_threads=2)  # raises: level 2/3 values come from the build config
+```
+
+**Give values per build.** One mapping, keyed by `namespace.Name`, stored
+with the build and installed everywhere a task of that build is constructed.
+
+```python
+config = {"reports.Aggregate": {"partition_size": 500, "num_threads": 8}}
+
+sd.build(Aggregate(period="2026-01"), build_config=config)          # local; also build_aio / build_sequential
+app.build_trigger(Aggregate(period="2026-01"), reactive=True, build_config=config)   # on Modal
+
+with sd.build_config_scope({"reports.Aggregate": {"num_threads": 2}}):  # in tests
+    assert Aggregate(period="2026-01").num_threads == 2
+```
+
+Two builds whose `dependencies_only` values differ have different scopes
+and never see each other's edges; builds whose `execution_only` values
+differ share a scope. A re-trigger (`build_trigger(build_id=...)`) reuses
+the build's stored config unless you pass the same one.
+
+**Deploy new code.** Edit `requires()`, change a default partition size,
+reshape a yield; commit; deploy under the same app name.
+
+```bash
+stardag modal deploy app.py     # the new code; recorded as a deployment of this app
+stardag modal deployments       # code versions deployed here, newest first — the newest is current
+```
+
+```python
+app.build_trigger(root, reactive=True)  # a new build, planned by the new code
+```
+
+Builds already running move too. Their next scheduler tick runs on the new
+code, sees the build was planned by an earlier version, and re-plans it:
+discovery again under the new code with the build's stored config, edges
+recorded under the new scope, the scope moved (`rolled_over` in that tick's
+summary). Containers already running finish on the old code and report as
+usual; a dynamic dependency one of them yields late lands in the old code's
+scope, so the re-planned build never sees it and the new code decides its
+own structure. An execution the new plan no longer needs finishes on its
+own; its output is content-addressed and harms nothing. Two preconditions:
+the deployment must be **recorded** (`stardag modal deploy` does that, and
+exits non-zero if the registry cannot be reached — re-run it, it is
+idempotent), and the task store must be **pickle-free** (`task_modules` or
+`require_pickle_free=True`), because a pickle carries the code it was
+written by. What cannot roll over — a root whose _identity_ parameters you
+changed, or a deployment that may store pickles — fails the build with
+`rollover_failed`; re-trigger it as a new build.
+
+A branch that should run beside production is another app with its own
+name and its own single live version. A convention, not a feature:
+
+```python
+import os
+
+app = sd_modal.StardagApp(f"reports-{os.environ.get('BRANCH', 'main')}", ...)
+```
+
+Deploy from a clean checkout — a dirty tree gets a one-off code id, so
+every deploy of it is a new scope that shares nothing. `STARDAG_CODE_ID`
+names the code where there is no git checkout (CI images, for example).
+
 ## v0.23.0 — Ten lingering builds per container, not one
 
 The headline is two changes, both about what reactive scheduling costs to

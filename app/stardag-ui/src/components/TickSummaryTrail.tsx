@@ -31,6 +31,16 @@ const OUTCOMES: Record<string, { label: string; help: string; tone: string }> = 
     help: "The build is owned by a different reactive app than the one that ticked, so this tick declined to drive it.",
     tone: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
   },
+  superseded: {
+    label: "superseded",
+    help: "The app was redeployed while this tick was running and a tick on the new code re-planned the build, so this one stepped aside. Normal after a deploy.",
+    tone: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300",
+  },
+  rollover_failed: {
+    label: "rollover failed",
+    help: "The app was redeployed and the new code could not re-plan this build — a root task's identity parameters changed, so it cannot be rebuilt from the registry. Re-trigger it as a new build.",
+    tone: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
+  },
 };
 
 // Counters this UI knows how to explain. Everything else in `summary` is
@@ -52,7 +62,10 @@ const COUNTERS: Record<string, { label: string; help: string }> = {
     label: "executions cancelled",
     help: "Detached executions cancelled by this tick.",
   },
-  iterations: { label: "iterations", help: "Scheduling passes within this tick." },
+  iterations: {
+    label: "iterations",
+    help: "Scheduling passes within this tick.",
+  },
   limit_denied: {
     label: "concurrency-limit denied",
     help: "Spawns refused because a named concurrency limit was full. The build is waiting for a slot, not stuck.",
@@ -61,7 +74,14 @@ const COUNTERS: Record<string, { label: string; help: string }> = {
     label: "claim denied",
     help: "Spawns refused because another build already holds the task's execution claim. The claim holder must finish or be released.",
   },
-  skipped: { label: "skipped", help: "Tasks skipped because an upstream failed." },
+  skipped: {
+    label: "skipped",
+    help: "Tasks skipped because an upstream failed.",
+  },
+  rolled_over: {
+    label: "rolled over",
+    help: "The build was planned by an earlier deployment; this tick re-planned it under the current code and moved its structure scope.",
+  },
   terminal_status: {
     label: "terminal status",
     help: "The status the tick moved the build to.",

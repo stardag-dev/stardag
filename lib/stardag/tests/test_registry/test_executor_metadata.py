@@ -60,11 +60,13 @@ class MetadataAwareRegistry(NoOpRegistry):
             )
         )
 
-    def build_start(self, root_tasks=None, description=None, executor_metadata=None):
+    def build_start(
+        self, root_tasks=None, description=None, executor_metadata=None, **kwargs
+    ):
         self.calls.append(("build_start", {"executor_metadata": executor_metadata}))
         return uuid4()
 
-    def build_resume(self, build_id, executor_metadata=None) -> None:
+    def build_resume(self, build_id, executor_metadata=None, **kwargs) -> None:
         self.calls.append(("build_resume", {"executor_metadata": executor_metadata}))
 
 

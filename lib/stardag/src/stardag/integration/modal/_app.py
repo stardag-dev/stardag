@@ -24,12 +24,18 @@ from modal.exception import NotFoundError as ModalNotFoundError
 
 from stardag import BaseTask
 from stardag.build import BuildSummary
+from stardag.build._scope import (
+    STARDAG_CODE_ID_ENV,
+    code_id as _process_code_id,
+)
 from stardag.build._task_modules import (
     TaskModulesError,
     expand_task_module_patterns,
+    import_task_modules,
     set_declared_task_module_patterns,
     validate_task_module_patterns,
 )
+from stardag.build_config import UnknownTaskClassError, canonical_structure_config
 from stardag.exceptions import StardagError
 from stardag.integration.modal._bootstrap import (
     ReactiveDiscovery,
@@ -218,6 +224,30 @@ def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
     return (f"{module_name.split('.')[0]}.*",)
 
 
+def _validate_build_config_at_trigger(
+    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]],
+) -> None:
+    """Fail a misconfigured trigger here, before a build exists for it.
+
+    The deployment validates the config again when it fixes the build's
+    scope, and a failure there is recorded as BUILD_FAILED — but that is a
+    build minted, spawned and failed remotely, read back from the registry,
+    for a typo the caller could have been told about synchronously. A
+    misspelled field, an identity field or an invalid value is a
+    :class:`BuildConfigError` right here. A class this process has not
+    imported is the one thing it cannot judge (the trigger need not import
+    every configured upstream; the bootstrap does), so that case passes
+    through to the deployment, which has the final word.
+    """
+    try:
+        canonical_structure_config(build_config)
+    except UnknownTaskClassError as e:
+        logger.debug(
+            f"build_config not fully checked at the trigger ({e}); the "
+            "deployment's bootstrap validates it against every task module."
+        )
+
+
 class StardagApp:
     """Wrapper around modal.App for Stardag task execution.
 
@@ -293,6 +323,12 @@ class StardagApp:
         Args:
             modal_app_or_name: Either a modal.App instance or a string name.
                 If a string, a new modal.App will be created with that name.
+                One live deployment per name, as on Modal: a redeploy
+                replaces the code every new spawn lands on, and a running
+                build rolls over to it at its next scheduler tick (see
+                ``docs/design/scope-keyed-dependency-structure.md``). A
+                branch or experiment that must not take over production is
+                simply another app name.
             build_function: Callable registered as the Modal "build" function.
                 Must match the ``BuildFunction`` protocol:
                 ``(tasks, worker_selector, app_name) -> BuildSummary | None``.
@@ -598,6 +634,8 @@ class StardagApp:
             assert isinstance(modal_app_or_name, modal.App)
             assert modal_app_or_name.name is not None
             self.modal_app = modal_app_or_name
+        # Minted at finalize(): the code identity baked into the deployment.
+        self._code_id: str | None = None
 
         # `is not None` rather than truthiness: a selector is an arbitrary
         # callable, and one whose class defines __bool__/__len__ falsey
@@ -726,9 +764,18 @@ class StardagApp:
 
     @property
     def name(self) -> str:
-        """The Modal app name."""
+        """The Modal app name this object deploys as, or was deployed as."""
         assert self.modal_app.name is not None
         return self.modal_app.name
+
+    @property
+    def code_id(self) -> str:
+        """The code identity of this process, minted once (see
+        ``stardag.build._scope.code_id``). Baked into the deployment at
+        :meth:`finalize`, so every container of it answers the same."""
+        if self._code_id is None:
+            self._code_id = _process_code_id()
+        return self._code_id
 
     # --- finalize (deploy) ---
 
@@ -818,6 +865,13 @@ class StardagApp:
             extra_secrets.append(
                 modal.Secret.from_dict({STARDAG_MODAL_WORKSPACE_ENV: deploy_workspace})
             )
+        # The code identity, minted here and baked into every function, so
+        # the bootstrap, every tick and every worker of this deployment
+        # derive one and the same structure scope — the first half of the
+        # scope key every edge they register carries.
+        extra_secrets.append(
+            modal.Secret.from_dict({STARDAG_CODE_ID_ENV: self.code_id})
+        )
         # The registry API-key secret is injected into every function (build,
         # workers, tick, watchdog) — all of them talk to the registry. It's
         # the ONLY secret propagated across functions; per-function
@@ -1024,6 +1078,14 @@ class StardagApp:
             build_kwargs: dict[str, typing.Any] | None = None,
         ) -> BuildSummary | None:
             _run_container_setup(container_setup)
+            # The deployed module list, imported before the builder hashes
+            # the build's structure scope: that hash validates every class
+            # the build config names, and a configured upstream discovered
+            # dynamically may live in a module the roots (which arrive by
+            # value) never import. Same list and same reasons as the tick.
+            if task_modules:
+                set_declared_task_module_patterns(task_module_patterns)
+                import_task_modules(task_modules)
             return build_fn(tasks, worker_selector, app_name, build_kwargs=build_kwargs)
 
         run_fn = self._run_function
@@ -1129,6 +1191,7 @@ class StardagApp:
             build_id: str,
             tasks: typing.Sequence[BaseTask] | BaseTask,
             tick_kwargs: dict[str, typing.Any] | None = None,
+            build_config: dict[str, dict[str, typing.Any]] | None = None,
         ) -> dict[str, typing.Any]:
             _run_container_setup(container_setup)
             _setup_logging()
@@ -1152,6 +1215,7 @@ class StardagApp:
                     elide_pickles=elide_pickles,
                     require_pickle_free=require_pickle_free,
                     limit_key_selector=tick_deployment.limit_key_selector,
+                    build_config=build_config,
                 )
             except BaseException as e:
                 # The trigger handed this container a RUNNING build and
@@ -1264,6 +1328,8 @@ class StardagApp:
         description: str | None = None,
         reactive: bool = False,
         tick_kwargs: dict[str, typing.Any] | None = None,
+        build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]]
+        | None = None,
     ) -> BuildTriggerResult:
         """Trigger a build with a registry build id minted at the trigger point.
 
@@ -1316,7 +1382,13 @@ class StardagApp:
                 root tasks to it.
             tick_kwargs: Optional kwargs for the reactive ``TickConfig``
                 (e.g. ``{"linger_seconds": 30}``).
-
+            build_config: The build's config — ``{"<namespace>.<Name>":
+                {"<field>": value}}`` for the tasks' ``dependencies_only`` /
+                ``execution_only`` fields (see ``StardagField.significance``).
+                Fixed for the build's life and stored in the registry; the
+                deployment installs it before it constructs or rehydrates any
+                task, so a value set here reaches every task of the build
+                and nothing else does.
         Returns:
             BuildTriggerResult with the ``build_id`` and the spawned Modal
             ``FunctionCall`` handle (the ``build`` function, or the
@@ -1344,6 +1416,8 @@ class StardagApp:
             )
         if reactive:
             tick_kwargs = _validate_tick_kwargs(tick_kwargs)
+        if build_config:
+            _validate_build_config_at_trigger(build_config)
 
         registry = registry_provider.get()
         # A configured registry is needed to mint a new build id, and
@@ -1358,12 +1432,29 @@ class StardagApp:
             )
         task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
         explicit_build_id = build_id is not None
-        executor_metadata = self._build_executor_metadata(reactive=reactive)
+        if (
+            explicit_build_id
+            and build_config is None
+            and not isinstance(registry, NoOpRegistry)
+        ):
+            assert build_id is not None
+            # A re-trigger by id without a config means "the build's own":
+            # the registry keeps a build's config for its life, and the
+            # bootstrap or resident build would otherwise plan under the
+            # bare config and be refused for a build that was configured.
+            stored = registry.build_get(build_id).build_config
+            if stored:
+                build_config = stored
+        app_name = self.name
+        executor_metadata = self._build_executor_metadata(
+            reactive=reactive, app_name=app_name
+        )
         if build_id is None:
             build_id = registry.build_start(
                 root_tasks=task_list,
                 description=description,
                 executor_metadata=executor_metadata,
+                build_config=build_config,
             )
 
         if reactive:
@@ -1374,22 +1465,28 @@ class StardagApp:
                 tick_kwargs=tick_kwargs,
                 is_retrigger=explicit_build_id,
                 executor_metadata=executor_metadata,
+                build_config=build_config,
+                app_name=app_name,
             )
 
         merged_kwargs["resume_build_id"] = build_id
+        if build_config is not None:
+            merged_kwargs["build_config"] = dict(build_config)
         build_function = modal.Function.from_name(
-            app_name=self.name,
+            app_name=app_name,
             name="build",
         )
         function_call = build_function.spawn(
             tasks=tasks,
             worker_selector=worker_selector or self.worker_selector,
-            app_name=self.name,
+            app_name=app_name,
             build_kwargs=merged_kwargs,
         )
         return BuildTriggerResult(build_id=build_id, function_call=function_call)
 
-    def _build_executor_metadata(self, *, reactive: bool) -> dict[str, typing.Any]:
+    def _build_executor_metadata(
+        self, *, reactive: bool, app_name: str | None = None
+    ) -> dict[str, typing.Any]:
         """Build-level executor metadata for a trigger (best-effort).
 
         ``function_name`` is the function the trigger actually spawns, not
@@ -1410,7 +1507,7 @@ class StardagApp:
             spawned = "bootstrap"
         metadata: dict[str, typing.Any] = {
             "kind": MODAL_EXECUTOR_NAME,
-            "app_name": self.name,
+            "app_name": app_name or self.name,
             "function_name": spawned,
             "reactive": reactive,
         }
@@ -1438,6 +1535,9 @@ class StardagApp:
         tick_kwargs: dict[str, typing.Any] | None,
         is_retrigger: bool,
         executor_metadata: dict[str, typing.Any] | None = None,
+        build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]]
+        | None = None,
+        app_name: str | None = None,
     ) -> BuildTriggerResult:
         """Reactive trigger: register the roots, then spawn ``bootstrap``.
 
@@ -1499,13 +1599,24 @@ class StardagApp:
         report, and it does.
         """
         root_ids = [str(t.id) for t in task_list]
+        app_name = app_name or self.name
         if is_retrigger:
             # Un-terminal the build (no-op on a fresh/running build).
             # Deliberately OUTSIDE the failure guard below: until this
             # succeeds the build may still be terminal, and marking a
             # terminal build failed on behalf of a resume that never
             # landed would misattribute someone else's outcome.
-            registry.build_resume(build_id, executor_metadata=executor_metadata)
+            #
+            # A re-trigger carries the same build config; a different one
+            # is refused by the registry (a build has one config for its
+            # life). No scope is named here: the bootstrap, which knows the
+            # deployment's code id, plans the build under it and moves the
+            # scope if the code changed since.
+            registry.build_resume(
+                build_id,
+                executor_metadata=executor_metadata,
+                build_config=build_config,
+            )
         # From here the build is RUNNING (fresh builds since build_start,
         # re-triggers since the resume above) and this trigger owns it.
         try:
@@ -1525,8 +1636,9 @@ class StardagApp:
                         build_id,
                         task_list,
                         registry=registry,
-                        app_name=self.name,
+                        app_name=app_name,
                         tick_kwargs=tick_kwargs,
+                        build_config=build_config,
                         task_module_patterns=self.task_modules,
                         elide_pickles=(
                             self._task_modules_declared or self.require_pickle_free
@@ -1543,12 +1655,16 @@ class StardagApp:
             # logs, i.e. exactly here.
             _advise_uncovered_root_task_modules(task_list, self.task_modules)
             bootstrap_function = modal.Function.from_name(
-                app_name=self.name, name="bootstrap"
+                app_name=app_name, name="bootstrap"
             )
+            # ``build_config`` only when given: a deployment predating the
+            # keyword would reject an unexpected argument, and a build with
+            # no config needs none.
             function_call = bootstrap_function.spawn(
                 build_id=str(build_id),
                 tasks=task_list,
                 tick_kwargs=tick_kwargs,
+                **({"build_config": dict(build_config)} if build_config else {}),
             )
         except BaseException as e:
             _fail_build_best_effort(registry, build_id, e)

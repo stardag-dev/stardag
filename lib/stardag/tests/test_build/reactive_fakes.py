@@ -38,7 +38,6 @@ from stardag.registry import (
     BuildExecutions,
     BuildFrontier,
     BuildNotifyResult,
-    FrontierExternalBlocker,
     FrontierTaskRef,
     NoOpRegistry,
     RegisteredTaskInfo,
@@ -78,6 +77,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         # simulate a non-reactive build.
         self.reactive_app_name: str | None = "test-app"
         self.reactive_tick_kwargs: dict | None = {}
+        # The scope the build is planned under, as the frontier reports it.
+        # None models a server predating scopes; a real scope naming another
+        # code id models a build a newer deployment re-planned mid-tick.
+        self.scope_key: str | None = None
         self.statuses: dict[str, str] = {}
         self.upstreams: dict[str, set[str]] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
@@ -167,7 +170,6 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.staged_starts: dict[str, tuple[str, str]] = {}
         # task_id -> (namespace, name), echoed on blocker entries.
         self.task_names: dict[str, tuple[str, str]] = {}
-        self.blocked_by_external_truncated = False
         # Derived status of OTHER builds in the environment, served by
         # build_get_aio — how the tick decides whether the build owning a
         # blocker is still going to schedule it. Absent ids 404, and
@@ -175,10 +177,6 @@ class FakeReactiveRegistry(NoOpRegistry):
         # the field.
         self.other_build_statuses: dict[UUID, str | None] = {}
         self.build_get_calls: list[UUID] = []
-        # Set False to emulate a server predating blocked_by_external: the
-        # fields stay at their model defaults, as they would deserialising
-        # a response that never carried them.
-        self.serves_blocked_by_external = True
         # Tick summaries reported by run_tick_aio, and an optional error to
         # raise from the reporting endpoint.
         self.reported_tick_summaries: list[dict] = []
@@ -188,6 +186,9 @@ class FakeReactiveRegistry(NoOpRegistry):
         # Set to make every id-based retry fail — a transient registry
         # error, or a route an older server does not serve.
         self.retry_by_id_error: Exception | None = None
+        # ...and every object-based retry, which is what the tick uses to
+        # reset a cancelled or skipped task it may run.
+        self.retry_error: Exception | None = None
         # Set False to emulate a server predating the executions route: the
         # tick falls back to filtering the frontier itself.
         self.serves_executions = True
@@ -338,15 +339,27 @@ class FakeReactiveRegistry(NoOpRegistry):
 
     # --- registry surface used by the tick ---
 
-    async def task_register_bulk_aio(self, build_id, tasks, *, limit_keys=None):
+    async def task_register_bulk_aio(
+        self,
+        build_id,
+        tasks,
+        *,
+        limit_keys=None,
+        declared_dependencies=None,
+        scope_key=None,
+    ):
         infos = []
         for task in tasks:
             tid = str(task.id)
             self.statuses.setdefault(tid, "pending")
-            self.upstreams.setdefault(tid, set()).update(
-                str(dep.id)
-                for dep in __import__("stardag").flatten_task_struct(task.requires())
-            )
+            # Mirrors the server: the declared set when the walk computed
+            # one, nothing for a task it pruned at, ``requires()`` only for
+            # a caller predating declarations.
+            if declared_dependencies is None:
+                deps = __import__("stardag").flatten_task_struct(task.requires())
+            else:
+                deps = declared_dependencies.get(task.id) or []
+            self.upstreams.setdefault(tid, set()).update(str(dep.id) for dep in deps)
             self.calls.append(("register", tid))
             executor, executor_ref = self.refs.get(tid, (None, None))
             infos.append(
@@ -504,6 +517,9 @@ class FakeReactiveRegistry(NoOpRegistry):
 
     async def task_retry_aio(self, build_id, task):
         tid = str(task.id)
+        if self.retry_error is not None:
+            self.calls.append(("retry-failed", tid))
+            raise self.retry_error
         self.calls.append(("retry", tid))
         self._count_event(tid, kind="other")
         # Same retryable set the server applies (suspended included: a
@@ -643,7 +659,9 @@ class FakeReactiveRegistry(NoOpRegistry):
             raise NotFoundError(f"Build {build_id} not found", detail="Build not found")
         return BuildInfo(id=build_id, status=self.other_build_statuses[build_id])
 
-    async def build_resume_aio(self, build_id, executor_metadata=None):
+    async def build_resume_aio(
+        self, build_id, executor_metadata=None, *, scope_key=None, build_config=None
+    ):
         """BUILD_RESUMED — what a re-trigger of this build id records.
 
         It starts a new round, and attempt counts are windowed to the
@@ -821,7 +839,13 @@ class FakeReactiveRegistry(NoOpRegistry):
                 ),
                 latest_status_expires_at=self.expires_at.get(tid),
                 attempt_count=(
-                    self.attempt_count(tid) if self.serves_attempt_counts else None
+                    (
+                        self.blocker_attempts[tid]
+                        if tid in self.blocker_attempts
+                        else self.attempt_count(tid)
+                    )
+                    if self.serves_attempt_counts
+                    else None
                 ),
                 interrupt_count=(
                     self.interrupt_count(tid) if self.serves_interrupt_counts else None
@@ -835,10 +859,21 @@ class FakeReactiveRegistry(NoOpRegistry):
             for tid, status in self.statuses.items()
             if tid not in self.not_in_build
         }
+        # Mirrors the server: CANCELLED and SKIPPED are actionable too once
+        # every upstream is complete — a revocation, or a skip whose reason
+        # no longer holds, for the tick to reset within its attempt budget.
         actionable = [
             ref(tid)
             for tid, status in in_build.items()
-            if status in ("pending", "suspended", "running", "interrupted")
+            if status
+            in (
+                "pending",
+                "suspended",
+                "running",
+                "interrupted",
+                "cancelled",
+                "skipped",
+            )
             and all(
                 self.statuses.get(up) == "completed"
                 for up in self.upstreams.get(tid, set())
@@ -848,52 +883,9 @@ class FakeReactiveRegistry(NoOpRegistry):
         for status in in_build.values():
             counts[status] = counts.get(status, 0) + 1
         running = [ref(tid) for tid, status in in_build.items() if status == "running"]
-        # Mirrors the API: computed ONLY when the build has nothing
-        # actionable and nothing running, so an empty list means "not
-        # blocked externally, OR not stalled".
-        blocked_by_external: list[FrontierExternalBlocker] = []
-        if self.serves_blocked_by_external and not actionable and not running:
-            for tid, status in in_build.items():
-                if status not in ("pending", "suspended", "running", "interrupted"):
-                    continue
-                for up in sorted(self.upstreams.get(tid, set())):
-                    if up not in self.statuses:
-                        continue
-                    if self.statuses[up] == "completed":
-                        continue
-                    if up not in self.status_build_id:
-                        continue  # this build's own doing — not external
-                    owner_id = self.status_build_id[up]
-                    if owner_id == build_id:
-                        continue
-                    namespace, name = self.task_names.get(up, ("", up))
-                    blocked_by_external.append(
-                        FrontierExternalBlocker(
-                            task_id=tid,
-                            blocking_task_id=up,
-                            blocking_task_namespace=namespace,
-                            blocking_task_name=name,
-                            blocking_status=self.statuses[up],
-                            blocking_status_at=self.status_at.get(up),
-                            # Mirrors the server: only a RUNNING task holds
-                            # a claim, so only a RUNNING blocker can carry
-                            # an expiry.
-                            blocking_status_expires_at=(
-                                self.expires_at.get(up)
-                                if self.statuses[up] == "running"
-                                else None
-                            ),
-                            blocking_status_build_id=owner_id,
-                            blocking_in_build=up not in self.not_in_build,
-                            # Mirrors the server: attempts are per build, so
-                            # only a blocker in this build's plan has any.
-                            blocking_attempt_count=(
-                                self.blocker_attempts.get(up, 0)
-                                if up not in self.not_in_build
-                                else None
-                            ),
-                        )
-                    )
+        # Always empty since edges became scoped to the build: the server
+        # re-closes the plan before reporting a stalled frontier, so a gate
+        # never points outside it. Kept on the wire for older SDKs.
         return BuildFrontier(
             build_id=build_id,
             build_status=self.build_status,
@@ -903,12 +895,11 @@ class FakeReactiveRegistry(NoOpRegistry):
             status_counts=counts,
             actionable=actionable,
             running=running,
-            blocked_by_external=blocked_by_external,
-            blocked_by_external_truncated=(
-                self.blocked_by_external_truncated and bool(blocked_by_external)
-            ),
+            blocked_by_external=[],
+            blocked_by_external_truncated=False,
             reactive_app_name=self.reactive_app_name,
             reactive_tick_kwargs=self.reactive_tick_kwargs,
+            scope_key=self.scope_key,
         )
 
 

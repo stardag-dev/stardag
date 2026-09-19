@@ -1,12 +1,34 @@
-"""Recursive upstream/downstream traversal for DAG visualization."""
+"""Recursive upstream/downstream traversal for DAG visualization.
+
+Edges are kept per *structure scope* (see ``models/task_dependency.py``),
+so a task can carry edges under several scopes: one per code version and
+structure config that ever planned it. Which of them a graph shows is the
+question this module answers, two ways:
+
+- **A build's graph** (``scope_key`` given) shows the edges in that build's
+  own scope. Unambiguous.
+- **The environment-wide view** (``scope_key`` None) follows each node's
+  **provenance**: the edges recorded in the scope of the build that produced
+  the node's current status. The graph then reads as "how each task was
+  actually built", and hops scopes where the history did — a complete
+  upstream built last month under old code shows its own old-code
+  ancestry, which is also the only scope its edges exist in. A task no
+  build has ever touched has no provenance and shows no edges.
+
+In both modes an edge is attributed by its **downstream** node, because a
+downstream declares its upstreams and never the other way round. Rows with
+a NULL scope predate scopes and count everywhere, which is the behaviour
+they had before.
+"""
 
 import hashlib
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from stardag_api.models import Task, TaskArtifact, TaskDependency
+from stardag_api.models import Build, Task, TaskArtifact, TaskDependency
 from stardag_api.models.enums import TaskStatus
 from stardag_api.schemas import (
     GroupSummary,
@@ -20,7 +42,7 @@ from stardag_api.services.status import get_all_task_global_statuses
 class _TraversedTask:
     """Lightweight container for a traversed task row."""
 
-    __slots__ = ("id", "task_id", "task_name", "task_namespace", "depth", "is_phantom")
+    __slots__ = ("id", "task_id", "task_name", "task_namespace", "depth", "scope_key")
 
     def __init__(
         self,
@@ -29,14 +51,47 @@ class _TraversedTask:
         task_name: str,
         task_namespace: str,
         depth: int,
-        is_phantom: bool = False,
+        scope_key: str | None = None,
     ):
         self.id = id
         self.task_id = task_id
         self.task_name = task_name
         self.task_namespace = task_namespace
         self.depth = depth
-        self.is_phantom = is_phantom
+        # Provenance scope: the scope the build behind the node's current
+        # status was planned under when it produced that status (frozen on
+        # the task row; the build's current scope for legacy rows). None
+        # when no build has touched it.
+        self.scope_key = scope_key
+
+
+def _provenance_scope(task, status_build):
+    """A node's provenance scope: the scope its status build was planned
+    under *when it produced the status*, frozen on the task row. A build's
+    scope moves on redeploy, so the build's current scope is only the
+    fallback for rows predating the column."""
+    return func.coalesce(task.latest_status_scope_key, status_build.scope_key)
+
+
+def _edge_scope_filter(scope_key: str | None, downstream, provenance):
+    """The predicate deciding whether an edge counts in this view.
+
+    ``downstream`` is the edge's downstream ``Task`` (possibly aliased) and
+    ``provenance`` the aliased ``Build`` joined on its
+    ``latest_status_build_id``; together they give the downstream's
+    provenance scope. An edge counts when it sits in that scope; in a
+    build's view, also when it sits in the build's own scope — the build's
+    plan is its own edges, and the context beyond the plan (complete
+    upstreams other builds produced) is read by provenance like everywhere
+    else. Legacy NULL-scope rows always count.
+    """
+    clauses = [
+        TaskDependency.scope_key.is_(None),
+        TaskDependency.scope_key == _provenance_scope(downstream, provenance),
+    ]
+    if scope_key is not None:
+        clauses.append(TaskDependency.scope_key == scope_key)
+    return or_(*clauses)
 
 
 async def _traverse_bfs(
@@ -45,13 +100,21 @@ async def _traverse_bfs(
     primary_task_pks: list[UUID],
     max_upstream_depth: int,
     max_downstream_depth: int,
+    scope_key: str | None,
 ) -> list[_TraversedTask]:
     """BFS traversal in both directions using iterative queries."""
+    prov = aliased(Build)
     # Fetch primary tasks
     result = await db.execute(
         select(
-            Task.id, Task.task_id, Task.task_name, Task.task_namespace, Task.is_phantom
-        ).where(Task.id.in_(primary_task_pks), Task.environment_id == environment_id)
+            Task.id,
+            Task.task_id,
+            Task.task_name,
+            Task.task_namespace,
+            _provenance_scope(Task, prov).label("scope_key"),
+        )
+        .outerjoin(prov, prov.id == Task.latest_status_build_id)
+        .where(Task.id.in_(primary_task_pks), Task.environment_id == environment_id)
     )
     rows = result.all()
 
@@ -63,28 +126,37 @@ async def _traverse_bfs(
             task_name=row.task_name,
             task_namespace=row.task_namespace,
             depth=0,
-            is_phantom=row.is_phantom,
+            scope_key=row.scope_key,
         )
 
-    # Upstream BFS (positive depth values)
+    # Upstream BFS (positive depth values). The edge's downstream is in the
+    # current frontier; its provenance decides whether the edge counts.
     current_frontier = set(visited.keys())
     for depth in range(1, max_upstream_depth + 1):
         if not current_frontier:
             break
 
+        downstream = aliased(Task)
+        downstream_prov = aliased(Build)
+        node_prov = aliased(Build)
         result = await db.execute(
             select(
                 Task.id,
                 Task.task_id,
                 Task.task_name,
                 Task.task_namespace,
-                Task.is_phantom,
-                TaskDependency.downstream_task_id,
+                _provenance_scope(Task, node_prov).label("scope_key"),
             )
             .join(TaskDependency, TaskDependency.upstream_task_id == Task.id)
+            .join(downstream, TaskDependency.downstream_task_id == downstream.id)
+            .outerjoin(
+                downstream_prov, downstream_prov.id == downstream.latest_status_build_id
+            )
+            .outerjoin(node_prov, node_prov.id == Task.latest_status_build_id)
             .where(
                 TaskDependency.downstream_task_id.in_(current_frontier),
                 Task.environment_id == environment_id,
+                _edge_scope_filter(scope_key, downstream, downstream_prov),
             )
         )
         upstream_rows = result.all()
@@ -98,31 +170,34 @@ async def _traverse_bfs(
                     task_name=row.task_name,
                     task_namespace=row.task_namespace,
                     depth=depth,
-                    is_phantom=row.is_phantom,
+                    scope_key=row.scope_key,
                 )
                 next_frontier.add(row.id)
 
         current_frontier = next_frontier
 
-    # Downstream BFS (negative depth values)
+    # Downstream BFS (negative depth values). The edge's downstream is the
+    # *new* node; again its provenance decides.
     current_frontier = {pk for pk in primary_task_pks if pk in visited}
     for depth_idx in range(1, max_downstream_depth + 1):
         if not current_frontier:
             break
 
+        node_prov = aliased(Build)
         result = await db.execute(
             select(
                 Task.id,
                 Task.task_id,
                 Task.task_name,
                 Task.task_namespace,
-                Task.is_phantom,
-                TaskDependency.upstream_task_id,
+                _provenance_scope(Task, node_prov).label("scope_key"),
             )
             .join(TaskDependency, TaskDependency.downstream_task_id == Task.id)
+            .outerjoin(node_prov, node_prov.id == Task.latest_status_build_id)
             .where(
                 TaskDependency.upstream_task_id.in_(current_frontier),
                 Task.environment_id == environment_id,
+                _edge_scope_filter(scope_key, Task, node_prov),
             )
         )
         downstream_rows = result.all()
@@ -136,7 +211,7 @@ async def _traverse_bfs(
                     task_name=row.task_name,
                     task_namespace=row.task_namespace,
                     depth=-depth_idx,
-                    is_phantom=row.is_phantom,
+                    scope_key=row.scope_key,
                 )
                 next_frontier.add(row.id)
 
@@ -153,6 +228,7 @@ async def traverse_upstream(
     downstream_depth: int = 0,
     max_per_type_per_level: int = 5,
     max_total_nodes: int = 500,
+    scope_key: str | None = None,
 ) -> TaskGraphExtendedResponse:
     """Traverse dependencies recursively and return extended graph data.
 
@@ -165,6 +241,9 @@ async def traverse_upstream(
         max_per_type_per_level: Max tasks per (task_name, depth, status) before
             ALL tasks in that group collapse into a single batch node
         max_total_nodes: Hard cap on total nodes returned
+        scope_key: The structure scope to read edges from (a build's graph).
+            None means the environment-wide view, which follows each node's
+            provenance scope — see the module docstring.
     """
     if not primary_task_pks:
         return TaskGraphExtendedResponse(
@@ -177,7 +256,12 @@ async def traverse_upstream(
         )
 
     traversed = await _traverse_bfs(
-        db, environment_id, primary_task_pks, upstream_depth, downstream_depth
+        db,
+        environment_id,
+        primary_task_pks,
+        upstream_depth,
+        downstream_depth,
+        scope_key,
     )
 
     total_upstream_count = sum(1 for t in traversed if t.depth > 0)
@@ -187,14 +271,25 @@ async def traverse_upstream(
     all_traversed_pks = [t.id for t in traversed]
     statuses = await get_all_task_global_statuses(db, all_traversed_pks)
 
-    # Build a set of phantom PKs for quick lookup
-    phantom_pks = {t.id for t in traversed if t.is_phantom}
-
     def _get_status(pk: UUID) -> TaskStatus:
-        if pk in phantom_pks:
-            return TaskStatus.UNREGISTERED
         tup = statuses.get(pk)
         return tup[0] if tup else TaskStatus.PENDING
+
+    # The focal scopes: the build's own in build mode, the primaries'
+    # provenance otherwise. An edge outside them is a hop between code
+    # versions, which the UI draws as such.
+    primary_pk_set = set(primary_task_pks)
+    if scope_key is not None:
+        focal_scopes: set[str] = {scope_key}
+    else:
+        focal_scopes = {
+            t.scope_key
+            for t in traversed
+            if t.id in primary_pk_set and t.scope_key is not None
+        }
+
+    def _cross_scope(edge_scope: str | None) -> bool:
+        return edge_scope is not None and edge_scope not in focal_scopes
 
     # Group by (depth, task_name, task_namespace, status) for batching
     groups_by_key: dict[tuple[int, str, str, TaskStatus], list[_TraversedTask]] = {}
@@ -251,18 +346,28 @@ async def traverse_upstream(
         truncated = True
 
     all_relevant_pks = set(included_task_pks) | grouped_task_pks
-    primary_pk_set = set(primary_task_pks)
 
-    # Fetch edges between all relevant tasks
+    # Fetch edges between all relevant tasks, under the same view rule the
+    # traversal used: attributed by the downstream's provenance (or the
+    # build's scope), legacy rows counting everywhere.
     if all_relevant_pks:
+        downstream = aliased(Task)
+        downstream_prov = aliased(Build)
         edge_result = await db.execute(
             select(
                 TaskDependency.upstream_task_id,
                 TaskDependency.downstream_task_id,
                 TaskDependency.is_dynamic,
-            ).where(
+                TaskDependency.scope_key,
+            )
+            .join(downstream, TaskDependency.downstream_task_id == downstream.id)
+            .outerjoin(
+                downstream_prov, downstream_prov.id == downstream.latest_status_build_id
+            )
+            .where(
                 TaskDependency.upstream_task_id.in_(all_relevant_pks),
                 TaskDependency.downstream_task_id.in_(all_relevant_pks),
+                _edge_scope_filter(scope_key, downstream, downstream_prov),
             )
         )
         raw_edges = edge_result.all()
@@ -270,21 +375,33 @@ async def traverse_upstream(
         raw_edges = []
 
     # Build edges, collapsing grouped task edges to group nodes.
-    # For collapsed edges (group ↔ task or group ↔ group), ``is_dynamic`` is
-    # the OR over all contributing raw edges — any dynamic contributor marks
-    # the aggregate as dynamic. Matches the UI expectation "show this edge
-    # as dynamic if any underlying contributor is dynamic".
+    # For collapsed edges (group ↔ task or group ↔ group), ``is_dynamic`` and
+    # ``is_cross_scope`` are each the OR over all contributing raw edges —
+    # any dynamic (cross-scope) contributor marks the aggregate. Matches the
+    # UI expectation "show this edge as dynamic if any underlying
+    # contributor is dynamic".
     included_pk_set = set(included_task_pks)
     edges: list[TaskEdgeExtended] = []
-    # group_id -> {counterpart_pk: any_dynamic}
-    group_downstream_pks: dict[str, dict[UUID, bool]] = {g.group_id: {} for g in groups}
-    group_upstream_pks: dict[str, dict[UUID, bool]] = {g.group_id: {} for g in groups}
-    # (src_group, tgt_group) -> any_dynamic
-    group_to_group_edges: dict[tuple[str, str], bool] = {}
+    # group_id -> {counterpart_pk: (any_dynamic, any_cross_scope)}
+    group_downstream_pks: dict[str, dict[UUID, tuple[bool, bool]]] = {
+        g.group_id: {} for g in groups
+    }
+    group_upstream_pks: dict[str, dict[UUID, tuple[bool, bool]]] = {
+        g.group_id: {} for g in groups
+    }
+    # (src_group, tgt_group) -> (any_dynamic, any_cross_scope)
+    group_to_group_edges: dict[tuple[str, str], tuple[bool, bool]] = {}
+
+    def _merge(
+        current: tuple[bool, bool] | None, is_dynamic: bool, cross: bool
+    ) -> tuple[bool, bool]:
+        prev_dyn, prev_cross = current or (False, False)
+        return (prev_dyn or is_dynamic, prev_cross or cross)
 
     for edge in raw_edges:
         source = edge.upstream_task_id
         target = edge.downstream_task_id
+        cross = _cross_scope(edge.scope_key)
         source_grouped = source in grouped_task_pks
         target_grouped = target in grouped_task_pks
 
@@ -293,24 +410,24 @@ async def traverse_upstream(
             tgt_group = pk_to_group[target]
             if src_group != tgt_group:
                 key = (src_group, tgt_group)
-                group_to_group_edges[key] = (
-                    group_to_group_edges.get(key, False) or edge.is_dynamic
+                group_to_group_edges[key] = _merge(
+                    group_to_group_edges.get(key), edge.is_dynamic, cross
                 )
             continue
 
         if source_grouped:
             group_id = pk_to_group[source]
             if target in included_pk_set:
-                group_downstream_pks[group_id][target] = (
-                    group_downstream_pks[group_id].get(target, False) or edge.is_dynamic
+                group_downstream_pks[group_id][target] = _merge(
+                    group_downstream_pks[group_id].get(target), edge.is_dynamic, cross
                 )
             continue
 
         if target_grouped:
             group_id = pk_to_group[target]
             if source in included_pk_set:
-                group_upstream_pks[group_id][source] = (
-                    group_upstream_pks[group_id].get(source, False) or edge.is_dynamic
+                group_upstream_pks[group_id][source] = _merge(
+                    group_upstream_pks[group_id].get(source), edge.is_dynamic, cross
                 )
             continue
 
@@ -320,29 +437,42 @@ async def traverse_upstream(
                     source=str(source),
                     target=str(target),
                     is_dynamic=edge.is_dynamic,
+                    scope_key=edge.scope_key,
+                    is_cross_scope=cross,
                 )
             )
 
     for group in groups:
         downstream_pks = group_downstream_pks.get(group.group_id, {})
         group.downstream_task_pks = [str(pk) for pk in downstream_pks]
-        for pk, is_dynamic in downstream_pks.items():
+        for pk, (is_dynamic, cross) in downstream_pks.items():
             edges.append(
                 TaskEdgeExtended(
-                    source=group.group_id, target=str(pk), is_dynamic=is_dynamic
+                    source=group.group_id,
+                    target=str(pk),
+                    is_dynamic=is_dynamic,
+                    is_cross_scope=cross,
                 )
             )
         upstream_pks = group_upstream_pks.get(group.group_id, {})
-        for pk, is_dynamic in upstream_pks.items():
+        for pk, (is_dynamic, cross) in upstream_pks.items():
             edges.append(
                 TaskEdgeExtended(
-                    source=str(pk), target=group.group_id, is_dynamic=is_dynamic
+                    source=str(pk),
+                    target=group.group_id,
+                    is_dynamic=is_dynamic,
+                    is_cross_scope=cross,
                 )
             )
 
-    for (src_group, tgt_group), is_dynamic in group_to_group_edges.items():
+    for (src_group, tgt_group), (is_dynamic, cross) in group_to_group_edges.items():
         edges.append(
-            TaskEdgeExtended(source=src_group, target=tgt_group, is_dynamic=is_dynamic)
+            TaskEdgeExtended(
+                source=src_group,
+                target=tgt_group,
+                is_dynamic=is_dynamic,
+                is_cross_scope=cross,
+            )
         )
 
     # Fetch artifact counts
@@ -370,6 +500,7 @@ async def traverse_upstream(
                 artifact_count=artifact_counts.get(task_info.id, 0),
                 is_primary=task_info.id in primary_pk_set,
                 traversal_depth=task_info.depth,
+                scope_key=task_info.scope_key,
             )
         )
 

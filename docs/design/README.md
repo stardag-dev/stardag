@@ -13,6 +13,7 @@ A note earns its place here when a design keeps getting re-litigated, or keeps
 being misread in the same way. If you find yourself explaining the same
 subtlety a second time, write it down here instead.
 
-| Note                                                                 | Subject                                                                                       |
-| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| [execution-claims-and-liveness.md](execution-claims-and-liveness.md) | How "is this task running right now?" is modelled, and why it is a status rather than a lease |
+| Note                                                                       | Subject                                                                                                                                                                   |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [execution-claims-and-liveness.md](execution-claims-and-liveness.md)       | How "is this task running right now?" is modelled, and why it is a status rather than a lease                                                                             |
+| [scope-keyed-dependency-structure.md](scope-keyed-dependency-structure.md) | Why a task's dependency edges are kept per code version and config rather than per task id, the three levels of parameter significance, and the two designs this replaced |

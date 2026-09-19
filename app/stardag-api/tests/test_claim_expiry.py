@@ -433,12 +433,12 @@ async def test_expired_cross_build_blocker_is_still_a_blocker(
     scheduler's ordinary recovery path handles: past the expiry the server
     hands the task to the next claimant, whoever asks.
 
-    The old wording, kept because the reasoning still holds: proving a
-    blocker dead does
-    NOT unblock the build. An upstream that is not in this build's task set
-    is not in its plan either, so this build still cannot run it — what the
-    expiry buys is certainty in place of inference, not one less blocker."""
-    build_a = await _new_build(client)
+    What the expiry buys is certainty in place of inference: the scheduler
+    is *told* the holder is gone rather than guessing from elapsed time."""
+    # Both builds under one structure scope, as two builds of one deployment
+    # are: closure follows edges within a scope and not across scopes.
+    scope = {"scope_key": "code-blk:cfg"}
+    build_a = (await client.post(BUILDS, json=scope)).json()["id"]
     await _register_task(client, build_a, "blk-up")
     await client.post(
         f"{BUILDS}/{build_a}/tasks", json=_register("blk-down", ["blk-up"])
@@ -448,7 +448,7 @@ async def test_expired_cross_build_blocker_is_still_a_blocker(
     )
     await _expire(async_session, "blk-up")
 
-    build_b = await _new_build(client)
+    build_b = (await client.post(BUILDS, json=scope)).json()["id"]
     await client.post(f"{BUILDS}/{build_b}/tasks", json=_register("blk-down"))
 
     frontier = (await client.get(f"{BUILDS}/{build_b}/frontier")).json()

@@ -31,11 +31,26 @@ MODAL_EXECUTOR_NAME = "modal"
 STARDAG_BUILD_ID_ENV = "STARDAG_BUILD_ID"
 """Env var through which the build id reaches Modal workers.
 
-Injected into ``env_overrides`` by :class:`ModalTaskExecutor` (so it is also
-set as a process env var around the task's run) and read by
-:class:`Runner` to report the task's lifecycle events from inside the
-worker. Riding on ``env_overrides`` keeps the worker function signature
-unchanged — older deployed workers simply apply it as a harmless env var.
+Injected into ``env_overrides`` by :class:`ModalTaskExecutor` whenever a
+build is active (so it is also set as a process env var around the task's
+run). :class:`Runner` reads it to report the task's lifecycle events from
+inside the worker, and to bind the structure-scope check to the build (only
+``build:<this build>`` is the server's placeholder). Whether the worker
+*reports* is a separate switch, ``STARDAG_WORKER_REPORTS_LIFECYCLE``; the
+build id is forwarded either way. Riding on ``env_overrides`` keeps the
+worker function signature unchanged — older deployed workers simply apply
+it as a harmless env var.
+"""
+
+STARDAG_WORKER_REPORTS_LIFECYCLE_ENV = "STARDAG_WORKER_REPORTS_LIFECYCLE"
+"""Env var switching worker-side lifecycle reporting off (``"0"``).
+
+Set by :class:`ModalTaskExecutor` when it was constructed with
+``worker_reports_lifecycle=False`` — a custom or legacy run function that
+does not self-report. It used to be inferred from the *absence* of
+``STARDAG_BUILD_ID``, which meant a non-reporting worker also lost the
+build id its scope check needs; the switch is explicit now so the id can
+always travel. Absent means reporting is on.
 """
 
 STARDAG_MODAL_APP_NAME_ENV = "STARDAG_MODAL_APP_NAME"
@@ -63,6 +78,26 @@ the orchestrator's derivation (see
 the bound: the worker's start is recorded when execution actually begins, so
 the expiry is re-based off the real start rather than off the pre-spawn
 claim, which absorbed however long the call sat queued.
+"""
+
+STARDAG_BUILD_CONFIG_ENV = "STARDAG_BUILD_CONFIG"
+"""Env var carrying the build's ``build_config`` (compact JSON) to workers.
+
+A worker installs it before the task runs, so tasks the task constructs —
+its dynamic dependencies — resolve their ``dependencies_only`` and
+``execution_only`` fields from the same config the bootstrap and the ticks
+use. Transported like ``STARDAG_BUILD_ID``; absent means ``{}``.
+"""
+
+STARDAG_SCOPE_KEY_ENV = "STARDAG_SCOPE_KEY"
+"""Env var carrying the build's structure scope key to workers.
+
+A worker runs whatever task it is handed — the task id promises the output
+whatever code produces it — but records the dynamic dependencies it yields
+under **its own** code id with the config half of this scope (see
+``_runner.worker_scope_key``), so a build that rolled over to a newer
+deployment never inherits an old worker's late yield. Absent, or the
+server's synthetic ``build:<id>``, means the server's default scope.
 """
 
 STARDAG_MODAL_FUNCTION_TIMEOUT_ENV = "STARDAG_MODAL_FUNCTION_TIMEOUT"

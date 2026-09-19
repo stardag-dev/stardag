@@ -74,6 +74,44 @@ class TestTickHappyPath:
         assert executor.spawned == []
         assert registry.calls == []
 
+    async def test_a_build_re_planned_by_other_code_supersedes_this_tick(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The frontier names a scope whose code id is not this process's: a
+        newer deployment re-planned the build under its own code. This tick
+        acts on nothing more and exits as superseded; its own scope, and the
+        build's own placeholder, are not other code."""
+        from stardag.build._scope import STARDAG_CODE_ID_ENV, _reset_for_tests
+
+        _reset_for_tests()
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        dep, root = _chain("superseded-dep", "superseded-root")
+        registry, executor, store = _setup([dep, root])
+        registry.scope_key = "beef" * 10 + ":0123456789abcdef"
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=TickConfig(linger_seconds=0),
+        )
+        assert summary.outcome == "superseded"
+        assert executor.spawned == []
+
+        registry.scope_key = "cafe" * 10 + ":0123456789abcdef"
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=TickConfig(linger_seconds=0),
+        )
+        assert summary.outcome == "terminal"
+        _reset_for_tests()
+
     async def test_not_reactive_build_is_noop(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
@@ -96,6 +134,176 @@ class TestTickHappyPath:
         # No scheduling happened — the tick observed reactive_meta is None on
         # its first frontier fetch and bailed before acting.
         assert registry.build_status == "running"
+
+
+class TestRollOverHook:
+    """The deployed tick re-plans a build planned by other code through a
+    hook the loop calls: after the lease is held, only for a RUNNING build,
+    once — so two deployments never plan one build at once and a late tick
+    on a finished build rewrites nothing."""
+
+    @pytest.fixture(autouse=True)
+    def _own_code(self, monkeypatch: pytest.MonkeyPatch):
+        from stardag.build._scope import STARDAG_CODE_ID_ENV, _reset_for_tests
+
+        _reset_for_tests()
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        yield
+        _reset_for_tests()
+
+    @staticmethod
+    def _hook(registry, calls: list, *, fail: bool = False):
+        from stardag.build import RollOverFailed
+
+        async def roll_over(frontier):
+            calls.append(frontier.scope_key)
+            if fail:
+                raise RollOverFailed(
+                    "no such root", {"from_scope_key": frontier.scope_key}
+                )
+            registry.scope_key = "cafe" * 10 + ":0123456789abcdef"
+            return registry.scope_key
+
+        return roll_over
+
+    async def test_rolls_over_once_under_the_lease_then_drives_the_build(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        dep, root = _chain("ro-dep", "ro-root")
+        registry, executor, store = _setup([dep, root])
+        registry.scope_key = "beef" * 10 + ":0123456789abcdef"
+        calls: list = []
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+            roll_over=self._hook(registry, calls),
+        )
+
+        assert calls == ["beef" * 10 + ":0123456789abcdef"]
+        assert summary.rolled_over == 1
+        assert summary.outcome == "terminal"
+        assert summary.terminal_status == "completed"
+        assert executor.spawned == [dep.id, root.id]
+
+    async def test_a_build_this_code_planned_needs_no_rollover(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The frontier the hook is judged on is read after the lease is
+        held: a scope this tick's own code planned — including one a
+        competing tick moved just before the lease changed hands — calls no
+        hook, and the tick simply drives the build."""
+        dep, root = _chain("ro-own-dep", "ro-own-root")
+        registry, executor, store = _setup([dep, root])
+        registry.scope_key = "cafe" * 10 + ":0123456789abcdef"
+        calls: list = []
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+            roll_over=self._hook(registry, calls),
+        )
+
+        assert calls == []
+        assert summary.rolled_over == 0
+        assert summary.outcome == "terminal"
+        assert executor.spawned == [dep.id, root.id]
+
+    async def test_no_hook_without_the_lease(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        dep, root = _chain("ro-lease-dep", "ro-lease-root")
+        registry, executor, store = _setup([dep, root], lease_acquired=False)
+        registry.scope_key = "beef" * 10 + ":0123456789abcdef"
+        calls: list = []
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+            roll_over=self._hook(registry, calls),
+        )
+
+        assert summary.outcome == "lease_held"
+        assert calls == []
+        assert summary.rolled_over == 0
+
+    async def test_a_finished_build_is_not_re_planned(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A late tick on a build that already ended must rewrite nothing:
+        the hook is skipped, and the tick ends as superseded since the
+        frontier still names other code."""
+        dep, root = _chain("ro-done-dep", "ro-done-root")
+        registry, executor, store = _setup([dep, root])
+        registry.scope_key = "beef" * 10 + ":0123456789abcdef"
+        registry.build_status = "completed"
+        calls: list = []
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+            roll_over=self._hook(registry, calls),
+        )
+
+        assert calls == []
+        assert summary.rolled_over == 0
+        assert summary.outcome == "superseded"
+        assert executor.spawned == []
+
+    async def test_a_failed_rollover_ends_the_tick_without_acting(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        dep, root = _chain("ro-fail-dep", "ro-fail-root")
+        registry, executor, store = _setup([dep, root])
+        registry.scope_key = "beef" * 10 + ":0123456789abcdef"
+        calls: list = []
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+            roll_over=self._hook(registry, calls, fail=True),
+        )
+
+        assert calls == ["beef" * 10 + ":0123456789abcdef"]
+        assert summary.outcome == "rollover_failed"
+        assert summary.error_type == "RollOverFailed"
+        assert summary.rolled_over == 0
+        assert executor.spawned == []
+
+    async def test_own_code_needs_no_hook_call(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        dep, root = _chain("ro-own-dep", "ro-own-root")
+        registry, executor, store = _setup([dep, root])
+        registry.scope_key = "cafe" * 10 + ":0123456789abcdef"
+        calls: list = []
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=FAST_TICK,
+            roll_over=self._hook(registry, calls),
+        )
+
+        assert calls == []
+        assert summary.outcome == "terminal"
 
 
 class TestTickSummaryReporting:

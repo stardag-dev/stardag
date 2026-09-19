@@ -190,12 +190,6 @@ def test_a_failed_blocker_is_left_alone_by_a_second_build(
     summaries_b = tick_summaries(build_b)
     assert_trail_complete(build_b, summaries_b)
 
-    reset_count = sum(s.get("in_build_blockers_reset", 0) for s in summaries_b)
-    assert reset_count == 0, (
-        f"Build B's ticks reset a blocker in its own plan {reset_count} "
-        "time(s). The failed task was the only blocker there.\n" + describe(build_b)
-    )
-
     # B never ran the shared task, nor anything downstream of it -- its
     # root was unreachable from the moment the blocker failed.
     spawned_b = sum(s.get("spawned", 0) for s in summaries_b)

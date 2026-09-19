@@ -51,7 +51,7 @@ function makeBlocker(
     blocking_status: "running",
     blocking_status_at: ago(3 * HOUR),
     blocking_status_build_id: OWNER_BUILD,
-    blocking_in_build: false,
+    blocking_in_build: true,
     ...overrides,
   };
 }
@@ -201,9 +201,7 @@ describe("BuildSchedulingPanel", () => {
     expect(screen.queryByText(/no upstream/i)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Scheduling" }));
-    expect(
-      await screen.findByText(/only looked for while a build is stalled/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/stalled on tasks of its own/i)).toBeInTheDocument();
     // Tick history is fetched on demand, not on every poll of a healthy build.
     await waitFor(() => expect(fetchBuildTickSummaries).toHaveBeenCalledTimes(1));
   });
@@ -312,16 +310,55 @@ describe("BuildSchedulingPanel", () => {
     expect(screen.queryByText(/never registered the blocking task/i)).toBeNull();
   });
 
-  it("still flags a blocker outside this build's plan", async () => {
+  it("labels cancelled and skipped actionable tasks as awaiting a reset", async () => {
+    // Edges are scoped to the build, so a cancelled or skipped task whose
+    // upstreams are all complete is listed as actionable: the scheduler
+    // resets it within budget and runs it. The strip says so instead of
+    // leaving a dead-looking status on screen.
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(
+      makeFrontier({
+        actionable: [
+          { task_id: "tid-grind-beans", latest_status: "cancelled" },
+          { task_id: "tid-froth-milk", latest_status: "skipped" },
+          { task_id: "tid-pour", latest_status: "pending" },
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    renderPanel();
+
+    expect(
+      await screen.findByText("3 actionable · 0 running · 2 awaiting reset"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Scheduling" }));
+    expect(await screen.findByText("reset pending (revocation)")).toBeInTheDocument();
+    expect(screen.getByText("reset pending (stale skip)")).toBeInTheDocument();
+    // The pending task needs no reset and gets no label.
+    expect(screen.getAllByText(/reset pending/)).toHaveLength(2);
+  });
+
+  it("keeps the legacy wording for a blocker an older server still sends", async () => {
+    // A current server lists no external blockers: a gate cannot point
+    // outside a build's plan any more. An older server still may, and for
+    // it the stalled headline keeps saying so — that is the compatibility
+    // path, and this test pins it rather than pretending it is gone.
     vi.mocked(fetchBuildFrontier).mockResolvedValue(
       makeFrontier({
         blocked_by_external: [makeBlocker({ blocking_in_build: false })],
       }),
     );
     renderPanel();
-    // Only reachable for a build registered before plan closure; reported
-    // because it changes what a reader should expect, not what a tick does.
-    expect(await screen.findByText("outside this build")).toBeInTheDocument();
+    expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
+    expect(screen.getByText(/held outside this build/)).toBeInTheDocument();
+  });
+
+  it("shows no outside-the-build wording for a scoped frontier", async () => {
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(
+      makeFrontier({ blocked_by_external: [], actionable: [], running: [] }),
+    );
+    renderPanel();
+    await screen.findByText(/Nothing runnable/);
+    expect(screen.queryByText(/outside this build/)).toBeNull();
   });
 
   it("says so when the blocker list was truncated", async () => {

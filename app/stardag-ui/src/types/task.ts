@@ -84,6 +84,14 @@ export interface Build {
   // Reactive-scheduling owner: the app whose ticks drive this build. Null
   // for ordinary (resident) builds — its presence is the reactive marker.
   reactive_app_name?: string | null;
+  // The structure scope this build's dependency edges live in:
+  // `<code_id>:<config_hash>`, or the server's synthetic `build:<id>` for
+  // a build that never set one. Optional: absent on older servers.
+  scope_key?: string | null;
+  // `{"<namespace>.<Name>": {"<field>": value}}` — the build config the
+  // tasks' dependencies_only / execution_only fields are read from. Null
+  // or absent means no overrides.
+  build_config?: Record<string, Record<string, unknown>> | null;
   // ---- Liveness. Two different numbers; do not confuse them. ----
   //
   // `last_active_at` is the column the API orders the build list by. It is
@@ -215,13 +223,11 @@ export interface BuildFrontier {
   actionable: FrontierTaskRef[];
   running: FrontierTaskRef[];
   /**
-   * **Populated only when the build has nothing actionable and nothing
-   * running** — i.e. only when it already looks stalled, which is the only
-   * state in which the answer matters and keeps a per-edge sort off the hot
-   * path of every healthy build's poll.
-   *
-   * So an empty list means *"not externally blocked, OR not stalled"*. Never
-   * render it as "no blockers" while the build is still progressing.
+   * Always empty from a current server: dependency edges are scoped to the
+   * build's structure scope and a stalled build re-closes its plan over
+   * them, so a gate can no longer point outside the plan. Kept on the wire
+   * (and rendered defensively) for servers predating scoped edges, where it
+   * listed upstreams held outside the build once it had stalled.
    */
   blocked_by_external: FrontierExternalBlocker[];
   // The blocker list is capped (it is a diagnostic, not a work queue — a
@@ -229,6 +235,9 @@ export interface BuildFrontier {
   blocked_by_external_truncated: boolean;
   reactive_app_name?: string | null;
   reactive_tick_kwargs?: Record<string, unknown> | null;
+  // See `Build.scope_key` / `Build.build_config`.
+  scope_key?: string | null;
+  build_config?: Record<string, Record<string, unknown>> | null;
 }
 
 // ---- Persisted reactive-scheduler tick summaries ----
@@ -287,9 +296,8 @@ export interface Task {
   status_build_id?: string;
   // Git commit hash from the event that determined the current status
   commit_hash?: string | null;
-  // True for placeholder rows the API auto-creates when an edge points at
-  // a not-yet-registered task (legacy/safety-hatch path; with the SDK's
-  // post-order discover this is rare). UI hides phantoms from list views.
+  // Always false: placeholder ("phantom") rows no longer exist — an edge
+  // may only name a registered task. Kept for responses from older servers.
   is_phantom?: boolean;
   // Executor identity of the most recent TASK_STARTED event. Optional:
   // absent on older API responses, null for tasks never started via an
@@ -349,6 +357,12 @@ export interface TaskEdge {
   source: string; // upstream task internal id
   target: string; // downstream task internal id
   is_dynamic?: boolean; // true if the edge was yielded dynamically at runtime
+  // The structure scope (code version + structure config) the edge was
+  // registered in; null for rows predating scopes.
+  scope_key?: string | null;
+  // The edge's scope differs from the focal tasks' provenance scope: the
+  // graph hopped code versions here.
+  is_cross_scope?: boolean;
 }
 
 export interface TaskGraphResponse {
@@ -359,6 +373,10 @@ export interface TaskGraphResponse {
 export interface TaskNodeExtended extends TaskNode {
   is_primary: boolean;
   traversal_depth: number;
+  // Provenance scope: the scope of the build that produced this node's
+  // current status, i.e. the scope its upstream edges are read from. Null
+  // when no build has touched the task yet.
+  scope_key?: string | null;
 }
 
 export interface GroupSummary {
@@ -376,6 +394,33 @@ export interface TaskEdgeExtended {
   source: string;
   target: string;
   is_dynamic?: boolean;
+  scope_key?: string | null;
+  is_cross_scope?: boolean;
+}
+
+// ---- Deployments ----
+
+/**
+ * One deployed code version of one app, as the registry records it at
+ * `stardag modal deploy` — the same thing a Modal deployment is. The
+ * newest row for an app is its current deployment.
+ */
+export interface Deployment {
+  id: string;
+  environment_id: string;
+  app_name: string;
+  code_id: string;
+  deployed_at: string;
+  // Modal's own app id (`ap-…`), when the deploy could record it; what a
+  // dashboard link needs.
+  modal_app_id?: string | null;
+  // Whether this is the app's newest deployment. Optional: older servers
+  // may not compute it.
+  current?: boolean;
+}
+
+export interface DeploymentListResponse {
+  deployments: Deployment[];
 }
 
 export interface TaskGraphExtendedResponse {
@@ -432,6 +477,11 @@ export interface TaskEvent {
   task_id: string | null;
   event_type: EventType;
   created_at: string;
+  // The build's structure scope when the event was recorded: for a
+  // registration event (pending, referenced) the scope it planned under,
+  // which is what plan membership reads; for a status event the scope that
+  // becomes the task's provenance. Absent on older servers.
+  scope_key?: string | null;
   error_message: string | null;
   event_metadata: Record<string, unknown> | null;
 }

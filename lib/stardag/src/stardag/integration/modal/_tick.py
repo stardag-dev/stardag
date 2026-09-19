@@ -25,10 +25,13 @@ from uuid import UUID
 from stardag.build import (
     BuildTaskStore,
     FailMode,
+    RollOverFailed,
     TickConfig,
     run_tick_aio,
 )
+from stardag.build._scope import code_id, is_synthetic_scope
 from stardag.build._wakeups import SpawnTick
+from stardag.build_config import rebind_to_build_config, set_build_config
 from stardag.build._task_modules import (
     import_task_modules,
     set_declared_task_module_patterns,
@@ -40,7 +43,13 @@ from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.integration.modal._selector import WorkerSelector
 from stardag.integration.modal._spawn import spawn_tick
 from stardag.integration.modal._settings import FunctionSettings
-from stardag.registry._base import NoOpRegistry, registry_provider
+from stardag._core.base_task import BaseTask
+from stardag.registry._base import (
+    BuildFrontier,
+    BuildInfo,
+    NoOpRegistry,
+    registry_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +375,33 @@ async def _run_deployed_tick_aio(
             "owner_app": owner_app,
             "forwarded": forwarded,
         }
+    # The structure scope. A server that knows scopes assigns every build
+    # one; None means the server predates them (refused below). A real
+    # scope naming another code id means the build was planned by other
+    # code — the live deployment inherits it and **re-plans** it under its
+    # own scope before scheduling (see ``_roll_over_build_aio``). The
+    # server's synthetic ``build:<this build's id>`` (a build nothing fixed
+    # a scope for — an older SDK) is driven as it is.
+    own_code_id = code_id()
+    if build_info.scope_key is None:
+        # A server that knows scopes assigns every build one — at least its
+        # own ``build:<id>`` placeholder. None means the server predates
+        # them, and such a server gates over environment-global edges,
+        # which this SDK refuses (see ``RegistryTooOldError``): driving the
+        # build would mix structures evaluated by different code.
+        logger.error(
+            f"Tick for build {build_id}: the registry reports no structure "
+            "scope for it, so it predates structure scopes. Refusing to drive "
+            "the build: upgrade the Registry API to a version matching this "
+            "SDK first."
+        )
+        return {"outcome": "registry_too_old", "build_id": str(build_id)}
+    may_roll_over = not is_synthetic_scope(build_info.scope_key, build_id=build_id)
+    # The build's config, installed before anything is rehydrated: a task
+    # rebuilt from registry data resolves its dependencies_only /
+    # execution_only fields from it, exactly as the bootstrap did.
+    set_build_config(build_info.build_config)
+
     # Per-build tick configuration persisted at trigger time in the
     # registry — every tick (worker wake-ups and watchdog sweeps
     # spawn with only the build id) runs with the same settings.
@@ -415,13 +451,47 @@ async def _run_deployed_tick_aio(
         reactive=True,
         modal_workspace=deployment.modal_workspace,
         worker_timeouts=deployment.worker_timeouts,
+        build_config=build_info.build_config,
+        scope_key=build_info.scope_key,
     )
+    # A build planned by other code is re-planned under this deployment's
+    # — by the tick itself, once it holds the build's lease and has seen a
+    # RUNNING frontier (see ``RollOver``), never before: two deployments
+    # must not plan one build at once, and a late tick on a finished build
+    # must rewrite nothing. The hook does the work and updates the
+    # executor's scope so the workers it spawns are told the new one; a
+    # failure carries its report out through ``rollover_details``.
+    rollover_details: dict[str, typing.Any] = {}
+
+    async def _roll_over(frontier: BuildFrontier) -> str | None:
+        rolled = await _roll_over_build_aio(
+            registry,
+            build_uuid,
+            build_info,
+            frontier=frontier,
+            deployment=deployment,
+            own_code_id=own_code_id,
+            app_name=app_name,
+        )
+        if rolled is None:
+            # Not the current deployment: the loop sees the foreign scope
+            # again and ends this tick as superseded.
+            return None
+        if isinstance(rolled, dict):
+            rollover_details.update(rolled)
+            raise RollOverFailed(rolled["error"], rolled)
+        executor.scope_key = rolled
+        return rolled
+
     summary = await run_tick_aio(
         build_uuid,
         registry=registry,
         task_executor=executor,
         task_store=task_store,
         config=config,
+        # Only a build with a real scope can be planned by other code; the
+        # server's placeholder (an older SDK's build) is driven as it is.
+        roll_over=_roll_over if may_roll_over else None,
     )
     # The container id is in the line because ticks now share containers
     # (``_TICK_CONCURRENCY``), and "how well are they packing?" is otherwise
@@ -434,7 +504,186 @@ async def _run_deployed_tick_aio(
         f"Tick for build {build_id} (container "
         f"{os.environ.get('MODAL_TASK_ID', 'unknown')}): {summary}"
     )
-    return dataclasses.asdict(summary)
+    result = dataclasses.asdict(summary)
+    if summary.outcome == "rollover_failed":
+        result.update(rollover_details)
+    return result
+
+
+async def _roll_over_build_aio(
+    registry: typing.Any,
+    build_id: UUID,
+    build_info: BuildInfo,
+    *,
+    frontier: BuildFrontier,
+    deployment: _TickDeployment,
+    own_code_id: str,
+    app_name: str,
+) -> str | dict[str, typing.Any] | None:
+    """Re-plan a build the live deployment inherited from other code.
+
+    **Forward only.** A tick of an *older* deployment can win the lease after
+    a newer one already moved the build — its container was mid-flight when
+    the redeploy landed — and would otherwise re-plan the build backward,
+    under code that is no longer live, with the two deployments moving it
+    back and forth. So before planning anything this asks the registry which
+    code is current for the app (the record ``stardag modal deploy`` writes,
+    newest first) and rolls over only when that is this tick's own code.
+    Any other answer returns ``None``: nothing is moved, and the loop ends
+    the tick as superseded; the current deployment's tick re-plans when it
+    is woken, which the registry's wake-up path does. An app with no
+    deployment on record at all is treated the same way: nothing says this
+    code is current, so nothing is moved. That is what makes the record
+    written by ``stardag modal deploy`` load-bearing, and why that command
+    fails rather than shrugs when it cannot record — the remedy is in the
+    log line here and in the command's error.
+
+    **A rollover needs a pickle-free task store.** The store is write-once
+    and a pickle carries the code it was written by: a by-value class is the
+    old code entire, and no rollover can refresh it. A deployment that
+    declared ``task_modules`` (or ``require_pickle_free``) stores registry
+    data instead, which this code rebuilds from; one that may hold pickles
+    would run old code for every non-root task the new plan re-uses. So the
+    rollover is refused for such a deployment, with the remedy in the
+    message, and the build is failed like any other rollover that cannot
+    happen.
+
+    The build's edges were evaluated by the code its scope names; this
+    deployment runs other code, so it plans the build again under its own
+    scope — rehydrating the roots from the registry, walking discovery with
+    the build's stored config, registering the plan under the new scope and
+    moving the build to it (:func:`plan_under_scope_aio`, the bootstrap's
+    own step). Completed tasks stay completed; executions the old plan
+    started finish on their own; a tick still lingering on the old code
+    exits as superseded when it sees the scope move.
+
+    **Roots come from the registry, never from the build's task store.**
+    The store holds pickles the old code wrote, write-once, and a pickle
+    carries the object it was made from: a by-value class is the old code
+    entire, and even a by-reference one restores the level 2/3 values the
+    old code resolved. Registry data is identity parameters only; rebuilt
+    here, under this code with the build's config installed, a root is
+    exactly what this deployment would construct. The same holds for every
+    task the tick loads afterwards: a pickle it does find is re-bound to the
+    installed config (see ``_frontier_actions._load_task``), and a
+    deployment that declared its task modules stores no pickles at all —
+    which is what makes a rollover fully code-safe; a by-value pickle is the
+    one payload no rollover can refresh, as the store's own contract says.
+
+    Runs inside the tick, under the build's lease, once (see ``RollOver``).
+
+    Returns the new scope key, or the tick's outcome dict when the build
+    cannot roll over. The one such case is a root the new code cannot
+    rehydrate — its class is gone, or its identity parameters changed — and
+    then the build is failed with the remedy in its message: re-trigger it
+    as a new build. See ``docs/design/scope-keyed-dependency-structure.md``.
+    """
+    from stardag._core.rehydrate import task_from_registry_data
+    from stardag.build._scope import structure_scope_key
+    from stardag.integration.modal._bootstrap import (
+        _fail_build_best_effort,
+        plan_under_scope_aio,
+    )
+
+    def _failed(reason: str, exc: BaseException) -> dict[str, typing.Any]:
+        message = (
+            f"Rollover of build {build_id} to code {own_code_id!r} failed: "
+            f"{reason}: {type(exc).__name__}: {exc}. Re-trigger it as a new "
+            "build."
+        )
+        logger.error(message)
+        _fail_build_best_effort(registry, build_id, RuntimeError(message))
+        return {
+            "outcome": "rollover_failed",
+            "build_id": str(build_id),
+            "from_scope_key": build_info.scope_key,
+            "code_id": own_code_id,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    try:
+        recorded = await registry.deployment_list_aio(app_name=app_name)
+    except Exception as e:
+        logger.warning(
+            f"Tick for build {build_id}: could not read the deployments on "
+            f"record for app {app_name!r} ({type(e).__name__}: {e}); not "
+            "rolling the build over from this tick."
+        )
+        return None
+    if recorded:
+        current = next((d for d in recorded if d.current), recorded[0])
+        if current.code_id != own_code_id:
+            logger.info(
+                f"Tick for build {build_id}: planned by other code, but this "
+                f"tick runs {own_code_id[:12]} and the current deployment of "
+                f"{app_name!r} is {current.code_id[:12]}; leaving the rollover "
+                "to the current deployment's tick."
+            )
+            return None
+    else:
+        logger.warning(
+            f"Tick for build {build_id}: planned by other code, and no "
+            f"deployment of {app_name!r} is on record, so nothing says this "
+            f"tick's code ({own_code_id[:12]}) is the current one; not rolling "
+            "the build over. `stardag modal deploy` records the deployment; "
+            "re-run it if the last deploy could not reach the registry."
+        )
+        return None
+    if not deployment.task_module_patterns and not deployment.require_pickle_free:
+        message = (
+            f"Rollover of build {build_id} to code {own_code_id!r} refused: "
+            "this deployment stores task pickles, which a rollover cannot "
+            "refresh (a pickle carries the code it was written by). Declare "
+            "task_modules on the StardagApp, or set require_pickle_free=True, "
+            "to make builds follow redeploys; or re-trigger this build as a "
+            "new build."
+        )
+        logger.error(message)
+        _fail_build_best_effort(registry, build_id, RuntimeError(message))
+        return {
+            "outcome": "rollover_failed",
+            "build_id": str(build_id),
+            "from_scope_key": build_info.scope_key,
+            "code_id": own_code_id,
+            "error": message,
+        }
+    try:
+        new_scope = structure_scope_key(own_code_id, build_info.build_config)
+    except Exception as e:
+        return _failed("the stored build config does not fit this code", e)
+    try:
+        roots: list[BaseTask] = []
+        for root_id in frontier.root_task_ids:
+            metadata = await registry.task_get_metadata_aio(UUID(root_id))
+            task = task_from_registry_data(metadata.body, expected_task_id=root_id)
+            if build_info.build_config:
+                task = rebind_to_build_config(task)
+            roots.append(task)
+    except Exception as e:
+        return _failed("a root could not be rehydrated under this code", e)
+    try:
+        discovery = await plan_under_scope_aio(
+            registry,
+            build_id,
+            roots,
+            scope_key=new_scope,
+            build_config=build_info.build_config,
+            task_module_patterns=deployment.task_module_patterns,
+            elide_pickles=bool(deployment.task_module_patterns)
+            or deployment.require_pickle_free,
+            require_pickle_free=deployment.require_pickle_free,
+            limit_key_selector=deployment.limit_key_selector,
+            retry_failed=False,
+        )
+    except Exception as e:
+        return _failed("planning under this code failed", e)
+    logger.info(
+        f"Tick for build {build_id}: rolled over from scope "
+        f"{build_info.scope_key!r} to {new_scope!r} — {len(roots)} root(s), "
+        f"{len(discovery.incomplete)} incomplete task(s) re-planned, "
+        f"{len(discovery.previously_completed)} already complete."
+    )
+    return new_scope
 
 
 # --- The watchdog sweep ---

@@ -789,6 +789,48 @@ re-trigger, and fails the task again rather than leaving it pending and
 inert. See
 [Retries and interruptions](../concepts/modal-orchestration.md#retries-and-interruptions).
 
+### Build config: per-build knobs without touching the task id
+
+_The full guide, including how to choose a parameter's significance:
+[Evolve a DAG Safely](evolve-dags.md)._
+
+Parameters declared `significance="dependencies_only"` or
+`"execution_only"` (see [Three levels of
+significance](../concepts/parameters.md#three-levels-of-significance))
+are never passed at init. Give them values per build on the trigger:
+
+```{.python notest}
+result = app.build_trigger(
+    root_task,
+    reactive=True,
+    build_config={
+        "reports.Aggregate": {"partition_size": 500, "num_threads": 8},
+    },
+)
+```
+
+The config is stored with the build and installed by the bootstrap, every
+tick and every worker before any task is constructed, so a yielded
+dependency sees the same values the scheduler planned with. A re-trigger of
+the same build reuses its stored config; a different one is a new build.
+
+### Redeploying while builds run
+
+_Why it is safe: [Evolve a DAG Safely](evolve-dags.md#4-deploy-new-code)._
+
+Deploy the new code under the same app name. Running containers finish on
+the old code; each running build is re-planned under the new code by its
+next scheduler tick (`rolled_over` in the tick summary) and continues.
+
+```bash
+stardag modal deploy app.py     # recorded as a deployment of this app
+stardag modal deployments       # code versions deployed to this environment, newest first
+```
+
+Deploy from a clean checkout: a dirty tree gets a one-off code id, so every
+deploy of it is a new structure scope that shares nothing. A branch that
+should run beside production is a separate app with its own name.
+
 ### Preemption and timeouts
 
 Two things routinely kill a Modal container without the task being wrong:

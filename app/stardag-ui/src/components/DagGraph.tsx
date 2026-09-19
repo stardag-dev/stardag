@@ -24,6 +24,7 @@ import type {
   GroupSummary,
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
+import { reactFlowEdgeId } from "../utils/graphEdges";
 import { BatchNode, type BatchNodeData } from "./BatchNode";
 import { LayoutToggle } from "./LayoutToggle";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
@@ -104,25 +105,47 @@ const EDGE_COLORS = {
 const DYNAMIC_EDGE_TOOLTIP =
   "Dynamic dependency — yielded at runtime from the upstream task's run() generator.";
 
+// An edge registered under a different structure scope than the focal
+// tasks' — the graph hopped code versions here. Drawn in a warm hue and
+// dotted so it reads as "history from another deployment", not as a live
+// edge of the build being viewed. Combined with a dynamic edge's dashes it
+// stays dotted: the hop matters more than how the edge was discovered.
+const CROSS_SCOPE_EDGE_COLORS = {
+  dark: "#d97706",
+  light: "#b45309",
+} as const;
+
+function crossScopeTooltip(scopeKey: string | null | undefined): string {
+  const short = scopeKey ? scopeKey.slice(0, 20) : "unknown";
+  return `Built under a different code version (scope ${short}) — this edge belongs to another deployment's structure.`;
+}
+
 function getEdgeStyle(
   isMuted: boolean,
   theme: string,
   depthOpacity: number,
   isDynamic: boolean = false,
+  isCrossScope: boolean = false,
 ) {
   const palette = theme === "dark" ? EDGE_COLORS.dark : EDGE_COLORS.light;
+  const crossScopeColor =
+    theme === "dark" ? CROSS_SCOPE_EDGE_COLORS.dark : CROSS_SCOPE_EDGE_COLORS.light;
   return {
-    stroke: isMuted ? palette.muted : palette.normal,
+    stroke: isCrossScope ? crossScopeColor : isMuted ? palette.muted : palette.normal,
     strokeWidth: isMuted ? 1.5 : 2,
-    opacity: isMuted ? depthOpacity * 0.7 : 1,
-    ...(isDynamic ? { strokeDasharray: "6 4" } : {}),
+    opacity: isMuted ? depthOpacity * 0.7 : isCrossScope ? 0.85 : 1,
+    ...(isCrossScope
+      ? { strokeDasharray: "2 3" }
+      : isDynamic
+        ? { strokeDasharray: "6 4" }
+        : {}),
   };
 }
 
-// Custom edge used for dynamic deps: renders the default bezier path plus
-// an SVG <title> child and a wider invisible hit-path so the native browser
-// tooltip shows up when the user hovers the edge (a 2px stroke is very
-// narrow to hit).
+// Custom edge used for dynamic and cross-scope deps: renders the default
+// bezier path plus an SVG <title> child and a wider invisible hit-path so
+// the native browser tooltip shows up when the user hovers the edge (a 2px
+// stroke is very narrow to hit).
 type DynamicEdgeData = { tooltip?: string };
 
 function DynamicEdge(props: EdgeProps<Edge<DynamicEdgeData>>) {
@@ -354,8 +377,17 @@ export function DagGraph({
           !(targetTask?.isFilterMatch ?? true);
 
         const isDynamic = graphEdge.is_dynamic ?? false;
+        const isCrossScope = graphEdge.is_cross_scope ?? false;
+        // The custom edge type carries the hover tooltip; static in-scope
+        // deps use React Flow's default edge type.
+        const tooltip = isCrossScope
+          ? crossScopeTooltip(graphEdge.scope_key) +
+            (isDynamic ? ` ${DYNAMIC_EDGE_TOOLTIP}` : "")
+          : isDynamic
+            ? DYNAMIC_EDGE_TOOLTIP
+            : null;
         return {
-          id: `${graphEdge.source}-${graphEdge.target}`,
+          id: reactFlowEdgeId(graphEdge),
           source: sourceId,
           target: targetId,
           animated: targetTask?.status === "running",
@@ -364,10 +396,9 @@ export function DagGraph({
             theme,
             getDepthOpacity(maxAbsDepth),
             isDynamic,
+            isCrossScope,
           ),
-          // Use the custom edge type for dynamic deps so we get the hover
-          // tooltip. Static deps use React Flow's default edge type.
-          ...(isDynamic ? { type: "dynamicEdge", data: {} } : {}),
+          ...(tooltip ? { type: "dynamicEdge", data: { tooltip } } : {}),
         };
       });
 

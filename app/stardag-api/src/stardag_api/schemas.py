@@ -92,6 +92,37 @@ class BuildCreate(BaseModel):
     # Executor-descriptive metadata of the trigger (e.g. the Modal
     # app/workspace/environment of a build_trigger call).
     executor_metadata: dict | None = None
+    # The structure scope this build's dependency edges live in, when the
+    # caller already knows it (a local build, which runs its own
+    # discovery). A reactive trigger leaves it out: the bootstrap that runs
+    # discovery inside the deployment sets it via ``PUT /builds/{id}/scope``
+    # before registering any edge. Absent, the build gets the synthetic
+    # ``build:<id>`` scope nobody else shares. The ``build:`` prefix is the
+    # server's to write: a claimed scope carrying it is a 400
+    # ``synthetic_scope_claimed``.
+    scope_key: str | None = Field(default=None, min_length=1, max_length=96)
+    # The build config: ``{"<namespace>.<Name>": {"<field>": value}}`` for
+    # dependencies_only / execution_only fields. Immutable for the build.
+    build_config: dict | None = None
+
+
+class SetBuildScopeRequest(BaseModel):
+    """Body of ``PUT /builds/{id}/scope``: set or move the build's structure scope.
+
+    A build's scope is the scope it is *currently planned under*. A build
+    still on its synthetic ``build:<id>`` scope takes the given one; a build
+    already on this exact scope answers 200 with nothing changed (an
+    idempotent re-trigger); a build on a *different* real scope **moves** to
+    the given one — the scheduler pass that re-planned it under new code
+    says so here, after registering the plan under that scope. What may
+    not change is ``build_config``: a supplied config that differs from the
+    stored one is 409 ``scope_mismatch``, since a build has one config for
+    its life. A scope shaped like the server's synthetic one
+    (``build:<uuid>``) cannot be claimed: 400 ``synthetic_scope_claimed``.
+    """
+
+    scope_key: str = Field(min_length=1, max_length=96)
+    build_config: dict | None = None
 
 
 class StatusTriggeredByUser(BaseModel):
@@ -149,6 +180,12 @@ class BuildResponse(BaseModel):
     # for non-reactive builds (and treated as {} when the marker is set but
     # no kwargs were given).
     reactive_tick_kwargs: dict | None = None
+    # The structure scope the build's dependency edges live in
+    # (``<code_id>:<config_hash>``, or the synthetic ``build:<id>`` for a
+    # build that never set one). See SetBuildScopeRequest.
+    scope_key: str | None = None
+    # The build config levels 2 and 3 parameters are read from; None = {}.
+    build_config: dict | None = None
     # ---- Liveness. Two different numbers; do not confuse them. ----
     #
     # ``last_active_at`` is the ``builds`` column that drives list ordering.
@@ -204,7 +241,30 @@ class TaskCreate(BaseModel):
     task_data: dict
     version: str | None = None
     output_uri: str | None = None  # Path to task output (if FileSystemTarget)
-    dependency_task_ids: list[str] = []  # task_ids of upstream dependencies
+    # task_ids of the task's static upstream dependencies, **as discovery
+    # computed them**. A list is a declaration and writes edges in the
+    # build's scope; ``None`` is "not declaring" and writes nothing — what
+    # a current SDK sends for a task discovery pruned at because it was
+    # already complete, whose ``requires()`` it therefore never evaluated.
+    # ``[]`` is a declaration of no upstreams. One value cannot carry both
+    # meanings, which is why the default is ``None`` and not ``[]``.
+    #
+    # Every listed upstream must already be registered in the environment:
+    # an unknown id is a 400, not a placeholder row. Every stardag build
+    # engine registers dependencies before parents, so a 400 here is a
+    # client bug, now loud. One tolerance, for SDKs predating ``None``:
+    # unknown upstreams of a task whose recorded status is COMPLETED are
+    # ignored, since nothing schedules above a complete task and the edge
+    # would gate nothing.
+    dependency_task_ids: list[str] | None = None
+    # The structure scope the declared edges are recorded under. ``None``
+    # (older SDKs, and the common case) means the build's current scope. A
+    # worker running under other code than the one currently driving the
+    # build names its own scope here, so the structure it discovered is
+    # attributed to the code that discovered it and never leaks into a
+    # scope that says otherwise. The synthetic shape ``build:<uuid>`` is
+    # accepted only when it is this build's own placeholder.
+    scope_key: str | None = Field(default=None, min_length=1, max_length=96)
     # The named concurrency-limit keys this task runs under, as the
     # registering app's ``limit_key_selector`` computes them. Recorded at
     # registration so the server knows which *pending* tasks want a key —
@@ -229,6 +289,10 @@ class TaskBulkCreate(BaseModel):
     """
 
     tasks: list[TaskCreate]
+    # The structure scope every declared edge in this batch is recorded
+    # under; see ``TaskCreate.scope_key``. ``None`` means the build's
+    # current scope.
+    scope_key: str | None = Field(default=None, min_length=1, max_length=96)
 
 
 class TaskResponse(BaseModel):
@@ -482,20 +546,25 @@ class BuildFrontierResponse(BaseModel):
     """Scheduling state of a build, for reactive scheduler ticks.
 
     ``actionable`` holds the tasks a scheduler can act on: global status
-    PENDING / SUSPENDED / RUNNING with **no incomplete upstream dependency**
+    PENDING / SUSPENDED / RUNNING / INTERRUPTED / CANCELLED / SKIPPED with
+    **no incomplete upstream dependency in this build's structure scope**
     (static or dynamic edges). The scheduler partitions them client-side:
     PENDING/SUSPENDED → spawn; RUNNING → verify the detached execution ref
-    is still live, re-spawn or self-heal completion otherwise.
+    is still live, re-spawn or self-heal completion otherwise; INTERRUPTED →
+    start again within its own budget; CANCELLED/SKIPPED → reset within the
+    attempt budget and spawn (a revocation, or a skip whose reason no longer
+    holds, since every upstream is complete), else leave to ``fail_mode``.
 
     ``status_counts`` covers *all* tasks referenced by the build, keyed by
     global status value — used for terminal detection (e.g. nothing running
     and nothing actionable).
 
-    ``blocked_by_external`` explains the gap between the two: dependency
-    gating is environment-global while ``running``/``status_counts`` are
-    scoped to this build, so a build can have nothing actionable and
-    nothing running yet still be legitimately waiting. See
-    :class:`FrontierExternalBlocker`.
+    ``blocked_by_external`` is always empty since edges became scoped to a
+    build's structure scope: a gate can no longer point outside the plan
+    (closure admits every incomplete upstream in the scope, at registration
+    and again when the build stalls), so a build with nothing actionable and
+    nothing running is genuinely finished or genuinely failed. The fields
+    stay on the wire for one release for older SDKs that read them.
     """
 
     build_id: UUID
@@ -529,6 +598,10 @@ class BuildFrontierResponse(BaseModel):
     # for non-reactive builds (treated as {} when the marker is set but no
     # kwargs were given). Read from the frontier by every tick.
     reactive_tick_kwargs: dict | None = None
+    # The build's structure scope and build config, so a scheduler tick can
+    # read them from the frontier it already fetches. See BuildResponse.
+    scope_key: str | None = None
+    build_config: dict | None = None
 
 
 class BuildExecutionRef(BaseModel):
@@ -824,6 +897,10 @@ class AddDependenciesRequest(BaseModel):
 
     upstream_task_ids: list[str]
     is_dynamic: bool = True
+    # The structure scope the edges are recorded under; see
+    # ``TaskCreate.scope_key``. A worker yielding dynamic dependencies names
+    # its own code's scope here. ``None`` means the build's current scope.
+    scope_key: str | None = Field(default=None, min_length=1, max_length=96)
 
 
 class AddDependenciesResponse(BaseModel):
@@ -917,6 +994,9 @@ class EventResponse(BaseModel):
     created_at: datetime
     error_message: str | None
     event_metadata: dict | None
+    # On registration events: the structure scope the task was registered
+    # into the build under (plan membership is per scope). None otherwise.
+    scope_key: str | None = None
 
 
 class EventListResponse(BaseModel):
@@ -969,6 +1049,11 @@ class TaskNodeExtended(TaskNode):
 
     is_primary: bool = True
     traversal_depth: int = 0
+    # The node's provenance scope: the scope the build that produced its
+    # current status was planned under *at that time* (frozen on the task;
+    # a build's own scope moves on redeploy), or None if no build has
+    # touched it. The scope its upstream edges are read from.
+    scope_key: str | None = None
 
 
 class GroupSummary(BaseModel):
@@ -990,6 +1075,17 @@ class TaskEdgeExtended(BaseModel):
     source: str
     target: str
     is_dynamic: bool = False
+    # The structure scope the edge was registered in (None for rows
+    # predating scopes). In the environment-wide view an edge is shown
+    # under the *provenance* scope of its downstream node — the scope of
+    # the build that produced that node's current status — so the graph
+    # reads as "how each task was actually built".
+    scope_key: str | None = None
+    # True when the edge's scope differs from the focal (primary) tasks'
+    # provenance scope: the graph hopped code versions here, and the UI
+    # draws the hop as such. For a collapsed group edge, any contributing
+    # cross-scope edge marks the aggregate.
+    is_cross_scope: bool = False
 
 
 class TaskGraphRequest(BaseModel):
@@ -1011,6 +1107,45 @@ class TaskGraphExtendedResponse(BaseModel):
     truncated: bool = False
     total_upstream_count: int = 0
     total_downstream_count: int = 0
+
+
+# --- Deployment Schemas ---
+
+
+class DeploymentUpsert(BaseModel):
+    """``POST /deployments``: record a deployed code version of an app.
+
+    A deployment is exactly the execution backend's: one code version of
+    one app name, of which the backend keeps one live at a time. Idempotent
+    on ``(environment, app_name, code_id)``: deploying the same code again
+    refreshes ``deployed_at`` and returns the existing record.
+    """
+
+    app_name: str = Field(min_length=1, max_length=64)
+    code_id: str = Field(min_length=1, max_length=64)
+    # The backend's own identifier, when the deploy knew it: Modal's app id
+    # (``ap-...``). Supplied on a re-record, it replaces the stored one.
+    modal_app_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class DeploymentResponse(BaseModel):
+    """One deployed code version of an app."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    environment_id: UUID
+    app_name: str
+    code_id: str
+    deployed_at: datetime
+    modal_app_id: str | None = None
+    # Whether this is the newest deployment of its app — the one the
+    # backend is running now, and the one a running build rolls over to.
+    current: bool = False
+
+
+class DeploymentListResponse(BaseModel):
+    deployments: list[DeploymentResponse]
 
 
 # --- API Key Schemas ---

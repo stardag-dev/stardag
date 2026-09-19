@@ -88,8 +88,44 @@ class Build(Base, TimestampMixin):
     # Optional user-provided documentation
     description: Mapped[str | None] = mapped_column(Text)
 
-    # Git context
+    # Git context: the SHA of the *triggering* process, for display. Not the
+    # code identity a build runs under — that is the first half of
+    # ``scope_key`` below, and it comes from the deployment.
     commit_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+
+    # The structure scope this build's dependency edges live in: the code
+    # id of the deployment (or local process) that evaluated ``requires()``
+    # and the hash of the structure-significant build config, as
+    # ``<code_id>:<config_hash>``. Fixed for the build's life: a resume or
+    # re-trigger under a different scope is refused. Readiness is evaluated
+    # over ``task_dependencies`` rows with this key only.
+    #
+    # Set once by whoever runs discovery (the reactive bootstrap, or the
+    # local process), *before* it registers any edge, via
+    # ``PUT /builds/{id}/scope``. Until then it is the synthetic
+    # ``build:<id>`` — a scope nobody else shares, so a client that never
+    # sets one (an older SDK) gets per-build edges: no caching, always
+    # correct. See ``docs/design/scope-keyed-dependency-structure.md``.
+    scope_key: Mapped[str] = mapped_column(
+        String(96),
+        nullable=False,
+        # Context-sensitive default: the synthetic scope names the row's own
+        # id, which is client-generated and processed first. Lets a Build be
+        # constructed without a scope (tests, and any caller predating the
+        # column) and land on exactly the scope create_build would give it.
+        default=lambda ctx: f"build:{ctx.get_current_parameters()['id']}",
+    )
+
+    # The build config: ``{"<namespace>.<Name>": {"<field>": value}}`` for
+    # the fields a task declares ``significance="dependencies_only"`` or
+    # ``"execution_only"``. The one place those values come from — never
+    # from the task's own data — and immutable for the build's life. Read by
+    # every worker and tick before rehydrating a task, so the two rehydration
+    # paths (pickle, registry data) agree by construction. NULL = ``{}``.
+    build_config: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=True,
+    )
 
     # Root task IDs (the tasks passed to sd.build()).
     # JSONB on Postgres for consistency and to avoid reparsing on access.

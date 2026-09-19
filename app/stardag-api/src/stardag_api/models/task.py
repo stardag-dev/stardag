@@ -208,6 +208,14 @@ class Task(Base, TimestampMixin):
         Uuid,
         ForeignKey("builds.id", ondelete="SET NULL"),
     )
+    # The structure scope the status build was planned under *when it
+    # produced this status* — the task's provenance scope, which the graph
+    # reads its upstream edges from. Frozen here because a build's scope
+    # moves when the live deployment does: joining through the build would
+    # render a task completed under the old code with the new code's
+    # ancestry. NULL only on rows predating the column (the graph then falls
+    # back to the build's current scope).
+    latest_status_scope_key: Mapped[str | None] = mapped_column(String(96))
     latest_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
     )

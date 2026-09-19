@@ -1,4 +1,5 @@
 import enum
+import warnings
 from typing import Annotated, Any, Type
 
 import pytest
@@ -200,9 +201,20 @@ def test_stardag_base_model_validate(
         assert actual == expected, f"Failed: {description}"
 
 
-class ModelWithHashExclude(StardagBaseModel):
-    a: Annotated[int, StardagField(hash_exclude=True)]
-    b: int
+# ``hash_exclude`` is deprecated in favour of ``significance``; it keeps its
+# hash-mode behaviour (and, unlike the new levels, still allows init) for one
+# release, which is what these expectations pin.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+
+    class ModelWithHashExclude(StardagBaseModel):
+        a: Annotated[int, StardagField(hash_exclude=True)]
+        b: int
+
+
+def test_hash_exclude_is_deprecated() -> None:
+    with pytest.warns(DeprecationWarning, match="execution_only"):
+        StardagField(hash_exclude=True)
 
 
 class Color(str, enum.Enum):  # `str, Enum` for Python 3.10 (StrEnum is 3.11+)

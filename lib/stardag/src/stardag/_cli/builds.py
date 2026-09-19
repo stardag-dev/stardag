@@ -444,19 +444,17 @@ _FINISHED_BUILD_STATUSES = (*_TERMINAL_BUILD_STATUSES, "exit_early")
 
 
 def _render_external_blockers(frontier: BuildFrontier) -> None:
-    """Render (or honestly explain the absence of) the external blockers.
+    """Explain a build with nothing to do, and render blockers if any come.
 
-    The server populates ``blocked_by_external`` **only** when the build
-    has nothing actionable and nothing running — a per-edge join is not
-    worth doing on every healthy build's poll. So an empty list means
-    "not externally blocked OR not stalled", and printing "no blockers"
-    for a build that is merely progressing would be a lie of exactly the
-    kind this command exists to stop telling.
+    Dependency edges are scoped to the build's structure scope, and the
+    plan is closed over that scope at registration and again whenever the
+    build stalls — so a gate cannot point outside the plan any more, and a
+    current server always answers an empty ``blocked_by_external``. A build
+    with nothing actionable and nothing running is therefore finished or
+    genuinely stuck on tasks of its own, and its status counts say which.
 
-    A *terminal* build also has nothing actionable and nothing running, but
-    that is how a finished build looks, not a symptom — so it must not be
-    described as possibly stuck. Emptiness only warrants the caveat while
-    the build could still be going somewhere.
+    The table below is kept for a server predating scopes, which still
+    reports blockers when the build looks stalled.
     """
     terminal = frontier.build_status in _FINISHED_BUILD_STATUSES
     stalled = not terminal and not frontier.actionable and not frontier.running
@@ -464,23 +462,24 @@ def _render_external_blockers(frontier: BuildFrontier) -> None:
     if not frontier.blocked_by_external:
         if terminal:
             console.print(
-                f"\n[dim]External blockers: not applicable — this build is "
+                f"\n[dim]Blockers: not applicable — this build is "
                 f"{frontier.build_status}.[/dim]"
             )
         elif not stalled:
             console.print(
-                "\n[dim]External blockers: not evaluated. The server computes "
-                "them only for a build with nothing actionable and nothing "
-                "running; this build has "
+                "\n[dim]Blockers: none. Every upstream in this build's "
+                "structure scope is part of its plan, and it has "
                 f"{len(frontier.actionable)} actionable and "
-                f"{len(frontier.running)} running, so it is progressing.[/dim]"
+                f"{len(frontier.running)} running.[/dim]"
             )
         else:
             console.print(
-                "\n[yellow]No external blockers reported, and this build has "
-                "nothing actionable and nothing running.[/yellow]\n"
-                "[dim]Either it is genuinely stuck (a tick will fail it), or "
-                "the registry API predates the blocker fields.[/dim]"
+                "\n[yellow]Nothing actionable and nothing running.[/yellow]\n"
+                "[dim]Every gate is inside this build's plan, so it is waiting "
+                "on tasks of its own that nothing will move — a failed "
+                "upstream under fail_mode=continue, or a status the tick "
+                "cannot reset. The status counts above name them; a re-trigger "
+                "resets the retryable set.[/dim]"
             )
         return
 
@@ -490,8 +489,8 @@ def _render_external_blockers(frontier: BuildFrontier) -> None:
             f"{', truncated' if frontier.blocked_by_external_truncated else ''})"
         ),
         caption=(
-            "Tasks of this build held back by an upstream whose current "
-            "status another build produced."
+            "Reported by a registry predating structure scopes: tasks of this "
+            "build held back by an upstream whose status another build produced."
         ),
     )
     table.add_column("Blocked task")
@@ -499,7 +498,6 @@ def _render_external_blockers(frontier: BuildFrontier) -> None:
     table.add_column("Status")
     table.add_column("For", justify="right")
     table.add_column("Owned by build")
-    table.add_column("In this build")
     for blocker in frontier.blocked_by_external:
         qualified = (
             f"{blocker.blocking_task_namespace}.{blocker.blocking_task_name}"
@@ -512,37 +510,22 @@ def _render_external_blockers(frontier: BuildFrontier) -> None:
             blocker.blocking_status,
             _age(blocker.blocking_status_at),
             str(blocker.blocking_status_build_id or "unknown"),
-            "yes" if blocker.blocking_in_build else "no",
         )
     console.print(table)
 
     if frontier.blocked_by_external_truncated:
         console.print(
             "[yellow]The list is truncated[/yellow] — there are more blockers "
-            "than the server returns. It is a diagnostic, not a work queue; a "
-            "truncated list still proves the build is waiting, not stuck."
+            "than the server returns."
         )
-
-    # What happens next is a function of the blocker's status, not of which
-    # build produced it — so say it once, by status.
     console.print(
         "\n[bold]What happens next depends on the status[/bold] — "
         "[bold]running[/bold] means another build holds the execution claim; "
         "it resolves when that build finishes or the claim expires. "
-        "[bold]cancelled[/bold] is a revocation, not a result: this build's "
-        "next tick resets it and runs it itself. [bold]suspended[/bold] "
-        "resolves as the owning build works through the dynamic dependencies "
-        "it yielded. [bold]failed[/bold] and [bold]skipped[/bold] are results "
-        "— a tick leaves them to this build's fail_mode, so re-trigger the "
-        "build to reset them and run them here."
-    )
-    console.print(
-        "\n[dim]A blocker stuck [bold]running[/bold] after its claim has "
-        "expired is the one case needing a hand: release the claim with "
-        "'stardag tasks cancel <owned-by-build> <blocking-task-id>', using the "
-        "build in the 'Owned by build' column — not this build, since the id "
-        "you pass becomes the task's new status owner and this build's next "
-        "tick would then stop seeing the task as recoverable.[/dim]"
+        "[bold]cancelled[/bold] and [bold]skipped[/bold] are this build's to "
+        "reset and run within its attempt budget. [bold]failed[/bold] is a "
+        "result — a tick leaves it to this build's fail_mode, so re-trigger "
+        "the build to reset it and run it here."
     )
 
 

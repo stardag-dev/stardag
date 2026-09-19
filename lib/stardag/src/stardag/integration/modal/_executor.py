@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 import traceback as tb_module
 import typing
 from uuid import UUID
@@ -27,8 +28,10 @@ from stardag.build import (
 from stardag.build._reactive import claim_ttl_seconds
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
+    STARDAG_BUILD_CONFIG_ENV,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
+    STARDAG_SCOPE_KEY_ENV,
     STARDAG_MODAL_APP_ID_ENV,
     STARDAG_MODAL_APP_NAME_ENV,
     STARDAG_MODAL_ENVIRONMENT_ENV,
@@ -37,6 +40,7 @@ from stardag.integration.modal._metadata import (
     STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
     STARDAG_MODAL_WORKSPACE_ENV,
     STARDAG_REACTIVE_ENV,
+    STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
     _get_modal_app_id_aio,
     _get_modal_environment,
     _get_modal_function_id_aio,
@@ -105,6 +109,9 @@ class ModalTaskExecutor(TaskExecutorABC):
         reactive: bool = False,
         modal_workspace: str | None = None,
         worker_timeouts: dict[str, int] | None = None,
+        build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]]
+        | None = None,
+        scope_key: str | None = None,
     ):
         """Initialize Modal executor.
 
@@ -137,9 +144,28 @@ class ModalTaskExecutor(TaskExecutorABC):
         self.worker_selector = worker_selector
         self.detached = detached
         self.worker_timeouts = dict(worker_timeouts or {})
+        # The build's config and structure scope, forwarded to every worker
+        # this executor spawns (see STARDAG_BUILD_CONFIG_ENV /
+        # STARDAG_SCOPE_KEY_ENV). None when the caller has none to forward.
+        self.build_config = build_config
+        self.scope_key = scope_key
         self.worker_reports_lifecycle = worker_reports_lifecycle
         # Reactive scheduling: forward the app name + reactive flag so
         # workers register their dynamic deps and wake the scheduler tick.
+        # That is the whole reactive protocol — a worker that does not
+        # report cannot register the dependencies it yields, cannot record
+        # its own suspension and wakes no tick, so a reactive build with
+        # non-reporting workers would sit RUNNING forever on its first
+        # dynamic yield. Refuse the combination here rather than there.
+        if reactive and not worker_reports_lifecycle:
+            raise ValueError(
+                "ModalTaskExecutor(reactive=True) needs self-reporting workers: "
+                "reactive scheduling has no resident orchestrator, so the "
+                "worker itself registers the dependencies it yields and wakes "
+                "the scheduler. Deploy the app with stardag's default Runner "
+                "(worker_reports_lifecycle=True), or drive the build with a "
+                "resident builder instead."
+            )
         self.reactive = reactive
         self.modal_workspace = modal_workspace
         # Executor metadata shared by every start this executor records
@@ -291,27 +317,37 @@ class ModalTaskExecutor(TaskExecutorABC):
     ) -> tuple[modal.Function, dict[str, str] | None, dict[str, typing.Any] | None]:
         """Resolve the worker function, env overrides, and executor metadata.
 
-        When ``worker_reports_lifecycle`` and an enclosing build is active,
-        the build id is injected as the ``STARDAG_BUILD_ID`` env override so
-        the worker-side :class:`Runner` can report lifecycle events. The
-        resolved executor metadata rides along the same channel
-        (``STARDAG_MODAL_*``) so worker self-reported starts carry it too —
-        as does the derived claim TTL, so the worker's own start does not
-        re-stamp the claim with the registry's generic default.
+        When an enclosing build is active, the build id and app name are
+        injected as env overrides (``STARDAG_BUILD_ID``,
+        ``STARDAG_MODAL_APP_NAME``) whatever ``worker_reports_lifecycle``
+        says: the worker's scope check is bound to the build id. With
+        reporting on, the resolved executor metadata rides along the same
+        channel (``STARDAG_MODAL_*``) so worker self-reported starts carry
+        it too — as does the derived claim TTL, so the worker's own start
+        does not re-stamp the claim with the registry's generic default.
+        With reporting off, ``STARDAG_WORKER_REPORTS_LIFECYCLE=0`` tells the
+        worker so, and none of the reporter's inputs are sent.
         """
         worker_name, env_overrides = _normalize_worker_selection(
             self.worker_selector(task)
         )
         worker_function = self._get_worker_function(worker_name)
         executor_metadata = await self._metadata_for_worker(worker_name)
-        if self.worker_reports_lifecycle:
-            build_id = get_current_build_id()
-            if build_id is not None:
-                env_overrides = {
-                    **(env_overrides or {}),
-                    STARDAG_BUILD_ID_ENV: str(build_id),
-                    STARDAG_MODAL_APP_NAME_ENV: self.modal_app_name,
-                }
+        build_id = get_current_build_id()
+        if build_id is not None:
+            # The build id and app name travel whether or not the worker
+            # reports: the worker's structure-scope check is bound to the
+            # build id (only ``build:<this build>`` is the placeholder), and
+            # a non-reporting worker needs that binding as much as a
+            # reporting one. Reporting itself is an explicit switch below.
+            env_overrides = {
+                **(env_overrides or {}),
+                STARDAG_BUILD_ID_ENV: str(build_id),
+                STARDAG_MODAL_APP_NAME_ENV: self.modal_app_name,
+            }
+            if not self.worker_reports_lifecycle:
+                env_overrides[STARDAG_WORKER_REPORTS_LIFECYCLE_ENV] = "0"
+            else:
                 ttl_seconds = claim_ttl_seconds(task, self)
                 if ttl_seconds is not None:
                     env_overrides[STARDAG_CLAIM_TTL_SECONDS_ENV] = str(ttl_seconds)
@@ -339,6 +375,24 @@ class ModalTaskExecutor(TaskExecutorABC):
                             env_overrides[env_name] = value
                 if self.reactive:
                     env_overrides[STARDAG_REACTIVE_ENV] = "1"
+        # The build's config and scope, so the worker resolves the dynamic
+        # dependencies it yields under the same config the scheduler plans
+        # with, and refuses to run under other code. Outside the lifecycle
+        # branch on purpose: a worker that does not self-report (a custom or
+        # legacy run function) still constructs tasks, and a configured
+        # build's structure must not depend on how its workers report.
+        if self.build_config:
+            env_overrides = {
+                **(env_overrides or {}),
+                STARDAG_BUILD_CONFIG_ENV: json.dumps(
+                    dict(self.build_config), separators=(",", ":"), sort_keys=True
+                ),
+            }
+        if self.scope_key is not None:
+            env_overrides = {
+                **(env_overrides or {}),
+                STARDAG_SCOPE_KEY_ENV: self.scope_key,
+            }
         return worker_function, env_overrides, executor_metadata
 
     def reports_lifecycle(self, task: BaseTask) -> bool:
