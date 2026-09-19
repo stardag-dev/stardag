@@ -791,6 +791,9 @@ inert. See
 
 ### Build config: per-build knobs without touching the task id
 
+_The full guide, including how to choose a parameter's significance:
+[Evolve a DAG Safely](evolve-dags.md)._
+
 Parameters declared `significance="dependencies_only"` or
 `"execution_only"` (see [Three levels of
 significance](../concepts/parameters.md#three-levels-of-significance))
@@ -812,6 +815,8 @@ dependency sees the same values the scheduler planned with. A re-trigger of
 the same build must carry the same config; a different one is a new build.
 
 ### Versioned deployments
+
+_Why and when: [Evolve a DAG Safely](evolve-dags.md#4-deploy-new-code-beside-running-builds-modal)._
 
 ```{.python notest}
 app = sd_modal.StardagApp("stardag-poc", versioned_deployments=True, ...)

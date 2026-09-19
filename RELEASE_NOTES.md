@@ -8,93 +8,166 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ## Unreleased — Dependency structure belongs to the code, not the task id
 
-Three related changes, one idea: **a task id promises the world state its
-completion establishes, not the upstream set it was built from.** The
-registry now keys a build's dependency edges by a _structure scope_ — the
-code version plus the build's `dependencies_only` config — instead of by
-task id. Changing `requires()` or a fan-out width no longer needs a version
-bump, no longer gates a task on upstreams nothing will produce again, and
-no longer re-runs a stale generation; a build already running keeps its
-own structure while the new code runs beside it.
+### The idea in one paragraph
 
-**Upgrade the registry server before the SDK.** A new SDK against an older
-server does not degrade: a build refuses to start, or to fix its scope, with
-`RegistryTooOldError`, because the server could neither key its edges nor
-keep its config. An older SDK against the new server keeps working, on a
-per-build scope the server assigns — always correct, never shared. A
-reactive build running across the server deploy keeps its gates: the
-migration copies its edges into its own scope. Modal apps deployed with an
-older SDK keep working under per-build scopes until redeployed.
+A task id is a promise about **output**: the same parameters give the same
+result at the same location. It was never meant to be a promise about the
+_upstream set_ the task was built from — a downstream asks for its input's
+output, not for how the input got there. Until now the registry stored a
+task's dependency edges as if they were part of that promise, globally and
+forever, so changing a `requires()` or a fan-out width without bumping the
+version left later builds gated on upstreams nothing would ever produce
+again, or re-running a stale generation. This release moves the edges to
+where they belong: **with the code that evaluated them.**
 
-### Three levels of significance, and the build config
+### What changes for you
 
-`sd.StardagField(significance=...)` replaces the ad-hoc `hash_exclude`:
+- **Change `requires()` or a fan-out freely.** No version bump. Deploy the
+  new code and start a new build; it plans with its own structure. A build
+  already running on the old code keeps its own structure and finishes.
+- **Runtime knobs get a proper home.** A partition size, a thread count, a
+  batch width are declared with a _significance_ and given a value **per
+  build** through one `build_config`, never in a constructor. The task id
+  stays the same, the whole build agrees on the value, and the registry
+  records identity parameters only. `hash_exclude=True` still works with
+  a `DeprecationWarning`.
+- **Builds that share code share discovery.** Two builds under the same
+  code and config trust each other's yielded dependencies, so an expensive
+  pre-yield section runs once per code version, not once per build.
+- **Fewer surprises in the scheduler.** A cancelled or skipped task in a
+  build's plan is simply reset and run; there are no "external blockers"
+  and no phantom placeholder tasks any more. Re-triggering a build after a
+  code change is refused with `ScopeMismatchError`: start a new one.
+- **Optional: keep old builds running through a redeploy.**
+  `StardagApp(versioned_deployments=True)` deploys each code version as its
+  own Modal app so a running build keeps ticking on the code it started
+  with while the new version deploys beside it.
 
-| level                 | affects                     | comes from       |
-| --------------------- | --------------------------- | ---------------- |
-| `"identity"`          | the output, the task id     | the constructor  |
-| `"dependencies_only"` | what is required or yielded | the build config |
-| `"execution_only"`    | how the work is done        | the build config |
+### How it works, briefly
 
-Levels 2 and 3 are **never passed at init** — that is what keeps one task
-id to one structure within a build. They come from `build_config=` on
-`sd.build` / `sd.build_aio` / `sd.build_sequential` /
-`StardagApp.build_trigger`, stored with the build and installed by every
-worker before it constructs a task; `sd.build_config_scope(...)` sets it in
-tests. The registry stores identity parameters only, so a task rebuilt from
-registry data and one unpickled from the build store now agree.
+Every build carries a **structure scope**: the deployment's _code id_ (the
+git SHA of a clean tree) plus a hash of the build's `dependencies_only`
+config. Dependency edges are recorded under that scope, and "are all my
+upstreams complete?" is answered over the build's own scope only. Task
+_completion_ and the _execution claim_ stay global, keyed on the task id,
+so caching and exactly-once execution are unchanged. Within a scope edges
+only grow, so a build can wait on an upstream it no longer needs but can
+never run before one it does. The full reasoning is in
+[`docs/design/scope-keyed-dependency-structure.md`](docs/design/scope-keyed-dependency-structure.md).
 
-### Migration
+One contract makes the sharing sound: **environment variables may affect
+how a task executes, never its output or its dependency structure.**
+Anything that changes what a task writes or yields is a parameter or a
+`dependencies_only` value.
 
-- **If you used `hash_exclude=True` for runtime knobs** (a thread count, a
-  partition size): change the annotation to
-  `significance="execution_only"` (or `"dependencies_only"` if the value
-  changes what the task requires or yields), delete the argument from
-  every constructor call, and pass the value in `build_config` keyed by
-  `"<namespace>.<Name>"`. Until you do, `hash_exclude` still works with a
-  `DeprecationWarning`. `AliasTask` is unaffected.
-- **If a task reads a fan-out width or partitioning from an environment
-  variable**, move it to a `dependencies_only` field: environment variables
-  must not affect output or dependency structure (execution is fine). The
-  registry warns when a yield differs from the one recorded in the same
-  scope.
-- **Custom `RegistryABC` implementations**: the four registration methods
-  take a keyword-only `declared_dependencies`; `build_start(_aio)` and
+### Upgrade order: server first, then SDK
+
+This SDK requires a Registry API at this release or later. Against an older
+server a build refuses to start, or to fix its scope, with
+`RegistryTooOldError` rather than run over environment-global edges. An
+older SDK against the new server keeps working on a per-build scope the
+server assigns. A reactive build running across the server deploy keeps
+its gates: the migration copies its edges into its own scope.
+
+### Migration checklist
+
+- `hash_exclude=True` → `significance="execution_only"` (or
+  `"dependencies_only"` if the value changes what is required or yielded),
+  delete the argument from every constructor call, pass the value in
+  `build_config` keyed `"<namespace>.<Name>"`. `AliasTask` is unaffected.
+- A fan-out width or partitioning read from an environment variable → a
+  `dependencies_only` field.
+- Custom `RegistryABC` implementations: the four registration methods take
+  a keyword-only `declared_dependencies`; `build_start(_aio)` and
   `build_resume(_aio)` take keyword-only `scope_key` / `build_config`;
   `build_set_scope(_aio)` and `deployment_*` are new with no-op defaults.
-- **Re-triggering a build after a code change now refuses** with
-  `ScopeMismatchError`. Start a new build; it shares nothing with the old
-  one and the old one keeps running.
-- **Upgrade the Registry API before the SDK.** This SDK requires a Registry
-  API at this release or later: against an older one a build refuses to
-  start (or to fix its scope) with `RegistryTooOldError` rather than run
-  over environment-global dependency edges. A newer server with an older
-  SDK keeps working, so the order is server first, then SDK.
+- In the UI, the Task Explorer graph follows each task's provenance (a hop
+  between code versions is marked), phantom nodes are gone, and the build
+  panel no longer lists external blockers.
 
-### What you will see in the UI
+### In practice
 
-- The Task Explorer's graph follows each task's _provenance_: the edges
-  from the scope of the build that produced its current status. A hop
-  between code versions is marked. A task no build has touched shows no
-  edges.
-- Placeholder ("phantom") nodes for never-registered upstreams are gone;
-  an unknown upstream is now a 400 at registration.
-- A build's scheduling panel no longer lists "external blockers"; a
-  cancelled or skipped task in the plan is reset and run by the frontier
-  pass instead.
+**Declare what each parameter is for.** Only identity parameters are passed
+at init; the other two are read from the build config.
 
-### Versioned deployments (opt-in)
+```python
+from typing import Annotated
+import stardag as sd
 
-`StardagApp(versioned_deployments=True)` deploys each code version under
-its own Modal app (`<family>--<code id>`) and records it in the registry,
-so a running build keeps ticking on the code it started with while newer
-code deploys beside it. `build_trigger(deployment=...)` resolves the newest,
-`"local"` or an explicit one; `stardag modal deployments` lists them and
-`stardag modal gc <family>` retires the idle ones. Without the flag the
-app deploys under its own name as before, and a tick from a redeploy
-refuses a build planned by other code rather than driving it.
+class Aggregate(sd.Task[Summary]):
+    __namespace__ = "reports"
+    period: str                                                                      # identity: part of the id
+    partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
+    num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
 
----
+    def run(self):
+        chunks = [Chunk(period=self.period, index=i) for i in range(self.partition_size)]
+        yield chunks                       # structure depends on partition_size, output does not
+        self._save(merge(c.load() for c in chunks), threads=self.num_threads)
+
+Aggregate(period="2026-01")                 # fine
+Aggregate(period="2026-01", num_threads=2)  # raises: level 2/3 values come from the build config
+```
+
+**Give values per build.** One mapping, keyed by `namespace.Name`, stored
+with the build and installed everywhere a task of that build is constructed.
+
+```python
+config = {"reports.Aggregate": {"partition_size": 500, "num_threads": 8}}
+
+sd.build(Aggregate(period="2026-01"), build_config=config)          # local; also build_aio / build_sequential
+app.build_trigger(Aggregate(period="2026-01"), reactive=True, build_config=config)   # on Modal
+
+with sd.build_config_scope({"reports.Aggregate": {"num_threads": 2}}):  # in tests
+    assert Aggregate(period="2026-01").num_threads == 2
+```
+
+Two builds whose `dependencies_only` values differ have different scopes
+and never see each other's edges; builds whose `execution_only` values
+differ share a scope. A re-trigger (`build_trigger(build_id=...)`) reuses
+the build's stored config unless you pass the same one.
+
+**Change dependencies without a version bump.** Edit `requires()`, change
+a default partition size, or reshape a yield; deploy; start a new build.
+
+```bash
+stardag modal deploy app.py            # the new code, same app name
+```
+
+```python
+app.build_trigger(root, reactive=True)  # a new build, planned by the new code
+```
+
+A build still running on the previous code is not touched, but with a
+single app name Modal's next spawns for it land on the new code and its
+next tick refuses to drive it (`scope_mismatch` in the tick summary):
+re-trigger it as a new build when convenient. If that stall is not
+acceptable, version the deployments:
+
+**Deploy new code beside running builds.**
+
+```python
+app = sd_modal.StardagApp("reports", versioned_deployments=True, ...)
+```
+
+```bash
+stardag modal deploy app.py                  # deploys reports--<code id>, records it in the registry
+stardag modal deployments --family reports   # which code ids are live, and how many builds run on each
+stardag modal gc reports --keep 1            # retire and stop deployments no running build needs
+```
+
+```python
+app.build_trigger(root, reactive=True)                          # newest recorded deployment
+app.build_trigger(root, reactive=True, deployment="local")      # this checkout's own code id
+app.build_trigger(root, reactive=True, deployment="3f9c1a2b")   # a recorded code id, or its prefix
+```
+
+Running builds keep ticking on the app they started on; the family name
+is what you write, the handle is what runs, and only the registry record
+ties them together. Deploy from a clean checkout — a dirty tree gets a
+one-off code id, so every deploy of it is a new app that shares nothing and
+that only `gc` cleans up. `STARDAG_CODE_ID` names the code where there is
+no git checkout (CI images, for example).
 
 ## v0.23.0 — Ten lingering builds per container, not one
 

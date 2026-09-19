@@ -6,6 +6,10 @@ Practical guides for common tasks and integrations.
 
 - **[ML Pipeline Example](ml-pipeline-example.md)** - Complete walkthrough of an ML pipeline
 
+## Operating DAGs
+
+- **[Evolve a DAG Safely](evolve-dags.md)** - Change dependencies, tune a run per build, deploy new code beside running builds
+
 ## Integrations
 
 - **[Integrate with Prefect](integrate-prefect.md)** - Orchestration and observability

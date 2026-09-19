@@ -231,6 +231,8 @@ code other than the code that planned it.
 
 ### Deployments and code versions
 
+_In practice: [Evolve a DAG Safely](../how-to/evolve-dags.md#4-deploy-new-code-beside-running-builds-modal)._
+
 A build's dependency edges belong to the code that evaluated them — its
 [structure scope](build-execution.md#structure-scope). The bootstrap fixes
 the scope from the deployment's code id, and every tick and worker compares

@@ -10,14 +10,15 @@ Understanding these concepts will help you get the most out of Stardag.
 
 Stardag is built around a few key abstractions:
 
-| Concept                                     | Description                                                           |
-| ------------------------------------------- | --------------------------------------------------------------------- |
-| **[Tasks](tasks.md)**                       | Units of work that produce outputs and declare dependencies           |
-| **[Targets](targets.md)**                   | Where and how outputs are stored                                      |
-| **[Dependencies](dependencies.md)**         | How task dependencies are declared                                    |
-| **[Parameters](parameters.md)**             | How to use task parameters and how they are hashed to get the task id |
-| **[AsyncIO](asyncio.md)**                   | How to use and implement asyncio tasks and targets execution          |
-| **[Build & Execution](build-execution.md)** | How DAGs are executed                                                 |
+| Concept                                              | Description                                                                                 |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **[Tasks](tasks.md)**                                | Units of work that produce outputs and declare dependencies                                 |
+| **[Targets](targets.md)**                            | Where and how outputs are stored                                                            |
+| **[Dependencies](dependencies.md)**                  | How task dependencies are declared                                                          |
+| **[Parameters](parameters.md)**                      | Task parameters, how they are hashed into the task id, and the three levels of significance |
+| **[AsyncIO](asyncio.md)**                            | How to use and implement asyncio tasks and targets execution                                |
+| **[Build & Execution](build-execution.md)**          | How DAGs are executed, and how builds share tasks and structure                             |
+| **[Orchestration on Modal](modal-orchestration.md)** | Deployed apps, reactive scheduling, deployments and code versions                           |
 
 ## The Big Picture
 

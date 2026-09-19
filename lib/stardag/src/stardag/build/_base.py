@@ -406,8 +406,8 @@ class TaskExecutorABC(ABC):
         ``(executor, ref)`` in the registry *before* awaiting ``wait()``.
 
         Raises:
-            Any exception if the execution could not be started; the build
-            engine converts it into a task failure.
+            Exception: if the execution could not be started; the build
+                engine converts it into a task failure.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support detached execution"

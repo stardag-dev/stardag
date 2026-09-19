@@ -58,6 +58,15 @@ Parameter hashing solves several problems:
 
 ## Three levels of significance
 
+!!! tip "In short"
+
+    Only parameters that change the **output** belong in the constructor.
+    A knob that changes which upstreams are required or yielded is
+    `significance="dependencies_only"`; one that changes only how the work
+    is done is `"execution_only"`. Both are read from one **build config**
+    per build, never passed at init. The how-to:
+    [Evolve a DAG Safely](../how-to/evolve-dags.md).
+
 Not every parameter is part of what a task _promises_. Stardag
 distinguishes three levels, declared per field with
 `sd.StardagField(significance=...)`:

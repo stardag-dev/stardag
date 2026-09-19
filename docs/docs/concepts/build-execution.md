@@ -134,6 +134,8 @@ Design record: [`docs/design/execution-claims-and-liveness.md`](https://github.c
 
 ### Structure scope
 
+_In practice: [Evolve a DAG Safely](../how-to/evolve-dags.md)._
+
 A task id promises the world state its completion establishes. It does
 **not** promise the set of upstream tasks it was built from: a downstream
 asks for its upstream's output, not for how the upstream got there. So the
