@@ -24,6 +24,7 @@ import type {
   GroupSummary,
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
+import { reactFlowEdgeId } from "../utils/graphEdges";
 import { BatchNode, type BatchNodeData } from "./BatchNode";
 import { LayoutToggle } from "./LayoutToggle";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
@@ -386,7 +387,7 @@ export function DagGraph({
             ? DYNAMIC_EDGE_TOOLTIP
             : null;
         return {
-          id: `${graphEdge.source}-${graphEdge.target}`,
+          id: reactFlowEdgeId(graphEdge),
           source: sourceId,
           target: targetId,
           animated: targetTask?.status === "running",

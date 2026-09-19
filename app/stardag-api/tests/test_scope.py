@@ -212,7 +212,7 @@ async def test_a_claimed_scope_may_not_look_synthetic(client: AsyncClient):
     assert created.json()["detail"]["error_code"] == "synthetic_scope_claimed"
 
     build_id = (await _build(client))["id"]
-    for claimed in (f"build:{other}", f"build:{build_id}", "build:ffff"):
+    for claimed in (f"build:{other}", f"build:{build_id}", f"Build:{other}"):
         put = await client.put(
             f"{BUILDS}/{build_id}/scope", json={"scope_key": claimed}
         )
@@ -231,6 +231,11 @@ async def test_a_claimed_scope_may_not_look_synthetic(client: AsyncClient):
         f"{BUILDS}/{build_id}/scope", json={"scope_key": "code:cfg"}
     )
     assert fixed.status_code == 200, fixed.text
+
+    # Only the exact placeholder shape is reserved: a code id that happens
+    # to be the word ``build`` gives ``build:<16 hex>``, an ordinary claim.
+    named_build = await _build(client, "build:ffffffffffffffff")
+    assert named_build["scope_key"] == "build:ffffffffffffffff"
 
 
 # --- Gating reads one scope --------------------------------------------
@@ -384,3 +389,85 @@ async def test_cancelled_is_actionable_only_once_its_upstreams_complete(
     actionable = _actionable(frontier)
     assert list(actionable) == ["down"], frontier
     assert actionable["down"]["latest_status"] == "cancelled"
+
+
+# --- Closure stops at completed tasks ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_closure_does_not_expand_from_a_completed_task(client: AsyncClient):
+    """Discovery prunes at complete tasks and so does closure. A build that
+    registers an already-completed task — a cached root an older client
+    still sends — must not inherit that task's incomplete historical
+    upstreams from the scope; an incomplete task with the same upstream
+    does inherit it."""
+    build_a = (await _build(client, "code-a:cfg"))["id"]
+    await _register_task(client, build_a, "u")
+    await _register_task(client, build_a, "c", ["u"])
+    await _register_task(client, build_a, "d", ["u"])
+    # ``c`` completes with ``u`` still pending: history the scope keeps.
+    await client.post(f"{BUILDS}/{build_a}/tasks/c/start")
+    await client.post(f"{BUILDS}/{build_a}/tasks/c/complete")
+
+    build_b = (await _build(client, "code-a:cfg"))["id"]
+    await _register_task(client, build_b, "c")
+    frontier_b = await _frontier(client, build_b)
+    assert _actionable(frontier_b) == {}, frontier_b
+    assert frontier_b["status_counts"] == {"completed": 1}, frontier_b
+
+    build_c = (await _build(client, "code-a:cfg"))["id"]
+    await _register_task(client, build_c, "d")
+    frontier_c = await _frontier(client, build_c)
+    assert set(_actionable(frontier_c)) == {"u"}, frontier_c
+    assert frontier_c["status_counts"] == {"pending": 2}, frontier_c
+
+
+@pytest.mark.asyncio
+async def test_stall_time_closure_is_charged_against_the_event_quota(
+    client: AsyncClient,
+):
+    """Every admission is a TASK_REFERENCED event, so the closure that runs
+    inside the frontier read is bounded by the same 24h event quota as any
+    other event path — a scope-mate's wide fan-out is not a way around it."""
+    from unittest.mock import patch
+
+    from stardag_api.limits import LimitsSettings, _entity_cache
+
+    build_a = (await _build(client, "code-a:cfg"))["id"]
+    build_b = (await _build(client, "code-a:cfg"))["id"]
+    await _register_task(client, build_a, "parent")
+    await _register_task(client, build_b, "parent")
+    await client.post(
+        f"{BUILDS}/{build_a}/tasks/parent/start", params={"claim": "true"}
+    )
+    for child in ("c1", "c2", "c3"):
+        await _register_task(client, build_a, child)
+    response = await client.post(
+        f"{BUILDS}/{build_a}/tasks/parent/dependencies",
+        json={"upstream_task_ids": ["c1", "c2", "c3"], "is_dynamic": True},
+    )
+    assert response.status_code == 200, response.text
+    await client.post(f"{BUILDS}/{build_a}/tasks/parent/suspend")
+
+    # B stalls; re-closing would admit three children as three events.
+    _entity_cache.clear()
+    settings = LimitsSettings(max_events_per_workspace_24h=1)
+    with patch("stardag_api.routes.builds.limits_settings", settings):
+        response = await client.get(f"{BUILDS}/{build_b}/frontier")
+    assert response.status_code == 429, response.text
+    assert response.json()["detail"]["error_code"] == "EVENT_CREATION_LIMIT"
+
+    def referenced(events: list[dict]) -> int:
+        return len([e for e in events if e["event_type"] == "task_referenced"])
+
+    # The one TASK_REFERENCED on B is its own registration of ``parent``
+    # (already known to the environment); nothing was admitted.
+    events = (await client.get(f"{BUILDS}/{build_b}/events")).json()
+    assert referenced(events) == 1, events
+    _entity_cache.clear()
+
+    # With the quota lifted the same read admits the three children.
+    frontier_b = await _frontier(client, build_b)
+    assert set(_actionable(frontier_b)) == {"c1", "c2", "c3"}, frontier_b
+    events = (await client.get(f"{BUILDS}/{build_b}/events")).json()
+    assert referenced(events) == 4, events

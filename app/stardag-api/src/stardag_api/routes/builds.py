@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Annotated, Mapping, Sequence, cast
 from uuid import UUID
@@ -2182,7 +2183,16 @@ def _is_synthetic_scope(build: Build) -> bool:
     return build.scope_key == synthetic_scope_key(build.id)
 
 
-_SYNTHETIC_SCOPE_PREFIX = "build:"
+# The exact shape ``synthetic_scope_key`` writes, and the one the SDK's
+# ``is_synthetic_scope`` recognises: ``build:`` followed by a hyphenated
+# UUID, in either case. A prefix test would be wrong in both directions — a
+# code id may legitimately be the word ``build`` (``STARDAG_CODE_ID=build``
+# gives a real ``build:<16 hex>`` scope) and ``Build:<uuid>`` would slip
+# past a case-sensitive one while the SDK reads it as the placeholder.
+_SYNTHETIC_SCOPE_RE = re.compile(
+    r"^build:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 def _refuse_synthetic_claim(scope_key: str) -> None:
@@ -2193,16 +2203,18 @@ def _refuse_synthetic_claim(scope_key: str) -> None:
     The server is the only one that writes that shape, so a client sending
     it — under this build's id or any other — is asking for a build that no
     code identity protects. Refused with 400 ``synthetic_scope_claimed``.
+    Exactly that shape, case-insensitively; ``build:<anything else>`` is an
+    ordinary claim from a code id that happens to be called ``build``.
     """
-    if scope_key.startswith(_SYNTHETIC_SCOPE_PREFIX):
+    if _SYNTHETIC_SCOPE_RE.match(scope_key):
         raise HTTPException(
             status_code=400,
             detail={
                 "error_code": "synthetic_scope_claimed",
                 "scope_key": scope_key,
                 "message": (
-                    f"The {_SYNTHETIC_SCOPE_PREFIX!r} prefix is reserved for the "
-                    "server's own per-build scope; a claimed structure scope is "
+                    "'build:<uuid>' is the server's own per-build scope and "
+                    "cannot be claimed; a claimed structure scope is "
                     "<code_id>:<config_hash>. Leave scope_key out to run under "
                     "the per-build scope."
                 ),
@@ -2542,6 +2554,7 @@ async def get_build_frontier(
         admitted = await _close_plan_over_dependencies(
             db,
             build_id=build_id,
+            workspace_id=auth.workspace_id,
             scope_key=build.scope_key,
             task_pks=list(
                 (
@@ -2966,6 +2979,7 @@ async def _close_plan_over_dependencies(
     db: AsyncSession,
     *,
     build_id: UUID,
+    workspace_id: UUID,
     scope_key: str,
     task_pks: Sequence[UUID],
 ) -> int:
@@ -3014,6 +3028,17 @@ async def _close_plan_over_dependencies(
     expiry the server no longer honours the claim and will hand the task to
     the next claimant whoever asks. Which build started it was never what
     made recovery safe — the claim is.
+
+    **Closure does not expand from a COMPLETED task.** Discovery prunes at
+    complete tasks and so does this: a registered task that is already
+    complete — a cached root an older client still sends — has upstreams
+    whose state is history, not this build's plan. Admitting them would run
+    work for a target that already exists.
+
+    Every admission is a ``TASK_REFERENCED`` event, so each level is checked
+    against the workspace's event quota before it is written: a scope-mate's
+    wide fan-out must not be a way past the limit that every other event
+    path enforces.
     """
     if not task_pks:
         return 0
@@ -3021,6 +3046,7 @@ async def _close_plan_over_dependencies(
     admitted = 0
     frontier_pks = list(task_pks)
     seen: set[UUID] = set(task_pks)
+    downstream = aliased(Task)
     while frontier_pks:
         in_plan = (
             select(Event.task_id)
@@ -3033,9 +3059,13 @@ async def _close_plan_over_dependencies(
                 await db.execute(
                     select(Task)
                     .join(TaskDependency, TaskDependency.upstream_task_id == Task.id)
+                    .join(
+                        downstream, TaskDependency.downstream_task_id == downstream.id
+                    )
                     .where(
                         TaskDependency.downstream_task_id.in_(frontier_pks),
                         TaskDependency.scope_key == scope_key,
+                        downstream.latest_status != TaskStatus.COMPLETED,
                         Task.latest_status != TaskStatus.COMPLETED,
                         Task.id.not_in(in_plan),
                     )
@@ -3045,11 +3075,16 @@ async def _close_plan_over_dependencies(
             .scalars()
             .all()
         )
+        level = [upstream for upstream in rows if upstream.id not in seen]
+        if level:
+            _raise_if_limit_exceeded(
+                await check_entity_creation_limit(
+                    db, workspace_id, "events", limits_settings, amount=len(level)
+                )
+            )
 
         frontier_pks = []
-        for upstream in rows:
-            if upstream.id in seen:
-                continue
+        for upstream in level:
             seen.add(upstream.id)
             # The one task event not recorded through ``transition_task``,
             # and the exemption is worth stating rather than leaving to be
@@ -3069,6 +3104,7 @@ async def _close_plan_over_dependencies(
                     event_type=EventType.TASK_REFERENCED,
                 )
             )
+            record_entity_created(workspace_id, "events")
             admitted += 1
             frontier_pks.append(upstream.id)
         if frontier_pks:
@@ -3078,7 +3114,7 @@ async def _close_plan_over_dependencies(
     return admitted
 
 
-def take_task_rows(rows: list[dict[str, object]]):
+def take_task_rows(rows: list[dict[str, object]], *, dialect_name: str):
     """Insert what is missing and lock what is not, in one statement.
 
     Every writer here has to end up holding the rows it is about to touch,
@@ -3099,7 +3135,26 @@ def take_task_rows(rows: list[dict[str, object]]):
 
     Caller sorts ``rows`` by ``task_id``. That is the agreed order, and it
     is the whole mechanism.
+
+    The row-lock semantics above are PostgreSQL's. SQLite — the test and
+    local-dev backend — has no row locks and a single writer, so its
+    statement is the same shape spelled in its own dialect (a conflict
+    *target* rather than a named constraint) and locks nothing; there is
+    nothing to lock against. Written out explicitly rather than letting the
+    PostgreSQL construct compile for SQLite, which yields a target-less
+    ``ON CONFLICT DO UPDATE`` that only SQLite 3.35+ accepts.
     """
+    if dialect_name == "sqlite":
+        return (
+            sqlite_insert(Task)
+            .values(rows)
+            .on_conflict_do_update(
+                index_elements=[Task.environment_id, Task.task_id],
+                set_={"task_id": Task.task_id},
+                where=false(),
+            )
+            .returning(Task.task_id)
+        )
     return (
         pg_insert(Task)
         .values(rows)
@@ -3110,6 +3165,10 @@ def take_task_rows(rows: list[dict[str, object]]):
         )
         .returning(Task.task_id)
     )
+
+
+def _dialect_name(db: AsyncSession) -> str:
+    return db.bind.dialect.name if db.bind is not None else "postgresql"
 
 
 def _lock_probe_row(
@@ -3279,7 +3338,8 @@ async def _reconcile_dependency_edges(
             [
                 _lock_probe_row(tid, environment_id=environment_id, now=now)
                 for tid in sorted({downstream_task_id, *requested_ids})
-            ]
+            ],
+            dialect_name=_dialect_name(db),
         )
     )
 
@@ -3481,7 +3541,8 @@ async def register_task(
                 if tid == task.task_id
                 else _lock_probe_row(tid, environment_id=build.environment_id, now=now)
                 for tid in sorted({task.task_id, *upstream_ids})
-            ]
+            ],
+            dialect_name=_dialect_name(db),
         )
     )
     created_ids: set[str] = set(created.scalars().all())
@@ -3542,7 +3603,11 @@ async def register_task(
     await transition_task(db, db_task, event)
 
     await _close_plan_over_dependencies(
-        db, build_id=build_id, scope_key=build.scope_key, task_pks=[db_task.id]
+        db,
+        build_id=build_id,
+        workspace_id=auth.workspace_id,
+        scope_key=build.scope_key,
+        task_pks=[db_task.id],
     )
 
     await db.commit()
@@ -3796,7 +3861,8 @@ async def register_tasks_bulk(
                         tid, environment_id=build.environment_id, now=now
                     )
                     for tid in to_take
-                ]
+                ],
+                dialect_name=_dialect_name(db),
             )
         )
         # RETURNING after DO NOTHING names the rows this call actually
@@ -3958,6 +4024,7 @@ async def register_tasks_bulk(
     await _close_plan_over_dependencies(
         db,
         build_id=build_id,
+        workspace_id=auth.workspace_id,
         scope_key=build.scope_key,
         task_pks=[t.id for t in db_task_by_task_id.values()],
     )

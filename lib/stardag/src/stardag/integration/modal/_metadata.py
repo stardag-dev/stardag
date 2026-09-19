@@ -31,11 +31,26 @@ MODAL_EXECUTOR_NAME = "modal"
 STARDAG_BUILD_ID_ENV = "STARDAG_BUILD_ID"
 """Env var through which the build id reaches Modal workers.
 
-Injected into ``env_overrides`` by :class:`ModalTaskExecutor` (so it is also
-set as a process env var around the task's run) and read by
-:class:`Runner` to report the task's lifecycle events from inside the
-worker. Riding on ``env_overrides`` keeps the worker function signature
-unchanged — older deployed workers simply apply it as a harmless env var.
+Injected into ``env_overrides`` by :class:`ModalTaskExecutor` whenever a
+build is active (so it is also set as a process env var around the task's
+run). :class:`Runner` reads it to report the task's lifecycle events from
+inside the worker, and to bind the structure-scope check to the build (only
+``build:<this build>`` is the server's placeholder). Whether the worker
+*reports* is a separate switch, ``STARDAG_WORKER_REPORTS_LIFECYCLE``; the
+build id is forwarded either way. Riding on ``env_overrides`` keeps the
+worker function signature unchanged — older deployed workers simply apply
+it as a harmless env var.
+"""
+
+STARDAG_WORKER_REPORTS_LIFECYCLE_ENV = "STARDAG_WORKER_REPORTS_LIFECYCLE"
+"""Env var switching worker-side lifecycle reporting off (``"0"``).
+
+Set by :class:`ModalTaskExecutor` when it was constructed with
+``worker_reports_lifecycle=False`` — a custom or legacy run function that
+does not self-report. It used to be inferred from the *absence* of
+``STARDAG_BUILD_ID``, which meant a non-reporting worker also lost the
+build id its scope check needs; the switch is explicit now so the id can
+always travel. Absent means reporting is on.
 """
 
 STARDAG_MODAL_APP_NAME_ENV = "STARDAG_MODAL_APP_NAME"

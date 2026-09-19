@@ -550,6 +550,33 @@ class TestForeignScopeRefusal:
         assert not task.complete()
         assert recording_registry.methods() == []
 
+    def test_a_non_reporting_worker_still_refuses_another_builds_placeholder(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        """Reporting off is an explicit switch, so the build id still
+        arrives and the synthetic check stays bound to it: nothing is
+        reported, and ``build:<other id>`` is a foreign scope."""
+        from stardag.integration.modal._metadata import (
+            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
+        )
+
+        task = make_range(limit=3)
+        env = {
+            **self._scoped_env(uuid4(), f"build:{uuid4()}"),
+            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV: "0",
+        }
+        with pytest.raises(RuntimeError, match="planned by other code"):
+            Runner()(task, env_overrides=env)
+        assert recording_registry.methods() == []
+
+        own = uuid4()
+        env = {
+            **self._scoped_env(own, f"build:{own}"),
+            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV: "0",
+        }
+        assert Runner()(make_range(limit=4), env_overrides=env) is None
+        assert recording_registry.methods() == []
+
     @pytest.mark.parametrize("raw", ["{not json", "[1, 2]", '{"ns.T": 3}'])
     def test_a_malformed_forwarded_config_fails_the_attempt(
         self, raw, recording_registry, fake_call_id, default_in_memory_fs_target

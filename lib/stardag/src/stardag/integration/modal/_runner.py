@@ -49,6 +49,7 @@ from stardag.integration.modal._metadata import (
     STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
     STARDAG_MODAL_WORKSPACE_ENV,
     STARDAG_REACTIVE_ENV,
+    STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
 )
 from stardag.integration.modal._protocols import RunFunction
 from stardag.integration.modal._spawn import spawn_tick
@@ -453,6 +454,11 @@ class _WorkerLifecycleReporter:
         def _get(key: str) -> str | None:
             return (env_overrides or {}).get(key) or os.environ.get(key)
 
+        # The explicit switch first: a non-reporting worker still receives
+        # the build id (its scope check is bound to it), so the id's
+        # presence no longer means "report".
+        if _get(STARDAG_WORKER_REPORTS_LIFECYCLE_ENV) == "0":
+            return None
         raw_build_id = _get(STARDAG_BUILD_ID_ENV)
         if not raw_build_id:
             return None

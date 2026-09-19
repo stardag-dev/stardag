@@ -40,6 +40,7 @@ from stardag.integration.modal._metadata import (
     STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
     STARDAG_MODAL_WORKSPACE_ENV,
     STARDAG_REACTIVE_ENV,
+    STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
     _get_modal_app_id_aio,
     _get_modal_environment,
     _get_modal_function_id_aio,
@@ -302,27 +303,37 @@ class ModalTaskExecutor(TaskExecutorABC):
     ) -> tuple[modal.Function, dict[str, str] | None, dict[str, typing.Any] | None]:
         """Resolve the worker function, env overrides, and executor metadata.
 
-        When ``worker_reports_lifecycle`` and an enclosing build is active,
-        the build id is injected as the ``STARDAG_BUILD_ID`` env override so
-        the worker-side :class:`Runner` can report lifecycle events. The
-        resolved executor metadata rides along the same channel
-        (``STARDAG_MODAL_*``) so worker self-reported starts carry it too —
-        as does the derived claim TTL, so the worker's own start does not
-        re-stamp the claim with the registry's generic default.
+        When an enclosing build is active, the build id and app name are
+        injected as env overrides (``STARDAG_BUILD_ID``,
+        ``STARDAG_MODAL_APP_NAME``) whatever ``worker_reports_lifecycle``
+        says: the worker's scope check is bound to the build id. With
+        reporting on, the resolved executor metadata rides along the same
+        channel (``STARDAG_MODAL_*``) so worker self-reported starts carry
+        it too — as does the derived claim TTL, so the worker's own start
+        does not re-stamp the claim with the registry's generic default.
+        With reporting off, ``STARDAG_WORKER_REPORTS_LIFECYCLE=0`` tells the
+        worker so, and none of the reporter's inputs are sent.
         """
         worker_name, env_overrides = _normalize_worker_selection(
             self.worker_selector(task)
         )
         worker_function = self._get_worker_function(worker_name)
         executor_metadata = await self._metadata_for_worker(worker_name)
-        if self.worker_reports_lifecycle:
-            build_id = get_current_build_id()
-            if build_id is not None:
-                env_overrides = {
-                    **(env_overrides or {}),
-                    STARDAG_BUILD_ID_ENV: str(build_id),
-                    STARDAG_MODAL_APP_NAME_ENV: self.modal_app_name,
-                }
+        build_id = get_current_build_id()
+        if build_id is not None:
+            # The build id and app name travel whether or not the worker
+            # reports: the worker's structure-scope check is bound to the
+            # build id (only ``build:<this build>`` is the placeholder), and
+            # a non-reporting worker needs that binding as much as a
+            # reporting one. Reporting itself is an explicit switch below.
+            env_overrides = {
+                **(env_overrides or {}),
+                STARDAG_BUILD_ID_ENV: str(build_id),
+                STARDAG_MODAL_APP_NAME_ENV: self.modal_app_name,
+            }
+            if not self.worker_reports_lifecycle:
+                env_overrides[STARDAG_WORKER_REPORTS_LIFECYCLE_ENV] = "0"
+            else:
                 ttl_seconds = claim_ttl_seconds(task, self)
                 if ttl_seconds is not None:
                     env_overrides[STARDAG_CLAIM_TTL_SECONDS_ENV] = str(ttl_seconds)
