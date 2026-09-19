@@ -535,3 +535,37 @@ class TestForeignScopeRefusal:
         Runner()(task, env_overrides=self._scoped_env(build_id, f"build:{build_id}"))
 
         assert task.complete()
+
+    def test_another_builds_placeholder_is_a_foreign_scope(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        """Only ``build:<this build's id>`` is the server's placeholder; a
+        scope claimed as ``build:<other id>`` would otherwise skip the
+        code-id check and let another deployment drive the build."""
+        task = make_range(limit=3)
+
+        with pytest.raises(RuntimeError, match="planned by other code"):
+            Runner()(task, env_overrides=self._scoped_env(uuid4(), f"build:{uuid4()}"))
+
+        assert not task.complete()
+        assert recording_registry.methods() == []
+
+    @pytest.mark.parametrize("raw", ["{not json", "[1, 2]", '{"ns.T": 3}'])
+    def test_a_malformed_forwarded_config_fails_the_attempt(
+        self, raw, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        """The build's scope was hashed from the real config; running on the
+        field defaults instead would evaluate a different structure under
+        that scope, so the attempt fails before the task starts."""
+        from stardag.integration.modal._metadata import STARDAG_BUILD_CONFIG_ENV
+
+        task = make_range(limit=3)
+        env = self._scoped_env(
+            uuid4(), "cafe" * 10 + ":ffffffffffffffff", build_config=raw
+        )
+
+        with pytest.raises(RuntimeError, match=STARDAG_BUILD_CONFIG_ENV):
+            Runner()(task, env_overrides=env)
+
+        assert not task.complete()
+        assert recording_registry.methods() == []

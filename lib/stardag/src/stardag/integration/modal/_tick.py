@@ -373,11 +373,12 @@ async def _run_deployed_tick_aio(
     # structure the edges do not describe, so it refuses rather than drive
     # the build. Only the code id half is compared — the config half is a
     # function of the build's own config, installed below (see
-    # ``scope_code_id``). The server's synthetic ``build:<id>`` scope (a
-    # build nothing fixed a scope for — an older SDK) is driven by anyone.
+    # ``scope_code_id``). The server's synthetic ``build:<this build's id>``
+    # scope (a build nothing fixed a scope for — an older SDK) is driven by
+    # anyone; bound to the id, so a claimed ``build:<other id>`` is foreign.
     own_code_id = code_id()
     if build_info.scope_key is not None and (
-        not is_synthetic_scope(build_info.scope_key)
+        not is_synthetic_scope(build_info.scope_key, build_id=build_id)
         and scope_code_id(build_info.scope_key) != own_code_id
     ):
         logger.error(

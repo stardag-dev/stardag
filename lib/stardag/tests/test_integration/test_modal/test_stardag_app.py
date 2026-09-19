@@ -530,6 +530,61 @@ class TestBuilderOrchestration:
         assert executor.scope_key == structure_scope_key("cafe" * 10, config)
         assert executor.scope_key != structure_scope_key("cafe" * 10, None)
 
+    def test_a_bare_resume_gives_the_executor_the_stored_config(self, monkeypatch):
+        """``build_remote``/``build_spawn`` can resume without a config; the
+        engine adopts the stored one, and so must the executor built before
+        it, or the workers would run on defaults under the bare scope."""
+        from typing import Annotated
+
+        from stardag.base_model import StardagField
+        from stardag.build._scope import STARDAG_CODE_ID_ENV, structure_scope_key
+        from stardag.build_config import task_config_key
+        from stardag.registry import BuildInfo
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+
+        class ConfiguredForResumeTest(_sd.Task[int]):
+            width: Annotated[int, StardagField(significance="dependencies_only")] = 2
+
+            def run(self):
+                return None
+
+        key = task_config_key(
+            ConfiguredForResumeTest.get_namespace(),
+            ConfiguredForResumeTest.get_name(),
+        )
+        build_id = uuid4()
+        stored = {key: {"width": 3}}
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get.return_value = BuildInfo(id=build_id, build_config=stored)
+        captured: dict = {}
+        mock_summary = MagicMock()
+        mock_summary.status = MagicMock(value="SUCCESS")
+
+        class CapturingBuilder(Builder):
+            def build(self, tasks, task_executor, build_kwargs=None):
+                captured["executor"] = task_executor
+                captured["build_kwargs"] = build_kwargs
+                return mock_summary
+
+        with registry_provider.override(registry):
+            CapturingBuilder()(
+                MagicMock(),
+                MagicMock(),
+                "app",
+                build_kwargs={"resume_build_id": build_id},
+            )
+
+        registry.build_get.assert_called_once_with(build_id)
+        assert captured["executor"].build_config == stored
+        assert captured["executor"].scope_key == structure_scope_key(
+            "cafe" * 10, stored
+        )
+        assert captured["build_kwargs"] == {
+            "resume_build_id": build_id,
+            "build_config": stored,
+        }
+
     def test_executor_without_a_config_has_the_bare_scope(self):
         captured: dict = {}
         mock_summary = MagicMock()
@@ -2699,6 +2754,38 @@ class TestTickAppOwnership:
             "scope_key": "beef" * 10 + ":0123456789abcdef",
             "code_id": "cafe" * 10,
         }
+        tick_aio.assert_not_called()
+
+    def test_another_builds_placeholder_scope_is_refused(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        """``build:<other id>`` is not this build's synthetic scope: the
+        registry accepts any claimed scope, so the placeholder shape alone
+        must not skip the code-id check."""
+        from uuid import uuid4
+
+        from stardag.build._scope import STARDAG_CODE_ID_ENV
+        from stardag.registry import BuildInfo
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        tick = self._capture_tick("app-a")
+        build_id = uuid4()
+        foreign = f"build:{uuid4()}"
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get_aio = AsyncMock(
+            return_value=BuildInfo(
+                id=build_id, reactive_app_name="app-a", scope_key=foreign
+            )
+        )
+        with (
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
+        ):
+            rp.get.return_value = registry
+            result = _invoke(tick, str(build_id))
+
+        assert result["outcome"] == "scope_mismatch"
+        assert result["scope_key"] == foreign
         tick_aio.assert_not_called()
 
     def test_own_code_drives_a_build_whose_config_names_unknown_classes(

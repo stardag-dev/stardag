@@ -340,17 +340,36 @@ def _build_config_from_env(
     env_overrides: dict[str, str] | None,
 ) -> dict[str, typing.Any] | None:
     """The build config the orchestrator forwarded (see
-    ``STARDAG_BUILD_CONFIG_ENV``), or None."""
+    ``STARDAG_BUILD_CONFIG_ENV``), or None when none was.
+
+    A forwarded value that does not decode to ``{"<class>": {"<field>":
+    value}}`` is an error, not a missing config: the build's scope was
+    hashed from the real config, and running this task on the field
+    defaults instead would evaluate a different structure under that scope.
+    Raising fails the attempt, which the scheduler records.
+    """
     raw = (env_overrides or {}).get(STARDAG_BUILD_CONFIG_ENV) or os.environ.get(
         STARDAG_BUILD_CONFIG_ENV
     )
     if not raw:
         return None
     try:
-        return json.loads(raw)
-    except ValueError:
-        logger.warning(f"Invalid {STARDAG_BUILD_CONFIG_ENV}; running without it.")
-        return None
+        decoded = json.loads(raw)
+    except ValueError as e:
+        raise RuntimeError(
+            f"{STARDAG_BUILD_CONFIG_ENV} is not valid JSON ({e}); refusing to "
+            "run the task on field defaults under a scope hashed from the "
+            "build's config."
+        ) from e
+    if not isinstance(decoded, dict) or not all(
+        isinstance(fields, dict) for fields in decoded.values()
+    ):
+        raise RuntimeError(
+            f"{STARDAG_BUILD_CONFIG_ENV} must decode to a mapping of task "
+            f"class to field overrides, got {type(decoded).__name__}; refusing "
+            "to run the task on field defaults."
+        )
+    return decoded
 
 
 def _refuse_foreign_scope(env_overrides: dict[str, str] | None) -> None:
@@ -373,7 +392,15 @@ def _refuse_foreign_scope(env_overrides: dict[str, str] | None) -> None:
     scope_key = (env_overrides or {}).get(STARDAG_SCOPE_KEY_ENV) or os.environ.get(
         STARDAG_SCOPE_KEY_ENV
     )
-    if scope_key is None or is_synthetic_scope(scope_key):
+    if scope_key is None:
+        return
+    # Bound to the forwarded build id: only ``build:<this build>`` is the
+    # server's placeholder; ``build:<another id>`` claimed by a caller is a
+    # foreign scope like any other.
+    build_id = (env_overrides or {}).get(STARDAG_BUILD_ID_ENV) or os.environ.get(
+        STARDAG_BUILD_ID_ENV
+    )
+    if is_synthetic_scope(scope_key, build_id=build_id or None):
         return
     if scope_code_id(scope_key) != code_id():
         raise RuntimeError(

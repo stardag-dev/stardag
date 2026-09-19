@@ -211,6 +211,16 @@ class TestScopeKey:
         assert not is_synthetic_scope("build:")
         assert not is_synthetic_scope("build:not-a-uuid")
 
+    def test_bound_to_a_build_only_its_own_placeholder_is_synthetic(self):
+        """The registry accepts any claimed scope, so ``build:<other id>``
+        must read as foreign where the build id is known."""
+        mine, other = uuid4(), uuid4()
+        assert is_synthetic_scope(f"build:{mine}", build_id=mine)
+        assert is_synthetic_scope(f"build:{mine}".upper(), build_id=str(mine))
+        assert not is_synthetic_scope(f"build:{other}", build_id=mine)
+        assert not is_synthetic_scope("build:" + "f" * 16, build_id=mine)
+        assert is_synthetic_scope(None, build_id=mine)
+
     def test_an_env_code_id_must_be_usable(self, monkeypatch: pytest.MonkeyPatch):
         _reset_for_tests()
         monkeypatch.setenv(STARDAG_CODE_ID_ENV, "a:b")

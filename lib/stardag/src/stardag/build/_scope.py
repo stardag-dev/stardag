@@ -28,9 +28,13 @@ import re
 import subprocess
 import uuid
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 from typing import Any
 
 from stardag.build_config import structure_config_hash
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -124,15 +128,25 @@ def scope_code_id(scope_key: str) -> str:
     return code
 
 
-def is_synthetic_scope(scope_key: str | None) -> bool:
+def is_synthetic_scope(
+    scope_key: str | None, *, build_id: "UUID | str | None" = None
+) -> bool:
     """Whether ``scope_key`` is the server's per-build placeholder — a build
     that never set a real scope, which every current tick may drive.
 
-    Exactly ``build:<uuid>``, the shape the server writes; a prefix test
-    would also match a real scope whose code id happens to be ``build``,
-    and a synthetic scope is the one case that skips the code-id check.
+    The server writes exactly ``build:<the build's own id>``. Given
+    ``build_id``, only that string counts: a synthetic scope is the one case
+    that skips the code-id check, and the registry accepts any claimed
+    scope, so ``build:<some other uuid>`` set by a caller must read as a
+    real (foreign) scope, not as the placeholder. Without a build id the
+    exact shape is all there is to go on; a prefix test would also match a
+    real scope whose code id happens to be ``build``.
     """
-    return scope_key is None or _SYNTHETIC_SCOPE_RE.match(scope_key) is not None
+    if scope_key is None:
+        return True
+    if build_id is not None:
+        return scope_key.lower() == f"{SYNTHETIC_SCOPE_PREFIX}{build_id}".lower()
+    return _SYNTHETIC_SCOPE_RE.match(scope_key) is not None
 
 
 def _reset_for_tests() -> None:

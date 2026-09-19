@@ -97,7 +97,9 @@ class BuildCreate(BaseModel):
     # discovery). A reactive trigger leaves it out: the bootstrap that runs
     # discovery inside the deployment sets it via ``PUT /builds/{id}/scope``
     # before registering any edge. Absent, the build gets the synthetic
-    # ``build:<id>`` scope nobody else shares.
+    # ``build:<id>`` scope nobody else shares. The ``build:`` prefix is the
+    # server's to write: a claimed scope carrying it is a 400
+    # ``synthetic_scope_claimed``.
     scope_key: str | None = Field(default=None, min_length=1, max_length=96)
     # The build config: ``{"<namespace>.<Name>": {"<field>": value}}`` for
     # dependencies_only / execution_only fields. Immutable for the build.
@@ -112,7 +114,9 @@ class SetBuildScopeRequest(BaseModel):
     200 with nothing changed (an idempotent re-trigger); a build that has a
     *different* real scope answers 409 ``scope_mismatch`` — a resume under
     other code or other structure config is a new build, not this one.
-    ``build_config`` follows the same rule.
+    ``build_config`` follows the same rule. A scope shaped like the
+    server's synthetic one (``build:...``) cannot be claimed: 400
+    ``synthetic_scope_claimed``.
     """
 
     scope_key: str = Field(min_length=1, max_length=96)

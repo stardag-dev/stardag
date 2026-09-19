@@ -934,6 +934,8 @@ async def create_build(
     # key can name it — a build that never sets a real scope (an older SDK,
     # or a reactive build before its bootstrap runs) gets per-build edges
     # under ``build:<id>``, which nobody else shares.
+    if build.scope_key is not None:
+        _refuse_synthetic_claim(build.scope_key)
     build_pk = generate_uuid7()
     db_build = Build(
         id=build_pk,
@@ -1785,6 +1787,7 @@ async def resume_build(
 
     needs_commit = False
     if scope_key is not None:
+        _refuse_synthetic_claim(scope_key)
         needs_commit = (
             _apply_scope(build, scope_key=scope_key, build_config=parsed_build_config)
             or needs_commit
@@ -2179,6 +2182,34 @@ def _is_synthetic_scope(build: Build) -> bool:
     return build.scope_key == synthetic_scope_key(build.id)
 
 
+_SYNTHETIC_SCOPE_PREFIX = "build:"
+
+
+def _refuse_synthetic_claim(scope_key: str) -> None:
+    """A caller may not *claim* a scope shaped like the server's own.
+
+    Ticks and workers read ``build:<uuid>`` as "the server's per-build
+    placeholder, driven by anyone" and skip the foreign-code guard for it.
+    The server is the only one that writes that shape, so a client sending
+    it — under this build's id or any other — is asking for a build that no
+    code identity protects. Refused with 400 ``synthetic_scope_claimed``.
+    """
+    if scope_key.startswith(_SYNTHETIC_SCOPE_PREFIX):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": "synthetic_scope_claimed",
+                "scope_key": scope_key,
+                "message": (
+                    f"The {_SYNTHETIC_SCOPE_PREFIX!r} prefix is reserved for the "
+                    "server's own per-build scope; a claimed structure scope is "
+                    "<code_id>:<config_hash>. Leave scope_key out to run under "
+                    "the per-build scope."
+                ),
+            },
+        )
+
+
 def _apply_scope(build: Build, *, scope_key: str, build_config: dict | None) -> bool:
     """Fix ``build``'s structure scope, set-once. Returns whether it changed.
 
@@ -2256,6 +2287,7 @@ async def set_build_scope(
     :class:`SetBuildScopeRequest`.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _refuse_synthetic_claim(payload.scope_key)
     build = await _get_build_for_update(build_id, db, auth)
     if _apply_scope(
         build, scope_key=payload.scope_key, build_config=payload.build_config

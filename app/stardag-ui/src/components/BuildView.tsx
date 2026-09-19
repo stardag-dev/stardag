@@ -27,6 +27,7 @@ import type {
 import { isExtendedResponse } from "../types/task";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
 import { rootsSatisfiedFrom } from "../utils/claims";
+import { isSyntheticScope } from "../utils/scope";
 import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { BuildExecutorChips } from "./ExecutorBadge";
@@ -862,7 +863,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
  */
 function BuildScopeChip({ scopeKey }: { scopeKey?: string | null }) {
   if (!scopeKey) return null;
-  const synthetic = scopeKey.startsWith("build:");
+  const synthetic = isSyntheticScope(scopeKey);
   return (
     <code
       title={

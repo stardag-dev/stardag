@@ -17,6 +17,7 @@ Pinned here:
 
 import pytest
 from httpx import AsyncClient
+from uuid import uuid4
 
 BUILDS = "/api/v1/builds"
 
@@ -195,6 +196,41 @@ async def test_resume_adopts_a_scope_onto_a_synthetic_build(client: AsyncClient)
     assert response.status_code == 200, response.text
     assert response.json()["scope_key"] == "code-9:cfg"
     assert response.json()["build_config"] == {"ns.T": {"n": 3}}
+
+
+# --- The synthetic shape is the server's -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_claimed_scope_may_not_look_synthetic(client: AsyncClient):
+    """Ticks and workers read ``build:<uuid>`` as the server's placeholder
+    and skip the code-id guard for it, so a client must not be able to
+    claim that shape — on create, on resume, or on the scope route."""
+    other = uuid4()
+    created = await client.post(BUILDS, json={"scope_key": f"build:{other}"})
+    assert created.status_code == 400, created.text
+    assert created.json()["detail"]["error_code"] == "synthetic_scope_claimed"
+
+    build_id = (await _build(client))["id"]
+    for claimed in (f"build:{other}", f"build:{build_id}", "build:ffff"):
+        put = await client.put(
+            f"{BUILDS}/{build_id}/scope", json={"scope_key": claimed}
+        )
+        assert put.status_code == 400, (claimed, put.text)
+        assert put.json()["detail"]["error_code"] == "synthetic_scope_claimed"
+        resumed = await client.post(
+            f"{BUILDS}/{build_id}/resume", params={"scope_key": claimed}
+        )
+        assert resumed.status_code == 400, (claimed, resumed.text)
+        assert resumed.json()["detail"]["error_code"] == "synthetic_scope_claimed"
+
+    # The build kept the scope the server gave it, and a real claim still works.
+    info = (await client.get(f"{BUILDS}/{build_id}")).json()
+    assert info["scope_key"] == f"build:{build_id}"
+    fixed = await client.put(
+        f"{BUILDS}/{build_id}/scope", json={"scope_key": "code:cfg"}
+    )
+    assert fixed.status_code == 200, fixed.text
 
 
 # --- Gating reads one scope --------------------------------------------
