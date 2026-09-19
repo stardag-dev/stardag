@@ -70,11 +70,14 @@ changed. Nobody wants that, and nobody asked for it.
 
 Concretely:
 
-- Every edge row carries a `scope_key`. Every build carries one, for its
-  whole life. Readiness — "are all my upstreams complete?" — is evaluated
-  over the edges in the build's own scope only.
-- Resuming or re-triggering a build under a different scope is refused. The
-  answer is a new build.
+- Every edge row carries a `scope_key`. Every build carries one — **the
+  scope it is currently planned under** — and readiness ("are all my
+  upstreams complete?") is evaluated over the edges in that scope only.
+- A build's scope moves when the code that drives it does: the first
+  scheduler pass on new code re-plans the build under its own scope (see
+  [Rollover](#rollover-a-build-follows-the-live-deployment)). Resuming or
+  re-triggering a build under a different `dependencies_only` config is
+  refused; a build has one config for its life.
 - Within a scope, edges only grow. Nothing retracts them, and no build
   outside the scope reads them.
 - Two builds in different scopes may materialise one task id over different
@@ -107,7 +110,8 @@ scope would rediscover. Discovering it again is only cost.
 ### What it buys
 
 - A changed `requires()` or fan-out needs no version bump and no refusal:
-  new code is a new scope, and the old build keeps its own edges.
+  new code is a new scope, a new build plans under it, and a running build
+  rolls over to it at its next scheduler pass.
 - Many builds over overlapping DAGs under one deployment share discovered
   structure. A fan-out's pre-yield section runs once per scope, not once per
   build.
@@ -140,15 +144,19 @@ Environment _variables_ are not in the key either, by contract (below).
 **Who computes it.** Whoever runs discovery: the reactive bootstrap, inside
 the deployment, for a reactive build; the local process for a resident one.
 The bootstrap writes the scope onto the build before registering any edge.
-Every scheduler tick and worker derives its own code id the same way and
-compares it with the code id half of the build's scope; a mismatch is a
-refusal with a message naming both, never a silent hand-off. Only that half
-is compared: the config half is a function of the build's own config, which
-the tick or worker installs, so recomputing it would verify nothing — and
-would require every task class the config names to be importable in a
-container that may have rehydrated a single task. A laptop whose clean tree is at the deployment's SHA shares the
-deployment's scope; a dirty laptop gets a private scope per process, always
-correct and never cached.
+Every scheduler tick derives its own code id the same way and compares it
+with the code id half of the build's scope; a mismatch means the build was
+planned by other code and the tick **re-plans it under its own** (below).
+Only that half is compared: the config half is a function of the build's own
+config, which the tick installs, so recomputing it would verify nothing —
+and would require every task class the config names to be importable in a
+container that may have rehydrated a single task. Workers compare nothing:
+a task id promises the output whatever code produces it. What a worker owns
+is the scope its _yields_ are recorded under — its own code id with the
+config half it was handed — so the structure a worker discovers is always
+attributed to the code that discovered it. A laptop whose clean tree is at
+the deployment's SHA shares the deployment's scope; a dirty laptop gets a
+private scope per process, always correct and never cached.
 
 ## The three levels of significance
 
@@ -225,37 +233,62 @@ table: the structure recorded under a scope stops being a function of the
 scope. The consequence is over-gating (below), never wrong output, and the
 registry warns when it sees it.
 
-## Deployments
+## Rollover: a build follows the live deployment
 
-Modal has one live deployment per app name. A redeploy lets in-flight inputs
-finish on the old version, but every _new_ spawn through the app name lands
-on the new one, and a reactive build progresses by new spawns. So after a
-redeploy under the same name a running build's next tick meets a scope
-mismatch and stalls. Safe, and not what anyone wants.
+Modal has one live deployment per app name. A redeploy lets in-flight
+inputs finish on the old version, but every _new_ spawn through the app
+name lands on the new one, and a reactive build progresses by new spawns.
+The conventional expectation — one live version of a production app, and
+running work moving to it — is what stardag follows. A **deployment** in
+stardag is exactly Modal's: one code version of one app, and the registry
+records each one as it is deployed (`app_name`, `code_id`, `deployed_at`);
+the newest is the current one. Nothing is kept alive beside it and nothing
+needs collecting.
 
-The only way an old build keeps running old code is for the old code to
-stay deployed under _some_ name, and Modal exposes no addressable function
-versions. So the version goes into the name: the user writes a **family**,
-`StardagApp("myapp")`, and each deploy creates a concrete handle,
-`myapp--<code_id[:12]>`. The registry keeps a **deployment record** per
-handle: family, handle, code id, environment, deployed and retired times.
+A running build is therefore not bound to the code that planned it. **Its
+scope is the scope it is currently planned under**, and the first scheduler
+pass that runs on new code moves it:
 
-The handle is a placeholder for a capability the platform does not have, and
-two rules keep it swappable:
+1. The tick takes the build's lease and finds the build's scope names another
+   code id. It **re-plans**: it rehydrates the roots from the registry (the
+   identity-level `task_data` is all that is needed), runs discovery under
+   its own code with the build's stored config, registers the plan's edges
+   under its own scope — the same steps as the reactive bootstrap — and
+   moves the build's scope to its own. Discovery stops at completed tasks,
+   so this costs one walk of the incomplete part of the DAG per redeploy.
+2. A tick still lingering on the old code sees the scope move on its next
+   frontier read and exits as superseded; the lease already guarantees one
+   driver at a time.
+3. Workers are code-agnostic. A container of any version may run a task,
+   because the task id already promises the output; whether the output
+   changes with the code is the user's `__version__` obligation, exactly as
+   before. What a worker must get right is where its **yields** land: it
+   registers the dynamic edges it discovers under its own code's scope,
+   never the build's current one. An old worker's late yield thus lands in
+   the old scope, the rolled-over build never sees it, and the new pass
+   re-runs the parent under new code — wasted work, correct outcome, the
+   over-approximation the rule already accepts.
+4. Executions the new plan no longer contains finish on their own. Their
+   targets are content-addressed, so they harm nothing; cancelling them is
+   an optional later step, and the authority rule and the executions
+   endpoint from the cancel work are the mechanism.
+5. A root whose identity parameters the new code changed cannot be
+   rehydrated. The build fails with one message: re-trigger it as a new
+   build. A build is a loose collection of roots (a re-trigger may append
+   some), so the failure is per build, not per root.
 
-1. Only the resolver knows the naming convention. Nothing parses a handle
-   back into parts. The trigger asks the record for a handle, the build
-   stores it, ticks spawn on it.
-2. The record, not the app name, is the identity. "Which deployments of this
-   family are live" and "which have no running build" are registry
-   questions.
+What this replaces: a first version of this design kept every code version
+deployed under its own Modal app (`<family>--<code id>`) so that a build
+could stay on the code that planned it. That needed a registry table
+joining families to handles, a resolver, a `deployment=` argument on the
+trigger, a garbage collector and a watchdog per handle — all to keep alive
+what the platform deliberately does not, and in direct conflict with what
+"deployment" means on it. The soundness argument never needed the binding:
+edges are keyed by code and config, not by build, and completion and the
+claim are global.
 
-Triggering resolves the deployment explicitly, as "the one for my local
-code" (deploying first if it does not exist, which is idempotent because
-the handle _is_ the code id), or by default as the newest live deployment of
-the family. Two code versions run side by side in one environment,
-coordinating through global completion and claims only. A deployment with no
-running build can be retired.
+**Branch deployments** are separate apps, `<app>-<branch>`, each with one
+live version; a documented workflow, not a new concept.
 
 ## What a build does with a shared task
 
@@ -305,12 +338,13 @@ scope.
 
 **Rows grow with deploys.** One edge row per edge per scope. Gating and
 closure probe one scope, so old rows cost nothing on the hot path, and they
-serve the provenance view below. Retiring a deployment can delete its
-scope's edges; nothing does so automatically.
+serve the provenance view below. A retention window for old scopes' edges is
+a later addition; nothing deletes them today.
 
-**A redeploy is a new scope**, including one that changes only a comment.
-The cache is per code version, and the code id does not try to be cleverer
-than the SHA.
+**A redeploy is a new scope**, including one that changes only a comment,
+and every running build re-plans once at its next scheduler pass. The cache
+is per code version, and the code id does not try to be cleverer than the
+SHA.
 
 **A dirty tree never shares.** By design; the code is unknown.
 
@@ -406,9 +440,10 @@ soundness, shares the discovered structure, and removes the last retraction.
 - Registration sends the dependency sets discovery actually computed, and
   declines to declare for a task it pruned at, instead of re-evaluating
   `requires()` for every task in the payload.
-- The refusal message for a scope mismatch names both scopes and the
-  remedy, because a refused build looks to whoever triggered it like stardag
-  declining to run.
+- The refusal message for a build-config mismatch names both configs and
+  the remedy, because a refused build looks to whoever triggered it like
+  stardag declining to run. (A code mismatch is no longer a refusal: the
+  build rolls over.)
 - Everything in
   [execution-claims-and-liveness.md](execution-claims-and-liveness.md) about
   cancel authority and execution refs. A build is a request, not an owner;

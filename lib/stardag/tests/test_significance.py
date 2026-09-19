@@ -18,6 +18,7 @@ from stardag.build._scope import (
     code_id,
     is_synthetic_scope,
     scope_code_id,
+    scope_config_hash,
     structure_scope_key,
 )
 from stardag.build_config import (
@@ -236,6 +237,13 @@ class TestScopeKey:
         assert is_synthetic_scope(f"build:{uuid4()}")
         assert is_synthetic_scope(None)
 
+    def test_the_config_half_travels_with_a_worker(self):
+        """A worker registers its yields under its own code id and the config
+        half it was handed; the placeholder has no config half."""
+        assert scope_config_hash("abc123:" + "f" * 16) == "f" * 16
+        assert scope_config_hash(f"build:{uuid4()}") == ""
+        assert scope_config_hash("abc123") == ""
+
     def test_the_code_id_half_is_what_a_container_compares(self):
         """A tick or worker checks only the code half of a scope: the config
         half is derived from the build's own config, so recomputing it would
@@ -286,6 +294,19 @@ class _Recording(NoOpRegistry):
     def __init__(self) -> None:
         super().__init__()
         self.starts: list[dict] = []
+        self.registration_scopes: list[str | None] = []
+
+    async def task_register_bulk_aio(
+        self,
+        build_id,
+        tasks,
+        *,
+        limit_keys=None,
+        declared_dependencies=None,
+        scope_key=None,
+    ):
+        self.registration_scopes.append(scope_key)
+        return None
 
     async def build_start_aio(
         self,
@@ -316,6 +337,13 @@ class TestBuildPassesItsScope:
         (start,) = registry.starts
         assert start["scope_key"] == structure_scope_key("codeXYZ", config)
         assert start["build_config"] == config
+        # Every registration names the scope explicitly — the scope of the
+        # code that evaluated the edges — rather than leaving it to the
+        # server's notion of the build's current scope.
+        assert registry.registration_scopes
+        assert set(registry.registration_scopes) == {
+            structure_scope_key("codeXYZ", config)
+        }
         # The config is not left installed after the build.
         assert get_build_config() is None
         # ...and the task that ran read it: it wrote its partition size.

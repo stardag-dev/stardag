@@ -553,154 +553,65 @@ def _report_task_modules(
             )
 
 
-def _record_deployment(stardag_app_instance: StardagApp, handle: str) -> None:
+def _record_deployment(
+    stardag_app_instance: StardagApp, app_name: str, *, modal_app_id: str | None
+) -> None:
+    """Record in the registry that this code id now runs as ``app_name``.
+
+    One row per deploy, exactly Modal's notion of a deployment: the newest
+    row for an app is the current one. Best-effort — a deploy without
+    registry credentials still deploys, it is just not listed by
+    ``stardag modal deployments``.
+    """
     from stardag.registry import NoOpRegistry, registry_provider
 
-    if not stardag_app_instance.versioned_deployments:
-        # An unversioned app deploys under one stable handle for every code
-        # version. A record binds a handle to ONE code id, so recording it
-        # would leave a stale record after the next redeploy (and a
-        # ``deployment_handle_taken`` refusal). Nothing resolves such an
-        # app by record — triggers use the family name directly.
-        logger.debug(
-            "Deployment %s not recorded: the app does not use versioned_deployments.",
-            handle,
-        )
-        return
     try:
         registry = registry_provider.get()
         if type(registry) is NoOpRegistry:
-            console.print(
-                "[dim]No registry configured; deployment not recorded "
-                "(triggers cannot resolve it by family).[/dim]"
-            )
+            console.print("[dim]No registry configured; deployment not recorded.[/dim]")
             return
         info = registry.deployment_record(
-            family=stardag_app_instance.family,
-            handle=handle,
+            app_name=app_name,
             code_id=stardag_app_instance.code_id,
+            modal_app_id=modal_app_id,
         )
     except Exception as e:  # pragma: no cover - network
         console.print(f"[yellow]Could not record the deployment: {e}[/yellow]")
         return
     if info is not None:
         console.print(
-            f"[cyan]Recorded deployment[/cyan] {info.handle} "
-            f"(family {info.family}, code {info.code_id[:12]})"
+            f"[cyan]Recorded deployment[/cyan] {info.app_name} "
+            f"(code {info.code_id[:12]})"
         )
 
 
 @app.command("deployments")
 def deployments(
-    family: Optional[str] = typer.Option(
-        None, "--family", help="Only this app family."
-    ),
-    include_retired: bool = typer.Option(
-        False, "--include-retired", help="Also list retired deployments."
-    ),
+    app_name: Optional[str] = typer.Option(None, "--app", help="Only this app."),
 ) -> None:
-    """List the deployments recorded in the registry, newest first."""
+    """List the deployments recorded in the registry, newest first.
+
+    A deployment is one code version of one app, recorded by ``stardag modal
+    deploy``; the newest per app is the one every new spawn lands on, and
+    running builds roll over to it at their next scheduler tick.
+    """
     from rich.table import Table
 
     from stardag.registry import registry_provider
 
-    rows = registry_provider.get().deployment_list(
-        family=family, include_retired=include_retired
-    )
+    rows = registry_provider.get().deployment_list(app_name=app_name)
     table = Table(title="Deployments")
-    for col in ("Family", "Handle", "Code id", "Running builds", "Created", "Retired"):
+    for col in ("App", "Code id", "Deployed", "Modal app id", ""):
         table.add_column(col)
     for d in rows:
         table.add_row(
-            d.family,
-            d.handle,
+            d.app_name,
             d.code_id[:12],
-            str(d.running_builds),
-            d.created_at.isoformat(timespec="seconds") if d.created_at else "-",
-            d.retired_at.isoformat(timespec="seconds") if d.retired_at else "-",
+            d.deployed_at.isoformat(timespec="seconds") if d.deployed_at else "-",
+            f"[dim]{d.modal_app_id}[/dim]" if d.modal_app_id else "-",
+            "[green]current[/green]" if d.current else "",
         )
     console.print(table)
-
-
-@app.command("gc")
-def gc(
-    family: str = typer.Argument(..., help="The app family to collect."),
-    keep: int = typer.Option(
-        1, "--keep", min=0, help="Keep this many of the newest idle deployments."
-    ),
-    env: Optional[str] = typer.Option(
-        None, "-e", "--env", help="Modal environment the apps are deployed in."
-    ),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="Show what would be stopped without doing it."
-    ),
-) -> None:
-    """Retire and stop deployments of a family no running build still needs.
-
-    A deployment is retirable when no RUNNING build references its handle.
-    The newest ``--keep`` retirable ones are kept so a trigger with no
-    explicit deployment still has something to resolve to.
-
-    The registry record is retired *first*, and the Modal app stopped only
-    once that succeeded. The registry refuses the retire (409) if a build
-    resolved the handle since the listing, in which case the deployment is
-    kept and its app left running; the other order would have stopped an
-    app a build had just been handed. What remains is the window between a
-    trigger resolving the handle and its first spawn: a trigger that read
-    the record before the retire and spawns after the stop fails loudly at
-    the spawn (the app is gone), never silently.
-    """
-    import subprocess
-
-    from stardag.exceptions import APIError
-    from stardag.registry import registry_provider
-
-    registry = registry_provider.get()
-    live = registry.deployment_list(family=family)
-    if not live:
-        console.print(f"No live deployments recorded for family {family!r}.")
-        return
-    idle = [d for d in live if d.running_builds == 0]
-    victims = idle[keep:]
-    busy = [d for d in live if d.running_builds]
-    for d in busy:
-        console.print(
-            f"[dim]keep {d.handle}: {d.running_builds} running build(s)[/dim]"
-        )
-    for d in idle[:keep]:
-        console.print(f"[dim]keep {d.handle}: among the {keep} newest idle[/dim]")
-    if not victims:
-        console.print("Nothing to collect.")
-        return
-    modal_cli = Path(sys.executable).with_name("modal")
-    for d in victims:
-        if dry_run:
-            console.print(f"would retire and stop {d.handle} (code {d.code_id[:12]})")
-            continue
-        try:
-            registry.deployment_retire(d.id)
-        except APIError as e:
-            if e.status_code == 409:
-                # A build resolved this handle between the listing and now.
-                # The record stays live and so does the app.
-                console.print(
-                    f"[dim]keep {d.handle}: a build took it since the listing[/dim]"
-                )
-                continue
-            raise
-        cmd = [str(modal_cli), "app", "stop", d.handle, "--yes"]
-        if env:
-            cmd += ["-e", env]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            output = ((result.stderr or "") + (result.stdout or "")).strip()
-            if "not found" not in output.lower() and "no app" not in output.lower():
-                error_console.print(
-                    f"[yellow]Retired {d.handle} but could not stop its app: "
-                    f"{output}. Stop it by hand: modal app stop {d.handle}[/yellow]"
-                )
-                continue
-        console.print(f"[green]retired and stopped {d.handle}[/green]")
 
 
 @app.command("deploy")
@@ -875,19 +786,27 @@ def deploy(
         )
         raise typer.Exit(1)
 
-    # Deploy the app
+    # Deploy the app. Modal's own deployment tag carries the code id unless
+    # the caller chose one, so `modal app history` shows the same identity
+    # the registry records.
     with enable_output():
         res = deploy_app(
-            modal_app, name=deployment_name, environment_name=env or "", tag=tag
+            modal_app,
+            name=deployment_name,
+            environment_name=env or "",
+            tag=tag or stardag_app_instance.code_id,
         )
 
     console.print(f"[green]Deployed {deployment_name}[/green]")
 
     # Record the deployment in the registry: which code version now runs
-    # under this handle. The record — not the app name — is what a trigger
-    # resolves and what `stardag modal gc` reads. Best-effort: a deploy
-    # without registry credentials still deploys.
-    _record_deployment(stardag_app_instance, deployment_name)
+    # as this app. Best-effort: a deploy without registry credentials
+    # still deploys.
+    _record_deployment(
+        stardag_app_instance,
+        deployment_name,
+        modal_app_id=getattr(res, "app_id", None),
+    )
 
     if stream_logs:
         # stream_app_logs is wrapped with @synchronizer.create_blocking, making it sync

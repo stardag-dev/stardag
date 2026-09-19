@@ -1747,11 +1747,11 @@ async def resume_build(
 ):
     """Mark an existing build as resumed.
 
-    ``scope_key`` / ``build_config``, when given, must agree with the
-    build's — a resume under other code or other structure config is a new
-    build, not this one, and is refused with 409 ``scope_mismatch``. A
-    build still on its synthetic scope adopts them (see
-    :func:`set_build_scope`).
+    ``scope_key``, when given, sets or moves the build's scope exactly as
+    :func:`set_build_scope` does — a resume from new code re-plans the build
+    under that code. ``build_config``, when given, must equal the stored one
+    (409 ``scope_mismatch`` otherwise). Neither is required: an older SDK
+    resumes without them and the build keeps its current scope.
 
     Called by the SDK when ``sd.build(resume_build_id=...)`` reuses an
     existing build that may have already terminated. Emits a
@@ -1792,26 +1792,6 @@ async def resume_build(
         needs_commit = (
             _apply_scope(build, scope_key=scope_key, build_config=parsed_build_config)
             or needs_commit
-        )
-    elif not _is_synthetic_scope(build):
-        # A build planned under a structure scope is resumed by naming that
-        # scope: the resumer's code and config are what the edges then get
-        # recorded under, so an unscoped resume — a client predating scopes
-        # — would register its structure into a scope that says otherwise.
-        # A synthetic scope is nobody's structure and stays open to anyone.
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "scope_required",
-                "build_id": str(build.id),
-                "scope_key": build.scope_key,
-                "message": (
-                    f"Build {build.id} was planned under structure scope "
-                    f"{build.scope_key!r}; a resume must name it. A client that "
-                    "cannot compute a structure scope may only re-trigger the "
-                    "builds it created. Start a new build instead."
-                ),
-            },
         )
 
     has_activity = (
@@ -2242,39 +2222,45 @@ def _refuse_synthetic_claim(scope_key: str) -> None:
         )
 
 
-def _apply_scope(build: Build, *, scope_key: str, build_config: dict | None) -> bool:
-    """Fix ``build``'s structure scope, set-once. Returns whether it changed.
+def _registration_scope(build: Build, requested: str | None) -> str:
+    """The scope a registration's edges are written under.
 
-    Three cases, and the middle one is the whole reason this is not a plain
-    assignment: a synthetic scope is replaced; the *same* real scope is a
-    no-op (an idempotent re-trigger); a *different* real scope is refused,
-    because the edges recorded under the old one were evaluated by other
-    code or other structure config and a build carries one scope for its
-    life. The answer to "I want to run this build under new code" is a new
-    build. ``build_config`` follows the same rule, compared as a whole: a
-    supplied config must equal the stored one whenever one is stored — a
-    reactive trigger stores it at ``POST /builds`` while the scope is still
-    synthetic, and a later scope claim may not rewrite it — and, on a build
-    with a real scope, also when nothing is stored, where "nothing" and
-    ``{}`` are the same config. ``None`` is not a config but "unspecified"
-    — an older SDK or a bare re-trigger — and keeps whatever is stored.
+    ``None`` — older SDKs, and the common case — is the build's current
+    scope. A caller that names one is a worker or a scheduler pass running
+    under other code than the one the build is currently planned under; its
+    edges are recorded under *its* scope, so structure is always attributed
+    to the code that discovered it. The synthetic shape is accepted only as
+    this build's own placeholder (a worker of a build nothing scoped, echoing
+    the scope it was handed); any other ``build:<uuid>`` is a 400.
     """
-    if not _is_synthetic_scope(build) and build.scope_key != scope_key:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "scope_mismatch",
-                "build_id": str(build.id),
-                "scope_key": build.scope_key,
-                "requested_scope_key": scope_key,
-                "message": (
-                    f"Build {build.id} runs under structure scope "
-                    f"{build.scope_key!r}; a resume under {scope_key!r} would "
-                    "mix dependency edges evaluated by different code or "
-                    "different structure config. Start a new build instead."
-                ),
-            },
-        )
+    if requested is None:
+        return build.scope_key
+    if requested != synthetic_scope_key(build.id):
+        _refuse_synthetic_claim(requested)
+    return requested
+
+
+def _apply_scope(build: Build, *, scope_key: str, build_config: dict | None) -> bool:
+    """Set or move ``build``'s structure scope. Returns whether anything changed.
+
+    A build's scope is the scope it is *currently planned under*, so any real
+    scope is accepted: a synthetic scope is replaced, the same scope is a
+    no-op (an idempotent re-trigger), and a *different* real scope is a
+    **rollover** — the scheduler pass that re-planned the build under new
+    code, having registered the plan's edges under its own scope, records
+    that the build now gates over that scope. The old scope's edges stay
+    where they are; other builds under that code may still be reading them.
+
+    What may not change is ``build_config``, compared as a whole: a supplied
+    config must equal the stored one whenever one is stored — a reactive
+    trigger stores it at ``POST /builds`` while the scope is still synthetic,
+    and a later scope claim may not rewrite it — and, on a build with a real
+    scope, also when nothing is stored, where "nothing" and ``{}`` are the
+    same config. ``None`` is not a config but "unspecified" — an older SDK or
+    a bare re-trigger — and keeps whatever is stored. A build has one config
+    for its life because the config is what the scope's second half is a
+    function of; new code re-plans under the same config, never another.
+    """
     if build_config is not None and (
         (build.build_config and build.build_config != build_config)
         or (
@@ -2292,7 +2278,7 @@ def _apply_scope(build: Build, *, scope_key: str, build_config: dict | None) -> 
                 "message": (
                     f"Build {build.id} was triggered with a different "
                     "build_config; a build has one config for its life. "
-                    "Start a new build instead."
+                    "Start a new build for another config."
                 ),
             },
         )
@@ -2313,13 +2299,14 @@ async def set_build_scope(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
-    """Fix the build's structure scope and build config, set-once.
+    """Set or move the build's structure scope; fix its build config.
 
     Called by whoever runs discovery — the reactive bootstrap inside the
-    deployment, or the local process of a resident build — **before it
-    registers any edge**, so every edge the build writes carries the scope
-    of the code and config that evaluated it. Idempotent for the same
-    scope; 409 ``scope_mismatch`` for a different one. See
+    deployment, or the local process of a resident build — after it has
+    registered the plan's edges under the scope it names, so the build gates
+    over exactly the edges the code driving it evaluated. Idempotent for the
+    same scope; a different real scope is a rollover to new code; a
+    different ``build_config`` is 409 ``scope_mismatch``. See
     :class:`SetBuildScopeRequest`.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -3477,7 +3464,8 @@ async def register_task(
     one that loses that race gets a reference rather than an error.
 
     Every declared upstream must already be registered; see
-    :class:`TaskCreate`. Edges are written in the build's structure scope.
+    :class:`TaskCreate`. Edges are written in the build's structure scope,
+    or in the scope the caller names (``TaskCreate.scope_key``).
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -3603,11 +3591,13 @@ async def register_task(
             ),
         )
 
-    # Static dependency edges (is_dynamic=False), in this build's scope.
+    # Static dependency edges (is_dynamic=False), in the caller's scope —
+    # the build's unless the caller runs under other code.
+    edge_scope = _registration_scope(build, task.scope_key)
     await _reconcile_dependency_edges(
         db=db,
         environment_id=build.environment_id,
-        scope_key=build.scope_key,
+        scope_key=edge_scope,
         downstream_task_pk=db_task.id,
         downstream_task_id=task.task_id,
         upstream_task_ids=upstream_ids,
@@ -3630,7 +3620,7 @@ async def register_task(
         db,
         build_id=build_id,
         workspace_id=auth.workspace_id,
-        scope_key=build.scope_key,
+        scope_key=edge_scope,
         task_pks=[db_task.id],
     )
 
@@ -3947,6 +3937,7 @@ async def register_tasks_bulk(
         for pk, t_id in upstream_lookup.all():
             pk_by_task_id[t_id] = pk
 
+    edge_scope = _registration_scope(build, payload.scope_key)
     edge_rows: list[dict[str, object]] = []
     for t in tasks_in:
         upstream_ids = declared[t.task_id]
@@ -3961,7 +3952,7 @@ async def register_tasks_bulk(
                     "id": generate_uuid7(),
                     "upstream_task_id": pk_by_task_id[upstream_id],
                     "downstream_task_id": downstream_pk,
-                    "scope_key": build.scope_key,
+                    "scope_key": edge_scope,
                     "is_dynamic": False,
                     "created_at": now,
                 }
@@ -4049,7 +4040,7 @@ async def register_tasks_bulk(
         db,
         build_id=build_id,
         workspace_id=auth.workspace_id,
-        scope_key=build.scope_key,
+        scope_key=edge_scope,
         task_pks=[t.id for t in db_task_by_task_id.values()],
     )
 
@@ -4529,7 +4520,7 @@ async def add_task_dependencies(
     added = await _reconcile_dependency_edges(
         db=db,
         environment_id=build.environment_id,
-        scope_key=build.scope_key,
+        scope_key=_registration_scope(build, request.scope_key),
         downstream_task_pk=db_task.id,
         downstream_task_id=task_id,
         upstream_task_ids=request.upstream_task_ids,

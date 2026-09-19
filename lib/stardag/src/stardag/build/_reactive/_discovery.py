@@ -182,8 +182,16 @@ async def discover_and_register_aio(
     _chunk_size: int = 50,
     max_concurrent_discover: int = _DEFAULT_MAX_CONCURRENT_DISCOVER,
     limit_key_selector: "Callable[[BaseTask], Sequence[str]] | None" = None,
+    scope_key: str | None = None,
 ) -> DiscoveryResult:
     """Walk ``tasks``' dependency trees, register everything, return state.
+
+    ``scope_key`` names the structure scope the declared edges are recorded
+    under — the scope of the code running this walk. ``None`` leaves it to
+    the registry (the build's current scope), which is right for the
+    bootstrap and the scheduler that planned the build; a worker of another
+    code version passes its own so its yields never land in a scope its
+    code did not evaluate.
 
     Post-order walk (deps before parents, so the bulk endpoint resolves
     ``dependency_task_ids`` without phantom rows), stopping at
@@ -324,6 +332,7 @@ async def discover_and_register_aio(
             declared_dependencies={
                 task.id: deps_of[task.id] for task in chunk if task.id in deps_of
             },
+            scope_key=scope_key,
             **({"limit_keys": keys} if keys is not None else {}),
         )
         if not retry_failed:

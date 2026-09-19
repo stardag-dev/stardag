@@ -294,15 +294,17 @@ class SDKVersionUnsupportedError(APIError):
 
 
 class ScopeMismatchError(APIError):
-    """A build was resumed under other code or other structure config.
+    """The registry refused to move a build's structure scope (HTTP 409
+    ``scope_mismatch``).
 
     The registry keys a build's dependency edges by a structure scope — the
     code id of the deployment (or local process) that evaluated
-    ``requires()`` plus the hash of its ``dependencies_only`` config — and a
-    build carries one scope for its life. Resuming or re-triggering it from
-    a different scope would mix edges evaluated by different code, so the
-    registry refuses (HTTP 409 ``scope_mismatch``). The answer is a new
-    build. See ``docs/design/scope-keyed-dependency-structure.md``.
+    ``requires()`` plus the hash of its ``dependencies_only`` config. A
+    build's scope *moves* when the code driving it changes (a rollover to
+    the live deployment); what it may not do is change its **build config**,
+    which is fixed for the build's life — that is the refusal this carries,
+    as :class:`BuildConfigMismatchError`. The answer is a new build. See
+    ``docs/design/scope-keyed-dependency-structure.md``.
     """
 
 

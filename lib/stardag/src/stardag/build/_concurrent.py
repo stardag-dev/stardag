@@ -78,7 +78,7 @@ from stardag.build_config import (
     rebind_to_build_config,
     set_build_config,
 )
-from stardag.exceptions import ScopeMismatchError
+from stardag.exceptions import BuildConfigMismatchError
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
 
@@ -757,10 +757,11 @@ async def build_aio(
             await registry.build_resume_aio(
                 build_id, scope_key=scope_key, build_config=build_config
             )
-        except ScopeMismatchError:
-            # Not a registry hiccup: the registry understood and refused.
-            # This build's edges were evaluated by other code or other
-            # structure config; continuing would mix them. New build.
+        except BuildConfigMismatchError:
+            # Not a registry hiccup: the registry understood and refused —
+            # the build was configured differently, and a build has one
+            # config for its life. New build. (Other code is not a refusal:
+            # the resume simply moves the build's scope to this code.)
             raise
         except Exception as reg_err:
             handle_registry_error(
@@ -897,6 +898,7 @@ async def build_aio(
                 registered_infos = await registry.task_register_bulk_aio(
                     build_id,
                     chunk,
+                    scope_key=scope_key,
                     declared_dependencies={
                         t.id: declared_deps[t.id]
                         for t in chunk
@@ -1107,7 +1109,11 @@ async def build_aio(
             if dynamic_deps:
                 try:
                     await registry.task_add_dependencies_aio(
-                        build_id, task, dynamic_deps, is_dynamic=True
+                        build_id,
+                        task,
+                        dynamic_deps,
+                        is_dynamic=True,
+                        scope_key=scope_key,
                     )
                 except Exception as reg_err:
                     handle_registry_error(
@@ -1616,6 +1622,7 @@ async def build_aio(
                         build_id,
                         task,
                         declared_dependencies=declared_deps.get(task.id),
+                        scope_key=scope_key,
                     )
                     state.registered = True
                 except Exception as reg_err:
@@ -1707,6 +1714,7 @@ async def build_aio(
                             build_id,
                             task,
                             declared_dependencies=declared_deps.get(task.id),
+                            scope_key=scope_key,
                         )
                         state.registered = True
                     except Exception as reg_err:

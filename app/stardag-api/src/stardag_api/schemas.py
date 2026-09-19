@@ -107,16 +107,18 @@ class BuildCreate(BaseModel):
 
 
 class SetBuildScopeRequest(BaseModel):
-    """Body of ``PUT /builds/{id}/scope``: fix the build's structure scope.
+    """Body of ``PUT /builds/{id}/scope``: set or move the build's structure scope.
 
-    Set-once: a build that still carries its synthetic ``build:<id>`` scope
-    takes the given one; a build that already has this exact scope answers
-    200 with nothing changed (an idempotent re-trigger); a build that has a
-    *different* real scope answers 409 ``scope_mismatch`` — a resume under
-    other code or other structure config is a new build, not this one.
-    ``build_config`` follows the same rule. A scope shaped like the
-    server's synthetic one (``build:...``) cannot be claimed: 400
-    ``synthetic_scope_claimed``.
+    A build's scope is the scope it is *currently planned under*. A build
+    still on its synthetic ``build:<id>`` scope takes the given one; a build
+    already on this exact scope answers 200 with nothing changed (an
+    idempotent re-trigger); a build on a *different* real scope **moves** to
+    the given one — the scheduler pass that re-planned it under new code
+    says so here, after registering the plan under that scope. What may
+    not change is ``build_config``: a supplied config that differs from the
+    stored one is 409 ``scope_mismatch``, since a build has one config for
+    its life. A scope shaped like the server's synthetic one
+    (``build:<uuid>``) cannot be claimed: 400 ``synthetic_scope_claimed``.
     """
 
     scope_key: str = Field(min_length=1, max_length=96)
@@ -255,6 +257,14 @@ class TaskCreate(BaseModel):
     # ignored, since nothing schedules above a complete task and the edge
     # would gate nothing.
     dependency_task_ids: list[str] | None = None
+    # The structure scope the declared edges are recorded under. ``None``
+    # (older SDKs, and the common case) means the build's current scope. A
+    # worker running under other code than the one currently driving the
+    # build names its own scope here, so the structure it discovered is
+    # attributed to the code that discovered it and never leaks into a
+    # scope that says otherwise. The synthetic shape ``build:<uuid>`` is
+    # accepted only when it is this build's own placeholder.
+    scope_key: str | None = Field(default=None, min_length=1, max_length=96)
     # The named concurrency-limit keys this task runs under, as the
     # registering app's ``limit_key_selector`` computes them. Recorded at
     # registration so the server knows which *pending* tasks want a key —
@@ -279,6 +289,10 @@ class TaskBulkCreate(BaseModel):
     """
 
     tasks: list[TaskCreate]
+    # The structure scope every declared edge in this batch is recorded
+    # under; see ``TaskCreate.scope_key``. ``None`` means the build's
+    # current scope.
+    scope_key: str | None = Field(default=None, min_length=1, max_length=96)
 
 
 class TaskResponse(BaseModel):
@@ -883,6 +897,10 @@ class AddDependenciesRequest(BaseModel):
 
     upstream_task_ids: list[str]
     is_dynamic: bool = True
+    # The structure scope the edges are recorded under; see
+    # ``TaskCreate.scope_key``. A worker yielding dynamic dependencies names
+    # its own code's scope here. ``None`` means the build's current scope.
+    scope_key: str | None = Field(default=None, min_length=1, max_length=96)
 
 
 class AddDependenciesResponse(BaseModel):
@@ -1091,34 +1109,35 @@ class TaskGraphExtendedResponse(BaseModel):
 
 
 class DeploymentUpsert(BaseModel):
-    """``POST /deployments``: record (or re-record) a deployed code version.
+    """``POST /deployments``: record a deployed code version of an app.
 
-    Idempotent on ``(environment, handle)``: deploying the same code id
-    under the same handle again returns the existing record. A different
-    ``code_id`` for an existing handle is a 409 — the handle is derived from
-    the code id, so that would be a resolver bug.
+    A deployment is exactly the execution backend's: one code version of
+    one app name, of which the backend keeps one live at a time. Idempotent
+    on ``(environment, app_name, code_id)``: deploying the same code again
+    refreshes ``deployed_at`` and returns the existing record.
     """
 
-    family: str = Field(min_length=1, max_length=64)
-    handle: str = Field(min_length=1, max_length=64)
+    app_name: str = Field(min_length=1, max_length=64)
     code_id: str = Field(min_length=1, max_length=64)
+    # The backend's own identifier, when the deploy knew it: Modal's app id
+    # (``ap-...``). Supplied on a re-record, it replaces the stored one.
+    modal_app_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class DeploymentResponse(BaseModel):
-    """A deployed code version of an app family."""
+    """One deployed code version of an app."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
     environment_id: UUID
-    family: str
-    handle: str
+    app_name: str
     code_id: str
-    created_at: datetime
-    retired_at: datetime | None = None
-    # RUNNING builds whose ``reactive_app_name`` is this handle: the number
-    # that decides whether the deployment is retirable.
-    running_builds: int = 0
+    deployed_at: datetime
+    modal_app_id: str | None = None
+    # Whether this is the newest deployment of its app — the one the
+    # backend is running now, and the one a running build rolls over to.
+    current: bool = False
 
 
 class DeploymentListResponse(BaseModel):

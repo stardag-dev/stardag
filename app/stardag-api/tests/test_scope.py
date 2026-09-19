@@ -82,11 +82,12 @@ async def test_create_with_a_scope_uses_it(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_set_scope_replaces_the_synthetic_one_and_is_then_fixed(
+async def test_set_scope_replaces_the_synthetic_one_and_moves_to_new_code(
     client: AsyncClient,
 ):
-    """Synthetic → set; the same scope again is a no-op; a different one is
-    refused. A build carries one scope for its life."""
+    """Synthetic → set; the same scope again is a no-op; another real scope
+    is a rollover to new code; another config is refused. A build's scope is
+    the one it is currently planned under; its config is for life."""
     build_id = (await _build(client))["id"]
 
     response = await client.put(
@@ -105,42 +106,33 @@ async def test_set_scope_replaces_the_synthetic_one_and_is_then_fixed(
     assert response.status_code == 200, response.text
     assert response.json()["scope_key"] == "code-1:cfg-a"
 
-    # Other code: a new build, not this one.
-    response = await client.put(
-        f"{BUILDS}/{build_id}/scope", json={"scope_key": "code-2:cfg-a"}
-    )
-    assert response.status_code == 409, response.text
-    detail = response.json()["detail"]
-    assert detail["error_code"] == "scope_mismatch"
-    assert detail["scope_key"] == "code-1:cfg-a"
-    assert detail["requested_scope_key"] == "code-2:cfg-a"
-
-    # Same scope, other config: also refused — a build has one config.
+    # Other config: refused — a build has one config.
     response = await client.put(
         f"{BUILDS}/{build_id}/scope",
         json={"scope_key": "code-1:cfg-a", "build_config": {"ns.T": {"n": 2}}},
     )
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["error_code"] == "scope_mismatch"
-
-    # Nothing moved.
     fetched = (await client.get(f"{BUILDS}/{build_id}")).json()
     assert fetched["scope_key"] == "code-1:cfg-a"
     assert fetched["build_config"] == {"ns.T": {"n": 1}}
 
+    # Other code, same config: the build rolls over.
+    response = await client.put(
+        f"{BUILDS}/{build_id}/scope",
+        json={"scope_key": "code-2:cfg-a", "build_config": {"ns.T": {"n": 1}}},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["scope_key"] == "code-2:cfg-a"
+    assert response.json()["build_config"] == {"ns.T": {"n": 1}}
+
 
 @pytest.mark.asyncio
-async def test_resume_checks_the_scope(client: AsyncClient):
-    """A re-trigger under another scope is refused; under the same one it
-    proceeds; without a scope it is refused too, since this build has one."""
+async def test_resume_sets_or_moves_the_scope(client: AsyncClient):
+    """A re-trigger under the same scope proceeds; under other code it
+    moves the build there; without a scope it keeps the current one."""
     build_id = (await _build(client, "code-1:cfg-a"))["id"]
     await _register_task(client, build_id, "t")
-
-    mismatch = await client.post(
-        f"{BUILDS}/{build_id}/resume", params={"scope_key": "code-2:cfg-a"}
-    )
-    assert mismatch.status_code == 409, mismatch.text
-    assert mismatch.json()["detail"]["error_code"] == "scope_mismatch"
 
     same = await client.post(
         f"{BUILDS}/{build_id}/resume", params={"scope_key": "code-1:cfg-a"}
@@ -148,13 +140,15 @@ async def test_resume_checks_the_scope(client: AsyncClient):
     assert same.status_code == 200, same.text
     assert same.json()["scope_key"] == "code-1:cfg-a"
 
-    # Without a scope on the query the resume is refused: this build was
-    # planned under a structure scope, and an unscoped resumer (a client
-    # predating scopes) would register its own structure into it.
+    moved = await client.post(
+        f"{BUILDS}/{build_id}/resume", params={"scope_key": "code-2:cfg-a"}
+    )
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["scope_key"] == "code-2:cfg-a"
+
     bare = await client.post(f"{BUILDS}/{build_id}/resume")
-    assert bare.status_code == 409, bare.text
-    assert bare.json()["detail"]["error_code"] == "scope_required"
-    assert bare.json()["detail"]["scope_key"] == "code-1:cfg-a"
+    assert bare.status_code == 200, bare.text
+    assert bare.json()["scope_key"] == "code-2:cfg-a"
 
 
 @pytest.mark.asyncio
@@ -245,6 +239,112 @@ async def test_resume_adopts_a_scope_onto_a_synthetic_build(client: AsyncClient)
     assert response.status_code == 200, response.text
     assert response.json()["scope_key"] == "code-9:cfg"
     assert response.json()["build_config"] == {"ns.T": {"n": 3}}
+
+
+# --- Rollover ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_rollover_gates_over_the_new_scope_and_keeps_the_old_edges(
+    client: AsyncClient,
+):
+    """Planned under code 1 with ``t <- u1``; re-planned under code 2 with
+    ``t <- u2``. Afterwards the build gates over code 2's edges only, and
+    code 1's edge is still there for any build that runs under code 1."""
+    build_id = (await _build(client, "code-1:cfg"))["id"]
+    await _register_task(client, build_id, "u1")
+    await _register_task(client, build_id, "t", ["u1"])
+    assert set(_actionable(await _frontier(client, build_id))) == {"u1"}
+
+    # New code re-plans: registers its structure under its own scope, then
+    # moves the build there.
+    for task_id, deps in (("u2", None), ("t", ["u2"])):
+        response = await client.post(
+            f"{BUILDS}/{build_id}/tasks",
+            json={**_register(task_id, deps), "scope_key": "code-2:cfg"},
+        )
+        assert response.status_code == 201, response.text
+    moved = await client.put(
+        f"{BUILDS}/{build_id}/scope", json={"scope_key": "code-2:cfg"}
+    )
+    assert moved.status_code == 200, moved.text
+
+    frontier = await _frontier(client, build_id)
+    assert frontier["scope_key"] == "code-2:cfg"
+    # u1 no longer gates t: only u2 does. u1 is still in the plan (its
+    # registration is this build's), just no longer anything's upstream here.
+    assert set(_actionable(frontier)) == {"u1", "u2"}, frontier
+    await client.post(f"{BUILDS}/{build_id}/tasks/u2/start")
+    await client.post(f"{BUILDS}/{build_id}/tasks/u2/complete")
+    assert "t" in _actionable(await _frontier(client, build_id))
+
+    # Code 1's edge survives for code 1's builds.
+    other = (await _build(client, "code-1:cfg"))["id"]
+    await _register_task(client, other, "t")
+    frontier_other = await _frontier(client, other)
+    assert "t" not in _actionable(frontier_other), frontier_other
+    assert "u1" in _actionable(frontier_other)
+
+
+@pytest.mark.asyncio
+async def test_registration_may_name_its_scope(client: AsyncClient):
+    """A caller under other code than the build's current one records its
+    edges under its own scope: the build's gating does not read them, and a
+    build under that code does."""
+    build_id = (await _build(client, "code-2:cfg"))["id"]
+    await _register_task(client, build_id, "t")
+
+    # An old worker (code 1) yields a child for t and registers it under
+    # code 1's scope, in bulk and via the dependencies route.
+    bulk = await client.post(
+        f"{BUILDS}/{build_id}/tasks/bulk",
+        json={"tasks": [_register("child")], "scope_key": "code-1:cfg"},
+    )
+    assert bulk.status_code == 201, bulk.text
+    edges = await client.post(
+        f"{BUILDS}/{build_id}/tasks/t/dependencies",
+        json={
+            "upstream_task_ids": ["child"],
+            "is_dynamic": True,
+            "scope_key": "code-1:cfg",
+        },
+    )
+    assert edges.status_code == 200, edges.text
+    assert edges.json()["added"] == 1
+
+    # The build (code 2) is not gated by code 1's yield.
+    assert "t" in _actionable(await _frontier(client, build_id))
+    # A code-1 build is.
+    old_code = (await _build(client, "code-1:cfg"))["id"]
+    await _register_task(client, old_code, "t")
+    frontier_old = await _frontier(client, old_code)
+    assert "t" not in _actionable(frontier_old), frontier_old
+    assert "child" in _actionable(frontier_old)
+
+
+@pytest.mark.asyncio
+async def test_a_registration_scope_may_be_this_builds_placeholder_only(
+    client: AsyncClient,
+):
+    """A worker of a build nothing scoped echoes the placeholder it was
+    handed; any other synthetic-shaped scope is a claim and is refused."""
+    build_id = (await _build(client))["id"]
+    own = await client.post(
+        f"{BUILDS}/{build_id}/tasks",
+        json={**_register("t"), "scope_key": f"build:{build_id}"},
+    )
+    assert own.status_code == 201, own.text
+    other = await client.post(
+        f"{BUILDS}/{build_id}/tasks",
+        json={**_register("t2"), "scope_key": f"build:{uuid4()}"},
+    )
+    assert other.status_code == 400, other.text
+    assert other.json()["detail"]["error_code"] == "synthetic_scope_claimed"
+    bulk = await client.post(
+        f"{BUILDS}/{build_id}/tasks/bulk",
+        json={"tasks": [_register("t3")], "scope_key": f"build:{uuid4()}"},
+    )
+    assert bulk.status_code == 400, bulk.text
 
 
 # --- The synthetic shape is the server's -------------------------------

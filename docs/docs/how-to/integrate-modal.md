@@ -812,30 +812,24 @@ result = app.build_trigger(
 The config is stored with the build and installed by the bootstrap, every
 tick and every worker before any task is constructed, so a yielded
 dependency sees the same values the scheduler planned with. A re-trigger of
-the same build must carry the same config; a different one is a new build.
+the same build reuses its stored config; a different one is a new build.
 
-### Versioned deployments
+### Redeploying while builds run
 
-_Why and when: [Evolve a DAG Safely](evolve-dags.md#4-deploy-new-code-beside-running-builds-modal)._
+_Why it is safe: [Evolve a DAG Safely](evolve-dags.md#4-deploy-new-code)._
 
-```{.python notest}
-app = sd_modal.StardagApp("stardag-poc", versioned_deployments=True, ...)
-```
+Deploy the new code under the same app name. Running containers finish on
+the old code; each running build is re-planned under the new code by its
+next scheduler tick (`rolled_over` in the tick summary) and continues.
 
 ```bash
-stardag modal deploy app.py          # deploys stardag-poc--<code id>, records it
-stardag modal deployments --family stardag-poc
-stardag modal gc stardag-poc --keep 1   # stop deployments no running build needs
-```
-
-```{.python notest}
-app.build_trigger(root_task, reactive=True)                      # newest recorded
-app.build_trigger(root_task, reactive=True, deployment="local")  # this checkout's code
-app.build_trigger(root_task, reactive=True, deployment="3f9c1a2b7e01")  # a code id
+stardag modal deploy app.py     # recorded as a deployment of this app
+stardag modal deployments       # code versions deployed to this environment, newest first
 ```
 
 Deploy from a clean checkout: a dirty tree gets a one-off code id, so every
-deploy of it is a new app that only `gc` cleans up.
+deploy of it is a new structure scope that shares nothing. A branch that
+should run beside production is a separate app with its own name.
 
 ### Preemption and timeouts
 

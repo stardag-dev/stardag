@@ -870,7 +870,7 @@ function BuildScopeChip({ scopeKey }: { scopeKey?: string | null }) {
       title={
         synthetic
           ? `Structure scope ${scopeKey} — this build's dependency edges are shared with no other build`
-          : `Structure scope ${scopeKey} — the code version and structure config this build's dependency edges were evaluated under`
+          : `Structure scope ${scopeKey} — the code version and structure config this build is currently planned under. It moves when the app is redeployed: the next scheduler pass re-plans the build under the new code.`
       }
       className="max-w-[14rem] truncate rounded bg-gray-100 px-1 py-0.5 font-mono text-[10px] text-gray-600 dark:bg-gray-700 dark:text-gray-300"
     >

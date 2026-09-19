@@ -35,111 +35,74 @@ def test_deploy_reaches_module_import():
 
 
 class TestRecordDeployment:
-    """A record binds a handle to one code id, which only a versioned
-    deployment has; an unversioned app redeploys under the same handle with
-    new code and must leave no record to go stale."""
+    """Every deploy is recorded: one row per (app, code id), Modal's own
+    notion of a deployment. The Modal app id rides along when the deploy
+    reported one; nothing else is derived from it."""
 
-    def _run(self, versioned: bool):
+    def _run(self, modal_app_id):
         from unittest.mock import MagicMock
 
         from stardag._cli.modal import _record_deployment
         from stardag.registry import NoOpRegistry, registry_provider
 
-        recorded: list[tuple[str, str, str]] = []
+        recorded: list[tuple[str, str, str | None]] = []
 
         class FakeRegistry(NoOpRegistry):
-            def deployment_record(self, *, family, handle, code_id):
-                recorded.append((family, handle, code_id))
+            def deployment_record(self, *, app_name, code_id, modal_app_id=None):
+                recorded.append((app_name, code_id, modal_app_id))
                 return None
 
-        stardag_app = MagicMock(
-            versioned_deployments=versioned, family="fam", code_id="c" * 40
-        )
+        stardag_app = MagicMock(code_id="c" * 40)
         with registry_provider.override(FakeRegistry()):
-            _record_deployment(stardag_app, "fam--cccccccccccc" if versioned else "fam")
+            _record_deployment(stardag_app, "myapp", modal_app_id=modal_app_id)
         return recorded
 
-    def test_an_unversioned_app_is_not_recorded(self):
-        assert self._run(versioned=False) == []
+    def test_a_deploy_is_recorded_under_the_app_name(self):
+        assert self._run("ap-123") == [("myapp", "c" * 40, "ap-123")]
 
-    def test_a_versioned_app_is_recorded(self):
-        assert self._run(versioned=True) == [("fam", "fam--cccccccccccc", "c" * 40)]
+    def test_without_a_modal_app_id_the_record_still_lands(self):
+        assert self._run(None) == [("myapp", "c" * 40, None)]
 
 
-class TestGcRetiresBeforeStopping:
-    """``gc`` retires the registry record first and stops the app only once
-    the registry agreed; a 409 means a build took the deployment since the
-    listing, and it is kept — app running, record live."""
+class TestDeploymentsListing:
+    """``stardag modal deployments`` lists what the registry recorded, newest
+    first, and marks the current one per app."""
 
-    @staticmethod
-    def _deployment(handle: str, running: int = 0):
+    def test_lists_newest_first_with_the_current_marked(self):
+        from datetime import datetime, timezone
         from uuid import uuid4
 
+        from stardag.registry import NoOpRegistry, registry_provider
         from stardag.registry._base import DeploymentInfo
 
-        return DeploymentInfo(
-            id=uuid4(),
-            family="fam",
-            handle=handle,
-            code_id=handle.split("--")[1] * 8,
-            running_builds=running,
-        )
-
-    def _run(self, monkeypatch, deployments, retire):
-        from stardag.registry import NoOpRegistry, registry_provider
-
-        events: list[tuple[str, str]] = []
+        rows = [
+            DeploymentInfo(
+                id=uuid4(),
+                app_name="myapp",
+                code_id="b" * 40,
+                deployed_at=datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc),
+                current=True,
+                modal_app_id="ap-new",
+            ),
+            DeploymentInfo(
+                id=uuid4(),
+                app_name="myapp",
+                code_id="a" * 40,
+                deployed_at=datetime(2026, 9, 19, 11, 0, tzinfo=timezone.utc),
+            ),
+        ]
+        asked: list[str | None] = []
 
         class FakeRegistry(NoOpRegistry):
-            def deployment_list(self, *, family=None, include_retired=False):
-                return list(deployments)
+            def deployment_list(self, *, app_name=None):
+                asked.append(app_name)
+                return rows
 
-            def deployment_retire(self, deployment_id, *, force=False):
-                handle = next(d.handle for d in deployments if d.id == deployment_id)
-                events.append(("retire", handle))
-                return retire(handle)
-
-        def fake_run(cmd, **kwargs):
-            events.append(("stop", cmd[cmd.index("stop") + 1]))
-            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-        monkeypatch.setattr("subprocess.run", fake_run)
         with registry_provider.override(FakeRegistry()):
-            result = runner.invoke(app, ["gc", "fam", "--keep", "1"])
-        return result, events
-
-    def test_retire_then_stop_in_that_order(self, monkeypatch):
-        newest, older, busy = (
-            self._deployment("fam--aaaa"),
-            self._deployment("fam--bbbb"),
-            self._deployment("fam--cccc", running=2),
-        )
-        result, events = self._run(
-            monkeypatch, [newest, older, busy], retire=lambda handle: None
-        )
+            result = runner.invoke(app, ["deployments", "--app", "myapp"])
         assert result.exit_code == 0, result.output
-        # Only the older idle one is collected: the newest idle is kept for
-        # the resolver, the busy one is never a candidate.
-        assert events == [("retire", "fam--bbbb"), ("stop", "fam--bbbb")]
-        assert "keep fam--cccc" in result.output
-
-    def test_a_deployment_taken_since_the_listing_is_kept_and_not_stopped(
-        self, monkeypatch
-    ):
-        from stardag.exceptions import APIError
-
-        def retire(handle):
-            raise APIError(
-                "in use",
-                status_code=409,
-                payload={"error_code": "deployment_in_use"},
-            )
-
-        result, events = self._run(
-            monkeypatch,
-            [self._deployment("fam--aaaa"), self._deployment("fam--bbbb")],
-            retire=retire,
-        )
-        assert result.exit_code == 0, result.output
-        assert events == [("retire", "fam--bbbb")]
-        assert "took it since the listing" in result.output
+        assert asked == ["myapp"]
+        assert result.output.index("bbbbbbbbbbbb") < result.output.index("aaaaaaaaaaaa")
+        assert "current" in result.output
+        assert "ap-new" in result.output
+        assert "gc" not in [c.name for c in app.registered_commands]

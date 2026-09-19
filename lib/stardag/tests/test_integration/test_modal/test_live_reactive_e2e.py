@@ -106,7 +106,13 @@ class MiniReactiveRegistry(NoOpRegistry):
             self.reactive_tick_kwargs = tick_kwargs
 
     async def task_register_bulk_aio(
-        self, build_id, tasks, *, limit_keys=None, declared_dependencies=None
+        self,
+        build_id,
+        tasks,
+        *,
+        limit_keys=None,
+        declared_dependencies=None,
+        scope_key=None,
     ):
         for task in tasks:
             tid = str(task.id)

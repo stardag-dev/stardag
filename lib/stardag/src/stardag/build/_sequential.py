@@ -62,7 +62,7 @@ from stardag.build_config import (
     rebind_to_build_config,
     set_build_config,
 )
-from stardag.exceptions import ScopeMismatchError
+from stardag.exceptions import BuildConfigMismatchError
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
@@ -365,9 +365,10 @@ def build_sequential(
             registry.build_resume(
                 build_id, scope_key=scope_key, build_config=build_config
             )
-        except ScopeMismatchError:
-            # The registry understood and refused: this build's edges were
-            # evaluated by other code or other structure config. New build.
+        except BuildConfigMismatchError:
+            # The registry understood and refused: the build was configured
+            # differently. A build has one config for its life; new build.
+            # (Other code is not a refusal — the scope simply moves.)
             raise
         except Exception as reg_err:
             handle_registry_error(
@@ -393,7 +394,10 @@ def build_sequential(
             return
         try:
             registry.task_register(
-                build_id, task, declared_dependencies=declared_deps.get(task.id)
+                build_id,
+                task,
+                declared_dependencies=declared_deps.get(task.id),
+                scope_key=scope_key,
             )
             registered_tasks.add(task.id)
         except Exception as reg_err:
@@ -425,6 +429,7 @@ def build_sequential(
                 registry.task_register_bulk(
                     build_id,
                     chunk,
+                    scope_key=scope_key,
                     declared_dependencies={
                         t.id: declared_deps[t.id]
                         for t in chunk
@@ -669,6 +674,7 @@ def build_sequential(
                     register_task_once,
                     task_count,
                     on_registry_failure,
+                    scope_key,
                 )
                 task_count.succeeded += 1
                 task_completed = True
@@ -723,6 +729,7 @@ def _run_task_sequential(
     register_task_once: Callable[[BaseTask], None],
     task_count: TaskCount | None = None,
     on_registry_failure: OnRegistryFailure = "raise",
+    scope_key: str | None = None,
 ) -> None:
     """Run a single task in sequential mode, handling dynamic deps."""
     # Ensure static requires() are complete before running this task. When the
@@ -750,6 +757,7 @@ def _run_task_sequential(
                 register_task_once,
                 task_count,
                 on_registry_failure,
+                scope_key,
             )
             if task_count is not None:
                 task_count.succeeded += 1
@@ -816,6 +824,7 @@ def _run_task_sequential(
                             register_task_once,
                             task_count,
                             on_registry_failure,
+                            scope_key,
                         )
                         if task_count is not None:
                             task_count.succeeded += 1
@@ -825,7 +834,11 @@ def _run_task_sequential(
                 if dynamic_deps:
                     try:
                         registry.task_add_dependencies(
-                            build_id, task, dynamic_deps, is_dynamic=True
+                            build_id,
+                            task,
+                            dynamic_deps,
+                            is_dynamic=True,
+                            scope_key=scope_key,
                         )
                     except Exception as reg_err:
                         handle_registry_error(
@@ -963,9 +976,10 @@ async def build_sequential_aio(
             await registry.build_resume_aio(
                 build_id, scope_key=scope_key, build_config=build_config
             )
-        except ScopeMismatchError:
-            # The registry understood and refused: this build's edges were
-            # evaluated by other code or other structure config. New build.
+        except BuildConfigMismatchError:
+            # The registry understood and refused: the build was configured
+            # differently. A build has one config for its life; new build.
+            # (Other code is not a refusal — the scope simply moves.)
             raise
         except Exception as reg_err:
             handle_registry_error(
@@ -988,7 +1002,10 @@ async def build_sequential_aio(
             return
         try:
             await registry.task_register_aio(
-                build_id, task, declared_dependencies=declared_deps.get(task.id)
+                build_id,
+                task,
+                declared_dependencies=declared_deps.get(task.id),
+                scope_key=scope_key,
             )
             registered_tasks.add(task.id)
         except Exception as reg_err:
@@ -1017,6 +1034,7 @@ async def build_sequential_aio(
                 await registry.task_register_bulk_aio(
                     build_id,
                     chunk,
+                    scope_key=scope_key,
                     declared_dependencies={
                         t.id: declared_deps[t.id]
                         for t in chunk
@@ -1257,6 +1275,7 @@ async def build_sequential_aio(
                     register_task_once_aio,
                     task_count,
                     on_registry_failure,
+                    scope_key,
                 )
                 task_count.succeeded += 1
                 task_completed = True
@@ -1333,6 +1352,7 @@ async def _run_task_sequential_aio(
     register_task_once_aio: Callable[[BaseTask], Awaitable[None]],
     task_count: TaskCount | None = None,
     on_registry_failure: OnRegistryFailure = "raise",
+    scope_key: str | None = None,
 ) -> None:
     """Run a single task in async sequential mode, handling dynamic deps."""
     # Ensure static requires() are complete before running this task — see the
@@ -1351,6 +1371,7 @@ async def _run_task_sequential_aio(
                 register_task_once_aio,
                 task_count,
                 on_registry_failure,
+                scope_key,
             )
             if task_count is not None:
                 task_count.succeeded += 1
@@ -1414,6 +1435,7 @@ async def _run_task_sequential_aio(
                     register_task_once_aio,
                     task_count,
                     on_registry_failure,
+                    scope_key,
                 )
                 if task_count is not None:
                     task_count.succeeded += 1
@@ -1423,7 +1445,7 @@ async def _run_task_sequential_aio(
         if dynamic_deps:
             try:
                 await registry.task_add_dependencies_aio(
-                    build_id, task, dynamic_deps, is_dynamic=True
+                    build_id, task, dynamic_deps, is_dynamic=True, scope_key=scope_key
                 )
             except Exception as reg_err:
                 handle_registry_error(

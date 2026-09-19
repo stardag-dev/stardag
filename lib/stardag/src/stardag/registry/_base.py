@@ -198,6 +198,12 @@ class BuildFrontier(StardagBaseModel):
     # inside the dynamic-dep registration window) — cancellation targets.
     # Defaults to empty for servers predating the field.
     running: list[FrontierTaskRef] = []
+    # The structure scope the build is currently planned under — the scope
+    # gating was evaluated over for this payload. A tick compares its code
+    # id half with its own on every read: a build re-planned by a newer
+    # deployment mid-tick is that tick's cue to exit as superseded. None on
+    # servers predating scopes.
+    scope_key: str | None = None
     # Non-terminal tasks of this build held back by an upstream this build
     # does not own, capped server-side (hence the truncation flag — the list
     # is a diagnostic, not a work queue; a truncated list still proves
@@ -340,20 +346,23 @@ class BuildInfo(StardagBaseModel):
 
 
 class DeploymentInfo(StardagBaseModel):
-    """A deployed code version of an app family, as the registry records it.
+    """One deployed code version of an app, as the registry records it.
 
-    The record — not the app name — is the identity of a deployment: the
-    trigger's default resolver asks for the newest live one of a family, and
-    the garbage collector asks which ones no running build still needs.
+    Exactly Modal's notion: one code version of one app name. The registry
+    keeps a row per ``stardag modal deploy`` so operators can see which
+    code ids an app has run and which is current; the newest row for an
+    app is the current one. Nothing resolves triggers through it and
+    nothing is kept alive beside it — a running build rolls over to the
+    live deployment at its next scheduler pass.
     """
 
     id: UUID
-    family: str
-    handle: str
+    app_name: str
     code_id: str
-    created_at: datetime | None = None
-    retired_at: datetime | None = None
-    running_builds: int = 0
+    deployed_at: datetime | None = None
+    current: bool = False
+    # Modal's own app id for the deployment, when the deploy reported one.
+    modal_app_id: str | None = None
 
 
 class _DeriveDependencies:
@@ -682,13 +691,16 @@ class RegistryABC(metaclass=abc.ABCMeta):
         scope_key: str,
         build_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
-        """Fix the build's structure scope and build config, set-once.
+        """Set or move the build's structure scope; fix its build config.
 
-        Called by whoever runs discovery — the reactive bootstrap inside the
-        deployment, or a local build — **before it registers any edge**.
-        Idempotent for the same scope; a different scope on a build that
-        already has a real one raises :class:`ScopeMismatchError`, since
-        that build's edges were evaluated by other code. Default: no-op.
+        Called by whoever plans the build — the reactive bootstrap inside
+        the deployment, a local build, or a tick re-planning a build it
+        inherited from other code — once the plan is registered under
+        ``scope_key``. Idempotent for the same scope; a different scope
+        simply moves the build (a rollover). A different ``build_config`` on
+        a build that already has one raises
+        :class:`BuildConfigMismatchError`: a build has one config for its
+        life. Default: no-op.
         """
         pass
 
@@ -796,6 +808,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         *,
         declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
+        scope_key: str | None = None,
     ) -> None:
         """Register a task as pending/scheduled.
 
@@ -810,6 +823,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
                 because it was already complete, so its ``requires()`` was
                 never evaluated and must not be evaluated here; the default
                 sentinel evaluates ``task.requires()`` (legacy callers).
+            scope_key: The structure scope the declared edges are recorded
+                under — the scope of the code that evaluated
+                ``requires()``. ``None`` records them under the build's
+                current scope, which is right for the code that planned the
+                build; a worker of another code version names its own.
         """
         pass
 
@@ -820,6 +838,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         *,
         limit_keys: Mapping[UUID, Sequence[str]] | None = None,
         declared_dependencies: Mapping[UUID, "Sequence[BaseTask] | None"] | None = None,
+        scope_key: str | None = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Register many tasks to a build in a single call.
 
@@ -852,12 +871,17 @@ class RegistryABC(metaclass=abc.ABCMeta):
         discovery computed for them; a task absent from the map declares
         nothing (it was pruned at). ``None`` for the whole mapping keeps the
         legacy behaviour of evaluating ``requires()`` per task.
+
+        ``scope_key`` is the structure scope the declared edges are recorded
+        under (see :meth:`task_register`); ``None`` is the build's current
+        scope.
         """
         for task in tasks:
             self.task_register(
                 build_id,
                 task,
                 declared_dependencies=_declared_for(task, declared_dependencies),
+                scope_key=scope_key,
             )
         return None
 
@@ -1285,30 +1309,21 @@ class RegistryABC(metaclass=abc.ABCMeta):
     # -------------------------------------------------------------------------
 
     def deployment_record(
-        self, *, family: str, handle: str, code_id: str
+        self, *, app_name: str, code_id: str, modal_app_id: str | None = None
     ) -> DeploymentInfo | None:
-        """Record a deployed code version (idempotent on ``handle``).
+        """Record that ``code_id`` was deployed as ``app_name`` (idempotent
+        on the pair; a repeat refreshes ``deployed_at``). ``modal_app_id`` is
+        Modal's own identifier for the app, kept for cross-reference.
 
         See :class:`DeploymentInfo`. Default: no-op returning None, for
         backends that do not track deployments.
         """
         return None
 
-    def deployment_list(
-        self, *, family: str | None = None, include_retired: bool = False
-    ) -> list[DeploymentInfo]:
-        """The environment's deployments, newest first. Default: none."""
+    def deployment_list(self, *, app_name: str | None = None) -> list[DeploymentInfo]:
+        """The environment's recorded deployments, newest first, the newest
+        per app marked ``current``. Default: none."""
         return []
-
-    def deployment_retire(
-        self, deployment_id: UUID, *, force: bool = False
-    ) -> DeploymentInfo | None:
-        """Retire a deployment so the resolver stops handing it out.
-
-        Refused while a RUNNING build still references its handle unless
-        ``force``. Default: no-op returning None.
-        """
-        return None
 
     def task_start(
         self,
@@ -1446,6 +1461,8 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         upstream_tasks: Sequence["BaseTask"],
         is_dynamic: bool = True,
+        *,
+        scope_key: str | None = None,
     ) -> None:
         """Record dependency edges for a task.
 
@@ -1464,6 +1481,10 @@ class RegistryABC(metaclass=abc.ABCMeta):
             upstream_tasks: The yielded deps to record as edges.
             is_dynamic: Marks the edges as dynamic (True by default —
                 static ``requires()`` are recorded during task_register).
+            scope_key: The structure scope the edges are recorded under —
+                the scope of the code that yielded them. ``None`` is the
+                build's current scope; a worker names its own (see
+                :meth:`task_register`).
         """
         pass
 
@@ -1611,9 +1632,15 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         *,
         declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
+        scope_key: str | None = None,
     ) -> None:
         """Async version of task_register."""
-        self.task_register(build_id, task, declared_dependencies=declared_dependencies)
+        self.task_register(
+            build_id,
+            task,
+            declared_dependencies=declared_dependencies,
+            scope_key=scope_key,
+        )
 
     async def task_register_bulk_aio(
         self,
@@ -1622,6 +1649,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         *,
         limit_keys: Mapping[UUID, Sequence[str]] | None = None,
         declared_dependencies: Mapping[UUID, "Sequence[BaseTask] | None"] | None = None,
+        scope_key: str | None = None,
     ) -> list[RegisteredTaskInfo] | None:
         """Async version of task_register_bulk.
 
@@ -1634,6 +1662,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
                 build_id,
                 task,
                 declared_dependencies=_declared_for(task, declared_dependencies),
+                scope_key=scope_key,
             )
         return None
 
@@ -1763,9 +1792,13 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         upstream_tasks: Sequence["BaseTask"],
         is_dynamic: bool = True,
+        *,
+        scope_key: str | None = None,
     ) -> None:
         """Async version of task_add_dependencies."""
-        self.task_add_dependencies(build_id, task, upstream_tasks, is_dynamic)
+        self.task_add_dependencies(
+            build_id, task, upstream_tasks, is_dynamic, scope_key=scope_key
+        )
 
     async def task_resume_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_resume."""
@@ -1840,6 +1873,7 @@ class NoOpRegistry(RegistryABC):
         task: "BaseTask",
         *,
         declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
+        scope_key: str | None = None,
     ) -> None:
         pass
 

@@ -401,22 +401,22 @@ export interface TaskEdgeExtended {
 // ---- Deployments ----
 
 /**
- * A deployed code version of an app family, as the registry records it.
- * The record — not the Modal app name — is a deployment's identity.
+ * One deployed code version of one app, as the registry records it at
+ * `stardag modal deploy` — the same thing a Modal deployment is. The
+ * newest row for an app is its current deployment.
  */
 export interface Deployment {
   id: string;
   environment_id: string;
-  // The app name the user wrote.
-  family: string;
-  // The concrete app the code version is deployed as (`<family>--<code>`
-  // with versioned deployments; the family itself otherwise).
-  handle: string;
+  app_name: string;
   code_id: string;
-  created_at: string;
-  retired_at: string | null;
-  // RUNNING builds whose reactive app is this handle.
-  running_builds: number;
+  deployed_at: string;
+  // Modal's own app id (`ap-…`), when the deploy could record it; what a
+  // dashboard link needs.
+  modal_app_id?: string | null;
+  // Whether this is the app's newest deployment. Optional: older servers
+  // may not compute it.
+  current?: boolean;
 }
 
 export interface DeploymentListResponse {

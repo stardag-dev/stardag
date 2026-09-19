@@ -77,6 +77,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         # simulate a non-reactive build.
         self.reactive_app_name: str | None = "test-app"
         self.reactive_tick_kwargs: dict | None = {}
+        # The scope the build is planned under, as the frontier reports it.
+        # None models a server predating scopes; a real scope naming another
+        # code id models a build a newer deployment re-planned mid-tick.
+        self.scope_key: str | None = None
         self.statuses: dict[str, str] = {}
         self.upstreams: dict[str, set[str]] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
@@ -336,7 +340,13 @@ class FakeReactiveRegistry(NoOpRegistry):
     # --- registry surface used by the tick ---
 
     async def task_register_bulk_aio(
-        self, build_id, tasks, *, limit_keys=None, declared_dependencies=None
+        self,
+        build_id,
+        tasks,
+        *,
+        limit_keys=None,
+        declared_dependencies=None,
+        scope_key=None,
     ):
         infos = []
         for task in tasks:
@@ -889,6 +899,7 @@ class FakeReactiveRegistry(NoOpRegistry):
             blocked_by_external_truncated=False,
             reactive_app_name=self.reactive_app_name,
             reactive_tick_kwargs=self.reactive_tick_kwargs,
+            scope_key=self.scope_key,
         )
 
 

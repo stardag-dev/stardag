@@ -58,13 +58,22 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   them, not to the task id.** A build's readiness is evaluated over the
   edges in its own _structure scope_ — the deployment's (or local
   process's) code id plus a hash of its `dependencies_only` config — so a
-  changed `requires()` or a changed fan-out needs no version bump, and a
-  build already running keeps its own structure while new code runs beside
-  it. A resume or re-trigger under other code is refused
-  (`ScopeMismatchError`): start a new build. Builds under the same code and
-  config share what they discovered, so a fan-out's pre-yield section runs
-  once per scope. Design record:
+  changed `requires()` or a changed fan-out needs no version bump. A build
+  has one `build_config` for its life: a resume or re-trigger with a
+  different `dependencies_only` config is refused
+  (`BuildConfigMismatchError`); start a new build. Builds under the same
+  code and config share what they discovered, so a fan-out's pre-yield
+  section runs once per scope. Design record:
   `docs/design/scope-keyed-dependency-structure.md`.
+- **A running build follows the live deployment.** After a redeploy, the
+  first tick on the new code re-plans the build — discovery again under
+  its own code with the stored config, edges under its own scope, the
+  build's scope moved — and reports `rolled_over` in its summary; a tick
+  still lingering on the old code exits `superseded`. Workers register the
+  dynamic dependencies they yield under their own code's scope, so an old
+  container's late yield never reaches a re-planned build. A root whose
+  identity parameters changed cannot be re-planned: the build fails with
+  `rollover_failed` — re-trigger it as a new build.
 - **Three levels of parameter significance.**
   `sd.StardagField(significance="identity" | "dependencies_only" |
 "execution_only")`. Levels 2 and 3 are read only from the **build
@@ -84,12 +93,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   upstream in the build's scope is complete. It used to be reached only
   through the external-blocker diagnostic, once the build had already
   stalled. `FAILED` is unchanged: a result, owned by `fail_mode`.
-- **`StardagApp(versioned_deployments=True)`** deploys each code version
-  under its own Modal app, `<family>--<code id>`, and records it in the
-  registry; `build_trigger(deployment=...)` resolves the newest, `"local"`
-  or an explicit one. New CLI: `stardag modal deployments`,
-  `stardag modal gc <family>`. `stardag modal deploy` records every
-  deployment (best-effort). Off by default.
+- **Deployments are recorded.** `stardag modal deploy` records
+  `(app_name, code_id)` in the registry (best-effort), and
+  `stardag modal deployments [--app NAME]` lists an environment's
+  deployments newest first — one live deployment per app, exactly as on
+  Modal. A branch that should run beside production is another app name.
 - Registration sends the dependency sets discovery actually computed, and
   declares nothing for a task it pruned at, instead of re-evaluating
   `requires()` for every task in the payload.
@@ -97,9 +105,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `task_register`, `task_register_aio`, `task_register_bulk` and
   `task_register_bulk_aio` take a keyword-only `declared_dependencies`;
   `build_start(_aio)` and `build_resume(_aio)` take keyword-only
-  `scope_key` / `build_config`; new `build_set_scope(_aio)`,
-  `deployment_record`, `deployment_list`, `deployment_retire`
-  (no-op defaults). `BuildInfo` gains `scope_key` and `build_config`.
+  `scope_key` / `build_config`, and the registration methods a keyword-only
+  `scope_key`; new `build_set_scope(_aio)`, `deployment_record`,
+  `deployment_list` (no-op defaults). `BuildInfo` gains `scope_key` and
+  `build_config`.
   The frontier's `blocked_by_external` is no longer read.
 - **The SDK refuses a Registry API that predates structure scopes** with
   `RegistryTooOldError`: a missing `PUT /builds/{id}/scope`, or a
@@ -112,17 +121,19 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   (`UnknownTaskClassError`) is left to the bootstrap to judge.
 - The resident Modal builder forwards the build's config and structure
   scope to the workers it spawns, as the reactive path already did.
-- `stardag modal gc` retires the registry record before stopping the app,
-  and keeps a deployment a build took since the listing.
 
 ### Registry API
 
 - **Dependency edges carry a `scope_key`** (`task_dependencies.scope_key`,
   `builds.scope_key`, `builds.build_config`), unique on
   `(scope_key, upstream, downstream)`; gating, plan closure and skip-blocked
-  read the build's scope only. New `PUT /builds/{id}/scope` (set-once, 409
-  `scope_mismatch`); `POST /builds/{id}/resume` accepts `scope_key` /
-  `build_config` and refuses a mismatch. `POST /builds` accepts them too.
+  read the build's current scope only. New `PUT /builds/{id}/scope` sets
+  or **moves** the build's scope (a re-plan under new code); a
+  `build_config` that differs from the stored one is a 409
+  `scope_mismatch`. `POST /builds/{id}/resume` and `POST /builds` accept
+  `scope_key` / `build_config` under the same rules. Registration endpoints
+  accept an optional `scope_key` so a worker's yields are recorded under the
+  code that evaluated them, defaulting to the build's current scope.
   A build that never sets a scope runs under a synthetic per-build one, so
   older SDKs keep working with per-build edges.
 - **Phantom placeholder rows are gone.** Every declared upstream must be
@@ -141,9 +152,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   node's edges from the scope of the build that produced its current
   status; a build's graph adds its own scope. Edges carry `scope_key` and
   `is_cross_scope`; nodes carry `scope_key`.
-- New `deployments` table and routes: `POST /deployments` (idempotent on
-  handle), `GET /deployments`, `POST /deployments/{id}/retire` (409
-  `deployment_in_use` while a RUNNING build references it, unless `force`).
+- New `deployments` table and routes: `POST /deployments`
+  (`{app_name, code_id}`, idempotent), `GET /deployments?app_name=` newest
+  first — one row per deployed code version of an app.
 - **Migration** `690e61e0c920`: adds the columns and table, backfills every
   build's synthetic scope, deletes phantoms, and **copies legacy edges into
   the scope of every RUNNING build** so a reactive build in flight across

@@ -13,13 +13,13 @@ disagreeing about what a task is.
     - **One `build_config` per build**, keyed `"<namespace>.<Name>"`, passed
       to `sd.build(...)` or `app.build_trigger(...)`. It is stored with the
       build and every worker installs it before constructing a task.
-    - **Changing `requires()` or a fan-out needs no version bump.** Deploy,
-      start a new build. Builds already running keep their own structure.
-    - **A build carries one code version for its life.** Re-triggering it
-      after a code change is refused; start a new build.
-    - **To keep old builds running through a redeploy on Modal**, turn on
-      `versioned_deployments=True`. Otherwise a redeploy under the same app
-      name stalls running builds until they are re-triggered.
+    - **Changing `requires()` or a fan-out needs no version bump.** Deploy;
+      new builds plan under the new code, and builds already running
+      **roll over** to it at their next scheduler pass.
+    - **One live deployment per app**, as on Modal. Want a branch to run
+      beside production? Give it its own app name.
+    - **A build has one config for its life.** Re-triggering it with a
+      different `dependencies_only` config is refused; start a new build.
 
 The concepts behind this page: [three levels of
 significance](../concepts/parameters.md#three-levels-of-significance),
@@ -104,50 +104,61 @@ code's _structure scope_ and evaluated over that scope only, so upstreams
 the old code needed do not gate it, and an abandoned fan-out from an old
 build is not inherited. Completed tasks stay completed: the task id still
 promises the output, and the new build reuses every target that exists.
+Builds that were already running move to the new code too — see the next
+step.
 
 Two builds under the **same** code and config share what they discovered.
 If one has already run a fan-out parent to its yield, the other trusts
 those edges and waits on or runs the children instead of re-running the
 parent's pre-yield section.
 
-## 4. Deploy new code beside running builds (Modal)
+## 4. Deploy new code
 
-Modal has one live deployment per app name. After a redeploy under the same
-name, in-flight containers finish on the old code but every _new_ spawn
-lands on the new one — and a reactive build progresses by new spawns. Its
-next tick sees code that did not plan the build and refuses to drive it
-(`outcome='scope_mismatch'` in the tick summary). Safe, and it means
-"redeploy, then re-trigger running builds as new builds".
-
-To keep them running instead:
-
-```{.python notest}
-app = sd_modal.StardagApp("reports", versioned_deployments=True, ...)
-```
+There is one live deployment per app, on Modal and in stardag. After
+`stardag modal deploy` under the same name, containers already running
+finish on the old code, and every new spawn lands on the new one. A running
+build's next scheduler tick therefore runs on the new code, notices the
+build was planned by another code version, and **re-plans it**: discovery
+again under the new code with the build's stored config, edges recorded
+under the new scope, and the build's scope moved. You will see `rolled_over`
+in that tick's summary. Nothing to do on your side.
 
 ```bash
-stardag modal deploy app.py                  # deploys reports--<code id> and records it
-stardag modal deployments --family reports   # live code ids, and how many builds run on each
-stardag modal gc reports --keep 1            # retire and stop the ones no running build needs
+stardag modal deploy app.py        # the new code, same app name; recorded as a deployment
+stardag modal deployments          # code versions deployed, newest first — the newest is current
 ```
+
+What happens to work in flight:
+
+- Containers started under the old code finish and report as usual.
+- A dynamic dependency an old container yields after the redeploy is
+  recorded under the old code's scope, never the new one, so the re-planned
+  build does not see it and the new code decides its own structure. The
+  parent runs again under new code; the children it already ran stay
+  completed.
+- An execution the new plan no longer needs finishes on its own. Its output
+  is content-addressed, so it harms nothing.
+- A tick that was still lingering on the old code exits with `superseded`.
+
+The one thing that cannot roll over is a root whose _identity_ parameters
+you changed: the registry cannot rebuild it, and the build fails with
+`rollover_failed`. Re-trigger it as a new build.
+
+**Branches.** A branch that should run beside production is another app
+with its own name and its own single live version. A convention, not a
+feature:
 
 ```{.python notest}
-app.build_trigger(root, reactive=True)                          # newest recorded deployment
-app.build_trigger(root, reactive=True, deployment="local")      # this checkout's own code id
-app.build_trigger(root, reactive=True, deployment="3f9c1a2b")   # a recorded code id, or a prefix of one
-```
+import os
 
-The name you wrote is the **family**; the app that runs is the **handle**
-`<family>--<code id>`; the registry record ties them together, and nothing
-else parses a handle. A running build keeps ticking on its own handle
-while newer code deploys beside it. `gc` refuses to retire a deployment a
-running build still names.
+app = sd_modal.StardagApp(f"reports-{os.environ.get('BRANCH', 'main')}", ...)
+```
 
 Two things to know about the code id:
 
 - It is the git SHA of a **clean** checkout. A dirty tree gets a one-off id
-  with a warning: every deploy of it is a new app that shares nothing, and
-  `gc` is what cleans it up. Commit before you deploy.
+  with a warning: every deploy of it is a new scope that shares nothing.
+  Commit before you deploy.
 - Where there is no git checkout — a CI image, a container built from an
   archive — set `STARDAG_CODE_ID` to name the code yourself.
 
@@ -171,7 +182,8 @@ to prevent. It keeps working for one release with a `DeprecationWarning`.
 - The Task Explorer's graph follows each task's _provenance_: the edges
   from the build that produced its current status. A hop between code
   versions is marked.
-- A build's page shows its structure scope. `build:<id>` means the build
-  never fixed one — an older SDK, or a build with no structure to share.
+- A build's page shows the structure scope it is currently planned under;
+  it changes after a redeploy. `build:<id>` means the build never fixed one
+  — an older SDK, or a build with no structure to share.
 - Placeholder ("phantom") nodes are gone; an upstream that was never
   registered is a registration error, not a grey node.

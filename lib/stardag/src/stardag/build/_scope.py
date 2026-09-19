@@ -128,6 +128,23 @@ def scope_code_id(scope_key: str) -> str:
     return code
 
 
+def scope_config_hash(scope_key: str) -> str:
+    """The config-hash half of a structure scope key (empty for a synthetic
+    scope, which has no config half).
+
+    A worker registers the dynamic edges it yields under *its own* code id
+    with the config half it was handed: the config is the build's, fixed for
+    its life, and hashing it again would need every configured task class
+    importable in a container that rehydrated one task. Two code versions
+    with the same config half are still two scopes, told apart by the code
+    half.
+    """
+    if is_synthetic_scope(scope_key):
+        return ""
+    _, sep, config = scope_key.partition(":")
+    return config if sep else ""
+
+
 def is_synthetic_scope(
     scope_key: str | None, *, build_id: "UUID | str | None" = None
 ) -> bool:

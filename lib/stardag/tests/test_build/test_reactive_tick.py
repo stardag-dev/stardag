@@ -74,6 +74,44 @@ class TestTickHappyPath:
         assert executor.spawned == []
         assert registry.calls == []
 
+    async def test_a_build_re_planned_by_other_code_supersedes_this_tick(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The frontier names a scope whose code id is not this process's: a
+        newer deployment re-planned the build under its own code. This tick
+        acts on nothing more and exits as superseded; its own scope, and the
+        build's own placeholder, are not other code."""
+        from stardag.build._scope import STARDAG_CODE_ID_ENV, _reset_for_tests
+
+        _reset_for_tests()
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        dep, root = _chain("superseded-dep", "superseded-root")
+        registry, executor, store = _setup([dep, root])
+        registry.scope_key = "beef" * 10 + ":0123456789abcdef"
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=TickConfig(linger_seconds=0),
+        )
+        assert summary.outcome == "superseded"
+        assert executor.spawned == []
+
+        registry.scope_key = "cafe" * 10 + ":0123456789abcdef"
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=TickConfig(linger_seconds=0),
+        )
+        assert summary.outcome == "terminal"
+        _reset_for_tests()
+
     async def test_not_reactive_build_is_noop(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):

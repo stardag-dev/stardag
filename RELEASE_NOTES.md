@@ -23,8 +23,8 @@ where they belong: **with the code that evaluated them.**
 ### What changes for you
 
 - **Change `requires()` or a fan-out freely.** No version bump. Deploy the
-  new code and start a new build; it plans with its own structure. A build
-  already running on the old code keeps its own structure and finishes.
+  new code: new builds plan with the new structure, and a build already
+  running **rolls over** to it at its next scheduler pass.
 - **Runtime knobs get a proper home.** A partition size, a thread count, a
   batch width are declared with a _significance_ and given a value **per
   build** through one `build_config`, never in a constructor. The task id
@@ -36,23 +36,30 @@ where they belong: **with the code that evaluated them.**
   pre-yield section runs once per code version, not once per build.
 - **Fewer surprises in the scheduler.** A cancelled or skipped task in a
   build's plan is simply reset and run; there are no "external blockers"
-  and no phantom placeholder tasks any more. Re-triggering a build after a
-  code change is refused with `ScopeMismatchError`: start a new one.
-- **Optional: keep old builds running through a redeploy.**
-  `StardagApp(versioned_deployments=True)` deploys each code version as its
-  own Modal app so a running build keeps ticking on the code it started
-  with while the new version deploys beside it.
+  and no phantom placeholder tasks any more. A build has one config for its
+  life: re-triggering it with a different `dependencies_only` config is
+  refused with `BuildConfigMismatchError` — start a new one.
+- **One live deployment per app, as on Modal.** A _deployment_ in stardag
+  is exactly Modal's: one code version of one app, recorded in the
+  registry at `stardag modal deploy` and listed by
+  `stardag modal deployments`. Redeploy under the same name and running
+  builds follow; a branch that should run beside production is another
+  app name.
 
 ### How it works, briefly
 
 Every build carries a **structure scope**: the deployment's _code id_ (the
 git SHA of a clean tree) plus a hash of the build's `dependencies_only`
 config. Dependency edges are recorded under that scope, and "are all my
-upstreams complete?" is answered over the build's own scope only. Task
-_completion_ and the _execution claim_ stay global, keyed on the task id,
-so caching and exactly-once execution are unchanged. Within a scope edges
-only grow, so a build can wait on an upstream it no longer needs but can
-never run before one it does. The full reasoning is in
+upstreams complete?" is answered over the scope the build is _currently
+planned under_. Task _completion_ and the _execution claim_ stay global,
+keyed on the task id, so caching and exactly-once execution are unchanged.
+Within a scope edges only grow, so a build can wait on an upstream it no
+longer needs but can never run before one it does. When the app is
+redeployed, the next scheduler pass re-plans each running build under the
+new code and moves its scope; workers register the dependencies they yield
+under their own code's scope, so an old container's late yield never
+reaches a re-planned build. The full reasoning is in
 [`docs/design/scope-keyed-dependency-structure.md`](docs/design/scope-keyed-dependency-structure.md).
 
 One contract makes the sharing sound: **environment variables may affect
@@ -66,10 +73,16 @@ This SDK requires a Registry API at this release or later. Against an older
 server a build refuses to start, or to fix its scope, with
 `RegistryTooOldError` rather than run over environment-global edges. An
 older SDK against the new server keeps working for the builds it creates,
-on a per-build scope the server assigns; it cannot resume a build this
-release planned under a structure scope — the server refuses that with
-`scope_required`. A reactive build running across the server deploy keeps
-its gates: the migration copies its edges into its own scope.
+on a per-build scope the server assigns. A reactive build running across
+the server deploy keeps its gates: the migration copies its edges into its
+own scope.
+
+An older SDK may also drive a build this release planned: its ticks and
+workers know nothing about scopes, so the edges they register land in the
+build's current scope. That can only add gates, never remove one, so the
+build stays correct; if the old code declares an upstream the new code
+dropped, the build waits on it until re-triggered. Avoid mixing SDK versions
+on one build; finish the rollout and re-trigger instead.
 
 ### Migration checklist
 
@@ -80,9 +93,10 @@ its gates: the migration copies its edges into its own scope.
 - A fan-out width or partitioning read from an environment variable → a
   `dependencies_only` field.
 - Custom `RegistryABC` implementations: the four registration methods take
-  a keyword-only `declared_dependencies`; `build_start(_aio)` and
-  `build_resume(_aio)` take keyword-only `scope_key` / `build_config`;
-  `build_set_scope(_aio)` and `deployment_*` are new with no-op defaults.
+  keyword-only `declared_dependencies` and `scope_key`; `build_start(_aio)`
+  and `build_resume(_aio)` take keyword-only `scope_key` / `build_config`;
+  `build_set_scope(_aio)`, `deployment_record` and `deployment_list` are
+  new with no-op defaults.
 - In the UI, the Task Explorer graph follows each task's provenance (a hop
   between code versions is marked), phantom nodes are gone, and the build
   panel no longer lists external blockers.
@@ -129,47 +143,42 @@ and never see each other's edges; builds whose `execution_only` values
 differ share a scope. A re-trigger (`build_trigger(build_id=...)`) reuses
 the build's stored config unless you pass the same one.
 
-**Change dependencies without a version bump.** Edit `requires()`, change
-a default partition size, or reshape a yield; deploy; start a new build.
+**Deploy new code.** Edit `requires()`, change a default partition size,
+reshape a yield; commit; deploy under the same app name.
 
 ```bash
-stardag modal deploy app.py            # the new code, same app name
+stardag modal deploy app.py     # the new code; recorded as a deployment of this app
+stardag modal deployments       # code versions deployed here, newest first — the newest is current
 ```
 
 ```python
 app.build_trigger(root, reactive=True)  # a new build, planned by the new code
 ```
 
-A build still running on the previous code is not touched, but with a
-single app name Modal's next spawns for it land on the new code and its
-next tick refuses to drive it (`scope_mismatch` in the tick summary):
-re-trigger it as a new build when convenient. If that stall is not
-acceptable, version the deployments:
+Builds already running move too. Their next scheduler tick runs on the new
+code, sees the build was planned by an earlier version, and re-plans it:
+discovery again under the new code with the build's stored config, edges
+recorded under the new scope, the scope moved (`rolled_over` in that tick's
+summary). Containers already running finish on the old code and report as
+usual; a dynamic dependency one of them yields late lands in the old code's
+scope, so the re-planned build never sees it and the new code decides its
+own structure. An execution the new plan no longer needs finishes on its
+own; its output is content-addressed and harms nothing. The one case that
+cannot roll over is a root whose _identity_ parameters you changed: the
+build fails with `rollover_failed` — re-trigger it as a new build.
 
-**Deploy new code beside running builds.**
-
-```python
-app = sd_modal.StardagApp("reports", versioned_deployments=True, ...)
-```
-
-```bash
-stardag modal deploy app.py                  # deploys reports--<code id>, records it in the registry
-stardag modal deployments --family reports   # which code ids are live, and how many builds run on each
-stardag modal gc reports --keep 1            # retire and stop deployments no running build needs
-```
+A branch that should run beside production is another app with its own
+name and its own single live version. A convention, not a feature:
 
 ```python
-app.build_trigger(root, reactive=True)                          # newest recorded deployment
-app.build_trigger(root, reactive=True, deployment="local")      # this checkout's own code id
-app.build_trigger(root, reactive=True, deployment="3f9c1a2b")   # a recorded code id, or its prefix
+import os
+
+app = sd_modal.StardagApp(f"reports-{os.environ.get('BRANCH', 'main')}", ...)
 ```
 
-Running builds keep ticking on the app they started on; the family name
-is what you write, the handle is what runs, and only the registry record
-ties them together. Deploy from a clean checkout — a dirty tree gets a
-one-off code id, so every deploy of it is a new app that shares nothing and
-that only `gc` cleans up. `STARDAG_CODE_ID` names the code where there is
-no git checkout (CI images, for example).
+Deploy from a clean checkout — a dirty tree gets a one-off code id, so
+every deploy of it is a new scope that shares nothing. `STARDAG_CODE_ID`
+names the code where there is no git checkout (CI images, for example).
 
 ## v0.23.0 — Ten lingering builds per container, not one
 

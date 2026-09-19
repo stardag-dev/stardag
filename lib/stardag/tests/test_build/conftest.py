@@ -118,7 +118,12 @@ class RecordingRegistry(NoOpRegistry):
         await super().build_fail_aio(build_id, error_message)
 
     async def task_register_aio(
-        self, build_id: UUID, task: BaseTask, *, declared_dependencies=None
+        self,
+        build_id: UUID,
+        task: BaseTask,
+        *,
+        declared_dependencies=None,
+        scope_key=None,
     ) -> None:
         self._record(
             "task_register_aio", task.id, declared_dependencies=declared_dependencies
@@ -128,7 +133,13 @@ class RecordingRegistry(NoOpRegistry):
         )
 
     async def task_register_bulk_aio(
-        self, build_id: UUID, tasks, *, limit_keys=None, declared_dependencies=None
+        self,
+        build_id: UUID,
+        tasks,
+        *,
+        limit_keys=None,
+        declared_dependencies=None,
+        scope_key=None,
     ) -> list[RegisteredTaskInfo] | None:
         for t in tasks:
             self._record(

@@ -42,7 +42,8 @@ from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.integration.modal._selector import WorkerSelector
 from stardag.integration.modal._spawn import spawn_tick
 from stardag.integration.modal._settings import FunctionSettings
-from stardag.registry._base import NoOpRegistry, registry_provider
+from stardag._core.base_task import BaseTask
+from stardag.registry._base import BuildInfo, NoOpRegistry, registry_provider
 
 logger = logging.getLogger(__name__)
 
@@ -368,14 +369,13 @@ async def _run_deployed_tick_aio(
             "owner_app": owner_app,
             "forwarded": forwarded,
         }
-    # The structure scope. Every edge of this build was evaluated by the
-    # code its scope names; a tick from other code would plan with a
-    # structure the edges do not describe, so it refuses rather than drive
-    # the build. Only the code id half is compared — the config half is a
-    # function of the build's own config, installed below (see
-    # ``scope_code_id``). The server's synthetic ``build:<this build's id>``
-    # scope (a build nothing fixed a scope for — an older SDK) is driven by
-    # anyone; bound to the id, so a claimed ``build:<other id>`` is foreign.
+    # The structure scope. A server that knows scopes assigns every build
+    # one; None means the server predates them (refused below). A real
+    # scope naming another code id means the build was planned by other
+    # code — the live deployment inherits it and **re-plans** it under its
+    # own scope before scheduling (see ``_roll_over_build_aio``). The
+    # server's synthetic ``build:<this build's id>`` (a build nothing fixed
+    # a scope for — an older SDK) is driven as it is.
     own_code_id = code_id()
     if build_info.scope_key is None:
         # A server that knows scopes assigns every build one — at least its
@@ -390,23 +390,10 @@ async def _run_deployed_tick_aio(
             "SDK first."
         )
         return {"outcome": "registry_too_old", "build_id": str(build_id)}
-    if (
+    needs_rollover = (
         not is_synthetic_scope(build_info.scope_key, build_id=build_id)
         and scope_code_id(build_info.scope_key) != own_code_id
-    ):
-        logger.error(
-            f"Tick for build {build_id}: the build runs under structure scope "
-            f"{build_info.scope_key!r}, but this deployment runs code "
-            f"{own_code_id!r}. Refusing to drive it: a build carries one scope "
-            "for its life, and a redeploy under new code needs a new build. "
-            "(Is a stale wake-up reaching a newer deployment of this app? "
-            "Then this is expected and harmless.)"
-        )
-        return {
-            "outcome": "scope_mismatch",
-            "scope_key": build_info.scope_key,
-            "code_id": own_code_id,
-        }
+    )
     # The build's config, installed before anything is rehydrated: a task
     # rebuilt from registry data resolves its dependencies_only /
     # execution_only fields from it, exactly as the bootstrap did.
@@ -455,6 +442,20 @@ async def _run_deployed_tick_aio(
         # per-module-list cache means later ticks return immediately.
         import_task_modules(deployment.task_modules)
 
+    scope_key = build_info.scope_key
+    if needs_rollover:
+        rolled = await _roll_over_build_aio(
+            registry,
+            build_uuid,
+            build_info,
+            deployment=deployment,
+            task_store=task_store,
+            own_code_id=own_code_id,
+        )
+        if isinstance(rolled, dict):
+            return rolled
+        scope_key = rolled
+
     executor = ModalTaskExecutor(
         modal_app_name=app_name,
         worker_selector=deployment.worker_selector,
@@ -462,7 +463,7 @@ async def _run_deployed_tick_aio(
         modal_workspace=deployment.modal_workspace,
         worker_timeouts=deployment.worker_timeouts,
         build_config=build_info.build_config,
-        scope_key=build_info.scope_key,
+        scope_key=scope_key,
     )
     summary = await run_tick_aio(
         build_uuid,
@@ -470,6 +471,7 @@ async def _run_deployed_tick_aio(
         task_executor=executor,
         task_store=task_store,
         config=config,
+        rolled_over=needs_rollover,
     )
     # The container id is in the line because ticks now share containers
     # (``_TICK_CONCURRENCY``), and "how well are they packing?" is otherwise
@@ -483,6 +485,95 @@ async def _run_deployed_tick_aio(
         f"{os.environ.get('MODAL_TASK_ID', 'unknown')}): {summary}"
     )
     return dataclasses.asdict(summary)
+
+
+async def _roll_over_build_aio(
+    registry: typing.Any,
+    build_id: UUID,
+    build_info: BuildInfo,
+    *,
+    deployment: _TickDeployment,
+    task_store: BuildTaskStore,
+    own_code_id: str,
+) -> str | dict[str, typing.Any]:
+    """Re-plan a build the live deployment inherited from other code.
+
+    The build's edges were evaluated by the code its scope names; this
+    deployment runs other code, so it plans the build again under its own
+    scope — rehydrating the roots from the registry, walking discovery with
+    the build's stored config, registering the plan under the new scope and
+    moving the build to it (:func:`plan_under_scope_aio`, the bootstrap's
+    own step). Completed tasks stay completed; executions the old plan
+    started finish on their own; a tick still lingering on the old code
+    exits as superseded when it sees the scope move.
+
+    Returns the new scope key, or the tick's outcome dict when the build
+    cannot roll over. The one such case is a root the new code cannot
+    rehydrate — its class is gone, or its identity parameters changed — and
+    then the build is failed with the remedy in its message: re-trigger it
+    as a new build. See ``docs/design/scope-keyed-dependency-structure.md``.
+    """
+    from stardag._core.rehydrate import task_from_registry_data
+    from stardag.build._scope import structure_scope_key
+    from stardag.integration.modal._bootstrap import (
+        _fail_build_best_effort,
+        plan_under_scope_aio,
+    )
+
+    def _failed(reason: str, exc: BaseException) -> dict[str, typing.Any]:
+        message = (
+            f"Rollover of build {build_id} to code {own_code_id!r} failed: "
+            f"{reason}: {type(exc).__name__}: {exc}. Re-trigger it as a new "
+            "build."
+        )
+        logger.error(message)
+        _fail_build_best_effort(registry, build_id, RuntimeError(message))
+        return {
+            "outcome": "rollover_failed",
+            "build_id": str(build_id),
+            "from_scope_key": build_info.scope_key,
+            "code_id": own_code_id,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    try:
+        new_scope = structure_scope_key(own_code_id, build_info.build_config)
+    except Exception as e:
+        return _failed("the stored build config does not fit this code", e)
+    try:
+        frontier = await registry.build_get_frontier_aio(build_id)
+        roots: list[BaseTask] = []
+        for root_id in frontier.root_task_ids:
+            task = await task_store.load_task_aio(root_id)
+            if task is None:
+                metadata = await registry.task_get_metadata_aio(UUID(root_id))
+                task = task_from_registry_data(metadata.body, expected_task_id=root_id)
+            roots.append(task)
+    except Exception as e:
+        return _failed("a root could not be rehydrated under this code", e)
+    try:
+        discovery = await plan_under_scope_aio(
+            registry,
+            build_id,
+            roots,
+            scope_key=new_scope,
+            build_config=build_info.build_config,
+            task_module_patterns=deployment.task_module_patterns,
+            elide_pickles=bool(deployment.task_module_patterns)
+            or deployment.require_pickle_free,
+            require_pickle_free=deployment.require_pickle_free,
+            limit_key_selector=deployment.limit_key_selector,
+            retry_failed=False,
+        )
+    except Exception as e:
+        return _failed("planning under this code failed", e)
+    logger.info(
+        f"Tick for build {build_id}: rolled over from scope "
+        f"{build_info.scope_key!r} to {new_scope!r} — {len(roots)} root(s), "
+        f"{len(discovery.incomplete)} incomplete task(s) re-planned, "
+        f"{len(discovery.previously_completed)} already complete."
+    )
+    return new_scope
 
 
 # --- The watchdog sweep ---

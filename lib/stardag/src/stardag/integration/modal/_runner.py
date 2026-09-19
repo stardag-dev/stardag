@@ -33,7 +33,7 @@ from stardag.build._task_modules import (
 )
 from stardag.integration.modal._limit_keys import deployed_limit_key_selector
 from stardag.integration.modal._logging import _setup_logging
-from stardag.build._scope import code_id, is_synthetic_scope, scope_code_id
+from stardag.build._scope import code_id, is_synthetic_scope, scope_config_hash
 from stardag.build_config import build_config_scope
 from stardag.integration.modal._metadata import (
     STARDAG_BUILD_CONFIG_ENV,
@@ -373,43 +373,24 @@ def _build_config_from_env(
     return decoded
 
 
-def _refuse_foreign_scope(env_overrides: dict[str, str] | None) -> None:
-    """Refuse to run a task whose build lives in another structure scope.
+def worker_scope_key(forwarded: str | None, build_id: UUID) -> str | None:
+    """The structure scope this worker records its yields under.
 
-    The orchestrator forwards the build's scope (see
-    ``STARDAG_SCOPE_KEY_ENV``); this worker compares the scope's code id
-    with its own. A mismatch means this container runs other code than the
-    one that planned the build — a stale wake-up reaching a newer
-    deployment, typically — and the dependencies it would yield belong to a
-    structure the build's edges do not describe. Raising here fails the
-    task loudly instead of quietly mixing two code versions in one build.
-
-    Only the code id is compared, deliberately: the config half of the
-    scope is derived from the build's own config, which this worker
-    installs as forwarded, so recomputing it here would verify nothing and
-    would need every task class the config names to be importable in this
-    container (see ``stardag.build._scope.scope_code_id``).
+    Workers are code-agnostic: a task id promises its output whatever code
+    produces it, so a container of any version may run any task. What a
+    worker owns is where the dependencies it **discovers** are attributed:
+    under its own code id, with the config half of the scope the scheduler
+    forwarded (the config is the build's, fixed for its life, and hashing it
+    here would need every configured class importable). A build that has
+    since rolled over to a newer deployment therefore never inherits an old
+    worker's late yield — it lands in the old code's scope and the new plan
+    re-runs the parent. No forwarded scope, or a placeholder (this build's
+    or, oddly, another's — a placeholder carries no config half to reuse),
+    means the server's default (the build's current scope).
     """
-    scope_key = (env_overrides or {}).get(STARDAG_SCOPE_KEY_ENV) or os.environ.get(
-        STARDAG_SCOPE_KEY_ENV
-    )
-    if scope_key is None:
-        return
-    # Bound to the forwarded build id: only ``build:<this build>`` is the
-    # server's placeholder; ``build:<another id>`` claimed by a caller is a
-    # foreign scope like any other.
-    build_id = (env_overrides or {}).get(STARDAG_BUILD_ID_ENV) or os.environ.get(
-        STARDAG_BUILD_ID_ENV
-    )
-    if is_synthetic_scope(scope_key, build_id=build_id or None):
-        return
-    if scope_code_id(scope_key) != code_id():
-        raise RuntimeError(
-            f"This worker runs code {code_id()!r}, but the build runs under "
-            f"structure scope {scope_key!r}, planned by other code. A build "
-            "carries one scope for its life; a redeploy under new code needs "
-            "a new build."
-        )
+    if forwarded is None or is_synthetic_scope(forwarded):
+        return None
+    return f"{code_id()}:{scope_config_hash(forwarded)}"
 
 
 class _WorkerLifecycleReporter:
@@ -438,6 +419,7 @@ class _WorkerLifecycleReporter:
         app_name: str | None = None,
         executor_metadata: dict[str, typing.Any] | None = None,
         claim_ttl_seconds: int | None = None,
+        scope_key: str | None = None,
     ):
         self.registry = registry
         self.build_id = build_id
@@ -446,6 +428,10 @@ class _WorkerLifecycleReporter:
         self.app_name = app_name
         self.executor_metadata = executor_metadata
         self.claim_ttl_seconds = claim_ttl_seconds
+        # The scope this worker's *yields* are recorded under: its own code
+        # id with the config half of the build's scope (see
+        # :func:`worker_scope_key`). None leaves it to the server.
+        self.scope_key = scope_key
 
     @classmethod
     def create(
@@ -517,6 +503,7 @@ class _WorkerLifecycleReporter:
             app_name=app_name,
             executor_metadata=executor_metadata,
             claim_ttl_seconds=ttl_seconds,
+            scope_key=worker_scope_key(_get(STARDAG_SCOPE_KEY_ENV), build_id),
         )
 
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
@@ -693,12 +680,17 @@ class _WorkerLifecycleReporter:
         # too, so a slot release can wake the build queued on them exactly
         # as it does for tasks the bootstrap registered. The selector is
         # the deployed app's, published by the worker wrapper.
+        # Under THIS worker's scope: the dynamic dependencies were yielded by
+        # the code running here, and the build may since have rolled over to
+        # a newer deployment whose plan must not inherit them — see
+        # :func:`worker_scope_key`.
         result = asyncio.run(
             discover_and_register_aio(
                 self.registry,
                 self.build_id,
                 task_struct,
                 limit_key_selector=deployed_limit_key_selector(),
+                scope_key=self.scope_key,
             )
         )
         store = BuildTaskStore(self.build_id)
@@ -739,7 +731,7 @@ class _WorkerLifecycleReporter:
             store.save_tasks(result.incomplete.values())
         deps = flatten_task_struct(task_struct)
         self.registry.task_add_dependencies(
-            self.build_id, self.task, deps, is_dynamic=True
+            self.build_id, self.task, deps, is_dynamic=True, scope_key=self.scope_key
         )
 
     def _wake_scheduler(self) -> None:
@@ -912,7 +904,6 @@ class Runner(RunFunction):
                 temp_env_vars(env_overrides or {}),
                 build_config_scope(_build_config_from_env(env_overrides)),
             ):
-                _refuse_foreign_scope(env_overrides)
                 # getattr: tolerate subclasses overriding __init__ w/o super()
                 reporter: _WorkerLifecycleReporter | None = None
                 if getattr(self, "report_lifecycle", True):

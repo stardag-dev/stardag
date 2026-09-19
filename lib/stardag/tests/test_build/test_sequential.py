@@ -758,7 +758,13 @@ class TrackingRegistry(NoOpRegistry):
         self.calls.append(("task_fail", task.id))
 
     def task_add_dependencies(
-        self, build_id: UUID, task, upstream_tasks, is_dynamic=True
+        self,
+        build_id: UUID,
+        task,
+        upstream_tasks,
+        is_dynamic=True,
+        *,
+        scope_key=None,
     ) -> None:
         for upstream in upstream_tasks:
             self.dynamic_dep_edges.append((upstream.id, task.id))
@@ -1536,12 +1542,24 @@ class BulkTrackingRegistry(NoOpRegistry):
         self.per_task_register_calls.append(task.id)
 
     def task_register_bulk(
-        self, build_id: UUID, tasks, *, limit_keys=None, declared_dependencies=None
+        self,
+        build_id: UUID,
+        tasks,
+        *,
+        limit_keys=None,
+        declared_dependencies=None,
+        scope_key=None,
     ) -> None:
         self.bulk_batches.append([t.id for t in tasks])
 
     async def task_register_bulk_aio(
-        self, build_id: UUID, tasks, *, limit_keys=None, declared_dependencies=None
+        self,
+        build_id: UUID,
+        tasks,
+        *,
+        limit_keys=None,
+        declared_dependencies=None,
+        scope_key=None,
     ) -> None:
         self.bulk_batches.append([t.id for t in tasks])
 

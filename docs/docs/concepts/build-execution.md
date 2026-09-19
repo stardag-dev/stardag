@@ -145,19 +145,24 @@ key is the **code id** (the git SHA of a clean tree; a one-off id for a
 dirty one) plus a hash of the build's `dependencies_only` config (see
 [Three levels of significance](parameters.md#three-levels-of-significance)).
 
-- A build carries one scope for its life. Readiness — "are all my
-  upstreams complete?" — is evaluated over the edges in the build's own
+- A build carries the scope it is **currently planned under**. Readiness —
+  "are all my upstreams complete?" — is evaluated over the edges in that
   scope only. Edges another code version recorded are invisible to it.
+- The scope moves with the code that drives the build. After a redeploy,
+  the first scheduler pass on the new code re-plans the build — discovery
+  again, under its own code, with the build's stored config — and moves the
+  scope. Changing `requires()` or a fan-out therefore needs no version
+  bump: new builds plan under the new code, running builds roll over to it
+  at their next pass. See [Deployments and code
+  versions](modal-orchestration.md#deployments-and-code-versions).
 - Builds under the same code and config share what they discovered: a
   fan-out's expensive pre-yield section runs once per scope, not once per
   build.
 - Within a scope, edges only grow and nothing retracts them, so gating can
   only over-approximate — never run a task before an upstream its code
   reads is complete.
-- A resume or re-trigger under other code or another `dependencies_only`
-  config is refused: **start a new build.** Changing `requires()` or a
-  fan-out therefore needs no version bump, and a build already running
-  keeps its own structure while the new one runs beside it.
+- A build has one `build_config` for its life. A resume or re-trigger with
+  a different `dependencies_only` config is refused: **start a new build.**
 
 Design record:
 [`docs/design/scope-keyed-dependency-structure.md`](https://github.com/stardag-dev/stardag/blob/main/docs/design/scope-keyed-dependency-structure.md).

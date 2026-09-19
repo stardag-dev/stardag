@@ -1,23 +1,21 @@
-"""Deployment records: which code version is deployed under which handle.
+"""Deployment records: which code versions of an app have been deployed.
 
-See ``models/deployment.py`` for what a deployment is and why it exists.
-This module is its registry surface: the deploy CLI records one, the SDK's
-trigger resolves the newest live one for a family, and the garbage
-collector asks which ones no running build still needs.
+See ``models/deployment.py`` for what a deployment is. This module is its
+registry surface: the deploy CLI records one, and the listing answers
+"which code is current for this app, and what ran before it".
 """
 
 from typing import Annotated
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.config import limits_settings
 from stardag_api.db import get_db
 from stardag_api.limits import LimitExceededError, check_rate_limit
-from stardag_api.models import Build, BuildStatus, Deployment, WorkspaceRole
+from stardag_api.models import Deployment, WorkspaceRole
 from stardag_api.models.base import utc_now
 from stardag_api.routes.workspaces import require_workspace_access
 from stardag_api.schemas import (
@@ -51,77 +49,55 @@ async def _require_admin_for_user_auth(db: AsyncSession, auth: SdkAuth) -> None:
     )
 
 
-async def _running_builds_by_handle(
-    db: AsyncSession, environment_id: UUID, handles: list[str]
-) -> dict[str, int]:
-    """RUNNING builds per app handle — what makes a deployment live.
-
-    A reactive build names its app in ``reactive_app_name``; a resident one
-    (``build_trigger(reactive=False)``, or ``build_spawn``) leaves that NULL
-    and carries the handle only in ``executor_metadata["app_name"]``. Both
-    execute on the deployment, so both keep it from being retired.
-    """
-    if not handles:
-        return {}
-    handle = func.coalesce(
-        Build.reactive_app_name,
-        Build.executor_metadata["app_name"].as_string(),
-    )
-    rows = (
-        await db.execute(
-            select(handle, func.count())
-            .where(
-                Build.environment_id == environment_id,
-                Build.latest_status == BuildStatus.RUNNING,
-                handle.in_(handles),
-            )
-            .group_by(handle)
-        )
-    ).all()
-    return {name: count for name, count in rows if name is not None}
-
-
-def _response(row: Deployment, running: int) -> DeploymentResponse:
+def _response(row: Deployment, *, current: bool) -> DeploymentResponse:
     return DeploymentResponse(
         id=row.id,
         environment_id=row.environment_id,
-        family=row.family,
-        handle=row.handle,
+        app_name=row.app_name,
         code_id=row.code_id,
-        created_at=row.created_at,
-        retired_at=row.retired_at,
-        running_builds=running,
+        deployed_at=row.deployed_at,
+        modal_app_id=row.modal_app_id,
+        current=current,
     )
+
+
+def _mark_current(rows: list[Deployment]) -> list[DeploymentResponse]:
+    """``rows`` newest-first; the first row seen per app is its current one."""
+    seen: set[str] = set()
+    out: list[DeploymentResponse] = []
+    for row in rows:
+        current = row.app_name not in seen
+        seen.add(row.app_name)
+        out.append(_response(row, current=current))
+    return out
 
 
 @router.get("", response_model=DeploymentListResponse)
 async def list_deployments(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
-    family: Annotated[str | None, Query(max_length=64)] = None,
-    include_retired: bool = False,
+    app_name: Annotated[str | None, Query(max_length=64)] = None,
 ):
-    """List the environment's deployments, newest first.
+    """List the environment's deployments, newest ``deployed_at`` first.
 
-    ``family`` narrows to one app family; ``include_retired`` adds the ones
-    already retired. Each row carries its count of RUNNING builds, which is
-    what decides whether it may be retired.
+    ``app_name`` narrows to one app. The newest row of an app is marked
+    ``current``: the code the backend runs now, and the code a running
+    build re-plans under at its next scheduler pass.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     query = select(Deployment).where(Deployment.environment_id == auth.environment_id)
-    if family is not None:
-        query = query.where(Deployment.family == family)
-    if not include_retired:
-        query = query.where(Deployment.retired_at.is_(None))
-    rows = (
-        (await db.execute(query.order_by(Deployment.created_at.desc()))).scalars().all()
+    if app_name is not None:
+        query = query.where(Deployment.app_name == app_name)
+    rows = list(
+        (
+            await db.execute(
+                query.order_by(Deployment.deployed_at.desc(), Deployment.id.desc())
+            )
+        )
+        .scalars()
+        .all()
     )
-    running = await _running_builds_by_handle(
-        db, auth.environment_id, [r.handle for r in rows]
-    )
-    return DeploymentListResponse(
-        deployments=[_response(r, running.get(r.handle, 0)) for r in rows]
-    )
+    return DeploymentListResponse(deployments=_mark_current(rows))
 
 
 @router.post("", response_model=DeploymentResponse, status_code=201)
@@ -130,12 +106,12 @@ async def record_deployment(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
-    """Record a deployed code version. Idempotent on ``(environment, handle)``.
+    """Record a deployed code version of an app.
 
-    Re-recording an existing handle with the same code id returns the
-    existing row and un-retires it (the app was deployed again). A
-    different code id for the same handle is a 409: the handle is derived
-    from the code id, so this would be a resolver bug, not a new version.
+    Idempotent on ``(environment, app_name, code_id)``: deploying the same
+    code again refreshes ``deployed_at`` — it *is* the current deployment
+    again, whatever was deployed in between — and returns the existing row,
+    with ``modal_app_id`` replaced when one is supplied.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     await _require_admin_for_user_auth(db, auth)
@@ -144,94 +120,27 @@ async def record_deployment(
             select(Deployment)
             .where(
                 Deployment.environment_id == auth.environment_id,
-                Deployment.handle == payload.handle,
+                Deployment.app_name == payload.app_name,
+                Deployment.code_id == payload.code_id,
             )
             .with_for_update()
         )
     ).scalar_one_or_none()
     if existing is not None:
-        if existing.code_id != payload.code_id:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error_code": "deployment_handle_taken",
-                    "handle": payload.handle,
-                    "code_id": existing.code_id,
-                    "requested_code_id": payload.code_id,
-                    "message": (
-                        f"Deployment handle {payload.handle!r} already records "
-                        f"code id {existing.code_id!r}; it cannot be re-recorded "
-                        f"as {payload.code_id!r}. A handle names exactly one "
-                        "code version."
-                    ),
-                },
-            )
-        if existing.family != payload.family:
-            existing.family = payload.family
-        existing.retired_at = None
+        existing.deployed_at = utc_now()
+        if payload.modal_app_id is not None:
+            existing.modal_app_id = payload.modal_app_id
         await db.commit()
-        running = await _running_builds_by_handle(
-            db, auth.environment_id, [existing.handle]
-        )
-        return _response(existing, running.get(existing.handle, 0))
+        await db.refresh(existing)
+        return _response(existing, current=True)
     row = Deployment(
         environment_id=auth.environment_id,
-        family=payload.family,
-        handle=payload.handle,
+        app_name=payload.app_name,
         code_id=payload.code_id,
+        deployed_at=utc_now(),
+        modal_app_id=payload.modal_app_id,
     )
     db.add(row)
     await db.commit()
     await db.refresh(row)
-    return _response(row, 0)
-
-
-@router.post("/{deployment_id}/retire", response_model=DeploymentResponse)
-async def retire_deployment(
-    deployment_id: UUID,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
-    force: bool = False,
-):
-    """Mark a deployment retired, so the resolver stops handing it out.
-
-    Refused with 409 while a RUNNING build still references its handle,
-    unless ``force`` — the caller is then saying the builds are theirs to
-    strand, which is what stopping the app would do anyway. Retiring
-    records nothing about the app itself; stopping it is the caller's
-    (the CLI's) job, and this is the bookkeeping that goes with it.
-    """
-    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    await _require_admin_for_user_auth(db, auth)
-    # Locked for the count-then-write below, so two retires of one
-    # deployment serialise. A trigger resolving the handle meanwhile is not
-    # serialised by this: resolution is a client-side read of the listing,
-    # so the residual window is a build that fails loudly at its first
-    # spawn against a stopped app, never one silently stranded mid-flight.
-    row = (
-        await db.execute(
-            select(Deployment).where(Deployment.id == deployment_id).with_for_update()
-        )
-    ).scalar_one_or_none()
-    if row is None or row.environment_id != auth.environment_id:
-        raise HTTPException(status_code=404, detail="Deployment not found")
-    running = (
-        await _running_builds_by_handle(db, auth.environment_id, [row.handle])
-    ).get(row.handle, 0)
-    if running and not force:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "deployment_in_use",
-                "handle": row.handle,
-                "running_builds": running,
-                "message": (
-                    f"Deployment {row.handle!r} still drives {running} running "
-                    "build(s). Wait for them, cancel them, or retire with force."
-                ),
-            },
-        )
-    if row.retired_at is None:
-        row.retired_at = utc_now()
-        await db.commit()
-    return _response(row, running)
+    return _response(row, current=True)

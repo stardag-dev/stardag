@@ -195,7 +195,13 @@ def test_crash_resume_reattaches_without_restarting_task(tmp_path):
     # as RUNNING with the pre-crash ref, as the API registry would.
     class ReattachRegistry(NoOpRegistry):
         async def task_register_bulk_aio(
-            self, build_id, tasks, *, limit_keys=None, declared_dependencies=None
+            self,
+            build_id,
+            tasks,
+            *,
+            limit_keys=None,
+            declared_dependencies=None,
+            scope_key=None,
         ):
             return [
                 RegisteredTaskInfo(

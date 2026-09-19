@@ -3,8 +3,9 @@
 Dependency edges become facts about the code and structure config that
 evaluated them rather than about the task id: every edge and every build
 carries a ``scope_key``, and a build's readiness is evaluated over the edges
-in its own scope only. The ``deployments`` table records which code version
-is deployed under which app handle. Phantom placeholder rows stop existing.
+in its own scope only. The ``deployments`` table records which code versions
+of an app have been deployed (the newest is current). Phantom placeholder
+rows stop existing.
 See ``docs/design/scope-keyed-dependency-structure.md``.
 
 Schema:
@@ -69,24 +70,26 @@ def upgrade() -> None:
         "deployments",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("environment_id", sa.Uuid(), nullable=False),
-        sa.Column("family", sa.String(length=64), nullable=False),
-        sa.Column("handle", sa.String(length=64), nullable=False),
+        sa.Column("app_name", sa.String(length=64), nullable=False),
         sa.Column("code_id", sa.String(length=64), nullable=False),
-        sa.Column("retired_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("deployed_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("modal_app_id", sa.String(length=64), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
             ["environment_id"], ["environments.id"], ondelete="CASCADE"
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("environment_id", "handle", name="uq_deployment_handle"),
+        sa.UniqueConstraint(
+            "environment_id", "app_name", "code_id", name="uq_deployment_app_code"
+        ),
     )
     op.create_index(
         op.f("ix_deployments_code_id"), "deployments", ["code_id"], unique=False
     )
     op.create_index(
-        "ix_deployments_environment_family_created",
+        "ix_deployments_environment_app_deployed",
         "deployments",
-        ["environment_id", "family", "created_at"],
+        ["environment_id", "app_name", "deployed_at"],
         unique=False,
     )
     op.create_index(
@@ -188,6 +191,6 @@ def downgrade() -> None:
     op.drop_column("builds", "build_config")
     op.drop_column("builds", "scope_key")
     op.drop_index(op.f("ix_deployments_environment_id"), table_name="deployments")
-    op.drop_index("ix_deployments_environment_family_created", table_name="deployments")
+    op.drop_index("ix_deployments_environment_app_deployed", table_name="deployments")
     op.drop_index(op.f("ix_deployments_code_id"), table_name="deployments")
     op.drop_table("deployments")

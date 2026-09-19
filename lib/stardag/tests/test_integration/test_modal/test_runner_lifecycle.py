@@ -438,11 +438,13 @@ class TestReactiveWorkerBehavior:
         registered_bulk: list[str] = []
         added_edges: list[tuple[str, list[str]]] = []
 
-        async def record_bulk(b, tasks, *, limit_keys=None, declared_dependencies=None):
+        async def record_bulk(
+            b, tasks, *, limit_keys=None, declared_dependencies=None, scope_key=None
+        ):
             registered_bulk.extend(str(t.id) for t in tasks)
             return None
 
-        def record_edges(b, task, upstream_tasks, is_dynamic=True):
+        def record_edges(b, task, upstream_tasks, is_dynamic=True, *, scope_key=None):
             added_edges.append((str(task.id), [str(u.id) for u in upstream_tasks]))
 
         recording_registry.task_register_bulk_aio = record_bulk  # type: ignore[method-assign]
@@ -474,125 +476,100 @@ class TestReactiveWorkerBehavior:
         assert tick_spawn_stub == {}  # no tick spawn without reactive flag
 
 
-class TestForeignScopeRefusal:
-    """A worker refuses a task whose build was planned by other code, and
-    decides that from the code id half of the forwarded scope alone."""
+class TestWorkerScope:
+    """Workers are code-agnostic: any container may run any task. What a
+    worker owns is the scope its *yields* are recorded under — its own code
+    id with the config half the scheduler forwarded — so a build that has
+    rolled over to newer code never inherits an old worker's late yield."""
 
     @pytest.fixture(autouse=True)
     def _own_code(self, monkeypatch):
-        from stardag.build._scope import STARDAG_CODE_ID_ENV
+        from stardag.build._scope import STARDAG_CODE_ID_ENV, _reset_for_tests
 
+        _reset_for_tests()
         monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        yield
+        _reset_for_tests()
 
-    @staticmethod
-    def _scoped_env(build_id: UUID, scope_key: str, build_config: str | None = None):
-        from stardag.integration.modal._metadata import (
-            STARDAG_BUILD_CONFIG_ENV,
-            STARDAG_SCOPE_KEY_ENV,
+    def test_the_worker_scope_is_its_code_with_the_forwarded_config_half(self):
+        from stardag.integration.modal._runner import worker_scope_key
+
+        build_id = uuid4()
+        assert (
+            worker_scope_key("beef" * 10 + ":0123456789abcdef", build_id)
+            == "cafe" * 10 + ":0123456789abcdef"
         )
+        # Its own scope stays its own.
+        assert (
+            worker_scope_key("cafe" * 10 + ":0123456789abcdef", build_id)
+            == "cafe" * 10 + ":0123456789abcdef"
+        )
+        # Nothing forwarded, or the build's own placeholder: the server
+        # decides (the build's current scope).
+        assert worker_scope_key(None, build_id) is None
+        assert worker_scope_key(f"build:{build_id}", build_id) is None
+        # Another build's placeholder carries no config half either.
+        assert worker_scope_key(f"build:{uuid4()}", build_id) is None
 
-        env = {**_env(build_id), STARDAG_SCOPE_KEY_ENV: scope_key}
-        if build_config is not None:
-            env[STARDAG_BUILD_CONFIG_ENV] = build_config
-        return env
-
-    def test_other_code_is_refused_before_the_task_starts(
+    def test_a_task_planned_by_other_code_runs_here(
         self, recording_registry, fake_call_id, default_in_memory_fs_target
     ):
+        """No refusal: the task id promises the output whatever code runs it."""
+        from stardag.integration.modal._metadata import STARDAG_SCOPE_KEY_ENV
+
         task = make_range(limit=3)
-        env = self._scoped_env(uuid4(), "beef" * 10 + ":0123456789abcdef")
-
-        with pytest.raises(RuntimeError, match="planned by other code"):
-            Runner()(task, env_overrides=env)
-
-        assert not task.complete()
-        assert recording_registry.methods() == []
-
-    def test_own_code_runs_whatever_the_config_names(
-        self, recording_registry, fake_call_id, default_in_memory_fs_target
-    ):
-        """The config half is not recomputed: a config naming a task class
-        this container never imported (a worker rehydrates one task, not the
-        whole DAG) must not stop the task, and the hash on the wire is not
-        second-guessed."""
-        task = make_range(limit=3)
-        env = self._scoped_env(
-            uuid4(),
-            "cafe" * 10 + ":ffffffffffffffff",
-            build_config='{"never.Imported": {"width": 7}}',
-        )
+        env = {
+            **_env(uuid4()),
+            STARDAG_SCOPE_KEY_ENV: "beef" * 10 + ":0123456789abcdef",
+        }
 
         assert Runner()(task, env_overrides=env) is None
         assert task.complete()
         assert recording_registry.methods() == ["task_start", "task_complete"]
 
-    def test_a_synthetic_scope_is_driven_by_anyone(
-        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    def test_yields_are_registered_under_the_workers_own_scope(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target, monkeypatch
     ):
-        task = make_range(limit=3)
-        build_id = uuid4()
-
-        Runner()(task, env_overrides=self._scoped_env(build_id, f"build:{build_id}"))
-
-        assert task.complete()
-
-    def test_another_builds_placeholder_is_a_foreign_scope(
-        self, recording_registry, fake_call_id, default_in_memory_fs_target
-    ):
-        """Only ``build:<this build's id>`` is the server's placeholder; a
-        scope claimed as ``build:<other id>`` would otherwise skip the
-        code-id check and let another deployment drive the build."""
-        task = make_range(limit=3)
-
-        with pytest.raises(RuntimeError, match="planned by other code"):
-            Runner()(task, env_overrides=self._scoped_env(uuid4(), f"build:{uuid4()}"))
-
-        assert not task.complete()
-        assert recording_registry.methods() == []
-
-    def test_a_non_reporting_worker_still_refuses_another_builds_placeholder(
-        self, recording_registry, fake_call_id, default_in_memory_fs_target
-    ):
-        """Reporting off is an explicit switch, so the build id still
-        arrives and the synthetic check stays bound to it: nothing is
-        reported, and ``build:<other id>`` is a foreign scope."""
+        """A suspending parent's children and edges land in this code's
+        scope with the forwarded config half, not in the build's scope."""
         from stardag.integration.modal._metadata import (
-            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
+            STARDAG_MODAL_APP_NAME_ENV,
+            STARDAG_REACTIVE_ENV,
+            STARDAG_SCOPE_KEY_ENV,
         )
 
-        task = make_range(limit=3)
-        env = {
-            **self._scoped_env(uuid4(), f"build:{uuid4()}"),
-            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV: "0",
-        }
-        with pytest.raises(RuntimeError, match="planned by other code"):
-            Runner()(task, env_overrides=env)
-        assert recording_registry.methods() == []
+        class _Stub:
+            def spawn(self, **kwargs):
+                return "tick-handle"
 
-        own = uuid4()
-        env = {
-            **self._scoped_env(own, f"build:{own}"),
-            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV: "0",
-        }
-        assert Runner()(make_range(limit=4), env_overrides=env) is None
-        assert recording_registry.methods() == []
-
-    @pytest.mark.parametrize("raw", ["{not json", "[1, 2]", '{"ns.T": 3}'])
-    def test_a_malformed_forwarded_config_fails_the_attempt(
-        self, raw, recording_registry, fake_call_id, default_in_memory_fs_target
-    ):
-        """The build's scope was hashed from the real config; running on the
-        field defaults instead would evaluate a different structure under
-        that scope, so the attempt fails before the task starts."""
-        from stardag.integration.modal._metadata import STARDAG_BUILD_CONFIG_ENV
-
-        task = make_range(limit=3)
-        env = self._scoped_env(
-            uuid4(), "cafe" * 10 + ":ffffffffffffffff", build_config=raw
+        monkeypatch.setattr(
+            modal.Function, "from_name", staticmethod(lambda **kwargs: _Stub())
         )
+        seen: dict[str, object] = {}
 
-        with pytest.raises(RuntimeError, match=STARDAG_BUILD_CONFIG_ENV):
-            Runner()(task, env_overrides=env)
+        async def record_bulk(
+            b, tasks, *, limit_keys=None, declared_dependencies=None, scope_key=None
+        ):
+            seen["bulk_scope"] = scope_key
+            return None
 
-        assert not task.complete()
-        assert recording_registry.methods() == []
+        def record_edges(b, task, upstream_tasks, is_dynamic=True, *, scope_key=None):
+            seen["edge_scope"] = scope_key
+
+        recording_registry.task_register_bulk_aio = record_bulk  # type: ignore[method-assign]
+        recording_registry.task_add_dependencies = record_edges  # type: ignore[method-assign]
+
+        build_id = uuid4()
+        env = {
+            **_env(build_id),
+            STARDAG_REACTIVE_ENV: "1",
+            STARDAG_MODAL_APP_NAME_ENV: "wake-app",
+            STARDAG_SCOPE_KEY_ENV: "beef" * 10 + ":0123456789abcdef",
+        }
+        result = Runner()(SyncDynamicRangeSumTask(limit=3), env_overrides=env)
+
+        assert result is not None  # suspended on the yielded dep
+        assert seen == {
+            "bulk_scope": "cafe" * 10 + ":0123456789abcdef",
+            "edge_scope": "cafe" * 10 + ":0123456789abcdef",
+        }

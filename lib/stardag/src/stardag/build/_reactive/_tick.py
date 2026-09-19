@@ -15,6 +15,7 @@ from stardag.build._base import (
     TaskExecutorABC,
     current_build_id_var,
 )
+from stardag.build._scope import code_id, is_synthetic_scope, scope_code_id
 from stardag.build._task_store import BuildTaskStore
 from stardag.build._wakeups import SpawnTick, drain_wake_candidates
 from stardag.exceptions import NotFoundError, is_missing_route_error
@@ -392,6 +393,10 @@ class TickSummary:
     spawned: int = 0
     self_healed: int = 0
     failed_recorded: int = 0
+    # 1 when this tick re-planned the build under its own code before
+    # scheduling it — a rollover to the live deployment (see
+    # ``docs/design/scope-keyed-dependency-structure.md``).
+    rolled_over: int = 0
     cancelled_refs: int = 0
     iterations: int = 0
     limit_denied: int = 0
@@ -722,6 +727,18 @@ async def _report_tick_summary(
         )
 
 
+def _planned_by_other_code(scope_key: str | None, build_id: UUID) -> bool:
+    """Whether ``scope_key`` names a code id other than this process's.
+
+    None (a server predating scopes) and the build's own synthetic
+    placeholder are "not other code": the first is refused earlier, the
+    second is a build nobody planned under a code id yet.
+    """
+    if scope_key is None or is_synthetic_scope(scope_key, build_id=build_id):
+        return False
+    return scope_code_id(scope_key) != code_id()
+
+
 async def run_tick_aio(
     build_id: UUID,
     *,
@@ -729,8 +746,14 @@ async def run_tick_aio(
     task_executor: TaskExecutorABC,
     task_store: BuildTaskStore | None = None,
     config: TickConfig | None = None,
+    rolled_over: bool = False,
 ) -> TickSummary:
     """Run one reactive scheduler tick for ``build_id`` (see module docs).
+
+    ``rolled_over`` records in the summary that the caller re-planned the
+    build under its own code before this tick (the deployed tick does, when
+    the build was planned by another code version); the summary is the one
+    place that fact is reported.
 
     Idempotent and safe to invoke at any time from anywhere (worker
     wake-ups, periodic watchdog, manual): single-flighted per build via the
@@ -764,7 +787,7 @@ async def run_tick_aio(
     """
     config = config or TickConfig()
     task_store = task_store or BuildTaskStore(build_id)
-    summary = TickSummary(outcome="lingered_out")
+    summary = TickSummary(outcome="lingered_out", rolled_over=int(rolled_over))
     try:
         await _run_tick_body_aio(
             build_id,
@@ -893,6 +916,21 @@ async def _run_tick_body_aio(
                         # marker never flips back to None mid-build, so it is
                         # safe to re-evaluate each iteration.
                         summary.outcome = "not_reactive"
+                        return
+                    if _planned_by_other_code(frontier.scope_key, build_id):
+                        # The build's scope moved under us: a tick on a newer
+                        # deployment took the lease after this one's lapsed
+                        # and re-planned the build under its own code. This
+                        # tick's frontier reads are now over a plan another
+                        # code version owns, so it stops here — the lease it
+                        # holds is released on the way out like any other
+                        # exit, and the new deployment's tick drives on.
+                        logger.info(
+                            f"Tick for build {build_id}: the build was re-planned "
+                            f"under {frontier.scope_key!r} by a newer deployment; "
+                            "this tick is superseded."
+                        )
+                        summary.outcome = "superseded"
                         return
 
                     acted, denied_this_round, awaiting_backend = await _act_on_frontier(

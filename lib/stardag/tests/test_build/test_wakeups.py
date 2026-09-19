@@ -64,7 +64,13 @@ class WakingRegistry(FakeReactiveRegistry):
         return handed
 
     async def task_register_bulk_aio(
-        self, build_id, tasks, *, limit_keys=None, declared_dependencies=None
+        self,
+        build_id,
+        tasks,
+        *,
+        limit_keys=None,
+        declared_dependencies=None,
+        scope_key=None,
     ):
         self.bulk_limit_keys.append(limit_keys)
         return await super().task_register_bulk_aio(

@@ -225,38 +225,57 @@ Each reactive build is owned by the app that triggered it (recorded in the
 registry). Only the owner's ticks drive it — a tick that reaches another
 app forwards the wake-up to the owner rather than running the build with
 the wrong code — and each app's watchdog sweeps only its own builds. A
-tick of the owning app additionally refuses a build whose structure scope
-its own code does not produce (see below); nothing drives a build with
-code other than the code that planned it.
+tick of the owning app that meets a build planned by an earlier deployment
+of the same app re-plans it under its own code (see below).
 
 ### Deployments and code versions
 
-_In practice: [Evolve a DAG Safely](../how-to/evolve-dags.md#4-deploy-new-code-beside-running-builds-modal)._
+_In practice: [Evolve a DAG Safely](../how-to/evolve-dags.md#4-deploy-new-code)._
+
+A **deployment** is one code version of one app — exactly what Modal means
+by the word. Modal keeps one live deployment per app name: after
+`stardag modal deploy` under the same name, in-flight inputs finish on the
+old code but every _new_ spawn lands on the new one. The registry records
+each deployment as it happens (`app_name`, `code_id`, `deployed_at`); the
+newest is the current one, and `stardag modal deployments` lists them.
+Nothing is kept alive beside the current deployment and nothing needs
+collecting.
 
 A build's dependency edges belong to the code that evaluated them — its
-[structure scope](build-execution.md#structure-scope). The bootstrap fixes
-the scope from the deployment's code id, and every tick and worker compares
-the scope's code id with its own before acting. A mismatch is a refusal,
-not a forward.
+[structure scope](build-execution.md#structure-scope) — and a running build
+**follows the live deployment**. A reactive build progresses by new spawns,
+so after a redeploy its next tick runs on the new code. That tick finds the
+build's scope names another code id and re-plans the build: it rebuilds the
+roots from the registry, runs discovery under its own code with the build's
+stored config, registers the plan's edges under its own scope, and moves the
+build's scope (`rolled_over` in the tick summary). Discovery stops at
+completed tasks, so a redeploy costs one walk of the incomplete part of each
+running DAG.
 
-Modal has one live deployment per app name and no addressable versions:
-after `stardag modal deploy` under the same name, in-flight inputs finish
-on the old code but every _new_ spawn lands on the new one. A reactive
-build progresses by new spawns, so a running build's next tick meets a
-scope mismatch and the build stalls until re-triggered as a new build.
-Safe, and not always what you want.
+Three things follow from that:
 
-`StardagApp(..., versioned_deployments=True)` deploys each code version
-under its own app instead: the name you wrote is the **family**, the
-deployed app is the **handle** `<family>--<code id>`, and the registry
-records which code id runs under which handle. A build then keeps ticking
-on the code it started with while newer code deploys beside it, and
-`build_trigger(deployment=...)` picks the deployment: the newest recorded
-one by default, `"local"` for this process's own code, or an explicit
-handle or code id. `stardag modal deployments` lists them;
-`stardag modal gc <family>` stops and retires the ones no running build
-still needs. The naming convention lives in one place in the SDK — the
-registry record is the identity, and nothing else parses a handle.
+- A tick still lingering on the old code sees the scope move and exits
+  (`superseded`); the lease already guarantees one driver per build.
+- Workers are code-agnostic — the task id promises the output whatever
+  code produces it — but each registers the dynamic dependencies it yields
+  under **its own** code's scope. An old container's late yield lands in the
+  old scope, the rolled-over build never sees it, and the new code re-runs
+  the parent: wasted work, correct outcome.
+- Executions the new plan no longer contains finish on their own; their
+  targets are content-addressed, so they harm nothing.
+
+The one case that cannot roll over is a root whose _identity_ parameters
+the new code changed: it cannot be rebuilt from the registry, and the build
+fails with `rollover_failed` — re-trigger it as a new build.
+
+A **branch deployment** is simply another app: give it its own name and it
+has its own single live version.
+
+```{.python notest}
+import os
+
+app = sd_modal.StardagApp(f"reports-{os.environ.get('BRANCH', 'main')}", ...)
+```
 
 ## Choosing
 
