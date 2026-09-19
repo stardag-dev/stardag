@@ -477,9 +477,10 @@ export interface TaskEvent {
   task_id: string | null;
   event_type: EventType;
   created_at: string;
-  // The structure scope a registration event (pending, referenced) was made
-  // under; a build's plan is the tasks registered under its current scope.
-  // Absent on lifecycle events and on older servers.
+  // The build's structure scope when the event was recorded: for a
+  // registration event (pending, referenced) the scope it planned under,
+  // which is what plan membership reads; for a status event the scope that
+  // becomes the task's provenance. Absent on older servers.
   scope_key?: string | null;
   error_message: string | null;
   event_metadata: Record<string, unknown> | null;

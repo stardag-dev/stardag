@@ -1049,9 +1049,10 @@ class TaskNodeExtended(TaskNode):
 
     is_primary: bool = True
     traversal_depth: int = 0
-    # The node's provenance scope: ``scope_key`` of the build that produced
-    # its current status, or None if no build has touched it (or the build
-    # row is gone). The scope its upstream edges are read from.
+    # The node's provenance scope: the scope the build that produced its
+    # current status was planned under *at that time* (frozen on the task;
+    # a build's own scope moves on redeploy), or None if no build has
+    # touched it. The scope its upstream edges are read from.
     scope_key: str | None = None
 
 

@@ -765,7 +765,9 @@ async def test_registration_events_carry_the_scope_they_were_made_under(
         by_type.setdefault(e["event_type"], []).append(e["scope_key"])
     assert by_type["task_pending"].count("code-1:cfg") == 2
     assert "code-0:cfg" in by_type["task_pending"]
-    assert by_type["task_started"] == [None]
+    # A lifecycle event carries the build's scope *at that moment*: the
+    # task's provenance, frozen on its row when the status moves.
+    assert by_type["task_started"] == ["code-1:cfg"]
 
     # Stall-time closure admits under the scope it closes over.
     mate = (await _build(client, "code-1:cfg"))["id"]

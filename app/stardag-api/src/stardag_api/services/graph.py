@@ -58,25 +58,36 @@ class _TraversedTask:
         self.task_name = task_name
         self.task_namespace = task_namespace
         self.depth = depth
-        # Provenance scope: the scope of the build behind the node's
-        # current status. None when no build has touched it.
+        # Provenance scope: the scope the build behind the node's current
+        # status was planned under when it produced that status (frozen on
+        # the task row; the build's current scope for legacy rows). None
+        # when no build has touched it.
         self.scope_key = scope_key
 
 
-def _edge_scope_filter(scope_key: str | None, provenance):
+def _provenance_scope(task, status_build):
+    """A node's provenance scope: the scope its status build was planned
+    under *when it produced the status*, frozen on the task row. A build's
+    scope moves on redeploy, so the build's current scope is only the
+    fallback for rows predating the column."""
+    return func.coalesce(task.latest_status_scope_key, status_build.scope_key)
+
+
+def _edge_scope_filter(scope_key: str | None, downstream, provenance):
     """The predicate deciding whether an edge counts in this view.
 
-    ``provenance`` is the aliased ``Build`` joined on the edge's downstream
-    task's ``latest_status_build_id``. An edge counts when it sits in the
-    downstream's provenance scope; in a build's view, also when it sits in
-    the build's own scope — the build's plan is its own edges, and the
-    context beyond the plan (complete upstreams other builds produced) is
-    read by provenance like everywhere else. Legacy NULL-scope rows always
-    count.
+    ``downstream`` is the edge's downstream ``Task`` (possibly aliased) and
+    ``provenance`` the aliased ``Build`` joined on its
+    ``latest_status_build_id``; together they give the downstream's
+    provenance scope. An edge counts when it sits in that scope; in a
+    build's view, also when it sits in the build's own scope — the build's
+    plan is its own edges, and the context beyond the plan (complete
+    upstreams other builds produced) is read by provenance like everywhere
+    else. Legacy NULL-scope rows always count.
     """
     clauses = [
         TaskDependency.scope_key.is_(None),
-        TaskDependency.scope_key == provenance.scope_key,
+        TaskDependency.scope_key == _provenance_scope(downstream, provenance),
     ]
     if scope_key is not None:
         clauses.append(TaskDependency.scope_key == scope_key)
@@ -100,7 +111,7 @@ async def _traverse_bfs(
             Task.task_id,
             Task.task_name,
             Task.task_namespace,
-            prov.scope_key,
+            _provenance_scope(Task, prov).label("scope_key"),
         )
         .outerjoin(prov, prov.id == Task.latest_status_build_id)
         .where(Task.id.in_(primary_task_pks), Task.environment_id == environment_id)
@@ -134,7 +145,7 @@ async def _traverse_bfs(
                 Task.task_id,
                 Task.task_name,
                 Task.task_namespace,
-                node_prov.scope_key,
+                _provenance_scope(Task, node_prov).label("scope_key"),
             )
             .join(TaskDependency, TaskDependency.upstream_task_id == Task.id)
             .join(downstream, TaskDependency.downstream_task_id == downstream.id)
@@ -145,7 +156,7 @@ async def _traverse_bfs(
             .where(
                 TaskDependency.downstream_task_id.in_(current_frontier),
                 Task.environment_id == environment_id,
-                _edge_scope_filter(scope_key, downstream_prov),
+                _edge_scope_filter(scope_key, downstream, downstream_prov),
             )
         )
         upstream_rows = result.all()
@@ -179,14 +190,14 @@ async def _traverse_bfs(
                 Task.task_id,
                 Task.task_name,
                 Task.task_namespace,
-                node_prov.scope_key,
+                _provenance_scope(Task, node_prov).label("scope_key"),
             )
             .join(TaskDependency, TaskDependency.downstream_task_id == Task.id)
             .outerjoin(node_prov, node_prov.id == Task.latest_status_build_id)
             .where(
                 TaskDependency.upstream_task_id.in_(current_frontier),
                 Task.environment_id == environment_id,
-                _edge_scope_filter(scope_key, node_prov),
+                _edge_scope_filter(scope_key, Task, node_prov),
             )
         )
         downstream_rows = result.all()
@@ -356,7 +367,7 @@ async def traverse_upstream(
             .where(
                 TaskDependency.upstream_task_id.in_(all_relevant_pks),
                 TaskDependency.downstream_task_id.in_(all_relevant_pks),
-                _edge_scope_filter(scope_key, downstream_prov),
+                _edge_scope_filter(scope_key, downstream, downstream_prov),
             )
         )
         raw_edges = edge_result.all()

@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from sqlalchemy.dialects import postgresql, sqlite
 
-from stardag_api.routes.builds import _lock_probe_row, take_task_rows
+from stardag_api.routes.builds import _lock_probe_row, edge_insert_stmt, take_task_rows
 
 
 def _rows() -> list[dict[str, object]]:
@@ -36,3 +36,37 @@ def test_postgresql_names_the_constraint():
     )
     assert "ON CONFLICT ON CONSTRAINT uq_task_environment_taskid DO UPDATE" in sql
     assert "WHERE false" in sql
+
+
+def _edge_rows() -> list[dict[str, object]]:
+    return [
+        {
+            "id": uuid4(),
+            "upstream_task_id": uuid4(),
+            "downstream_task_id": uuid4(),
+            "scope_key": "code:cfg",
+            "is_dynamic": False,
+            "created_at": datetime.now(timezone.utc),
+        }
+    ]
+
+
+def test_edge_insert_on_sqlite_names_the_conflict_target():
+    sql = str(
+        edge_insert_stmt(_edge_rows(), dialect_name="sqlite").compile(
+            dialect=sqlite.dialect()
+        )
+    )
+    assert (
+        "ON CONFLICT (scope_key, upstream_task_id, downstream_task_id) DO NOTHING"
+        in sql
+    )
+
+
+def test_edge_insert_on_postgresql_names_the_constraint():
+    sql = str(
+        edge_insert_stmt(_edge_rows(), dialect_name="postgresql").compile(
+            dialect=postgresql.dialect()
+        )
+    )
+    assert "ON CONFLICT ON CONSTRAINT uq_task_dependency_scope_edge DO NOTHING" in sql

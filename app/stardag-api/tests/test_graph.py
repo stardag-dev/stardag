@@ -19,6 +19,7 @@ async def register_task(
     task_id: str,
     task_name: str,
     dependency_task_ids: list[str] | None = None,
+    scope_key: str | None = None,
     task_namespace: str = "test",
 ) -> dict:
     data = {
@@ -28,6 +29,8 @@ async def register_task(
         "task_data": {"name": task_name},
         "dependency_task_ids": dependency_task_ids or [],
     }
+    if scope_key is not None:
+        data["scope_key"] = scope_key
     response = await client.post(f"/api/v1/builds/{build_id}/tasks", json=data)
     assert response.status_code == 201
     return response.json()
@@ -555,4 +558,58 @@ async def test_environment_graph_follows_each_nodes_provenance(client: AsyncClie
     assert by_source["Up2"]["scope_key"] == "s2"
     assert by_source["Up2"]["is_cross_scope"] is False
     assert by_source["Up1"]["scope_key"] == "s1"
+    assert by_source["Up1"]["is_cross_scope"] is True
+
+
+@pytest.mark.asyncio
+async def test_provenance_is_frozen_when_the_builds_scope_moves(client: AsyncClient):
+    """A build's scope moves when the live deployment does. A task the build
+    completed under the old code keeps that code's ancestry in the graph:
+    its provenance is the scope the build was planned under when it produced
+    the status, not the build's current scope."""
+    build = (
+        await client.post("/api/v1/builds", json={"scope_key": "code-a:cfg"})
+    ).json()["id"]
+    await register_task(client, build, "up1", "Up1")
+    await register_task(client, build, "down", "Down", dependency_task_ids=["up1"])
+    await _complete(client, build, "up1")
+    await _complete(client, build, "down")
+
+    # The deployment moves on and the same build is re-planned under new
+    # code, which declares another upstream for the (complete) task.
+    moved = await client.put(
+        f"/api/v1/builds/{build}/scope", json={"scope_key": "code-b:cfg"}
+    )
+    assert moved.status_code == 200, moved.text
+    await register_task(client, build, "up2", "Up2")
+    await register_task(
+        client,
+        build,
+        "down",
+        "Down",
+        dependency_task_ids=["up2"],
+        scope_key="code-b:cfg",
+    )
+
+    # Environment view: how ``down`` was actually built — under code A.
+    response = await client.post(
+        "/api/v1/tasks/graph", json={"task_ids": ["down"], "upstream_depth": 1}
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    names = {n["task_name"]: n for n in data["nodes"]}
+    assert set(names) == {"Down", "Up1"}, names
+    assert names["Down"]["scope_key"] == "code-a:cfg"
+    assert [e["scope_key"] for e in data["edges"]] == ["code-a:cfg"]
+
+    # The build's own view under its current scope: its new edge to up2,
+    # plus the provenance edge to up1 — a hop between code versions, marked.
+    response = await client.get(f"/api/v1/builds/{build}/graph?upstream_depth=1")
+    data = response.json()
+    names_by_id = {n["id"]: n["task_name"] for n in data["nodes"]}
+    by_source = {names_by_id[e["source"]]: e for e in data["edges"]}
+    assert set(by_source) == {"Up1", "Up2"}, by_source
+    assert by_source["Up2"]["scope_key"] == "code-b:cfg"
+    assert by_source["Up2"]["is_cross_scope"] is False
+    assert by_source["Up1"]["scope_key"] == "code-a:cfg"
     assert by_source["Up1"]["is_cross_scope"] is True

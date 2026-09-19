@@ -11,6 +11,9 @@ See ``docs/design/scope-keyed-dependency-structure.md``.
 Schema:
 
 - ``builds.scope_key`` (non-null) and ``builds.build_config``.
+- ``tasks.latest_status_scope_key`` (nullable): the scope the status build
+  was planned under when it produced the task's current status — the
+  task's provenance scope, frozen because a build's scope moves on redeploy.
 - ``events.scope_key`` (nullable) on registration events: the scope a task
   was registered into the build under, which is what plan membership reads.
 - ``task_dependencies.scope_key`` (nullable — NULL marks a row written before
@@ -135,6 +138,21 @@ def upgrade() -> None:
         """
     )
 
+    # 2c. A task's provenance scope is frozen at status time, because a
+    # build's scope moves on redeploy. Every pre-migration status was
+    # produced under its build's (now synthetic) scope.
+    op.add_column(
+        "tasks",
+        sa.Column("latest_status_scope_key", sa.String(length=96), nullable=True),
+    )
+    op.execute(
+        """
+        UPDATE tasks SET latest_status_scope_key = b.scope_key
+        FROM builds b
+        WHERE tasks.latest_status_build_id = b.id
+        """
+    )
+
     # 3. Edges: the column, the constraint swap, then the copies for builds
     # in flight. The old unique constraint has to go before the copies land,
     # since a copy duplicates a legacy row on (upstream, downstream).
@@ -207,6 +225,7 @@ def downgrade() -> None:
     op.drop_column("task_dependencies", "scope_key")
     op.drop_index("ix_events_build_scope", table_name="events")
     op.drop_column("events", "scope_key")
+    op.drop_column("tasks", "latest_status_scope_key")
     op.drop_column("builds", "build_config")
     op.drop_column("builds", "scope_key")
     op.drop_index(op.f("ix_deployments_environment_id"), table_name="deployments")

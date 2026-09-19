@@ -3204,6 +3204,36 @@ def _dialect_name(db: AsyncSession) -> str:
     return db.bind.dialect.name if db.bind is not None else "postgresql"
 
 
+def edge_insert_stmt(edge_rows: list[dict[str, object]], *, dialect_name: str):
+    """``INSERT ... ON CONFLICT DO NOTHING`` for dependency edges, per dialect.
+
+    An edge that already exists under the same scope is not an error, it is
+    the same fact stated twice. PostgreSQL names the unique constraint;
+    SQLite has no ``ON CONSTRAINT`` form and takes the conflict target
+    instead. Letting the PostgreSQL construct compile for SQLite gave a
+    target-less ``ON CONFLICT DO NOTHING``, which SQLite happens to accept,
+    but the statement should say what it means on both backends — see
+    :func:`take_task_rows`.
+    """
+    if dialect_name == "sqlite":
+        return (
+            sqlite_insert(TaskDependency)
+            .values(edge_rows)
+            .on_conflict_do_nothing(
+                index_elements=[
+                    TaskDependency.scope_key,
+                    TaskDependency.upstream_task_id,
+                    TaskDependency.downstream_task_id,
+                ]
+            )
+        )
+    return (
+        pg_insert(TaskDependency)
+        .values(edge_rows)
+        .on_conflict_do_nothing(constraint="uq_task_dependency_scope_edge")
+    )
+
+
 def _lock_probe_row(
     task_id: str, *, environment_id: UUID, now: datetime
 ) -> dict[str, object]:
@@ -3389,11 +3419,7 @@ async def _reconcile_dependency_edges(
     ]
 
     # 3. Bulk insert the edge rows.
-    edge_stmt = (
-        pg_insert(TaskDependency)
-        .values(edge_rows)
-        .on_conflict_do_nothing(constraint="uq_task_dependency_scope_edge")
-    )
+    edge_stmt = edge_insert_stmt(edge_rows, dialect_name=_dialect_name(db))
     result = await db.execute(edge_stmt)
     # CursorResult.rowcount totals across all VALUES rows on Postgres
     # (with asyncpg, this is reliable even for ON CONFLICT DO NOTHING —
@@ -3983,11 +4009,7 @@ async def register_tasks_bulk(
                 }
             )
     if edge_rows:
-        await db.execute(
-            pg_insert(TaskDependency)
-            .values(edge_rows)
-            .on_conflict_do_nothing(constraint="uq_task_dependency_scope_edge")
-        )
+        await db.execute(edge_insert_stmt(edge_rows, dialect_name=_dialect_name(db)))
 
     # Phase 3: bulk-insert events with explicit per-event timestamps so
     # that ``list_tasks_in_build`` can order tasks by per-build first

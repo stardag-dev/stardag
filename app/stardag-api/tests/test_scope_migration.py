@@ -128,6 +128,15 @@ async def test_migration_scopes_running_builds_and_drops_phantoms(
         await _insert_edge(pg_session, up_pk, old_down_pk)
         done_build = await _insert_build(pg_session, status="completed")
         await _insert_event(pg_session, done_build, old_down_pk)
+        # A task whose status the terminal build produced: its provenance
+        # scope must come out as that build's (synthetic) scope.
+        await pg_session.execute(
+            text(
+                "UPDATE tasks SET latest_status = 'completed', "
+                "latest_status_build_id = :b WHERE id = :t"
+            ),
+            {"b": done_build, "t": old_down_pk},
+        )
 
         phantom_pk = await _insert_task(pg_session, "mig-phantom", is_phantom=True)
         await _insert_edge(pg_session, phantom_pk, down_pk)
@@ -154,6 +163,15 @@ async def test_migration_scopes_running_builds_and_drops_phantoms(
             scope=f"build:{build_id}",
         )
         assert scopes == 1, (build_id, scopes)
+
+    # The completed task's provenance is frozen as the scope its status
+    # build was planned under — the build's synthetic scope, pre-migration.
+    provenance = await _scalar(
+        pg_session,
+        "SELECT latest_status_scope_key FROM tasks WHERE id = :t",
+        t=old_down_pk,
+    )
+    assert provenance == f"build:{done_build}"
 
     # The running build's edge was copied into its scope; the legacy row
     # stays as history.
