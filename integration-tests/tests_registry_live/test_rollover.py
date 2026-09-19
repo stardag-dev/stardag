@@ -101,8 +101,15 @@ def _deploy(app_name: str, modal_environment: str, code_id: str) -> None:
     )
 
 
-def _edges_into(deployment: Deployment, task_id: str) -> list[dict]:
-    """Every recorded edge into ``task_id``, with the scope each carries."""
+def _edge_scopes_into(deployment: Deployment, task_id: str) -> set[str | None]:
+    """The scopes of the edges the graph shows into ``task_id``.
+
+    Graph nodes and edges are keyed by the registry's row ids, so the task's
+    deterministic id is resolved through the node list first. The graph
+    follows a node's *provenance* scope — the scope of the build that
+    produced its current status — so after a rollover this is the new
+    scope's view of the task, not every edge ever recorded.
+    """
     with httpx.Client(timeout=60.0) as client:
         response = client.post(
             f"{deployment.api_url.rstrip('/')}/api/v1/tasks/graph",
@@ -110,7 +117,9 @@ def _edges_into(deployment: Deployment, task_id: str) -> list[dict]:
             json={"task_ids": [task_id], "upstream_depth": 1},
         )
         response.raise_for_status()
-        return [e for e in response.json()["edges"] if e["target"] == task_id]
+    body = response.json()
+    row_ids = {n["id"] for n in body["nodes"] if n["task_id"] == task_id}
+    return {e["scope_key"] for e in body["edges"] if e["target"] in row_ids}
 
 
 def test_a_running_build_rolls_over_to_the_new_deployment(
@@ -177,14 +186,13 @@ def test_a_running_build_rolls_over_to_the_new_deployment(
         )
         assert not any(s.get("outcome") == "rollover_failed" for s in summaries)
 
-        # Nothing retracts an edge: the parent's static edge under A is still
-        # recorded, and the build's plan under B recorded its own.
-        scopes_into_parent = {
-            e["scope_key"] for e in _edges_into(deployment, str(parent.id))
-        }
-        assert scope_a in scopes_into_parent, (
-            f"The edges recorded under code A are gone: {scopes_into_parent}"
-        )
+        # The rollover recorded the parent's edges under B, and that is what
+        # the graph shows for it now: a node's edges follow the scope of the
+        # build that produced its status. That nothing retracted the edges
+        # under A is a registry rule, asserted where the rows are visible
+        # (``test_a_rollover_gates_over_the_new_scope_and_keeps_the_old_edges``
+        # in the API suite); the graph deliberately does not show them here.
+        scopes_into_parent = _edge_scopes_into(deployment, str(parent.id))
         assert scope_b in scopes_into_parent, (
             f"The rollover recorded no edges under code B: {scopes_into_parent}"
         )
