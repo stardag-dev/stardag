@@ -439,6 +439,68 @@ class TestBuilderOrchestration:
 
         assert calls == ["setup", "build", "teardown"]
 
+    def test_executor_carries_the_builds_config_and_scope(self, monkeypatch):
+        """The resident path: the executor is built before the engine runs,
+        yet it is what forwards the build's config and scope to every
+        worker. Both are derived here from the same kwargs the engine gets,
+        so a configured resident build's workers resolve dynamic
+        dependencies from the config and refuse a foreign scope, as a
+        reactive build's do."""
+        from typing import Annotated
+
+        from stardag.base_model import StardagField
+        from stardag.build._scope import STARDAG_CODE_ID_ENV
+        from stardag.build_config import task_config_key
+
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+
+        class ConfiguredForBuilderTest(_sd.Task[int]):
+            width: Annotated[int, StardagField(significance="dependencies_only")] = 2
+
+            def run(self):
+                return None
+
+        key = task_config_key(
+            ConfiguredForBuilderTest.get_namespace(),
+            ConfiguredForBuilderTest.get_name(),
+        )
+        config = {key: {"width": 7}}
+        captured: dict = {}
+        mock_summary = MagicMock()
+        mock_summary.status = MagicMock(value="SUCCESS")
+
+        class CapturingBuilder(Builder):
+            def build(self, tasks, task_executor, build_kwargs=None):
+                captured["executor"] = task_executor
+                return mock_summary
+
+        CapturingBuilder()(
+            MagicMock(), MagicMock(), "app", build_kwargs={"build_config": config}
+        )
+
+        executor = captured["executor"]
+        assert executor.build_config == config
+        assert executor.scope_key.startswith("cafe" * 10 + ":")
+        # The hash half is the config's, not the empty config's.
+        from stardag.build._scope import structure_scope_key
+
+        assert executor.scope_key == structure_scope_key("cafe" * 10, config)
+        assert executor.scope_key != structure_scope_key("cafe" * 10, None)
+
+    def test_executor_without_a_config_has_the_bare_scope(self):
+        captured: dict = {}
+        mock_summary = MagicMock()
+        mock_summary.status = MagicMock(value="SUCCESS")
+
+        class CapturingBuilder(Builder):
+            def build(self, tasks, task_executor, build_kwargs=None):
+                captured["executor"] = task_executor
+                return mock_summary
+
+        CapturingBuilder()(MagicMock(), MagicMock(), "app")
+        assert captured["executor"].build_config is None
+        assert captured["executor"].scope_key is not None
+
     def test_teardown_called_on_build_exception(self):
         calls = []
 
@@ -746,6 +808,67 @@ class TestStardagAppBuildTrigger:
         assert captured["op"] == "spawn"
         assert captured["kwargs"]["tasks"] is root
         assert captured["kwargs"]["build_kwargs"] == {"resume_build_id": build_id}
+
+    def test_a_misconfigured_build_config_fails_before_a_build_is_minted(
+        self, modal_function_stub
+    ):
+        """A misspelled field on a class this process knows is refused here,
+        synchronously, with no build started: the alternative is a build
+        minted, spawned and failed remotely for a typo."""
+        from typing import Annotated
+
+        from stardag.base_model import StardagField
+        from stardag.build_config import BuildConfigError, task_config_key
+
+        class ConfiguredForTriggerTest(_sd.Task[int]):
+            width: Annotated[int, StardagField(significance="dependencies_only")] = 2
+
+            def run(self):
+                return None
+
+        key = task_config_key(
+            ConfiguredForTriggerTest.get_namespace(),
+            ConfiguredForTriggerTest.get_name(),
+        )
+        app = self._make_app()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = uuid4()
+
+        with registry_provider.override(registry):
+            with pytest.raises(BuildConfigError, match="no such field"):
+                app.build_trigger(
+                    MagicMock(spec=BaseTask), build_config={key: {"widht": 3}}
+                )
+            with pytest.raises(BuildConfigError, match="not a valid"):
+                app.build_trigger(
+                    MagicMock(spec=BaseTask),
+                    build_config={key: {"width": "seven"}},
+                )
+        registry.build_start.assert_not_called()
+        assert "op" not in modal_function_stub
+
+    def test_a_config_naming_an_unimported_class_is_left_to_the_bootstrap(
+        self, modal_function_stub
+    ):
+        """The trigger need not import every configured upstream; a class
+        it does not know is not a typo it can judge, so the build proceeds
+        and the bootstrap — which imports every task module — decides."""
+        app = self._make_app()
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+
+        with registry_provider.override(registry):
+            result = app.build_trigger(
+                MagicMock(spec=BaseTask),
+                build_config={"never.Imported": {"width": 3}},
+            )
+
+        assert result.build_id == build_id
+        registry.build_start.assert_called_once()
+        assert registry.build_start.call_args.kwargs["build_config"] == {
+            "never.Imported": {"width": 3}
+        }
 
     def test_sequence_of_roots_passed_as_list_to_registry(self, modal_function_stub):
         app = self._make_app()

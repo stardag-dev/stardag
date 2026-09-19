@@ -118,6 +118,10 @@ async def test_migration_scopes_running_builds_and_drops_phantoms(
         down_pk = await _insert_task(pg_session, "mig-down")
         await _insert_edge(pg_session, up_pk, down_pk)
         running_build = await _insert_build(pg_session, status="running")
+        # Two events on the same downstream in one build, as any running task
+        # has (pending, then started): the backfill must still copy its edge
+        # exactly once, or the new unique constraint aborts the migration.
+        await _insert_event(pg_session, running_build, down_pk)
         await _insert_event(pg_session, running_build, down_pk)
 
         old_down_pk = await _insert_task(pg_session, "mig-old-down")

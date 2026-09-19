@@ -101,6 +101,19 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `deployment_record`, `deployment_list`, `deployment_retire`
   (no-op defaults). `BuildInfo` gains `scope_key` and `build_config`.
   The frontier's `blocked_by_external` is no longer read.
+- **The SDK refuses a Registry API that predates structure scopes** with
+  `RegistryTooOldError`: a missing `PUT /builds/{id}/scope`, or a
+  `POST /builds` / `POST /builds/{id}/resume` that does not echo the
+  `scope_key` it was sent. Upgrade the server first; a newer server with an
+  older SDK is supported, the reverse is not.
+- `build_trigger(build_config=...)` validates the config locally before a
+  build is minted (`BuildConfigError` for a misspelled field, an identity
+  field or an invalid value); a class the trigger process has not imported
+  (`UnknownTaskClassError`) is left to the bootstrap to judge.
+- The resident Modal builder forwards the build's config and structure
+  scope to the workers it spawns, as the reactive path already did.
+- `stardag modal gc` retires the registry record before stopping the app,
+  and keeps a deployment a build took since the listing.
 
 ### Registry API
 

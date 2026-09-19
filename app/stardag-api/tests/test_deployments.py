@@ -106,6 +106,39 @@ async def test_retire_refuses_while_a_build_runs_on_it(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_a_resident_build_keeps_a_deployment_live(client: AsyncClient):
+    """A non-reactive trigger never sets ``reactive_app_name``; the handle it
+    runs on is in the build's executor metadata. It executes on the
+    deployment all the same, so it counts, and retiring is refused."""
+    recorded = (
+        await client.post(DEPLOYMENTS, json=_record("myapp--abc", "abc"))
+    ).json()
+    started = await client.post(
+        BUILDS,
+        json={"executor_metadata": {"kind": "modal", "app_name": "myapp--abc"}},
+    )
+    assert started.status_code == 201, started.text
+    assert started.json()["reactive_app_name"] is None
+
+    listed = (await client.get(DEPLOYMENTS)).json()["deployments"]
+    assert listed[0]["running_builds"] == 1
+
+    refused = await client.post(f"{DEPLOYMENTS}/{recorded['id']}/retire")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["running_builds"] == 1
+
+    # A build on another app, and one on this app that has finished, count
+    # for nothing.
+    await client.post(
+        BUILDS, json={"executor_metadata": {"kind": "modal", "app_name": "other"}}
+    )
+    done = await client.post(f"{BUILDS}/{started.json()['id']}/complete")
+    assert done.status_code == 200, done.text
+    listed = (await client.get(DEPLOYMENTS)).json()["deployments"]
+    assert listed[0]["running_builds"] == 0
+
+
+@pytest.mark.asyncio
 async def test_retire_a_deployment_nobody_runs_on(client: AsyncClient):
     recorded = (
         await client.post(DEPLOYMENTS, json=_record("myapp--idle", "idle"))

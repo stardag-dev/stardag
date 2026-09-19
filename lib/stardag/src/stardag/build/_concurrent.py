@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import inspect
 import logging
 import traceback as tb_module
@@ -66,8 +67,14 @@ from stardag.build._concurrency import (
     build_concurrency_limiter,
 )
 from stardag.build._scope import code_id, structure_scope_key
+from stardag.build._sequential import installs_build_config_aio
 from stardag.build._wakeups import drain_wake_candidates
-from stardag.build_config import build_config_scope, rebind_to_build_config
+from stardag.build_config import (
+    BuildConfig,
+    get_build_config,
+    rebind_to_build_config,
+    set_build_config,
+)
 from stardag.exceptions import ScopeMismatchError
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
@@ -178,7 +185,9 @@ class DefaultExecutionModeSelector:
 # =============================================================================
 
 
-def _run_task_in_process(task: BaseTask) -> TaskStruct | None:
+def _run_task_in_process(
+    task: BaseTask, build_config: BuildConfig | None = None
+) -> TaskStruct | None:
     """Execute task in subprocess, respecting dynamic deps contract.
 
     This function is called in a subprocess via ProcessPoolExecutor.
@@ -198,12 +207,18 @@ def _run_task_in_process(task: BaseTask) -> TaskStruct | None:
 
     Args:
         task: The task to execute.
+        build_config: The build's config, installed in this process before
+            ``run()`` so the tasks it constructs (its dynamic dependencies,
+            its ``requires()``) resolve their ``dependencies_only`` and
+            ``execution_only`` fields from it, as they do in the parent.
+            A fresh process has no context of its own.
 
     Returns:
         - None: Task completed (generator finished or no dynamic deps).
         - TaskStruct: Task yielded deps that are NOT complete. These need
             to be built, then the task will be re-executed.
     """
+    set_build_config(build_config)
     result = task.run()
 
     if result is None:
@@ -388,15 +403,26 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         elif mode == ExecutionMode.SYNC_THREAD:
             assert self._thread_pool is not None
             loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(self._thread_pool, task.run)
+            # ``run_in_executor`` does not carry the calling context into
+            # the pool thread, and the build config lives in a ContextVar:
+            # a ``run()`` that constructs tasks — its dynamic dependencies,
+            # or a ``requires()`` — would resolve their level 2/3 fields to
+            # the class defaults, against a scope hashed from the config.
+            # Run it in a copy of this context so it reads what the build
+            # installed.
+            context = contextvars.copy_context()
+            return await loop.run_in_executor(self._thread_pool, context.run, task.run)
 
         elif mode == ExecutionMode.SYNC_PROCESS:
             assert self._process_pool is not None
             loop = asyncio.get_running_loop()
             # Use helper that handles generators by collecting all yielded deps
             # and returning TaskStruct (which IS picklable, unlike generators)
+            # A subprocess starts with an empty context; the config goes
+            # along as a plain argument and is installed there before
+            # ``run()`` constructs anything. See ``_run_task_in_process``.
             return await loop.run_in_executor(
-                self._process_pool, _run_task_in_process, task
+                self._process_pool, _run_task_in_process, task, get_build_config()
             )
 
         elif mode == ExecutionMode.SYNC_BLOCKING:
@@ -516,6 +542,7 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
 # =============================================================================
 
 
+@installs_build_config_aio
 async def build_aio(
     tasks: Sequence[BaseTask] | BaseTask,
     task_executor: TaskExecutorABC | None = None,
@@ -595,12 +622,10 @@ async def build_aio(
                 raise ValueError(
                     f"Invalid task at index {idx}: {task} (must be BaseTask)"
                 )
-    # The config is installed for the whole build — released in the outer
-    # ``finally`` — and the roots are re-created under it: they were
-    # constructed by the caller before it existed, so they carry whatever
-    # level 2/3 values were resolvable there.
-    _build_config_cm = build_config_scope(build_config)
-    _build_config_cm.__enter__()
+    # The config is installed around this whole function (see
+    # ``installs_build_config_aio``) and the roots are re-created under it:
+    # they were constructed by the caller before it existed, so they carry
+    # whatever level 2/3 values were resolvable there.
     if build_config:
         tasks = [rebind_to_build_config(t) for t in tasks]
     scope_key = structure_scope_key(code_id(), build_config)
@@ -729,7 +754,6 @@ async def build_aio(
             # Not a registry hiccup: the registry understood and refused.
             # This build's edges were evaluated by other code or other
             # structure config; continuing would mix them. New build.
-            _build_config_cm.__exit__(None, None, None)
             raise
         except Exception as reg_err:
             handle_registry_error(
@@ -2074,7 +2098,6 @@ async def build_aio(
 
     finally:
         current_build_id_var.reset(_build_id_token)
-        _build_config_cm.__exit__(None, None, None)
         if lock_renewals:
             for renewal in lock_renewals.values():
                 renewal.cancel()

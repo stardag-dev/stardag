@@ -54,21 +54,31 @@ async def _require_admin_for_user_auth(db: AsyncSession, auth: SdkAuth) -> None:
 async def _running_builds_by_handle(
     db: AsyncSession, environment_id: UUID, handles: list[str]
 ) -> dict[str, int]:
-    """RUNNING reactive builds per app handle — what makes a deployment live."""
+    """RUNNING builds per app handle — what makes a deployment live.
+
+    A reactive build names its app in ``reactive_app_name``; a resident one
+    (``build_trigger(reactive=False)``, or ``build_spawn``) leaves that NULL
+    and carries the handle only in ``executor_metadata["app_name"]``. Both
+    execute on the deployment, so both keep it from being retired.
+    """
     if not handles:
         return {}
+    handle = func.coalesce(
+        Build.reactive_app_name,
+        Build.executor_metadata["app_name"].as_string(),
+    )
     rows = (
         await db.execute(
-            select(Build.reactive_app_name, func.count())
+            select(handle, func.count())
             .where(
                 Build.environment_id == environment_id,
                 Build.latest_status == BuildStatus.RUNNING,
-                Build.reactive_app_name.in_(handles),
+                handle.in_(handles),
             )
-            .group_by(Build.reactive_app_name)
+            .group_by(handle)
         )
     ).all()
-    return {handle: count for handle, count in rows if handle is not None}
+    return {name: count for name, count in rows if name is not None}
 
 
 def _response(row: Deployment, running: int) -> DeploymentResponse:
@@ -193,7 +203,16 @@ async def retire_deployment(
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     await _require_admin_for_user_auth(db, auth)
-    row = await db.get(Deployment, deployment_id)
+    # Locked for the count-then-write below, so two retires of one
+    # deployment serialise. A trigger resolving the handle meanwhile is not
+    # serialised by this: resolution is a client-side read of the listing,
+    # so the residual window is a build that fails loudly at its first
+    # spawn against a stopped app, never one silently stranded mid-flight.
+    row = (
+        await db.execute(
+            select(Deployment).where(Deployment.id == deployment_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if row is None or row.environment_id != auth.environment_id:
         raise HTTPException(status_code=404, detail="Deployment not found")
     running = (

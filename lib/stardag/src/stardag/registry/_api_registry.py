@@ -30,6 +30,7 @@ from stardag.exceptions import (
     InvalidTokenError,
     NotAuthenticatedError,
     NotFoundError,
+    RegistryTooOldError,
     QuotaExceededError,
     RateLimitError,
     TokenExpiredError,
@@ -619,6 +620,7 @@ class APIRegistry(RegistryABC):
             operation="Start build",
         )
         data = response.json()
+        _require_scope_support(data, scope_key, "POST /builds")
         build_id = UUID(data["id"])
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
@@ -635,11 +637,15 @@ class APIRegistry(RegistryABC):
 
         Emits a BUILD_RESUMED event server-side so a build that previously
         terminated (FAILED / COMPLETED / CANCELLED / EXIT_EARLY) flips
-        back to RUNNING. The endpoint is new in the post-resume API; on
-        older servers the request 404s with FastAPI's missing-route body,
-        which we swallow with a warning so the SDK keeps working against
-        an un-upgraded registry. Resource-level 404s (build does not
-        exist) are re-raised.
+        back to RUNNING. On a server predating the endpoint the request
+        404s with FastAPI's missing-route body, which is swallowed with a
+        warning; resource-level 404s (build does not exist) are re-raised.
+
+        When a ``scope_key`` is claimed, the server must acknowledge it: a
+        server predating structure scopes ignores the parameter silently and
+        answers without one, and that is a :class:`RegistryTooOldError` — a
+        build resumed on such a server would be gated over
+        environment-global edges this SDK does not tolerate.
         """
         params = self._get_event_params()
         if executor_metadata is not None:
@@ -648,7 +654,7 @@ class APIRegistry(RegistryABC):
             )
         _add_scope_params(params, scope_key, build_config)
         try:
-            self._request(
+            response = self._request(
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/resume",
                 params=params,
@@ -660,6 +666,8 @@ class APIRegistry(RegistryABC):
                 raise
             if not is_missing_route_error(e):
                 raise
+            if scope_key is not None:
+                raise _registry_too_old(f"POST /builds/{build_id}/resume") from e
             logger.warning(
                 "Registry API does not support POST /builds/%s/resume; "
                 "the resumed build will keep its previous status in the "
@@ -668,6 +676,9 @@ class APIRegistry(RegistryABC):
                 build_id,
             )
             return
+        _require_scope_support(
+            _json_or_empty(response), scope_key, f"POST /builds/{build_id}/resume"
+        )
         logger.info(f"Resumed build: {build_id}")
 
     def build_complete(self, build_id: UUID) -> None:
@@ -1324,6 +1335,7 @@ class APIRegistry(RegistryABC):
             operation="Start build",
         )
         data = response.json()
+        _require_scope_support(data, scope_key, "POST /builds")
         build_id = UUID(data["id"])
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
@@ -1347,7 +1359,7 @@ class APIRegistry(RegistryABC):
             )
         _add_scope_params(params, scope_key, build_config)
         try:
-            await self._arequest(
+            response = await self._arequest(
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/resume",
                 params=params,
@@ -1359,6 +1371,8 @@ class APIRegistry(RegistryABC):
                 raise
             if not is_missing_route_error(e):
                 raise
+            if scope_key is not None:
+                raise _registry_too_old(f"POST /builds/{build_id}/resume") from e
             logger.warning(
                 "Registry API does not support POST /builds/%s/resume; "
                 "the resumed build will keep its previous status in the "
@@ -1367,6 +1381,9 @@ class APIRegistry(RegistryABC):
                 build_id,
             )
             return
+        _require_scope_support(
+            _json_or_empty(response), scope_key, f"POST /builds/{build_id}/resume"
+        )
         logger.info(f"Resumed build: {build_id}")
 
     async def build_complete_aio(self, build_id: UUID) -> None:
@@ -2155,9 +2172,10 @@ class APIRegistry(RegistryABC):
         """Fix the build's structure scope, set-once (``PUT /builds/{id}/scope``).
 
         A 409 ``scope_mismatch`` is a :class:`ScopeMismatchError`. Against a
-        server predating scopes the route is missing; the build then runs on
-        the server's own per-build scope, which is always correct and never
-        shared, so this is a warning rather than a failure.
+        server predating scopes the route is missing, and that is a
+        :class:`RegistryTooOldError`: such a server gates every build over
+        environment-global edges, exactly what scopes exist to prevent, so
+        the SDK refuses rather than degrading. Upgrade the server first.
         """
         body: dict[str, Any] = {"scope_key": scope_key}
         if build_config is not None:
@@ -2173,14 +2191,7 @@ class APIRegistry(RegistryABC):
         except APIError as e:
             _raise_if_scope_mismatch(e)
             if isinstance(e, NotFoundError) and is_missing_route_error(e):
-                logger.warning(
-                    "Registry API does not support PUT /builds/%s/scope; the "
-                    "build keeps its per-build scope, so its dependency edges "
-                    "are shared with no other build. Upgrade the Registry API "
-                    "for structure-scope sharing.",
-                    build_id,
-                )
-                return
+                raise _registry_too_old(f"PUT /builds/{build_id}/scope") from e
             raise
 
     async def build_set_scope_aio(
@@ -2205,14 +2216,7 @@ class APIRegistry(RegistryABC):
         except APIError as e:
             _raise_if_scope_mismatch(e)
             if isinstance(e, NotFoundError) and is_missing_route_error(e):
-                logger.warning(
-                    "Registry API does not support PUT /builds/%s/scope; the "
-                    "build keeps its per-build scope, so its dependency edges "
-                    "are shared with no other build. Upgrade the Registry API "
-                    "for structure-scope sharing.",
-                    build_id,
-                )
-                return
+                raise _registry_too_old(f"PUT /builds/{build_id}/scope") from e
             raise
 
     def deployment_record(
@@ -2764,6 +2768,38 @@ def _add_scope_params(
         params["build_config"] = _json.dumps(
             dict(build_config), separators=(",", ":"), sort_keys=True
         )
+
+
+def _registry_too_old(operation: str) -> RegistryTooOldError:
+    return RegistryTooOldError(
+        f"{operation}: the Registry API predates structure scopes, so it "
+        "would gate this build over environment-global dependency edges. "
+        "Upgrade the Registry API (stardag-api) to a version matching this "
+        "SDK before building against it; a newer server with an older SDK "
+        "is fine, the reverse is not.",
+        operation=operation,
+    )
+
+
+def _require_scope_support(
+    data: Mapping[str, Any], scope_key: str | None, operation: str
+) -> None:
+    """A server that knows scopes echoes the build's ``scope_key``.
+
+    One that predates them ignores the field silently — an unknown body
+    field or query parameter is not an error to it — so its silence is the
+    only evidence there is. Checked only when a scope was actually claimed.
+    """
+    if scope_key is not None and "scope_key" not in data:
+        raise _registry_too_old(operation)
+
+
+def _json_or_empty(response: Any) -> Mapping[str, Any]:
+    try:
+        data = response.json()
+    except ValueError:
+        return {}
+    return data if isinstance(data, Mapping) else {}
 
 
 def _raise_if_scope_mismatch(error: APIError) -> None:

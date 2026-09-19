@@ -64,6 +64,11 @@ registry data and one unpickled from the build store now agree.
 - **Re-triggering a build after a code change now refuses** with
   `ScopeMismatchError`. Start a new build; it shares nothing with the old
   one and the old one keeps running.
+- **Upgrade the Registry API before the SDK.** This SDK requires a Registry
+  API at this release or later: against an older one a build refuses to
+  start (or to fix its scope) with `RegistryTooOldError` rather than run
+  over environment-global dependency edges. A newer server with an older
+  SDK keeps working, so the order is server first, then SDK.
 
 ### What you will see in the UI
 

@@ -15,6 +15,7 @@ import typing
 
 from stardag import BaseTask, build
 from stardag.build import BuildExitStatus, BuildSummary
+from stardag.build._scope import code_id, structure_scope_key
 from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.integration.modal._logging import _setup_logging
 from stardag.integration.modal._protocols import BuildFunction
@@ -112,10 +113,23 @@ class Builder(BuildFunction):
         build_kwargs: dict[str, typing.Any] | None = None,
     ) -> BuildSummary | None:
         """Core build logic to orchestrate the DAG build."""
+        # The build's config and structure scope are the engine's to install
+        # and compute (``stardag.build(..., build_config=...)``), but the
+        # executor is constructed here, before the engine runs, and it is
+        # what forwards both to every worker it spawns
+        # (``STARDAG_BUILD_CONFIG`` / ``STARDAG_SCOPE_KEY``). Deriving them
+        # here from the same kwargs the engine receives keeps the two in
+        # step: a worker of a configured resident build resolves its
+        # dynamic dependencies from the config and refuses a foreign scope,
+        # exactly as a reactive build's worker does.
+        build_config = (build_kwargs or {}).get("build_config")
+        scope_key = structure_scope_key(code_id(), build_config)
         modal_executor = ModalTaskExecutor(
             modal_app_name=app_name,
             worker_selector=worker_selector,
             detached=getattr(self, "detached", True),
+            build_config=build_config,
+            scope_key=scope_key,
         )
         summary_or_exception: BuildSummary | None | Exception = BuildFailedError(
             "Unknown error during build"

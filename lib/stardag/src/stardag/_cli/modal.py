@@ -622,15 +622,24 @@ def gc(
         False, "--dry-run", help="Show what would be stopped without doing it."
     ),
 ) -> None:
-    """Stop and retire deployments of a family no running build still needs.
+    """Retire and stop deployments of a family no running build still needs.
 
     A deployment is retirable when no RUNNING build references its handle.
     The newest ``--keep`` retirable ones are kept so a trigger with no
-    explicit deployment still has something to resolve to. Stopping the
-    Modal app is done here; the registry record is retired alongside.
+    explicit deployment still has something to resolve to.
+
+    The registry record is retired *first*, and the Modal app stopped only
+    once that succeeded. The registry refuses the retire (409) if a build
+    resolved the handle since the listing, in which case the deployment is
+    kept and its app left running; the other order would have stopped an
+    app a build had just been handed. What remains is the window between a
+    trigger resolving the handle and its first spawn: a trigger that read
+    the record before the retire and spawns after the stop fails loudly at
+    the spawn (the app is gone), never silently.
     """
     import subprocess
 
+    from stardag.exceptions import APIError
     from stardag.registry import registry_provider
 
     registry = registry_provider.get()
@@ -653,8 +662,19 @@ def gc(
     modal_cli = Path(sys.executable).with_name("modal")
     for d in victims:
         if dry_run:
-            console.print(f"would stop and retire {d.handle} (code {d.code_id[:12]})")
+            console.print(f"would retire and stop {d.handle} (code {d.code_id[:12]})")
             continue
+        try:
+            registry.deployment_retire(d.id)
+        except APIError as e:
+            if e.status_code == 409:
+                # A build resolved this handle between the listing and now.
+                # The record stays live and so does the app.
+                console.print(
+                    f"[dim]keep {d.handle}: a build took it since the listing[/dim]"
+                )
+                continue
+            raise
         cmd = [str(modal_cli), "app", "stop", d.handle, "--yes"]
         if env:
             cmd += ["-e", env]
@@ -663,11 +683,11 @@ def gc(
             output = ((result.stderr or "") + (result.stdout or "")).strip()
             if "not found" not in output.lower() and "no app" not in output.lower():
                 error_console.print(
-                    f"[yellow]Could not stop {d.handle}: {output}[/yellow]"
+                    f"[yellow]Retired {d.handle} but could not stop its app: "
+                    f"{output}. Stop it by hand: modal app stop {d.handle}[/yellow]"
                 )
                 continue
-        registry.deployment_retire(d.id)
-        console.print(f"[green]stopped and retired {d.handle}[/green]")
+        console.print(f"[green]retired and stopped {d.handle}[/green]")
 
 
 @app.command("deploy")

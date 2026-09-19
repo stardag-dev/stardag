@@ -2188,7 +2188,11 @@ def _apply_scope(build: Build, *, scope_key: str, build_config: dict | None) -> 
     because the edges recorded under the old one were evaluated by other
     code or other structure config and a build carries one scope for its
     life. The answer to "I want to run this build under new code" is a new
-    build. ``build_config`` follows the same rule, compared as a whole.
+    build. ``build_config`` follows the same rule, compared as a whole: on a
+    build with a real scope, a supplied config must equal the stored one,
+    where "nothing stored" and ``{}`` are the same config. ``None`` is not
+    a config but "unspecified" — an older SDK or a bare re-trigger — and
+    keeps whatever is stored.
     """
     if not _is_synthetic_scope(build) and build.scope_key != scope_key:
         raise HTTPException(
@@ -2209,8 +2213,7 @@ def _apply_scope(build: Build, *, scope_key: str, build_config: dict | None) -> 
     if (
         not _is_synthetic_scope(build)
         and build_config is not None
-        and build.build_config is not None
-        and build.build_config != build_config
+        and (build.build_config or {}) != build_config
     ):
         raise HTTPException(
             status_code=409,

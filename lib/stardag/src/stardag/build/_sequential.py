@@ -17,11 +17,20 @@ breaks the sync contract.
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import logging
 import time
-from collections.abc import Awaitable, Sequence
-from typing import Any, AsyncIterator, Callable, Literal, Mapping
+from collections.abc import Awaitable, Coroutine, Sequence
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Literal,
+    Mapping,
+    ParamSpec,
+    TypeVar,
+)
 from uuid import UUID
 
 from stardag import (
@@ -52,6 +61,51 @@ from stardag.exceptions import ScopeMismatchError
 from stardag.registry import RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _bound_build_config(
+    fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> Mapping[str, Mapping[str, Any]] | None:
+    """The ``build_config`` argument of a call to ``fn``, however it was passed."""
+    bound = inspect.signature(fn).bind_partial(*args, **kwargs)
+    return bound.arguments.get("build_config")
+
+
+def installs_build_config(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Run a sync build entry point inside ``build_config_scope(build_config)``.
+
+    The config has to be installed before anything in the body runs — the
+    roots are re-bound to it and its structure hash is computed first thing
+    — and released whatever the body does, including a registry that
+    refuses the build before the main ``try`` is reached. A ``with`` around
+    the *whole* body is the only shape with no gap; a manual ``__enter__``
+    paired with ``__exit__`` calls in ``finally`` and in error branches left
+    the caller's context holding a failed build's config whenever the
+    failure came earlier than the branches did.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with build_config_scope(_bound_build_config(fn, args, kwargs)):
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def installs_build_config_aio(
+    fn: Callable[_P, Coroutine[Any, Any, _R]],
+) -> Callable[_P, Coroutine[Any, Any, _R]]:
+    """Async twin of :func:`installs_build_config`."""
+
+    @functools.wraps(fn)
+    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with build_config_scope(_bound_build_config(fn, args, kwargs)):
+            return await fn(*args, **kwargs)
+
+    return wrapper
 
 
 # Number of tasks the build engine sends per ``task_register_bulk[_aio]``
@@ -130,6 +184,7 @@ def _check_for_deadlock(
             )
 
 
+@installs_build_config
 def build_sequential(
     tasks: Sequence[BaseTask] | BaseTask,
     registry: RegistryABC | None = None,
@@ -186,8 +241,9 @@ def build_sequential(
         BuildSummary with status, task counts, and build_id
     """
     tasks_list = _validate_tasks(tasks)
-    _build_config_cm = build_config_scope(build_config)
-    _build_config_cm.__enter__()
+    # The config is installed around this whole function (see
+    # ``installs_build_config``); the roots are re-created under it, since
+    # the caller constructed them before it existed.
     if build_config:
         tasks_list = [rebind_to_build_config(t) for t in tasks_list]
     scope_key = structure_scope_key(code_id(), build_config)
@@ -234,7 +290,6 @@ def build_sequential(
         except ScopeMismatchError:
             # The registry understood and refused: this build's edges were
             # evaluated by other code or other structure config. New build.
-            _build_config_cm.__exit__(None, None, None)
             raise
         except Exception as reg_err:
             handle_registry_error(
@@ -577,8 +632,6 @@ def build_sequential(
             build_id=build_id,
             error=e,
         )
-    finally:
-        _build_config_cm.__exit__(None, None, None)
 
 
 def _run_task_sequential(
@@ -729,6 +782,7 @@ def _run_task_sequential(
         )
 
 
+@installs_build_config_aio
 async def build_sequential_aio(
     tasks: Sequence[BaseTask] | BaseTask,
     registry: RegistryABC | None = None,
@@ -785,8 +839,9 @@ async def build_sequential_aio(
         BuildSummary with status, task counts, and build_id
     """
     tasks_list = _validate_tasks(tasks)
-    _build_config_cm = build_config_scope(build_config)
-    _build_config_cm.__enter__()
+    # The config is installed around this whole function (see
+    # ``installs_build_config``); the roots are re-created under it, since
+    # the caller constructed them before it existed.
     if build_config:
         tasks_list = [rebind_to_build_config(t) for t in tasks_list]
     scope_key = structure_scope_key(code_id(), build_config)
@@ -827,7 +882,8 @@ async def build_sequential_aio(
                 build_id, scope_key=scope_key, build_config=build_config
             )
         except ScopeMismatchError:
-            _build_config_cm.__exit__(None, None, None)
+            # The registry understood and refused: this build's edges were
+            # evaluated by other code or other structure config. New build.
             raise
         except Exception as reg_err:
             handle_registry_error(
@@ -1160,8 +1216,6 @@ async def build_sequential_aio(
             build_id=build_id,
             error=e,
         )
-    finally:
-        _build_config_cm.__exit__(None, None, None)
 
 
 async def _iter_dynamic_deps(result: Any) -> AsyncIterator[Any]:

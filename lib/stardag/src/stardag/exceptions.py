@@ -229,6 +229,24 @@ def is_missing_route_error(err: "NotFoundError") -> bool:
     return getattr(err, "detail", None) == "Not Found"
 
 
+class RegistryTooOldError(APIError):
+    """The Registry API predates a contract this SDK depends on.
+
+    Raised when a server does not know structure scopes — the route
+    ``PUT /builds/{id}/scope`` is missing, or ``POST /builds`` /
+    ``POST /builds/{id}/resume`` answer without a ``scope_key`` although one
+    was sent (an older server ignores unknown fields silently, so its
+    silence is the only evidence). Dependency gating on such a server is
+    environment-global and would mix edges evaluated by different code,
+    which this SDK does not tolerate: upgrade the Registry API first, then
+    the SDK. The reverse order (new server, old SDK) is supported.
+    """
+
+    def __init__(self, message: str, *, operation: str | None = None):
+        self.operation = operation
+        super().__init__(message, status_code=None, detail=None)
+
+
 class SDKVersionUnsupportedError(APIError):
     """This SDK is older than the registry's minimum supported version (426).
 

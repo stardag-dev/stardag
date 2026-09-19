@@ -45,6 +45,18 @@ class BuildConfigError(StardagError):
     """The build config names something the task classes do not have."""
 
 
+class UnknownTaskClassError(BuildConfigError):
+    """The build config names a task class this process has not registered.
+
+    Separate from the other config errors because it is the one a caller
+    may legitimately be unable to judge: a trigger process that never
+    imported the module holding a configured upstream cannot tell a typo
+    from an unimported class, while the bootstrap — which imports every
+    task module — can. A misspelled field, an identity field or an invalid
+    value is a plain :class:`BuildConfigError` wherever it is seen.
+    """
+
+
 _build_config: ContextVar[BuildConfig | None] = ContextVar(
     "stardag_build_config", default=None
 )
@@ -137,7 +149,7 @@ def canonical_structure_config(config: BuildConfig | None) -> dict[str, dict[str
         try:
             cls = BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
         except KeyError as e:
-            raise BuildConfigError(
+            raise UnknownTaskClassError(
                 f"build_config names task class {key!r}, which is not "
                 "registered (is its module imported here?)."
             ) from e

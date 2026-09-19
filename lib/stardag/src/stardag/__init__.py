@@ -54,6 +54,7 @@ from stardag._version import __version__
 from stardag.base_model import Significance, StardagBaseModel, StardagField
 from stardag.build_config import (
     BuildConfigError,
+    UnknownTaskClassError,
     build_config_scope,
     get_build_config,
     set_build_config,
@@ -64,6 +65,7 @@ from stardag.exceptions import (
     APIError,
     AuthenticationError,
     AuthorizationError,
+    RegistryTooOldError,
     SDKVersionUnsupportedError,
     StardagError,
     ResumableInterruption,
@@ -88,6 +90,7 @@ from stardag.target import (
 
 __all__ = [
     "BuildConfigError",
+    "UnknownTaskClassError",
     "Significance",
     "build_config_scope",
     "get_build_config",
@@ -123,6 +126,7 @@ __all__ = [
     "Polymorphic",
     "registry_provider",
     "ResumableInterruption",
+    "RegistryTooOldError",
     "SDKVersionUnsupportedError",
     "StardagError",
     "StardagBaseModel",

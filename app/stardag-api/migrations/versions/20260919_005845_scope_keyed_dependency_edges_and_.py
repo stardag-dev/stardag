@@ -141,18 +141,30 @@ def upgrade() -> None:
         INSERT INTO task_dependencies
             (id, upstream_task_id, downstream_task_id, scope_key, is_dynamic,
              created_at)
-        SELECT DISTINCT
+        SELECT
             gen_random_uuid(),
-            e.upstream_task_id,
-            e.downstream_task_id,
-            b.scope_key,
-            e.is_dynamic,
-            e.created_at
-        FROM task_dependencies e
-        JOIN events ev ON ev.task_id = e.downstream_task_id
-        JOIN builds b ON b.id = ev.build_id
-        WHERE e.scope_key IS NULL
-          AND b.latest_status = 'running'
+            copies.upstream_task_id,
+            copies.downstream_task_id,
+            copies.scope_key,
+            copies.is_dynamic,
+            copies.created_at
+        FROM (
+            -- One row per (edge, build): a running downstream normally has
+            -- several events in its build, and a DISTINCT over a generated
+            -- uuid would keep every one of them, then trip the new unique
+            -- constraint on (scope_key, upstream, downstream).
+            SELECT DISTINCT
+                e.upstream_task_id,
+                e.downstream_task_id,
+                b.scope_key,
+                e.is_dynamic,
+                e.created_at
+            FROM task_dependencies e
+            JOIN events ev ON ev.task_id = e.downstream_task_id
+            JOIN builds b ON b.id = ev.build_id
+            WHERE e.scope_key IS NULL
+              AND b.latest_status = 'running'
+        ) AS copies
         """
     )
 

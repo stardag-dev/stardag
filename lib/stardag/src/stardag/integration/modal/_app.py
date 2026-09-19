@@ -31,6 +31,7 @@ from stardag.build._task_modules import (
     set_declared_task_module_patterns,
     validate_task_module_patterns,
 )
+from stardag.build_config import UnknownTaskClassError, canonical_structure_config
 from stardag.exceptions import StardagError
 from stardag.integration.modal._bootstrap import (
     ReactiveDiscovery,
@@ -217,6 +218,30 @@ def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
         )
         return ()
     return (f"{module_name.split('.')[0]}.*",)
+
+
+def _validate_build_config_at_trigger(
+    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]],
+) -> None:
+    """Fail a misconfigured trigger here, before a build exists for it.
+
+    The deployment validates the config again when it fixes the build's
+    scope, and a failure there is recorded as BUILD_FAILED — but that is a
+    build minted, spawned and failed remotely, read back from the registry,
+    for a typo the caller could have been told about synchronously. A
+    misspelled field, an identity field or an invalid value is a
+    :class:`BuildConfigError` right here. A class this process has not
+    imported is the one thing it cannot judge (the trigger need not import
+    every configured upstream; the bootstrap does), so that case passes
+    through to the deployment, which has the final word.
+    """
+    try:
+        canonical_structure_config(build_config)
+    except UnknownTaskClassError as e:
+        logger.debug(
+            f"build_config not fully checked at the trigger ({e}); the "
+            "deployment's bootstrap validates it against every task module."
+        )
 
 
 class StardagApp:
@@ -1430,6 +1455,8 @@ class StardagApp:
             )
         if reactive:
             tick_kwargs = _validate_tick_kwargs(tick_kwargs)
+        if build_config:
+            _validate_build_config_at_trigger(build_config)
 
         registry = registry_provider.get()
         # A configured registry is needed to mint a new build id, and
