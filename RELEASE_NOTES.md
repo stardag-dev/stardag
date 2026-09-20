@@ -116,15 +116,27 @@ class Aggregate(sd.Task[Summary]):
     partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
     num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
 
+    def requires(self):
+        return ListExportFiles(period=self.period)
+
     def run(self):
-        chunks = [Chunk(period=self.period, index=i) for i in range(self.partition_size)]
-        yield chunks                       # structure depends on partition_size, output does not
+        files = self.requires().load()      # the period's export: a list of file names
+        chunks = [
+            ChunkStats(files=files[i : i + self.partition_size])
+            for i in range(0, len(files), self.partition_size)
+        ]
+        yield chunks                        # the slicing depends on partition_size, the summary does not
         summary = merge((c.load() for c in chunks), threads=self.num_threads)
         self._save(summary)
 
 Aggregate(period="2026-01")                 # fine
 Aggregate(period="2026-01", num_threads=2)  # raises: level 2/3 values come from the build config
 ```
+
+The file list is loaded from a static upstream and sliced by
+`partition_size` into one `ChunkStats` task per slice. Slicing 1,000 files
+by 100 or by 500 yields different chunk tasks but the same merged summary:
+the partition size shapes the structure, not the output.
 
 **Give values per build.** One mapping, keyed by `namespace.Name`, stored
 with the build and installed everywhere a task of that build is constructed.

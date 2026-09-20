@@ -86,14 +86,23 @@ class Aggregate(sd.Task[Summary]):
     partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
     num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
 
+    def requires(self):
+        return ListExportFiles(period=self.period)
+
     def run(self):
-        # partition_size decides how many chunk tasks are yielded; the
-        # output is the same however it is chunked.
-        chunks = [Chunk(period=self.period, index=i) for i in range(self.partition_size)]
-        yield chunks
+        files = self.requires().load()      # the period's export: a list of file names
+        chunks = [
+            ChunkStats(files=files[i : i + self.partition_size])
+            for i in range(0, len(files), self.partition_size)
+        ]
+        yield chunks                        # the slicing depends on partition_size, the summary does not
         summary = merge((c.load() for c in chunks), threads=self.num_threads)
         self._save(summary)
 ```
+
+The file list is loaded from a static upstream; `partition_size` only
+decides how it is sliced into `ChunkStats` tasks. Slicing 1,000 files by
+100 or by 500 yields different chunk tasks but the same merged summary.
 
 A level 2 or 3 field is **never passed at init** — `Aggregate(period="2026-01",
 num_threads=2)` raises. Give it a default: the build config overrides the

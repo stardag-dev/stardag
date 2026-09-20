@@ -39,17 +39,27 @@ class Aggregate(sd.Task[Summary]):
     partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
     num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
 
+    def requires(self):
+        return ListExportFiles(period=self.period)
+
     def run(self):
-        chunks = [Chunk(period=self.period, index=i) for i in range(self.partition_size)]
-        yield chunks
+        files = self.requires().load()      # the period's export: a list of file names
+        chunks = [
+            ChunkStats(files=files[i : i + self.partition_size])
+            for i in range(0, len(files), self.partition_size)
+        ]
+        yield chunks                        # the slicing depends on partition_size, the summary does not
         summary = merge((c.load() for c in chunks), threads=self.num_threads)
         self._save(summary)
 ```
 
-`period` is part of the task id: two periods are two outputs. The
-partition size changes which chunk tasks are yielded but not the merged
-result, so it is _dependencies only_. The thread count changes neither, so
-it is _execution only_. Passing either at init raises — that is what keeps
+`period` is part of the task id: two periods are two outputs. The file
+list comes from a static upstream, so it is known once that upstream has
+run; the partition size decides how that list is sliced into `ChunkStats`
+tasks, each summarising one slice. Slicing 1,000 files by 100 or by 500
+yields different chunk tasks but the same merged summary, so the partition
+size is _dependencies only_. The thread count changes neither, so it is
+_execution only_. Passing either at init raises — that is what keeps
 one task id to one structure within a build.
 
 The rule of thumb: **if two values of the parameter would give a different
