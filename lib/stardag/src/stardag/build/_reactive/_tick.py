@@ -342,15 +342,19 @@ class TickConfig:
     # ``0`` disables the wait entirely (a deployment whose workers do not
     # report their own lifecycle has nothing to wait for).
     #
-    # Only a tick that will still be here when the window closes can use
-    # one: with ``linger_seconds <= 0`` — the watchdog sweep, one pass and
-    # out — the wait is skipped, and rightly, since a sweep arrives long
-    # after the event and any report would have landed already. For the
-    # same reason the wait is bounded by ``tick_timeout_seconds`` where
-    # that is known: this is the one thing that extends a tick past the
-    # ``linger_seconds`` its operator sized against the container, so a
-    # value larger than the container buys a truncated wait and a warning,
-    # never a tick killed mid-wait.
+    # Every tick honours it, including the one-pass tick a watchdog sweep
+    # spawns (``linger_seconds=0``): the window lives in the tick's
+    # memory, so a tick that exits instead of waiting is a tick that
+    # classifies synchronously, and a sweep landing inside a worker's
+    # grace is not a rare shape. Such a tick waits for the window and
+    # nothing else, so it stays one pass over the frontier — it simply
+    # does not leave with a verdict owed.
+    #
+    # Bounded by ``tick_timeout_seconds`` where that is known, because
+    # this is the one thing that can keep a tick past the
+    # ``linger_seconds`` its operator sized against the container: a
+    # grace larger than the container buys a truncated wait and a
+    # warning, never a tick killed mid-wait.
     worker_report_grace_seconds: float = 30.0
     # How many of a pass's per-task actions may be in flight at once. Each
     # actionable task costs a task-store read, an acquiring start, an
@@ -962,14 +966,11 @@ async def _run_tick_body_aio(
     entered = asyncio.get_event_loop().time()
     lease = SchedulerLease(registry, build_id)
     # Probe-observed deaths this tick is holding for the worker's report,
-    # and the deadlines that end the holding. Per tick because the wait is
-    # only worth opening by a scheduler that will still be here to close
-    # it — hence ``enabled`` following ``linger_seconds``; see
-    # ``_ReportWindow``.
-    report_window = _ReportWindow(
-        config.worker_report_grace_seconds,
-        enabled=config.linger_seconds > 0,
-    )
+    # and the deadlines that end the holding. Per tick, because only the
+    # tick that opened a window can close it — which is also why a tick
+    # that does not linger waits for one anyway rather than hand it on.
+    # See ``_ReportWindow``.
+    report_window = _ReportWindow(config.worker_report_grace_seconds)
     acquired = False
     # Whether this tick ever cleared the wake-up flag — i.e. whether it took
     # responsibility for a wake-up at all. Gates the hand-off; see the
@@ -1152,6 +1153,17 @@ async def _run_tick_body_aio(
                     owed = report_window.seconds_until_due()
                     if owed is not None:
                         extended = loop.time() + owed
+                        if hard_deadline is not None:
+                            # With a verdict owed, the ceiling binds the
+                            # *whole* deadline, not just the extension: a
+                            # ``linger_seconds`` longer than the container
+                            # would otherwise carry the wait past the
+                            # reserve and be killed mid-wait anyway. Only
+                            # here, though — an over-long linger with no
+                            # window open is a pre-existing
+                            # misconfiguration and not this feature's to
+                            # re-time.
+                            deadline = min(deadline, hard_deadline)
                         if hard_deadline is not None and extended > hard_deadline:
                             # Wait for what fits and no more. Exiting with
                             # the window still open is safe — it leaves the
@@ -1177,8 +1189,10 @@ async def _run_tick_body_aio(
                                     "or give the tick function a longer "
                                     "timeout."
                                 )
-                        # Never shortens an existing deadline: this only
-                        # declines to extend one past the container.
+                        # Below the ceiling, this only ever extends: a
+                        # deadline the linger already set is never
+                        # shortened by the window's arithmetic, only by
+                        # the container clamp above.
                         deadline = max(deadline, extended)
 
                     # Linger: poll the wake-up flag until deadline.

@@ -40,12 +40,21 @@ class _ReportWindow:
     heals. The clock bounds the wait; the state ends it early, every time
     it happens.
 
-    **Scoped to one tick**, deliberately. The window is only useful to a
-    scheduler that will still be here when it closes, so a tick that
-    cannot wait (``linger_seconds <= 0`` — the watchdog sweep) is
-    constructed with ``enabled=False`` and acts immediately, exactly as
-    before. A sweep arrives long after the event anyway: if the worker
-    were going to report, it would have.
+    **Scoped to one tick**, which is what decides who may open one. The
+    window lives in memory, so only the tick that opened it can close it
+    — and a tick that would exit first must therefore *wait* rather than
+    hand the wait on. That includes the one-pass tick the watchdog sweep
+    spawns (``linger_seconds=0``): it stays for the window and no longer,
+    which costs a bounded ~grace of container time and only on a build
+    that has a verdict owed. The alternative was letting a sweep classify
+    synchronously, and a sweep can perfectly well land inside a worker's
+    grace — the execution ending moments before the periodic pass is not
+    a rare shape. That would be the STA-65 race, reintroduced on the one
+    path nobody watches.
+
+    ``grace_seconds <= 0`` is the off switch, for a deployment whose
+    workers do not report their own lifecycle and where there is
+    therefore nothing to wait for.
 
     Keyed by task id and validated against the ref, so a task whose next
     execution also dies opens a fresh window rather than inheriting the
@@ -56,11 +65,10 @@ class _ReportWindow:
         self,
         grace_seconds: float,
         *,
-        enabled: bool = True,
         clock: "typing.Callable[[], float]" = time.monotonic,
     ) -> None:
         self._grace = grace_seconds
-        self._enabled = enabled and grace_seconds > 0
+        self._enabled = grace_seconds > 0
         self._clock = clock
         # task id -> (executor ref, when this pass first found it gone)
         self._open: dict[str, tuple[str, float]] = {}

@@ -325,18 +325,22 @@ class TestWorkerReportWindow:
         assert summary.terminal_status == "failed"
         assert registry.build_status == "failed"
 
-    async def test_a_single_pass_tick_does_not_wait(
+    async def test_a_single_pass_tick_waits_too(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """``linger_seconds=0`` — the watchdog sweep — opens no window.
+        """``linger_seconds=0`` — the watchdog sweep — is no exception.
 
-        The wait is only worth opening by a scheduler that will still be
-        here to close it, and a sweep is one pass and out. It is also the
-        tick least likely to need it: nobody told it anything, so it is
-        looking at a build where whatever happened happened long ago and
-        any report has landed or never will.
+        The window lives in the tick's memory, so a tick that exits
+        rather than waiting is a tick that classifies *synchronously*.
+        That is the whole bug, and a sweep is not immune to it: the
+        periodic pass can perfectly well land in the seconds between an
+        execution ending and its worker reporting.
+
+        What "one pass and out" costs here is bounded and conditional —
+        the sweep waits for a verdict it owes and for nothing else, so a
+        build with nothing to decide still exits immediately (below).
         """
-        (root,) = _chain("sweep-no-wait")
+        (root,) = _chain("sweep-waits")
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
@@ -349,6 +353,41 @@ class TestWorkerReportWindow:
             attempt_count=2,
         )
 
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=self._config(linger_seconds=0, grace=0.1),
+        )
+
+        assert summary.executions_awaiting_report == 1
+        # ...and having waited, it still records the verdict rather than
+        # leaving the build to the next sweep five minutes later.
+        assert summary.report_window_expired == 1
+        assert summary.failed_recorded == 1
+        assert summary.terminal_status == "failed"
+
+    async def test_a_single_pass_tick_with_nothing_owed_exits_at_once(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The other half: no verdict owed, no wait.
+
+        A sweep over a build whose executions all probe live is out
+        immediately, which is what ``linger_seconds=0`` is for.
+        """
+        (root,) = _chain("sweep-no-wait")
+        executor = FakeTickExecutor(
+            statuses={"fc-live": DetachedExecutionStatus.RUNNING}
+        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-live",
+        )
+
         summary = await asyncio.wait_for(
             run_tick_aio(
                 uuid4(),
@@ -357,15 +396,12 @@ class TestWorkerReportWindow:
                 task_store=store,
                 config=self._config(linger_seconds=0, grace=self.LONG_GRACE),
             ),
-            # A sweep that opened the window would sit here for the whole
-            # grace; fail in seconds rather than hang the suite for it.
             timeout=5,
         )
 
         assert summary.executions_awaiting_report == 0
-        assert summary.report_window_expired == 0
-        assert summary.failed_recorded == 1
-        assert summary.terminal_status == "failed"
+        assert summary.failed_recorded == 0
+        assert summary.outcome == "lingered_out"
 
     async def test_a_lapsed_claim_still_gets_the_window(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -529,15 +565,12 @@ class TestReportWindowBookkeeping:
         window.retain(set())
         assert window.seconds_until_due() is None
 
-    def test_a_disabled_or_zero_window_never_holds_anything(self):
-        disabled, _ = self._window(grace=10.0, enabled=False)
-        assert disabled.observe("t", "ref-1") == "no_window"
-        assert disabled.seconds_until_due() is None
-        assert not disabled.due()
-
+    def test_a_zero_grace_never_holds_anything(self):
+        """The off switch, for a deployment whose workers never report."""
         zero, _ = self._window(grace=0.0)
         assert zero.observe("t", "ref-1") == "no_window"
         assert zero.seconds_until_due() is None
+        assert not zero.due()
 
 
 class TestBuildTaskStoreRoundTrip:
@@ -1510,6 +1543,11 @@ class TestFanOutConcurrency:
                 poll_interval_seconds=0.01,
                 max_concurrent_actions=4,
                 fail_mode=FailMode.CONTINUE,
+                # The four dead refs are here to be *counted*, not waited
+                # for; the worker report window has its own tests, and
+                # leaving it on would spend its whole grace before this
+                # pass records anything.
+                worker_report_grace_seconds=0,
             ),
         )
 
