@@ -6,7 +6,7 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## Unreleased — Dependency structure belongs to the code, not the task id
+## v0.24.0 — Dependency structure belongs to the code, not the task id
 
 ### The idea in one paragraph
 
@@ -69,8 +69,9 @@ Anything that changes what a task writes or yields is a parameter or a
 
 ### Upgrade order: server first, then SDK
 
-This SDK requires a Registry API at this release or later. Against an older
-server a build refuses to start, or to fix its scope, with
+This SDK requires a Registry API at `server-v0.4.0` or later (the hosted
+service is upgraded first; self-hosters run `stardag self-host upgrade`).
+Against an older server a build refuses to start, or to fix its scope, with
 `RegistryTooOldError` rather than run over environment-global edges. An
 older SDK against the new server keeps working for the builds it creates,
 on a per-build scope the server assigns. A reactive build running across
@@ -100,6 +101,27 @@ on one build; finish the rollout and re-trigger instead.
 - In the UI, the Task Explorer graph follows each task's provenance (a hop
   between code versions is marked), phantom nodes are gone, and the build
   panel no longer lists external blockers.
+
+### Also in v0.24.0
+
+Smaller changes with a user-visible edge; the [changelog](CHANGELOG.md) has
+the detail on each.
+
+- **A Modal interruption is classified by the exception it was raised
+  from, not by a stopwatch.** A function timeout and an explicit cancel are
+  reported as failures; only a real preemption expects a restart, and it is
+  now recorded as `TASK_PREEMPTED` so a restart that never comes is visible
+  (the UI marks the claim "restart expected").
+- **A build cancels only the executions it started, and actually stops
+  them** (`stardag builds cancel --cascade`). A neighbouring build's running
+  tasks are no longer revoked by a cancel elsewhere.
+- **Two builds registering a shared task at the same moment no longer get a
+  500**, and a retried scheduler-lease acquire by the holder is granted
+  rather than reported as a loss.
+- **Custom `RegistryABC` implementers**: besides the scope changes above,
+  `task_cancel_aio` takes keyword-only `if_executor` / `if_executor_ref`,
+  and `build_get_executions(_aio)` takes a keyword-only `cursor`. Update an
+  external execution-list implementation before running a tick against it.
 
 ### In practice
 

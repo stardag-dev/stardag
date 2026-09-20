@@ -4,7 +4,7 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.24.0] — 2026-09-20
 
 ### SDK
 
@@ -127,6 +127,65 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - The resident Modal builder forwards the build's config and structure
   scope to the workers it spawns, as the reactive path already did.
 
+- Default prebuilt server image bumped to `0.4.0`
+  (`DEFAULT_SERVER_VERSION = "0.4.0"`, from the `server-v0.4.0` release) —
+  the server version this SDK release is tested against, and the one that
+  carries every Registry API change below. A newer SDK against an older
+  self-hosted API is refused (`RegistryTooOldError`) rather than degraded;
+  self-hosters upgrade the server first (`stardag self-host upgrade`), then
+  the SDK.
+
+- **Breaking, for anyone implementing `RegistryABC` outside this repo:**
+  `task_cancel_aio` takes keyword-only `if_executor` and `if_executor_ref`, and
+  `build_get_executions` / `build_get_executions_aio` take a keyword-only
+  `cursor`. Subclasses that override the old signatures raise `TypeError`
+  when the reactive tick calls them, and **the two degrade differently**:
+  a stale `task_cancel_aio` is caught per task, so the symptom is a cancel
+  that is never recorded rather than a crash, while a stale
+  `build_get_executions` fails the tick — that call site catches only a
+  missing route, on purpose, because a cascaded build's frontier shows
+  nothing to stop and degrading quietly would report "nothing to do" and
+  leave the containers running with no second chance. **Update an external
+  execution-list implementation before running a tick against it.**
+
+- **A cancelled or failing build no longer stops other builds' executions.**
+  The tick's cancel pass read the frontier's `running` list, which is every
+  RUNNING task in the build's _plan_ — and after plan closure that includes
+  tasks another build has claimed and is executing. A cancelled build
+  cancelled them: killing live containers, releasing claims it never held,
+  and doing it again on every tick a neighbour's status write earned it. It
+  now asks the registry which executions it started and has not seen end
+  (`GET /builds/{id}/executions`, `RegistryABC.build_get_executions`) and
+  stops only those. Against a server predating the route it falls back to
+  the frontier filtered on the new `latest_status_build_id`; against one
+  predating that field too, it behaves exactly as before.
+- **`stardag builds cancel --cascade` now actually stops the executions it
+  releases.** The cascade writes TASK_CANCELLED for the claims the build
+  held — which is what lets the next build take those tasks over — but a
+  cascaded task is CANCELLED and therefore in neither `running` nor
+  `actionable`, so the one caller of `cancel_detached` could not see it.
+  The claim was released and the container kept running, and the next
+  claimant started a second execution of the same task. The executions
+  route reports them, so the one tick a cancel asks for now stops them.
+- **A tick that resets a blocked upstream now runs it, instead of lingering
+  for a wake-up it never sent.** Resetting a cancelled blocker is the one
+  thing terminal handling does that changes the frontier, and the pass
+  treated it as no action at all: it fell through to the linger poll, which
+  waits on the registry's wake-up flag — and that flag deliberately skips
+  the build whose own event caused the change, since it is the one that
+  already knows. So the tick waited for news it had already heard, exited on
+  its deadline, and left the build with nothing running, nothing scheduled
+  and no flag to be handed out on, until the watchdog. Reachable whenever a
+  shared task is genuinely left cancelled, which is exactly what the cancel
+  fixes above make the common outcome.
+- **A worker no longer spawns a tick for a build that cannot use one.** A
+  cancelled build's workers keep running until a tick stops them, and each
+  one re-flagged the build on its way out, so every drain in the
+  environment handed it out again. `POST /builds/{id}/notify` now answers
+  `needs_tick` truthfully and the worker skips the spawn when it is false.
+  The one tick a cancel wants is unaffected: the cancel sets that flag
+  itself, and it survives until a tick drains it.
+
 ### Registry API
 
 - **Dependency edges carry a `scope_key`** (`task_dependencies.scope_key`,
@@ -185,67 +244,6 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - `GET /tasks` and `GET /tasks/{id}` now carry `latest_status_expires_at`
   and `latest_preempted_at` alongside the other claim fields.
 
-### UI
-
-- Claim triage marks a held claim "restart expected" when the platform said
-  it was restarting that execution and the restart has not reported back —
-  the one place `RUNNING` alone cannot distinguish a container that is
-  working from one that was taken away and never replaced. `task_preempted`
-  appears in a task's event timeline.
-
-- **Breaking, for anyone implementing `RegistryABC` outside this repo:**
-  `task_cancel_aio` takes keyword-only `if_executor` and `if_executor_ref`, and
-  `build_get_executions` / `build_get_executions_aio` take a keyword-only
-  `cursor`. Subclasses that override the old signatures raise `TypeError`
-  when the reactive tick calls them, and **the two degrade differently**:
-  a stale `task_cancel_aio` is caught per task, so the symptom is a cancel
-  that is never recorded rather than a crash, while a stale
-  `build_get_executions` fails the tick — that call site catches only a
-  missing route, on purpose, because a cascaded build's frontier shows
-  nothing to stop and degrading quietly would report "nothing to do" and
-  leave the containers running with no second chance. **Update an external
-  execution-list implementation before running a tick against it.**
-
-- **A cancelled or failing build no longer stops other builds' executions.**
-  The tick's cancel pass read the frontier's `running` list, which is every
-  RUNNING task in the build's _plan_ — and after plan closure that includes
-  tasks another build has claimed and is executing. A cancelled build
-  cancelled them: killing live containers, releasing claims it never held,
-  and doing it again on every tick a neighbour's status write earned it. It
-  now asks the registry which executions it started and has not seen end
-  (`GET /builds/{id}/executions`, `RegistryABC.build_get_executions`) and
-  stops only those. Against a server predating the route it falls back to
-  the frontier filtered on the new `latest_status_build_id`; against one
-  predating that field too, it behaves exactly as before.
-- **`stardag builds cancel --cascade` now actually stops the executions it
-  releases.** The cascade writes TASK_CANCELLED for the claims the build
-  held — which is what lets the next build take those tasks over — but a
-  cascaded task is CANCELLED and therefore in neither `running` nor
-  `actionable`, so the one caller of `cancel_detached` could not see it.
-  The claim was released and the container kept running, and the next
-  claimant started a second execution of the same task. The executions
-  route reports them, so the one tick a cancel asks for now stops them.
-- **A tick that resets a blocked upstream now runs it, instead of lingering
-  for a wake-up it never sent.** Resetting a cancelled blocker is the one
-  thing terminal handling does that changes the frontier, and the pass
-  treated it as no action at all: it fell through to the linger poll, which
-  waits on the registry's wake-up flag — and that flag deliberately skips
-  the build whose own event caused the change, since it is the one that
-  already knows. So the tick waited for news it had already heard, exited on
-  its deadline, and left the build with nothing running, nothing scheduled
-  and no flag to be handed out on, until the watchdog. Reachable whenever a
-  shared task is genuinely left cancelled, which is exactly what the cancel
-  fixes above make the common outcome.
-- **A worker no longer spawns a tick for a build that cannot use one.** A
-  cancelled build's workers keep running until a tick stops them, and each
-  one re-flagged the build on its way out, so every drain in the
-  environment handed it out again. `POST /builds/{id}/notify` now answers
-  `needs_tick` truthfully and the worker skips the spawn when it is false.
-  The one tick a cancel wants is unaffected: the cancel sets that flag
-  itself, and it survives until a tick drains it.
-
-### Registry API
-
 - `POST /builds/{build}/tasks/{task}/cancel` refuses with 409
   `not_claim_holder` when the task is RUNNING, SUSPENDED or INTERRUPTED
   under a different build. Authority to revoke is build-scoped — the
@@ -279,6 +277,33 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   another build has since reset and is about to run, nor revoke the claim of
   an execution it started since and nobody stopped. A no-op rather than an
   error: losing that race is a normal outcome, not a fault.
+
+### UI
+
+- Claim triage marks a held claim "restart expected" when the platform said
+  it was restarting that execution and the restart has not reported back —
+  the one place `RUNNING` alone cannot distinguish a container that is
+  working from one that was taken away and never replaced. `task_preempted`
+  appears in a task's event timeline.
+
+### Deployment
+
+- **Server image `0.4.0`**, carrying every Registry API change above:
+  scope-keyed dependency edges, plan membership and provenance by scope,
+  the `deployments` table and `POST`/`GET /deployments`, phantom rows
+  removed (migration `690e61e0c920`, which copies a running build's edges
+  into its own scope); `POST /builds/{b}/tasks/{t}/preempt` and
+  `tasks.latest_preempted_at` (migration for `TASK_PREEMPTED`, additive);
+  build-scoped cancel authority and `GET /builds/{b}/executions`;
+  idempotent concurrent registration and one insert order for the
+  registration paths; the lease holder's re-acquire granted. Minor rather
+  than patch for the usual reason: the HTTP surface grew and there are
+  schema migrations. Self-hosters upgrade with `stardag self-host upgrade`;
+  the hosted service builds from this commit.
+- **Upgrade order is server first, then SDK.** An SDK at 0.24.0 refuses a
+  Registry API older than 0.4.0 with `RegistryTooOldError`; an older SDK
+  against the new server keeps working on a per-build scope the server
+  assigns.
 
 ## [0.23.0] — 2026-09-01
 
