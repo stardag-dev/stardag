@@ -26,6 +26,7 @@ from stardag.build import (
 )
 from stardag.build._reactive import _frontier_actions as frontier_module
 from stardag.build._reactive._report_window import _ReportWindow
+from stardag.build._reactive._tick import _EXIT_RESERVE_SECONDS
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
@@ -449,25 +450,22 @@ class TestWorkerReportWindow:
         assert summary.failed_recorded == 1
         assert summary.terminal_status == "failed"
 
-    async def test_the_window_never_outlives_the_container(
+    async def test_a_grace_too_large_for_the_container_is_trimmed_to_fit(
         self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """A grace larger than the tick's own timeout waits what it can.
+        """A wait no tick can outlive is trimmed, not merely truncated.
 
-        The window is the one thing that extends a tick past the
-        ``linger_seconds`` its operator sized against the container, so it
-        is the one thing that has to respect the container. Being killed
-        mid-wait would cost the lease release and the summary as well as
-        the verdict.
+        The distinction is whether the fallback ever runs. Truncating each
+        wait would have every tick open a window, exit before it closed,
+        and the next start from zero — a silently-dead execution deferred
+        forever by ticks that each assume a later one will decide. Trimming
+        keeps the promise that a window closes inside the tick that opened
+        it.
 
-        Exiting with the window still open is the safe end of that trade:
-        the task is left exactly as this pass found it — RUNNING under a
-        ref whose worker's report the registry will still honour — and the
-        next tick, woken by that report or by the watchdog, starts the
-        window again. So this asserts the tick *returned*, not that it
-        recorded anything.
+        Here the configured grace is 30s and the container offers 0.3s
+        beyond its exit reserve, so the verdict lands in 0.3s.
         """
-        (root,) = _chain("grace-over-container")
+        (root,) = _chain("grace-trimmed")
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
@@ -490,27 +488,66 @@ class TestWorkerReportWindow:
                     config=self._config(
                         linger_seconds=0.2,
                         grace=self.LONG_GRACE,
-                        # Every second of which the exit reserve already
-                        # claims, so no wait fits at all.
-                        tick_timeout_seconds=5,
+                        tick_timeout_seconds=_EXIT_RESERVE_SECONDS + 0.3,
                     ),
                 ),
-                # The whole point: a tick that honoured the 30s grace
-                # regardless would still be waiting here.
+                # A tick that honoured the configured 30s would still be
+                # waiting here — and, being killed at 10.3s, forever.
                 timeout=10,
             )
 
+        # It still waited...
         assert summary.executions_awaiting_report == 1
-        # Left open on purpose — nothing was recorded, and nothing was
-        # broken either: the task is still RUNNING under its ref.
-        assert summary.report_window_expired == 0
-        assert summary.failed_recorded == 0
-        assert summary.outcome == "lingered_out"
-        assert registry.statuses[str(root.id)] == "running"
+        # ...and still reached the verdict, which is the whole point.
+        assert summary.report_window_expired == 1
+        assert summary.failed_recorded == 1
+        assert summary.terminal_status == "failed"
         assert any(
-            "cannot wait out the worker report window" in r.message
+            "does not fit in this tick's own container timeout" in r.message
             for r in caplog.records
-        ), "a window the container cannot honour should say so"
+        ), "a trimmed grace should say so"
+
+    async def test_a_container_too_small_to_wait_at_all_does_not(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Trimmed to nothing is the same as switched off.
+
+        A tick whose whole life is shorter than the reserve its exit needs
+        has no wait to give, so it classifies immediately — the behaviour
+        before any of this existed, which is the right floor to degrade
+        to.
+        """
+        (root,) = _chain("container-too-small")
+        executor = FakeTickExecutor(
+            statuses={"fc-dead": DetachedExecutionStatus.FAILED}
+        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-dead",
+            attempt_count=2,
+        )
+
+        summary = await asyncio.wait_for(
+            run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                task_store=store,
+                config=self._config(
+                    linger_seconds=0.2,
+                    grace=self.LONG_GRACE,
+                    tick_timeout_seconds=_EXIT_RESERVE_SECONDS / 2,
+                ),
+            ),
+            timeout=10,
+        )
+
+        assert summary.executions_awaiting_report == 0
+        assert summary.failed_recorded == 1
+        assert summary.terminal_status == "failed"
 
 
 class TestReportWindowBookkeeping:

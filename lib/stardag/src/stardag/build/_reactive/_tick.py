@@ -970,7 +970,31 @@ async def _run_tick_body_aio(
     # tick that opened a window can close it — which is also why a tick
     # that does not linger waits for one anyway rather than hand it on.
     # See ``_ReportWindow``.
-    report_window = _ReportWindow(config.worker_report_grace_seconds)
+    #
+    # Trimmed to what this container can actually honour, rather than
+    # merely truncating the wait later. The difference is whether the
+    # fallback ever runs at all: a grace that no tick can outlive would
+    # have every tick open a window, exit before it closed, and the next
+    # one start again from zero — a silent execution deferred forever by
+    # ticks that each believe a later one will decide. Trimming keeps the
+    # promise that a window always closes inside the tick that opened it.
+    report_grace = config.worker_report_grace_seconds
+    if config.tick_timeout_seconds is not None:
+        usable = config.tick_timeout_seconds - _EXIT_RESERVE_SECONDS
+        if report_grace > usable:
+            logger.warning(
+                f"TickConfig.worker_report_grace_seconds={report_grace:.0f}s "
+                "does not fit in this tick's own container timeout "
+                f"({config.tick_timeout_seconds:.0f}s, less "
+                f"{_EXIT_RESERVE_SECONDS:.0f}s reserved for the tick's "
+                f"exit); waiting {max(0.0, usable):.0f}s for a worker's "
+                "report instead. Lower the grace or give the tick "
+                "function a longer timeout — a wait the container cannot "
+                "outlive would otherwise never reach the failure it is "
+                "the fallback for."
+            )
+            report_grace = max(0.0, usable)
+    report_window = _ReportWindow(report_grace)
     acquired = False
     # Whether this tick ever cleared the wake-up flag — i.e. whether it took
     # responsibility for a wake-up at all. Gates the hand-off; see the
@@ -1177,17 +1201,15 @@ async def _run_tick_body_aio(
                             extended = hard_deadline
                             if not warned_clamped:
                                 warned_clamped = True
-                                logger.warning(
-                                    f"Tick for build {build_id} cannot wait "
-                                    "out the worker report window "
-                                    f"({config.worker_report_grace_seconds:.0f}s) "
-                                    "inside its own container timeout "
-                                    f"({config.tick_timeout_seconds:.0f}s); "
-                                    "waiting as long as it can and leaving "
-                                    "the rest to the next tick. Lower "
-                                    "TickConfig.worker_report_grace_seconds "
-                                    "or give the tick function a longer "
-                                    "timeout."
+                                logger.info(
+                                    f"Tick for build {build_id} opened a "
+                                    "worker report window too late in its "
+                                    "container's life to wait it out; "
+                                    "leaving the verdict to the next tick, "
+                                    "which gets the whole window. (The "
+                                    "grace itself fits — it is trimmed at "
+                                    "startup — so this is timing, not "
+                                    "configuration.)"
                                 )
                         # Below the ceiling, this only ever extends: a
                         # deadline the linger already set is never

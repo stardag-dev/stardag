@@ -669,11 +669,10 @@ async def _act_on_frontier(
                         f"Execution {ref} of task {task.id} (build "
                         f"{build_id}) is gone from the backend. Holding "
                         "the verdict for up to "
-                        f"{config.worker_report_grace_seconds:.0f}s: only "
-                        "the worker knows whether it checkpointed and "
-                        "wants resuming, and calling this a failure first "
-                        "would spend an attempt and get its report "
-                        "refused."
+                        f"{report_window.grace_seconds:.0f}s: only the "
+                        "worker knows whether it checkpointed and wants "
+                        "resuming, and calling this a failure first would "
+                        "spend an attempt and get its report refused."
                     )
                     return
                 if decision == "holding":
@@ -685,18 +684,17 @@ async def _act_on_frontier(
                         f"Execution {ref} of task {task.id} (build "
                         f"{build_id}) is gone and no worker reported what "
                         "ended it within "
-                        f"{config.worker_report_grace_seconds:.0f}s; "
-                        "recording it as a failure. A task that meant to "
-                        "be resumed reports an interruption from its "
-                        "grace window — raise "
-                        "TickConfig.worker_report_grace_seconds if this "
-                        "build's workers need longer to checkpoint."
+                        f"{report_window.grace_seconds:.0f}s; recording it "
+                        "as a failure. A task that meant to be resumed "
+                        "reports an interruption from its grace window — "
+                        "raise TickConfig.worker_report_grace_seconds if "
+                        "this build's workers need longer to checkpoint."
                     )
             await _record_task_failure(
                 task,
                 (
                     "Detached execution ended with no report from its "
-                    f"worker within {config.worker_report_grace_seconds:.0f}s "
+                    f"worker within {report_window.grace_seconds:.0f}s "
                     "(observed by tick)"
                 )
                 if expired

@@ -73,6 +73,15 @@ class _ReportWindow:
         # task id -> (executor ref, when this pass first found it gone)
         self._open: dict[str, tuple[str, float]] = {}
 
+    @property
+    def grace_seconds(self) -> float:
+        """The wait this window actually gives, which is not always the
+        configured one — a tick trims it to what its container can honour
+        (see ``TickConfig.worker_report_grace_seconds``). Read it rather
+        than the config wherever the number is shown to a human, or a
+        trimmed deployment's logs will quote a wait nobody waited."""
+        return self._grace
+
     def observe(self, task_id: str, ref: str) -> Decision:
         """Record that ``ref`` probed dead for ``task_id``, and decide.
 
