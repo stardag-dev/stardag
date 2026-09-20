@@ -25,7 +25,13 @@ sd.namespace("examples.ml_pipeline.class_api", scope=__name__)
 class ExamplesMLPipelineBase(sd.Task[LoadedT], abc.ABC, typing.Generic[LoadedT]):
     __version__ = "0"
 
-    sleep_seconds: Annotated[float, sd.StardagField(hash_exclude=True)] = 3.0
+    # How long each task pretends to work. It changes neither the output nor
+    # which upstreams are needed, so it is *execution only*: never passed at
+    # init, read from the build config (see ``__main__`` below), and not part
+    # of the task id. This is the modern spelling of ``hash_exclude=True``.
+    sleep_seconds: Annotated[float, sd.StardagField(significance="execution_only")] = (
+        3.0
+    )
 
     def run(self) -> None:
         logger.info(f"Running task: {self.__class__.__name__}")
@@ -348,5 +354,15 @@ def get_benchmark_dag(
 if __name__ == "__main__":
     metrics = get_metrics_dag()
     print(metrics.model_dump_json(indent=2))
-    sd.build([metrics], global_lock_config=GlobalLockConfig(enabled=True))
+    # Level 2/3 parameters are given per build, keyed "<namespace>.<Name>":
+    # here the simulated work is shortened for the two slowest steps, without
+    # touching any task id. Omit a class to leave it at the field default.
+    sd.build(
+        [metrics],
+        global_lock_config=GlobalLockConfig(enabled=True),
+        build_config={
+            "examples.ml_pipeline.class_api.TrainedModel": {"sleep_seconds": 0.5},
+            "examples.ml_pipeline.class_api.Predictions": {"sleep_seconds": 0.5},
+        },
+    )
     print(json.dumps(metrics.load(), indent=2))
