@@ -164,7 +164,9 @@ build's config, a task is exactly what that deployment would construct —
 nothing carries over from the code that planned the build. (It used to:
 task objects were also pickled to the target root, and a pickle restores
 the non-identity values the _writing_ code resolved, which no rollover
-could refresh. That store is gone; see the release notes for v0.25.0.)
+could refresh. That store has been retired — see
+[RELEASE_NOTES.md](https://github.com/stardag-dev/stardag/blob/main/RELEASE_NOTES.md)
+for the migration note.)
 
 Two things cannot roll over: a root whose _identity_ parameters you
 changed, and a task the new deployment cannot rebuild — its class is gone,
