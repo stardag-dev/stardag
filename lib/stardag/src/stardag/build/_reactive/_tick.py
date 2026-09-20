@@ -37,6 +37,14 @@ if typing.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# What a tick keeps back from its container's wall-clock limit for its own
+# exit: releasing the lease, draining wake candidates, the hand-off and the
+# summary report — a handful of registry round trips. Only the report
+# window consults it, because only the report window can extend a tick
+# past the ``linger_seconds`` its operator sized against the container.
+_EXIT_RESERVE_SECONDS = 10.0
+
+
 # Default in-flight bound for the frontier actions a tick performs per task
 # (load / probe / claim / spawn / record). These are registry HTTP calls, and
 # 50 is the resident engine's long-standing bound against the same registry.
@@ -337,7 +345,12 @@ class TickConfig:
     # Only a tick that will still be here when the window closes can use
     # one: with ``linger_seconds <= 0`` — the watchdog sweep, one pass and
     # out — the wait is skipped, and rightly, since a sweep arrives long
-    # after the event and any report would have landed already.
+    # after the event and any report would have landed already. For the
+    # same reason the wait is bounded by ``tick_timeout_seconds`` where
+    # that is known: this is the one thing that extends a tick past the
+    # ``linger_seconds`` its operator sized against the container, so a
+    # value larger than the container buys a truncated wait and a warning,
+    # never a tick killed mid-wait.
     worker_report_grace_seconds: float = 30.0
     # How many of a pass's per-task actions may be in flight at once. Each
     # actionable task costs a task-store read, an acquiring start, an
@@ -970,7 +983,22 @@ async def _run_tick_body_aio(
             build_id_token = current_build_id_var.set(build_id)
             try:
                 loop = asyncio.get_event_loop()
-                deadline = loop.time() + config.linger_seconds
+                started = loop.time()
+                deadline = started + config.linger_seconds
+                # The container's own life, when the caller knows it — the
+                # ceiling on any extension the report window asks for
+                # below. A tick killed mid-wait records nothing, loses the
+                # lease release and the summary with it, and is exactly
+                # what ``tick_timeout_seconds`` exists to let a tick avoid.
+                hard_deadline = (
+                    started + config.tick_timeout_seconds - _EXIT_RESERVE_SECONDS
+                    if config.tick_timeout_seconds is not None
+                    else None
+                )
+                # Logged once per tick, and only if a window is actually
+                # cut short: "the grace is larger than the container" is a
+                # misconfiguration worth a line, but only where it bites.
+                warned_clamped = False
                 while True:
                     if lease.lost:
                         summary.outcome = "lease_lost"
@@ -1115,7 +1143,35 @@ async def _run_tick_body_aio(
                     # moment the window is closed or dropped.
                     owed = report_window.seconds_until_due()
                     if owed is not None:
-                        deadline = max(deadline, loop.time() + owed)
+                        extended = loop.time() + owed
+                        if hard_deadline is not None and extended > hard_deadline:
+                            # Wait for what fits and no more. Exiting with
+                            # the window still open is safe — it leaves the
+                            # task exactly as this pass found it, RUNNING
+                            # under a ref whose worker's report the registry
+                            # will still honour, for the next tick (woken by
+                            # that very report, or by the watchdog) to
+                            # re-evaluate from scratch. Being killed
+                            # mid-wait is not: the lease goes unreleased and
+                            # the summary unreported.
+                            extended = hard_deadline
+                            if not warned_clamped:
+                                warned_clamped = True
+                                logger.warning(
+                                    f"Tick for build {build_id} cannot wait "
+                                    "out the worker report window "
+                                    f"({config.worker_report_grace_seconds:.0f}s) "
+                                    "inside its own container timeout "
+                                    f"({config.tick_timeout_seconds:.0f}s); "
+                                    "waiting as long as it can and leaving "
+                                    "the rest to the next tick. Lower "
+                                    "TickConfig.worker_report_grace_seconds "
+                                    "or give the tick function a longer "
+                                    "timeout."
+                                )
+                        # Never shortens an existing deadline: this only
+                        # declines to extend one past the container.
+                        deadline = max(deadline, extended)
 
                     # Linger: poll the wake-up flag until deadline.
                     #

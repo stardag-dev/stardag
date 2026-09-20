@@ -174,11 +174,17 @@ class TestWorkerReportWindow:
     LONG_GRACE = 30.0
 
     @staticmethod
-    def _config(*, linger_seconds: float, grace: float) -> TickConfig:
+    def _config(
+        *,
+        linger_seconds: float,
+        grace: float,
+        tick_timeout_seconds: float | None = None,
+    ) -> TickConfig:
         return TickConfig(
             linger_seconds=linger_seconds,
             poll_interval_seconds=0.01,
             worker_report_grace_seconds=grace,
+            tick_timeout_seconds=tick_timeout_seconds,
         )
 
     async def test_a_report_in_flight_is_not_pre_empted_by_the_probe(
@@ -406,6 +412,69 @@ class TestWorkerReportWindow:
         assert summary.report_window_expired == 1
         assert summary.failed_recorded == 1
         assert summary.terminal_status == "failed"
+
+    async def test_the_window_never_outlives_the_container(
+        self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A grace larger than the tick's own timeout waits what it can.
+
+        The window is the one thing that extends a tick past the
+        ``linger_seconds`` its operator sized against the container, so it
+        is the one thing that has to respect the container. Being killed
+        mid-wait would cost the lease release and the summary as well as
+        the verdict.
+
+        Exiting with the window still open is the safe end of that trade:
+        the task is left exactly as this pass found it — RUNNING under a
+        ref whose worker's report the registry will still honour — and the
+        next tick, woken by that report or by the watchdog, starts the
+        window again. So this asserts the tick *returned*, not that it
+        recorded anything.
+        """
+        (root,) = _chain("grace-over-container")
+        executor = FakeTickExecutor(
+            statuses={"fc-dead": DetachedExecutionStatus.FAILED}
+        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-dead",
+            attempt_count=2,
+        )
+
+        with caplog.at_level("WARNING"):
+            summary = await asyncio.wait_for(
+                run_tick_aio(
+                    uuid4(),
+                    registry=registry,
+                    task_executor=executor,
+                    task_store=store,
+                    config=self._config(
+                        linger_seconds=0.2,
+                        grace=self.LONG_GRACE,
+                        # Every second of which the exit reserve already
+                        # claims, so no wait fits at all.
+                        tick_timeout_seconds=5,
+                    ),
+                ),
+                # The whole point: a tick that honoured the 30s grace
+                # regardless would still be waiting here.
+                timeout=10,
+            )
+
+        assert summary.executions_awaiting_report == 1
+        # Left open on purpose — nothing was recorded, and nothing was
+        # broken either: the task is still RUNNING under its ref.
+        assert summary.report_window_expired == 0
+        assert summary.failed_recorded == 0
+        assert summary.outcome == "lingered_out"
+        assert registry.statuses[str(root.id)] == "running"
+        assert any(
+            "cannot wait out the worker report window" in r.message
+            for r in caplog.records
+        ), "a window the container cannot honour should say so"
 
 
 class TestReportWindowBookkeeping:
