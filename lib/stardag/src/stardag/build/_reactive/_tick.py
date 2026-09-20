@@ -28,6 +28,7 @@ from stardag.build._reactive._frontier_actions import (
     _act_on_frontier,
     _any_ref_settled,
 )
+from stardag.build._reactive._report_window import _ReportWindow
 from stardag.build._reactive._terminal import _handle_terminal
 
 if typing.TYPE_CHECKING:
@@ -301,6 +302,35 @@ class TickConfig:
     # long training run is a plausible afternoon, 20 identical timeouts of
     # a hung task is a clear signal and a bounded bill.
     max_interruptions: int = 20
+    # How long a tick holds off classifying an execution its probe found
+    # gone, waiting for the worker to say what ended it.
+    #
+    # The probe answers "is this execution still running?", and "no" is
+    # not a verdict: the same event — the platform ended the input — is an
+    # *interruption* when the task caught it and checkpointed (resumed on
+    # ``max_interruptions``, no attempt spent) and a *failure* when it did
+    # not (retried on ``max_attempts``). Only the dying worker knows
+    # which, and it reports from the grace window the platform gives it,
+    # which is exactly the window a probe can land inside. Without this
+    # the two racers classify one event differently depending on who looks
+    # first, and under load the tick wins — so a task built to be
+    # interrupted and resumed burns its attempt budget on interruptions
+    # instead.
+    #
+    # Sized to a checkpoint plus the report: stardag's own Modal worker
+    # allows its report 10s *after* the task's ``except`` block returns,
+    # and the block is user code. 30s covers an ordinary checkpoint with
+    # room to spare while bounding what it costs in the other direction —
+    # a worker that died silently, where this is pure added latency before
+    # the tick heals the build. Raise it for tasks that checkpoint slowly;
+    # ``0`` disables the wait entirely (a deployment whose workers do not
+    # report their own lifecycle has nothing to wait for).
+    #
+    # Only a tick that will still be here when the window closes can use
+    # one: with ``linger_seconds <= 0`` — the watchdog sweep, one pass and
+    # out — the wait is skipped, and rightly, since a sweep arrives long
+    # after the event and any report would have landed already.
+    worker_report_grace_seconds: float = 30.0
     # How many of a pass's per-task actions may be in flight at once. Each
     # actionable task costs a task-store read, an acquiring start, an
     # executor spawn and a ref-recording start; doing that serially makes a
@@ -440,6 +470,18 @@ class TickSummary:
     # spawning here would duplicate the execution. Not an error — it is the
     # guard working.
     interruptions_backend_retrying: int = 0
+    # --- the worker's report window (TickConfig.worker_report_grace_seconds) ---
+    # Executions a probe found gone that this tick left unclassified,
+    # waiting for the worker to report what ended them. Not an error
+    # either: it is what keeps a checkpointed interruption from being
+    # recorded as a failure by whoever looked first.
+    executions_awaiting_report: int = 0
+    # ...and those whose window closed with nothing reported, so the tick
+    # recorded the failure itself. The expected value is 0 on a deployment
+    # whose workers report their own lifecycle; a steady non-zero count
+    # means either workers are dying without a word (the case this
+    # fallback exists for) or the grace is shorter than they need.
+    report_window_expired: int = 0
     # Cancelled or skipped tasks in this build's plan that this tick reset so
     # it could run them itself (the collaboration path: a shared task another
     # build cancelled is still this build's to run, and a skip whose upstreams
@@ -890,6 +932,15 @@ async def _run_tick_body_aio(
     # this tick was flagged before the spawn, so the holder's re-checks (the
     # linger poll, then the exit handshake above) cover it.
     lease = SchedulerLease(registry, build_id)
+    # Probe-observed deaths this tick is holding for the worker's report,
+    # and the deadlines that end the holding. Per tick because the wait is
+    # only worth opening by a scheduler that will still be here to close
+    # it — hence ``enabled`` following ``linger_seconds``; see
+    # ``_ReportWindow``.
+    report_window = _ReportWindow(
+        config.worker_report_grace_seconds,
+        enabled=config.linger_seconds > 0,
+    )
     acquired = False
     # Whether this tick ever cleared the wake-up flag — i.e. whether it took
     # responsibility for a wake-up at all. Gates the hand-off; see the
@@ -1003,6 +1054,7 @@ async def _run_tick_body_aio(
                         task_store=task_store,
                         config=config,
                         summary=summary,
+                        report_window=report_window,
                     )
                     terminal = await _handle_terminal(
                         frontier,
@@ -1045,12 +1097,26 @@ async def _run_tick_body_aio(
                         )
                         continue
 
+                    # A probe found an execution gone and this tick is
+                    # holding the verdict for its worker (see
+                    # ``_ReportWindow``). Lingering out first would leave
+                    # the task RUNNING behind a claim nobody will release
+                    # until it lapses — the stall the probe exists to
+                    # prevent — so the deadline moves out to cover the
+                    # window. Bounded by the grace, and given back the
+                    # moment the window is closed or dropped.
+                    owed = report_window.seconds_until_due()
+                    if owed is not None:
+                        deadline = max(deadline, loop.time() + owed)
+
                     # Linger: poll the wake-up flag until deadline.
                     #
-                    # Two ways out. ``needs_tick`` is the ordinary one: some
-                    # worker reported something.
+                    # Three ways out. ``needs_tick`` is the ordinary one:
+                    # some worker reported something — including the
+                    # report the window above is waiting for, which is why
+                    # that wait almost never runs to its deadline.
                     #
-                    # The other is an interrupted task whose execution still
+                    # The second is an interrupted task whose execution still
                     # probes as live. That one is NOT waiting for an event —
                     # nothing will ever emit one, because the worker that would
                     # have reported is dead and an interrupted task produces
@@ -1070,8 +1136,23 @@ async def _run_tick_body_aio(
                     # scheduled to follow up. For a genuine backend retry that
                     # is fine — the restarted worker's own events re-tick the
                     # build. It is the unwinding race this closes.
+                    #
+                    # The third is a report window closing with nothing
+                    # reported. Alone among the three it is a clock rather
+                    # than an observation, and the tick owes a pass to
+                    # whatever it made wait — hence the ``due()`` check
+                    # below, before the exit handshake rather than after.
                     while True:
                         if loop.time() >= deadline:
+                            if report_window.due():
+                                # A held verdict whose window has closed:
+                                # one more pass to record it, rather than
+                                # exiting and leaving it to the watchdog.
+                                # The pass acts, which re-arms the linger
+                                # deadline; if the task resolved itself in
+                                # the meantime the window is dropped and
+                                # this falls through next time round.
+                                break
                             # Exit handshake, pre-release half (see the
                             # docstring): the flag may have been set since
                             # the last poll, and a worker that saw the

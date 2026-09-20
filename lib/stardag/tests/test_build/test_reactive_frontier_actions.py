@@ -25,6 +25,7 @@ from stardag.build import (
     run_tick_aio,
 )
 from stardag.build._reactive import _frontier_actions as frontier_module
+from stardag.build._reactive._report_window import _ReportWindow
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
@@ -147,6 +148,320 @@ class TestRunningTaskResolution:
 
         assert summary.outcome == "lingered_out"
         assert executor.spawned == []
+
+
+class TestWorkerReportWindow:
+    """Who gets to say what ended an execution the probe found gone.
+
+    The platform ending an input is one event with two meanings: a task
+    that caught it and checkpointed is INTERRUPTED and is resumed on
+    ``max_interruptions``; a task that did not is FAILED and spends an
+    attempt. Only the dying worker knows which, and it reports from the
+    platform's grace window — precisely the window a scheduler's probe can
+    land inside.
+
+    Before this, whoever looked first decided, and under load that was the
+    tick: a checkpointing task had its resumption recorded as a failure,
+    spent an attempt on it, and its own report was then refused as a
+    statement about an execution it no longer held (STA-65). So the worker
+    is the authority and the probe is the fallback, and these pin both
+    halves — including that the fallback still fires when no report comes.
+    """
+
+    # Long enough that nothing in these tests reaches it by accident: a
+    # window that closes on time is one test's subject, and everywhere
+    # else its closing would be the race this whole class is about.
+    LONG_GRACE = 30.0
+
+    @staticmethod
+    def _config(*, linger_seconds: float, grace: float) -> TickConfig:
+        return TickConfig(
+            linger_seconds=linger_seconds,
+            poll_interval_seconds=0.01,
+            worker_report_grace_seconds=grace,
+        )
+
+    async def test_a_report_in_flight_is_not_pre_empted_by_the_probe(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The STA-65 race, with the worker reporting as the probe lands.
+
+        The executor below reports the interruption from inside the probe
+        call, which is the worst case rather than an unlikely one: a cancel
+        ends the input the moment it is issued, so the backend can answer
+        "gone" while the container is still running its ``except`` block.
+        """
+        (root,) = _chain("report-in-flight")
+
+        class ReportingExecutor(FakeTickExecutor):
+            probes = 0
+            registry: typing.Any = None
+
+            async def detached_status(self, task, executor, ref):
+                ReportingExecutor.probes += 1
+                if ReportingExecutor.probes == 1:
+                    # The worker's report lands while the probe is in
+                    # flight — it checkpointed and asked to be resumed.
+                    await ReportingExecutor.registry.task_interrupt_aio(
+                        uuid4(), task, "checkpointed", ref
+                    )
+                    ReportingExecutor.registry.needs_tick = True
+                return DetachedExecutionStatus.FAILED
+
+        executor = ReportingExecutor()
+        registry, _, store = _setup([root], auto_complete=True, executor=executor)
+        ReportingExecutor.registry = registry
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-cancelled",
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=self._config(linger_seconds=1.0, grace=self.LONG_GRACE),
+        )
+
+        # The probe held its verdict...
+        assert summary.executions_awaiting_report == 1
+        assert summary.report_window_expired == 0
+        # ...so nothing invented a failure, and no attempt was spent on an
+        # interruption the task asked to survive.
+        assert summary.failed_recorded == 0
+        assert summary.retried == 0
+        assert ("fail", str(root.id)) not in registry.calls
+        # ...and the task was resumed, which is the accounting the build
+        # should show for a checkpointed task the platform killed.
+        assert summary.interruptions_restarted == 1
+        assert executor.spawned == [root.id]
+        assert summary.terminal_status == "completed"
+
+    async def test_no_report_within_the_window_records_the_failure(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The other half: the window is a wait, not an amnesty.
+
+        A worker that died without a word — OOM, a lost container — reports
+        nothing ever, and the probe is the only thing that will notice. The
+        failure it records is the same one as before, just later, and the
+        reason string says so rather than leaving a reader to wonder why
+        the tick waited.
+        """
+        (root,) = _chain("no-report")
+        executor = FakeTickExecutor(statuses={"fc-oom": DetachedExecutionStatus.FAILED})
+        registry, _, store = _setup([root], auto_complete=True, executor=executor)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-oom",
+            attempt_count=1,
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=self._config(linger_seconds=1.0, grace=0.1),
+        )
+
+        assert summary.executions_awaiting_report == 1
+        assert summary.report_window_expired == 1
+        assert summary.failed_recorded == 1
+        # ...and the ordinary retry path took over from there, unchanged.
+        assert summary.retried == 1
+        assert executor.spawned == [root.id]
+        assert summary.terminal_status == "completed"
+        (reason,) = registry.fail_reasons[str(root.id)]
+        assert reason is not None and "no report" in reason
+
+    async def test_the_tick_holds_past_its_linger_rather_than_owe_a_verdict(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A window outliving the linger deadline must not end the tick.
+
+        Exiting there would leave the task RUNNING behind a claim nobody
+        releases until it lapses — the stall the probe exists to prevent,
+        reintroduced by the wait meant to make the probe polite. The linger
+        deadline therefore moves out to cover the window.
+
+        The linger below is far shorter than the grace, so a tick that did
+        not hold on would record nothing at all.
+        """
+        (root,) = _chain("held-past-linger")
+        executor = FakeTickExecutor(
+            statuses={"fc-dead": DetachedExecutionStatus.FAILED}
+        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-dead",
+            attempt_count=2,  # budget spent: the failure is final
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=self._config(linger_seconds=0.05, grace=0.4),
+        )
+
+        assert summary.report_window_expired == 1
+        assert summary.failed_recorded == 1
+        assert summary.terminal_status == "failed"
+        assert registry.build_status == "failed"
+
+    async def test_a_single_pass_tick_does_not_wait(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """``linger_seconds=0`` — the watchdog sweep — opens no window.
+
+        The wait is only worth opening by a scheduler that will still be
+        here to close it, and a sweep is one pass and out. It is also the
+        tick least likely to need it: nobody told it anything, so it is
+        looking at a build where whatever happened happened long ago and
+        any report has landed or never will.
+        """
+        (root,) = _chain("sweep-no-wait")
+        executor = FakeTickExecutor(
+            statuses={"fc-dead": DetachedExecutionStatus.FAILED}
+        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-dead",
+            attempt_count=2,
+        )
+
+        summary = await asyncio.wait_for(
+            run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                task_store=store,
+                config=self._config(linger_seconds=0, grace=self.LONG_GRACE),
+            ),
+            # A sweep that opened the window would sit here for the whole
+            # grace; fail in seconds rather than hang the suite for it.
+            timeout=5,
+        )
+
+        assert summary.executions_awaiting_report == 0
+        assert summary.report_window_expired == 0
+        assert summary.failed_recorded == 1
+        assert summary.terminal_status == "failed"
+
+    async def test_a_lapsed_claim_is_failed_without_waiting(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """An expiry the claim has already passed closes the window early.
+
+        The claim is the outer bound on any grace a worker could still be
+        inside: past it the claim is not honoured by anyone, so a report
+        arriving now would be refused regardless. Waiting for one would be
+        pure latency in front of a heal.
+        """
+        (root,) = _chain("lapsed-claim-dead-ref")
+        executor = FakeTickExecutor(
+            statuses={"fc-dead": DetachedExecutionStatus.FAILED}
+        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-dead",
+            attempt_count=2,
+            expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        )
+
+        summary = await asyncio.wait_for(
+            run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                task_store=store,
+                config=self._config(linger_seconds=1.0, grace=self.LONG_GRACE),
+            ),
+            timeout=5,
+        )
+
+        assert summary.executions_awaiting_report == 0
+        assert summary.failed_recorded == 1
+        assert summary.terminal_status == "failed"
+
+
+class TestReportWindowBookkeeping:
+    """``_ReportWindow`` on its own clock — the arithmetic the tick trusts."""
+
+    @staticmethod
+    def _window(grace: float = 10.0, **kwargs: typing.Any) -> tuple:
+        now = [0.0]
+        window = _ReportWindow(grace, clock=lambda: now[0], **kwargs)
+        return window, now
+
+    def test_the_first_sighting_opens_and_the_expiry_closes(self):
+        window, now = self._window(grace=10.0)
+        assert window.observe("t", "ref-1") == "opened"
+        now[0] = 9.0
+        assert window.observe("t", "ref-1") == "holding"
+        assert window.seconds_until_due() == pytest.approx(1.0)
+        assert not window.due()
+        now[0] = 10.0
+        assert window.due()
+        assert window.observe("t", "ref-1") == "expired"
+        # Closed, not re-armed: the verdict has been taken.
+        assert window.seconds_until_due() is None
+        assert not window.due()
+
+    def test_a_new_execution_opens_a_new_window(self):
+        """The window belongs to one execution, not to the task.
+
+        A task whose retry also dies is a second event, and it gets its
+        own worker and its own grace — inheriting the first window would
+        give the second worker no time at all.
+        """
+        window, now = self._window(grace=10.0)
+        assert window.observe("t", "ref-1") == "opened"
+        now[0] = 50.0
+        assert window.observe("t", "ref-2") == "opened"
+        assert window.seconds_until_due() == pytest.approx(10.0)
+
+    def test_a_task_that_resolved_itself_stops_holding_the_tick(self):
+        """What ``retain`` is for: the window's own end condition.
+
+        The worker reporting takes the task out of RUNNING, so the next
+        pass does not probe it and never names it here. Left behind, its
+        entry would hold the tick past its linger for a decision nobody is
+        waiting on.
+        """
+        window, _ = self._window(grace=10.0)
+        window.observe("kept", "ref-1")
+        window.observe("gone", "ref-2")
+        window.retain({"kept"})
+        assert window.seconds_until_due() == pytest.approx(10.0)
+        window.retain(set())
+        assert window.seconds_until_due() is None
+
+    def test_a_disabled_or_zero_window_never_holds_anything(self):
+        disabled, _ = self._window(grace=10.0, enabled=False)
+        assert disabled.observe("t", "ref-1") == "no_window"
+        assert disabled.seconds_until_due() is None
+        assert not disabled.due()
+
+        zero, _ = self._window(grace=0.0)
+        assert zero.observe("t", "ref-1") == "no_window"
+        assert zero.seconds_until_due() is None
 
 
 class TestBuildTaskStoreRoundTrip:

@@ -46,7 +46,16 @@ from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
 auto_namespace(__name__)
 
-FAST_TICK = TickConfig(linger_seconds=0.3, poll_interval_seconds=0.01)
+FAST_TICK = TickConfig(
+    linger_seconds=0.3,
+    poll_interval_seconds=0.01,
+    # No report window: a probe that finds an execution gone acts on it in
+    # the same pass, which is what nearly every test here is about (the
+    # attempt budget, terminal detection, self-healing). The window is a
+    # wait, and a wait in this config is either dead time or a race; it
+    # has its own tests, which set a grace explicitly.
+    worker_report_grace_seconds=0,
+)
 
 
 # =============================================================================
