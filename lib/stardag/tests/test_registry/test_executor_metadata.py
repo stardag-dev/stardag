@@ -152,7 +152,9 @@ class TestAPIRegistryWireFormat:
         monkeypatch.setenv("SHORT_SHA", "abc1234")
         build_id = uuid4()
         registry, captured = self._make_registry_and_capture(
-            {"id": str(build_id), "name": "brave-tiger-42"}, status_code=201
+            # A scope-aware server answers every start with a scope.
+            {"id": str(build_id), "name": "brave-tiger-42", "scope_key": "build:x"},
+            status_code=201,
         )
 
         result = registry.build_start(executor_metadata=METADATA)

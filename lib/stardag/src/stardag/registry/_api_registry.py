@@ -2901,17 +2901,26 @@ def _require_scope_support(
     only evidence there is. And the echo has to be *the* scope: a server
     that knows the field either adopts the one it was sent or refuses with
     a 409, so any other answer means the build is gated under a scope this
-    SDK will not register edges in. Checked only when a scope was claimed.
+    SDK will not register edges in. The echo is checked only when a scope
+    was claimed; a build *start* is additionally required to answer with
+    some scope, since a scope-aware server assigns every build one.
 
     The same goes for ``build_config`` when one was claimed: every later
     tick and worker rehydrates level 2 and 3 fields from what the server
     kept, so a server that echoes the scope but not the config would have
     them silently run at the defaults. ``None`` and ``{}`` are one config.
     """
+    if "scope_key" not in data and (
+        scope_key is not None or operation == "POST /builds"
+    ):
+        # A claim that was not echoed; or a build start, which a
+        # scope-aware server always answers with a scope (the synthetic
+        # placeholder at least) — so its absence there is a pre-scope
+        # server even when nothing was claimed. Caught at the trigger,
+        # before the deployment's bootstrap registers a single edge.
+        raise _registry_too_old(operation)
     if scope_key is None:
         return
-    if "scope_key" not in data:
-        raise _registry_too_old(operation)
     if data["scope_key"] != scope_key:
         raise RegistryTooOldError(
             f"{operation}: the Registry API answered structure scope "

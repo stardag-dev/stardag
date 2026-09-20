@@ -166,7 +166,10 @@ jobs:
 
           [ "$LABELLED" = "true" ] && both true "Labelled modal-live."
 
-          changed=$(gh pr diff "$PR" --repo "$REPO" --name-only)
+          # The files API, not `gh pr diff --name-only`: the diff endpoint
+          # refuses a PR past 20,000 changed lines (HTTP 406), which a
+          # large PR hits and then skips both tiers as "nothing changed".
+          changed=$(gh api "repos/$REPO/pulls/$PR/files" --paginate -q '.[].filename')
 
           for tier in modal_live registry_live; do
             case "$tier" in

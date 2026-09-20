@@ -2024,16 +2024,64 @@ class TestScopeRequiresANewServer:
         registry = self._registry(handler)
         assert registry.build_start(root_tasks=[], scope_key="code:cfg") == build_id
 
-    def test_build_start_without_a_scope_claim_asks_nothing_of_the_server(self):
-        """No scope sent, nothing to echo: the check applies only to a
-        claim that was actually made."""
+    def test_build_start_without_a_scope_claim_accepts_any_scope(self):
+        """No scope sent, nothing to echo: the server's own (synthetic)
+        scope is fine, and the echo check applies only to a claim that
+        was actually made."""
         build_id = uuid4()
 
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
+            return httpx.Response(
+                201,
+                json={
+                    "id": str(build_id),
+                    "name": "b",
+                    "scope_key": f"build:{build_id}",
+                },
+            )
 
         registry = self._registry(handler)
         assert registry.build_start(root_tasks=[]) == build_id
+
+    def test_build_start_without_a_scope_claim_still_needs_a_scoped_server(self):
+        """A scope-aware server assigns every build a scope and answers
+        with it, so a start answered with none is a pre-scope server —
+        refused here, at the trigger, rather than by the deployment's
+        bootstrap after it has registered environment-global edges. The
+        committed build is failed, as for a refused claim."""
+        from stardag.exceptions import RegistryTooOldError
+
+        build_id = uuid4()
+        failed: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/fail"):
+                failed.append(request.url.path)
+                return httpx.Response(200, json={"id": str(build_id)})
+            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
+
+        registry = self._registry(handler)
+        with pytest.raises(RegistryTooOldError, match="predates structure scopes"):
+            registry.build_start(root_tasks=[])
+        assert len(failed) == 1
+
+    @pytest.mark.asyncio
+    async def test_build_start_aio_without_a_scope_claim_still_needs_a_scoped_server(
+        self,
+    ):
+        from stardag.exceptions import RegistryTooOldError
+
+        build_id = uuid4()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/fail"):
+                return httpx.Response(200, json={"id": str(build_id)})
+            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
+
+        registry = self._registry(handler)
+        self._inject_async(registry, handler)
+        with pytest.raises(RegistryTooOldError, match="predates structure scopes"):
+            await registry.build_start_aio(root_tasks=[])
 
     @pytest.mark.asyncio
     async def test_build_start_aio_that_does_not_echo_the_scope(self):
