@@ -1553,8 +1553,8 @@ class StardagApp:
           to the builder) and return.
 
         The DAG walk, the rehydration pre-flight, the reactive marker and
-        the first tick all live in the
-        bootstrap container — see :func:`run_reactive_bootstrap`, which
+        the first tick all live in the bootstrap container — see
+        :func:`run_reactive_bootstrap`, which
         also documents the ordering guarantee that keeps a tick from ever
         seeing a partially-registered DAG. Triggering is therefore fast
         and touches no target root, which for a ``modalvol://`` root is

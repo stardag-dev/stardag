@@ -2,11 +2,11 @@
 
 :func:`run_reactive_bootstrap` discovers the DAG, refuses it if a scheduler
 tick could not rebuild every task in it, arms the build and spawns the first
-tick. It normally
-runs **inside Modal**, as the body of the deployed ``bootstrap`` function
-(discovery is target-root I/O, which is far cheaper next to a mounted volume
-than from a laptop), and runs in the triggering process instead when an app
-opts out with ``StardagApp(reactive_discovery="local")``.
+tick. It normally runs **inside Modal**, as the body of the deployed
+``bootstrap`` function (discovery is target-root I/O, which is far cheaper
+next to a mounted volume than from a laptop), and runs in the triggering
+process instead when an app opts out with
+``StardagApp(reactive_discovery="local")``.
 
 Also here: the rehydration pre-flight the bootstrap applies (and the
 advisory, roots-only version the trigger emits), and

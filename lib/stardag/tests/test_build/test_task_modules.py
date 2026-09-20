@@ -28,6 +28,7 @@ from stardag.build._task_modules import (
     import_task_modules,
     last_import_failures,
     module_is_covered,
+    _MAX_LISTED_CLASSES,
     plan_rehydration,
     set_declared_task_module_patterns,
     suggested_pattern_for,
@@ -447,18 +448,52 @@ class TestPlanRehydration:
         assert "round-trip failed" in plan.unreconstructable[0][1]
         assert "__aliased" in plan.unreconstructable[0][1]
 
-    def test_the_error_names_every_task_and_reason(self):
+    def test_the_error_names_the_class_the_reason_and_the_remedy(self):
         tasks = [SyncOnlyTask(name="x"), SyncOnlyTask(name="y")]
         plan = plan_rehydration(tasks, ["unrelated_pkg.*"])
         error = plan.error(["unrelated_pkg.*"])
         assert error is not None
         assert "2 task(s)" in error
-        for task in tasks:
-            assert str(task.id) in error
+        assert f"{SyncOnlyTask.__module__}.{SyncOnlyTask.__qualname__}" in error
         assert "not covered by task_modules" in error
         # The remedy: the narrowest pattern that would cover the class.
         assert suggested_pattern_for(SyncOnlyTask.__module__) in error
         assert "['unrelated_pkg.*']" in error
+
+    def test_the_listing_is_by_class_with_one_example_task(self):
+        """One broken class over a fan-out is the normal shape of a refusal.
+
+        Listing every task would put thousands of identical lines in the
+        log and in the ``error_message`` recorded on the build; one example
+        id per class is what makes it diagnosable.
+        """
+        tasks = [SyncOnlyTask(name=f"t{i}") for i in range(50)]
+        plan = plan_rehydration(tasks, ["unrelated_pkg.*"])
+        error = plan.error(["unrelated_pkg.*"])
+        assert error is not None
+        listed = [line for line in error.splitlines() if line.startswith("  - ")]
+        assert len(listed) == 1
+        assert "(and 49 more task(s) of this class)" in error
+        # The example is a real task of the build.
+        assert any(str(task.id) in error for task in tasks)
+
+    def test_many_distinct_classes_truncate(self):
+        import stardag as sd
+
+        classes = [
+            type(
+                f"TruncatedTask{i}",
+                (sd.Task[int],),
+                {"__module__": "acme_unreachable.tasks", "run": lambda self: None},
+            )
+            for i in range(_MAX_LISTED_CLASSES + 5)
+        ]
+        plan = plan_rehydration([cls() for cls in classes], ["unrelated_pkg.*"])
+        error = plan.error(["unrelated_pkg.*"])
+        assert error is not None
+        listed = [line for line in error.splitlines() if line.startswith("  - ")]
+        assert len(listed) == _MAX_LISTED_CLASSES + 1  # + the "...and N more" line
+        assert "...and 5 further class(es)." in error
 
     def test_summary_aggregates_repeated_reasons(self):
         tasks = [SyncOnlyTask(name=f"t{i}") for i in range(3)]

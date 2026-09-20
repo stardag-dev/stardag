@@ -111,13 +111,11 @@ _CLAIM_TTL_GRACE_SECONDS = 900.0
 # second pass on a fresh frontier all have to fit in the same container.
 _SPAWN_BUDGET_FRACTION = 0.25
 
-# Wall-clock cost of putting ONE actionable task on a worker: the
-# metadata read it is rebuilt from, the acquiring start, the executor
-# spawn, and the ref-recording start — four network round-trips.
-# Deliberately
-# pessimistic (a p99 round-trip, not a median), because underestimating it
-# inflates the cap, and an inflated cap is the failure this exists to
-# prevent.
+# Wall-clock cost of putting ONE actionable task on a worker: the metadata
+# read it is rebuilt from, the acquiring start, the executor spawn, and the
+# ref-recording start — four network round-trips. Deliberately pessimistic
+# (a p99 round-trip, not a median), because underestimating it inflates the
+# cap, and an inflated cap is the failure this exists to prevent.
 _SECONDS_PER_SPAWN = 2.0
 
 # Used when NO wall-clock limit is known at all — neither the tick's own

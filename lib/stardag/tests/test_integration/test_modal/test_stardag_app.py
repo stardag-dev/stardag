@@ -2140,7 +2140,10 @@ class TestReactiveRehydrationPreflight:
 
         message = str(exc.value)
         assert "2 task(s)" in message
-        assert str(root.id) in message and str(dep.id) in message
+        # Both are SyncOnlyTask, so the listing names the class once with
+        # one example id (see RehydrationPlan.error).
+        assert "(and 1 more task(s) of this class)" in message
+        assert str(root.id) in message or str(dep.id) in message
         assert "not covered by task_modules" in message
         # The remedy, not just the diagnosis.
         assert "stardag.utils.testing.*" in message
@@ -2264,7 +2267,7 @@ class TestRequirePickleFreeIsDeprecated:
         assert app.task_modules == (SyncOnlyTask.__module__,)
         assert not hasattr(app, "require_pickle_free")
 
-    def test_it_no_longer_contradicts_an_opted_out_app(self, caplog):
+    def test_it_no_longer_contradicts_an_opted_out_app(self):
         """It used to raise here — "meaningless without task_modules". The
         contradiction is gone with the flag's meaning: the app is simply
         resident-only, which its reactive trigger says."""
@@ -2278,7 +2281,12 @@ class TestRequirePickleFreeIsDeprecated:
         from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
         _app_with_task_modules("tm-no-flag", task_modules=[SyncOnlyTask.__module__])
-        assert [w for w in recwarn if issubclass(w.category, DeprecationWarning)] == []
+        assert [
+            w
+            for w in recwarn
+            if issubclass(w.category, DeprecationWarning)
+            and "require_pickle_free" in str(w.message)
+        ] == []
 
 
 class TestDynamicDepCoverage:
