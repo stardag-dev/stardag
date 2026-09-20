@@ -645,15 +645,22 @@ async def _act_on_frontier(
             # decision is held open for the worker; see ``_ReportWindow``.
             expired = False
             ref = item.latest_executor_ref
-            if ref is not None and not _claim_has_lapsed(
-                item.latest_status_expires_at, datetime.now(timezone.utc)
-            ):
-                # Skipped for the two shapes where no report is coming: no
-                # ref at all (nothing probed it — the claim-expiry branch
-                # of ``_resolve_running``, which already waited out the
-                # whole claim), and a claim that has itself lapsed, which
-                # is the outer bound on any grace window a worker could
-                # still be inside.
+            if ref is not None:
+                # Skipped for the one shape where no report is coming: no
+                # ref at all, which is the claim-expiry branch of
+                # ``_resolve_running`` — nothing probed it, and it has
+                # already waited out the whole claim.
+                #
+                # A *lapsed* claim is deliberately NOT a second such
+                # shape, though it reads like one. The registry refuses a
+                # report about a different execution, not about an expired
+                # claim: TASK_INTERRUPTED ends a claim, so applying it to
+                # a lapsed one releases something already released and is
+                # honoured (only TASK_PREEMPTED, which *grants* a window,
+                # requires a live claim). Skipping the wait there would
+                # therefore steal a verdict the registry would have taken
+                # — and at the worst moment, since a claim expires around
+                # the timeout whose report this is.
                 probed_dead.add(item.task_id)
                 decision = report_window.observe(item.task_id, ref)
                 if decision == "opened":

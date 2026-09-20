@@ -361,15 +361,23 @@ class TestWorkerReportWindow:
         assert summary.failed_recorded == 1
         assert summary.terminal_status == "failed"
 
-    async def test_a_lapsed_claim_is_failed_without_waiting(
+    async def test_a_lapsed_claim_still_gets_the_window(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """An expiry the claim has already passed closes the window early.
+        """An expired claim is not a closed window, tempting as it reads.
 
-        The claim is the outer bound on any grace a worker could still be
-        inside: past it the claim is not honoured by anyone, so a report
-        arriving now would be refused regardless. Waiting for one would be
-        pure latency in front of a heal.
+        The claim expiry looks like an outer bound on the wait — past it
+        nobody honours the claim, so why wait for its holder? Because the
+        registry refuses a report about a *different execution*, not one
+        from an expired claim: `TASK_INTERRUPTED` ends a claim, so
+        applying it to a lapsed one releases something already released
+        and is honoured. (Only `TASK_PREEMPTED`, which grants a fresh
+        window, requires a live claim.)
+
+        Skipping the wait here would therefore take a verdict the
+        registry would have given the worker — and at the worst possible
+        moment, since a claim expires around the timeout whose report
+        this would be.
         """
         (root,) = _chain("lapsed-claim-dead-ref")
         executor = FakeTickExecutor(
@@ -385,18 +393,17 @@ class TestWorkerReportWindow:
             expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
         )
 
-        summary = await asyncio.wait_for(
-            run_tick_aio(
-                uuid4(),
-                registry=registry,
-                task_executor=executor,
-                task_store=store,
-                config=self._config(linger_seconds=1.0, grace=self.LONG_GRACE),
-            ),
-            timeout=5,
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            task_store=store,
+            config=self._config(linger_seconds=1.0, grace=0.1),
         )
 
-        assert summary.executions_awaiting_report == 0
+        assert summary.executions_awaiting_report == 1
+        # ...and the fallback still fires, so nothing is left hanging.
+        assert summary.report_window_expired == 1
         assert summary.failed_recorded == 1
         assert summary.terminal_status == "failed"
 

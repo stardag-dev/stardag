@@ -223,7 +223,15 @@ class SchedulerLease:
 # =============================================================================
 
 
-@dataclass
+# Keyword-only, both of them. The fields here are grouped by what they
+# mean — the two budgets together, the fan-out throttles together — and a
+# new knob belongs beside its relatives rather than appended to the end.
+# That is only safe if position carries no meaning: inserting a field
+# ahead of existing ones would otherwise re-bind a positional caller's
+# arguments silently, turning a grace period into a concurrency bound.
+# Keyword-only makes such a call a TypeError instead, and leaves the
+# grouping free to stay readable.
+@dataclass(kw_only=True)
 class TickConfig:
     """Configuration for reactive scheduler ticks.
 
@@ -400,7 +408,7 @@ class TickConfig:
     report_tick_summaries: bool = True
 
 
-@dataclass
+@dataclass(kw_only=True)
 class TickSummary:
     """Outcome of one scheduler tick, for logging/observability.
 
