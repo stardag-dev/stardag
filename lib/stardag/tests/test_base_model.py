@@ -342,3 +342,261 @@ def test_stardag_base_model_serialize(
             context={CONTEXT_MODE_KEY: mode},
         )
         assert actual == expected, f"Failed: {description}"
+
+
+# ---------------------------------------------------------------------------
+# The three levels of parameter significance on the model: resolved from the
+# build config, refused at init, dropped from the hash and registry payloads.
+# The config module itself is tested in ``tests/test_build_config.py``; the
+# scope key in ``tests/test_build/test_scope.py``. Design:
+# ``docs/design/scope-keyed-dependency-structure.md``.
+# ---------------------------------------------------------------------------
+
+import stardag as sd  # noqa: E402
+from stardag.base_model import field_significance  # noqa: E402
+from stardag.build_config import (  # noqa: E402
+    build_config_scope,
+    get_build_config,
+    rebind_to_build_config,
+)
+from stardag.target import InMemoryTarget  # noqa: E402
+
+
+class Fanout(sd.Task[int]):
+    __namespace__ = "sig_tests"
+    __version__ = "1"
+
+    key: str
+    partition_size: Annotated[int, StardagField(significance="dependencies_only")] = 100
+    threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+    def run(self) -> None:
+        self.target().save(self.partition_size)
+
+    def target(self) -> InMemoryTarget[int]:  # type: ignore[override]
+        return InMemoryTarget(key=str(self.id))
+
+
+class Required(sd.Task[int]):
+    """A level 2 field with no default: the config must supply it."""
+
+    __namespace__ = "sig_tests"
+    key: str
+    width: Annotated[int, StardagField(significance="dependencies_only")]
+
+    def run(self) -> None:
+        return None
+
+
+class Holder(sd.Task[int]):
+    """A task whose parameter is a configured task."""
+
+    __namespace__ = "sig_tests"
+    inner: Fanout
+
+    def run(self) -> None:
+        return None
+
+
+KEY = "sig_tests.Fanout"
+
+
+class TestSignificanceOnTheModel:
+    def test_defaults_apply_without_a_build_config(self):
+        task = Fanout(key="a")
+        assert (task.partition_size, task.threads) == (100, 1)
+        assert get_build_config() is None
+
+    @pytest.mark.parametrize("field", ["partition_size", "threads"])
+    def test_non_identity_fields_cannot_be_passed_at_init(self, field: str):
+        with pytest.raises(ValidationError, match="build config"):
+            # Plain validation is init: only ``mode="compat"`` (registry data)
+            # tolerates the field being present.
+            Fanout.model_validate({"key": "a", field: 7})
+
+    def test_values_are_resolved_from_the_build_config(self):
+        with build_config_scope({KEY: {"partition_size": 250, "threads": 8}}):
+            task = Fanout(key="a")
+        assert (task.partition_size, task.threads) == (250, 8)
+
+    def test_levels_two_and_three_do_not_move_the_id(self):
+        plain = Fanout(key="a")
+        with build_config_scope({KEY: {"partition_size": 250, "threads": 8}}):
+            configured = Fanout(key="a")
+        assert configured.id == plain.id
+
+    def test_registry_mode_dump_carries_identity_only(self):
+        with build_config_scope({KEY: {"partition_size": 250, "threads": 8}}):
+            task = Fanout(key="a")
+        data = task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
+        assert "partition_size" not in data and "threads" not in data
+        assert data["key"] == "a"
+        assert data["__name"] == "Fanout"
+        # ...and the ordinary dump still shows the effective values.
+        assert task.model_dump()["partition_size"] == 250
+
+    def test_compat_validation_strips_a_stale_value(self):
+        """Registry data written before significance existed carries the
+        value; rehydration drops it and resolves from the config instead."""
+        with build_config_scope({KEY: {"partition_size": 9}}):
+            task = Fanout.model_validate(
+                {"key": "a", "version": "1", "partition_size": 42, "threads": 3},
+                context={CONTEXT_MODE_KEY: "compat"},
+            )
+        assert task.partition_size == 9
+        assert task.threads == 1
+
+    def test_compat_mode_lets_the_config_win_over_a_stale_value(self):
+        """Both present: the stored value is old data, the config is the
+        build's; the config wins for every non-identity field it names."""
+        with build_config_scope({KEY: {"partition_size": 9, "threads": 4}}):
+            task = Fanout.model_validate(
+                {"key": "a", "version": "1", "partition_size": 42, "threads": 3},
+                context={CONTEXT_MODE_KEY: "compat"},
+            )
+        assert (task.partition_size, task.threads) == (9, 4)
+
+    def test_rebind_re_resolves_from_the_installed_config(self):
+        task = Fanout(key="a")
+        with build_config_scope({KEY: {"partition_size": 3}}):
+            rebound = rebind_to_build_config(task)
+        assert isinstance(rebound, Fanout)
+        assert rebound.partition_size == 3
+        assert rebound.id == task.id
+
+    def test_a_required_level_two_field_needs_the_config(self):
+        # ``model_validate`` rather than the constructor: the field has no
+        # default, so the static signature demands it, while at runtime the
+        # build config is the only place it may come from.
+        with pytest.raises(ValidationError, match="width"):
+            Required.model_validate({"key": "a"})
+        with build_config_scope({"sig_tests.Required": {"width": 5}}):
+            assert Required.model_validate({"key": "a"}).width == 5
+
+    def test_compat_default_is_refused_on_a_non_identity_field(self):
+        with pytest.raises(ValueError, match="compat_default"):
+            StardagField(compat_default=1, significance="execution_only")
+
+    def test_hash_exclude_reads_as_execution_only(self):
+        with pytest.warns(DeprecationWarning):
+            legacy = StardagField(hash_exclude=True)
+        assert legacy.effective_significance == "execution_only"
+        assert not legacy.is_identity
+        assert field_significance(Fanout.model_fields["key"]) == "identity"
+        assert (
+            field_significance(Fanout.model_fields["partition_size"])
+            == "dependencies_only"
+        )
+
+    def test_field_significance_by_kind(self):
+        with pytest.warns(DeprecationWarning):
+
+            class Mixed(StardagBaseModel):
+                plain: int = 0
+                legacy: Annotated[int, StardagField(hash_exclude=True)] = 0
+                explicit: Annotated[
+                    int, StardagField(significance="execution_only")
+                ] = 0
+                compat: Annotated[int, StardagField(compat_default=0)] = 0
+
+        fields = Mixed.model_fields
+        assert field_significance(fields["plain"]) == "identity"
+        assert field_significance(fields["legacy"]) == "execution_only"
+        assert field_significance(fields["explicit"]) == "execution_only"
+        assert field_significance(fields["compat"]) == "identity"
+
+    def test_non_identity_fields_are_the_build_config_fields_and_cached(self):
+        with pytest.warns(DeprecationWarning):
+
+            class Mixed(StardagBaseModel):
+                plain: int = 0
+                legacy: Annotated[int, StardagField(hash_exclude=True)] = 0
+                deps: Annotated[int, StardagField(significance="dependencies_only")] = 0
+                exec_: Annotated[int, StardagField(significance="execution_only")] = 0
+
+        first = Mixed._non_identity_fields()
+        assert first == ("deps", "exec_")
+        assert Mixed._non_identity_fields() is first
+
+    def test_registry_dump_drops_nested_non_identity_fields_too(self):
+        """A configured task nested as a parameter is serialised by its own
+        class, under the same context, so its level 2/3 fields are dropped
+        from the outer payload as well."""
+        with build_config_scope({KEY: {"partition_size": 250, "threads": 8}}):
+            holder = Holder(inner=Fanout(key="a"))
+        data = holder.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
+        assert data["inner"]["key"] == "a"
+        assert "partition_size" not in data["inner"]
+        assert "threads" not in data["inner"]
+        # And rehydration under compat mode resolves the nested task from the
+        # config installed at that point.
+        with build_config_scope({KEY: {"partition_size": 3}}):
+            rebuilt = Holder.model_validate(data, context={CONTEXT_MODE_KEY: "compat"})
+        assert rebuilt.inner.partition_size == 3
+        assert rebuilt.id == holder.id
+
+
+class TestLegacyHashExcludeInPayloads:
+    """A deprecated ``hash_exclude=True`` field may still be passed at init,
+    so a task registered with a non-default value must rehydrate with it:
+    dropped from the hash, kept in the registry payload. An explicit
+    ``execution_only`` field is in neither — its value lives in the build
+    config."""
+
+    @pytest.fixture
+    def legacy(self):
+        with pytest.warns(DeprecationWarning):
+
+            class Legacy(sd.Task[int]):
+                __namespace__ = "sig_legacy"
+                key: str
+                knob: Annotated[int, StardagField(hash_exclude=True)] = 1
+                threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+                def run(self):
+                    return None
+
+        return Legacy
+
+    def test_hash_excluded_value_is_stored_but_not_hashed(self, legacy):
+        task = legacy(key="a", knob=7)
+        registry_data = task.model_dump(
+            mode="json", context={CONTEXT_MODE_KEY: "registry"}
+        )
+        hash_data = task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "hash"})
+        assert registry_data["knob"] == 7
+        assert "knob" not in hash_data
+        assert "threads" not in registry_data and "threads" not in hash_data
+        # And the id does not move with the knob.
+        assert legacy(key="a", knob=7).id == legacy(key="a").id
+
+    def test_a_stored_value_rehydrates(self, legacy):
+        data = legacy(key="a", knob=7).model_dump(
+            mode="json", context={CONTEXT_MODE_KEY: "registry"}
+        )
+        rebuilt = legacy.model_validate(data, context={CONTEXT_MODE_KEY: "compat"})
+        assert rebuilt.knob == 7
+
+
+class TestSignificanceIsChecked:
+    def test_hash_exclude_with_an_explicit_significance_is_refused(self):
+        """The deprecated flag and an explicit non-identity significance
+        disagree about init (one allows it, the other refuses), so the pair
+        is contradictory rather than redundant."""
+        with pytest.warns(DeprecationWarning):
+            with pytest.raises(ValueError, match="contradictory"):
+                StardagField(hash_exclude=True, significance="execution_only")
+        with pytest.warns(DeprecationWarning):
+            legacy = StardagField(hash_exclude=True)
+        assert legacy.is_legacy_hash_exclude and not legacy.is_build_config_field
+        assert legacy.effective_significance == "execution_only"
+        explicit = StardagField(significance="dependencies_only")
+        assert explicit.is_build_config_field and not explicit.is_legacy_hash_exclude
+
+    def test_a_typo_is_refused_at_field_creation(self):
+        """A Literal is a hint; an unchecked typo would read as non-identity
+        on the model and as execution-only in the structure hash."""
+        with pytest.raises(ValueError, match="dependencies_only") as excinfo:
+            StardagField(significance="dependencies-only")  # type: ignore[arg-type]
+        assert "identity" in str(excinfo.value)
+        assert "execution_only" in str(excinfo.value)
