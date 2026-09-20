@@ -102,12 +102,13 @@ Try it: start a reactive build (below), change something in `tasks.py` that
 alters the structure — say, which shards `report_dag` yields — commit, and
 run the deploy command again while the build is in flight.
 
-Two preconditions, both already met by this app: the deploy must have been
-recorded (the command exits non-zero if it could not reach the registry),
-and the app declares `task_modules`, so ticks rebuild tasks from registry
-data rather than from pickles a previous deployment wrote. The code id is
-the git SHA of a clean checkout; a dirty tree gets a one-off id and a
-warning, so commit before deploying.
+One precondition, already met by this app: the deploy must have been
+recorded (the command exits non-zero if it could not reach the registry).
+What makes the re-plan safe is that a tick rebuilds every task from the
+registry's identity-level data under its own code — which needs the app's
+`task_modules` to name the modules defining those classes, as this one
+does. The code id is the git SHA of a clean checkout; a dirty tree gets a
+one-off id and a warning, so commit before deploying.
 
 **A branch beside production** is simply another app name with its own
 single live version — a convention, not a feature:

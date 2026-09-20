@@ -6,6 +6,99 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## Unreleased
+
+### Registry data is the only task representation
+
+v0.24.0 made a running reactive build **follow the live deployment**: the
+first scheduler tick on new code re-plans the build under its own scope and
+drives on. That is only fully safe when no task object carries state from
+the code that planned the build — and one did. Reactive builds also wrote
+each task object as a **pickle** to the target root, under
+`_stardag_builds/<build-id>/tasks/`, and a tick loaded that pickle in
+preference to rebuilding the task.
+
+Stdlib `pickle` stores classes **by reference**, so such a pickle never
+carried old _code_; the class resolved to whatever the loading process had.
+What it carried was old _state_: every `dependencies_only` /
+`execution_only` value exactly as the writing code's defaults or config
+resolved it. v0.24.0 patched around that — re-binding a pickle it could
+rebuild, and **refusing the rollover entirely** for a deployment that might
+store pickles it could not. This release removes the cause instead.
+
+**A task is now rebuilt from the registry's `task_data` and the
+deployment's importable code, always.** `task_data` is the registry-mode
+dump — identity parameters only — so a rebuilt task resolves its level 2
+and 3 fields from the build config installed where it is rebuilt, under the
+code running there. There is nothing left for a redeploy to invalidate.
+
+### What changes for you
+
+- **`task_modules` is now required for reactive builds.** It was
+  recommended; with no pickle fallback it is the whole contract. The
+  default still infers `"<root package of the module defining the app>.*"`,
+  and **that inferred value is now the real declaration** — it used to be
+  observation-only, precisely because it gated pickle elision.
+  `build_trigger(reactive=True)` on an app with no task modules (defined in
+  `__main__` or a loose script, or `task_modules=[]`) raises immediately,
+  before a build id is minted. Resident builds are unaffected.
+- **A reactive build is refused if any incomplete task cannot be rebuilt.**
+  The bootstrap dry-runs the reconstruction over the whole discovered set
+  and raises `TaskModulesError` naming every offending class, its task id,
+  the reason, and the `task_modules` entry that would cover it — failing
+  the build in the registry and propagating on
+  `result.function_call.get()`. This is what `require_pickle_free=True`
+  used to do on request; it is now simply how it works.
+- **Rollover has no precondition but the deployment record.** The
+  `rollover_failed` refusal for "this deployment stores task pickles" is
+  gone. A build now fails a rollover only when the new deployment genuinely
+  cannot rebuild one of its tasks.
+- **No target-root write access is needed at plan time**, on any reactive
+  build. The store was the only writer, and a `modalvol://` or object-locked
+  root no longer needs a carve-out.
+- `StardagApp(require_pickle_free=...)` is **accepted, deprecated and
+  ignored** (a `DeprecationWarning`); remove it. `BuildTaskStore` is
+  removed from `stardag.build`, `run_tick_aio` no longer takes
+  `task_store`, and `plan_pickle_elision` / `PickleElisionPlan` are renamed
+  `plan_rehydration` / `RehydrationPlan`.
+- **`AliasTask` cannot appear as an incomplete task in a reactive build.**
+  Its `loads_type` is pickled bytes, and auto-unpickling registry-supplied
+  bytes inside a scheduler tick is a code-execution path, so rehydration
+  refuses those payloads — as it always has. It was the one case the store
+  genuinely covered, and it covered nothing real: an `AliasTask` has no
+  `run()`, so a complete one never reaches the frontier and an incomplete
+  one is a build that could not proceed either way. What changes is that
+  you are told at the trigger rather than at the stall.
+
+### Upgrading: builds already in flight
+
+**Pickles written by an older SDK are not read.** Deliberately — reading
+one is exactly the stale-state bug this removes.
+
+For a reactive build **already running** when you upgrade and redeploy,
+the rule is: it fails at its next tick if any of its incomplete tasks is
+not rebuildable from registry data, i.e. if its class is not covered by the
+deployment's `task_modules`. Every other in-flight build rolls over
+unaffected, because everything it needs was already coming from the
+registry.
+
+Two things make that narrow. Since v0.24.0 a deployment that might store
+pickles could not roll a build over **at all** — it was failed with
+`rollover_failed` — so the population that regresses is builds on an app
+that has not been redeployed since. And new builds fail at the _trigger_,
+synchronously, with every offending class named.
+
+**Recommended:** before upgrading, let in-flight reactive builds on apps
+that do not declare `task_modules` finish, or re-trigger them afterwards
+(re-triggering an existing build id is supported and resumes it).
+
+Leftover `_stardag_builds/<build-id>/tasks/*.pkl` files are never read or
+written again and can be deleted at your convenience. Stardag will not
+delete them: a target root may be immutable or append-only, and the SDK has
+no business assuming otherwise.
+
+---
+
 ## v0.24.0 — Dependency structure belongs to the code, not the task id
 
 ### The idea in one paragraph

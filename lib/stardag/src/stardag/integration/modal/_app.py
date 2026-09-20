@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import typing
+import warnings
 from uuid import UUID
 
 import modal
@@ -117,8 +118,8 @@ logger = logging.getLogger(__name__)
 # threads — the exact hazard ``_modal_tick`` is async to avoid.
 #
 # **Why 10, and why bounded at all.** Concurrency is not free per tick: each
-# holds a ``BuildTaskStore``, up to ``TickConfig.max_concurrent_actions``
-# in-flight registry calls, and a share of one HTTP connection pool (see
+# holds up to ``TickConfig.max_concurrent_actions`` in-flight registry
+# calls, and a share of one HTTP connection pool (see
 # ``APIRegistry``'s async limits, sized against this number). Ten is enough
 # that the linger stops driving container count at the scale reactive builds
 # actually run at, and small enough that one container's loss is bounded.
@@ -193,8 +194,11 @@ def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
     ``__main__``, or a loose script that Modal loads as a top-level module.
     Such a module isn't importable in a container under a stable name in
     the first place, so a pattern derived from it would be a lie. We warn
-    and opt out (the pickle path still works), rather than baking in a
-    module list that would fail to import in every tick container.
+    and opt out, rather than baking in a module list that would fail to
+    import in every tick container. An app that opts out (here or with
+    ``task_modules=[]``) is resident-only: a reactive trigger on it is
+    refused, because a scheduler tick would have no way to rebuild a
+    single one of its tasks.
 
     Args:
         _depth: Stack frames back to the user's call site (``__init__``'s
@@ -216,12 +220,12 @@ def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
         logger.warning(
             "Could not infer StardagApp(task_modules=...): the app is "
             f"defined in {module_name or 'an unknown module'!r}, which is "
-            "not part of an importable package. Reactive scheduler ticks "
-            "will therefore fall back to the build task store's pickles "
-            "(which need target-root write access at trigger time and are "
-            "invalidated by a redeploy). Declare the modules explicitly — "
-            'e.g. task_modules=["my_pkg.tasks.*"] — to let ticks '
-            "reconstruct tasks from registry data instead, or pass "
+            "not part of an importable package. This app can only run "
+            "RESIDENT builds — build_trigger(reactive=True) will be "
+            "refused, because a scheduler tick rebuilds every task it "
+            "schedules from registry data and can only do that for a "
+            "class whose module it has imported. Declare the modules "
+            'explicitly — e.g. task_modules=["my_pkg.tasks.*"] — or pass '
             "task_modules=[] to silence this warning."
         )
         return ()
@@ -295,9 +299,8 @@ class StardagApp:
         container_setup: The app's container-level setup hook, or None
             (see the ``container_setup`` argument).
         task_modules: The validated task-module patterns (see the
-            ``task_modules`` argument); empty when opted out.
-        require_pickle_free: Whether a reactive build refuses to fall
-            back to writing task pickles.
+            ``task_modules`` argument); empty when opted out, which makes
+            the app resident-only.
         reactive_discovery: Where a reactive trigger discovers the DAG
             (``"modal"`` by default; see the argument of the same name).
     """
@@ -571,45 +574,24 @@ class StardagApp:
                 than at module scope.
 
                 Default (``None``): infer ``"<root package of the module
-                defining this app>.*"``. Pass ``[]`` to opt out.
+                defining this app>.*"``. Pass ``[]`` to opt out — which
+                makes the app **resident-only**, since a reactive trigger
+                on an app with no task modules is refused.
 
-                **Declaring this explicitly is also the opt-in to skipping
-                pickles** — the inferred default only drives the coverage
-                warning. The trigger reads the local app definition while
-                the tick runs the deployed one, so if inference alone
-                elided, upgrading stardag would start dropping pickles that
-                an app deployed by an older version cannot compensate for.
-            require_pickle_free: Turn the pickle fallback from a silent
-                safety net into a hard error. With ``task_modules``
-                covering a build's classes, a reactive build writes no
-                task pickles at all and therefore needs no target-root
-                *write* access; with this flag, a build that *would* have
-                fallen back to pickling fails instead, naming every task
-                and why. Off by default (the fallback is what keeps the
-                feature additive).
-
-                The *gate* is the reactive bootstrap, where the task
-                store is written — normally in the ``bootstrap``
-                container. It fails loudly: the ``TaskModulesError``
-                records a terminal BUILD_FAILED and is re-raised on the
-                bootstrap's Modal call, so it surfaces both in the
-                registry and on
-                ``BuildTriggerResult.function_call.get()``.
-
-                The *guarantee* is separate, because the bootstrap is not
-                the only writer: a scheduler tick writes back the tasks it
-                rehydrates. Ticks of an app with this flag therefore get a
-                store that refuses every write (see
-                ``BuildTaskStore(pickle_free=...)``), which costs nothing —
-                the write-back is a cache, and on such a build every task
-                is rehydratable by construction.
-
-                One documented exception, unchanged: dynamic dependencies
-                registered from inside a worker apply the same elision but
-                never raise, and an uncovered one still gets its pickle.
-                Their task has already run, and failing its bookkeeping to
-                enforce a storage preference would be a strictly worse
-                outcome than one extra pickle.
+                **This is a precondition, not a preference.** There is no
+                second way for a tick to get a task object, so the reactive
+                bootstrap runs a dry run of the reconstruction over the
+                whole discovered DAG and **refuses the build** if any task
+                fails it, naming each class and the pattern that would
+                cover it. A class the deployment cannot import is a task
+                nothing could ever schedule; saying so at the trigger beats
+                discovering it one stalled task at a time.
+            require_pickle_free: **Deprecated and ignored.** Reactive
+                builds no longer write task pickles at all — the build task
+                store is retired and registry data is the only task
+                representation — so what this flag used to ask for is
+                simply how it works. Passing it (either value) emits a
+                ``DeprecationWarning`` and changes nothing; remove it.
             modal_workspace: Explicit Modal workspace name recorded in the
                 executor metadata of triggered builds and started tasks
                 (used by the UI for Modal dashboard deep links). Default:
@@ -722,26 +704,27 @@ class StardagApp:
         # rebuild task objects from registry data (see
         # stardag.build._task_modules). Validated eagerly — a malformed
         # pattern must fail here, not silently match nothing and surface
-        # hours later as a tick that cannot reconstruct a task.
+        # hours later as a build refused for classes the user believes
+        # they declared.
         #
-        # Whether the patterns were *declared* or merely inferred decides
-        # whether pickles may be elided — see _persist_discovered_tasks.
-        # Inference must stay observation-only: it happens on every app,
-        # including apps written before this feature existed.
-        self._task_modules_declared = task_modules is not None
+        # Declared and inferred patterns are the same thing now. They used
+        # to differ, because inference gated pickle elision and an SDK
+        # upgrade must not start dropping pickles on an app's behalf;
+        # with no pickles to drop there is nothing left for the
+        # distinction to gate, and an app whose tasks live under its own
+        # root package is exactly the app the inferred pattern serves.
         if task_modules is None:
             task_modules = _infer_task_module_patterns()
         self.task_modules: tuple[str, ...] = validate_task_module_patterns(task_modules)
-        if require_pickle_free and not self.task_modules:
-            raise TaskModulesError(
-                "require_pickle_free=True is meaningless without "
-                "task_modules: with no declared modules, no task can be "
-                "reconstructed from registry data and every task would "
-                "need a pickle. Declare task_modules explicitly (if you "
-                "left it at the default, inference was not possible — see "
-                "the warning above), or drop require_pickle_free."
+        if require_pickle_free:
+            warnings.warn(
+                "StardagApp(require_pickle_free=...) is deprecated and "
+                "ignored: reactive builds no longer write task pickles at "
+                "all (the build task store is retired), so every reactive "
+                "build is pickle-free by construction. Remove the argument.",
+                DeprecationWarning,
+                stacklevel=2,
             )
-        self.require_pickle_free = require_pickle_free
         # Explicit Modal workspace name for executor metadata (UI deep
         # links). Default: resolved from the Modal token, best-effort.
         # Used by build_trigger and by the tick's executor; the resident
@@ -1149,14 +1132,6 @@ class StardagApp:
             ),
             task_modules=tuple(task_modules),
             task_module_patterns=task_module_patterns,
-            # The tick writes to the build task store too (rehydrating a
-            # task writes it back), so the flag has to reach it or the
-            # "writes no pickles" promise holds only until the first tick.
-            require_pickle_free=self.require_pickle_free,
-            # The rollover gate: whether this deployment leaves pickles in
-            # the store. Declared modules, not inferred ones — inference
-            # is observation-only and keeps the store in use.
-            elide_pickles=self._task_modules_declared or self.require_pickle_free,
         )
 
         # ``async def`` on purpose, and load-bearing. Modal serves
@@ -1192,9 +1167,6 @@ class StardagApp:
         # cloudpickled into the call exactly as build_spawn passes
         # ``tasks=`` to the builder — so the DAG is walked here, next to
         # the mounted target root, instead of on the triggering machine.
-        elide_pickles = self._task_modules_declared or self.require_pickle_free
-        require_pickle_free = self.require_pickle_free
-
         def _modal_bootstrap(
             build_id: str,
             tasks: typing.Sequence[BaseTask] | BaseTask,
@@ -1213,15 +1185,12 @@ class StardagApp:
                     registry=registry,
                     app_name=app_name,
                     tick_kwargs=tick_kwargs,
-                    # The DEPLOYED module list and elision opt-in, frozen
-                    # here alongside the tick's. The trigger does not
-                    # supply them, which is what makes the coverage
-                    # pre-flight compare the DAG against what the ticks
-                    # will actually import rather than against the
-                    # caller's local app definition.
+                    # The DEPLOYED module list, frozen here alongside the
+                    # tick's. The trigger does not supply it, which is what
+                    # makes the rehydration pre-flight compare the DAG
+                    # against what the ticks will actually import rather
+                    # than against the caller's local app definition.
                     task_module_patterns=task_module_patterns,
-                    elide_pickles=elide_pickles,
-                    require_pickle_free=require_pickle_free,
                     limit_key_selector=tick_deployment.limit_key_selector,
                     build_config=build_config,
                 )
@@ -1424,6 +1393,26 @@ class StardagApp:
             )
         if reactive:
             tick_kwargs = _validate_tick_kwargs(tick_kwargs)
+            if not self.task_modules:
+                # Refused here, before a build id is minted: a scheduler
+                # tick rebuilds every task it schedules from the registry's
+                # stored task_data, and can only resolve a class whose
+                # defining module it has imported. With no task modules it
+                # imports none, so this app's every reactive build would
+                # fail its first tick, task by task. Resident builds are
+                # unaffected — they hold the real objects.
+                raise TaskModulesError(
+                    "build_trigger(reactive=True) needs task_modules, and "
+                    f"this app ({self.name!r}) has none. A reactive "
+                    "scheduler tick reconstructs every task from registry "
+                    "data and can resolve only classes whose modules it "
+                    'imported. Pass task_modules=["my_pkg.tasks.*"] to '
+                    "StardagApp (the default infers it from the app's own "
+                    "package, which is not possible for an app defined in "
+                    "__main__ or a loose script — see the warning at "
+                    "construction), or use a resident build "
+                    "(build_spawn / build_trigger without reactive=True)."
+                )
         if build_config:
             _validate_build_config_at_trigger(build_config)
             # Stored with the build and forwarded to every worker as JSON,
@@ -1563,8 +1552,8 @@ class StardagApp:
           into the call, exactly as :meth:`build_spawn` passes ``tasks=``
           to the builder) and return.
 
-        The DAG walk, the task-module coverage pre-flight, the task-store
-        writes, the reactive marker and the first tick all live in the
+        The DAG walk, the rehydration pre-flight, the reactive marker and
+        the first tick all live in the
         bootstrap container — see :func:`run_reactive_bootstrap`, which
         also documents the ordering guarantee that keeps a tick from ever
         seeing a partially-registered DAG. Triggering is therefore fast
@@ -1651,10 +1640,6 @@ class StardagApp:
                         tick_kwargs=tick_kwargs,
                         build_config=build_config,
                         task_module_patterns=self.task_modules,
-                        elide_pickles=(
-                            self._task_modules_declared or self.require_pickle_free
-                        ),
-                        require_pickle_free=self.require_pickle_free,
                         limit_key_selector=self.limit_key_selector,
                     ).tick_call,
                 )

@@ -341,9 +341,9 @@ rejected for reasons that are not about hashing:
   currently declares it — which is the property you want from something
   persisted indefinitely.
 - **Importing a module name taken from registry data is an execution
-  primitive.** It is the same concern that keeps `AliasTask` off the
-  pickle-free path. Making it safe requires an allowlist — that is, a
-  declaration — which is `task_modules` again, only implicit.
+  primitive.** It is the same concern that keeps `AliasTask` out of
+  registry-data rehydration. Making it safe requires an allowlist — that
+  is, a declaration — which is `task_modules` again, only implicit.
 - **It is unbounded and invisible.** `task_modules` plus deploy-time
   expansion is explicit and auditable: you can see exactly which modules a
   deployment can resolve, and the redeploy requirement is visible at the
@@ -353,17 +353,18 @@ So the comparison "one key versus a large feature" is not real; the
 alternative is a key _plus_ import-on-miss _plus_ an allowlist _plus_ a
 refactoring hazard, and it is less explicit.
 
-The fair version of the critique is narrower and worth keeping in view: the
-_declaration_ (patterns, deploy-time expansion, container import) is the core
-of `task_modules`, while the _elision_ half (trigger-time pre-flight,
-conditional pickle writing, `require_pickle_free`) is an optimization on top
-and should be justified on its own terms.
-
-Related: elision follows only from an **explicit** `task_modules`
-declaration, never from the inferred default. The trigger reads the local app
-definition while the tick runs the deployed one, so if inference alone
-elided, upgrading the SDK would start dropping pickles that an app deployed
-by an older SDK has no baked-in module list to compensate for.
+The fair version of the critique was narrower and is now moot: the
+_declaration_ (patterns, deploy-time expansion, container import) was always
+the core of `task_modules`, while the _elision_ half (trigger-time
+pre-flight, conditional pickle writing, `require_pickle_free`) read as an
+optimization on top that had to be justified on its own terms. **That half
+no longer exists.** STA-69 retired the pickle store outright, so there is
+nothing to elide: registry data is the only task representation, the
+pre-flight is a precondition rather than an optimization, and
+`require_pickle_free` is a deprecated no-op. The same change made the
+inferred default load-bearing — the reason it was observation-only was
+precisely that it gated elision, and an SDK upgrade must not start dropping
+pickles on an app's behalf.
 
 ### 4. `last_active_at` and `last_activity_at` are different things
 

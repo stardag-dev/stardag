@@ -22,7 +22,6 @@ from stardag import (
     flatten_task_struct,
 )
 from stardag.build import (
-    BuildTaskStore,
     DetachedExecutionStatus,
     DetachedHandle,
     TaskExecutorABC,
@@ -962,33 +961,20 @@ class FakeTickExecutor(TaskExecutorABC):
         pass
 
 
-class InMemoryTaskStore(BuildTaskStore):
-    """BuildTaskStore on a dict — no target roots needed in engine tests.
+def registry_body(task: BaseTask) -> dict:
+    """The ``task_data`` the registry stores for ``task``.
 
-    Pickle-only now: the reactive marker/owner/config live in the registry
-    (see ``FakeReactiveRegistry.reactive_meta``), not the store.
-
-    Overrides the ``_write_task`` hooks, not ``save_task`` itself, so the
-    base class's ``pickle_free`` guard applies here exactly as it does in
-    production. A double that wrote where the real store refuses would make
-    the tests for that guard vacuous.
+    Exactly what ``_get_task_data_for_registration`` sends: the
+    **registry-mode** dump, identity parameters only. Tests that stage a
+    task for a tick to rebuild must use this and not a plain
+    ``model_dump()`` — a full dump carries the ``dependencies_only`` /
+    ``execution_only`` values *this* process resolved, which is the state
+    the pickle store used to smuggle across a redeploy and the reason it
+    was retired.
     """
+    from stardag.base_model import CONTEXT_MODE_KEY
 
-    def __init__(self, build_id: UUID, *, pickle_free: bool = False):
-        super().__init__(build_id, pickle_free=pickle_free)
-        self._tasks: dict[str, BaseTask] = {}
-
-    def _write_task(self, task: BaseTask) -> None:
-        self._tasks[str(task.id)] = task
-
-    def load_task(self, task_id):
-        return self._tasks.get(str(task_id))
-
-    async def _write_task_aio(self, task: BaseTask) -> None:
-        self._write_task(task)
-
-    async def load_task_aio(self, task_id):
-        return self.load_task(task_id)
+    return task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
 
 
 # =============================================================================
@@ -1017,8 +1003,15 @@ def _setup(
 ) -> tuple[
     FakeReactiveRegistry,
     FakeTickExecutor,
-    InMemoryTaskStore,
 ]:
+    """A fake registry holding ``tasks``, and an executor to run them.
+
+    Every task is registered *with its ``task_data``*, because that is the
+    only thing a tick can rebuild a task object from. A test that wants to
+    stage the absence of a task object omits the body (see
+    ``registry.metadata_bodies``), which is the fake's stand-in for a class
+    the tick cannot import.
+    """
     root = tasks[-1]
     registry = FakeReactiveRegistry(
         root_task_ids=[str(root.id)], auto_complete=auto_complete
@@ -1033,12 +1026,10 @@ def _setup(
             str(task.id),
             upstreams={str(d.id) for d in flatten_task_struct(task.requires())},
         )
-    store = InMemoryTaskStore(uuid4())
-    store.save_tasks(tasks)
+        registry.metadata_bodies[str(task.id)] = registry_body(task)
     return (
         registry,
         executor or FakeTickExecutor(),
-        store,
     )
 
 

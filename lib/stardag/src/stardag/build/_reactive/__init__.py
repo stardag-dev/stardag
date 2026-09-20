@@ -41,12 +41,12 @@ with detached support. Requirements and current limitations:
 
 - A real registry (frontier computation is registry-backed; the reactive
   marker/owner live in the frontier's ``reactive_app_name``).
-- Task objects are rehydrated from the :class:`BuildTaskStore` — written by
-  the trigger (initial discovery) and by workers (dynamic deps) — or, when
-  the pickle is absent, reconstructed from the registry's stored task data.
-  The latter resolves only *registered* classes, i.e. classes whose
-  defining module the tick process has imported; see
-  ``stardag.build._task_modules`` for how an app declares those.
+- Task objects are rebuilt from the registry's stored ``task_data`` — the
+  identity-level dump written at registration — and nothing else. That
+  resolves only *registered* classes, i.e. classes whose defining module
+  the tick process has imported; see ``stardag.build._task_modules`` for
+  how an app declares those, and why a reactive build whose classes it
+  does not cover is refused at the bootstrap rather than stalled later.
 - The global concurrency lock and build-local ``ConcurrencyConfig`` limits
   are not applied by ticks (infra-level limits, e.g. Modal per-function
   ``concurrency_limit``, still apply). Registry-backed named limits *are*

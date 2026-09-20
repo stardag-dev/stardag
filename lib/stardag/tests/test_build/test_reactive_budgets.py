@@ -40,7 +40,7 @@ class TestRetryPath:
         to pending by discovery (retry_failed=True) and the re-triggered
         build runs to completion instead of FAIL_FASTing on tick 1."""
         (root,) = _chain("retry-root")
-        registry, executor, store = _setup([root])
+        registry, executor = _setup([root])
         registry.add_task(str(root.id), status="failed")
 
         # What the reactive trigger does on (re-)trigger:
@@ -54,7 +54,6 @@ class TestRetryPath:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
         assert summary.terminal_status == "completed"
@@ -68,7 +67,7 @@ class TestRetryPath:
         permanently unschedulable, since the re-trigger's retry skipped it.
         It is now reset like any other non-completed status."""
         (root,) = _chain("suspended-retry-root")
-        registry, executor, store = _setup([root])
+        registry, executor = _setup([root])
         registry.add_task(str(root.id), status="suspended")
 
         result = await discover_and_register_aio(
@@ -82,7 +81,6 @@ class TestRetryPath:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
         assert summary.terminal_status == "completed"
@@ -95,7 +93,7 @@ class TestRetryPath:
         retry_failed=False, so widening the retryable set cannot make a
         suspending worker reset its own task."""
         (root,) = _chain("suspended-worker-root")
-        registry, _, _ = _setup([root], auto_complete=False)
+        registry, _ = _setup([root], auto_complete=False)
         registry.add_task(str(root.id), status="suspended")
 
         result = await discover_and_register_aio(registry, uuid4(), root)
@@ -110,14 +108,13 @@ class TestRetryPath:
         """Control: without the retry, the failed status poisons the build
         (the pre-fix behavior the stack review flagged)."""
         (root,) = _chain("poison-root")
-        registry, executor, store = _setup([root])
+        registry, executor = _setup([root])
         registry.add_task(str(root.id), status="failed")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
         assert summary.terminal_status == "failed"
@@ -157,13 +154,12 @@ class TestAttemptBudget:
         build — bounded, not a loop."""
         (root,) = _chain("budget-spawn-fail")
         executor = SpawnFailingExecutor()
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,  # max_attempts=2, FAIL_FAST
         )
 
@@ -185,7 +181,7 @@ class TestAttemptBudget:
         failure recorded on the way there."""
         (root,) = _chain("budget-probe-retry")
         executor = FakeTickExecutor(statuses={"fc-oom": DetachedExecutionStatus.FAILED})
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -198,7 +194,6 @@ class TestAttemptBudget:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -222,7 +217,7 @@ class TestAttemptBudget:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -236,7 +231,6 @@ class TestAttemptBudget:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=FAST_TICK,
             )
 
@@ -268,7 +262,7 @@ class TestAttemptBudget:
         reason this message exists.
         """
         (root,) = _chain("budget-operator-retry")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         # Exactly what `stardag tasks retry` / the UI's Retry leaves behind:
         # pending again, with the attempts already spent.
         registry.add_task(str(root.id), status="pending", attempt_count=2)
@@ -278,7 +272,6 @@ class TestAttemptBudget:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=FAST_TICK,
             )
 
@@ -312,14 +305,13 @@ class TestAttemptBudget:
         """
         build_id = uuid4()
         (root,) = _chain("budget-round-reset")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         registry.add_task(str(root.id), status="pending", attempt_count=2)
 
         refused = await run_tick_aio(
             build_id,
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -338,7 +330,6 @@ class TestAttemptBudget:
             build_id,
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -355,14 +346,13 @@ class TestAttemptBudget:
         """0 is "not attempted in this build", never "out of budget" — even
         with retries switched off entirely."""
         (root,) = _chain("budget-zero-count")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         registry.add_task(str(root.id), status="pending", attempt_count=0)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=1
             ),
@@ -379,14 +369,13 @@ class TestAttemptBudget:
         suspend-heavy task is "over budget" while perfectly healthy. Gating
         it would cap dynamic dependencies, not retries."""
         (root,) = _chain("budget-suspended")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         registry.add_task(str(root.id), status="suspended", attempt_count=5)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=2
             ),
@@ -403,14 +392,13 @@ class TestAttemptBudget:
         the second reading finds the same absence. Retrying it would burn
         the budget to arrive at the same failure, later."""
         (root,) = _chain("budget-no-object")
-        registry, executor, store = _setup([root], auto_complete=False)
-        store._tasks.pop(str(root.id), None)  # no pickle, no registry data
+        registry, executor = _setup([root], auto_complete=False)
+        registry.metadata_bodies.pop(str(root.id), None)  # nothing to rebuild from
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -427,13 +415,12 @@ class TestAttemptBudget:
         """The pre-``max_attempts`` behaviour, still available verbatim."""
         (root,) = _chain("budget-disabled")
         executor = SpawnFailingExecutor()
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=1
             ),
@@ -454,7 +441,7 @@ class TestAttemptBudget:
         policy silently doing nothing is its own trap."""
         (root,) = _chain("budget-old-server")
         executor = SpawnFailingExecutor()
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.serves_attempt_counts = False
 
         with caplog.at_level("WARNING"):
@@ -462,7 +449,6 @@ class TestAttemptBudget:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=FAST_TICK,
             )
 
@@ -482,13 +468,12 @@ class TestAttemptBudget:
         this build fail on a transient error?" is answerable without logs."""
         (root,) = _chain("budget-summary")
         executor = SpawnFailingExecutor()
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
 
         await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -520,14 +505,13 @@ class TestInterruptedTasks:
         """No configuration involved: the status exists only because a
         worker asked to be resumed, so the tick resumes it."""
         (root,) = _chain("interrupted-default")
-        registry, executor, store = _setup([root], auto_complete=True)
+        registry, executor = _setup([root], auto_complete=True)
         registry.statuses[str(root.id)] = "interrupted"
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -544,14 +528,13 @@ class TestInterruptedTasks:
         """An INTERRUPTED task is one that asked to be resumed, so it goes
         straight back to the frontier with no failure in its history."""
         (root,) = _chain("interrupted-restart")
-        registry, executor, store = _setup([root], auto_complete=True)
+        registry, executor = _setup([root], auto_complete=True)
         registry.statuses[str(root.id)] = "interrupted"
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
@@ -571,14 +554,13 @@ class TestInterruptedTasks:
         """Exempt from the attempt budget does not mean unbounded: a task
         that times out forever must stop, with a message naming the knob."""
         (root,) = _chain("interrupted-exhausted")
-        registry, executor, store = _setup([root], auto_complete=True)
+        registry, executor = _setup([root], auto_complete=True)
         registry.add_task(str(root.id), status="interrupted", interrupt_count=3)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
@@ -600,7 +582,7 @@ class TestInterruptedTasks:
         interruptions with ``max_attempts=2`` — a task charged for them
         would already be refused a start."""
         (root,) = _chain("interrupted-not-an-attempt")
-        registry, executor, store = _setup([root], auto_complete=True)
+        registry, executor = _setup([root], auto_complete=True)
         registry.add_task(str(root.id), status="interrupted", interrupt_count=2)
         assert registry.attempt_count(str(root.id)) == 1
 
@@ -608,7 +590,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
@@ -652,7 +633,7 @@ class TestInterruptedTasks:
                     return DetachedExecutionStatus.RUNNING
                 return DetachedExecutionStatus.FAILED
 
-        registry, executor, store = _setup(
+        registry, executor = _setup(
             [root], auto_complete=True, executor=SettlingExecutor()
         )
         registry.add_task(
@@ -666,7 +647,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -686,7 +666,7 @@ class TestInterruptedTasks:
         A permanently-live ref lingers out rather than duplicating the
         execution."""
         (root,) = _chain("interrupted-still-live")
-        registry, executor, store = _setup(
+        registry, executor = _setup(
             [root],
             auto_complete=False,
             executor=FakeTickExecutor(
@@ -704,7 +684,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(linger_seconds=0.1, poll_interval_seconds=0.02),
         )
 
@@ -719,7 +698,7 @@ class TestInterruptedTasks:
         """The control for the guard above: a ref that probes FAILED is a
         finished execution, so the task is the scheduler's to start."""
         (root,) = _chain("interrupted-dead-ref")
-        registry, executor, store = _setup(
+        registry, executor = _setup(
             [root],
             auto_complete=True,
             executor=FakeTickExecutor(
@@ -737,7 +716,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
@@ -758,7 +736,7 @@ class TestInterruptedTasks:
         would wedge the build rather than protect it."""
         (root,) = _chain("interrupted-unknown-ref")
         # FakeTickExecutor answers UNKNOWN for any ref it was not told about.
-        registry, executor, store = _setup([root], auto_complete=True)
+        registry, executor = _setup([root], auto_complete=True)
         registry.add_task(
             str(root.id),
             status="interrupted",
@@ -770,7 +748,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
@@ -787,7 +764,7 @@ class TestInterruptedTasks:
         loop, so resumption degrades to the bounded thing rather than to an
         unbounded one."""
         (root,) = _chain("interrupted-no-counter")
-        registry, executor, store = _setup([root], auto_complete=True)
+        registry, executor = _setup([root], auto_complete=True)
         registry.statuses[str(root.id)] = "interrupted"
         registry.serves_interrupt_counts = False
 
@@ -795,7 +772,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
@@ -813,14 +789,13 @@ class TestInterruptedTasks:
         what must not happen when the platform, not the task, ended the
         run. The dep is interrupted and the build still completes."""
         dep, root = _chain("ff-dep", "ff-root")
-        registry, executor, store = _setup([dep, root], auto_complete=True)
+        registry, executor = _setup([dep, root], auto_complete=True)
         registry.statuses[str(dep.id)] = "interrupted"
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
@@ -849,7 +824,7 @@ class TestInterruptedTasks:
         broken = SyncOnlyTask(name="ff-cancel-broken", deps=())
         resuming = SyncOnlyTask(name="ff-cancel-resuming", deps=())
         root = SyncOnlyTask(name="ff-cancel-root", deps=(broken, resuming))
-        registry, executor, store = _setup(
+        registry, executor = _setup(
             [broken, resuming, root],
             auto_complete=False,
             executor=FakeTickExecutor(
@@ -868,7 +843,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.05,
                 poll_interval_seconds=0.02,
@@ -898,7 +872,7 @@ class TestInterruptedTasks:
         broken = SyncOnlyTask(name="ff-fresh-broken", deps=())
         resuming = SyncOnlyTask(name="ff-fresh-resuming", deps=())
         root = SyncOnlyTask(name="ff-fresh-root", deps=(broken, resuming))
-        registry, executor, store = _setup(
+        registry, executor = _setup(
             [broken, resuming, root],
             auto_complete=False,
             # The interrupted task's OLD ref is dead, so the pass resumes it.
@@ -918,7 +892,6 @@ class TestInterruptedTasks:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.05,
                 poll_interval_seconds=0.02,

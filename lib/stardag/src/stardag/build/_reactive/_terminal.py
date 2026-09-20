@@ -8,7 +8,6 @@ from stardag.build._base import (
     FailMode,
     TaskExecutorABC,
 )
-from stardag.build._task_store import BuildTaskStore
 from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.registry import (
     BuildExecution,
@@ -52,7 +51,6 @@ async def _handle_terminal(
     build_id: UUID,
     registry: RegistryABC,
     task_executor: TaskExecutorABC,
-    task_store: BuildTaskStore,
     config: TickConfig,
     summary: TickSummary,
     denied_this_round: int = 0,
@@ -65,9 +63,7 @@ async def _handle_terminal(
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
         if frontier.build_status == "cancelled":
             # Cancelled externally (e.g. UI): stop the running work.
-            await _cancel_running(
-                frontier, build_id, registry, task_executor, task_store, summary
-            )
+            await _cancel_running(frontier, build_id, registry, task_executor, summary)
         return frontier.build_status
 
     counts = frontier.status_counts
@@ -75,9 +71,7 @@ async def _handle_terminal(
     failed = counts.get("failed", 0)
 
     if failed > 0 and config.fail_mode == FailMode.FAIL_FAST:
-        await _cancel_running(
-            frontier, build_id, registry, task_executor, task_store, summary
-        )
+        await _cancel_running(frontier, build_id, registry, task_executor, summary)
         await _skip_blocked(registry, build_id, summary)
         await registry.build_fail_aio(
             build_id, f"{failed} task(s) failed (fail_mode=FAIL_FAST)"
@@ -198,7 +192,6 @@ async def _cancel_running(
     build_id: UUID,
     registry: RegistryABC,
     task_executor: TaskExecutorABC,
-    task_store: BuildTaskStore,
     summary: TickSummary,
 ) -> None:
     """Stop the detached executions **this build** is responsible for.
@@ -266,9 +259,7 @@ async def _cancel_running(
         ]
         if not remaining:
             break
-        await _stop_each(
-            remaining, build_id, registry, task_executor, task_store, summary, stopped
-        )
+        await _stop_each(remaining, build_id, registry, task_executor, summary, stopped)
     else:
         # Reached when the final pass still found work — which it then
         # stopped. So this is not "they are still running": it is "they
@@ -288,7 +279,6 @@ async def _stop_each(
     build_id: UUID,
     registry: RegistryABC,
     task_executor: TaskExecutorABC,
-    task_store: BuildTaskStore,
     summary: TickSummary,
     stopped: "set[tuple[str, str]]",
 ) -> None:
@@ -306,7 +296,7 @@ async def _stop_each(
         # gets no third chance, so the pass has to be able to retry the
         # half that failed. Re-stopping an already-stopped execution is
         # cheap; a leaked claim is not.
-        task = await _load_task(item.task_id, registry, task_store, quiet=True)
+        task = await _load_task(item.task_id, registry, quiet=True)
         if task is None:
             continue
         try:

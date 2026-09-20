@@ -1,29 +1,22 @@
 """Declaring the modules whose import registers a build's task classes.
 
-Reactive scheduling reconstructs task *objects* from data, and the two
-available paths have disjoint failure modes:
+Reactive scheduling reconstructs task *objects* from data: a scheduler
+tick is a short-lived process that learns *which* tasks are actionable
+from the registry frontier, and rebuilds each one from the identity-level
+``task_data`` the registry stored at registration
+(:func:`stardag.task_from_registry_data`). That is the **only**
+representation of a task outside a running process — there is no pickle
+store any more (see ``RELEASE_NOTES.md``).
 
-======================================  ====================================
-path                                    fails when
-======================================  ====================================
-pickle from the ``BuildTaskStore``      the app was redeployed (pickles are
-                                        same-deployment only), or the target
-                                        root is not writable
-``task_from_registry_data``             the module defining the task class
-                                        was never imported in the
-                                        reconstructing process
-======================================  ====================================
-
-The second failure mode is easy to miss. A pickle embeds
-``module.QualName`` and ``pickle.loads`` **self-imports**, so it resolves
-its class regardless of what the container happened to import. Polymorphic
-JSON carries only ``__namespace`` / ``__name``; ``get_class()`` is a plain
-dict lookup that raises ``KeyError`` and **never attempts an import**.
-Since the default namespace is ``""`` (the module path is consulted only to
-resolve an explicitly registered namespace), the stored payload generally
-contains no module locator at all. Task classes register at *class
-definition* time, so the only way to make a class resolvable is to import
-its defining module.
+Which makes one failure mode load-bearing: ``task_from_registry_data``
+fails when the module defining the task class was never imported in the
+reconstructing process. Polymorphic JSON carries only ``__namespace`` /
+``__name``; ``get_class()`` is a plain dict lookup that raises
+``KeyError`` and **never attempts an import**. Since the default namespace
+is ``""`` (the module path is consulted only to resolve an explicitly
+registered namespace), the stored payload generally contains no module
+locator at all. Task classes register at *class definition* time, so the
+only way to make a class resolvable is to import its defining module.
 
 Meanwhile the deployed scheduler tick is defined inside stardag itself and
 drags in user modules only incidentally — whatever the app's selector
@@ -32,8 +25,8 @@ cover a DAG's task classes: DAGs are typically assembled in scripts and
 entrypoints rather than in the module defining the app.
 
 Hence this module: a way for an app to *declare* the modules whose import
-registers the task classes it may schedule, so a scheduler process can make
-itself able to reconstruct them. Nothing here is Modal-specific, and
+registers the task classes it may schedule, so a scheduler process can
+make itself able to reconstruct them. Nothing here is Modal-specific, and
 nothing here is needed by a resident (non-reactive) build — a resident
 orchestrator holds the real task objects, and workers receive tasks by
 value (self-importing, like any unpickle).
@@ -50,10 +43,10 @@ Three pieces, used at three different times:
    (:func:`last_import_failures`) so a later rehydration error can point at
    it.
 3. **Trigger time** — :func:`uncovered_task_classes` and
-   :func:`plan_pickle_elision` answer "will a tick be able to rebuild this
-   task from registry data alone?" for a concrete task set, which is what
-   lets the trigger skip writing pickles (and warn about the classes it
-   cannot skip).
+   :func:`plan_rehydration` answer "will a tick be able to rebuild this
+   task from registry data?" for a concrete task set. That is now a
+   *precondition*, not a preference: the reactive bootstrap refuses to arm
+   a build any of whose incomplete tasks fails it, naming each one.
 
 Pattern grammar
 ---------------
@@ -63,7 +56,8 @@ wildcard (``"a.b.*"``, matching ``a.b`` and everything below it). A ``*``
 anywhere but the final component, an empty pattern, or a component that is
 not a valid identifier is a :class:`TaskModulesError` — a malformed pattern
 must never degrade into a silent no-match, because the symptom would be a
-scheduler tick failing to rebuild a task hours later.
+build refused (or, for a dynamically yielded dependency, a task failed)
+with a coverage message naming classes the user believes they declared.
 
 Two deliberate expansion choices, both about what a wildcard sweeps up:
 
@@ -388,12 +382,12 @@ def set_declared_task_module_patterns(patterns: typing.Sequence[str]) -> None:
     several frames below any reference to the app object.
     """
     global _declared_patterns
-    # Normalised, not stored verbatim: these patterns drive coverage checks
-    # and the pickle-elision decision, and a stray space makes a pattern
+    # Normalised, not stored verbatim: these patterns decide whether a
+    # class is reconstructable at all, and a stray space makes a pattern
     # match nothing while still reading as a declaration at the call site.
-    # A silently-inert declaration is the worst outcome here — it turns
-    # "ticks reconstruct tasks by import" back into "ticks need the
-    # pickles" with no signal.
+    # A silently-inert declaration is the worst outcome here — every class
+    # it was meant to cover becomes one a tick cannot rebuild, with no
+    # signal until the warning or the refusal names it.
     cleaned = tuple(p.strip() for p in patterns)
     if any(not p for p in cleaned):
         raise ValueError(
@@ -465,42 +459,42 @@ def format_uncovered_message(
     declared = list(patterns) if patterns else "not declared"
     return (
         f"{head} not covered by this app's task_modules ({declared}). A "
-        "reactive scheduler tick will not be able to reconstruct them from "
-        "registry data, so they stay dependent on the build task store's "
-        f"pickles. Add {suggestions} to task_modules and redeploy the app."
-        + (f" {remedy}" if remedy else "")
+        "reactive scheduler tick reconstructs every task it schedules from "
+        "registry data, and can only do that for a class whose module it "
+        f"has imported. Add {suggestions} to task_modules and redeploy the "
+        "app." + (f" {remedy}" if remedy else "")
     )
 
 
 # =============================================================================
-# Conditional pickle elision
+# The rehydration pre-flight
 # =============================================================================
 
 
 @dataclass(frozen=True)
-class PickleElisionPlan:
-    """Which tasks still need a pickle in the build task store, and why.
+class RehydrationPlan:
+    """Which tasks a scheduler tick could rebuild from registry data, and why not.
 
-    A task needs no pickle when its class is covered by the declared
+    A task is reconstructable when its class is covered by the declared
     patterns *and* its registration payload round-trips back to the same
-    task id. Everything else keeps the pickle it would have gotten anyway,
-    so the feature is purely subtractive — nothing that works today stops
-    working because a task did not qualify.
+    task id. Anything else is unschedulable in a reactive build: the tick
+    that would put it on a worker has nothing to build the object from.
     """
 
-    pickle_free: tuple[BaseTask, ...] = ()
-    # (task, reason) for the tasks that must still be pickled
-    pickled: tuple[tuple[BaseTask, str], ...] = ()
+    reconstructable: tuple[BaseTask, ...] = ()
+    # (task, reason) for the tasks a tick could not rebuild
+    unreconstructable: tuple[tuple[BaseTask, str], ...] = ()
 
     def summary(self) -> str:
         """One-line log summary: counts, plus the distinct reasons."""
         line = (
-            f"{len(self.pickle_free)} task(s) pickle-free, {len(self.pickled)} pickled"
+            f"{len(self.reconstructable)} task(s) reconstructable, "
+            f"{len(self.unreconstructable)} not"
         )
-        if not self.pickled:
+        if not self.unreconstructable:
             return line + "."
         reasons: dict[str, int] = {}
-        for _, reason in self.pickled:
+        for _, reason in self.unreconstructable:
             reasons[reason] = reasons.get(reason, 0) + 1
         rendered = "; ".join(
             f"{reason} (x{count})" if count > 1 else reason
@@ -508,56 +502,78 @@ class PickleElisionPlan:
         )
         return f"{line} — {rendered}."
 
-    def require_pickle_free_error(self) -> str | None:
-        """Message for ``require_pickle_free``, or None if everything qualified."""
-        if not self.pickled:
+    def error(self, patterns: typing.Sequence[str]) -> str | None:
+        """The refusal message, or None when every task qualified."""
+        if not self.unreconstructable:
             return None
         lines = [
             f"  - {type(task).__module__}.{type(task).__qualname__} "
             f"(task {task.id}): {reason}"
-            for task, reason in self.pickled
+            for task, reason in self.unreconstructable
         ]
+        suggestions = sorted(
+            {
+                suggested_pattern_for(type(task).__module__)
+                for task, reason in self.unreconstructable
+                if reason == _UNCOVERED_REASON
+            }
+        )
+        declared = list(patterns) if patterns else "not declared"
         return (
-            f"require_pickle_free=True, but {len(self.pickled)} task(s) "
-            "cannot be reconstructed from registry data alone and would "
-            "need a pickle in the build task store:\n" + "\n".join(lines)
+            f"{len(self.unreconstructable)} task(s) in this build cannot be "
+            "reconstructed from registry data, so a reactive scheduler tick "
+            "could never put them on a worker:\n"
+            + "\n".join(lines)
+            + f"\n\nThis app's task_modules: {declared}."
+            + (
+                f" Add {suggestions} to task_modules and redeploy the app."
+                if suggestions
+                else ""
+            )
         )
 
 
 _UNCOVERED_REASON = "task class not covered by task_modules"
 
 
-def plan_pickle_elision(
+def plan_rehydration(
     tasks: typing.Iterable[BaseTask],
     patterns: typing.Sequence[str],
-) -> PickleElisionPlan:
-    """Decide, per task, whether the build task store still needs its pickle.
+) -> RehydrationPlan:
+    """Decide, per task, whether a scheduler tick could rebuild it.
 
     The self-check reconstructs the task from exactly the payload that
-    registration stores (``model_dump(mode="json")`` — see
-    ``_get_task_data_for_registration``), so it is a faithful dry run of
-    what a scheduler tick will do. Note this is *cheaper* than the write it
-    replaces: pure CPU, versus a per-task target-root existence check plus
-    a conditional upload.
+    registration stores — the **registry-mode** dump, identity parameters
+    only (see ``_get_task_data_for_registration``) — so it is a faithful
+    dry run of what a scheduler tick will do. Dumping in any other mode
+    would check a payload the registry does not hold: a full dump carries
+    the ``dependencies_only`` / ``execution_only`` values this process
+    resolved, which the tick reads from the build config instead.
 
     ``AliasTask`` payloads fail the check by construction (rehydration
     refuses ``__aliased`` data, whose pickled ``loads_type`` would be an
     execution primitive in a scheduler process), as do dynamically
-    generated and otherwise non-importable classes. Those are exactly the
-    cases that keep their pickles.
+    generated and otherwise non-importable classes, and any field whose
+    serialization does not round-trip to the same id.
     """
-    pickle_free: list[BaseTask] = []
-    pickled: list[tuple[BaseTask, str]] = []
+    from stardag.base_model import CONTEXT_MODE_KEY
+
+    reconstructable: list[BaseTask] = []
+    unreconstructable: list[tuple[BaseTask, str]] = []
     for task in tasks:
         if not module_is_covered(type(task).__module__, patterns):
-            pickled.append((task, _UNCOVERED_REASON))
+            unreconstructable.append((task, _UNCOVERED_REASON))
             continue
         try:
             task_from_registry_data(
-                task.model_dump(mode="json"), expected_task_id=task.id
+                task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"}),
+                expected_task_id=task.id,
             )
         except Exception as e:
-            pickled.append((task, f"registry-data round-trip failed ({e})"))
+            unreconstructable.append((task, f"registry-data round-trip failed ({e})"))
             continue
-        pickle_free.append(task)
-    return PickleElisionPlan(pickle_free=tuple(pickle_free), pickled=tuple(pickled))
+        reconstructable.append(task)
+    return RehydrationPlan(
+        reconstructable=tuple(reconstructable),
+        unreconstructable=tuple(unreconstructable),
+    )

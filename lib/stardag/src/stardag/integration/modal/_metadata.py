@@ -64,8 +64,9 @@ STARDAG_REACTIVE_ENV = "STARDAG_REACTIVE"
 """Env var flagging reactive scheduling to workers ("1" when reactive).
 
 In reactive mode the worker additionally registers dynamically yielded
-deps (with task-store persistence) and wakes the scheduler after terminal
-events — there is no resident orchestrator to do either.
+deps — which is what a later tick rebuilds them from — and wakes the
+scheduler after terminal events; there is no resident orchestrator to do
+either.
 """
 
 STARDAG_CLAIM_TTL_SECONDS_ENV = "STARDAG_CLAIM_TTL_SECONDS"

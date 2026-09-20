@@ -1,15 +1,17 @@
 """Reactive bootstrap: everything a reactive build needs before it can tick.
 
-:func:`run_reactive_bootstrap` discovers the DAG, checks task-module coverage,
-persists the task store, arms the build and spawns the first tick. It normally
+:func:`run_reactive_bootstrap` discovers the DAG, refuses it if a scheduler
+tick could not rebuild every task in it, arms the build and spawns the first
+tick. It normally
 runs **inside Modal**, as the body of the deployed ``bootstrap`` function
 (discovery is target-root I/O, which is far cheaper next to a mounted volume
 than from a laptop), and runs in the triggering process instead when an app
 opts out with ``StardagApp(reactive_discovery="local")``.
 
-Also here: the coverage checks and the pickle-elision decision the bootstrap
-applies, and :func:`_fail_build_best_effort`, the "never leave an orphan
-RUNNING build" helper its callers share.
+Also here: the rehydration pre-flight the bootstrap applies (and the
+advisory, roots-only version the trigger emits), and
+:func:`_fail_build_best_effort`, the "never leave an orphan RUNNING build"
+helper its callers share.
 """
 
 from __future__ import annotations
@@ -22,77 +24,62 @@ from uuid import UUID
 import modal
 
 from stardag import BaseTask
-from stardag.build import BuildTaskStore, discover_and_register_aio
+from stardag.build import discover_and_register_aio
 from stardag.build._reactive._discovery import DiscoveryResult
 from stardag.build._scope import code_id, structure_scope_key
 from stardag.build_config import build_config_scope, rebind_to_build_config
 from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.build._task_modules import (
-    PickleElisionPlan,
+    RehydrationPlan,
     TaskModulesError,
     expand_task_module_patterns,
     import_task_modules,
     format_uncovered_message,
-    plan_pickle_elision,
+    plan_rehydration,
     uncovered_task_classes,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _preflight_task_modules(
-    tasks: typing.Iterable[BaseTask], task_module_patterns: typing.Sequence[str]
+def _preflight_rehydration(
+    build_id: UUID,
+    tasks: typing.Iterable[BaseTask],
+    task_module_patterns: typing.Sequence[str],
 ) -> None:
-    """Warn about discovered task classes the declared patterns don't cover.
+    """Refuse to arm a build a scheduler tick could not drive. Raises.
 
     Takes the app's declared ``task_modules`` **patterns**, not the module
     list they expand to: coverage is a question about patterns, and
-    :func:`uncovered_task_classes` matches classes against them. (The
-    expansion is a separate deploy-time artifact — it is what a tick
-    imports; see :class:`stardag.integration.modal._tick._TickDeployment`.)
+    :func:`plan_rehydration` matches classes against them. (The expansion
+    is a separate deploy-time artifact — it is what a tick imports; see
+    :class:`stardag.integration.modal._tick._TickDeployment`.)
 
-    **The authoritative coverage check.** It runs wherever discovery runs
-    — normally the bootstrap container — on the set discovery just walked:
-    those are exactly the tasks a tick may have to rehydrate, and reusing
-    discovery's (pruned) walk avoids a second traversal of the DAG. It is
-    never skipped, and it is what gates ``require_pickle_free`` (via the
-    persistence step, which additionally knows about round-trip failures,
-    not just coverage).
+    **The authoritative check, and the only one.** It runs wherever
+    discovery runs — normally the bootstrap container — on the set
+    discovery just walked: those are exactly the tasks a tick will have to
+    rebuild, and reusing discovery's (pruned) walk avoids a second
+    traversal of the DAG.
 
-    **Severity is a warning, not an error** (unless
-    ``require_pickle_free``). An uncovered class is not broken: it falls
-    back to the pickle path, which is exactly how every reactive build
-    worked before ``task_modules`` existed. Failing would therefore break
-    working setups the moment they upgrade, which is precisely what "this
-    feature is additive" forbids.
+    **It raises.** A tick has no second way to get a task object since the
+    pickle store was retired, so a task that fails the dry run is one the
+    build can never schedule. The alternatives are both worse than a
+    refusal at trigger time: arming the build anyway means it runs until it
+    reaches that task and then fails it, hours later, one task at a time;
+    warning and continuing means the same thing with a log line nobody
+    reads. Here the message names every offending class at once, with the
+    ``task_modules`` entry that would cover it, before anything is spawned.
 
     In the default (bootstrap) placement these are the patterns **baked
     into the deployment at ``finalize()``** — not the caller's local app
-    definition. That closes the stale-deploy blind spot this check used to
-    carry: it compares the DAG against the patterns the deployed ticks
-    were built from, so "you changed ``task_modules`` but didn't redeploy"
-    is visible rather than silently agreeable.
-
-    Skipped entirely when the app opted out of ``task_modules`` — an app
-    that never declared any would otherwise warn about every class in
-    every DAG, on every trigger.
+    definition. So "you changed ``task_modules`` but didn't redeploy" is
+    visible rather than silently agreeable.
     """
-    if not task_module_patterns:
-        return
-    uncovered = uncovered_task_classes(tasks, task_module_patterns)
-    if not uncovered:
-        return
-    logger.warning(
-        format_uncovered_message(
-            uncovered,
-            task_module_patterns,
-            remedy=(
-                "Until then these tasks stay dependent on their "
-                "build-task-store pickles, which need target-root "
-                "write access and are invalidated by a redeploy."
-            ),
-        )
-    )
+    plan: RehydrationPlan = plan_rehydration(tasks, task_module_patterns)
+    error = plan.error(task_module_patterns)
+    if error is not None:
+        raise TaskModulesError(error)
+    logger.info(f"Build {build_id} rehydration pre-flight: {plan.summary()}")
 
 
 def _advise_uncovered_root_task_modules(
@@ -104,7 +91,7 @@ def _advise_uncovered_root_task_modules(
     :func:`_preflight_task_modules`.
 
     Purely additive early feedback, and deliberately **not** a check in
-    its own right: :func:`_preflight_task_modules` is the authoritative
+    its own right: :func:`_preflight_rehydration` is the authoritative
     one and always runs over the full discovered set wherever discovery
     runs. This looks at the **root tasks only** — a fixed, tiny set the
     trigger already holds — so it costs no ``requires()`` traversal, no
@@ -130,65 +117,11 @@ def _advise_uncovered_root_task_modules(
             remedy=(
                 "This is an early, ROOT-TASKS-ONLY note from the trigger; "
                 "the full check runs over the whole discovered DAG where "
-                "discovery runs and may name more classes."
+                "discovery runs, may name more classes, and REFUSES the "
+                "build rather than warning."
             ),
         )
     )
-
-
-def _persist_discovered_tasks(
-    build_id: UUID,
-    tasks: typing.Iterable[BaseTask],
-    *,
-    task_module_patterns: typing.Sequence[str],
-    elide_pickles: bool,
-    require_pickle_free: bool,
-) -> None:
-    """Write the build task store, skipping pickles that aren't needed.
-
-    Takes the declared ``task_modules`` **patterns** —
-    :func:`plan_pickle_elision` matches task classes against them, exactly
-    as the coverage check does.
-
-    Unless the app *opted in* (``elide_pickles``), this is byte-for-byte
-    the old behaviour: pickle everything. With opt-in, each task gets a
-    dry run of what a tick will do — reconstruct it from exactly the
-    payload registration stored — and only the ones that fail keep a
-    pickle. A build whose classes are all covered writes nothing to the
-    target root at all.
-
-    Runs **inside the bootstrap container**, which is a large part of why
-    the move is worth doing: for a ``modalvol://`` target root the store
-    is a mounted filesystem here and a rate-limited volume API from a
-    laptop. The same writes that used to be N remote calls from the
-    trigger are now N local ones.
-
-    ``elide_pickles`` is the app's opt-in — ``task_modules`` passed
-    explicitly (or ``require_pickle_free``), NOT merely inferred —
-    resolved at ``finalize()`` and baked in alongside the patterns.
-    Inference must stay observation-only: it happens for every app,
-    including apps written before the feature existed, and an SDK upgrade
-    must never start dropping pickles on its own.
-    """
-    # Deliberately NOT a ``pickle_free=require_pickle_free`` store, unlike
-    # the tick's (see ``_TickDeployment.require_pickle_free``). Here the
-    # gate below is the enforcement, and it is exact: it names the offending
-    # tasks and fails the build. A store that silently dropped the same
-    # writes would, if the gate ever stopped firing first, leave a build
-    # that starts fine and stalls later at "could not rehydrate" — strictly
-    # the worse failure. The tick has no such gate and nothing to lose: its
-    # write-back is a cache over an object it already holds.
-    store = BuildTaskStore(build_id)
-    if not task_module_patterns or not elide_pickles:
-        store.save_tasks(tasks)
-        return
-    plan: PickleElisionPlan = plan_pickle_elision(tasks, task_module_patterns)
-    if require_pickle_free:
-        error = plan.require_pickle_free_error()
-        if error is not None:
-            raise TaskModulesError(error)
-    store.save_tasks(task for task, _ in plan.pickled)
-    logger.info(f"Build {build_id} task store: {plan.summary()}")
 
 
 def _fail_build_best_effort(
@@ -248,12 +181,10 @@ def run_reactive_bootstrap(
     app_name: str,
     tick_kwargs: dict[str, typing.Any] | None,
     task_module_patterns: typing.Sequence[str],
-    elide_pickles: bool,
-    require_pickle_free: bool,
     limit_key_selector: LimitKeySelector | None = None,
     build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None = None,
 ) -> ReactiveBootstrapResult:
-    """Discover the DAG, persist it, arm the build, spawn the first tick.
+    """Discover the DAG, check it, arm the build, spawn the first tick.
 
     **First, the structure scope.** The bootstrap runs inside the
     deployment, so it knows the code id every tick and worker of this
@@ -277,14 +208,13 @@ def run_reactive_bootstrap(
     ``bootstrap`` function, because discovery is target-root I/O:
     ``complete_aio()`` is one target existence check per task, and for a
     ``modalvol://`` root that is a rate-limited Volume *API* call from
-    outside Modal versus a ``stat`` on a mounted filesystem inside it.
-    The task-store writes below move with it for the same reason. The
+    outside Modal versus a ``stat`` on a mounted filesystem inside it. The
     same code also runs at the trigger when an app opts out with
     ``StardagApp(reactive_discovery="local")``.
 
     **The ordering guarantee — do not "tidy" this.** The reactive marker
     (``build_set_reactive_meta``, which is what makes ``reactive_app_name``
-    non-None) is written **last**, after discovery *and* persistence have
+    non-None) is written **last**, after discovery *and* registration have
     completed, and a tick no-ops on any build whose ``reactive_app_name``
     is None. That ordering is the whole reason no tick can ever observe a
     partially-registered DAG. It is load-bearing, not stylistic:
@@ -319,8 +249,6 @@ def run_reactive_bootstrap(
             app_name=app_name,
             tick_kwargs=tick_kwargs,
             task_module_patterns=task_module_patterns,
-            elide_pickles=elide_pickles,
-            require_pickle_free=require_pickle_free,
             limit_key_selector=limit_key_selector,
             build_config=build_config,
         )
@@ -334,12 +262,10 @@ async def plan_under_scope_aio(
     scope_key: str,
     build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None,
     task_module_patterns: typing.Sequence[str],
-    elide_pickles: bool,
-    require_pickle_free: bool,
     limit_key_selector: LimitKeySelector | None,
     retry_failed: bool,
 ) -> DiscoveryResult:
-    """Plan ``build_id`` under ``scope_key``: discover, register, persist, move.
+    """Plan ``build_id`` under ``scope_key``: discover, register, check, move.
 
     The one planning step, shared by the reactive bootstrap (a fresh build)
     and a tick's **rollover** (a build the live deployment inherits from
@@ -347,11 +273,15 @@ async def plan_under_scope_aio(
     Discovery walks the roots under the config already installed in this
     process, registers every incomplete task with its static upstreams
     **explicitly under** ``scope_key`` — the scope of the code doing the
-    walking — checks task-module coverage, persists what a tick could not
-    rebuild from registry data, and only then moves the build's scope to
+    walking — checks that a scheduler tick could rebuild every one of them
+    from registry data, and only then moves the build's scope to
     ``scope_key``. Registering first and moving last means a scheduler that
     reads the build mid-plan still gates over the old, complete plan rather
     than a half-written new one.
+
+    Raises :class:`TaskModulesError` if the pre-flight refuses the plan —
+    for the bootstrap that fails the build at the trigger, and for a
+    rollover the tick turns it into ``rollover_failed``.
 
     ``retry_failed`` is the bootstrap's re-trigger semantic (a failed task
     is reset for another attempt); a rollover passes False, because new
@@ -365,15 +295,9 @@ async def plan_under_scope_aio(
         limit_key_selector=limit_key_selector,
         scope_key=scope_key,
     )
-    # --- task-module coverage pre-flight (see _preflight_task_modules) ---
-    _preflight_task_modules(discovery.incomplete.values(), task_module_patterns)
-    # --- task persistence, with conditional pickle elision ---
-    _persist_discovered_tasks(
-        build_id,
-        discovery.incomplete.values(),
-        task_module_patterns=task_module_patterns,
-        elide_pickles=elide_pickles,
-        require_pickle_free=require_pickle_free,
+    # --- rehydration pre-flight (see _preflight_rehydration): raises ---
+    _preflight_rehydration(
+        build_id, discovery.incomplete.values(), task_module_patterns
     )
     await registry.build_set_scope_aio(
         build_id, scope_key=scope_key, build_config=build_config
@@ -389,8 +313,6 @@ def _run_reactive_bootstrap_scoped(
     app_name: str,
     tick_kwargs: dict[str, typing.Any] | None,
     task_module_patterns: typing.Sequence[str],
-    elide_pickles: bool,
-    require_pickle_free: bool,
     limit_key_selector: LimitKeySelector | None,
     build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None,
 ) -> ReactiveBootstrapResult:
@@ -409,10 +331,7 @@ def _run_reactive_bootstrap_scoped(
         # trigger, constructed before any config existed, so their
         # non-identity fields are the defaults. Re-creating them here is
         # what makes the config reach them. Without a config there is
-        # nothing to resolve and the objects stay exactly as sent — which
-        # also keeps a dynamically parametrised class (``AliasTask[int]``)
-        # pickleable, since a re-validated instance may resolve to a class
-        # pickle cannot find by name.
+        # nothing to resolve and the objects stay exactly as sent.
         task_list = [rebind_to_build_config(task) for task in task_list]
     discovery = asyncio.run(
         plan_under_scope_aio(
@@ -422,8 +341,6 @@ def _run_reactive_bootstrap_scoped(
             scope_key=scope_key,
             build_config=build_config,
             task_module_patterns=task_module_patterns,
-            elide_pickles=elide_pickles,
-            require_pickle_free=require_pickle_free,
             limit_key_selector=limit_key_selector,
             retry_failed=True,
         )

@@ -16,7 +16,6 @@ from stardag.build._base import (
     current_build_id_var,
 )
 from stardag.build._scope import code_id, is_synthetic_scope, scope_code_id
-from stardag.build._task_store import BuildTaskStore
 from stardag.build._wakeups import SpawnTick, drain_wake_candidates
 from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.registry import (
@@ -357,7 +356,7 @@ class TickConfig:
     # warning, never a tick killed mid-wait.
     worker_report_grace_seconds: float = 30.0
     # How many of a pass's per-task actions may be in flight at once. Each
-    # actionable task costs a task-store read, an acquiring start, an
+    # actionable task costs a metadata read, an acquiring start, an
     # executor spawn and a ref-recording start; doing that serially makes a
     # wide layer a queue of thousands of round-trips in one container.
     #
@@ -835,7 +834,6 @@ async def run_tick_aio(
     *,
     registry: RegistryABC,
     task_executor: TaskExecutorABC,
-    task_store: BuildTaskStore | None = None,
     config: TickConfig | None = None,
     roll_over: RollOver | None = None,
 ) -> TickSummary:
@@ -877,14 +875,12 @@ async def run_tick_aio(
     success-path report.
     """
     config = config or TickConfig()
-    task_store = task_store or BuildTaskStore(build_id)
     summary = TickSummary(outcome="lingered_out")
     try:
         await _run_tick_body_aio(
             build_id,
             registry=registry,
             task_executor=task_executor,
-            task_store=task_store,
             config=config,
             summary=summary,
             roll_over=roll_over,
@@ -907,7 +903,6 @@ async def _run_tick_body_aio(
     *,
     registry: RegistryABC,
     task_executor: TaskExecutorABC,
-    task_store: BuildTaskStore,
     config: TickConfig,
     summary: TickSummary,
     roll_over: RollOver | None = None,
@@ -1120,7 +1115,6 @@ async def _run_tick_body_aio(
                         build_id=build_id,
                         registry=registry,
                         task_executor=task_executor,
-                        task_store=task_store,
                         config=config,
                         summary=summary,
                         report_window=report_window,
@@ -1130,7 +1124,6 @@ async def _run_tick_body_aio(
                         build_id=build_id,
                         registry=registry,
                         task_executor=task_executor,
-                        task_store=task_store,
                         config=config,
                         summary=summary,
                         denied_this_round=denied_this_round,

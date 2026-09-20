@@ -151,21 +151,25 @@ What happens to work in flight:
   is content-addressed, so it harms nothing.
 - A tick that was still lingering on the old code exits with `superseded`.
 
-Two preconditions, both checked by the tick before it re-plans:
+One precondition, checked by the tick before it re-plans: **the deployment
+must be recorded.** `stardag modal deploy` records each deploy in the
+registry; if it cannot (the registry was unreachable), the app is live but
+the command exits non-zero and says so, and no build rolls over to that
+code until you re-run the deploy — it is idempotent.
 
-- **The deployment must be recorded.** `stardag modal deploy` records each
-  deploy in the registry; if it cannot (the registry was unreachable), the
-  app is live but the command exits non-zero and says so, and no build
-  rolls over to that code until you re-run the deploy — it is idempotent.
-- **The task store must be pickle-free.** Declare `task_modules` on the
-  `StardagApp` (or set `require_pickle_free=True`): a pickle carries the
-  code it was written by, and a rollover cannot refresh it. A deployment
-  that may store pickles fails the build with `rollover_failed` and a
-  message saying exactly this.
+What makes a rollover code-safe at all is that a task object has no
+representation outside a running process other than the registry's
+identity-level `task_data`. Rebuilt in the new deployment, under the
+build's config, a task is exactly what that deployment would construct —
+nothing carries over from the code that planned the build. (It used to:
+task objects were also pickled to the target root, and a pickle restores
+the non-identity values the _writing_ code resolved, which no rollover
+could refresh. That store is gone; see the release notes for v0.25.0.)
 
-Two things cannot roll over at all: a root whose _identity_ parameters you
-changed (the registry cannot rebuild it), and a build on a deployment that
-stores pickles. Both fail with `rollover_failed`; re-trigger as a new build.
+Two things cannot roll over: a root whose _identity_ parameters you
+changed, and a task the new deployment cannot rebuild — its class is gone,
+or no longer covered by the deployment's `task_modules`. Both fail the
+build with `rollover_failed`; re-trigger as a new build.
 
 **Branches.** A branch that should run beside production is another app
 with its own name and its own single live version. A convention, not a

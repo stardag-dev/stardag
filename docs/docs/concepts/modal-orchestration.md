@@ -277,11 +277,13 @@ A rollover only moves _forward_: the tick asks the registry which code is
 the current deployment of its app and re-plans only if that is its own, so a
 tick of an older deployment that wins the lease late exits `superseded`
 instead of moving the build back. That is why `stardag modal deploy` records
-every deploy and exits non-zero if it cannot. It also requires a pickle-free
-task store (`task_modules` or `require_pickle_free=True`): a pickle carries
-the code it was written by. What cannot roll over fails the build with
-`rollover_failed` — a root whose _identity_ parameters changed, or a
-deployment that may store pickles — and the remedy is a new build.
+every deploy and exits non-zero if it cannot. What makes the re-plan safe is
+that a task is rebuilt from the registry's identity-level `task_data` and
+the new deployment's own code, so it carries nothing from the code that
+planned the build. What cannot roll over fails the build with
+`rollover_failed` — a root whose _identity_ parameters changed, or a task
+the new deployment cannot rebuild (its class gone, or outside its
+`task_modules`) — and the remedy is a new build.
 
 A **branch deployment** is simply another app: give it its own name and it
 has its own single live version.

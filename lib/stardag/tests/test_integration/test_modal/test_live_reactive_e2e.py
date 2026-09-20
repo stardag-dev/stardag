@@ -4,10 +4,11 @@ Drives the reactive scheduler loop against **real Modal workers** with the
 ticks executed locally (watchdog-style, repeatedly), using an in-memory
 fake registry fed exclusively by the ticks' own event calls:
 
-1. "Trigger": discovery + registration into the fake registry + task-store
-   persistence on the shared Modal volume (exactly what
+1. "Trigger": discovery + registration into the fake registry — which is
+   also where the task's ``task_data`` lands, the only thing a tick
+   rebuilds a task object from (exactly what
    ``build_trigger(reactive=True)`` does).
-2. Tick #1 rehydrates the task from the store, spawns a real detached
+2. Tick #1 rebuilds the task from that registry data, spawns a real detached
    worker, records the ref, lingers, exits — **no process is now watching
    the task**.
 3. Later ticks probe the recorded ref via Modal (`detached_status`) and/or
@@ -43,7 +44,6 @@ try:
 
     from stardag import flatten_task_struct
     from stardag.build import (
-        BuildTaskStore,
         TickConfig,
         discover_and_register_aio,
         run_tick_aio,
@@ -92,6 +92,9 @@ class MiniReactiveRegistry(NoOpRegistry):
         self.statuses: dict[str, str] = {}
         self.upstreams: dict[str, set[str]] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
+        # task_id -> the registry-mode dump a tick rebuilds the task from.
+        # Registration IS the persistence now: there is no task store.
+        self.metadata_bodies: dict[str, dict] = {}
         self.build_status = "running"
         # The reactive marker/owner/config now lives in the registry (not the
         # target root); set by the trigger via build_set_reactive_meta.
@@ -114,13 +117,37 @@ class MiniReactiveRegistry(NoOpRegistry):
         declared_dependencies=None,
         scope_key=None,
     ):
+        from stardag.base_model import CONTEXT_MODE_KEY
+
         for task in tasks:
             tid = str(task.id)
             self.statuses.setdefault(tid, "pending")
             self.upstreams.setdefault(tid, set()).update(
                 str(d.id) for d in flatten_task_struct(task.requires())
             )
+            self.metadata_bodies[tid] = task.model_dump(
+                mode="json", context={CONTEXT_MODE_KEY: "registry"}
+            )
         return None
+
+    async def task_get_metadata_aio(self, task_id):
+        from stardag.registry._base import TaskMetadata
+
+        tid = str(task_id)
+        body = self.metadata_bodies[tid]
+        return TaskMetadata(
+            id=task_id,
+            body=body,
+            name=body.get("__name", ""),
+            namespace=body.get("__namespace", ""),
+            version=body.get("version", ""),
+            output_uri=None,
+            status=self.statuses.get(tid, "pending"),
+            registered_at=None,
+            started_at=None,
+            completed_at=None,
+            error_message=None,
+        )
 
     async def task_start_aio(
         self,
@@ -195,15 +222,14 @@ def test_reactive_build_completes_without_resident_orchestrator():
         modal_app_name=TEST_APP_NAME,
         worker_selector=lambda t: "default",
     )
-    store = BuildTaskStore(build_id)
 
     async def trigger():
         # What the reactive bootstrap does (in-container behind
         # build_trigger(reactive=True); see run_reactive_bootstrap):
-        # discover + register + persist task objects, and only THEN set
-        # the reactive marker/config in the registry.
-        discovery = await discover_and_register_aio(registry, build_id, task)
-        await store.save_tasks_aio(discovery.incomplete.values())
+        # discover + register — registration is what a tick rebuilds the
+        # task objects from — and only THEN set the reactive
+        # marker/config in the registry.
+        await discover_and_register_aio(registry, build_id, task)
         await registry.build_set_reactive_meta_aio(
             build_id, app_name=TEST_APP_NAME, tick_kwargs={}
         )
@@ -223,7 +249,6 @@ def test_reactive_build_completes_without_resident_orchestrator():
                 build_id,
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=tick_config,
             )
         )
