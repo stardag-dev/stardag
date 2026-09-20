@@ -952,6 +952,14 @@ async def _run_tick_body_aio(
     # exit. A held lease means immediate no-op — the wake-up that spawned
     # this tick was flagged before the spawn, so the holder's re-checks (the
     # linger poll, then the exit handshake above) cover it.
+    # Sampled before anything that can block, because what it measures is
+    # this container's remaining life and the clock behind
+    # ``tick_timeout_seconds`` has been running since the invocation, not
+    # since the lease was won. Acquiring the lease is a registry round
+    # trip and a slow one still counts against the kill time; starting
+    # from after it would quietly hand the report window back the margin
+    # the reserve exists to keep.
+    entered = asyncio.get_event_loop().time()
     lease = SchedulerLease(registry, build_id)
     # Probe-observed deaths this tick is holding for the worker's report,
     # and the deadlines that end the holding. Per tick because the wait is
@@ -983,15 +991,15 @@ async def _run_tick_body_aio(
             build_id_token = current_build_id_var.set(build_id)
             try:
                 loop = asyncio.get_event_loop()
-                started = loop.time()
-                deadline = started + config.linger_seconds
+                deadline = loop.time() + config.linger_seconds
                 # The container's own life, when the caller knows it — the
                 # ceiling on any extension the report window asks for
                 # below. A tick killed mid-wait records nothing, loses the
                 # lease release and the summary with it, and is exactly
                 # what ``tick_timeout_seconds`` exists to let a tick avoid.
+                # Measured from ``entered`` (see above), not from here.
                 hard_deadline = (
-                    started + config.tick_timeout_seconds - _EXIT_RESERVE_SECONDS
+                    entered + config.tick_timeout_seconds - _EXIT_RESERVE_SECONDS
                     if config.tick_timeout_seconds is not None
                     else None
                 )

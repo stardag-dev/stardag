@@ -129,8 +129,9 @@ tick probing a running task sees whether the execution still exists, not
 what ended it, and a cancelled input stops existing while the container is
 still checkpointing. So a probe that finds an execution gone holds its
 verdict for `TickConfig.worker_report_grace_seconds` (default 30) and
-records a failure only if no report arrives — one event, one
-classification, whoever observes it first.
+records a failure only if no report arrives. The worker's classification
+wins wherever it makes one; the probe is the fallback for the execution
+that ends without a word.
 
 ### Wake-ups: how a build with no process learns something changed
 
