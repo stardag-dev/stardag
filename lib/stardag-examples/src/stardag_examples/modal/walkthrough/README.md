@@ -113,8 +113,10 @@ warning, so commit before deploying.
 single live version — a convention, not a feature:
 
 ```sh
+# Modal app names allow letters, digits, `-` and `_`; a branch like
+# `user/feature` needs its slash replaced.
 uv run stardag modal deploy src/stardag_examples/modal/walkthrough/app.py \
-  --name "stardag_examples-walkthrough-$(git branch --show-current)"
+  --name "stardag_examples-walkthrough-$(git branch --show-current | tr '/' '-')"
 ```
 
 The [Evolve a DAG Safely](https://stardag-dev.github.io/stardag/how-to/evolve-dags/)
