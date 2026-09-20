@@ -23,6 +23,14 @@ also the *harder* case: elapsed is nowhere near the declared timeout, so the
 old rule classifies it as a preemption with total confidence. Against the
 fix, the exception chain says ``InputCancellation`` and the worker reports.
 
+**And who classifies it.** The worker is the only party that can: a probe
+sees that the call is gone, not what ended it, and Modal ends a cancelled
+input the moment the cancel is issued — while the container is still
+unwinding. A tick that called that a failure would spend an attempt on an
+interruption and get the worker's report refused, which is STA-65. Both
+halves are asserted below: the resumption happened, and no failure was
+recorded on the way.
+
 **Why the cancel comes from outside stardag.** A cancel stardag issued
 itself would be one it has already recorded, and the registry would then
 (correctly) refuse the interruption as a report about a task it just
@@ -203,6 +211,20 @@ def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
     assert resumptions >= 1, (
         "No tick reported resuming the interrupted task, so the build "
         "completed by some other route than the one under test.\n" + describe(build_id)
+    )
+
+    # The other route, named, because it is the one this used to take
+    # under load (STA-65). A tick probing the cancelled call sees it gone
+    # before the worker's report lands, and calling that a failure spends
+    # an attempt, retries the task, and gets the worker's report refused —
+    # the build still completes, so only the accounting says which
+    # happened. Nothing in this scenario should fail: the execution ended
+    # because the platform was asked to end it, and the worker said so.
+    failures = sum(s.get("failed_recorded", 0) for s in summaries)
+    assert failures == 0, (
+        "A tick recorded a failure for an execution the worker reported as "
+        "an interruption — the probe classified the cancelled input before "
+        "the report landed (STA-65).\n" + describe(build_id)
     )
 
     deployment.assert_same_container()

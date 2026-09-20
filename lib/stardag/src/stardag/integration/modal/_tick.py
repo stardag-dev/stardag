@@ -79,6 +79,11 @@ _TICK_KWARGS_ALLOWED = (
     # expected is recovered by re-triggering with a raised value, which
     # only works if a re-trigger can say it.
     "max_interruptions",
+    # ...and the window a tick waits before classifying an execution its
+    # probe found gone. Per-build for the same reason the two budgets are:
+    # how long a worker needs to checkpoint and report is a property of
+    # the tasks in this build, not of the deployment running them.
+    "worker_report_grace_seconds",
 )
 
 

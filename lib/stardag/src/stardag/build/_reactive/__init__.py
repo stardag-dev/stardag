@@ -149,6 +149,9 @@ from stardag.build._reactive._frontier_actions import (
     _spawn_cap as _spawn_cap,
     claim_ttl_seconds as claim_ttl_seconds,
 )
+from stardag.build._reactive._report_window import (
+    _ReportWindow as _ReportWindow,
+)
 from stardag.build._reactive._terminal import (
     _handle_terminal as _handle_terminal,
     _skip_blocked as _skip_blocked,

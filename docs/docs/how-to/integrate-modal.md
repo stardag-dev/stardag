@@ -471,7 +471,8 @@ there applies only to the tick — the watchdog is sync and never packed.
 **Per-build knobs** (`tick_kwargs`, persisted with the build so every tick
 shares them): `linger_seconds` (default 120), `poll_interval_seconds` (3),
 `fail_mode`, `max_attempts` (2), `max_interruptions` (20),
-`max_concurrent_actions` (50), `max_spawns_per_tick` (derived). Callables —
+`worker_report_grace_seconds` (30), `max_concurrent_actions` (50),
+`max_spawns_per_tick` (derived). Callables —
 `worker_selector`, `limit_key_selector` — are deployed-app configuration,
 never per-trigger.
 
@@ -969,6 +970,16 @@ interruption you do not catch is a failure.** The execution dies, a
 scheduler tick notices, and the task is retried under the ordinary
 `TickConfig.max_attempts` (default 2) like any other failure.
 
+A tick that notices first waits for you, though. Modal ends a cancelled
+input the moment the cancel is issued, so a probe can see the call gone
+while your `except` block is still checkpointing — and calling that a
+failure would spend an attempt on an interruption you were in the middle
+of reporting. So the probe holds its verdict for
+`TickConfig.worker_report_grace_seconds` (default 30) and records a
+failure only if nothing arrives. Raise it if your checkpoints take longer
+than that; the only cost of a larger value is how long a build waits
+before healing a worker that died without a word.
+
 That is deliberate. Letting an interruption propagate means the task had no
 plan for one, which leaves exactly two possibilities — it hung, or the
 worker's `timeout` is too small for the work — and neither is improved by
@@ -999,13 +1010,14 @@ failures and fail the build for the one reason it was built to survive.
 
 #### The knobs, and how they multiply
 
-| knob                                | covers                                                           |
-| ----------------------------------- | ---------------------------------------------------------------- |
-| `FunctionSettings(timeout=)`        | how long one execution attempt may run                           |
-| `FunctionSettings(retries=)`        | exceptions raised inside the container, and timeouts             |
-| `FunctionSettings(nonpreemptible=)` | opts out of reclamation entirely (3× CPU/memory price; no GPU)   |
-| `TickConfig.max_attempts`           | failures a tick records itself — spawn failures, dead executions |
-| `TickConfig.max_interruptions`      | how many times a task may ask to be resumed                      |
+| knob                                     | covers                                                                          |
+| ---------------------------------------- | ------------------------------------------------------------------------------- |
+| `FunctionSettings(timeout=)`             | how long one execution attempt may run                                          |
+| `FunctionSettings(retries=)`             | exceptions raised inside the container, and timeouts                            |
+| `FunctionSettings(nonpreemptible=)`      | opts out of reclamation entirely (3× CPU/memory price; no GPU)                  |
+| `TickConfig.max_attempts`                | failures a tick records itself — spawn failures, dead executions                |
+| `TickConfig.max_interruptions`           | how many times a task may ask to be resumed                                     |
+| `TickConfig.worker_report_grace_seconds` | how long a tick waits for your report before calling a dead execution a failure |
 
 They **multiply**, which is easy to miss: a worker with `retries=3` running
 a task allowed 20 interruptions can consume up to 80 container attempts.

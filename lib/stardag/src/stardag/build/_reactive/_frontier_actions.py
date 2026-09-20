@@ -38,6 +38,9 @@ from stardag.build._reactive._budgets import (
 from stardag.build._reactive._discovery import (
     _run_bounded,
 )
+from stardag.build._reactive._report_window import (
+    _ReportWindow,
+)
 
 if typing.TYPE_CHECKING:
     from stardag.build._reactive._tick import TickConfig, TickSummary
@@ -393,6 +396,7 @@ async def _act_on_frontier(
     task_store: BuildTaskStore,
     config: TickConfig,
     summary: TickSummary,
+    report_window: _ReportWindow,
 ) -> tuple[bool, int, "list[tuple[FrontierTaskRef, BaseTask]]"]:
     """Spawn/probe/heal the actionable tasks, with bounded concurrency.
 
@@ -451,6 +455,15 @@ async def _act_on_frontier(
     frontier entirely, so the deterministic failures — the ones where
     "retry it" is the wrong answer — are structurally out of reach of this
     budget rather than excluded by a judgement call.
+
+    **And whose verdict a dead execution is.** The middle case above is
+    the only one where something else may be about to classify the same
+    event: the platform ended the input, and the dying worker is saying —
+    in its grace window, on a path the probe cannot see — whether it
+    checkpointed and wants resuming (an interruption, its own budget) or
+    simply died (a failure, an attempt). The probe only knows the
+    execution is gone, which is not that answer. So the worker gets the
+    window and the probe is the fallback; see ``_ReportWindow``.
 
     **The budget gate.** A task arriving PENDING with its budget already
     spent is refused a start and failed again, with a message saying why.
@@ -601,6 +614,10 @@ async def _act_on_frontier(
     }
 
     # --- phase 2: probe the RUNNING ones ------------------------------
+    # Task ids whose execution probed dead in THIS pass, so the report
+    # window can forget the ones that have since resolved themselves.
+    probed_dead: set[str] = set()
+
     async def probe(item: FrontierTaskRef, task: BaseTask) -> None:
         nonlocal acted
         resolution = await _resolve_running(item, task, task_executor)
@@ -616,9 +633,72 @@ async def _act_on_frontier(
             # frontier already counted — the claim-expiry path arrives via
             # exactly this branch, so the two mechanisms record one attempt
             # between them, not two.
+            #
+            # ...but not yet, if a worker may still be explaining it. Two
+            # of the cases above end the input from outside the container,
+            # and a worker that caught that and checkpointed is reporting
+            # an INTERRUPTION — resumed on its own budget — in the grace
+            # window the platform gives it. Recording a failure first
+            # spends an attempt on an event the task asked to survive and
+            # leaves the worker's report to be refused (it would arrive
+            # about an execution the task no longer holds). So the
+            # decision is held open for the worker; see ``_ReportWindow``.
+            expired = False
+            ref = item.latest_executor_ref
+            if ref is not None:
+                # Skipped for the one shape where no report is coming: no
+                # ref at all, which is the claim-expiry branch of
+                # ``_resolve_running`` — nothing probed it, and it has
+                # already waited out the whole claim.
+                #
+                # A *lapsed* claim is deliberately NOT a second such
+                # shape, though it reads like one. The registry refuses a
+                # report about a different execution, not about an expired
+                # claim: TASK_INTERRUPTED ends a claim, so applying it to
+                # a lapsed one releases something already released and is
+                # honoured (only TASK_PREEMPTED, which *grants* a window,
+                # requires a live claim). Skipping the wait there would
+                # therefore steal a verdict the registry would have taken
+                # — and at the worst moment, since a claim expires around
+                # the timeout whose report this is.
+                probed_dead.add(item.task_id)
+                decision = report_window.observe(item.task_id, ref)
+                if decision == "opened":
+                    summary.executions_awaiting_report += 1
+                    logger.info(
+                        f"Execution {ref} of task {task.id} (build "
+                        f"{build_id}) is gone from the backend. Holding "
+                        "the verdict for up to "
+                        f"{report_window.grace_seconds:.0f}s: only the "
+                        "worker knows whether it checkpointed and wants "
+                        "resuming, and calling this a failure first would "
+                        "spend an attempt and get its report refused."
+                    )
+                    return
+                if decision == "holding":
+                    return
+                expired = decision == "expired"
+                if expired:
+                    summary.report_window_expired += 1
+                    logger.warning(
+                        f"Execution {ref} of task {task.id} (build "
+                        f"{build_id}) is gone and no worker reported what "
+                        "ended it within "
+                        f"{report_window.grace_seconds:.0f}s; recording it "
+                        "as a failure. A task that meant to be resumed "
+                        "reports an interruption from its grace window — "
+                        "raise TickConfig.worker_report_grace_seconds if "
+                        "this build's workers need longer to checkpoint."
+                    )
             await _record_task_failure(
                 task,
-                "Detached execution failed (observed by tick)",
+                (
+                    "Detached execution ended with no report from its "
+                    f"worker within {report_window.grace_seconds:.0f}s "
+                    "(observed by tick)"
+                )
+                if expired
+                else "Detached execution failed (observed by tick)",
                 build_id=build_id,
                 registry=registry,
                 config=config,
@@ -633,6 +713,7 @@ async def _act_on_frontier(
         [partial(probe, item, task) for item, task in running_items],
         semaphore,
     )
+    report_window.retain(probed_dead)
 
     # --- phase 2b: refuse starts for tasks already at their budget -----
     async def deny_budget(item: FrontierTaskRef, task: BaseTask) -> None:

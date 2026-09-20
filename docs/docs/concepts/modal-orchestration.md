@@ -124,6 +124,15 @@ how long the execution had been running — Modal raises `KeyboardInterrupt`
 for a preemption and `InputCancellation` for a timeout, and only the first
 restarts.
 
+And it comes from the **worker**, which is the only thing that knows. A
+tick probing a running task sees whether the execution still exists, not
+what ended it, and a cancelled input stops existing while the container is
+still checkpointing. So a probe that finds an execution gone holds its
+verdict for `TickConfig.worker_report_grace_seconds` (default 30) and
+records a failure only if no report arrives. The worker's classification
+wins wherever it makes one; the probe is the fallback for the execution
+that ends without a word.
+
 ### Wake-ups: how a build with no process learns something changed
 
 A reactive build progresses only while a tick runs for it, and a tick runs
