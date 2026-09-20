@@ -344,6 +344,77 @@ class TestBuildIdInjection:
         assert env_overrides is not None
         assert STARDAG_WORKER_REPORTS_LIFECYCLE_ENV not in env_overrides
 
+    async def test_an_executor_built_before_the_build_forwards_the_installed_config(
+        self, monkeypatch
+    ):
+        """``sd.build(root, executor=ModalTaskExecutor(...), build_config=...)``:
+        the executor exists before the build and was given no config or
+        scope, so it takes both from the build it runs in — the config the
+        engine installed and the scope derived from it the same way — or
+        discovery would plan under the config while workers ran at the
+        defaults."""
+        import json
+        from uuid import uuid4
+
+        from stardag.build._base import current_build_id_var
+        from stardag.build._scope import (
+            STARDAG_CODE_ID_ENV,
+            _reset_for_tests,
+            structure_scope_key,
+        )
+        from stardag.build_config import build_config_scope
+        from stardag.integration.modal._metadata import (
+            STARDAG_BUILD_CONFIG_ENV,
+            STARDAG_SCOPE_KEY_ENV,
+        )
+
+        from typing import Annotated
+
+        import stardag as sd
+
+        class Configured(sd.Task[int]):
+            __namespace__ = "detached_executor_tests"
+            key: str
+            width: Annotated[int, sd.StardagField(significance="dependencies_only")] = 1
+
+            def run(self) -> None:
+                pass
+
+        _reset_for_tests()
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "codeEXEC")
+        config = {"detached_executor_tests.Configured": {"width": 3}}
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)  # no build_config, no scope_key
+        token = current_build_id_var.set(uuid4())
+        try:
+            with build_config_scope(config):
+                await executor.submit_detached(_make_task())
+        finally:
+            current_build_id_var.reset(token)
+            _reset_for_tests()
+
+        _, env_overrides = worker.spawn_calls[0]
+        assert env_overrides is not None
+        assert json.loads(env_overrides[STARDAG_BUILD_CONFIG_ENV]) == config
+        assert env_overrides[STARDAG_SCOPE_KEY_ENV] == structure_scope_key(
+            "codeEXEC", config
+        )
+
+    async def test_outside_a_build_nothing_is_derived(self):
+        """No active build, nothing installed: the executor forwards no
+        config and no scope, as before."""
+        from stardag.integration.modal._metadata import (
+            STARDAG_BUILD_CONFIG_ENV,
+            STARDAG_SCOPE_KEY_ENV,
+        )
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+        await executor.submit_detached(_make_task())
+        _, env_overrides = worker.spawn_calls[0]
+        assert not env_overrides or STARDAG_BUILD_CONFIG_ENV not in env_overrides
+        assert not env_overrides or STARDAG_SCOPE_KEY_ENV not in env_overrides
+
     async def test_config_and_scope_are_forwarded_without_lifecycle_reporting(self):
         """A worker that does not self-report still constructs tasks, so a
         configured build's config and scope reach it regardless: the

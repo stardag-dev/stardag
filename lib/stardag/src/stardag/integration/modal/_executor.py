@@ -26,7 +26,8 @@ from stardag.build import (
     get_current_build_id,
 )
 from stardag.build._reactive import claim_ttl_seconds
-from stardag.build_config import jsonable_build_config
+from stardag.build._scope import code_id, structure_scope_key
+from stardag.build_config import get_build_config, jsonable_build_config
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_CONFIG_ENV,
@@ -385,17 +386,31 @@ class ModalTaskExecutor(TaskExecutorABC):
         # branch on purpose: a worker that does not self-report (a custom or
         # legacy run function) still constructs tasks, and a configured
         # build's structure must not depend on how its workers report.
-        if self.build_config:
+        #
+        # Given at construction by the deployed builder and the tick; an
+        # executor a caller constructed *before* the build (the documented
+        # ``sd.build(root, executor=ModalTaskExecutor(...), build_config=...)``
+        # path) has neither, and takes them from the build it is running in:
+        # the config the engine installed, and the scope the engine derived
+        # from it the same way, on this machine. Without that, discovery
+        # would plan under the config while the workers ran at the defaults.
+        build_config = self.build_config
+        scope_key = self.scope_key
+        if build_config is None and get_current_build_id() is not None:
+            build_config = get_build_config()
+        if scope_key is None and get_current_build_id() is not None:
+            scope_key = structure_scope_key(code_id(), build_config)
+        if build_config:
             env_overrides = {
                 **(env_overrides or {}),
                 STARDAG_BUILD_CONFIG_ENV: json.dumps(
-                    dict(self.build_config), separators=(",", ":"), sort_keys=True
+                    dict(build_config), separators=(",", ":"), sort_keys=True
                 ),
             }
-        if self.scope_key is not None:
+        if scope_key is not None:
             env_overrides = {
                 **(env_overrides or {}),
-                STARDAG_SCOPE_KEY_ENV: self.scope_key,
+                STARDAG_SCOPE_KEY_ENV: scope_key,
             }
         return worker_function, env_overrides, executor_metadata
 
