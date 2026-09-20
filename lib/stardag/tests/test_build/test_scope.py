@@ -224,6 +224,32 @@ class TestBuildPassesItsScope:
         assert Dated(key="d").target().load() == 2030
         _reset_for_tests()
 
+    @pytest.mark.parametrize("mode", ["warn", "raise"])
+    async def test_a_resume_refused_by_a_too_old_server_propagates(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ):
+        """The resume call sits inside the engines' registry-error handler,
+        and ``on_registry_failure="warn"`` used to shrug the refusal off as
+        an outage and run the build unscoped. A refusal is not an outage."""
+        from stardag.exceptions import RegistryTooOldError
+
+        class TooOld(_Recording):
+            async def build_resume_aio(  # type: ignore[override]
+                self, build_id, *args, **kwargs
+            ):
+                raise RegistryTooOldError("predates scopes", operation="resume")
+
+        _reset_for_tests()
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "codeOLD")
+        with pytest.raises(RegistryTooOldError):
+            await sd.build_aio(
+                [Fanout(key="resume-me")],
+                registry=TooOld(),
+                resume_build_id=uuid4(),
+                on_registry_failure=mode,  # type: ignore[arg-type]
+            )
+        _reset_for_tests()
+
     def test_build_sequential_passes_scope_too(self, monkeypatch: pytest.MonkeyPatch):
         _reset_for_tests()
         monkeypatch.setenv(STARDAG_CODE_ID_ENV, "codeSEQ")

@@ -76,13 +76,17 @@ class Event(Base):
         index=True,
     )
 
-    # The structure scope a registration event (TASK_PENDING /
-    # TASK_REFERENCED) was made under. A build's plan under its current
-    # scope is the set of tasks registered into it under that scope, and
-    # nothing else: a task the build registered under an earlier scope has
-    # its gating edges in that scope only, so counting it in the current
-    # plan would let it run ungated. Lifecycle events leave this NULL; they
-    # are global facts about the task, not about a plan.
+    # The structure scope the event was made under. For a registration
+    # event (TASK_PENDING / TASK_REFERENCED) that is the scope the
+    # registering code evaluated the edges in, and plan membership reads
+    # only these: a build's plan under its current scope is the set of
+    # tasks registered into it under that scope, and nothing else — a task
+    # registered under an earlier scope has its gating edges in that scope
+    # only, so counting it in the current plan would let it run ungated.
+    # Every other task event carries the build's scope at the time it
+    # landed (set by ``transition_task``), which the fold copies into
+    # ``tasks.latest_status_scope_key`` as the task's provenance scope.
+    # NULL only on events written before scopes existed.
     scope_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
 
     # Optional error message for failure events

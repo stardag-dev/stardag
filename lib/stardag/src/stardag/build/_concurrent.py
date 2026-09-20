@@ -751,8 +751,10 @@ async def build_aio(
         logger.info(f"Resuming build: {build_id}")
         # Emit a BUILD_RESUMED event so the registry flips a previously
         # terminal build back to RUNNING and the UI surfaces "running
-        # (resumed)". On older registry servers this is a no-op (the
-        # endpoint 404s and APIRegistry swallows it with a warning).
+        # (resumed)". A server predating scopes is refused here
+        # (RegistryTooOldError), whatever on_registry_failure says — see
+        # handle_registry_error — as is a config the build was not
+        # started with.
         try:
             await registry.build_resume_aio(
                 build_id, scope_key=scope_key, build_config=build_config

@@ -28,6 +28,7 @@ from typing import (
 from uuid import UUID
 
 from stardag import BaseTask, TaskStruct
+from stardag.exceptions import RegistryTooOldError, ScopeMismatchError
 
 logger = logging.getLogger(__name__)
 
@@ -803,11 +804,30 @@ def handle_registry_error(
 ) -> None:
     """Handle a registry call failure based on the configured mode.
 
+    ``"warn"`` tolerates an *outage*: the registry was unreachable or
+    errored, the build is still sound, and the caller chose to carry on
+    without the record. It never tolerates a *refusal* — the registry
+    understood the call and said no, or does not speak the contract this
+    SDK depends on — because the build would then run under a different
+    rule than the one it asked for. A :class:`RegistryTooOldError` (the
+    server predates structure scopes, so it would gate over
+    environment-global edges) and a :class:`ScopeMismatchError` (the
+    server refused a scope or config claim) propagate whatever the mode.
+    Every registry call the engines guard passes through here, so this is
+    the one place that distinction has to be made.
+
     Args:
         error: The exception that occurred.
         message: A human-readable message describing what failed.
         on_registry_failure: "warn" to log and continue, "raise" to propagate.
     """
-    if on_registry_failure == "raise":
+    if on_registry_failure == "raise" or isinstance(error, _NEVER_SWALLOWED):
         raise error.with_traceback(error.__traceback__)
     logger.warning(f"{message}: {error}")
+
+
+# Refusals, as opposed to outages: see handle_registry_error.
+_NEVER_SWALLOWED: tuple[type[Exception], ...] = (
+    RegistryTooOldError,
+    ScopeMismatchError,
+)

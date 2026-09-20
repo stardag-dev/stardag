@@ -379,8 +379,10 @@ def build_sequential(
     if resume_build_id is not None:
         build_id = resume_build_id
         # Emit a BUILD_RESUMED event so the registry flips a previously
-        # terminal build back to RUNNING. On older registry servers this
-        # is a no-op (the endpoint 404s and APIRegistry swallows it).
+        # terminal build back to RUNNING. A server predating scopes is
+        # refused here (RegistryTooOldError), whatever on_registry_failure
+        # says — see handle_registry_error — as is a config the build was
+        # not started with.
         try:
             registry.build_resume(
                 build_id, scope_key=scope_key, build_config=build_config
@@ -990,8 +992,10 @@ async def build_sequential_aio(
     if resume_build_id is not None:
         build_id = resume_build_id
         # Emit a BUILD_RESUMED event so the registry flips a previously
-        # terminal build back to RUNNING. On older registry servers this
-        # is a no-op (the endpoint 404s and APIRegistry swallows it).
+        # terminal build back to RUNNING. A server predating scopes is
+        # refused here (RegistryTooOldError), whatever on_registry_failure
+        # says — see handle_registry_error — as is a config the build was
+        # not started with.
         try:
             await registry.build_resume_aio(
                 build_id, scope_key=scope_key, build_config=build_config
