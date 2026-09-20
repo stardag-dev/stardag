@@ -23,10 +23,15 @@ import modal
 
 from stardag import BaseTask
 from stardag.build import BuildTaskStore, discover_and_register_aio
+from stardag.build._reactive._discovery import DiscoveryResult
+from stardag.build._scope import code_id, structure_scope_key
+from stardag.build_config import build_config_scope, rebind_to_build_config
 from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.build._task_modules import (
     PickleElisionPlan,
     TaskModulesError,
+    expand_task_module_patterns,
+    import_task_modules,
     format_uncovered_message,
     plan_pickle_elision,
     uncovered_task_classes,
@@ -246,8 +251,23 @@ def run_reactive_bootstrap(
     elide_pickles: bool,
     require_pickle_free: bool,
     limit_key_selector: LimitKeySelector | None = None,
+    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None = None,
 ) -> ReactiveBootstrapResult:
     """Discover the DAG, persist it, arm the build, spawn the first tick.
+
+    **First, the structure scope.** The bootstrap runs inside the
+    deployment, so it knows the code id every tick and worker of this
+    deployment will answer, and it holds the build config; it fixes the
+    build's scope from the two *before* registering any edge, so every
+    edge the build writes carries the scope of the code and config that
+    evaluated it. A build planned by other code (a re-trigger from a new
+    deployment) is simply re-planned here and its scope moved — see
+    :func:`plan_under_scope_aio`. The config is installed
+    for this process, and the roots — constructed on the triggering
+    machine, before any config existed — are re-created under it, so
+    their ``dependencies_only`` / ``execution_only`` fields, and those of
+    every task ``requires()`` constructs from here on, come from the
+    build config. See ``docs/design/scope-keyed-dependency-structure.md``.
 
     Everything a reactive build needs before it can be scheduled, except
     minting the build and registering its roots — those cost no target
@@ -287,14 +307,63 @@ def run_reactive_bootstrap(
     # plan-time keys to wake the builds queued on a key when a slot frees —
     # it can learn them nowhere else, since the selector is deployed-app
     # code.
-    discovery = asyncio.run(
-        discover_and_register_aio(
-            registry,
+    # The config is installed for the duration of the bootstrap only: the
+    # ``reactive_discovery="local"`` path runs this in the trigger's own
+    # process, and a completed build's level 2/3 values must not linger in
+    # the caller's context for the next task it constructs.
+    with build_config_scope(build_config):
+        return _run_reactive_bootstrap_scoped(
             build_id,
-            tuple(task_list),
-            retry_failed=True,
+            task_list,
+            registry=registry,
+            app_name=app_name,
+            tick_kwargs=tick_kwargs,
+            task_module_patterns=task_module_patterns,
+            elide_pickles=elide_pickles,
+            require_pickle_free=require_pickle_free,
             limit_key_selector=limit_key_selector,
+            build_config=build_config,
         )
+
+
+async def plan_under_scope_aio(
+    registry: typing.Any,
+    build_id: UUID,
+    roots: typing.Sequence[BaseTask],
+    *,
+    scope_key: str,
+    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None,
+    task_module_patterns: typing.Sequence[str],
+    elide_pickles: bool,
+    require_pickle_free: bool,
+    limit_key_selector: LimitKeySelector | None,
+    retry_failed: bool,
+) -> DiscoveryResult:
+    """Plan ``build_id`` under ``scope_key``: discover, register, persist, move.
+
+    The one planning step, shared by the reactive bootstrap (a fresh build)
+    and a tick's **rollover** (a build the live deployment inherits from
+    other code — see ``docs/design/scope-keyed-dependency-structure.md``).
+    Discovery walks the roots under the config already installed in this
+    process, registers every incomplete task with its static upstreams
+    **explicitly under** ``scope_key`` — the scope of the code doing the
+    walking — checks task-module coverage, persists what a tick could not
+    rebuild from registry data, and only then moves the build's scope to
+    ``scope_key``. Registering first and moving last means a scheduler that
+    reads the build mid-plan still gates over the old, complete plan rather
+    than a half-written new one.
+
+    ``retry_failed`` is the bootstrap's re-trigger semantic (a failed task
+    is reset for another attempt); a rollover passes False, because new
+    code is not a retry request.
+    """
+    discovery = await discover_and_register_aio(
+        registry,
+        build_id,
+        tuple(roots),
+        retry_failed=retry_failed,
+        limit_key_selector=limit_key_selector,
+        scope_key=scope_key,
     )
     # --- task-module coverage pre-flight (see _preflight_task_modules) ---
     _preflight_task_modules(discovery.incomplete.values(), task_module_patterns)
@@ -305,6 +374,59 @@ def run_reactive_bootstrap(
         task_module_patterns=task_module_patterns,
         elide_pickles=elide_pickles,
         require_pickle_free=require_pickle_free,
+    )
+    await registry.build_set_scope_aio(
+        build_id, scope_key=scope_key, build_config=build_config
+    )
+    return discovery
+
+
+def _run_reactive_bootstrap_scoped(
+    build_id: UUID,
+    task_list: list[BaseTask],
+    *,
+    registry: typing.Any,
+    app_name: str,
+    tick_kwargs: dict[str, typing.Any] | None,
+    task_module_patterns: typing.Sequence[str],
+    elide_pickles: bool,
+    require_pickle_free: bool,
+    limit_key_selector: LimitKeySelector | None,
+    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None,
+) -> ReactiveBootstrapResult:
+    """:func:`run_reactive_bootstrap` with the build config already installed."""
+    # The scope hash validates every class the build config names, and a
+    # configured class need not be one the roots import — a dynamic
+    # upstream three yields down is the typical case. Register the app's
+    # declared task modules first, exactly as the deployed ``build`` and
+    # ``tick`` wrappers do; cached per module list, so a warm container
+    # pays nothing.
+    if task_module_patterns:
+        import_task_modules(expand_task_module_patterns(task_module_patterns))
+    scope_key = structure_scope_key(code_id(), build_config)
+    if build_config:
+        # Only with a config to resolve: the roots arrived by value from the
+        # trigger, constructed before any config existed, so their
+        # non-identity fields are the defaults. Re-creating them here is
+        # what makes the config reach them. Without a config there is
+        # nothing to resolve and the objects stay exactly as sent — which
+        # also keeps a dynamically parametrised class (``AliasTask[int]``)
+        # pickleable, since a re-validated instance may resolve to a class
+        # pickle cannot find by name.
+        task_list = [rebind_to_build_config(task) for task in task_list]
+    discovery = asyncio.run(
+        plan_under_scope_aio(
+            registry,
+            build_id,
+            task_list,
+            scope_key=scope_key,
+            build_config=build_config,
+            task_module_patterns=task_module_patterns,
+            elide_pickles=elide_pickles,
+            require_pickle_free=require_pickle_free,
+            limit_key_selector=limit_key_selector,
+            retry_failed=True,
+        )
     )
     # The reactive marker/owner/config, written LAST — see the ordering
     # guarantee in this function's docstring. This is an upsert: because
@@ -319,6 +441,7 @@ def run_reactive_bootstrap(
     tick_call = tick_function.spawn(build_id=str(build_id))
     summary = {
         "build_id": str(build_id),
+        "scope_key": scope_key,
         "roots": len(task_list),
         "incomplete": len(discovery.incomplete),
         "previously_completed": len(discovery.previously_completed),

@@ -54,8 +54,116 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `Cron` or `Period`, fixed at deploy time, and `spawn()` takes no start
   time).
 
+- **Dependency edges are scoped to the code and config that evaluated
+  them, not to the task id.** A build's readiness is evaluated over the
+  edges in its own _structure scope_ — the deployment's (or local
+  process's) code id plus a hash of its `dependencies_only` config — so a
+  changed `requires()` or a changed fan-out needs no version bump. A build
+  has one `build_config` for its life: a resume or re-trigger with a
+  different `dependencies_only` config is refused
+  (`BuildConfigMismatchError`); start a new build. Builds under the same
+  code and config share what they discovered, so a fan-out's pre-yield
+  section runs once per scope. Design record:
+  `docs/design/scope-keyed-dependency-structure.md`.
+- **A running build follows the live deployment.** After a redeploy, the
+  first tick on the new code re-plans the build — discovery again under
+  its own code with the stored config, edges under its own scope, the
+  build's scope moved — and reports `rolled_over` in its summary; a tick
+  still lingering on the old code exits `superseded`. Workers register the
+  dynamic dependencies they yield under their own code's scope, so an old
+  container's late yield never reaches a re-planned build. A rollover moves
+  forward only (the tick re-plans only if the registry's current deployment
+  of its app is its own code) and requires a pickle-free task store
+  (`task_modules` or `require_pickle_free=True`). A root whose identity
+  parameters changed, or a deployment that may store pickles, cannot be
+  re-planned: the build fails with `rollover_failed` — re-trigger it as a
+  new build. `stardag modal deploy` exits non-zero when it cannot record
+  the deployment, since no build rolls over to unrecorded code.
+- **Three levels of parameter significance.**
+  `sd.StardagField(significance="identity" | "dependencies_only" |
+"execution_only")`. Levels 2 and 3 are read only from the **build
+  config** (`build_config=` on `sd.build`, `sd.build_aio`,
+  `sd.build_sequential` and `StardagApp.build_trigger`;
+  `sd.build_config_scope(...)` for tests) and **can no longer be passed at
+  init** — that is what keeps one task id to one structure within a build.
+  The registry stores only identity-level `task_data`, so a task rebuilt
+  from registry data and one unpickled from the build store agree by
+  construction (closes the "frozen at first registration" inconsistency).
+- **`hash_exclude=True` is deprecated** in favour of
+  `significance="execution_only"`. It keeps working for one release with a
+  `DeprecationWarning`; the difference is that the old option allowed the
+  value at init and the new levels do not.
+- **A cancelled or skipped task in a build's plan is reset and run** (within
+  the attempt budget) by the ordinary frontier pass, as soon as every
+  upstream in the build's scope is complete. It used to be reached only
+  through the external-blocker diagnostic, once the build had already
+  stalled. `FAILED` is unchanged: a result, owned by `fail_mode`.
+- **Deployments are recorded.** `stardag modal deploy` records
+  `(app_name, code_id)` in the registry (best-effort), and
+  `stardag modal deployments [--app NAME]` lists an environment's
+  deployments newest first — one live deployment per app, exactly as on
+  Modal. A branch that should run beside production is another app name.
+- Registration sends the dependency sets discovery actually computed, and
+  declares nothing for a task it pruned at, instead of re-evaluating
+  `requires()` for every task in the payload.
+- **Breaking for `RegistryABC` implementers outside this repo:**
+  `task_register`, `task_register_aio`, `task_register_bulk` and
+  `task_register_bulk_aio` take a keyword-only `declared_dependencies`;
+  `build_start(_aio)` and `build_resume(_aio)` take keyword-only
+  `scope_key` / `build_config`, and the registration methods a keyword-only
+  `scope_key`; new `build_set_scope(_aio)`, `deployment_record`,
+  `deployment_list` (no-op defaults). `BuildInfo` gains `scope_key` and
+  `build_config`.
+  The frontier's `blocked_by_external` is no longer read.
+- **The SDK refuses a Registry API that predates structure scopes** with
+  `RegistryTooOldError`: a missing `PUT /builds/{id}/scope`, or a
+  `POST /builds` / `POST /builds/{id}/resume` that does not echo the
+  `scope_key` it was sent. Upgrade the server first; a newer server with an
+  older SDK is supported, the reverse is not.
+- `build_trigger(build_config=...)` validates the config locally before a
+  build is minted (`BuildConfigError` for a misspelled field, an identity
+  field or an invalid value); a class the trigger process has not imported
+  (`UnknownTaskClassError`) is left to the bootstrap to judge.
+- The resident Modal builder forwards the build's config and structure
+  scope to the workers it spawns, as the reactive path already did.
+
 ### Registry API
 
+- **Dependency edges carry a `scope_key`** (`task_dependencies.scope_key`,
+  `builds.scope_key`, `builds.build_config`), unique on
+  `(scope_key, upstream, downstream)`; gating, plan closure and skip-blocked
+  read the build's current scope only. New `PUT /builds/{id}/scope` sets
+  or **moves** the build's scope (a re-plan under new code); a
+  `build_config` that differs from the stored one is a 409
+  `scope_mismatch`. `POST /builds/{id}/resume` and `POST /builds` accept
+  `scope_key` / `build_config` under the same rules. Registration endpoints
+  accept an optional `scope_key` so a worker's yields are recorded under the
+  code that evaluated them, defaulting to the build's current scope.
+  A build that never sets a scope runs under a synthetic per-build one, so
+  older SDKs keep working with per-build edges.
+- **Phantom placeholder rows are gone.** Every declared upstream must be
+  registered; an unknown id is a 400 `unknown_upstream_task_ids` on both
+  registration endpoints and on `/dependencies`. The one tolerance: unknown
+  upstreams of a task whose recorded status is COMPLETED are dropped, for
+  SDKs that re-derive `requires()` for pruned tasks. The migration deletes
+  existing phantom rows and their edges.
+- `TaskCreate.dependency_task_ids` is `list[str] | None`: a list declares,
+  `null` declares nothing.
+- **Plan closure re-runs when a build stalls**, so an edge a scope-mate's
+  worker wrote after registration is picked up. `blocked_by_external` is
+  therefore always empty (kept on the wire for one release).
+- **CANCELLED and SKIPPED tasks are actionable** when gated open.
+- **The graph reads by provenance.** The environment-wide graph shows each
+  node's edges from the scope of the build that produced its current
+  status; a build's graph adds its own scope. Edges carry `scope_key` and
+  `is_cross_scope`; nodes carry `scope_key`.
+- New `deployments` table and routes: `POST /deployments`
+  (`{app_name, code_id}`, idempotent), `GET /deployments?app_name=` newest
+  first — one row per deployed code version of an app.
+- **Migration** `690e61e0c920`: adds the columns and table, backfills every
+  build's synthetic scope, deletes phantoms, and **copies legacy edges into
+  the scope of every RUNNING build** so a reactive build in flight across
+  the deploy keeps its gates.
 - **`TASK_INTERRUPTED` applies only while the task is `RUNNING` under the
   reporting build.** A worker cannot tell a deliberate cancel from a
   function timeout, so it reports either way and the registry decides — it

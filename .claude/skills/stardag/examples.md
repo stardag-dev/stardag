@@ -113,7 +113,7 @@ from stardag.target import LoadedT
 class PipelineBase(sd.Task[LoadedT], abc.ABC, typing.Generic[LoadedT]):
     __version__ = "1"
     version: str = __version__
-    sleep_seconds: Annotated[float, sd.StardagField(hash_exclude=True)] = 0.0
+    sleep_seconds: Annotated[float, sd.StardagField(significance="execution_only")] = 0.0
 
     def run(self) -> None:
         self._run()
@@ -267,7 +267,7 @@ class DownstreamTask(sd.Task[int]):
         return self.data
 ```
 
-### Hash-Excluded Runtime Parameters
+### Execution-Only Runtime Parameters
 
 ```python
 class FlexibleTask(sd.Task[dict]):
@@ -275,10 +275,11 @@ class FlexibleTask(sd.Task[dict]):
     dataset_name: str
     model_type: str
 
-    # These DON'T affect the task ID (runtime tuning)
-    num_workers: Annotated[int, sd.StardagField(hash_exclude=True)] = 4
-    verbose: Annotated[bool, sd.StardagField(hash_exclude=True)] = False
-    timeout: Annotated[float, sd.StardagField(hash_exclude=True)] = 300.0
+    # These DON'T affect the task ID (runtime tuning). Never passed at
+    # init — set per build via build_config={"FlexibleTask": {...}}.
+    num_workers: Annotated[int, sd.StardagField(significance="execution_only")] = 4
+    verbose: Annotated[bool, sd.StardagField(significance="execution_only")] = False
+    timeout: Annotated[float, sd.StardagField(significance="execution_only")] = 300.0
 ```
 
 ### Inspecting the DAG

@@ -71,7 +71,7 @@ sd.build(task)
 When a registry is configured, `sd.build()` automatically:
 
 1. Creates a build record (`POST /builds`)
-2. Registers each task (`POST /builds/{id}/tasks`) — edges are reconciled on every registration, and phantom task records are created for unregistered upstream dependencies
+2. Registers each task (`POST /builds/{id}/tasks`) — edges are recorded in the build's structure scope on every registration; every declared upstream must already be registered (an unknown id is a 400)
 3. Reports task start/complete/fail events — each event includes the git commit hash in metadata for traceability
 4. Marks build as complete/failed
 
@@ -105,7 +105,7 @@ The React frontend at `app.stardag.com` provides:
 - **Task Explorer**: Search and browse tasks with advanced filtering (refactored into `TaskExplorerSearch` + `TaskExplorerTable` sub-components)
 - **DAG Graph**: Interactive visualization with configurable upstream/downstream depth, batch/group nodes for collapsed same-type dependencies, depth-based opacity fading, and breadcrumb navigation
 - **Task Detail**: Shows commit hash from status-determining event; Event Log table shows per-event commit hash
-- **Phantom Nodes**: Dashed border styling for unregistered/phantom task nodes in the DAG
+- **Provenance graph**: the environment-wide DAG shows each task's edges from the scope of the build that produced its status; cross-scope hops are marked
 - **Artifact Viewer**: Display task artifacts (markdown with syntax highlighting, JSON)
 - **Workspace Management**: Create/manage workspaces, invite members, manage API keys
 - **Search**: Full-text search with filter syntax (`key:op:value`)

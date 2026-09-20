@@ -32,3 +32,133 @@ def test_deploy_reaches_module_import():
     )
     assert result.exit_code == 1
     assert "Error importing module" in result.output
+
+
+class TestRecordDeployment:
+    """Every deploy is recorded: one row per (app, code id), Modal's own
+    notion of a deployment. The Modal app id rides along when the deploy
+    reported one; nothing else is derived from it."""
+
+    def _run(self, modal_app_id):
+        from unittest.mock import MagicMock
+
+        from stardag._cli.modal import _record_deployment
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        recorded: list[tuple[str, str, str | None]] = []
+
+        class FakeRegistry(NoOpRegistry):
+            def deployment_record(self, *, app_name, code_id, modal_app_id=None):
+                recorded.append((app_name, code_id, modal_app_id))
+                return None
+
+        stardag_app = MagicMock(code_id="c" * 40)
+        with registry_provider.override(FakeRegistry()):
+            _record_deployment(stardag_app, "myapp", modal_app_id=modal_app_id)
+        return recorded
+
+    def test_a_deploy_is_recorded_under_the_app_name(self):
+        assert self._run("ap-123") == [("myapp", "c" * 40, "ap-123")]
+
+    def test_a_registry_that_keeps_no_records_is_a_notice_not_a_failure(self):
+        """The RegistryABC default returns None: nothing was recorded, so
+        the operator is told no build will roll over to this code — but a
+        custom registry without deployment records is not a broken deploy."""
+        from unittest.mock import MagicMock, patch
+
+        from stardag._cli import modal as cli_modal
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        class KeepsNoRecords(NoOpRegistry):
+            def deployment_record(self, *, app_name, code_id, modal_app_id=None):
+                return None
+
+        with (
+            registry_provider.override(KeepsNoRecords()),
+            patch.object(cli_modal, "console") as console,
+        ):
+            cli_modal._record_deployment(
+                MagicMock(code_id="c" * 40), "myapp", modal_app_id=None
+            )
+        (printed,) = [str(c.args[0]) for c in console.print.call_args_list]
+        assert "does not record deployments" in printed
+        assert "will not roll over" in printed
+
+    def test_without_a_modal_app_id_the_record_still_lands(self):
+        assert self._run(None) == [("myapp", "c" * 40, None)]
+
+    def test_a_recording_failure_fails_the_deploy(self):
+        """The record is what a tick consults before rolling a build over,
+        so a deploy that could not record is a deploy no build will follow:
+        the command says so and exits 1, with the remedy (re-run, it is
+        idempotent)."""
+        from unittest.mock import MagicMock
+
+        import typer
+
+        from stardag._cli.modal import _record_deployment
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        class FailingRegistry(NoOpRegistry):
+            def deployment_record(self, *, app_name, code_id, modal_app_id=None):
+                raise ConnectionError("registry unreachable")
+
+        with registry_provider.override(FailingRegistry()):
+            with pytest.raises(typer.Exit) as excinfo:
+                _record_deployment(
+                    MagicMock(code_id="c" * 40), "myapp", modal_app_id="ap-1"
+                )
+        assert excinfo.value.exit_code == 1
+
+    def test_without_a_registry_nothing_is_recorded_and_nothing_fails(self):
+        from unittest.mock import MagicMock
+
+        from stardag._cli.modal import _record_deployment
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        with registry_provider.override(NoOpRegistry()):
+            _record_deployment(MagicMock(code_id="c" * 40), "myapp", modal_app_id=None)
+
+
+class TestDeploymentsListing:
+    """``stardag modal deployments`` lists what the registry recorded, newest
+    first, and marks the current one per app."""
+
+    def test_lists_newest_first_with_the_current_marked(self):
+        from datetime import datetime, timezone
+        from uuid import uuid4
+
+        from stardag.registry import NoOpRegistry, registry_provider
+        from stardag.registry._base import DeploymentInfo
+
+        rows = [
+            DeploymentInfo(
+                id=uuid4(),
+                app_name="myapp",
+                code_id="b" * 40,
+                deployed_at=datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc),
+                current=True,
+                modal_app_id="ap-new",
+            ),
+            DeploymentInfo(
+                id=uuid4(),
+                app_name="myapp",
+                code_id="a" * 40,
+                deployed_at=datetime(2026, 9, 19, 11, 0, tzinfo=timezone.utc),
+            ),
+        ]
+        asked: list[str | None] = []
+
+        class FakeRegistry(NoOpRegistry):
+            def deployment_list(self, *, app_name=None):
+                asked.append(app_name)
+                return rows
+
+        with registry_provider.override(FakeRegistry()):
+            result = runner.invoke(app, ["deployments", "--app", "myapp"])
+        assert result.exit_code == 0, result.output
+        assert asked == ["myapp"]
+        assert result.output.index("bbbbbbbbbbbb") < result.output.index("aaaaaaaaaaaa")
+        assert "current" in result.output
+        assert "ap-new" in result.output
+        assert "gc" not in [c.name for c in app.registered_commands]

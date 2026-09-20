@@ -900,18 +900,18 @@ async def test_bulk_register_referenced_event_for_existing_task(
 
 
 @pytest.mark.asyncio
-async def test_bulk_register_creates_phantom_for_unknown_upstream(
-    client: AsyncClient,
-):
-    """Edges referencing a task that's neither in this batch nor in
-    the DB trigger phantom creation (the documented safety hatch).
-    Explicit test that the bulk path emits exactly one phantom for the
-    unknown upstream, not multiple/none."""
+async def test_bulk_register_refuses_an_unknown_upstream(client: AsyncClient):
+    """An edge may only name a registered task.
+
+    A batch naming an upstream that is neither in the batch nor in the
+    environment is refused whole — no task rows, no events — with an error
+    that names the task and the id. Every stardag build engine registers
+    dependencies before the tasks that declare them, so reaching this is a
+    client bug; it used to be hidden behind a placeholder row.
+    """
     response = await client.post("/api/v1/builds", json={})
     build_id = response.json()["id"]
 
-    # Two real tasks both depending on an unknown ``orphan-up`` —
-    # deliberately not present in the batch and not pre-registered.
     response = await client.post(
         f"/api/v1/builds/{build_id}/tasks/bulk",
         json={
@@ -933,23 +933,90 @@ async def test_bulk_register_creates_phantom_for_unknown_upstream(
             ]
         },
     )
-    assert response.status_code == 201
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert detail["error_code"] == "unknown_upstream_task_ids"
+    assert detail["task_id"] == "child-a"
+    assert detail["unknown_upstream_task_ids"] == ["orphan-up"]
 
-    # Inspect the build's graph: both children should point at one
-    # phantom upstream node (not two — the reconcile must dedupe across
-    # the batch).
-    graph = (
-        await client.get(f"/api/v1/builds/{build_id}/graph?upstream_depth=1")
-    ).json()
-    upstream_nodes = [n for n in graph["nodes"] if n["task_id"] == "orphan-up"]
-    assert len(upstream_nodes) == 1, (
-        f"Expected exactly one phantom row for orphan-up; saw "
-        f"{[n['task_id'] for n in upstream_nodes]}"
+    # Nothing was written: no rows for the batch, no events in the build.
+    for tid in ("child-a", "child-b", "orphan-up"):
+        assert (await client.get(f"/api/v1/tasks/{tid}")).status_code == 404
+    events = (await client.get(f"/api/v1/builds/{build_id}/events")).json()
+    assert [e for e in events if e.get("task_id")] == []
+
+
+@pytest.mark.asyncio
+async def test_single_register_refuses_an_unknown_upstream(client: AsyncClient):
+    """Same refusal on the single-task endpoint, and equally write-free."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json=_register_payload("lonely-child", ["never-registered"]),
     )
-    edges_to_orphan = [
-        e for e in graph["edges"] if e["source"] == upstream_nodes[0]["id"]
-    ]
-    assert len(edges_to_orphan) == 2
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert detail["error_code"] == "unknown_upstream_task_ids"
+    assert detail["task_id"] == "lonely-child"
+    assert detail["unknown_upstream_task_ids"] == ["never-registered"]
+    assert (await client.get("/api/v1/tasks/lonely-child")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_add_task_dependencies_refuses_an_unknown_upstream(
+    client: AsyncClient,
+):
+    """The dynamic-dependency endpoint too: the SDK registers yielded
+    dependencies before it posts the edges, so an unknown id is a bug."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=_register_payload("d"))
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/d/dependencies",
+        json={"upstream_task_ids": ["ghost"], "is_dynamic": True},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error_code"] == "unknown_upstream_task_ids"
+    graph = (await client.get(f"/api/v1/builds/{build_id}/graph")).json()
+    assert graph["edges"] == []
+
+
+async def _complete(client: AsyncClient, build_id: str, task_id: str) -> None:
+    await client.post(f"/api/v1/builds/{build_id}/tasks/{task_id}/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/{task_id}/complete")
+
+
+@pytest.mark.asyncio
+async def test_unknown_upstreams_of_a_complete_task_are_dropped(
+    client: AsyncClient,
+):
+    """The one tolerance: a task whose recorded status is COMPLETED.
+
+    Nothing schedules above a complete task, so an edge into it would gate
+    nothing — and an SDK predating ``null`` declarations re-derives
+    ``requires()`` for the complete tasks it pruned at, whose upstreams it
+    never registered. Refusing there would break every older client over
+    work that is already done. The unknown id is dropped; the call succeeds.
+    """
+    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{build_a}/tasks", json=_register_payload("done"))
+    await _complete(client, build_a, "done")
+
+    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    single = await client.post(
+        f"/api/v1/builds/{build_b}/tasks",
+        json=_register_payload("done", ["never-registered"]),
+    )
+    assert single.status_code == 201, single.text
+    bulk = await client.post(
+        f"/api/v1/builds/{build_b}/tasks/bulk",
+        json={"tasks": [_register_payload("done", ["also-unknown"])]},
+    )
+    assert bulk.status_code == 201, bulk.text
+    graph = (
+        await client.get(f"/api/v1/builds/{build_b}/graph?upstream_depth=1")
+    ).json()
+    assert graph["edges"] == []
+    assert {n["task_id"] for n in graph["nodes"]} == {"done"}
 
 
 @pytest.mark.asyncio
@@ -1475,17 +1542,7 @@ async def test_add_task_dependencies_creates_edges(client: AsyncClient):
     }
     await client.post(f"/api/v1/builds/{build_id}/tasks", json=orch)
 
-    # Dynamically record a dep via the new endpoint (upstream has not been
-    # registered yet — endpoint should create a phantom)
-    response = await client.post(
-        f"/api/v1/builds/{build_id}/tasks/orch/dependencies",
-        json={"upstream_task_ids": ["yielded-dep"], "is_dynamic": True},
-    )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body == {"added": 1, "total": 1}
-
-    # Register the yielded dep properly so it appears in the build graph
+    # The yielded dep is registered first, as the SDK does, then the edge.
     await client.post(
         f"/api/v1/builds/{build_id}/tasks",
         json={
@@ -1495,6 +1552,13 @@ async def test_add_task_dependencies_creates_edges(client: AsyncClient):
             "dependency_task_ids": [],
         },
     )
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/orch/dependencies",
+        json={"upstream_task_ids": ["yielded-dep"], "is_dynamic": True},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body == {"added": 1, "total": 1}
 
     # Graph endpoint should return the edge with is_dynamic=True
     response = await client.get(f"/api/v1/builds/{build_id}/graph")
@@ -1512,10 +1576,11 @@ async def test_add_task_dependencies_idempotent(client: AsyncClient):
     response = await client.post("/api/v1/builds", json={})
     build_id = response.json()["id"]
 
-    await client.post(
-        f"/api/v1/builds/{build_id}/tasks",
-        json={"task_id": "d", "task_name": "D", "task_data": {}},
-    )
+    for tid in ("d", "u1", "u2"):
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks",
+            json={"task_id": tid, "task_name": tid.upper(), "task_data": {}},
+        )
 
     payload = {"upstream_task_ids": ["u1", "u2"], "is_dynamic": True}
     first = await client.post(
@@ -1536,7 +1601,12 @@ async def test_static_deps_graph_has_is_dynamic_false(client: AsyncClient):
     response = await client.post("/api/v1/builds", json={})
     build_id = response.json()["id"]
 
-    # Register a downstream with a static dep
+    # Register the upstream first (deps before parents), then a downstream
+    # with a static dep on it.
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={"task_id": "up", "task_name": "Up", "task_data": {}},
+    )
     await client.post(
         f"/api/v1/builds/{build_id}/tasks",
         json={
@@ -1545,11 +1615,6 @@ async def test_static_deps_graph_has_is_dynamic_false(client: AsyncClient):
             "task_data": {},
             "dependency_task_ids": ["up"],
         },
-    )
-    # Register the upstream so it's in the build
-    await client.post(
-        f"/api/v1/builds/{build_id}/tasks",
-        json={"task_id": "up", "task_name": "Up", "task_data": {}},
     )
 
     response = await client.get(f"/api/v1/builds/{build_id}/graph")
@@ -2043,6 +2108,17 @@ def _register_payload(task_id: str, deps: list[str] | None = None) -> dict:
     }
 
 
+# Dependency edges are read per *structure scope* — the code and structure
+# config that evaluated them. Two builds only see each other's edges when
+# they share one, so the cross-build scenarios below create their builds
+# under a common scope, as two builds of one deployment would be.
+SHARED_SCOPE = "code-abc:cfg-000"
+
+
+async def _scoped_build(client: AsyncClient, scope: str = SHARED_SCOPE) -> str:
+    return (await client.post("/api/v1/builds", json={"scope_key": scope})).json()["id"]
+
+
 @pytest.mark.asyncio
 async def test_retry_task_resets_failed_to_pending(client: AsyncClient):
     """TASK_RETRIED flips failed/cancelled/skipped back to pending (global
@@ -2206,7 +2282,7 @@ async def _assert_frontier_reports_cross_build_blocker(client: AsyncClient) -> N
     report. The claim is what coordinates: this build will be denied the
     start until the holder finishes or its claim lapses.
     """
-    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_a = await _scoped_build(client)
     await client.post(
         f"/api/v1/builds/{build_a}/tasks", json=_register_payload("ext-up")
     )
@@ -2219,7 +2295,7 @@ async def _assert_frontier_reports_cross_build_blocker(client: AsyncClient) -> N
         params={"executor": "modal", "executor_ref": "fc-build-a"},
     )
 
-    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_b = await _scoped_build(client)
     await client.post(
         f"/api/v1/builds/{build_b}/tasks", json=_register_payload("ext-down")
     )
@@ -2269,18 +2345,15 @@ async def test_registration_pulls_in_known_upstreams(client):
     """A build's plan must be closed under the dependency relation.
 
     Registration walks `task.requires()` — static edges only — while gating
-    consults *every* recorded edge, including dynamic ones a previous build
-    discovered at runtime. A task can therefore be gated by an upstream that
-    is not in its plan, which no build containing it can ever schedule:
-    a permanent deadlock, and the one shape the whole cross-build blocker
-    machinery was built to describe rather than prevent.
-
-    A dynamic edge outlives the build that recorded it, so a later build
-    that statically discovers the same task inherits the dependency and must
-    inherit the upstream with it.
+    consults every recorded edge *in the build's scope*, including dynamic
+    ones a scope-mate discovered at runtime. A task can therefore be gated
+    by an upstream that is not in its plan, which no build containing it
+    can ever schedule: a permanent deadlock. Within one scope the edge is
+    exactly what this build would have discovered itself, so following it
+    is unconditionally correct.
     """
     # Build A runs "parent" and discovers "dyn-up" dynamically.
-    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_a = await _scoped_build(client)
     await client.post(
         f"/api/v1/builds/{build_a}/tasks", json=_register_payload("parent")
     )
@@ -2293,31 +2366,63 @@ async def test_registration_pulls_in_known_upstreams(client):
         json=_register_payload("parent", deps=["dyn-up"]),
     )
 
-    # Build B registers only "parent" — its static requires() has no dyn-up.
-    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    # Build B, in the same scope, registers only "parent" — its static
+    # requires() has no dyn-up.
+    build_b = await _scoped_build(client)
     await client.post(
         f"/api/v1/builds/{build_b}/tasks", json=_register_payload("parent")
     )
 
     frontier = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
     # dyn-up must be in B's plan — and actionable, since nothing gates it.
-    # Without closure B reports it as an out-of-plan blocker instead, which
-    # no build containing "parent" can ever clear.
     assert [t["task_id"] for t in frontier["actionable"]] == ["dyn-up"], (
         f"dyn-up not schedulable by build B: {frontier}"
     )
     assert frontier["blocked_by_external"] == []
 
 
-async def test_frontier_reports_attempts_for_an_in_plan_blocker(client):
-    """A blocker inside this build's plan carries its attempt count.
+async def test_edges_from_another_scope_are_not_inherited(client):
+    """The other half of the rule: a different scope is other code.
 
-    A scheduler may reset such a blocker and run it — the task is in its
-    plan, so it is its to run. It needs the attempts already spent to stay
-    inside the same retry budget an ordinary task obeys; without it, a task
-    that fails every time would be reset, rerun and re-failed forever.
+    An edge recorded under one structure scope says nothing about what a
+    build under another scope would discover, so closure does not follow
+    it and gating does not read it. Build B's ``parent`` is ungated and
+    ``dyn-up`` is nowhere in its plan.
     """
-    build = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_a = await _scoped_build(client, "code-old:cfg")
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks", json=_register_payload("parent")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks", json=_register_payload("dyn-up")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks",
+        json=_register_payload("parent", deps=["dyn-up"]),
+    )
+
+    build_b = await _scoped_build(client, "code-new:cfg")
+    await client.post(
+        f"/api/v1/builds/{build_b}/tasks", json=_register_payload("parent")
+    )
+
+    frontier = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
+    assert [t["task_id"] for t in frontier["actionable"]] == ["parent"], frontier
+    assert frontier["status_counts"] == {"pending": 1}
+
+
+async def test_cancelled_in_plan_task_is_actionable_with_its_attempts(client):
+    """A cancelled task whose upstreams are complete is the build's to run.
+
+    A cancel is a revocation, not a verdict: it released the claim and left
+    the task in a status nothing schedules. The frontier reports it as
+    actionable — carrying the attempts this build already spent, so the
+    scheduler's reset stays inside the same retry budget an ordinary task
+    obeys; without it, a task that fails every time would be reset, rerun
+    and re-failed forever. It is not a "blocker" any more: nothing outside
+    the plan is involved.
+    """
+    build = await _scoped_build(client)
     await client.post(f"/api/v1/builds/{build}/tasks", json=_register_payload("up"))
     await client.post(
         f"/api/v1/builds/{build}/tasks",
@@ -2329,16 +2434,16 @@ async def test_frontier_reports_attempts_for_an_in_plan_blocker(client):
 
     # ...then another build cancels it (the fail-fast cascade shape), so the
     # status this build is now looking at was set elsewhere.
-    other = (await client.post("/api/v1/builds", json={})).json()["id"]
+    other = await _scoped_build(client)
     await client.post(f"/api/v1/builds/{other}/tasks", json=_register_payload("up"))
     await client.post(f"/api/v1/builds/{other}/tasks/up/cancel")
 
     frontier = (await client.get(f"/api/v1/builds/{build}/frontier")).json()
-    blockers = frontier["blocked_by_external"]
-    assert len(blockers) == 1
-    assert blockers[0]["blocking_task_id"] == "up"
-    assert blockers[0]["blocking_in_build"] is True
-    assert blockers[0]["blocking_attempt_count"] == 1
+    assert frontier["blocked_by_external"] == []
+    actionable = {t["task_id"]: t for t in frontier["actionable"]}
+    assert list(actionable) == ["up"], frontier
+    assert actionable["up"]["latest_status"] == "cancelled"
+    assert actionable["up"]["attempt_count"] == 1
 
 
 async def test_frontier_reports_blocker_owned_by_another_build(client: AsyncClient):
@@ -2354,20 +2459,17 @@ async def test_frontier_reports_blocker_owned_by_another_build_postgres(pg_clien
 
 
 @pytest.mark.asyncio
-async def test_every_reported_blocker_is_now_in_this_builds_plan(
+async def test_closure_over_the_scope_admits_the_whole_incomplete_chain(
     client: AsyncClient,
 ):
-    """`blocking_in_build` is False only for builds registered before plan
-    closure existed.
+    """Closure admits every incomplete upstream in the scope at registration.
 
-    Closure admits every incomplete upstream at registration, so a build
-    cannot be gated by something outside its own plan. The field stays on
-    the model — builds registered under the old rule still have open plans,
-    and the scheduler's out-of-plan handling remains their safety net — but
-    for anything registered now it is always True, which is what makes the
-    blocker actionable rather than a dead end.
+    A build cannot be gated by something outside its own plan: the whole
+    incomplete chain arrives with the task that depends on it, and the
+    only member gated open — the cancelled top — is reported as actionable
+    so the scheduler can reset and run it.
     """
-    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_a = await _scoped_build(client)
     for tid, deps in (("top", None), ("mid", ["top"]), ("down", ["mid"])):
         await client.post(
             f"/api/v1/builds/{build_a}/tasks", json=_register_payload(tid, deps)
@@ -2375,29 +2477,31 @@ async def test_every_reported_blocker_is_now_in_this_builds_plan(
     await client.post(f"/api/v1/builds/{build_a}/tasks/top/start")
     await client.post(f"/api/v1/builds/{build_a}/tasks/top/cancel")
 
-    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_b = await _scoped_build(client)
     await client.post(f"/api/v1/builds/{build_b}/tasks", json=_register_payload("down"))
 
     frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
-    blockers = frontier_b["blocked_by_external"]
-    assert blockers, frontier_b
-    assert all(e["blocking_in_build"] for e in blockers), blockers
-    # And the whole incomplete chain came with it.
+    # The whole incomplete chain came with it...
     assert frontier_b["status_counts"] == {"pending": 2, "cancelled": 1}
+    # ...and the one task gated open is the cancelled top.
+    actionable = [t for t in frontier_b["actionable"]]
+    assert [t["task_id"] for t in actionable] == ["top"], frontier_b
+    assert actionable[0]["latest_status"] == "cancelled"
+    assert frontier_b["blocked_by_external"] == []
 
 
 @pytest.mark.asyncio
 async def test_frontier_omits_external_blockers_while_the_build_progresses(
     client: AsyncClient,
 ):
-    """The blocker list is computed only when the build has nothing
-    actionable and nothing running.
+    """A running upstream in the plan is progress, not a blocker.
 
-    That is the single state in which "why is this not progressing?" is a
-    real question, and the gate keeps a per-edge sort off the hot path: the
-    frontier is re-read on every linger poll of every healthy build.
+    A shared upstream another build is executing is in this build's plan
+    (closure over the scope) and appears in its ``running``; the claim is
+    what coordinates. A cancelled one is gated open and actionable. In no
+    phase is anything reported as blocking from outside the plan.
     """
-    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_a = await _scoped_build(client)
     await client.post(
         f"/api/v1/builds/{build_a}/tasks", json=_register_payload("gate-up")
     )
@@ -2407,7 +2511,7 @@ async def test_frontier_omits_external_blockers_while_the_build_progresses(
     )
     await client.post(f"/api/v1/builds/{build_a}/tasks/gate-up/start")
 
-    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_b = await _scoped_build(client)
     await client.post(
         f"/api/v1/builds/{build_b}/tasks", json=_register_payload("gate-down")
     )
@@ -2444,30 +2548,24 @@ async def test_frontier_omits_external_blockers_while_the_build_progresses(
     assert [t["task_id"] for t in frontier_b["running"]] == ["gate-up"]
     assert frontier_b["blocked_by_external"] == []
 
-    # Stalled only when nothing is driving the upstream. Another build
-    # cancels it (the fail-fast shape) — now it is in this build's plan in a
-    # status nothing will move, which is the one case worth reporting, and
-    # it is reported as in-plan so a scheduler can reset and run it.
+    # Another build cancels the upstream (the fail-fast shape). It is in
+    # this build's plan, gated open, in a status nothing else will move —
+    # so the frontier reports it as actionable for this build to reset and
+    # run. Nothing is "blocking from outside".
     await client.post(f"/api/v1/builds/{build_a}/tasks/gate-up/cancel")
     frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
-    assert frontier_b["actionable"] == []
+    assert [t["task_id"] for t in frontier_b["actionable"]] == ["gate-up"]
+    assert frontier_b["actionable"][0]["latest_status"] == "cancelled"
     assert frontier_b["running"] == []
-    blockers = frontier_b["blocked_by_external"]
-    assert [e["blocking_task_id"] for e in blockers] == ["gate-up"]
-    assert blockers[0]["blocking_in_build"] is True
+    assert frontier_b["blocked_by_external"] == []
 
 
 @pytest.mark.asyncio
-async def test_frontier_external_blockers_are_capped_and_flagged(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-):
-    """The blocker list is a bounded diagnostic; truncation is reported
-    rather than silent."""
-    from stardag_api.routes import builds as builds_routes
-
-    monkeypatch.setattr(builds_routes, "_MAX_FRONTIER_EXTERNAL_BLOCKERS", 1)
-
-    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+async def test_blocked_by_external_is_always_empty(client: AsyncClient):
+    """No gate can point outside the plan any more, so the diagnostic that
+    described one is always empty — kept on the wire for older SDKs. A
+    stalled build's cancelled upstream shows up as actionable instead."""
+    build_a = await _scoped_build(client)
     await client.post(
         f"/api/v1/builds/{build_a}/tasks", json=_register_payload("cap-up")
     )
@@ -2476,22 +2574,19 @@ async def test_frontier_external_blockers_are_capped_and_flagged(
             f"/api/v1/builds/{build_a}/tasks", json=_register_payload(tid, ["cap-up"])
         )
     await client.post(f"/api/v1/builds/{build_a}/tasks/cap-up/start")
-    # Cancelled, not left running: a running upstream is in the plan and
-    # keeps the build un-stalled, so the blocker list is never computed.
-    # Only a status nothing is driving produces the diagnostic.
     await client.post(f"/api/v1/builds/{build_a}/tasks/cap-up/cancel")
 
-    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_b = await _scoped_build(client)
     for tid in ("cap-down-1", "cap-down-2"):
         await client.post(
             f"/api/v1/builds/{build_b}/tasks", json=_register_payload(tid)
         )
 
     frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
-    assert len(frontier_b["blocked_by_external"]) == 1
-    assert frontier_b["blocked_by_external_truncated"] is True
-    # Registration order, so the cap keeps a stable prefix across polls.
-    assert frontier_b["blocked_by_external"][0]["task_id"] == "cap-down-1"
+    assert frontier_b["blocked_by_external"] == []
+    assert frontier_b["blocked_by_external_truncated"] is False
+    assert [t["task_id"] for t in frontier_b["actionable"]] == ["cap-up"]
+    assert frontier_b["actionable"][0]["latest_status"] == "cancelled"
 
 
 @pytest.mark.asyncio

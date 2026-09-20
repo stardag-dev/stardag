@@ -229,6 +229,24 @@ def is_missing_route_error(err: "NotFoundError") -> bool:
     return getattr(err, "detail", None) == "Not Found"
 
 
+class RegistryTooOldError(APIError):
+    """The Registry API predates a contract this SDK depends on.
+
+    Raised when a server does not know structure scopes — the route
+    ``PUT /builds/{id}/scope`` is missing, or ``POST /builds`` /
+    ``POST /builds/{id}/resume`` answer without a ``scope_key`` although one
+    was sent (an older server ignores unknown fields silently, so its
+    silence is the only evidence). Dependency gating on such a server is
+    environment-global and would mix edges evaluated by different code,
+    which this SDK does not tolerate: upgrade the Registry API first, then
+    the SDK. The reverse order (new server, old SDK) is supported.
+    """
+
+    def __init__(self, message: str, *, operation: str | None = None):
+        self.operation = operation
+        super().__init__(message, status_code=None, detail=None)
+
+
 class SDKVersionUnsupportedError(APIError):
     """This SDK is older than the registry's minimum supported version (426).
 
@@ -273,6 +291,25 @@ class SDKVersionUnsupportedError(APIError):
             detail=None,
             payload=payload,
         )
+
+
+class ScopeMismatchError(APIError):
+    """The registry refused to move a build's structure scope (HTTP 409
+    ``scope_mismatch``).
+
+    The registry keys a build's dependency edges by a structure scope — the
+    code id of the deployment (or local process) that evaluated
+    ``requires()`` plus the hash of its ``dependencies_only`` config. A
+    build's scope *moves* when the code driving it changes (a rollover to
+    the live deployment); what it may not do is change its **build config**,
+    which is fixed for the build's life — that is the refusal this carries,
+    as :class:`BuildConfigMismatchError`. The answer is a new build. See
+    ``docs/design/scope-keyed-dependency-structure.md``.
+    """
+
+
+class BuildConfigMismatchError(ScopeMismatchError):
+    """A build was resumed with a different ``build_config``."""
 
 
 class RateLimitError(APIError):

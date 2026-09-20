@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import threading
@@ -32,7 +33,11 @@ from stardag.build._task_modules import (
 )
 from stardag.integration.modal._limit_keys import deployed_limit_key_selector
 from stardag.integration.modal._logging import _setup_logging
+from stardag.build._scope import code_id, is_synthetic_scope, scope_config_hash
+from stardag.build_config import build_config_scope
 from stardag.integration.modal._metadata import (
+    STARDAG_BUILD_CONFIG_ENV,
+    STARDAG_SCOPE_KEY_ENV,
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
@@ -44,6 +49,7 @@ from stardag.integration.modal._metadata import (
     STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
     STARDAG_MODAL_WORKSPACE_ENV,
     STARDAG_REACTIVE_ENV,
+    STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
 )
 from stardag.integration.modal._protocols import RunFunction
 from stardag.integration.modal._spawn import spawn_tick
@@ -331,6 +337,107 @@ def _classify_interruption(
     return None
 
 
+def _build_config_from_env(
+    env_overrides: dict[str, str] | None,
+) -> dict[str, typing.Any] | None:
+    """The build config the orchestrator forwarded (see
+    ``STARDAG_BUILD_CONFIG_ENV``), or None when none was.
+
+    A forwarded value that does not decode to ``{"<class>": {"<field>":
+    value}}`` is an error, not a missing config: the build's scope was
+    hashed from the real config, and running this task on the field
+    defaults instead would evaluate a different structure under that scope.
+    Raising fails the attempt, which the scheduler records.
+    """
+    raw = (env_overrides or {}).get(STARDAG_BUILD_CONFIG_ENV) or os.environ.get(
+        STARDAG_BUILD_CONFIG_ENV
+    )
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except ValueError as e:
+        raise RuntimeError(
+            f"{STARDAG_BUILD_CONFIG_ENV} is not valid JSON ({e}); refusing to "
+            "run the task on field defaults under a scope hashed from the "
+            "build's config."
+        ) from e
+    if not isinstance(decoded, dict) or not all(
+        isinstance(fields, dict) for fields in decoded.values()
+    ):
+        raise RuntimeError(
+            f"{STARDAG_BUILD_CONFIG_ENV} must decode to a mapping of task "
+            f"class to field overrides, got {type(decoded).__name__}; refusing "
+            "to run the task on field defaults."
+        )
+    return decoded
+
+
+def worker_scope_key(forwarded: str | None, build_id: UUID) -> str | None:
+    """The structure scope this worker records its yields under.
+
+    Workers are code-agnostic: a task id promises its output whatever code
+    produces it, so a container of any version may run any task. What a
+    worker owns is where the dependencies it **discovers** are attributed:
+    under its own code id, with the config half of the scope the scheduler
+    forwarded (the config is the build's, fixed for its life, and hashing it
+    here would need every configured class importable). A build that has
+    since rolled over to a newer deployment therefore never inherits an old
+    worker's late yield — it lands in the old code's scope and the new plan
+    re-runs the parent. No forwarded scope at all means the server's
+    default — the build's current scope. This build's own placeholder
+    (``build:<build_id>``, a build nothing had fixed a scope for when this
+    worker was spawned) is sent back **as is**, not as "the default": the
+    build may since have been re-triggered by a newer SDK and moved to a
+    real scope, and the default would then be that new scope — exactly the
+    plan a late yield of this older worker must stay out of. Named
+    explicitly, the yield lands in the placeholder scope, which the moved
+    build no longer reads. Another build's placeholder is a misrouted
+    spawn: the scheduler forwards the scope of the build it drives, so a
+    placeholder naming some other build cannot be honoured (it carries no
+    config half) and must not fall back to writing into this build's
+    current scope either. It is refused, and the attempt fails before the
+    task runs.
+    """
+    if forwarded is None:
+        return None
+    if is_synthetic_scope(forwarded, build_id=build_id):
+        return forwarded
+    if is_synthetic_scope(forwarded):
+        raise RuntimeError(
+            f"Worker for build {build_id} was handed structure scope "
+            f"{forwarded!r}, another build's placeholder. A placeholder names "
+            "no code and no config, so this worker's yields could only be "
+            "misattributed; refusing to run the task."
+        )
+    return f"{code_id()}:{scope_config_hash(forwarded)}"
+
+
+def _worker_scope_preflight(env_overrides: dict[str, str] | None) -> str | None:
+    """The worker's scope, decided before any user code runs.
+
+    :func:`worker_scope_key` refuses a misrouted spawn (another build's
+    placeholder) by raising. That refusal has to happen here, ahead of
+    ``setup`` and outside the best-effort reporter creation — a reporter that
+    fails to build is logged and the task still runs, and a non-reporting
+    worker builds no reporter at all — or a misrouted task would run anyway
+    in both of those modes. No forwarded build id means nothing to bind to,
+    and the server decides.
+    """
+
+    def _get(key: str) -> str | None:
+        return (env_overrides or {}).get(key) or os.environ.get(key)
+
+    raw_build_id = _get(STARDAG_BUILD_ID_ENV)
+    if not raw_build_id:
+        return None
+    try:
+        build_id = UUID(raw_build_id)
+    except ValueError:
+        return None
+    return worker_scope_key(_get(STARDAG_SCOPE_KEY_ENV), build_id)
+
+
 class _WorkerLifecycleReporter:
     """Reports a task's lifecycle events from inside a Modal worker.
 
@@ -357,6 +464,7 @@ class _WorkerLifecycleReporter:
         app_name: str | None = None,
         executor_metadata: dict[str, typing.Any] | None = None,
         claim_ttl_seconds: int | None = None,
+        scope_key: str | None = None,
     ):
         self.registry = registry
         self.build_id = build_id
@@ -365,14 +473,31 @@ class _WorkerLifecycleReporter:
         self.app_name = app_name
         self.executor_metadata = executor_metadata
         self.claim_ttl_seconds = claim_ttl_seconds
+        # The scope this worker's *yields* are recorded under: its own code
+        # id with the config half of the build's scope (see
+        # :func:`worker_scope_key`). None leaves it to the server.
+        self.scope_key = scope_key
 
     @classmethod
     def create(
-        cls, task: BaseTask, env_overrides: dict[str, str] | None
+        cls,
+        task: BaseTask,
+        env_overrides: dict[str, str] | None,
+        *,
+        scope_key: str | None = None,
     ) -> "_WorkerLifecycleReporter | None":
+        """``scope_key`` is the worker's scope as :func:`_worker_scope_preflight`
+        decided it — decided *before* this, so a refusal is never swallowed
+        by the best-effort creation this runs under."""
+
         def _get(key: str) -> str | None:
             return (env_overrides or {}).get(key) or os.environ.get(key)
 
+        # The explicit switch first: a non-reporting worker still receives
+        # the build id (its scope check is bound to it), so the id's
+        # presence no longer means "report".
+        if _get(STARDAG_WORKER_REPORTS_LIFECYCLE_ENV) == "0":
+            return None
         raw_build_id = _get(STARDAG_BUILD_ID_ENV)
         if not raw_build_id:
             return None
@@ -431,6 +556,7 @@ class _WorkerLifecycleReporter:
             app_name=app_name,
             executor_metadata=executor_metadata,
             claim_ttl_seconds=ttl_seconds,
+            scope_key=scope_key,
         )
 
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
@@ -607,12 +733,17 @@ class _WorkerLifecycleReporter:
         # too, so a slot release can wake the build queued on them exactly
         # as it does for tasks the bootstrap registered. The selector is
         # the deployed app's, published by the worker wrapper.
+        # Under THIS worker's scope: the dynamic dependencies were yielded by
+        # the code running here, and the build may since have rolled over to
+        # a newer deployment whose plan must not inherit them — see
+        # :func:`worker_scope_key`.
         result = asyncio.run(
             discover_and_register_aio(
                 self.registry,
                 self.build_id,
                 task_struct,
                 limit_key_selector=deployed_limit_key_selector(),
+                scope_key=self.scope_key,
             )
         )
         store = BuildTaskStore(self.build_id)
@@ -653,7 +784,7 @@ class _WorkerLifecycleReporter:
             store.save_tasks(result.incomplete.values())
         deps = flatten_task_struct(task_struct)
         self.registry.task_add_dependencies(
-            self.build_id, self.task, deps, is_dynamic=True
+            self.build_id, self.task, deps, is_dynamic=True, scope_key=self.scope_key
         )
 
     def _wake_scheduler(self) -> None:
@@ -814,6 +945,11 @@ class Runner(RunFunction):
         # understating elapsed time makes a real timeout read as a
         # preemption.
         started_at = time.monotonic()
+        # Refuse a misrouted spawn before any user code runs: raises for
+        # another build's placeholder, in every reporting mode (see
+        # ``_worker_scope_preflight``). The attempt fails here; the tick
+        # that spawned it records the failure when it probes the call.
+        worker_scope = _worker_scope_preflight(env_overrides)
         try:
             self.setup(task)
             # All lifecycle reporting happens inside the env-overrides
@@ -822,12 +958,17 @@ class Runner(RunFunction):
             # stardag's config/registry providers cache on first access —
             # registry connection settings should come from the container's
             # process environment, i.e. deployment secrets, not overrides.)
-            with temp_env_vars(env_overrides or {}):
+            with (
+                temp_env_vars(env_overrides or {}),
+                build_config_scope(_build_config_from_env(env_overrides)),
+            ):
                 # getattr: tolerate subclasses overriding __init__ w/o super()
                 reporter: _WorkerLifecycleReporter | None = None
                 if getattr(self, "report_lifecycle", True):
                     try:
-                        reporter = _WorkerLifecycleReporter.create(task, env_overrides)
+                        reporter = _WorkerLifecycleReporter.create(
+                            task, env_overrides, scope_key=worker_scope
+                        )
                     except Exception:
                         # Best-effort contract covers creation too: a broken
                         # registry config must not fail a task before it runs.

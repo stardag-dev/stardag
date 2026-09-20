@@ -73,8 +73,10 @@ trigger (cheap, no target I/O):
   mint or resume the build; register the roots; spawn bootstrap
 
 bootstrap (one container, once per trigger):
-  discover the DAG next to the target root; register it, closed over
-  dependencies; persist task objects; arm the build; spawn the first tick
+  fix the build's structure scope (this deployment's code id + the
+  dependencies_only config) and install the build config; discover the
+  DAG next to the target root; register it; persist task objects; arm
+  the build; spawn the first tick
 
 tick (short-lived, single-flighted per build):
   acquire the build's scheduler lease (held → exit)
@@ -222,9 +224,64 @@ looked.
 Each reactive build is owned by the app that triggered it (recorded in the
 registry). Only the owner's ticks drive it — a tick that reaches another
 app forwards the wake-up to the owner rather than running the build with
-the wrong code — and each app's watchdog sweeps only its own builds.
-Re-triggering a build from another app moves ownership, and re-persists
-the task objects under the new app's code.
+the wrong code — and each app's watchdog sweeps only its own builds. A
+tick of the owning app that meets a build planned by an earlier deployment
+of the same app re-plans it under its own code (see below).
+
+### Deployments and code versions
+
+_In practice: [Evolve a DAG Safely](../how-to/evolve-dags.md#4-deploy-new-code)._
+
+A **deployment** is one code version of one app — exactly what Modal means
+by the word. Modal keeps one live deployment per app name: after
+`stardag modal deploy` under the same name, in-flight inputs finish on the
+old code but every _new_ spawn lands on the new one. The registry records
+each deployment as it happens (`app_name`, `code_id`, `deployed_at`); the
+newest is the current one, and `stardag modal deployments` lists them.
+Nothing is kept alive beside the current deployment and nothing needs
+collecting.
+
+A build's dependency edges belong to the code that evaluated them — its
+[structure scope](build-execution.md#structure-scope) — and a running build
+**follows the live deployment**. A reactive build progresses by new spawns,
+so after a redeploy its next tick runs on the new code. That tick finds the
+build's scope names another code id and re-plans the build: it rebuilds the
+roots from the registry, runs discovery under its own code with the build's
+stored config, registers the plan's edges under its own scope, and moves the
+build's scope (`rolled_over` in the tick summary). Discovery stops at
+completed tasks, so a redeploy costs one walk of the incomplete part of each
+running DAG.
+
+Three things follow from that:
+
+- A tick still lingering on the old code sees the scope move and exits
+  (`superseded`); the lease already guarantees one driver per build.
+- Workers are code-agnostic — the task id promises the output whatever
+  code produces it — but each registers the dynamic dependencies it yields
+  under **its own** code's scope. An old container's late yield lands in the
+  old scope, the rolled-over build never sees it, and the new code re-runs
+  the parent: wasted work, correct outcome.
+- Executions the new plan no longer contains finish on their own; their
+  targets are content-addressed, so they harm nothing.
+
+A rollover only moves _forward_: the tick asks the registry which code is
+the current deployment of its app and re-plans only if that is its own, so a
+tick of an older deployment that wins the lease late exits `superseded`
+instead of moving the build back. That is why `stardag modal deploy` records
+every deploy and exits non-zero if it cannot. It also requires a pickle-free
+task store (`task_modules` or `require_pickle_free=True`): a pickle carries
+the code it was written by. What cannot roll over fails the build with
+`rollover_failed` — a root whose _identity_ parameters changed, or a
+deployment that may store pickles — and the remedy is a new build.
+
+A **branch deployment** is simply another app: give it its own name and it
+has its own single live version.
+
+```{.python notest}
+import os
+
+app = sd_modal.StardagApp(f"reports-{os.environ.get('BRANCH', 'main')}", ...)
+```
 
 ## Choosing
 

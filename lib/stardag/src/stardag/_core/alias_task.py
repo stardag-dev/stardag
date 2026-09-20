@@ -1,13 +1,12 @@
 import base64
 from functools import cached_property
 from pickle import dumps as pickle_dumps
-from typing import TYPE_CHECKING, Annotated, Any, Generic, Type, Union, get_args
+from typing import TYPE_CHECKING, Any, Generic, Type, Union, get_args
 from uuid import UUID
 
 from pydantic import BaseModel, SerializationInfo, ValidationInfo, model_validator
 
 from stardag._core.task import LoadedT, Task
-from stardag.base_model import StardagField
 from stardag.target.serialize import get_serializer
 
 if TYPE_CHECKING:
@@ -78,7 +77,11 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
     assert downstream_task.id == downstream_task_with_alias.id
     """
 
-    aliased: Annotated[AliasedMetadata, StardagField(hash_exclude=True)]
+    # No ``StardagField`` annotation: the field *does* determine the id,
+    # through the ``id`` and ``_hash_mode_finalize`` overrides below, so the
+    # ``hash_exclude=True`` it used to carry was misleading signalling
+    # rather than a mechanism.
+    aliased: AliasedMetadata
 
     @classmethod
     def from_registry(

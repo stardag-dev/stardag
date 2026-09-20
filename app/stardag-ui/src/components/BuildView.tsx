@@ -27,6 +27,7 @@ import type {
 import { isExtendedResponse } from "../types/task";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
 import { rootsSatisfiedFrom } from "../utils/claims";
+import { isSyntheticScope } from "../utils/scope";
 import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { BuildExecutorChips } from "./ExecutorBadge";
@@ -333,6 +334,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
           <span className="flex items-center gap-1.5">
             <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
             <BuildExecutorChips metadata={build.executor_metadata} />
+            <BuildScopeChip scopeKey={build.scope_key} />
           </span>
         ) : undefined,
       },
@@ -344,12 +346,9 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     return () => setBreadcrumb([]);
   }, [build, buildId, selectedTask, onBack, setBreadcrumb]);
 
-  // Hide phantom rows (placeholders auto-created by the API when an edge
-  // pointed at a not-yet-registered task). With the SDK's post-order
-  // discover walk this is rare; phantoms still render in the DAG (where
-  // dropping them would break edges) but we keep them out of the table
-  // and the "X tasks" counter to avoid showing "tid[:12]"-style
-  // placeholder names alongside real tasks.
+  // Placeholder ("phantom") rows no longer exist on a current server — an
+  // edge may only name a registered task — but an older Registry API still
+  // returns them, so the flag is still honoured for that case only.
   const realTasks = useMemo(() => allTasks.filter((t) => !t.is_phantom), [allTasks]);
 
   // Whether every root has since completed — see `rootsSatisfiedFrom`. Computed
@@ -621,6 +620,8 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                 superseded={rootsSuperseded}
               />
 
+              <BuildConfigDisclosure config={build.build_config} />
+
               {/* Scheduler state. Renders itself only when it has something
                   to say — see `schedulingPanelForm`. Placed above the DAG so
                   a stalled build's explanation is the first thing read. */}
@@ -853,5 +854,53 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
         </p>
       </ConfirmDialog>
     </div>
+  );
+}
+
+/**
+ * The build's structure scope — `<code id>:<config hash>`, or the server's
+ * synthetic `build:<id>` when nothing fixed one. Monospace and truncated;
+ * the full key is in the title. Absent on servers predating scopes.
+ */
+function BuildScopeChip({ scopeKey }: { scopeKey?: string | null }) {
+  if (!scopeKey) return null;
+  const synthetic = isSyntheticScope(scopeKey);
+  return (
+    <code
+      title={
+        synthetic
+          ? `Structure scope ${scopeKey} — this build's dependency edges are shared with no other build`
+          : `Structure scope ${scopeKey} — the code version and structure config this build is currently planned under. It moves when the app is redeployed: the next scheduler pass re-plans the build under the new code.`
+      }
+      className="max-w-[14rem] truncate rounded bg-gray-100 px-1 py-0.5 font-mono text-[10px] text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+    >
+      {synthetic ? "scope: per-build" : `scope: ${scopeKey.slice(0, 12)}…`}
+    </code>
+  );
+}
+
+/**
+ * The build config levels 2 and 3 parameters are read from. Collapsed by
+ * default and absent entirely when the build has no overrides.
+ */
+function BuildConfigDisclosure({
+  config,
+}: {
+  config?: Record<string, Record<string, unknown>> | null;
+}) {
+  if (!config || Object.keys(config).length === 0) return null;
+  return (
+    <details className="border-b border-gray-200 px-4 py-1.5 text-xs dark:border-gray-700">
+      <summary className="cursor-pointer font-medium text-gray-700 dark:text-gray-300">
+        Build config
+        <span className="ml-1 font-normal text-gray-500 dark:text-gray-400">
+          ({Object.keys(config).length} task class
+          {Object.keys(config).length === 1 ? "" : "es"})
+        </span>
+      </summary>
+      <pre className="mt-1 overflow-x-auto rounded bg-gray-50 p-2 font-mono text-[11px] text-gray-700 dark:bg-gray-900 dark:text-gray-300">
+        {JSON.stringify(config, null, 2)}
+      </pre>
+    </details>
   );
 }

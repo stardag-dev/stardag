@@ -284,9 +284,21 @@ class TestBuildIdInjection:
         _, env_overrides = worker.spawn_calls[0]
         assert env_overrides is None or STARDAG_BUILD_ID_ENV not in env_overrides
 
-    async def test_not_injected_when_worker_reporting_disabled(self):
+    async def test_reporting_disabled_is_an_explicit_switch_not_a_missing_id(self):
+        """A non-reporting worker still gets the build id and app name — its
+        structure-scope check is bound to the build id — and is told not to
+        report by ``STARDAG_WORKER_REPORTS_LIFECYCLE=0``. The reporter's own
+        inputs (claim TTL, function timeout) are not sent."""
+        from uuid import uuid4
+
         from stardag.build._base import current_build_id_var
-        from stardag.integration.modal._metadata import STARDAG_BUILD_ID_ENV
+        from stardag.integration.modal._metadata import (
+            STARDAG_BUILD_ID_ENV,
+            STARDAG_CLAIM_TTL_SECONDS_ENV,
+            STARDAG_MODAL_APP_NAME_ENV,
+            STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
+            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
+        )
 
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = ModalTaskExecutor(
@@ -296,7 +308,8 @@ class TestBuildIdInjection:
         )
         executor._worker_functions["default"] = worker  # pyright: ignore[reportArgumentType]
 
-        token = current_build_id_var.set(__import__("uuid").uuid4())
+        build_id = uuid4()
+        token = current_build_id_var.set(build_id)
         try:
             await executor.submit_detached(_make_task())
             assert executor.reports_lifecycle(_make_task()) is False
@@ -304,8 +317,156 @@ class TestBuildIdInjection:
             current_build_id_var.reset(token)
 
         _, env_overrides = worker.spawn_calls[0]
-        assert env_overrides is None or STARDAG_BUILD_ID_ENV not in env_overrides
+        assert env_overrides is not None
+        assert env_overrides[STARDAG_BUILD_ID_ENV] == str(build_id)
+        assert env_overrides[STARDAG_MODAL_APP_NAME_ENV] == "test-app"
+        assert env_overrides[STARDAG_WORKER_REPORTS_LIFECYCLE_ENV] == "0"
+        assert STARDAG_CLAIM_TTL_SECONDS_ENV not in env_overrides
+        assert STARDAG_MODAL_FUNCTION_TIMEOUT_ENV not in env_overrides
+
+    async def test_reporting_enabled_sends_no_switch(self):
+        from uuid import uuid4
+
+        from stardag.build._base import current_build_id_var
+        from stardag.integration.modal._metadata import (
+            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
+        )
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+        token = current_build_id_var.set(uuid4())
+        try:
+            await executor.submit_detached(_make_task())
+        finally:
+            current_build_id_var.reset(token)
+
+        _, env_overrides = worker.spawn_calls[0]
+        assert env_overrides is not None
+        assert STARDAG_WORKER_REPORTS_LIFECYCLE_ENV not in env_overrides
+
+    async def test_an_executor_built_before_the_build_forwards_the_installed_config(
+        self, monkeypatch
+    ):
+        """``sd.build(root, executor=ModalTaskExecutor(...), build_config=...)``:
+        the executor exists before the build and was given no config or
+        scope, so it takes both from the build it runs in — the config the
+        engine installed and the scope derived from it the same way — or
+        discovery would plan under the config while workers ran at the
+        defaults."""
+        import json
+        from uuid import uuid4
+
+        from stardag.build._base import current_build_id_var
+        from stardag.build._scope import (
+            STARDAG_CODE_ID_ENV,
+            _reset_for_tests,
+            structure_scope_key,
+        )
+        from stardag.build_config import build_config_scope
+        from stardag.integration.modal._metadata import (
+            STARDAG_BUILD_CONFIG_ENV,
+            STARDAG_SCOPE_KEY_ENV,
+        )
+
+        from typing import Annotated
+
+        import stardag as sd
+
+        class Configured(sd.Task[int]):
+            __namespace__ = "detached_executor_tests"
+            key: str
+            width: Annotated[int, sd.StardagField(significance="dependencies_only")] = 1
+
+            def run(self) -> None:
+                pass
+
+        _reset_for_tests()
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "codeEXEC")
+        config = {"detached_executor_tests.Configured": {"width": 3}}
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)  # no build_config, no scope_key
+        token = current_build_id_var.set(uuid4())
+        try:
+            with build_config_scope(config):
+                await executor.submit_detached(_make_task())
+        finally:
+            current_build_id_var.reset(token)
+            _reset_for_tests()
+
+        _, env_overrides = worker.spawn_calls[0]
+        assert env_overrides is not None
+        assert json.loads(env_overrides[STARDAG_BUILD_CONFIG_ENV]) == config
+        assert env_overrides[STARDAG_SCOPE_KEY_ENV] == structure_scope_key(
+            "codeEXEC", config
+        )
+
+    async def test_outside_a_build_nothing_is_derived(self):
+        """No active build, nothing installed: the executor forwards no
+        config and no scope, as before."""
+        from stardag.integration.modal._metadata import (
+            STARDAG_BUILD_CONFIG_ENV,
+            STARDAG_SCOPE_KEY_ENV,
+        )
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+        await executor.submit_detached(_make_task())
+        _, env_overrides = worker.spawn_calls[0]
+        assert not env_overrides or STARDAG_BUILD_CONFIG_ENV not in env_overrides
+        assert not env_overrides or STARDAG_SCOPE_KEY_ENV not in env_overrides
+
+    async def test_config_and_scope_are_forwarded_without_lifecycle_reporting(self):
+        """A worker that does not self-report still constructs tasks, so a
+        configured build's config and scope reach it regardless: the
+        structure of a build must not depend on how its workers report."""
+        from stardag.integration.modal._metadata import (
+            STARDAG_BUILD_CONFIG_ENV,
+            STARDAG_BUILD_ID_ENV,
+            STARDAG_SCOPE_KEY_ENV,
+        )
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = ModalTaskExecutor(
+            modal_app_name="test-app",
+            worker_selector=lambda task: "default",
+            worker_reports_lifecycle=False,
+            build_config={"ns.T": {"width": 3}},
+            scope_key="cafe:0123456789abcdef",
+        )
+        executor._worker_functions["default"] = worker  # pyright: ignore[reportArgumentType]
+
+        await executor.submit_detached(_make_task())
+
+        _, env_overrides = worker.spawn_calls[0]
+        assert env_overrides is not None
+        assert env_overrides[STARDAG_BUILD_CONFIG_ENV] == '{"ns.T":{"width":3}}'
+        assert env_overrides[STARDAG_SCOPE_KEY_ENV] == "cafe:0123456789abcdef"
+        # No build was active around this submit, so no id to forward.
+        assert STARDAG_BUILD_ID_ENV not in env_overrides
 
     async def test_reports_lifecycle_requires_build_context(self):
         executor = _make_executor(FakeWorkerFunction(FakeFunctionCall()))
         assert executor.reports_lifecycle(_make_task()) is False
+
+
+def test_reactive_scheduling_needs_self_reporting_workers():
+    """A reactive build has no resident orchestrator: the worker registers
+    the dependencies it yields and wakes the tick. A worker that does not
+    report can do neither, so the combination would stall on the first
+    dynamic yield; it is refused at construction."""
+    with pytest.raises(ValueError, match="self-reporting workers"):
+        ModalTaskExecutor(
+            modal_app_name="app",
+            worker_selector=lambda task: "default",
+            reactive=True,
+            worker_reports_lifecycle=False,
+        )
+    # Either alone is fine.
+    ModalTaskExecutor(
+        modal_app_name="app", worker_selector=lambda task: "default", reactive=True
+    )
+    ModalTaskExecutor(
+        modal_app_name="app",
+        worker_selector=lambda task: "default",
+        worker_reports_lifecycle=False,
+    )

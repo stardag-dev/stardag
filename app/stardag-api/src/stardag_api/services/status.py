@@ -206,6 +206,12 @@ REPORT_APPLIED_KEY = "report_applied"
 # applied. Named so the refusal paths cannot drift apart.
 _END_OF_EXECUTION_REPORTS = (EventType.TASK_INTERRUPTED, EventType.TASK_PREEMPTED)
 
+# Events that register a task into a build's plan; they carry the scope they
+# were made under (set by the registration routes) and are the only events
+# plan membership reads. Every other task event gets the build's scope at
+# the time it lands, as the task's provenance — see ``transition_task``.
+_REGISTRATION_EVENTS = (EventType.TASK_PENDING, EventType.TASK_REFERENCED)
+
 
 def refused_report_filter() -> "ColumnElement[bool]":
     """Exclude reports that were written but changed nothing.
@@ -493,8 +499,20 @@ async def transition_task(
     db: AsyncSession,
     task: Task,
     event: Event,
+    *,
+    scope_key: str | None = None,
 ) -> None:
     """Record ``event`` and let it move ``task``'s denormalised status.
+
+    Every event that can move a status carries the structure scope its
+    build is planned under at that moment (``event.scope_key``), and the
+    fold copies it into ``task.latest_status_scope_key`` — the task's
+    provenance scope, frozen at status time because the build's own scope
+    moves when the live deployment does. Registration events arrive with
+    the scope they were made under already set; for any other task event
+    the caller may pass ``scope_key`` when it has the build at hand, and
+    otherwise it is read from the build here (one indexed lookup). Plan
+    membership is unaffected: it counts registration events only.
 
     **The one way a task's ``latest_status`` changes.** Every path that
     records a task event used to do this by hand — the event routes,
@@ -515,6 +533,18 @@ async def transition_task(
     same-transaction wake-up flag must *not* be set on, since it is the one
     that already knows.
     """
+    if (
+        event.scope_key is None
+        and event.task_id is not None
+        and event.event_type not in _REGISTRATION_EVENTS
+    ):
+        event.scope_key = (
+            scope_key
+            if scope_key is not None
+            else await db.scalar(
+                select(Build.scope_key).where(Build.id == event.build_id)
+            )
+        )
     db.add(event)
     if event.id is None or event.created_at is None:
         # The apply reads both, and they are Python-side column defaults,
@@ -590,6 +620,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
+        task.latest_status_scope_key = event.scope_key
         task.latest_completed_at = event.created_at
         task.latest_status_expires_at = None
         task.latest_waiting_for_lock = False
@@ -613,6 +644,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
+        task.latest_status_scope_key = event.scope_key
         if task.latest_started_at is None:
             task.latest_started_at = event.created_at
         task.latest_waiting_for_lock = False
@@ -643,6 +675,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
             task.latest_status_at = event.created_at
             task.latest_status_event_id = event.id
             task.latest_status_build_id = event.build_id
+            task.latest_status_scope_key = event.scope_key
             task.latest_completed_at = None
             task.latest_error_message = None
             task.latest_status_expires_at = None
@@ -659,6 +692,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
+        task.latest_status_scope_key = event.scope_key
         task.latest_waiting_for_lock = False
         # A resume re-asserts the claim, so it re-grants the expiry —
         # renewal on lifecycle traffic that already exists.
@@ -673,6 +707,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
+        task.latest_status_scope_key = event.scope_key
         task.latest_completed_at = event.created_at
         task.latest_error_message = event.error_message
         task.latest_status_expires_at = None
@@ -683,6 +718,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
+        task.latest_status_scope_key = event.scope_key
         task.latest_completed_at = event.created_at
         task.latest_status_expires_at = None
         if event_commit is not None:
@@ -692,6 +728,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
+        task.latest_status_scope_key = event.scope_key
         task.latest_completed_at = event.created_at
         task.latest_status_expires_at = None
     elif et == EventType.TASK_SUSPENDED:
@@ -699,6 +736,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
+        task.latest_status_scope_key = event.scope_key
         # A suspension is an execution that yielded and returned: nothing is
         # running, so the claim is over and its expiry is meaningless.
         task.latest_status_expires_at = None
@@ -715,6 +753,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
+        task.latest_status_scope_key = event.scope_key
         # The platform ended this execution, so the claim is over — same as
         # a suspension, and the reason the interruption is worth reporting
         # at all: it frees the claim and any concurrency-limit slots now,
@@ -801,6 +840,7 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
             task.latest_status_at = event.created_at
             task.latest_status_event_id = event.id
             task.latest_status_build_id = event.build_id
+            task.latest_status_scope_key = event.scope_key
     # TASK_REFERENCED is informational and never affects latest_* state
     # (the global semantics treat it as a no-op).
 

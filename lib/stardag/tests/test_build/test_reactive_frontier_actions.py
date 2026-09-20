@@ -486,6 +486,51 @@ class TestRehydrationFallback:
         # Healed back into the store for subsequent ticks.
         assert store.load_task(root.id) is not None
 
+    async def test_a_pickle_of_a_covered_class_is_rebound_to_this_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A store hit for a class the deployment's task modules cover is
+        re-bound to this code's defaults — a pickle an earlier deployment
+        wrote carries the level 2/3 values *its* code resolved, and a build
+        that rolled over must not schedule from those."""
+        import stardag as sd
+        from stardag.base_model import StardagField
+        from stardag.build_config import build_config_scope
+
+        class Covered(sd.Task[int]):
+            __namespace__ = "frontier_tests"
+            key: str
+            width: typing.Annotated[
+                int, StardagField(significance="dependencies_only")
+            ] = 4
+
+            def run(self) -> None:
+                pass
+
+        # The pickle: written under another config, so it carries width=9.
+        with build_config_scope({"frontier_tests.Covered": {"width": 9}}):
+            stale = Covered(key="k")
+        assert stale.width == 9
+        store = InMemoryTaskStore(uuid4())
+        store.save_task(stale)
+        registry = FakeReactiveRegistry(root_task_ids=[str(stale.id)])
+
+        # Not covered, no config installed: left as pickled.
+        monkeypatch.setattr(frontier_module, "declared_task_module_patterns", tuple)
+        loaded = await frontier_module._load_task(str(stale.id), registry, store)
+        assert isinstance(loaded, Covered) and loaded.width == 9
+
+        # Covered: re-bound, so this code's default applies.
+        monkeypatch.setattr(
+            frontier_module,
+            "declared_task_module_patterns",
+            lambda: (Covered.__module__,),
+        )
+        loaded = await frontier_module._load_task(str(stale.id), registry, store)
+        assert isinstance(loaded, Covered)
+        assert loaded.id == stale.id
+        assert loaded.width == 4
+
     async def test_store_miss_and_no_metadata_still_fails_task(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):

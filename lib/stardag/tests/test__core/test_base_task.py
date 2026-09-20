@@ -3,6 +3,8 @@ from datetime import datetime
 from typing import Annotated, Type
 from unittest.mock import Mock
 
+import warnings
+
 import pytest
 
 from stardag._core.base_task import (
@@ -139,8 +141,11 @@ class BasicTask(MockBaseTask):
     a: int
 
 
-class HashExcludeTask(MockBaseTask):
-    a: Annotated[int, StardagField(hash_exclude=True)]
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+
+    class HashExcludeTask(MockBaseTask):
+        a: Annotated[int, StardagField(hash_exclude=True)]
 
 
 class CompatDefaultTask(MockBaseTask):
@@ -151,10 +156,13 @@ class WithNestedTask(MockBaseTask):
     task: BasicTask
 
 
-class NonTaskModel(StardagBaseModel):
-    a: Annotated[int, StardagField(hash_exclude=True)]
-    b: Annotated[str, StardagField(compat_default="default")]
-    tasks: tuple[SubClass[BaseTask], ...]
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+
+    class NonTaskModel(StardagBaseModel):
+        a: Annotated[int, StardagField(hash_exclude=True)]
+        b: Annotated[str, StardagField(compat_default="default")]
+        tasks: tuple[SubClass[BaseTask], ...]
 
 
 class ComplexNestedTask(MockBaseTask):

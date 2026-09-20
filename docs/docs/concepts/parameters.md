@@ -56,6 +56,100 @@ Parameter hashing solves several problems:
 3. **Caching**: Re-running with same parameters reuses existing outputs
 4. **Composition**: Upstream task IDs are included in downstream hashes
 
+## Three levels of significance
+
+!!! tip "In short"
+
+    Only parameters that change the **output** belong in the constructor.
+    A knob that changes which upstreams are required or yielded is
+    `significance="dependencies_only"`; one that changes only how the work
+    is done is `"execution_only"`. Both are read from one **build config**
+    per build, never passed at init. The how-to:
+    [Evolve a DAG Safely](../how-to/evolve-dags.md).
+
+Not every parameter is part of what a task _promises_. Stardag
+distinguishes three levels, declared per field with
+`sd.StardagField(significance=...)`:
+
+| Level          | `significance`         | Affects                                                      | Comes from                                  |
+| -------------- | ---------------------- | ------------------------------------------------------------ | ------------------------------------------- |
+| 1 Identity     | `"identity"` (default) | the output — what the task promises; part of the task ID     | the constructor, like any parameter         |
+| 2 Dependencies | `"dependencies_only"`  | which upstream tasks are required or yielded, not the output | the **build config**, never the constructor |
+| 3 Execution    | `"execution_only"`     | neither output nor structure — only how the work is done     | the **build config**, never the constructor |
+
+```{.python notest}
+from typing import Annotated
+
+class Aggregate(sd.Task[Summary]):
+    __namespace__ = "reports"
+    period: str                                                             # identity
+    partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
+    num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
+
+    def requires(self):
+        return ListExportFiles(period=self.period)
+
+    def run(self):
+        files = self.requires().load()      # the period's export: a list of file names
+        chunks = [
+            ChunkStats(files=files[i : i + self.partition_size])
+            for i in range(0, len(files), self.partition_size)
+        ]
+        yield chunks                        # the slicing depends on partition_size, the summary does not
+        summary = merge((c.load() for c in chunks), threads=self.num_threads)
+        self._save(summary)
+```
+
+The file list is loaded from a static upstream; `partition_size` only
+decides how it is sliced into `ChunkStats` tasks. Slicing 1,000 files by
+100 or by 500 yields different chunk tasks but the same merged summary.
+
+A level 2 or 3 field is **never passed at init** — `Aggregate(period="2026-01",
+num_threads=2)` raises. Give it a default: the build config overrides the
+default, and a level 2 or 3 field without one would make every constructor
+call demand a value that only the config may supply. It is read from the
+**build config**, one mapping per build keyed by `namespace.Name`, or by the
+bare `Name` for a task without a `__namespace__`:
+
+```{.python notest}
+sd.build(root, build_config={"reports.Aggregate": {"partition_size": 500, "num_threads": 8}})
+
+# On Modal, the same argument on the trigger:
+app.build_trigger(root, reactive=True, build_config={...})
+
+# In tests, or anywhere no build is running:
+with sd.build_config_scope({"reports.Aggregate": {"num_threads": 2}}):
+    task = Aggregate(period="2026-01")  # num_threads == 2
+```
+
+Why one mechanism and not two: if one downstream could pass a partition
+size to its upstream while another let the upstream read the config, there
+would be two versions of one upstream in one build with one task ID. The
+registry stores only identity parameters with a task; the build config is
+stored with the build, and every worker installs it before it constructs or
+rebuilds a task, so the two always agree.
+
+The registry keys a build's dependency edges by a _structure scope_ — the
+code version plus the `dependencies_only` config — which is what lets a
+changed partition size or a changed `requires()` run without a version bump
+and without disturbing builds already running. See
+[Build & Execution](build-execution.md#structure-scope).
+
+**Environment variables must not affect a task's output or its
+dependency structure.** They may affect execution (a thread count read
+from the environment is fine). Anything that changes what a task yields or
+writes is a parameter or a `dependencies_only` config value; reading it from
+the environment breaks the contract the shared structure relies on, and the
+registry warns when it notices.
+
+!!! note "`hash_exclude` is deprecated"
+
+    `sd.StardagField(hash_exclude=True)` did what `significance="execution_only"`
+    does — dropped the field from the hash — but allowed the value at init,
+    which is exactly what the build config exists to prevent. It keeps working
+    for one release with a `DeprecationWarning`; move the value to the build
+    config and change the annotation.
+
 ## The Task ID
 
 Every task has an `id` property:

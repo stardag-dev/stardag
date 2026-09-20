@@ -11,6 +11,7 @@ import type {
   BuildStatus,
   BuildTickSummary,
   FrontierExternalBlocker,
+  FrontierTaskRef,
   TaskStatus,
 } from "../types/task";
 import {
@@ -43,9 +44,48 @@ const STATUS_ORDER: TaskStatus[] = [
   "failed",
   "cancelled",
   "skipped",
-  "unregistered",
   "completed",
 ];
+
+/**
+ * A cancelled or skipped task the frontier lists as actionable: every
+ * upstream in the build's scope is complete, so the scheduler resets it
+ * within its attempt budget and runs it. A cancel is a revocation, not a
+ * verdict; a skip whose upstreams have since completed is a skip whose
+ * reason no longer holds. Rendered so a reader sees the reset coming rather
+ * than a dead-looking status.
+ */
+function resetPendingLabel(status: TaskStatus): string | null {
+  if (status === "cancelled") return "reset pending (revocation)";
+  if (status === "skipped") return "reset pending (stale skip)";
+  return null;
+}
+
+function AwaitingReset({ actionable }: { actionable: FrontierTaskRef[] }) {
+  const awaiting = actionable.filter((t) => resetPendingLabel(t.latest_status));
+  if (awaiting.length === 0) return null;
+  return (
+    <ul className="space-y-0.5">
+      {awaiting.map((t) => (
+        <li
+          key={t.task_id}
+          className="flex flex-wrap items-center gap-x-1.5 text-xs text-gray-700 dark:text-gray-300"
+        >
+          <code
+            title={t.task_id}
+            className="rounded bg-gray-100 px-1 py-0.5 font-mono text-[11px] dark:bg-gray-700"
+          >
+            {shortId(t.task_id)}
+          </code>
+          <StatusBadge status={t.latest_status} />
+          <span className="text-gray-600 dark:text-gray-400">
+            {resetPendingLabel(t.latest_status)}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function shortId(id: string): string {
   return id.slice(0, 8);
@@ -191,14 +231,6 @@ function BlockerCard({
           <BuildLink buildId={ownerBuildId} onNavigateToBuild={onNavigateToBuild} />
         ) : (
           <span className="text-gray-500 dark:text-gray-400">no owning build</span>
-        )}
-        {!blocker.blocking_in_build && (
-          <span
-            title="The blocking task is not part of this build at all"
-            className="rounded bg-amber-100 px-1 py-0.5 text-[11px] text-amber-900 dark:bg-amber-900/40 dark:text-amber-200"
-          >
-            outside this build
-          </span>
         )}
         {actions.length > 0 && isAdmin && ownerBuildId && (
           <span className="ml-auto flex items-center gap-1.5">
@@ -452,7 +484,13 @@ export function BuildSchedulingPanel({
   }
   if (!frontier || form === "hidden") return null;
 
+  // Always empty from a current server (edges are scoped to the build, and
+  // a stalled build re-closes its plan before it is reported as stalled);
+  // rendered defensively for servers predating that.
   const blockers = frontier.blocked_by_external;
+  const awaitingResetCount = frontier.actionable.filter((t) =>
+    resetPendingLabel(t.latest_status),
+  ).length;
   const totalTasks = Object.values(frontier.status_counts).reduce((a, b) => a + b, 0);
   // A status nothing is in is not information about this build.
   const counts = Object.entries(frontier.status_counts)
@@ -560,15 +598,17 @@ export function BuildSchedulingPanel({
           {appChip}
           <span className="text-xs text-gray-600 dark:text-gray-400">
             {frontier.actionable.length} actionable · {frontier.running.length} running
+            {awaitingResetCount > 0 ? ` · ${awaitingResetCount} awaiting reset` : ""}
             {frontier.needs_tick ? " · wake-up pending" : ""}
           </span>
         </div>
         {stripOpen && (
           <div className="mt-2 space-y-2 pb-1">
             {countChips}
+            <AwaitingReset actionable={frontier.actionable} />
             <p className="text-xs text-gray-500 dark:text-gray-400">
-              Upstreams owned by other builds are only looked for while a build is
-              stalled, so nothing here says whether this build has any.
+              Every upstream in this build&rsquo;s structure scope is part of its plan,
+              so a stalled build is stalled on tasks of its own.
             </p>
             <div>
               <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
@@ -585,7 +625,6 @@ export function BuildSchedulingPanel({
   // --- Stalled form ---
 
   const blockedTaskCount = new Set(blockers.map((b) => b.task_id)).size;
-  const externalCount = blockers.filter((b) => !b.blocking_in_build).length;
 
   // One line that says what is wrong. The paragraph-length version is
   // still below, behind the disclosure, for when the headline is not
@@ -596,8 +635,7 @@ export function BuildSchedulingPanel({
     headline =
       `${blockedTaskCount} task${blockedTaskCount === 1 ? "" : "s"} blocked by ` +
       `${blockers.length} upstream${blockers.length === 1 ? "" : "s"} ` +
-      `held outside this build` +
-      (externalCount > 0 ? `, ${externalCount} not part of it` : "");
+      `held outside this build`;
   } else if (frontier.needs_tick) {
     headline = "Nothing runnable — a scheduler wake-up is still pending";
   } else if (frontier.reactive_app_name) {
@@ -612,12 +650,7 @@ export function BuildSchedulingPanel({
       `Nothing in this build is actionable and nothing is running. ` +
       `${blockedTaskCount} of its task${blockedTaskCount === 1 ? " is" : "s are"} ` +
       `held back by ${blockers.length} upstream${blockers.length === 1 ? "" : "s"} ` +
-      `whose status ${blockers.length === 1 ? "was" : "were"} set outside this build` +
-      (externalCount > 0
-        ? ` — ${externalCount} of which ${
-            externalCount === 1 ? "is" : "are"
-          } not even part of this build.`
-        : ".");
+      `whose status ${blockers.length === 1 ? "was" : "were"} set outside this build.`;
   } else if (frontier.needs_tick) {
     verdict =
       "Nothing in this build is actionable and nothing is running, and no upstream " +

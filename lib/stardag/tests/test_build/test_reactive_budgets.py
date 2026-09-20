@@ -838,10 +838,10 @@ class TestInterruptedTasks:
         the premise of the backend-retry guard — so a dying build must
         cancel it, and must not leave it INTERRUPTED.
 
-        Left behind it is a permanent wedge for every other build gated on
-        it: ``_OWNER_DRIVEN_STATUSES`` reads interrupted as "the owner will
-        move it", so a neighbour waits and then fails, where a CANCELLED
-        task is reset and run.
+        Left behind it is a wedge for every other build gated on it: an
+        INTERRUPTED task holds no claim a neighbour can see lapse and is not
+        one of the statuses a neighbour may reset, where a CANCELLED task is
+        reset and run.
         """
         # Siblings, not a chain: a failed *upstream* would gate the
         # interrupted task out of `actionable` and the test would pass for

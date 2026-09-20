@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import inspect
 import logging
 import traceback as tb_module
@@ -17,7 +18,17 @@ import warnings
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from enum import StrEnum
-from typing import AsyncGenerator, Generator, Literal, Protocol, Sequence, Union, cast
+from typing import (
+    Any,
+    AsyncGenerator,
+    Generator,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+    Union,
+    cast,
+)
 from uuid import UUID
 
 from stardag import (
@@ -55,7 +66,19 @@ from stardag.build._concurrency import (
     ConcurrencyLimiter,
     build_concurrency_limiter,
 )
+from stardag.build._scope import code_id, structure_scope_key
+from stardag.build._sequential import (
+    _stored_build_config_or_given_aio,
+    installs_build_config_aio,
+)
 from stardag.build._wakeups import drain_wake_candidates
+from stardag.build_config import (
+    BuildConfig,
+    get_build_config,
+    rebind_to_build_config,
+    set_build_config,
+)
+from stardag.exceptions import BuildConfigMismatchError
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
 
@@ -165,7 +188,9 @@ class DefaultExecutionModeSelector:
 # =============================================================================
 
 
-def _run_task_in_process(task: BaseTask) -> TaskStruct | None:
+def _run_task_in_process(
+    task: BaseTask, build_config: BuildConfig | None = None
+) -> TaskStruct | None:
     """Execute task in subprocess, respecting dynamic deps contract.
 
     This function is called in a subprocess via ProcessPoolExecutor.
@@ -185,12 +210,18 @@ def _run_task_in_process(task: BaseTask) -> TaskStruct | None:
 
     Args:
         task: The task to execute.
+        build_config: The build's config, installed in this process before
+            ``run()`` so the tasks it constructs (its dynamic dependencies,
+            its ``requires()``) resolve their ``dependencies_only`` and
+            ``execution_only`` fields from it, as they do in the parent.
+            A fresh process has no context of its own.
 
     Returns:
         - None: Task completed (generator finished or no dynamic deps).
         - TaskStruct: Task yielded deps that are NOT complete. These need
             to be built, then the task will be re-executed.
     """
+    set_build_config(build_config)
     result = task.run()
 
     if result is None:
@@ -375,15 +406,26 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         elif mode == ExecutionMode.SYNC_THREAD:
             assert self._thread_pool is not None
             loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(self._thread_pool, task.run)
+            # ``run_in_executor`` does not carry the calling context into
+            # the pool thread, and the build config lives in a ContextVar:
+            # a ``run()`` that constructs tasks — its dynamic dependencies,
+            # or a ``requires()`` — would resolve their level 2/3 fields to
+            # the class defaults, against a scope hashed from the config.
+            # Run it in a copy of this context so it reads what the build
+            # installed.
+            context = contextvars.copy_context()
+            return await loop.run_in_executor(self._thread_pool, context.run, task.run)
 
         elif mode == ExecutionMode.SYNC_PROCESS:
             assert self._process_pool is not None
             loop = asyncio.get_running_loop()
             # Use helper that handles generators by collecting all yielded deps
             # and returning TaskStruct (which IS picklable, unlike generators)
+            # A subprocess starts with an empty context; the config goes
+            # along as a plain argument and is installed there before
+            # ``run()`` constructs anything. See ``_run_task_in_process``.
             return await loop.run_in_executor(
-                self._process_pool, _run_task_in_process, task
+                self._process_pool, _run_task_in_process, task, get_build_config()
             )
 
         elif mode == ExecutionMode.SYNC_BLOCKING:
@@ -503,6 +545,7 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
 # =============================================================================
 
 
+@installs_build_config_aio
 async def build_aio(
     tasks: Sequence[BaseTask] | BaseTask,
     task_executor: TaskExecutorABC | None = None,
@@ -518,6 +561,7 @@ async def build_aio(
     concurrency_limiter: ConcurrencyLimiter | None = None,
     claim: bool | None = None,
     claim_config: ClaimConfig | None = None,
+    build_config: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -561,6 +605,13 @@ async def build_aio(
             future registry-backed/global implementation). Takes precedence
             over ``concurrency_config``. When neither is set, no throttle is
             applied (zero overhead).
+        build_config: ``{"<namespace>.<Name>": {"<field>": value}}`` — the one
+            source of every ``dependencies_only`` / ``execution_only`` task
+            parameter for this build (see ``stardag.build_config``). Installed
+            for the whole build, so tasks constructed by ``requires()`` and by
+            dynamic yields read it; the root tasks are re-bound to it too. Its
+            ``dependencies_only`` part, with this process's code id, is the
+            structure scope the build's dependency edges are recorded under.
 
     Returns:
         BuildSummary with status, task counts, and build_id
@@ -574,10 +625,21 @@ async def build_aio(
                 raise ValueError(
                     f"Invalid task at index {idx}: {task} (must be BaseTask)"
                 )
-
     # Determine registry: explicit > registry_provider
     if registry is None:
         registry = registry_provider.get()
+    # The config is installed around this whole function (see
+    # ``installs_build_config_aio``); a bare resume adopts the build's own;
+    # the roots are re-created under it: they were constructed by the
+    # caller before it existed, so they carry whatever level 2/3 values were
+    # resolvable there.
+    build_config = await _stored_build_config_or_given_aio(
+        registry, resume_build_id, build_config, on_registry_failure
+    )
+    if build_config:
+        tasks = [rebind_to_build_config(t) for t in tasks]
+    scope_key = structure_scope_key(code_id(), build_config)
+
     logger.info(f"Using registry: {type(registry).__name__}")
     is_noop_registry = type(registry) is NoOpRegistry
 
@@ -671,6 +733,12 @@ async def build_aio(
     # post-order walk is designed to eliminate (diamond DAGs, shared deps).
     discover_done: dict[UUID, asyncio.Event] = {}
 
+    # The static dependencies discovery computed, per task it expanded.
+    # Absent = pruned at (complete), which the registry reads as "declares
+    # nothing". Passed with every registration so the payload never
+    # re-evaluates ``requires()``.
+    declared_deps: dict[UUID, list[BaseTask]] = {}
+
     # Synchronization for concurrent discovery
     discover_lock = asyncio.Lock()
     discover_semaphore = asyncio.Semaphore(max_concurrent_discover)
@@ -683,10 +751,20 @@ async def build_aio(
         logger.info(f"Resuming build: {build_id}")
         # Emit a BUILD_RESUMED event so the registry flips a previously
         # terminal build back to RUNNING and the UI surfaces "running
-        # (resumed)". On older registry servers this is a no-op (the
-        # endpoint 404s and APIRegistry swallows it with a warning).
+        # (resumed)". A server predating scopes is refused here
+        # (RegistryTooOldError), whatever on_registry_failure says — see
+        # handle_registry_error — as is a config the build was not
+        # started with.
         try:
-            await registry.build_resume_aio(build_id)
+            await registry.build_resume_aio(
+                build_id, scope_key=scope_key, build_config=build_config
+            )
+        except BuildConfigMismatchError:
+            # Not a registry hiccup: the registry understood and refused —
+            # the build was configured differently, and a build has one
+            # config for its life. New build. (Other code is not a refusal:
+            # the resume simply moves the build's scope to this code.)
+            raise
         except Exception as reg_err:
             handle_registry_error(
                 reg_err,
@@ -694,7 +772,9 @@ async def build_aio(
                 on_registry_failure,
             )
     else:
-        build_id = await registry.build_start_aio(root_tasks=tasks)
+        build_id = await registry.build_start_aio(
+            root_tasks=tasks, scope_key=scope_key, build_config=build_config
+        )
         logger.info(f"Started build: {build_id}")
 
     # Expose the build id ambiently for the duration of the build (e.g.
@@ -732,10 +812,11 @@ async def build_aio(
                 done_event = discover_done[task.id]
                 already_seen = True
             else:
-                static_deps = flatten_task_struct(task.requires())
-                task_states[task.id] = TaskExecutionState(
-                    task=task, static_deps=static_deps
-                )
+                # ``static_deps`` is filled in below, only once the task is
+                # known to be incomplete (or ``register_all``): a complete
+                # task's ``requires()`` is never evaluated, and never
+                # declared to the registry.
+                task_states[task.id] = TaskExecutionState(task=task)
                 completion_events[task.id] = asyncio.Event()
                 discover_done[task.id] = asyncio.Event()
                 done_event = discover_done[task.id]
@@ -748,11 +829,6 @@ async def build_aio(
             # parent further up our chain would append ahead of the dep.
             await done_event.wait()
             return
-
-        # ``static_deps`` is only assigned in the else-branch above, but
-        # pyright can't infer the control flow; pull it back from the
-        # state we just stored.
-        static_deps = task_states[task.id].static_deps
 
         try:
             # Check completion outside lock (I/O bound, use semaphore to limit concurrency)
@@ -772,10 +848,19 @@ async def build_aio(
                     pending_registrations.append(task)
                     return
 
-            # Task not complete (or register_all) — recurse into deps
-            # first (post-order). TaskGroup waits for all children to
-            # finish before this body continues, so all child appends to
-            # pending_registrations land before our own append below.
+            # Task not complete (or register_all): now, and only now, ask
+            # it what it requires. What the walk computes here is what the
+            # registry is told — the declaration, per task — so a pruned
+            # task declares nothing rather than a re-derived set naming
+            # upstreams nobody registered.
+            static_deps = flatten_task_struct(task.requires())
+            task_states[task.id].static_deps = static_deps
+            declared_deps[task.id] = static_deps
+
+            # Recurse into deps first (post-order). TaskGroup waits for all
+            # children to finish before this body continues, so all child
+            # appends to pending_registrations land before our own append
+            # below.
             async with asyncio.TaskGroup() as tg:
                 for dep in static_deps:
                     tg.create_task(discover(dep))
@@ -813,7 +898,14 @@ async def build_aio(
             chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
             try:
                 registered_infos = await registry.task_register_bulk_aio(
-                    build_id, chunk
+                    build_id,
+                    chunk,
+                    scope_key=scope_key,
+                    declared_dependencies={
+                        t.id: declared_deps[t.id]
+                        for t in chunk
+                        if t.id in declared_deps
+                    },
                 )
             except Exception as reg_err:
                 # Include up to 5 task IDs in the warning so debugging is
@@ -1019,7 +1111,11 @@ async def build_aio(
             if dynamic_deps:
                 try:
                     await registry.task_add_dependencies_aio(
-                        build_id, task, dynamic_deps, is_dynamic=True
+                        build_id,
+                        task,
+                        dynamic_deps,
+                        is_dynamic=True,
+                        scope_key=scope_key,
                     )
                 except Exception as reg_err:
                     handle_registry_error(
@@ -1524,7 +1620,12 @@ async def build_aio(
                 # The claim start 404s on unregistered tasks — retry the
                 # registration first (same warn-mode protection as below).
                 try:
-                    await registry.task_register_aio(build_id, task)
+                    await registry.task_register_aio(
+                        build_id,
+                        task,
+                        declared_dependencies=declared_deps.get(task.id),
+                        scope_key=scope_key,
+                    )
                     state.registered = True
                 except Exception as reg_err:
                     handle_registry_error(
@@ -1611,7 +1712,12 @@ async def build_aio(
             if not state.started:
                 if not state.registered:
                     try:
-                        await registry.task_register_aio(build_id, task)
+                        await registry.task_register_aio(
+                            build_id,
+                            task,
+                            declared_dependencies=declared_deps.get(task.id),
+                            scope_key=scope_key,
+                        )
                         state.registered = True
                     except Exception as reg_err:
                         handle_registry_error(
@@ -2037,6 +2143,7 @@ def build(
     concurrency_limiter: ConcurrencyLimiter | None = None,
     claim: bool | None = None,
     claim_config: ClaimConfig | None = None,
+    build_config: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
@@ -2065,6 +2172,7 @@ def build(
                 concurrency_limiter=concurrency_limiter,
                 claim=claim,
                 claim_config=claim_config,
+                build_config=build_config,
             )
         )
     except RuntimeError as e:

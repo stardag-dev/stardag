@@ -60,11 +60,13 @@ class MetadataAwareRegistry(NoOpRegistry):
             )
         )
 
-    def build_start(self, root_tasks=None, description=None, executor_metadata=None):
+    def build_start(
+        self, root_tasks=None, description=None, executor_metadata=None, **kwargs
+    ):
         self.calls.append(("build_start", {"executor_metadata": executor_metadata}))
         return uuid4()
 
-    def build_resume(self, build_id, executor_metadata=None) -> None:
+    def build_resume(self, build_id, executor_metadata=None, **kwargs) -> None:
         self.calls.append(("build_resume", {"executor_metadata": executor_metadata}))
 
 
@@ -150,7 +152,9 @@ class TestAPIRegistryWireFormat:
         monkeypatch.setenv("SHORT_SHA", "abc1234")
         build_id = uuid4()
         registry, captured = self._make_registry_and_capture(
-            {"id": str(build_id), "name": "brave-tiger-42"}, status_code=201
+            # A scope-aware server answers every start with a scope.
+            {"id": str(build_id), "name": "brave-tiger-42", "scope_key": "build:x"},
+            status_code=201,
         )
 
         result = registry.build_start(executor_metadata=METADATA)

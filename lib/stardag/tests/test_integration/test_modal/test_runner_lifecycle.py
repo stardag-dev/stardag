@@ -438,11 +438,13 @@ class TestReactiveWorkerBehavior:
         registered_bulk: list[str] = []
         added_edges: list[tuple[str, list[str]]] = []
 
-        async def record_bulk(b, tasks, *, limit_keys=None):
+        async def record_bulk(
+            b, tasks, *, limit_keys=None, declared_dependencies=None, scope_key=None
+        ):
             registered_bulk.extend(str(t.id) for t in tasks)
             return None
 
-        def record_edges(b, task, upstream_tasks, is_dynamic=True):
+        def record_edges(b, task, upstream_tasks, is_dynamic=True, *, scope_key=None):
             added_edges.append((str(task.id), [str(u.id) for u in upstream_tasks]))
 
         recording_registry.task_register_bulk_aio = record_bulk  # type: ignore[method-assign]
@@ -472,3 +474,160 @@ class TestReactiveWorkerBehavior:
         Runner()(make_range(limit=3), env_overrides=_env(uuid4()))
 
         assert tick_spawn_stub == {}  # no tick spawn without reactive flag
+
+
+class TestWorkerScope:
+    """Workers are code-agnostic: any container may run any task. What a
+    worker owns is the scope its *yields* are recorded under — its own code
+    id with the config half the scheduler forwarded — so a build that has
+    rolled over to newer code never inherits an old worker's late yield."""
+
+    @pytest.fixture(autouse=True)
+    def _own_code(self, monkeypatch):
+        from stardag.build._scope import STARDAG_CODE_ID_ENV, _reset_for_tests
+
+        _reset_for_tests()
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
+        yield
+        _reset_for_tests()
+
+    def test_the_worker_scope_is_its_code_with_the_forwarded_config_half(self):
+        from stardag.integration.modal._runner import worker_scope_key
+
+        build_id = uuid4()
+        assert (
+            worker_scope_key("beef" * 10 + ":0123456789abcdef", build_id)
+            == "cafe" * 10 + ":0123456789abcdef"
+        )
+        # Its own scope stays its own.
+        assert (
+            worker_scope_key("cafe" * 10 + ":0123456789abcdef", build_id)
+            == "cafe" * 10 + ":0123456789abcdef"
+        )
+        # Nothing forwarded, or the build's own placeholder: the server
+        # decides (the build's current scope).
+        assert worker_scope_key(None, build_id) is None
+        # The build's own placeholder is sent back as is, never as "the
+        # default": the build may since have moved to a real scope, and a
+        # late yield of this worker must stay out of that plan.
+        assert worker_scope_key(f"build:{build_id}", build_id) == f"build:{build_id}"
+        # Another build's placeholder is a misrouted spawn: it carries no
+        # config half and must not fall back to this build's current scope.
+        with pytest.raises(RuntimeError, match="another build's placeholder"):
+            worker_scope_key(f"build:{uuid4()}", build_id)
+
+    def test_another_builds_placeholder_is_refused_before_setup_when_not_reporting(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        """A non-reporting worker builds no reporter, so the refusal cannot
+        live there: it is a preflight, and it fires in this mode too."""
+        from stardag.integration.modal._metadata import (
+            STARDAG_SCOPE_KEY_ENV,
+            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
+        )
+
+        task = make_range(limit=3)
+        env = {
+            **_env(uuid4()),
+            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV: "0",
+            STARDAG_SCOPE_KEY_ENV: f"build:{uuid4()}",
+        }
+
+        with pytest.raises(RuntimeError, match="another build's placeholder"):
+            Runner()(task, env_overrides=env)
+
+        assert not task.complete()
+        assert recording_registry.methods() == []
+
+    def test_another_builds_placeholder_is_not_swallowed_by_reporter_creation(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        """Reporter creation is best-effort and logs its failures; the scope
+        refusal is decided before it, so it propagates rather than leaving
+        the task to run without a reporter."""
+        from stardag.integration.modal._metadata import STARDAG_SCOPE_KEY_ENV
+
+        task = make_range(limit=3)
+        env = {**_env(uuid4()), STARDAG_SCOPE_KEY_ENV: f"build:{uuid4()}"}
+
+        with pytest.raises(RuntimeError, match="another build's placeholder"):
+            Runner()(task, env_overrides=env)
+
+        assert not task.complete()
+        assert recording_registry.methods() == []
+
+    def test_the_builds_own_placeholder_runs(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        from stardag.integration.modal._metadata import STARDAG_SCOPE_KEY_ENV
+
+        build_id = uuid4()
+        task = make_range(limit=3)
+        env = {**_env(build_id), STARDAG_SCOPE_KEY_ENV: f"build:{build_id}"}
+
+        assert Runner()(task, env_overrides=env) is None
+        assert task.complete()
+        assert recording_registry.methods() == ["task_start", "task_complete"]
+
+    def test_a_task_planned_by_other_code_runs_here(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        """No refusal: the task id promises the output whatever code runs it."""
+        from stardag.integration.modal._metadata import STARDAG_SCOPE_KEY_ENV
+
+        task = make_range(limit=3)
+        env = {
+            **_env(uuid4()),
+            STARDAG_SCOPE_KEY_ENV: "beef" * 10 + ":0123456789abcdef",
+        }
+
+        assert Runner()(task, env_overrides=env) is None
+        assert task.complete()
+        assert recording_registry.methods() == ["task_start", "task_complete"]
+
+    def test_yields_are_registered_under_the_workers_own_scope(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target, monkeypatch
+    ):
+        """A suspending parent's children and edges land in this code's
+        scope with the forwarded config half, not in the build's scope."""
+        from stardag.integration.modal._metadata import (
+            STARDAG_MODAL_APP_NAME_ENV,
+            STARDAG_REACTIVE_ENV,
+            STARDAG_SCOPE_KEY_ENV,
+        )
+
+        class _Stub:
+            def spawn(self, **kwargs):
+                return "tick-handle"
+
+        monkeypatch.setattr(
+            modal.Function, "from_name", staticmethod(lambda **kwargs: _Stub())
+        )
+        seen: dict[str, object] = {}
+
+        async def record_bulk(
+            b, tasks, *, limit_keys=None, declared_dependencies=None, scope_key=None
+        ):
+            seen["bulk_scope"] = scope_key
+            return None
+
+        def record_edges(b, task, upstream_tasks, is_dynamic=True, *, scope_key=None):
+            seen["edge_scope"] = scope_key
+
+        recording_registry.task_register_bulk_aio = record_bulk  # type: ignore[method-assign]
+        recording_registry.task_add_dependencies = record_edges  # type: ignore[method-assign]
+
+        build_id = uuid4()
+        env = {
+            **_env(build_id),
+            STARDAG_REACTIVE_ENV: "1",
+            STARDAG_MODAL_APP_NAME_ENV: "wake-app",
+            STARDAG_SCOPE_KEY_ENV: "beef" * 10 + ":0123456789abcdef",
+        }
+        result = Runner()(SyncDynamicRangeSumTask(limit=3), env_overrides=env)
+
+        assert result is not None  # suspended on the yielded dep
+        assert seen == {
+            "bulk_scope": "cafe" * 10 + ":0123456789abcdef",
+            "edge_scope": "cafe" * 10 + ":0123456789abcdef",
+        }

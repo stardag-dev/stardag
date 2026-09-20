@@ -310,13 +310,24 @@ sd.build(
 from typing import Annotated
 
 class MyTask(sd.Task[int]):
-    # Included in hash (affects task ID) — default
+    # Identity (default): part of the task ID, passed at init
     important_param: int
 
-    # Excluded from hash (runtime-only, doesn't affect task ID)
-    sleep_seconds: Annotated[float, sd.StardagField(hash_exclude=True)] = 1.0
-    debug: Annotated[bool, sd.StardagField(hash_exclude=True)] = False
+    # Dependencies-only: changes what is required/yielded, not the output.
+    # Read from the build config, never passed at init; part of the
+    # build's structure scope.
+    partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
+
+    # Execution-only: how the work is done. Read from the build config,
+    # never passed at init; not part of any hash.
+    num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
 ```
+
+Supply levels 2/3 per build: `sd.build(root, build_config={"ns.MyTask":
+{"partition_size": 500}})`, `app.build_trigger(root, build_config=...)`,
+or `with sd.build_config_scope({...}):` in tests. Passing them at init
+raises. `hash_exclude=True` is deprecated (DeprecationWarning; maps to
+`execution_only` but still allows init).
 
 ### Task ID Determinism
 
