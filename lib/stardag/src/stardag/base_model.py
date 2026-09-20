@@ -122,11 +122,37 @@ class StardagField:
                 f"Drop compat_default or make the field identity-significant "
                 f"(got significance={self.significance!r})."
             )
+        if self.hash_exclude and self.significance != "identity":
+            # The two disagree about init: a legacy hash_exclude field may be
+            # passed at init for one release, an explicit non-identity field
+            # may not. One or the other, never both.
+            raise ValueError(
+                "hash_exclude=True is the deprecated spelling of "
+                'significance="execution_only"; combining it with an explicit '
+                f"significance={self.significance!r} is contradictory. Drop "
+                "hash_exclude."
+            )
 
     @property
     def is_identity(self) -> bool:
         """Whether the field is part of the task's identity."""
         return self.significance == "identity" and not self.hash_exclude
+
+    @property
+    def is_legacy_hash_exclude(self) -> bool:
+        """The deprecated form: ``hash_exclude=True`` with no explicit
+        significance. Dropped from the hash like an ``execution_only`` field,
+        but still accepted at init and kept in the registry payload for one
+        release. Readers should use this and :attr:`is_build_config_field`
+        rather than the raw pair."""
+        return self.hash_exclude and self.significance == "identity"
+
+    @property
+    def is_build_config_field(self) -> bool:
+        """An explicit ``dependencies_only`` / ``execution_only`` field: never
+        passed at init, never hashed, never stored; resolved from the build
+        config."""
+        return self.significance != "identity"
 
     @property
     def effective_significance(self) -> Significance:
@@ -238,16 +264,16 @@ class StardagBaseModel(BaseModel):
         cached = cls.__dict__.get("__stardag_non_identity_fields__")
         if cached is not None:
             return cached
-        # The *explicit* significance, not the effective one: a legacy
-        # ``hash_exclude=True`` field is excluded from the hash and the
-        # registry payload like an execution_only field, but it may still
-        # be passed at init for one release — that is the whole difference
+        # Build-config fields only, not the legacy ``hash_exclude`` form: a
+        # legacy field is excluded from the hash like an execution_only
+        # field, but it may still be passed at init and is kept in the
+        # registry payload for one release — that is the whole difference
         # the deprecation note describes.
         names = tuple(
             name
             for name, field in cls.model_fields.items()
             if (meta := _get_annotation(field, StardagField)) is not None
-            and meta.significance != "identity"
+            and meta.is_build_config_field
         )
         try:
             setattr(cls, "__stardag_non_identity_fields__", names)
@@ -296,19 +322,16 @@ class StardagBaseModel(BaseModel):
             maybe_stardag_field = _get_annotation(field, StardagField)
             if maybe_stardag_field is not None:
                 stardag_field: StardagField = maybe_stardag_field
-                # A field with an explicit non-identity significance is
-                # neither hashed nor stored: it is not part of what the task
-                # promises, and its value comes from the build config, never
-                # from the payload. Checked first to short-circuit before
-                # the attribute read.
-                if stardag_field.significance != "identity":
+                # A build-config field is neither hashed nor stored: it is
+                # not part of what the task promises, and its value comes
+                # from the build config, never from the payload.
+                if stardag_field.is_build_config_field:
                     continue
-                # A legacy ``hash_exclude=True`` field is dropped from the
-                # hash but KEPT in the registry payload: it may still be
-                # passed at init for one release, so a task registered with
-                # a non-default value must rehydrate with that value, not
-                # the default.
-                if stardag_field.hash_exclude and mode == "hash":
+                # The legacy form is dropped from the hash but KEPT in the
+                # registry payload: it may still be passed at init for one
+                # release, so a task registered with a non-default value
+                # must rehydrate with that value, not the default.
+                if stardag_field.is_legacy_hash_exclude and mode == "hash":
                     continue
                 # Compare the *raw* Python value (not the already-serialized
                 # `value`) against compat_default. The serialized form differs

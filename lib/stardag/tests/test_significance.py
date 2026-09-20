@@ -176,6 +176,20 @@ class TestLegacyHashExcludeInPayloads:
 
 
 class TestSignificanceIsChecked:
+    def test_hash_exclude_with_an_explicit_significance_is_refused(self):
+        """The deprecated flag and an explicit non-identity significance
+        disagree about init (one allows it, the other refuses), so the pair
+        is contradictory rather than redundant."""
+        with pytest.warns(DeprecationWarning):
+            with pytest.raises(ValueError, match="contradictory"):
+                StardagField(hash_exclude=True, significance="execution_only")
+        with pytest.warns(DeprecationWarning):
+            legacy = StardagField(hash_exclude=True)
+        assert legacy.is_legacy_hash_exclude and not legacy.is_build_config_field
+        assert legacy.effective_significance == "execution_only"
+        explicit = StardagField(significance="dependencies_only")
+        assert explicit.is_build_config_field and not explicit.is_legacy_hash_exclude
+
     def test_a_typo_is_refused_at_field_creation(self):
         """A Literal is a hint; an unchecked typo would read as non-identity
         on the model and as execution-only in the structure hash."""
