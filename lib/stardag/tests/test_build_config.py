@@ -13,6 +13,7 @@ installing the context around a build are in
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Annotated
 
 import pytest
@@ -26,6 +27,7 @@ from stardag.build_config import (
     build_config_scope,
     canonical_structure_config,
     get_build_config,
+    jsonable_build_config,
     rebind_to_build_config,
     resolve_field_value,
     set_build_config,
@@ -306,3 +308,56 @@ class TestRebindToBuildConfig:
         assert rebound.inner.partition_size == 3
         assert rebound.id == outer.id
         assert rebound.inner.id == outer.inner.id
+
+
+class Dated(sd.Task[int]):
+    __namespace__ = "bc_tests"
+
+    key: str
+    since: Annotated[datetime, StardagField(significance="dependencies_only")] = (
+        datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+
+    def run(self) -> None:
+        self.target().save(1)
+
+    def target(self) -> InMemoryTarget[int]:  # type: ignore[override]
+        return InMemoryTarget(key=str(self.id))
+
+
+DATED = task_config_key("bc_tests", "Dated")
+
+
+class TestJsonableBuildConfig:
+    """A config is stored with the build and sent to workers as JSON, so it
+    is settled into JSON form at the entry — a Python value a field accepts
+    at validation must not become a TypeError in a client library."""
+
+    def test_python_values_take_their_json_form(self):
+        at = datetime(2026, 3, 4, 5, 6, tzinfo=timezone.utc)
+        assert jsonable_build_config({DATED: {"since": at}}) == {
+            DATED: {"since": "2026-03-04T05:06:00Z"}
+        }
+
+    def test_json_native_values_pass_through(self):
+        config = {KEY: {"partition_size": 250, "ratio": 0.7}, OTHER: {"width": 4}}
+        assert jsonable_build_config(config) == config
+        assert jsonable_build_config(None) is None
+        assert jsonable_build_config({}) == {}
+
+    def test_the_json_form_resolves_back_to_the_field_type(self):
+        at = datetime(2026, 3, 4, 5, 6, tzinfo=timezone.utc)
+        with build_config_scope(jsonable_build_config({DATED: {"since": at}})):
+            assert Dated(key="a").since == at
+
+    def test_the_json_form_hashes_like_the_python_form(self):
+        at = datetime(2026, 3, 4, 5, 6, tzinfo=timezone.utc)
+        raw = {DATED: {"since": at}}
+        assert structure_config_hash(raw) == structure_config_hash(
+            jsonable_build_config(raw)
+        )
+        assert structure_config_hash(raw) != structure_config_hash(None)
+
+    def test_a_value_with_no_json_form_is_a_config_error(self):
+        with pytest.raises(BuildConfigError, match="no JSON form"):
+            jsonable_build_config({DATED: {"since": object()}})

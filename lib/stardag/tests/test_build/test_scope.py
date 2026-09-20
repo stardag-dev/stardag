@@ -7,6 +7,7 @@ Design: ``docs/design/scope-keyed-dependency-structure.md``.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -29,6 +30,10 @@ from stardag.target import InMemoryTarget
 
 
 class Fanout(sd.Task[int]):
+    """A probe, not a model DAG: ``run`` writes the level 2 value it
+    resolved so a test can observe which config reached it. A real task's
+    output must not depend on a ``dependencies_only`` field."""
+
     __namespace__ = "scope_tests"
     __version__ = "1"
 
@@ -177,6 +182,46 @@ class TestBuildPassesItsScope:
         assert get_build_config() is None
         # ...and the task that ran read it: it wrote its partition size.
         assert Fanout(key="build-me").target().load() == 250
+        _reset_for_tests()
+
+    async def test_the_config_is_stored_in_its_json_form(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A Python value the field accepts (a datetime) is settled into JSON
+        at the entry, so the registry body and the worker environment carry
+        the form they can serialise — and the task still reads a datetime."""
+
+        class Dated(sd.Task[int]):
+            __namespace__ = "scope_tests"
+
+            key: str
+            since: Annotated[
+                datetime, StardagField(significance="dependencies_only")
+            ] = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+            def run(self) -> None:
+                self.target().save(self.since.year)
+
+            def target(self) -> InMemoryTarget[int]:  # type: ignore[override]
+                return InMemoryTarget(key=str(self.id))
+
+        _reset_for_tests()
+        monkeypatch.setenv(STARDAG_CODE_ID_ENV, "codeJSON")
+        registry = _Recording()
+        at = datetime(2030, 3, 4, tzinfo=timezone.utc)
+        key = "scope_tests.Dated"
+
+        summary = await sd.build_aio(
+            [Dated(key="d")], registry=registry, build_config={key: {"since": at}}
+        )
+
+        assert summary.status.name == "SUCCESS"
+        (start,) = registry.starts
+        assert start["build_config"] == {key: {"since": "2030-03-04T00:00:00Z"}}
+        assert start["scope_key"] == structure_scope_key(
+            "codeJSON", {key: {"since": at}}
+        )
+        assert Dated(key="d").target().load() == 2030
         _reset_for_tests()
 
     def test_build_sequential_passes_scope_too(self, monkeypatch: pytest.MonkeyPatch):

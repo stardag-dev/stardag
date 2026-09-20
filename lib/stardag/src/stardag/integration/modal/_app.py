@@ -35,7 +35,11 @@ from stardag.build._task_modules import (
     set_declared_task_module_patterns,
     validate_task_module_patterns,
 )
-from stardag.build_config import UnknownTaskClassError, canonical_structure_config
+from stardag.build_config import (
+    UnknownTaskClassError,
+    canonical_structure_config,
+    jsonable_build_config,
+)
 from stardag.exceptions import StardagError
 from stardag.integration.modal._bootstrap import (
     ReactiveDiscovery,
@@ -1418,6 +1422,9 @@ class StardagApp:
             tick_kwargs = _validate_tick_kwargs(tick_kwargs)
         if build_config:
             _validate_build_config_at_trigger(build_config)
+            # Stored with the build and forwarded to every worker as JSON,
+            # so it takes its JSON form here, before it leaves this process.
+            build_config = jsonable_build_config(build_config)
 
         registry = registry_provider.get()
         # A configured registry is needed to mint a new build id, and

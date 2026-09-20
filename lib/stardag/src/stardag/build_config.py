@@ -108,6 +108,41 @@ def resolve_field_value(key: str, field_name: str) -> tuple[bool, Any]:
     return True, entry[field_name]
 
 
+def jsonable_build_config(
+    config: BuildConfig | None,
+) -> dict[str, dict[str, Any]] | None:
+    """``config`` with every value in JSON mode — the form a build config is
+    stored and transported in.
+
+    A caller may build the mapping from Python objects (a ``datetime``, a
+    ``UUID``, a ``Path``) and each field's validator accepts those, but the
+    config is stored with the build and sent to every worker as JSON, so it
+    has to *be* JSON before it leaves the caller's process. Validation later
+    turns the JSON form back into the field's type, the same way an identity
+    parameter round-trips through the registry. A value with no JSON form is
+    a :class:`BuildConfigError` here rather than a ``TypeError`` from deep in
+    a client library. ``None`` and ``{}`` pass through unchanged.
+    """
+    if config is None:
+        return None
+    from pydantic_core import PydanticSerializationError, to_jsonable_python
+
+    out: dict[str, dict[str, Any]] = {}
+    for key, fields in config.items():
+        out[key] = {}
+        for field_name, value in fields.items():
+            try:
+                out[key][field_name] = to_jsonable_python(value)
+            except PydanticSerializationError as e:
+                raise BuildConfigError(
+                    f"build_config value for {key}.{field_name} "
+                    f"({type(value).__name__}) has no JSON form; the config is "
+                    "stored with the build and sent to every worker as JSON. "
+                    f"Pass a JSON-compatible value instead: {e}"
+                ) from e
+    return out
+
+
 def structure_config_hash(config: BuildConfig | None) -> str:
     """Hash of the ``dependencies_only`` part of ``config``: the second half
     of a structure scope key.

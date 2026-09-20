@@ -59,6 +59,7 @@ from stardag.build._scope import code_id, structure_scope_key
 from stardag.build_config import (
     BuildConfig,
     build_config_scope,
+    jsonable_build_config,
     rebind_to_build_config,
     set_build_config,
 )
@@ -79,6 +80,23 @@ def _bound_build_config(
     return bound.arguments.get("build_config")
 
 
+def _bind_jsonable_build_config(
+    fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[tuple[Any, ...], dict[str, Any], BuildConfig | None]:
+    """``(args, kwargs, config)`` with the call's ``build_config`` in JSON
+    mode (:func:`jsonable_build_config`), so the body stores and forwards the
+    same form it installs. The form has to be settled here, at the entry:
+    every downstream carrier — the registry body, the worker environment —
+    is JSON."""
+    bound = inspect.signature(fn).bind_partial(*args, **kwargs)
+    config = bound.arguments.get("build_config")
+    if config is None:
+        return args, kwargs, None
+    config = jsonable_build_config(config)
+    bound.arguments["build_config"] = config
+    return bound.args, bound.kwargs, config
+
+
 def installs_build_config(fn: Callable[_P, _R]) -> Callable[_P, _R]:
     """Run a sync build entry point inside ``build_config_scope(build_config)``.
 
@@ -94,8 +112,9 @@ def installs_build_config(fn: Callable[_P, _R]) -> Callable[_P, _R]:
 
     @functools.wraps(fn)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-        with build_config_scope(_bound_build_config(fn, args, kwargs)):
-            return fn(*args, **kwargs)
+        args_, kwargs_, config = _bind_jsonable_build_config(fn, args, kwargs)
+        with build_config_scope(config):
+            return fn(*args_, **kwargs_)  # type: ignore[arg-type]
 
     return wrapper
 
@@ -107,8 +126,9 @@ def installs_build_config_aio(
 
     @functools.wraps(fn)
     async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-        with build_config_scope(_bound_build_config(fn, args, kwargs)):
-            return await fn(*args, **kwargs)
+        args_, kwargs_, config = _bind_jsonable_build_config(fn, args, kwargs)
+        with build_config_scope(config):
+            return await fn(*args_, **kwargs_)  # type: ignore[arg-type]
 
     return wrapper
 

@@ -16,7 +16,11 @@ from stardag.build._base import (
     DetachedExecutionStatus,
     TaskExecutorABC,
 )
-from stardag.build._task_modules import import_failure_note
+from stardag.build._task_modules import (
+    declared_task_module_patterns,
+    import_failure_note,
+    module_is_covered,
+)
 from stardag.build_config import get_build_config, rebind_to_build_config
 from stardag.build._task_store import BuildTaskStore
 from stardag.registry import (
@@ -229,12 +233,22 @@ async def _load_task(
     task = await task_store.load_task_aio(task_id)
     if task is not None:
         # A pickle restores the level 2/3 values the writer's code resolved,
-        # not this process's. Re-binding re-validates the identity data
-        # under the installed build config and this code, so a build that
-        # rolled over to a newer deployment does not schedule tasks carrying
-        # the old code's defaults. Only with a config to resolve — the same
-        # rule as the bootstrap's, for the same pickle-safety reason.
-        if get_build_config():
+        # not this process's: a build that rolled over to a newer deployment
+        # would otherwise schedule tasks carrying the old code's defaults,
+        # from pickles an earlier deployment wrote before this one declared
+        # its task modules. Re-binding re-validates the identity data under
+        # the installed build config and this code — the same object a
+        # registry rehydration would produce, so for a re-bound task the
+        # pickle is only a cache of the identity data. Done whenever there is
+        # a config to resolve, and for every class the deployment's task
+        # modules cover (importable by name here, by declaration). A class
+        # outside both is left as pickled: with no config there is nothing
+        # to resolve, and a re-validated instance of a dynamically
+        # parametrised class may resolve to one pickle cannot find by name —
+        # the bootstrap's rule, for the same reason.
+        if get_build_config() or module_is_covered(
+            type(task).__module__, declared_task_module_patterns()
+        ):
             task = rebind_to_build_config(task)
         return task
     try:

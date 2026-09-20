@@ -539,14 +539,17 @@ async def _roll_over_build_aio(
     log line here and in the command's error.
 
     **A rollover needs a pickle-free task store.** The store is write-once
-    and a pickle carries the code it was written by: a by-value class is the
-    old code entire, and no rollover can refresh it. A deployment that
-    declared ``task_modules`` (or ``require_pickle_free``) stores registry
-    data instead, which this code rebuilds from; one that may hold pickles
-    would run old code for every non-root task the new plan re-uses. So the
-    rollover is refused for such a deployment, with the remedy in the
-    message, and the build is failed like any other rollover that cannot
-    happen.
+    and a pickle carries the state the old code resolved — every level 2/3
+    value as that code's defaults had it — which no rollover can refresh
+    unless the class is importable by name here, so the object can be
+    rebuilt from its identity data. A deployment that declared
+    ``task_modules`` (or ``require_pickle_free``) can: every covered task is
+    rebuilt from registry data, or re-bound when an earlier deployment's
+    pickle is found (``_frontier_actions._load_task``). One that declares
+    neither would carry old state into the new plan for every non-root task
+    it re-uses. So the rollover is refused for such a deployment, with the
+    remedy in the message, and the build is failed like any other rollover
+    that cannot happen.
 
     The build's edges were evaluated by the code its scope names; this
     deployment runs other code, so it plans the build again under its own
@@ -559,16 +562,15 @@ async def _roll_over_build_aio(
 
     **Roots come from the registry, never from the build's task store.**
     The store holds pickles the old code wrote, write-once, and a pickle
-    carries the object it was made from: a by-value class is the old code
-    entire, and even a by-reference one restores the level 2/3 values the
-    old code resolved. Registry data is identity parameters only; rebuilt
-    here, under this code with the build's config installed, a root is
-    exactly what this deployment would construct. The same holds for every
-    task the tick loads afterwards: a pickle it does find is re-bound to the
-    installed config (see ``_frontier_actions._load_task``), and a
-    deployment that declared its task modules stores no pickles at all —
-    which is what makes a rollover fully code-safe; a by-value pickle is the
-    one payload no rollover can refresh, as the store's own contract says.
+    restores the level 2/3 values the old code resolved. Registry data is
+    identity parameters only; rebuilt here, under this code with the build's
+    config installed, a root is exactly what this deployment would
+    construct. The same holds for every task the tick loads afterwards: a
+    pickle it does find for a class the deployment's task modules cover, or
+    when a config is installed, is re-bound to this code and config (see
+    ``_frontier_actions._load_task``), and a deployment that declared its
+    task modules writes no pickles of its own — which is what makes a
+    rollover code-safe for every covered class.
 
     Runs inside the tick, under the build's lease, once (see ``RollOver``).
 

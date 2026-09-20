@@ -26,6 +26,7 @@ from stardag.build import (
     get_current_build_id,
 )
 from stardag.build._reactive import claim_ttl_seconds
+from stardag.build_config import jsonable_build_config
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_CONFIG_ENV,
@@ -147,7 +148,10 @@ class ModalTaskExecutor(TaskExecutorABC):
         # The build's config and structure scope, forwarded to every worker
         # this executor spawns (see STARDAG_BUILD_CONFIG_ENV /
         # STARDAG_SCOPE_KEY_ENV). None when the caller has none to forward.
-        self.build_config = build_config
+        # Forwarded as JSON (STARDAG_BUILD_CONFIG_ENV), so it is settled into
+        # its JSON form here; the engines do the same at their entry, and a
+        # caller constructing the executor directly gets the same guarantee.
+        self.build_config = jsonable_build_config(build_config)
         self.scope_key = scope_key
         self.worker_reports_lifecycle = worker_reports_lifecycle
         # Reactive scheduling: forward the app name + reactive flag so

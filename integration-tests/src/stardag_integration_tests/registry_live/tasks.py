@@ -258,7 +258,7 @@ class ConfiguredFanOut(sd.Task[list[int]]):
     """``SuspendingParent`` with its width read from the build config.
 
     ``children`` is ``dependencies_only``: the number of dynamic children
-    changes the structure, not the output. Two builds with different widths
+    changes the structure, not the output (see ``run``). Two builds with different widths
     have different scopes, so an abandoned wide generation from one build
     is never inherited by a narrower build of the same task id — and two
     builds with the *same* width share a scope, so the second trusts the
@@ -298,4 +298,9 @@ class ConfiguredFanOut(sd.Task[list[int]]):
         kids = self.child_tasks()
         assert len(kids) == len(indices)
         yield kids
-        self._save([len(kid.load()) for kid in kids])
+        # Width-invariant, as a dependencies_only field demands: every
+        # child summarises the same one-element range, so the set of their
+        # lengths is {1} at any width. The output must not encode the width,
+        # or two builds with different configs would disagree on the output
+        # behind one task id.
+        self._save(sorted({len(kid.load()) for kid in kids}))
