@@ -546,33 +546,40 @@ class RehydrationPlan:
     def error(self, patterns: typing.Sequence[str]) -> str | None:
         """The refusal message, or None when every task qualified.
 
-        **The listing is truncated**, and the distinct *classes* are what
-        it is truncated to. The offending set is normally one bad class
-        over every task of a fan-out, so an unbounded listing would be
-        thousands of identical lines — in the log, and in the
-        ``error_message`` the caller records on the build. One example
-        task id per class is what makes the failure diagnosable; the rest
-        are the same fact repeated.
+        **The listing is truncated**, and the unit it truncates to is the
+        ``(class, reason)`` pair. The offending set is normally one bad
+        class over every task of a fan-out, so an unbounded listing would
+        be thousands of identical lines — in the log, and in the
+        ``error_message`` the caller records on the build. One example task
+        id per pair is what makes the failure diagnosable; the rest are the
+        same fact repeated.
+
+        **Not by class alone**, because a reason can be task-specific: two
+        tasks of one class fail the round trip with different exception
+        text, and collapsing them would pick one arbitrary reason and then
+        claim the count applies to it. The coverage reasons are constants,
+        so the common case is still a single line.
         """
         if not self.unreconstructable:
             return None
-        example: dict[str, tuple[BaseTask, str]] = {}
-        counts: dict[str, int] = {}
+        example: dict[tuple[str, str], BaseTask] = {}
+        counts: dict[tuple[str, str], int] = {}
         for task, reason in self.unreconstructable:
             cls = type(task)
-            key = f"{cls.__module__}.{cls.__qualname__}"
-            example.setdefault(key, (task, reason))
+            key = (f"{cls.__module__}.{cls.__qualname__}", reason)
+            example.setdefault(key, task)
             counts[key] = counts.get(key, 0) + 1
-        listed = sorted(example)[:_MAX_LISTED_CLASSES]
+        listed = sorted(example)[:_MAX_LISTED_GROUPS]
         lines = []
         for key in listed:
-            task, reason = example[key]
+            class_name, reason = key
+            task = example[key]
             others = counts[key] - 1
-            more = f" (and {others} more task(s) of this class)" if others else ""
-            lines.append(f"  - {key} (e.g. task {task.id}): {reason}{more}")
+            more = f" (and {others} more task(s), same reason)" if others else ""
+            lines.append(f"  - {class_name} (e.g. task {task.id}): {reason}{more}")
         hidden = len(example) - len(listed)
         if hidden:
-            lines.append(f"  - ...and {hidden} further class(es).")
+            lines.append(f"  - ...and {hidden} further class/reason group(s).")
         # Deliberately NOT truncated with the listing: the remedy has to
         # cover every unreachable class, including the ones the listing
         # dropped, or following it leaves the build refused for the same
@@ -603,10 +610,10 @@ _MAIN_MODULE_REASON = (
     "task class defined in a __main__ module, which no container can import"
 )
 
-# Distinct classes named in a refusal message before it truncates. Well
-# above any plausible number of genuinely-different broken classes, and far
-# below the number of tasks one broken class can produce.
-_MAX_LISTED_CLASSES = 20
+# Distinct ``(class, reason)`` pairs named in a refusal message before it
+# truncates. Well above any plausible number of genuinely-different
+# failures, and far below the number of tasks one broken class can produce.
+_MAX_LISTED_GROUPS = 20
 
 
 def plan_rehydration(

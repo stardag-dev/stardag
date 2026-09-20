@@ -2142,7 +2142,7 @@ class TestReactiveRehydrationPreflight:
         assert "2 task(s)" in message
         # Both are SyncOnlyTask, so the listing names the class once with
         # one example id (see RehydrationPlan.error).
-        assert "(and 1 more task(s) of this class)" in message
+        assert "(and 1 more task(s), same reason)" in message
         assert str(root.id) in message or str(dep.id) in message
         assert "not covered by task_modules" in message
         # The remedy, not just the diagnosis.

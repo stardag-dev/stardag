@@ -30,7 +30,8 @@ from stardag.build._task_modules import (
     module_is_covered,
     module_is_main,
     _MAIN_MODULE_REASON,
-    _MAX_LISTED_CLASSES,
+    _MAX_LISTED_GROUPS,
+    RehydrationPlan,
     plan_rehydration,
     set_declared_task_module_patterns,
     suggested_pattern_for,
@@ -479,12 +480,12 @@ class TestPlanRehydration:
         assert suggested_pattern_for(SyncOnlyTask.__module__) in error
         assert "['unrelated_pkg.*']" in error
 
-    def test_the_listing_is_by_class_with_one_example_task(self):
+    def test_the_listing_is_grouped_with_one_example_task(self):
         """One broken class over a fan-out is the normal shape of a refusal.
 
         Listing every task would put thousands of identical lines in the
         log and in the ``error_message`` recorded on the build; one example
-        id per class is what makes it diagnosable.
+        id per (class, reason) is what makes it diagnosable.
         """
         tasks = [SyncOnlyTask(name=f"t{i}") for i in range(50)]
         plan = plan_rehydration(tasks, ["unrelated_pkg.*"])
@@ -492,9 +493,37 @@ class TestPlanRehydration:
         assert error is not None
         listed = [line for line in error.splitlines() if line.startswith("  - ")]
         assert len(listed) == 1
-        assert "(and 49 more task(s) of this class)" in error
+        assert "(and 49 more task(s), same reason)" in error
         # The example is a real task of the build.
         assert any(str(task.id) in error for task in tasks)
+
+    def test_one_class_with_task_specific_reasons_is_not_collapsed(self):
+        """Grouping by class alone would pick one arbitrary reason and then
+        attach the whole class's count to it.
+
+        A round-trip reason embeds the exception, so two tasks of one class
+        can genuinely fail differently. Built directly rather than through
+        `plan_rehydration`, because that is the surface under test: the
+        message must not claim a count spans a reason it does not.
+        """
+        a, b, c = (SyncOnlyTask(name=n) for n in ("a", "b", "c"))
+        plan = RehydrationPlan(
+            unreconstructable=(
+                (a, "registry-data round-trip failed (field x)"),
+                (b, "registry-data round-trip failed (field x)"),
+                (c, "registry-data round-trip failed (field y)"),
+            )
+        )
+        error = plan.error(["some_pkg.*"])
+        assert error is not None
+        listed = [line for line in error.splitlines() if line.startswith("  - ")]
+        assert len(listed) == 2
+        assert "(field x)" in error and "(field y)" in error
+        # The count belongs to the reason it is printed beside.
+        assert "(and 1 more task(s), same reason)" in error
+        assert "(and 2 more" not in error
+        # A round-trip failure has no one-line remedy; don't invent one.
+        assert "Add [" not in error
 
     def test_many_distinct_classes_truncate(self):
         import stardag as sd
@@ -505,14 +534,14 @@ class TestPlanRehydration:
                 (sd.Task[int],),
                 {"__module__": "acme_unreachable.tasks", "run": lambda self: None},
             )
-            for i in range(_MAX_LISTED_CLASSES + 5)
+            for i in range(_MAX_LISTED_GROUPS + 5)
         ]
         plan = plan_rehydration([cls() for cls in classes], ["unrelated_pkg.*"])
         error = plan.error(["unrelated_pkg.*"])
         assert error is not None
         listed = [line for line in error.splitlines() if line.startswith("  - ")]
-        assert len(listed) == _MAX_LISTED_CLASSES + 1  # + the "...and N more" line
-        assert "...and 5 further class(es)." in error
+        assert len(listed) == _MAX_LISTED_GROUPS + 1  # + the "...and N more" line
+        assert "...and 5 further class/reason group(s)." in error
 
     def test_summary_aggregates_repeated_reasons(self):
         tasks = [SyncOnlyTask(name=f"t{i}") for i in range(3)]
