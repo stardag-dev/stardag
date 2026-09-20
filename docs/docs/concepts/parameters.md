@@ -91,7 +91,8 @@ class Aggregate(sd.Task[Summary]):
         # output is the same however it is chunked.
         chunks = [Chunk(period=self.period, index=i) for i in range(self.partition_size)]
         yield chunks
-        self._save(merge(c.load() for c in chunks), threads=self.num_threads)
+        summary = merge((c.load() for c in chunks), threads=self.num_threads)
+        self._save(summary)
 ```
 
 A level 2 or 3 field is **never passed at init** — `Aggregate(period="2026-01",

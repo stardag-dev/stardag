@@ -42,7 +42,8 @@ class Aggregate(sd.Task[Summary]):
     def run(self):
         chunks = [Chunk(period=self.period, index=i) for i in range(self.partition_size)]
         yield chunks
-        self._save(merge(c.load() for c in chunks), threads=self.num_threads)
+        summary = merge((c.load() for c in chunks), threads=self.num_threads)
+        self._save(summary)
 ```
 
 `period` is part of the task id: two periods are two outputs. The

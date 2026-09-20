@@ -119,7 +119,8 @@ class Aggregate(sd.Task[Summary]):
     def run(self):
         chunks = [Chunk(period=self.period, index=i) for i in range(self.partition_size)]
         yield chunks                       # structure depends on partition_size, output does not
-        self._save(merge(c.load() for c in chunks), threads=self.num_threads)
+        summary = merge((c.load() for c in chunks), threads=self.num_threads)
+        self._save(summary)
 
 Aggregate(period="2026-01")                 # fine
 Aggregate(period="2026-01", num_threads=2)  # raises: level 2/3 values come from the build config
