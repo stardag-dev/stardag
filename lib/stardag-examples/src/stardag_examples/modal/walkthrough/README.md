@@ -83,7 +83,45 @@ uv run stardag modal deploy src/stardag_examples/modal/walkthrough/app.py
 ```
 
 This creates the `build`, `worker_default`, `worker_long`, `tick` and
-`tick_watchdog` functions (the latter two power reactive scheduling).
+`tick_watchdog` functions (the latter two power reactive scheduling), and
+records the deployment — this code version, under this app name — in the
+registry:
+
+```sh
+uv run stardag modal deployments --app stardag_examples-walkthrough
+```
+
+### Redeploy while builds are running
+
+There is one live deployment per app. Deploy again under the same name and
+containers already running finish on the old code, every new spawn lands on
+the new one, and a running reactive build's next scheduler tick **re-plans
+it** under the new code (`rolled_over` in the tick summary): discovery again,
+edges recorded under the new code's structure scope, completed tasks kept.
+Try it: start a reactive build (below), change something in `tasks.py` that
+alters the structure — say, which shards `report_dag` yields — commit, and
+run the deploy command again while the build is in flight.
+
+Two preconditions, both already met by this app: the deploy must have been
+recorded (the command exits non-zero if it could not reach the registry),
+and the app declares `task_modules`, so ticks rebuild tasks from registry
+data rather than from pickles a previous deployment wrote. The code id is
+the git SHA of a clean checkout; a dirty tree gets a one-off id and a
+warning, so commit before deploying.
+
+**A branch beside production** is simply another app name with its own
+single live version — a convention, not a feature:
+
+```sh
+# Modal app names allow letters, digits, `-` and `_`; a branch like
+# `user/feature` needs its slash replaced.
+uv run stardag modal deploy src/stardag_examples/modal/walkthrough/app.py \
+  --name "stardag_examples-walkthrough-$(git branch --show-current | tr '/' '-')"
+```
+
+The [Evolve a DAG Safely](https://stardag-dev.github.io/stardag/how-to/evolve-dags/)
+how-to has the full account, including the three levels of parameter
+significance and the per-build `build_config`.
 
 ## Configure the named concurrency limit
 
