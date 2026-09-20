@@ -209,7 +209,7 @@ class TestWorkerReportWindow:
                 return DetachedExecutionStatus.FAILED
 
         executor = ReportingExecutor()
-        registry, _, store = _setup([root], auto_complete=True, executor=executor)
+        registry, _ = _setup([root], auto_complete=True, executor=executor)
         ReportingExecutor.registry = registry
         registry.add_task(
             str(root.id),
@@ -222,7 +222,6 @@ class TestWorkerReportWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=self._config(linger_seconds=1.0, grace=self.LONG_GRACE),
         )
 
@@ -253,7 +252,7 @@ class TestWorkerReportWindow:
         """
         (root,) = _chain("no-report")
         executor = FakeTickExecutor(statuses={"fc-oom": DetachedExecutionStatus.FAILED})
-        registry, _, store = _setup([root], auto_complete=True, executor=executor)
+        registry, _ = _setup([root], auto_complete=True, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -266,7 +265,6 @@ class TestWorkerReportWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=self._config(linger_seconds=1.0, grace=0.1),
         )
 
@@ -299,7 +297,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -313,7 +311,6 @@ class TestWorkerReportWindow:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=self._config(linger_seconds=5.0, grace=0.1),
             ),
             timeout=3,
@@ -340,7 +337,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -353,7 +350,6 @@ class TestWorkerReportWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=self._config(linger_seconds=0.05, grace=0.4),
         )
 
@@ -381,7 +377,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -394,7 +390,6 @@ class TestWorkerReportWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=self._config(linger_seconds=0, grace=0.1),
         )
 
@@ -417,7 +412,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-live": DetachedExecutionStatus.RUNNING}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -430,7 +425,6 @@ class TestWorkerReportWindow:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=self._config(linger_seconds=0, grace=self.LONG_GRACE),
             ),
             timeout=5,
@@ -462,7 +456,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -476,7 +470,6 @@ class TestWorkerReportWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=self._config(linger_seconds=1.0, grace=0.1),
         )
 
@@ -505,7 +498,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -520,7 +513,6 @@ class TestWorkerReportWindow:
                     uuid4(),
                     registry=registry,
                     task_executor=executor,
-                    task_store=store,
                     config=self._config(
                         linger_seconds=0.2,
                         grace=self.LONG_GRACE,
@@ -557,7 +549,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -571,7 +563,6 @@ class TestWorkerReportWindow:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=self._config(
                     linger_seconds=0.2,
                     grace=self.LONG_GRACE,
