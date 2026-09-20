@@ -99,7 +99,8 @@ A level 2 or 3 field is **never passed at init** — `Aggregate(period="2026-01"
 num_threads=2)` raises. Give it a default: the build config overrides the
 default, and a level 2 or 3 field without one would make every constructor
 call demand a value that only the config may supply. It is read from the
-**build config**, one mapping per build keyed by `namespace.Name`:
+**build config**, one mapping per build keyed by `namespace.Name`, or by the
+bare `Name` for a task without a `__namespace__`:
 
 ```{.python notest}
 sd.build(root, build_config={"reports.Aggregate": {"partition_size": 500, "num_threads": 8}})
