@@ -147,14 +147,29 @@ def _pattern_problem(pattern: str) -> str | None:
     return None
 
 
+def module_is_main(module_name: str) -> bool:
+    """Whether ``module_name`` is a ``__main__`` module.
+
+    Its own predicate because it is the one *unfixable* reason a class is
+    not reconstructable, and the difference has to reach the user. Every
+    other unreachable module is fixed by adding a pattern; this one is
+    fixed only by moving the class. A remedy that cannot work is worse than
+    none — ``my_pkg.__main__`` in particular would otherwise be told to add
+    ``my_pkg.*``, which reads as entirely plausible and changes nothing.
+    """
+    return module_name == "__main__" or module_name.endswith(".__main__")
+
+
 def module_is_covered(module_name: str, patterns: typing.Sequence[str]) -> bool:
     """Whether importing the declared ``patterns`` reaches ``module_name``.
 
     Mirrors :func:`expand_task_module_patterns`, including its ``__main__``
     exclusion — a class defined in a ``__main__`` module is never
-    reconstructable in a scheduler container, wildcard or not.
+    reconstructable in a scheduler container, wildcard or not. A caller
+    that reports *why* must ask :func:`module_is_main` first; this one
+    collapses the two cases into a single False.
     """
-    if module_name == "__main__" or module_name.endswith(".__main__"):
+    if module_is_main(module_name):
         return False
     for pattern in patterns:
         if pattern.endswith(_WILDCARD_SUFFIX):
@@ -450,7 +465,6 @@ def format_uncovered_message(
 ) -> str:
     """Render the actionable "these classes are not covered" message."""
     names = [f"{cls.__module__}.{cls.__qualname__}" for cls in uncovered]
-    suggestions = sorted({suggested_pattern_for(cls.__module__) for cls in uncovered})
     head = (
         f"Task class {names[0]} is"
         if len(names) == 1
@@ -461,9 +475,36 @@ def format_uncovered_message(
         f"{head} not covered by this app's task_modules ({declared}). A "
         "reactive scheduler tick reconstructs every task it schedules from "
         "registry data, and can only do that for a class whose module it "
-        f"has imported. Add {suggestions} to task_modules and redeploy the "
-        "app." + (f" {remedy}" if remedy else "")
+        "has imported."
+        + _remedy_for(cls.__module__ for cls in uncovered)
+        + (f" {remedy}" if remedy else "")
     )
+
+
+def _remedy_for(modules: typing.Iterable[str]) -> str:
+    """The fix for a set of unreachable modules, split by which fix applies.
+
+    A ``__main__`` module gets its own sentence, because no pattern reaches
+    one: :func:`module_is_covered` excludes it outright, so telling the
+    user to add ``my_pkg.*`` for a class in ``my_pkg.__main__`` sends them
+    through a redeploy to the identical message.
+    """
+    listed = list(modules)
+    suggestions = sorted(
+        {suggested_pattern_for(m) for m in listed if not module_is_main(m)}
+    )
+    main_modules = sorted({m for m in listed if module_is_main(m)})
+    parts = []
+    if suggestions:
+        parts.append(f" Add {suggestions} to task_modules and redeploy the app.")
+    if main_modules:
+        parts.append(
+            f" {main_modules} cannot be covered by any pattern — a __main__ "
+            "module is an entrypoint, never importable under a stable name in "
+            "a container. Move the task class into an ordinary module of your "
+            "package and declare that module instead."
+        )
+    return "".join(parts)
 
 
 # =============================================================================
@@ -533,16 +574,18 @@ class RehydrationPlan:
         if hidden:
             lines.append(f"  - ...and {hidden} further class(es).")
         # Deliberately NOT truncated with the listing: the remedy has to
-        # cover every uncovered class, including the ones the listing
+        # cover every unreachable class, including the ones the listing
         # dropped, or following it leaves the build refused for the same
         # reason. It is short regardless — `suggested_pattern_for` collapses
         # a module to its package.
-        suggestions = sorted(
-            {
-                suggested_pattern_for(type(task).__module__)
-                for task, reason in self.unreconstructable
-                if reason == _UNCOVERED_REASON
-            }
+        #
+        # Only the two *module reachability* reasons get a remedy. A
+        # round-trip failure has no one-line fix, and its per-task line
+        # already carries the exception.
+        remedy = _remedy_for(
+            type(task).__module__
+            for task, reason in self.unreconstructable
+            if reason in (_UNCOVERED_REASON, _MAIN_MODULE_REASON)
         )
         declared = list(patterns) if patterns else "not declared"
         return (
@@ -551,15 +594,14 @@ class RehydrationPlan:
             "could never put them on a worker:\n"
             + "\n".join(lines)
             + f"\n\nThis app's task_modules: {declared}."
-            + (
-                f" Add {suggestions} to task_modules and redeploy the app."
-                if suggestions
-                else ""
-            )
+            + remedy
         )
 
 
 _UNCOVERED_REASON = "task class not covered by task_modules"
+_MAIN_MODULE_REASON = (
+    "task class defined in a __main__ module, which no container can import"
+)
 
 # Distinct classes named in a refusal message before it truncates. Well
 # above any plausible number of genuinely-different broken classes, and far
@@ -592,7 +634,14 @@ def plan_rehydration(
     reconstructable: list[BaseTask] = []
     unreconstructable: list[tuple[BaseTask, str]] = []
     for task in tasks:
-        if not module_is_covered(type(task).__module__, patterns):
+        module = type(task).__module__
+        if module_is_main(module):
+            # Reported apart from plain non-coverage because the remedy
+            # differs, and the plain one would be a lie here: no pattern
+            # reaches a __main__ module (see :func:`module_is_main`).
+            unreconstructable.append((task, _MAIN_MODULE_REASON))
+            continue
+        if not module_is_covered(module, patterns):
             unreconstructable.append((task, _UNCOVERED_REASON))
             continue
         try:

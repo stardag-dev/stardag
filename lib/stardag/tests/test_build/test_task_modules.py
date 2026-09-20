@@ -28,6 +28,8 @@ from stardag.build._task_modules import (
     import_task_modules,
     last_import_failures,
     module_is_covered,
+    module_is_main,
+    _MAIN_MODULE_REASON,
     _MAX_LISTED_CLASSES,
     plan_rehydration,
     set_declared_task_module_patterns,
@@ -386,6 +388,23 @@ class TestCoverage:
 # =============================================================================
 
 
+class TestMainModules:
+    """``__main__`` is unreachable, and knowably so — which is the point."""
+
+    @pytest.mark.parametrize("module", ["__main__", "my_pkg.__main__", "a.b.__main__"])
+    def test_recognised(self, module: str):
+        assert module_is_main(module)
+        # ...and therefore never covered, by any pattern.
+        assert not module_is_covered(module, [suggested_pattern_for(module)])
+        assert not module_is_covered(module, [module])
+
+    @pytest.mark.parametrize(
+        "module", ["__main__x", "my_pkg.main", "my_pkg.__main__x", "main"]
+    )
+    def test_not_confused_with_ordinary_modules(self, module: str):
+        assert not module_is_main(module)
+
+
 class TestDeclaredPatterns:
     def test_set_and_read_back(self):
         previous = declared_task_module_patterns()
@@ -499,6 +518,49 @@ class TestPlanRehydration:
         tasks = [SyncOnlyTask(name=f"t{i}") for i in range(3)]
         plan = plan_rehydration(tasks, ["unrelated_pkg.*"])
         assert "(x3)" in plan.summary()
+
+    def test_a_main_module_class_gets_its_own_reason(self):
+        """Not plain non-coverage: no pattern reaches a ``__main__`` module.
+
+        ``module_is_covered`` excludes one outright, so the generic remedy
+        would be a lie — and the ``my_pkg.__main__`` shape is the dangerous
+        one, because ``suggested_pattern_for`` produces ``my_pkg.*``, which
+        reads as plausible and changes nothing.
+        """
+        import stardag as sd
+
+        entrypoint_task = type(
+            "EntrypointTask",
+            (sd.Task[int],),
+            {"__module__": "my_pkg.__main__", "run": lambda self: None},
+        )()
+        plan = plan_rehydration([entrypoint_task], ["my_pkg.*"])
+
+        assert plan.reconstructable == ()
+        assert [reason for _, reason in plan.unreconstructable] == [_MAIN_MODULE_REASON]
+        error = plan.error(["my_pkg.*"])
+        assert error is not None
+        assert "cannot be covered by any pattern" in error
+        assert "my_pkg.__main__" in error
+        # ...and it must NOT tell them to add the pattern they already have.
+        assert "Add [" not in error
+
+    def test_main_and_ordinary_uncovered_classes_each_get_their_remedy(self):
+        import stardag as sd
+
+        entrypoint_task = type(
+            "BothEntrypointTask",
+            (sd.Task[int],),
+            {"__module__": "__main__", "run": lambda self: None},
+        )()
+        plan = plan_rehydration(
+            [entrypoint_task, SyncOnlyTask(name="ordinary")], ["unrelated_pkg.*"]
+        )
+        error = plan.error(["unrelated_pkg.*"])
+        assert error is not None
+        assert suggested_pattern_for(SyncOnlyTask.__module__) in error
+        assert "cannot be covered by any pattern" in error
+        assert "'__main__'" in error
 
     def test_no_patterns_means_nothing_is_reconstructable(self):
         task = SyncOnlyTask(name="no-patterns")
