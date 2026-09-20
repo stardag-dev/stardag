@@ -60,6 +60,30 @@ class TestRecordDeployment:
     def test_a_deploy_is_recorded_under_the_app_name(self):
         assert self._run("ap-123") == [("myapp", "c" * 40, "ap-123")]
 
+    def test_a_registry_that_keeps_no_records_is_a_notice_not_a_failure(self):
+        """The RegistryABC default returns None: nothing was recorded, so
+        the operator is told no build will roll over to this code — but a
+        custom registry without deployment records is not a broken deploy."""
+        from unittest.mock import MagicMock, patch
+
+        from stardag._cli import modal as cli_modal
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        class KeepsNoRecords(NoOpRegistry):
+            def deployment_record(self, *, app_name, code_id, modal_app_id=None):
+                return None
+
+        with (
+            registry_provider.override(KeepsNoRecords()),
+            patch.object(cli_modal, "console") as console,
+        ):
+            cli_modal._record_deployment(
+                MagicMock(code_id="c" * 40), "myapp", modal_app_id=None
+            )
+        (printed,) = [str(c.args[0]) for c in console.print.call_args_list]
+        assert "does not record deployments" in printed
+        assert "will not roll over" in printed
+
     def test_without_a_modal_app_id_the_record_still_lands(self):
         assert self._run(None) == [("myapp", "c" * 40, None)]
 

@@ -246,9 +246,15 @@ class _TickDeployment:
         task_modules: The concrete module list expanded at ``finalize()``,
             imported here so a tick can rebuild task objects from registry
             data. Empty when the app opted out.
-        task_module_patterns: The declared patterns behind that list,
-            published for the coverage checks that report against patterns
-            rather than expansions.
+        task_module_patterns: The patterns behind that list — declared, or
+            inferred when the app declared none — published for the
+            coverage checks that report against patterns rather than
+            expansions.
+        elide_pickles: Whether the deployment writes no task pickles for
+            covered classes: ``task_modules`` *declared* (inference is
+            observation-only and leaves the store in use), or
+            ``require_pickle_free``. The rollover gate reads this, not the
+            patterns, which are non-empty for an inferring app too.
         require_pickle_free: The app's ``require_pickle_free``, which the
             tick needs because it is a *writer* of the build task store —
             rehydrating a task writes it back — and the flag's promise is
@@ -269,6 +275,7 @@ class _TickDeployment:
     task_modules: tuple[str, ...]
     task_module_patterns: tuple[str, ...]
     require_pickle_free: bool
+    elide_pickles: bool = False
 
 
 async def _run_deployed_tick_aio(
@@ -631,7 +638,10 @@ async def _roll_over_build_aio(
             "re-run it if the last deploy could not reach the registry."
         )
         return None
-    if not deployment.task_module_patterns and not deployment.require_pickle_free:
+    if not deployment.elide_pickles:
+        # Declared task modules or require_pickle_free — not the patterns,
+        # which an app that declared nothing still carries by inference
+        # while writing pickles for every class.
         message = (
             f"Rollover of build {build_id} to code {own_code_id!r} refused: "
             "this deployment stores task pickles, which a rollover cannot "

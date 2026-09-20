@@ -1153,6 +1153,10 @@ class StardagApp:
             # task writes it back), so the flag has to reach it or the
             # "writes no pickles" promise holds only until the first tick.
             require_pickle_free=self.require_pickle_free,
+            # The rollover gate: whether this deployment leaves pickles in
+            # the store. Declared modules, not inferred ones — inference
+            # is observation-only and keeps the store in use.
+            elide_pickles=self._task_modules_declared or self.require_pickle_free,
         )
 
         # ``async def`` on purpose, and load-bearing. Modal serves

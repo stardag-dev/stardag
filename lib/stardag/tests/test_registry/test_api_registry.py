@@ -1750,6 +1750,21 @@ class TestScopeRequiresANewServer:
         with pytest.raises(RegistryTooOldError, match="predates structure scopes"):
             registry.build_set_scope(uuid4(), scope_key="code:cfg")
 
+    def test_missing_deployments_route_is_a_too_old_server(self):
+        """Recording a deployment is what lets builds follow a redeploy, so
+        a server without the route is refused, not skipped — the deploy
+        command fails on it like on any recording failure."""
+        from stardag.exceptions import RegistryTooOldError
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path.endswith("/deployments")
+            return httpx.Response(404, json={"detail": "Not Found"})
+
+        registry = self._registry(handler)
+        with pytest.raises(RegistryTooOldError, match="predates deployments"):
+            registry.deployment_record(app_name="app", code_id="c" * 40)
+
     def test_a_resource_404_on_the_scope_route_is_still_not_found(self):
         from stardag.exceptions import RegistryTooOldError
 

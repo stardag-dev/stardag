@@ -2309,6 +2309,7 @@ class TestTickTaskStoreIsPickleFree:
             task_modules=(),
             task_module_patterns=(),
             require_pickle_free=require_pickle_free,
+            elide_pickles=require_pickle_free,
         )
         registry = MagicMock(spec=RegistryABC)
         # Not reactively scheduled: the tick body returns before it
@@ -3232,6 +3233,33 @@ class TestTickAppOwnership:
         )
         registry.task_get_metadata_aio.assert_not_awaited()
         registry.build_set_scope_aio.assert_not_awaited()
+
+    def _tick_deployment_for(self, **app_kwargs):
+        """The ``_TickDeployment`` the deployed tick body runs with."""
+        tick = self._capture_tick("app-a", **app_kwargs)
+        with patch(
+            "stardag.integration.modal._app._run_deployed_tick_aio",
+            new_callable=AsyncMock,
+        ) as run_tick:
+            run_tick.return_value = {}
+            _invoke(tick, str(uuid4()), None)
+        return run_tick.call_args.kwargs["deployment"]
+
+    def test_an_app_declaring_nothing_does_not_open_the_rollover_gate(
+        self, default_in_memory_fs_target
+    ):
+        """An app that declares no task_modules may still carry *inferred*
+        patterns (observation-only; the store stays in use), so the gate
+        reads the elision decision, not the patterns: the tick's deployment
+        says elide_pickles=False for it whatever inference found."""
+        deployment = self._tick_deployment_for()  # nothing declared
+        assert deployment.elide_pickles is False
+
+    def test_declared_task_modules_open_the_rollover_gate(
+        self, default_in_memory_fs_target
+    ):
+        deployment = self._tick_deployment_for(task_modules=["stardag.utils.testing.*"])
+        assert deployment.elide_pickles is True
 
     def test_the_tick_gets_no_hook_for_a_placeholder_scoped_build(
         self, default_in_memory_fs_target, monkeypatch

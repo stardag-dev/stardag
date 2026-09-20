@@ -2305,10 +2305,14 @@ class APIRegistry(RegistryABC):
         """Record that ``code_id`` was deployed as ``app_name``
         (``POST /deployments``, idempotent on the pair).
 
-        Against a server predating deployments the route is missing: the
-        deploy still works, the record is simply not kept — logged, not
-        raised.
+        The record is what a scheduler tick consults before rolling a build
+        over to this code, so a server without the route — one predating
+        deployments, and therefore structure scopes — is a
+        :class:`RegistryTooOldError`, not a skipped record: the deploy
+        command fails on it, as it does on any recording failure, rather
+        than exit 0 for a deployment no build will follow.
         """
+        operation = f"Record deployment of {app_name}"
         try:
             response = self._request(
                 "POST",
@@ -2319,18 +2323,18 @@ class APIRegistry(RegistryABC):
                     **({"modal_app_id": modal_app_id} if modal_app_id else {}),
                 },
                 params=self._get_params(),
-                operation=f"Record deployment of {app_name}",
+                operation=operation,
             )
         except NotFoundError as e:
             if not is_missing_route_error(e):
                 raise
-            logger.warning(
-                "Registry API does not support POST /deployments; the "
-                "deployment of %s is not recorded. Upgrade the Registry API "
-                "to see deployments in `stardag modal deployments`.",
-                app_name,
-            )
-            return None
+            raise RegistryTooOldError(
+                f"{operation}: the Registry API predates deployments (and "
+                "structure scopes), so the deployment cannot be recorded and "
+                "no reactive build would follow it. Upgrade the Registry API "
+                "(stardag-api) to a version matching this SDK.",
+                operation=operation,
+            ) from e
         return DeploymentInfo.model_validate(response.json())
 
     def deployment_list(self, *, app_name: str | None = None) -> list[DeploymentInfo]:

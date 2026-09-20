@@ -597,11 +597,21 @@ def _record_deployment(
             "deploy is idempotent and records the same code id."
         )
         raise typer.Exit(1)
-    if info is not None:
+    if info is None:
+        # The RegistryABC default: a registry that does not keep deployment
+        # records. Not a failure of this deploy, but a fact about the
+        # registry the operator should see, since no build will roll over
+        # to this code without a record.
         console.print(
-            f"[cyan]Recorded deployment[/cyan] {info.app_name} "
-            f"(code {info.code_id[:12]})"
+            f"[yellow]Deployed {app_name} (code "
+            f"{stardag_app_instance.code_id[:12]}), but this registry does "
+            "not record deployments; running reactive builds will not roll "
+            "over to it.[/yellow]"
         )
+        return
+    console.print(
+        f"[cyan]Recorded deployment[/cyan] {info.app_name} (code {info.code_id[:12]})"
+    )
 
 
 @app.command("deployments")
