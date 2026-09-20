@@ -96,7 +96,12 @@ class StardagField:
     one release, with a warning; the new levels enforce immediately.
     """
     significance: Significance = "identity"
-    """What the parameter is significant for; see :data:`Significance`."""
+    """What the parameter is significant for; see :data:`Significance`.
+
+    A ``dependencies_only`` or ``execution_only`` field should carry a
+    default: the build config overrides it, and without one every
+    constructor call would demand a value that only the config may supply.
+    """
 
     def __post_init__(self) -> None:
         if self.significance not in get_args(Significance):
