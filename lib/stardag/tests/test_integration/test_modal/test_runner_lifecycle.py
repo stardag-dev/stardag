@@ -456,8 +456,15 @@ class TestReactiveWorkerBehavior:
         yielded_dep_id = registered_bulk[0]
         assert len(registered_bulk) == 1
         assert added_edges == [(str(parent.id), [yielded_dep_id])]
-        # Registration IS the persistence: a tick rebuilds the yielded dep
-        # from the ``task_data`` recorded above and from nothing else.
+        # What is asserted here is that the worker *registers* the yielded
+        # dep, which is the whole of its persistence duty now: a real
+        # registry stores each task's ``task_data`` as part of
+        # ``task_register_bulk``, and that payload is the only thing a
+        # later tick can rebuild the object from. This double records ids
+        # only, so the payload itself is not under test here — the
+        # round trip is covered directly in
+        # ``test_task_modules.TestPlanRehydration``.
+        #
         # And the scheduler was woken up.
         assert tick_spawn_stub["spawn_kwargs"] == {"build_id": str(build_id)}
 
