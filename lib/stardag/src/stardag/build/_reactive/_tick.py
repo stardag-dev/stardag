@@ -1260,6 +1260,13 @@ async def _run_tick_body_aio(
                                 # deadline; if the task resolved itself in
                                 # the meantime the window is dropped and
                                 # this falls through next time round.
+                                #
+                                # Ordinarily the poll above has already
+                                # caught this. It is here for the deadline
+                                # that expires without an intervening poll
+                                # — a linger shorter than one interval, or
+                                # a window trimmed to land on the deadline
+                                # itself.
                                 break
                             # Exit handshake, pre-release half (see the
                             # docstring): the flag may have been set since
@@ -1305,6 +1312,17 @@ async def _run_tick_body_aio(
                             # to prevent, and the successor has the flag.
                             summary.outcome = "lease_lost"
                             return
+                        if report_window.due():
+                            # Checked every poll, not only at the deadline
+                            # below: the deadline is the *later* of the
+                            # linger and the window, so with the defaults
+                            # (120s linger, 30s grace) waiting for it would
+                            # sit on a closed window for 90s before
+                            # recording anything. Costs nothing — the
+                            # window is in memory — and bounds the fallback
+                            # at one poll interval past the grace, which is
+                            # what the grace is documented to mean.
+                            break
                         if awaiting_backend and await _any_ref_settled(
                             awaiting_backend, task_executor
                         ):

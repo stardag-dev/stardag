@@ -287,6 +287,49 @@ class TestWorkerReportWindow:
         (reason,) = registry.fail_reasons[str(root.id)]
         assert reason is not None and "no report" in reason
 
+    async def test_the_verdict_lands_on_the_grace_not_on_the_linger(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A closed window is acted on at once, not at the next deadline.
+
+        The deadline a tick sleeps to is the *later* of its linger and its
+        open windows, so a tick that only consulted the window when that
+        deadline expired would sit on a closed one for the difference —
+        with the defaults, 30s of grace followed by 90s of nothing. The
+        window is in memory, so checking it every poll costs nothing and
+        makes the grace mean what it says.
+
+        The linger here is fifty times the grace; a tick that waited for
+        it would not finish inside this test's timeout.
+        """
+        (root,) = _chain("verdict-on-grace")
+        executor = FakeTickExecutor(
+            statuses={"fc-dead": DetachedExecutionStatus.FAILED}
+        )
+        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-dead",
+            attempt_count=2,
+        )
+
+        summary = await asyncio.wait_for(
+            run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                task_store=store,
+                config=self._config(linger_seconds=5.0, grace=0.1),
+            ),
+            timeout=3,
+        )
+
+        assert summary.report_window_expired == 1
+        assert summary.failed_recorded == 1
+        assert summary.terminal_status == "failed"
+
     async def test_the_tick_holds_past_its_linger_rather_than_owe_a_verdict(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
