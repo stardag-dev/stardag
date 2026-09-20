@@ -515,24 +515,28 @@ class RehydrationPlan:
         """
         if not self.unreconstructable:
             return None
-        by_class: dict[str, tuple[BaseTask, str, int]] = {}
+        example: dict[str, tuple[BaseTask, str]] = {}
+        counts: dict[str, int] = {}
         for task, reason in self.unreconstructable:
             cls = type(task)
             key = f"{cls.__module__}.{cls.__qualname__}"
-            first = by_class.get(key)
-            by_class[key] = (
-                (task, reason, 1)
-                if first is None
-                else (first[0], first[1], first[2] + 1)
-            )
+            example.setdefault(key, (task, reason))
+            counts[key] = counts.get(key, 0) + 1
+        listed = sorted(example)[:_MAX_LISTED_CLASSES]
         lines = []
-        for key in sorted(by_class)[:_MAX_LISTED_CLASSES]:
-            task, reason, count = by_class[key]
-            more = f" (and {count - 1} more task(s) of this class)" if count > 1 else ""
+        for key in listed:
+            task, reason = example[key]
+            others = counts[key] - 1
+            more = f" (and {others} more task(s) of this class)" if others else ""
             lines.append(f"  - {key} (e.g. task {task.id}): {reason}{more}")
-        hidden = len(by_class) - len(lines)
+        hidden = len(example) - len(listed)
         if hidden:
             lines.append(f"  - ...and {hidden} further class(es).")
+        # Deliberately NOT truncated with the listing: the remedy has to
+        # cover every uncovered class, including the ones the listing
+        # dropped, or following it leaves the build refused for the same
+        # reason. It is short regardless — `suggested_pattern_for` collapses
+        # a module to its package.
         suggestions = sorted(
             {
                 suggested_pattern_for(type(task).__module__)
