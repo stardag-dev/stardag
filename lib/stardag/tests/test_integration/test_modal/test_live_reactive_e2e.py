@@ -133,8 +133,15 @@ class MiniReactiveRegistry(NoOpRegistry):
     async def task_get_metadata_aio(self, task_id):
         from stardag.registry._base import TaskMetadata
 
+        from stardag.exceptions import NotFoundError
+
         tid = str(task_id)
-        body = self.metadata_bodies[tid]
+        try:
+            body = self.metadata_bodies[tid]
+        except KeyError:
+            raise NotFoundError(
+                f"Task {tid} not found", detail="Task not found"
+            ) from None
         return TaskMetadata(
             id=task_id,
             body=body,

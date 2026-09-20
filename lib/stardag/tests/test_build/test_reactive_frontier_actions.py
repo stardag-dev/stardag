@@ -911,6 +911,17 @@ class TestDerivedClaimTtl:
         assert claim_ttl_seconds(task, _Raising()) is None
 
 
+async def _load_task_raises(registry, task_id: str) -> bool:
+    """True if ``_load_task`` propagated rather than returning None."""
+    from stardag.exceptions import NotFoundError
+
+    try:
+        await frontier_module._load_task(task_id, registry)
+    except NotFoundError:
+        return True
+    return False
+
+
 class TestRehydration:
     """A tick rebuilds every task it schedules from the registry's stored
     ``task_data``, and from nothing else."""
@@ -1021,6 +1032,65 @@ class TestRehydration:
 
         assert summary.failed_recorded == 1
         assert summary.terminal_status == "failed"
+
+    async def test_a_transient_registry_error_is_not_a_verdict_on_the_task(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A 500 must not permanently fail a task — or, via fail_mode, a build.
+
+        ``_load_task`` is the only way to get a task object now, so it sits
+        on the critical path for every actionable task, and the caller marks
+        what it reports as NON-retryable. Swallowing an outage there would
+        turn a registry blip into a dead build. It must propagate instead:
+        the tick ends as ``outcome="error"``, which is reported, diagnosable
+        and retried by the next tick.
+        """
+        from stardag.exceptions import APIError
+
+        (root,) = _chain("transient-error-root")
+        registry, executor = _setup([root], auto_complete=False)
+
+        async def boom(task_id):
+            raise APIError("upstream timeout", status_code=500)
+
+        registry.task_get_metadata_aio = boom  # type: ignore[method-assign]
+
+        with pytest.raises(APIError):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                config=FAST_TICK,
+            )
+
+        # The task was NOT failed, and no attempt was spent on it.
+        assert registry.statuses[str(root.id)] == "pending"
+        assert registry.build_status != "failed"
+
+    async def test_a_missing_route_404_propagates_but_a_missing_task_does_not(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The two 404s mean opposite things.
+
+        A resource 404 is a fact about this task and is deterministic; a
+        route 404 means the server has no such endpoint, which is a fact
+        about the deployment and says nothing about the task.
+        """
+        from stardag.exceptions import NotFoundError
+
+        (root,) = _chain("route-404-root")
+        registry, executor = _setup([root], auto_complete=False)
+
+        async def missing_route(task_id):
+            raise NotFoundError("Not Found", detail="Not Found")
+
+        registry.task_get_metadata_aio = missing_route  # type: ignore[method-assign]
+        assert await _load_task_raises(registry, str(root.id))
+
+        # ...whereas a resource 404 resolves to None and fails the task.
+        registry2, _ = _setup([root], auto_complete=False)
+        registry2.metadata_bodies.clear()
+        assert await frontier_module._load_task(str(root.id), registry2) is None
 
     async def test_a_successful_rebuild_logs_nothing_above_debug(
         self,

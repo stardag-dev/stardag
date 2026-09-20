@@ -19,6 +19,8 @@ from stardag.build._base import (
 from stardag.build._task_modules import (
     import_failure_note,
 )
+from stardag._core.rehydrate import TaskRehydrationError
+from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.registry import (
     BuildFrontier,
     FrontierTaskRef,
@@ -203,10 +205,23 @@ async def _load_task(
     why the pickle store this used to consult first is gone (see
     ``RELEASE_NOTES.md`` and ``docs/design/scope-keyed-dependency-structure.md``).
 
-    Returns None on failure rather than raising: the caller decides what a
-    missing object means, and the two cases differ — a RUNNING task
-    resolves itself through its worker's self-reporting, while a pending
-    one can never be scheduled and is failed.
+    Returns None **only for a deterministic failure** — the registry has no
+    metadata for this task, or the payload cannot be validated back into
+    its class. The caller decides what that means, and the two cases
+    differ: a RUNNING task resolves itself through its worker's
+    self-reporting, while a pending one can never be scheduled and is
+    failed, permanently and without spending an attempt.
+
+    **Everything else propagates**, and the distinction is load-bearing
+    now that this is the only way to get a task object. A timeout, a 500,
+    an expired key or a server too old for the endpoint says nothing about
+    the task; swallowing one would turn a registry blip into a permanently
+    failed task and, through ``fail_mode``, a permanently failed build. A
+    raised error instead ends the tick as ``outcome="error"`` — reported,
+    diagnosable, and retried by the next tick — which is exactly the
+    behaviour an outage should get. That is also what lets the caller mark
+    the failure non-retryable in good conscience: by then it is known to be
+    a property of the data, not of the network.
 
     With ``quiet=True`` the failure logs a single warning without the stack
     trace, for those tolerant callers; the repeated per-tick
@@ -223,17 +238,32 @@ async def _load_task(
     """
     try:
         metadata = await registry.task_get_metadata_aio(UUID(task_id))
+    except NotFoundError as e:
+        # A *resource* 404 is a fact about this task: the registry has no
+        # metadata for it, and no retry changes that. A *route* 404 is a
+        # fact about the server (too old for this endpoint), which is an
+        # outage, not a verdict on the task — propagate it.
+        if is_missing_route_error(e):
+            raise
+        _log_unrebuildable(task_id, e, quiet=quiet)
+        return None
+    try:
         task = task_from_registry_data(metadata.body, expected_task_id=task_id)
-    except Exception as e:
-        message = f"Task {task_id} could not be rebuilt from its registry data"
-        note = import_failure_note()
-        if quiet:
-            logger.warning(f"{message}: {e}{note}")
-        else:
-            logger.exception(f"{message}.{note}")
+    except TaskRehydrationError as e:
+        _log_unrebuildable(task_id, e, quiet=quiet)
         return None
     logger.debug(f"Rebuilt task {task_id} from registry data.")
     return task
+
+
+def _log_unrebuildable(task_id: str, error: Exception, *, quiet: bool) -> None:
+    """Report a task this process cannot rebuild — see :func:`_load_task`."""
+    message = f"Task {task_id} could not be rebuilt from its registry data"
+    note = import_failure_note()
+    if quiet:
+        logger.warning(f"{message}: {error}{note}")
+    else:
+        logger.exception(f"{message}.{note}")
 
 
 class _SpawnCap(typing.NamedTuple):
@@ -496,10 +526,13 @@ async def _act_on_frontier(
                 registry=registry,
                 config=config,
                 summary=summary,
-                # Deterministic: neither the registry's stored task_data
-                # nor this process's imported task classes change between
-                # passes, so a retry buys a second identical failure at the
-                # cost of an attempt. Fail it once and let the build say so.
+                # Deterministic, and known to be: ``_load_task`` returns
+                # None only for a missing record or an invalid payload, and
+                # re-raises anything that might be transient. Neither the
+                # stored task_data nor this process's imported task classes
+                # change between passes, so a retry buys a second identical
+                # failure at the cost of an attempt. Fail it once and let
+                # the build say so.
                 retryable=False,
             )
             acted = True

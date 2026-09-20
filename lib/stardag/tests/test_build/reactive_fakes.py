@@ -153,8 +153,12 @@ class FakeReactiveRegistry(NoOpRegistry):
         # from serves_attempt_counts: the two shipped separately, and the
         # degradations differ.
         self.serves_interrupt_counts = True
-        # task_id -> task_data body, served by task_get_metadata_aio
-        # (rehydration fallback); missing key -> KeyError, like a 404.
+        # task_id -> task_data body, served by task_get_metadata_aio. This
+        # is the ONLY thing a tick can rebuild a task object from, so a
+        # missing entry raises NotFoundError exactly as the real registry
+        # answers for an unknown task — and NOT a bare KeyError, which
+        # ``_load_task`` deliberately does not treat as a verdict on the
+        # task (see its "everything else propagates" rule).
         self.metadata_bodies: dict[str, dict] = {}
         # --- cross-build scope (mirrors the API's two scopes) ---
         # ``statuses`` is environment-global; these task ids exist in the
@@ -599,7 +603,12 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def task_get_metadata_aio(self, task_id):
         from stardag.registry._base import TaskMetadata
 
-        body = self.metadata_bodies[str(task_id)]
+        try:
+            body = self.metadata_bodies[str(task_id)]
+        except KeyError:
+            raise NotFoundError(
+                f"Task {task_id} not found", detail="Task not found"
+            ) from None
         return TaskMetadata(
             id=task_id,
             body=body,
