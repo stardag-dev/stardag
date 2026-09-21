@@ -171,6 +171,10 @@ class RecordingRegistry(NoOpRegistry):
             executor=executor,
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
+            # Recorded as well as forwarded: a double that swallows the
+            # identity exercises the legacy path and cannot catch a
+            # start that forgot to name its execution.
+            execution_id=execution_id,
         )
         await super().task_start_aio(
             build_id,
@@ -178,6 +182,7 @@ class RecordingRegistry(NoOpRegistry):
             executor=executor,
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
+            execution_id=execution_id,
         )
 
     async def task_complete_aio(self, build_id: UUID, task: BaseTask) -> None:
@@ -218,8 +223,12 @@ class RecordingRegistry(NoOpRegistry):
         executor_ref: str | None = None,
         execution_id: UUID | None = None,
     ) -> None:
-        self._record("task_interrupt_aio", task.id, reason=reason)
-        await super().task_interrupt_aio(build_id, task, reason, executor_ref)
+        self._record(
+            "task_interrupt_aio", task.id, reason=reason, execution_id=execution_id
+        )
+        await super().task_interrupt_aio(
+            build_id, task, reason, executor_ref, execution_id=execution_id
+        )
 
     async def task_suspend_aio(self, build_id: UUID, task: BaseTask) -> None:
         self._record("task_suspend_aio", task.id)
