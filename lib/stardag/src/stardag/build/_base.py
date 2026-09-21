@@ -426,6 +426,18 @@ class TaskExecutorABC(ABC):
         this specific going missing is invisible until a report is quietly
         mis-attributed.
 
+        **Detached submissions only.** :meth:`submit` takes no identity,
+        so a worker started that way cannot name its own execution and
+        its self-reports are judged on the executor reference alone --
+        the behaviour that predates identities. That is a deliberate
+        limit rather than an oversight: claims default to probeable
+        (detached) executions, so the claimed-but-not-detached
+        combination needs ``claim=True`` asked for explicitly, and
+        widening ``submit`` -- the primary executor method, which nearly
+        every custom executor overrides -- would break far more than the
+        gap is worth. Nothing degrades below the pre-identity behaviour
+        on that path.
+
         Raises:
             Exception: if the execution could not be started; the build
                 engine converts it into a task failure.

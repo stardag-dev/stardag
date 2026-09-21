@@ -333,7 +333,7 @@ class MetadataDetachedExecutor(FakeDetachedExecutor):
     async def submit_detached(
         self, task: BaseTask, *, execution_id: UUID | None = None
     ) -> DetachedHandle:
-        handle = await super().submit_detached(task)
+        handle = await super().submit_detached(task, execution_id=execution_id)
         return DetachedHandle(
             executor=handle.executor,
             ref=handle.ref,

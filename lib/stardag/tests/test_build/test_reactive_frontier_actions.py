@@ -1439,7 +1439,7 @@ class InstrumentedTickExecutor(FakeTickExecutor):
             await asyncio.sleep(0)
             await asyncio.sleep(0)
             self.call_log.append(("spawn", str(task.id)))
-            return await super().submit_detached(task)
+            return await super().submit_detached(task, execution_id=execution_id)
         finally:
             self.in_flight -= 1
 
