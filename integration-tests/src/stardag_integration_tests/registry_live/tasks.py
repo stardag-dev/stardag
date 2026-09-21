@@ -343,13 +343,21 @@ class WorkerFanIn(sd.Task[int]):
     than one Modal function, all started within a few seconds of each
     other.
 
-    ``stopped_seconds`` is deliberately the *shorter* sleep, and that is
-    the whole evidence the scenario rests on. Both groups start together,
-    so if a stopped container had survived its cancellation it would reach
-    completion *before* the untouched ones do — and COMPLETED is sticky.
-    Waiting for the untouched group and then finding the stopped group
-    still not completed is therefore proof the container is gone, rather
-    than a race the scenario happened to win.
+    **The sleep has to outlive the whole scenario**, and that is what the
+    duration is for rather than pacing. The evidence the scenario rests on
+    is a probe of Modal itself once the command has returned: the calls it
+    selected are no longer running and the ones it excluded still are. An
+    upstream that reached the end of its own sleep in the meantime would
+    answer "not running" for a reason that has nothing to do with the
+    cancel, and the assertion would pass having tested nothing.
+
+    It is sized for the container-start skew between the first upstream and
+    the last, plus the command's own run -- generously, but not unboundedly,
+    because every second past the scenario is a container still billing.
+    Getting it wrong is safe in the one direction that matters: an upstream
+    that outran its sleep is COMPLETED, not RUNNING, so the scenario's
+    "all four running" wait never comes true and it fails on that timeout
+    rather than passing vacuously.
 
     ``salt`` reaches the leaf and through it every task id here -- see the
     note on ``get_range``.
@@ -357,8 +365,7 @@ class WorkerFanIn(sd.Task[int]):
 
     salt: str
     stopped_worker: str = "alt"
-    stopped_seconds: int = 60
-    kept_seconds: int = 150
+    seconds: int = 180
     per_worker: int = 2
 
     def requires(self):
@@ -366,23 +373,18 @@ class WorkerFanIn(sd.Task[int]):
 
     def stopped_tasks(self) -> list:
         """The upstreams the scenario will stop. Nameable before they run."""
-        leaf = get_range(limit=2, salt=self.salt)
-        return [
-            slow_on_worker(
-                values=leaf,
-                seconds=self.stopped_seconds + index,
-                worker=self.stopped_worker,
-            )
-            for index in range(self.per_worker)
-        ]
+        return self._upstreams(self.stopped_worker)
 
     def kept_tasks(self) -> list:
-        """The upstreams that must run on undisturbed and finish."""
+        """The upstreams that must be left running by the same command."""
+        return self._upstreams("default")
+
+    def _upstreams(self, worker: str) -> list:
+        # The index gives two distinct ids per worker; the worker name
+        # keeps the two groups apart, so all four are separate tasks.
         leaf = get_range(limit=2, salt=self.salt)
         return [
-            slow_on_worker(
-                values=leaf, seconds=self.kept_seconds + index, worker="default"
-            )
+            slow_on_worker(values=leaf, seconds=self.seconds + index, worker=worker)
             for index in range(self.per_worker)
         ]
 

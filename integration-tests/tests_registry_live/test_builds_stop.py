@@ -7,24 +7,34 @@ together, against real containers:
    claims*, so it names this build's executions and nobody else's.
 2. The calls it selected are cancelled -- actually cancelled, in Modal,
    not merely recorded as cancelled in the registry.
-3. The build is cancelled **afterwards**, releasing the claims. Anything a
-   filter excluded keeps running, and its result still lands.
+3. The build is cancelled **afterwards**, releasing the claims.
 
-Every one of those is invisible to a unit test. The selection rules are
-pinned in ``tests/test__cli/test_stop.py``; what cannot be pinned there is
-whether a container actually died, which is the entire question.
+The selection rules are pinned in ``tests/test__cli/test_stop.py``; what
+cannot be pinned there is whether a container actually died, which is the
+entire question. So the assertion is made against Modal itself: after the
+command returns, the calls it named are asked whether they are still
+running, and so are the calls it left alone.
 
-**How "it died" is established.** Both groups of upstreams start within
-seconds of each other and the stopped group sleeps for *less* time than
-the kept group. So a stopped container that survived its cancellation
-would reach completion first, and COMPLETED is sticky -- the row would say
-so no matter what happened afterwards. Waiting for the kept group to
-complete and then finding the stopped group still not completed is
-therefore evidence, not a race won.
+**Why Modal and not the task rows.** The registry says CANCELLED for every
+one of these the moment the build is cancelled, whether or not anything
+stopped -- that is the whole reason this command exists. The one place the
+difference between "stopped" and "recorded as stopped" is visible is the
+backend, so that is where it is looked for.
+
+**Why the window is narrow, for now.** A tick of a terminal build still
+runs the automated cancel drain, which cancels *every* execution the build
+started -- including the ones a filter deliberately left alone. That is
+STA-81's to delete, after this merges, and until then "the rest run on to
+completion" is not observable end to end. The probe below is taken at the
+one moment that is unambiguous: immediately after the command returns,
+before any tick can reach the build. When the drain goes, this scenario
+should grow the other half -- wait for the excluded upstreams to reach
+COMPLETED, which proves both that they were untouched and that a result
+landing after the cancel still counts.
 
 Against a command that cancelled the build first, this fails from both
 ends at once: the list would be taken after the claims were released, and
-the stopped containers would run on to completion.
+the stopped containers would still be running when it returned.
 """
 
 from __future__ import annotations
@@ -49,16 +59,39 @@ pytestmark = [
     pytest.mark.timeout(900),
 ]
 
-# The build has to stay resident long enough to put four containers on
-# workers and for the kept pair to finish afterwards.
+# Long enough for the tick to put four containers on two workers and stay
+# resident while they start.
 LINGER_SECONDS = 240
 
 RUNNING_TIMEOUT_SECONDS = 420
-COMPLETION_TIMEOUT_SECONDS = 420
+# A cancel reaches Modal's scheduler promptly, but "promptly" is not
+# "synchronously" -- poll rather than assert once.
+STOPPED_TIMEOUT_SECONDS = 120
 
 
-def _ids(tasks) -> list[str]:
-    return [str(task.id) for task in tasks]
+def _call_is_running(ref: str) -> bool:
+    """Ask Modal whether a function call is still in flight.
+
+    The same poll the Modal executor's own ``detached_status`` makes: a
+    zero timeout raises the builtin ``TimeoutError`` while the call is
+    running, and anything else means it is over -- finished, cancelled, or
+    gone. Here the ambiguity that note warns about cannot arise, because
+    these tasks only ever end by sleeping out or by being cancelled.
+    """
+    import modal
+
+    try:
+        modal.FunctionCall.from_id(ref).get(timeout=0)
+    except TimeoutError:
+        return True
+    except Exception:
+        return False
+    return False
+
+
+def _refs(entries: list[dict]) -> dict[str, str]:
+    """``task_id -> executor_ref`` from one of the command's JSON lists."""
+    return {entry["task_id"]: entry["executor_ref"] for entry in entries}
 
 
 def test_stop_cancels_only_the_selected_workers_calls() -> None:
@@ -103,44 +136,43 @@ def test_stop_cancels_only_the_selected_workers_calls() -> None:
     assert result.exit_code == 0, f"{result.output}\n{describe(build_id)}"
 
     payload = json.loads(result.stdout)
-    assert sorted(task["task_id"] for task in payload["selected"]) == sorted(
-        _ids(stopped)
-    ), (
-        "The command stopped a different set than the worker filter names.\n"
-        f"{result.output}\n{describe(build_id)}"
+    selected_refs = _refs(payload["selected"])
+    excluded_refs = _refs(payload["excluded_by_filter"])
+
+    assert sorted(selected_refs) == sorted(str(task.id) for task in stopped), (
+        "The command selected a different set than the worker filter "
+        f"names.\n{result.output}\n{describe(build_id)}"
     )
-    assert sorted(task["task_id"] for task in payload["excluded_by_filter"]) == sorted(
-        _ids(kept)
-    ), (
+    assert sorted(excluded_refs) == sorted(str(task.id) for task in kept), (
         "The untouched upstreams were not reported as excluded, so the "
         "operator was not told what keeps running.\n"
         f"{result.output}\n{describe(build_id)}"
     )
 
-    # The build is cancelled after the calls, which is what releases the
-    # claims. Checked before the long wait below so a failure here is not
-    # reported as a timeout.
-    assert build_status(build_id) == "cancelled", describe(build_id)
-
-    # The kept containers run on with their claims released and report
-    # their results anyway -- COMPLETED is sticky, so a completion that
-    # lands after the cancel still wins.
-    wait_until(
-        lambda: all(task_status(task.id) == "completed" for task in kept),
-        build_id=build_id,
-        timeout=COMPLETION_TIMEOUT_SECONDS,
-        what="the upstreams the filter excluded to finish on their own",
+    # The half a unit test cannot reach: the containers the command left
+    # alone are still running, right now, with their claims already
+    # released. Asserted before the wait below, because it is the one that
+    # is only true in this window.
+    still_running = {
+        task_id: _call_is_running(ref) for task_id, ref in excluded_refs.items()
+    }
+    assert all(still_running.values()), (
+        "An execution the worker filter excluded is no longer running on "
+        "Modal, so 'builds stop' stopped more than it selected.\n"
+        f"{still_running}\n{describe(build_id)}"
     )
 
-    # ...and by then a surviving stopped container would have completed
-    # too: it started at the same time and sleeps for less. Anything but
-    # COMPLETED here means its container is gone.
-    for task in stopped:
-        status = task_status(task.id)
-        assert status != "completed", (
-            f"Task {task.id} was selected by 'builds stop' and completed "
-            "anyway, so its Modal call outlived the cancellation -- the "
-            "one thing this command has to guarantee. It sleeps for less "
-            "than the tasks that were left alone, and those have already "
-            f"finished.\n{describe(build_id)}"
-        )
+    # ...and the ones it did select are gone. Polled rather than asserted
+    # once: the cancel reaches Modal's scheduler promptly, not atomically.
+    wait_until(
+        lambda: not any(_call_is_running(ref) for ref in selected_refs.values()),
+        build_id=build_id,
+        timeout=STOPPED_TIMEOUT_SECONDS,
+        poll_interval=3.0,
+        what="the selected Modal calls to stop running",
+    )
+
+    # And the build is cancelled, which is what released the claims. Last,
+    # because it is the only step that is also visible from the registry --
+    # a failure here should not mask the two above.
+    assert build_status(build_id) == "cancelled", describe(build_id)
