@@ -493,10 +493,15 @@ class FakeReactiveRegistry(NoOpRegistry):
         )
         if not started:
             return StartClaimResult(started=False, denied_reason="limit")
-        # A granted claim records its identity -- including recording
-        # none, since it is a new attempt and inherits nothing. That is
-        # the server's fold; an ordinary start preserves instead.
-        self.execution_ids[tid] = None if execution_id is None else str(execution_id)
+        # A granted *claim* records its identity -- including recording
+        # none, since it is a new attempt and inherits nothing. Gated on
+        # ``claim`` like the server, which keys the clear on the claim
+        # flag: the limiter's unclaiming acquire comes through here too
+        # and must preserve, or it would erase a live identity.
+        if claim:
+            self.execution_ids[tid] = (
+                None if execution_id is None else str(execution_id)
+            )
         return StartClaimResult(
             started=True,
             execution_id=None if execution_id is None else str(execution_id),

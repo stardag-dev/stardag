@@ -255,6 +255,19 @@ async def test_the_ref_recording_start_does_not_erase_the_identity(
     )
     assert late_retry.status_code == 200, late_retry.text
 
+    # And granting it must not undo what the execution recorded. The
+    # re-delivered claim carries no executor of its own, so assigning
+    # from it would blank the ref while the task stays RUNNING, and
+    # nothing could re-attach to the live worker -- a worse failure than
+    # the refusal this replaced.
+    row = await _task_row(async_session, "ref-recording")
+    assert row.latest_executor_ref == "fc-1", (
+        "the accepted retry erased the executor reference the spawn had "
+        "recorded, so the live worker is now unreachable"
+    )
+    assert row.latest_executor == "modal"
+    assert row.latest_status == "running"
+
 
 async def test_a_granted_claim_inherits_no_identity(
     client: AsyncClient, async_session: AsyncSession

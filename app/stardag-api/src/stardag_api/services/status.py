@@ -675,9 +675,28 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # ref from an earlier detached one behind. The descriptive
         # executor_metadata follows the exact same set/clear semantics.
         metadata = event.event_metadata or {}
-        task.latest_executor = metadata.get("executor")
-        task.latest_executor_ref = metadata.get("executor_ref")
-        task.latest_executor_metadata = metadata.get("executor_metadata")
+        recorded_execution = _as_uuid(metadata.get("execution_id"))
+        # A re-delivery of the claim this task already holds, carrying
+        # no executor of its own. It must not erase what the execution
+        # has recorded since.
+        #
+        # This is the cost of granting the retry rather than refusing
+        # it. The sequence is ordinary: claim, then the post-spawn start
+        # records the ref, then the claim's lost answer is re-delivered
+        # and is now accepted. Assigning the executor fields from it
+        # would blank the ref while the task stays RUNNING, and nothing
+        # could re-attach to the live worker -- a worse failure than the
+        # refusal this replaced.
+        claim_redelivery = (
+            recorded_execution is not None
+            and task.latest_execution_id is not None
+            and recorded_execution == task.latest_execution_id
+            and metadata.get("executor") is None
+        )
+        if not claim_redelivery:
+            task.latest_executor = metadata.get("executor")
+            task.latest_executor_ref = metadata.get("executor_ref")
+            task.latest_executor_metadata = metadata.get("executor_metadata")
         # The claim's identity -- set when the start names one, and
         # otherwise **left alone**. Deliberately not the set-or-clear of
         # the three fields above.
@@ -689,7 +708,6 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # retried claim arriving even slightly late would be read as a
         # second attempt and refused -- which is the failure this column
         # exists to close. TASK_RETRIED below is the reset.
-        recorded_execution = _as_uuid(metadata.get("execution_id"))
         if recorded_execution is not None or metadata.get("claim"):
             # A *granted claim* always writes, including a clear: it won
             # arbitration, so it is a new attempt and inherits nothing.

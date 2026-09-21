@@ -54,6 +54,10 @@ class ClaimRegistry(RecordingRegistry):
         # Per task, the identity of the claim it is held under -- the
         # API's ``tasks.latest_execution_id``.
         self.execution_ids: dict[str, str | None] = {}
+        # Per task, the build whose claim was granted -- the API's
+        # ``latest_status_build_id``, which it tests before comparing
+        # identities.
+        self.claim_build_ids: dict[str, object] = {}
         # Every identity this registry was sent on a claim, in order.
         self.claim_execution_ids: list[str | None] = []
         # Simulates a lost response: the first claim commits server-side
@@ -101,6 +105,7 @@ class ClaimRegistry(RecordingRegistry):
             self.execution_ids[tid] = (
                 None if execution_id is None else str(execution_id)
             )
+            self.claim_build_ids[tid] = build_id
             return StartClaimResult(
                 started=False,
                 denied_reason="already_running",
@@ -112,8 +117,15 @@ class ClaimRegistry(RecordingRegistry):
         # emulate the limiter's unclaiming acquire, which starts a task its
         # own build has already claimed.
         held = self.execution_ids.get(tid)
-        # The same attempt asking again -- the server's rule.
-        same_attempt = execution_id is not None and held == str(execution_id)
+        # The same attempt asking again -- the server's rule, which
+        # tests the holding build before it compares identities, so a
+        # neighbour sending the holder's id is refused like any other
+        # second claimant.
+        same_attempt = (
+            execution_id is not None
+            and held == str(execution_id)
+            and self.claim_build_ids.get(tid) == build_id
+        )
         if claim and status == "running" and not same_attempt:
             stored_executor, stored_ref = self.refs.get(tid, (None, None))
             return StartClaimResult(
@@ -134,6 +146,7 @@ class ClaimRegistry(RecordingRegistry):
             self.execution_ids[tid] = (
                 None if execution_id is None else str(execution_id)
             )
+            self.claim_build_ids[tid] = build_id
         return StartClaimResult(
             started=True,
             execution_id=None if execution_id is None else str(execution_id),
