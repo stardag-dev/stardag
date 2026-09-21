@@ -748,6 +748,7 @@ class TrackingRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ) -> None:
         self.calls.append(("task_start", task.id))
 
@@ -1283,6 +1284,7 @@ class OrderedTrackingRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ) -> None:
         self.calls.append(("task_start", task.id))
 
@@ -1303,6 +1305,7 @@ class OrderedTrackingRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ) -> None:
         self.calls.append(("task_start", task.id))
 
@@ -1571,6 +1574,7 @@ class BulkTrackingRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ) -> None:
         self.task_start_calls.append(task.id)
 
@@ -1582,6 +1586,7 @@ class BulkTrackingRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ) -> None:
         self.task_start_calls.append(task.id)
 
@@ -1844,6 +1849,7 @@ class FailOnStartRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ) -> None:
         self.calls.append(("task_start", task.id))
         raise ConnectionError("would-be 404 on /start")
@@ -1862,6 +1868,7 @@ class FailOnStartRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ) -> None:
         self.calls.append(("task_start", task.id))
         raise ConnectionError("would-be 404 on /start")
@@ -1940,6 +1947,7 @@ class TestDiscoverTimeRegistrationErrorHandling:
                 executor_ref=None,
                 executor_metadata=None,
                 claim_ttl_seconds=None,
+                execution_id=None,
             ) -> None:
                 self.calls.append(("task_start", task.id))
 
@@ -1958,6 +1966,7 @@ class TestDiscoverTimeRegistrationErrorHandling:
                 executor_ref=None,
                 executor_metadata=None,
                 claim_ttl_seconds=None,
+                execution_id=None,
             ) -> None:
                 self.calls.append(("task_start", task.id))
 

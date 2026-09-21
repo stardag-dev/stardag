@@ -421,6 +421,14 @@ class StartClaimResult(StardagBaseModel):
     # which is not evidence of death — the loser waits, as it always has.
     latest_status_expires_at: str | None = None
     denied_keys: list[str] = []
+    # The execution the task is now recorded as running under, echoed by
+    # a registry that understands ``execution_id``. On a grant it is the
+    # caller's own id coming back, which is how a caller confirms the
+    # server honoured it; on an ``already_running`` denial it names the
+    # execution that won. ``None`` from a registry predating the field —
+    # not an error, since the only cost is the protections the id buys,
+    # which is how every earlier release behaved.
+    execution_id: str | None = None
 
 
 class RegisteredTaskInfo(StardagBaseModel):
@@ -1339,6 +1347,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Mark a task as started/running.
 
@@ -1398,6 +1407,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         reason: str | None = None,
         executor_ref: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Record that a task's execution was interrupted by the platform.
 
@@ -1416,6 +1426,14 @@ class RegistryABC(metaclass=abc.ABCMeta):
                 on. The registry honours the report only while the task
                 still holds this ref, which is what stops a slow report
                 from applying to a replacement execution.
+            execution_id: Optional identity of the execution this call
+                belongs to, minted by the caller before it claims. The
+                claim is taken before the spawn, so there is no executor
+                reference yet; this is the identity that exists anyway.
+                Repeat it on every later call about the same execution.
+                Omitted, the registry falls back to the
+                ``(executor, executor_ref)`` pair, which is the behaviour
+                of every release before it existed.
         """
         pass
 
@@ -1425,6 +1443,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         reason: str | None = None,
         executor_ref: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Record that the platform is restarting this execution itself.
 
@@ -1681,6 +1700,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
         *,
         claim: bool = True,
     ) -> StartClaimResult:
@@ -1747,6 +1767,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Async version of task_start."""
         self.task_start(
@@ -1756,6 +1777,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
             claim_ttl_seconds=claim_ttl_seconds,
+            execution_id=execution_id,
         )
 
     async def task_complete_aio(self, build_id: UUID, task: "BaseTask") -> None:
@@ -1774,9 +1796,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         reason: str | None = None,
         executor_ref: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Async version of task_interrupt."""
-        self.task_interrupt(build_id, task, reason, executor_ref)
+        self.task_interrupt(
+            build_id, task, reason, executor_ref, execution_id=execution_id
+        )
 
     async def task_preempt_aio(
         self,
@@ -1784,9 +1809,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         reason: str | None = None,
         executor_ref: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Async version of task_preempt."""
-        self.task_preempt(build_id, task, reason, executor_ref)
+        self.task_preempt(
+            build_id, task, reason, executor_ref, execution_id=execution_id
+        )
 
     async def task_suspend_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_suspend."""
@@ -1895,6 +1923,7 @@ class NoOpRegistry(RegistryABC):
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
         *,
         claim: bool = True,
     ) -> StartClaimResult:
@@ -1907,7 +1936,10 @@ class NoOpRegistry(RegistryABC):
         :class:`RegistryABC` (where it would silently defeat arbitration a
         real backend was expected to provide).
         """
-        return StartClaimResult(started=True)
+        return StartClaimResult(
+            started=True,
+            execution_id=None if execution_id is None else str(execution_id),
+        )
 
 
 def _declared_for(

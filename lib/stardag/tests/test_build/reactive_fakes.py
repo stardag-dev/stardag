@@ -30,7 +30,7 @@ from stardag.build import (
 from stardag.build._reactive import (
     _RETRYABLE_STATUSES,
 )
-from stardag.exceptions import NotFoundError
+from stardag.exceptions import APIError, NotFoundError
 from stardag.registry import (
     SchedulerLeaseResult,
     BuildExecution,
@@ -92,6 +92,14 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.statuses: dict[str, str] = {}
         self.upstreams: dict[str, set[str]] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
+        # Per task, the identity of the execution it is recorded as
+        # running under -- the API's ``tasks.latest_execution_id``.
+        # Modelled rather than ignored because the two rules that read it
+        # are the ones this double exists to let a test falsify: a
+        # retried claim is granted, and a start from a superseded
+        # execution is refused. A double that accepted the parameter and
+        # dropped it would pass either way.
+        self.execution_ids: dict[str, str | None] = {}
         self.start_metadata: dict[str, dict | None] = {}
         self.needs_tick = False
         # Scheduler lease state (see build_acquire_scheduler_lease_aio).
@@ -124,6 +132,11 @@ class FakeReactiveRegistry(NoOpRegistry):
         # claim_ttl_seconds as sent on each start: task_id -> list of TTLs
         # (a spawn records two starts — the claim and the post-spawn ref).
         self.sent_claim_ttls: dict[str, list[int | None]] = {}
+        # Every execution id this registry was sent, per task, in order --
+        # claim first, then the starts that re-record the same execution.
+        # A test asserts they are one id: three calls describing one
+        # execution is the property the identity exists to express.
+        self.sent_execution_ids: dict[str, list[str | None]] = {}
         # --- attempt counting per build ROUND (TickConfig.max_attempts) ---
         # Rather than keeping a number, keep the lifecycle events and derive
         # the count the way the server does (see ``attempt_count``). Each
@@ -392,13 +405,40 @@ class FakeReactiveRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ):
         tid = str(task.id)
+        held = self.execution_ids.get(tid)
+        if (
+            execution_id is not None
+            and held is not None
+            and str(execution_id) != held
+            and self.statuses.get(tid) == "running"
+        ):
+            # The server's supersession rule: a non-claiming start naming
+            # an execution the task no longer runs under is refused, so a
+            # late restart cannot evict the build that took the task over.
+            # Raised rather than silently ignored, because the caller sees
+            # a 409 and that is what a test of this path has to observe.
+            self.calls.append(("start-superseded", tid))
+            raise APIError(
+                "Task is running under a different execution",
+                status_code=409,
+                payload={"error_code": "execution_superseded", "execution_id": held},
+            )
         self.calls.append(("start", tid))
         self._count_event(tid, kind="start")
         self.sent_claim_ttls.setdefault(tid, []).append(claim_ttl_seconds)
+        self.sent_execution_ids.setdefault(tid, []).append(
+            None if execution_id is None else str(execution_id)
+        )
         self.statuses[tid] = "running"
+        self.status_build_id[tid] = build_id
         self.refs[tid] = (executor, executor_ref)
+        # Set *or cleared* on every start, as the row fold does it: a
+        # start describes one execution completely, so one naming none
+        # leaves none behind rather than inheriting its predecessor's.
+        self.execution_ids[tid] = None if execution_id is None else str(execution_id)
         # Per build, because that is what the event log records and what
         # the executions listing reads. ``refs`` alone is the *current*
         # execution, which stops being this build's the moment another one
@@ -434,6 +474,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        execution_id=None,
         *,
         claim=True,
     ):
@@ -446,13 +487,21 @@ class FakeReactiveRegistry(NoOpRegistry):
         tid = str(task.id)
         self.calls.append(("start_claim", tid))
         self.claim_limit_keys[tid] = list(limit_keys or [])
-        if claim and self.statuses.get(tid) == "running":
+        held = self.execution_ids.get(tid)
+        same_execution = (
+            execution_id is not None
+            and held is not None
+            and str(execution_id) == held
+            and self.status_build_id.get(tid, build_id) == build_id
+        )
+        if claim and self.statuses.get(tid) == "running" and not same_execution:
             executor_name, ref = self.refs.get(tid, (None, None))
             return StartClaimResult(
                 started=False,
                 denied_reason="already_running",
                 executor=executor_name,
                 executor_ref=ref,
+                execution_id=held,
             )
         if claim and self.statuses.get(tid) == "completed":
             return StartClaimResult(started=False, denied_reason="already_completed")
@@ -464,10 +513,14 @@ class FakeReactiveRegistry(NoOpRegistry):
             executor_metadata=executor_metadata,
             limit_keys=limit_keys,
             claim_ttl_seconds=claim_ttl_seconds,
+            execution_id=execution_id,
         )
         if not started:
             return StartClaimResult(started=False, denied_reason="limit")
-        return StartClaimResult(started=True)
+        return StartClaimResult(
+            started=True,
+            execution_id=None if execution_id is None else str(execution_id),
+        )
 
     async def _acquire_limits(
         self,
@@ -478,6 +531,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ):
         # The limits half of a start, mirroring the API's semantics: count
         # running holders per key against configured caps (self.limits);
@@ -506,6 +560,7 @@ class FakeReactiveRegistry(NoOpRegistry):
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
             claim_ttl_seconds=claim_ttl_seconds,
+            execution_id=execution_id,
         )
         return True
 
@@ -576,7 +631,9 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.fail_reasons.setdefault(tid, []).append(error_message)
         self.statuses[tid] = "failed"
 
-    async def task_interrupt_aio(self, build_id, task, reason=None, executor_ref=None):
+    async def task_interrupt_aio(
+        self, build_id, task, reason=None, executor_ref=None, execution_id=None
+    ):
         """What a worker reports when the platform took its container.
 
         Mirrors the server: the claim goes (so no expiry survives) but the
@@ -931,6 +988,7 @@ class FakeTickExecutor(TaskExecutorABC):
         # ref -> probe status
         self.probe_statuses = statuses or {}
         self.spawned: list[UUID] = []
+        self.spawned_execution_ids: list[UUID | None] = []
         self.cancelled_refs: list[str] = []
         self._spawn_count = 0
         # The backend's own wall-clock limit, from which the tick derives
@@ -946,8 +1004,15 @@ class FakeTickExecutor(TaskExecutorABC):
     def supports_detached(self, task: BaseTask) -> bool:
         return True
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         self.spawned.append(task.id)
+        # What the worker would be told it is. Recorded so a test can
+        # check the identity actually reaches the container rather than
+        # stopping at the registry -- the worker's own start is the one
+        # the supersession rule is there to judge.
+        self.spawned_execution_ids.append(execution_id)
         self._spawn_count += 1
 
         async def wait():

@@ -29,7 +29,7 @@ from typing import (
     Union,
     cast,
 )
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from stardag import (
     BaseTask,
@@ -1428,9 +1428,20 @@ async def build_aio(
                         ),
                     )
                 attempted = True
+                # A fresh identity per claim *attempt*: a retry of this
+                # same request repeats it and is granted as the same
+                # execution, while going round this loop again -- a
+                # genuine second attempt, after a dead winner was recorded
+                # failed -- mints a new one and is arbitrated as it always
+                # was. The claim has no executor ref to be identified by,
+                # since the spawn has not happened yet.
+                state.execution_id = uuid4()
                 try:
                     result = await registry.task_start_claim_aio(
-                        build_id, task, executor_metadata=claim_metadata
+                        build_id,
+                        task,
+                        executor_metadata=claim_metadata,
+                        execution_id=state.execution_id,
                     )
                 except Exception as claim_err:
                     # Registry hiccup on the claim itself: in `warn` mode
@@ -1553,9 +1564,15 @@ async def build_aio(
     async def registry_task_start(
         task: BaseTask, handle: DetachedHandle | None
     ) -> None:
-        """Emit TASK_STARTED, with the detached-execution ref when present."""
+        """Emit TASK_STARTED, with the detached-execution ref when present.
+
+        Carries the execution identity the claim was taken with, so this
+        start re-records the same execution rather than looking like a
+        new one to the registry's supersession rule.
+        """
+        execution_id = task_states[task.id].execution_id
         if handle is None:
-            await registry.task_start_aio(build_id, task)
+            await registry.task_start_aio(build_id, task, execution_id=execution_id)
             return
         await registry.task_start_aio(
             build_id,
@@ -1563,6 +1580,7 @@ async def build_aio(
             executor=handle.executor,
             executor_ref=handle.ref,
             executor_metadata=handle.executor_metadata,
+            execution_id=execution_id,
         )
 
     async def submit_with_lock(
@@ -1699,7 +1717,9 @@ async def build_aio(
                     )
             if handle is None and task_executor.supports_detached(task):
                 try:
-                    handle = await task_executor.submit_detached(task)
+                    handle = await task_executor.submit_detached(
+                        task, execution_id=task_states[task.id].execution_id
+                    )
                 except Exception as e:
                     return TaskExecutionError(
                         exception=e,

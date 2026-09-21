@@ -83,6 +83,7 @@ class SharedClaimRegistry(NoOpRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        execution_id=None,
         *,
         claim=True,
     ) -> StartClaimResult:
@@ -110,6 +111,7 @@ class SharedClaimRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ):
         self.statuses[str(task.id)] = "running"
         if executor_ref is not None:
@@ -128,7 +130,7 @@ class CountingModalExecutor(ModalTaskExecutor):
         self.spawn_count = 0
         self.reattach_successes = 0
 
-    async def submit_detached(self, task):
+    async def submit_detached(self, task, *, execution_id=None):
         self.spawn_count += 1
         return await super().submit_detached(task)
 

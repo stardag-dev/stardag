@@ -193,6 +193,13 @@ class TaskExecutionState:
     exception: BaseException | None = None
     # True when task is waiting for a global lock held by another build
     waiting_for_lock: bool = False
+    # Identity of the execution this build is about to run, or is running,
+    # for the task. Minted when the claim is taken -- before the spawn, so
+    # before any executor ref exists -- and reused by the start that
+    # records the ref and by the worker inside the container, so all three
+    # name one execution. None when nothing has been claimed or started
+    # yet for this attempt.
+    execution_id: UUID | None = None
 
     @property
     def all_deps(self) -> list[BaseTask]:
@@ -398,13 +405,26 @@ class TaskExecutorABC(ABC):
         """
         return False
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         """Start a detached execution of ``task`` and return its handle.
 
         Only called when :meth:`supports_detached` returned True for the
         task. Implementations should return as soon as the execution is
         durably started (spawned) — the build engine records the handle's
         ``(executor, ref)`` in the registry *before* awaiting ``wait()``.
+
+        ``execution_id`` is the identity the caller minted before it
+        claimed the task. An implementation whose workers report their own
+        lifecycle **must forward it into the execution**, because the
+        registry honours a worker's start and its interruption reports
+        only while the task still holds the execution they name — a worker
+        that cannot name its own execution loses those protections and
+        falls back to the pre-identity rules. Forwarded explicitly rather
+        than read from ambient context: it is per-execution, and a value
+        this specific going missing is invisible until a report is quietly
+        mis-attributed.
 
         Raises:
             Exception: if the execution could not be started; the build
@@ -568,13 +588,15 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
             return False
         return executor.supports_detached(task)
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         """Route detached submission to the owning executor."""
         key = self.router(task)
         executor = self.executors.get(key)
         if executor is None:
             raise KeyError(f"No executor found for routing key: {key}")
-        return await executor.submit_detached(task)
+        return await executor.submit_detached(task, execution_id=execution_id)
 
     async def reattach(
         self, task: BaseTask, executor: str, ref: str

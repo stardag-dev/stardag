@@ -1,20 +1,25 @@
-# Executions as records
+# Execution identity, and the record that was not built
 
-Why an execution — one container, running one task, started by one build,
-from start to end — gets a row of its own rather than being reassembled
-from the event log at each point of use, what that row is allowed to mean,
-and the two things it deliberately does not do.
+Why an execution — one container, running one task, started by one build —
+carries an identity minted before it exists, what that identity is allowed
+to decide, and why the table originally designed to hold it is not being
+built.
 
 Written after a change to the cancel path took five review rounds, where
 what the rounds had in common turned out to be more informative than what
 any of them found.
 
-> **Written before the change exists.** A reader on `main` will find the
-> reconstruction described below, not the table. The note is here first
-> because the decisions it records — what the row is allowed to mean, and
-> the two things it must not do — are the part worth reviewing, and because
-> the same reasoning has now been re-derived several times without being
-> written down.
+> **The `executions` table is not planned.** What shipped is one column,
+> `tasks.latest_execution_id`. The table, its backfill and the rewrite of
+> the executions listing were all driven by **automated cancellation** —
+> a short-lived scheduler reaching into containers it did not start — and
+> that feature is being withdrawn in favour of cooperative cancellation
+> (a worker checks whether it is still wanted) plus a human-driven stop
+> command. With nothing left that has to reconstruct "what is mine to
+> stop", the record that reconstruction needed stops being worth its
+> cost. The design is kept below because the reasoning is the point, and
+> because the identity is a strict prefix of the table: if the table is
+> ever needed, this column is its key. See STA-78 for the decision.
 
 It is a companion to
 [execution-claims-and-liveness.md](execution-claims-and-liveness.md),
@@ -45,273 +50,202 @@ from the listing entirely and its container be left running.
 That is not a discipline problem. It is what a missing abstraction looks
 like from the inside.
 
-## Why the reconstruction is load-bearing rather than incidental
+**Five of those eight are cancellation machinery**, and they are the five
+being deleted rather than unified. The three that remain — the two
+authority rules and the claim-retry test — are all about the _present_:
+does this request concern the execution the task is running under right
+now? That question needs an identity, not a history, and it is the part
+this note's design survives into.
 
-Three sources claim to know about an execution, and they disagree by
-design.
+## Why an identity was missing in the first place
 
-| Source        | What it knows                           | Why it is not enough                                                                                                                                                       |
-| ------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| the task row  | current status, owner, executor columns | environment-global and overwritten by every writer; after a takeover it names somebody else's execution, and every start sets _or clears_ the executor columns             |
-| the event log | history, append-only, per build         | the execution has to be ranked out of it, and the rule is subtle — the latest start decides the backend, the newest reference from _that_ backend identifies the execution |
-| the backend   | whether a container is actually alive   | reachable only through a probe, and a stop cannot be confirmed                                                                                                             |
+Both engines claim a task **before** spawning it. The claim and any
+concurrency-limit slots have to be acquired in one transaction, so that a
+denied task never occupies a worker, and that transaction happens while
+the execution is still hypothetical. There is therefore no executor
+reference at claim time and never was.
 
-Two properties of the surrounding design, both deliberate, keep the
-reconstruction on the critical path rather than at the edges: the claim
-records no third-party-evaluable liveness beyond its expiry, and the
-server cannot stop anything — it can only record that a claim is gone. So
-the code compensates with heuristics, and heuristics compose badly.
+That is the whole gap. The task row's executor columns describe whoever
+holds the task now and are set _or cleared_ by every start; the event log
+holds the history but has to be ranked, and the ranking rule is subtle;
+the backend knows whether a container is alive but only through a probe,
+and a stop cannot be confirmed. None of the three can say "this request
+is about the execution that is running", because until the spawn returns
+the execution has no name.
 
-There is also a testing asymmetry that let all of this run. The unit-test
-fake keyed its listing on _current ownership_, which is the same
-conceptual mistake the endpoint had, and it stored at most one reference
-per build and task, so a second execution of one task overwrote the first.
-A double that shares the code's misconception cannot falsify it. Only the
-live tier could, and it did, twice, on defects every unit test passed.
-
-A smaller fact makes the shape of the gap concrete: a reactive execution
-emits **three** `TASK_STARTED` events — the claiming start, the tick's
+A smaller fact makes the shape concrete: a reactive execution emits
+**three** `TASK_STARTED` events — the claiming start, the tick's
 reference-recording start, and the worker's own self-report. "The start"
-is not one event, and the thing all three describe has no name.
+is not one event, and the thing all three describe had no name.
 
-## An execution is not a claim, and the table must not pretend otherwise
+Two defects follow directly, and both are closed by giving it one.
 
-This is the invariant the rest of the design falls out of, and it is the
-one a reader will get wrong first.
+**A retried claiming start could not be told from a second attempt.** The
+registry client retries a POST whose response was lost, so a claiming
+start that succeeded can be delivered twice. Refused, the second delivery
+tells a worker that somebody else holds the task — a correct reason to
+stand down, and it does, while itself holding the claim. The task is then
+claimed and not running until the claim expires, which is the worst
+outcome available at that endpoint. The build id cannot separate the two
+cases, because two attempts of one build are legitimately distinct; the
+reference cannot, because there is not one yet.
 
-> The claim says who may run the task next. An execution row says what one
-> build set running. **Several rows may be open for one task at once**, and
-> after a takeover that is the correct state, not a corrupt one: build A's
-> container runs on while build B holds the claim.
+**A worker's own start could evict the live holder.** That start is
+non-claiming and was folded in unconditionally. A preemption brings the
+claim's expiry forward to a short restart grace, deliberately, so that a
+restart which never arrives becomes visible in minutes; if the restart is
+merely late, the claim lapses, a neighbour claims the task and spawns,
+and then the original restart lands and takes the task back. Two
+executions of one task, which is what claims exist to prevent.
 
-So there is no uniqueness constraint over the open row for a task, and
-"the task holds this execution" is not "this row is open". It is a
-pointer: `tasks.latest_execution_id`, written by the same fold that grants
-the claim, so no reader can pair a fresh claim with a stale execution.
+## An execution is not a claim
 
-Representing two live executions of one task is the point. The old
-reconstruction could not say it, which is exactly why a cascading cancel
-could release a claim, let a neighbour take the task within seconds, and
-leave the first container unreachable by any query about the present.
+The invariant the rest of the design falls out of, and the one a reader
+will get wrong first.
 
-## The design: a row, and a pointer from the claim to it
+> The claim says who may run the task next. An execution identity says
+> what the task is running under now. **A container whose execution is no
+> longer named here may well still be running** — the server cannot stop
+> anything — so nothing here concludes that a container is gone.
 
-A row carries the build that started the execution, the task it runs, the
-executor and reference that address it, the descriptive metadata the UI
-deep-links from, when it started, and — when something reported it — when
-and how it ended.
+This is why the identity is a single column on the task row rather than a
+lifecycle to be tracked. It records the present, and the present is
+exactly one execution. What the _past_ would have needed — several
+executions of one task open at once, which after a takeover is the
+correct state — is the record that is not being built.
 
-Two questions that used to be one become two indexed reads. _What is mine
-to stop?_ is this build's rows with no end recorded. _Does the task still
-hold this execution?_ is a pointer comparison. The first is about the
-past and is build-scoped; the second is about the present and is
-environment-global. Conflating them is the original mistake, and once they
-are separate columns they cannot be conflated by accident.
+## What the identity decides, and what it refuses to
 
-What this deletes: the two window functions and the join on latest
-backend, the ranking rule and the several paragraphs explaining why
-neither half of it alone is right, the whole-history-per-call scan behind
-the conditional cancel, and the fake's special case — which then has a
-thing to model instead of a rule to re-derive.
+Minted by the caller before it claims, repeated on every later call about
+the same execution: the claiming start, the start that records the
+reference, the worker's own self-report, and its interruption and
+preemption reports.
 
-### What ends a row, and what does not
+**Client-minted, necessarily.** A server-minted id would be one the retry
+does not have, since a lost response is the entire failure being
+answered.
 
-A row ends on **evidence that the container is gone**, and on nothing
-else.
+On a **claiming** start, the id is the retry test: the same id from the
+same build is the same execution asking again and is granted, a different
+id while the claim is live is arbitrated exactly as before.
 
-- A worker's own end-of-execution report — completed, failed, suspended —
-  ends it. The worker is the container; its report is the evidence.
-- A cancel does **not**. A cancel is a request to stop, not a report that
-  anything stopped, and a task this build cancelled is precisely one whose
-  container it still has to go and kill. This is the absence the listing
-  was built around and it survives unchanged.
-- An interruption or a preemption does **not**. The platform ended one
-  attempt and the backend may be restarting the same call under the same
-  reference, which is by construction still the same execution.
-- A retry ends it: the build has given up on that execution, and the
-  container, if any, is the drain's problem rather than the claim's.
-- A probe that finds the backend's call gone ends it. Which observations
-  count as that is carried by an explicit flag on the report rather than
-  inferred from the event type, because the same platform event is
-  classified differently depending on who sees it first — the subject of a
-  separate change, and the reason this is a flag rather than a rule here.
+On a **non-claiming** start, the id is the supersession test: a start
+naming an execution the task demonstrably no longer runs under is refused
+with a 409. Three conditions, each load-bearing — a live claim (a task
+nobody holds is up for grabs, and an ordinary retry must not be refused),
+both identities present, and the ids differing.
 
-### Retirement is the pointer moving, not the row closing
+**Absence is never a mismatch**, in either rule and in both directions of
+a rolling deploy. A caller that mints no id falls back to the
+`(executor, executor_ref)` pair. A task claimed before the column existed
+has no opinion to contradict. Refusing on a missing value would turn a
+version skew into tasks that look unstarted, which is worse than the bug
+being fixed.
 
-The tempting simplification is that recording a new start for a task ends
-the previous row, so that retirement becomes data. It is half right, and
-the wrong half is the expensive one.
+A Modal preemption restarts the input under the **same call id** and the
+restarted worker re-sends the same execution id, so a legitimate restart
+matches and is accepted. That is not a special case bolted on; it is what
+"the same execution" means.
 
-Ending A's row because B started would hide A's still-running container
-from A's own drain — which is the incident the listing exists to prevent,
-reintroduced through a tidier-looking door. Ending A's _own_ earlier row
-when A retries has the same defect one build in.
+### Why a missing current identity is treated differently from a missing reference
 
-So retirement of the _current_ execution is the pointer moving, and
-retirement of the _row_ is evidence arriving. Today's code has one
-mechanism for both questions, which is why answering one of them correctly
-kept breaking the other.
+The two look symmetric and are not, which is worth stating because the
+asymmetry reads like an oversight.
 
-## The claim needs an identity before it has an execution to name
+A missing current **reference** is not a wildcard: a replacement's
+claiming start clears the reference before its spawn records the new one,
+so treating NULL as "matches anything" would make the whole
+acquire→spawn gap accept a dead execution's report.
 
-The engines claim before they spawn, because the claim and any
-concurrency-limit slots have to be taken in one transaction and a denied
-task must not occupy a worker. The reference is the spawn's own id, so it
-does not exist yet. That leaves a claiming start with nothing to identify
-itself by.
+A missing current **identity** is treated as no opinion, because that gap
+does not exist for it. A replacement mints its id _before_ claiming and
+the claiming start carries it, so a task running under a replacement
+always has one. NULL therefore means the running execution predates the
+identity, and the honest answer is to fall back to the behaviour of that
+era rather than refuse a report the server cannot evaluate.
 
-The consequence is not theoretical. The registry client retries a POST
-whose response never arrived, so a claiming start that _succeeded_ can be
-delivered twice; the second delivery is refused by the state its own first
-attempt created, and a refusal is indistinguishable from losing a race to
-somebody else. The worker stands down from a task it holds the claim on,
-and the task is claimed and not running until the claim expires. That is
-the worst outcome available at that endpoint.
+## The record that was not built, and why it would have been needed
 
-The retry-policy comment in the registry client already names what is
-missing, in its own words: an identity the claim can carry before it has
-an execution to name. The execution row is that identity, on one
-condition — **the client mints the id**. A server-minted id is one the
-retry does not have, since the lost response is the whole failure.
+Recorded so the next person does not re-derive it from scratch.
 
-### What a second delivery gets
+The table was `executions(id, build_id, task_id, executor, executor_ref,
+executor_metadata, started_at, ended_at)`, keyed by the same client-minted
+id this column now holds. Its point was never the identity — it was the
+question the identity cannot answer: **what did this build start, that it
+may still have to stop?**
 
-- **The same id, and the task still points at it** — granted. It is the
-  same execution asking again, which is what a retry is.
-- **A different id from the same build, claim live** — refused, exactly as
-  another build is refused. Two attempts of one build are legitimately
-  distinct executions, and granting on the build alone would hand out real
-  double-claims.
-- **No id at all** — the previous rule, unchanged: the `(executor,
-executor_ref)` pair, with a request naming neither always refused. An
-  SDK predating this sends nothing, and version skew must not become a
-  behaviour change.
+That question is about the past, and the past is where a task row cannot
+help. A cascading cancel releases the claims a build held so the next
+build can take those tasks over — which is correct — and from that instant
+the task row names the new execution while the old one, still running, is
+unreachable by any query about the present. Hence the ranking over the
+event log, in five places, which had to agree.
 
-The awkward case an earlier sketch could not answer is answered here
-without a caveat. If the spawn succeeded but the start that would have
-recorded its reference was lost, a rule of "same build, and no execution
-recorded yet" would grant the re-ask while the execution ran — the double
-run the claim exists to prevent. With a minted id the re-ask is granted
-because it genuinely _is_ the same execution, and a fresh attempt carries a
-fresh id and is refused. The identity does the work that a NULL was being
-asked to do.
+Three decisions from that design are worth keeping, because each is a
+place the obvious answer is wrong:
 
-## The silent death needs no expiry on the row
+- **Several rows open for one task is the correct state**, not a
+  corruption, so there could be no uniqueness constraint over the open
+  row. Representing the takeover is the entire point.
+- **Retirement is the pointer moving, not the row closing.** "Recording a
+  new start ends the previous row" is the tempting simplification and it
+  is wrong in the case that matters: ending A's row when B starts hides
+  A's still-running container from A's own drain, which is the incident
+  the listing exists to prevent, reintroduced through a tidier door.
+- **The row needed no expiry of its own.** Following the consumers, the
+  claim's expiry bounds the harm and the only reader of "no end recorded"
+  is a drain that cancels idempotently. The row is evidence; the claim is
+  authority; only authority needs an expiry, because only authority can
+  be held against somebody.
 
-A worker that dies without reporting leaves a row with no end recorded,
-which looks like the unbounded-claim problem the claim itself had. It is
-not, and the difference is worth stating because the instinct to add a
-second expiry column is strong.
-
-Follow the consumers. The pointer answers which execution the task holds.
-The claim's own expiry bounds how long a vanished holder can deny the task
-to everyone else, and that is the harm an expiry exists to bound. The only
-consumer of "no end recorded" is the drain, and cancelling is idempotent
-at every backend stardag supports, so a reference whose container is
-already gone costs one no-op call. Open rows are bounded by the build's
-task count, and the build is terminal by the time it drains.
-
-> The row is evidence. The claim is authority. Only authority needs an
-> expiry, because only authority can be held against somebody.
-
-Adding an expiry here would buy a shorter drain list and would cost a
-second clock that has to agree with the first — and the claim note already
-records what happens when two mechanisms answer one question with
-different defaults.
-
-## Both engines, or the split reappears
-
-The reactive engine is not the only one that claims before spawning; the
-resident engine does the same, by the same argument, with the same
-consequence on a retried claim. Minting an id in one and not the other
-would fix half a bug and leave the shape that produced eight
-reconstructions.
-
-So every start carries an execution id — claiming or not, reactive,
-resident or sequential. "Some starts have rows and some do not" is a
-distinction every future reader would have to rediscover. What the
-resident engine does not get is a drain: it holds its handles in memory
-and has no listing to consume.
-
-## Migration: no backfill, except for the builds in flight
-
-An absent row means "no execution known", which is what the reconstruction
-returned for the same history, so nothing has to be reconstructed into the
-table for correctness.
-
-With one exception, and it is the same exception the scope-keyed
-dependency migration made for the same reason. A build in flight across
-the deploy has starts in the event log and no rows, so its drain would
-find nothing to stop and leak every container it started — and an older
-SDK's cancel, which still names an execution by `(executor,
-executor_ref)`, would resolve against an empty table. So one open row per
-build and task is written for non-terminal builds, from the ranking query
-being retired, at the moment it is retired. Terminal builds get nothing;
-their executions are history.
-
-The older cancel parameters keep working against a newer server, because
-the compatibility direction is one-way by contract. They are answered by a
-single indexed read against the table rather than by the ranking query, so
-the rule and its commentary are genuinely gone even though the parameters
-that used to need it remain.
-
-The task row's executor columns stay too, and that is not hedging. They
-are read by the task explorer, the build view, the search results and
-three CLI commands as the _display_ coordinates of whatever is running
-now, which is a question about the present that the task row is the right
-place for. Only the sites that make a _decision_ move to the table.
+What withdraws the need for all of it is the decision to stop cancelling
+preemptively. A worker that checks whether it is still wanted needs no
+external record of what is running — it _is_ what is running, and it
+already knows its own identity. A human running a stop command reads the
+build's live executions off the task rows while the claims are still
+held, which is exact at that moment and needs no ranking at all. Neither
+path asks the question the table existed to answer.
 
 ## Corrections — things that keep being misread
 
-### 1. "It is just a claim table normalised"
+### 1. "The identity is just the executor reference, earlier"
 
-It is the opposite. A claim table would have one live row per task; this
-has as many open rows per task as there are builds that started
-executions of it, and the case with two is the case the design exists for.
-Any constraint enforcing one open row per task would re-create the bug.
+It is earlier, and that is the whole difference rather than a detail. The
+reference exists only after the spawn returns, and both defects above
+happen in the window before that. A design that waits for the reference
+cannot close either.
 
-### 2. "Recording a new start ends the previous row"
+### 2. "Refusing a superseded start could strand a task"
 
-Written into the original proposal, and wrong in the case that matters —
-see "Retirement is the pointer moving". A start is evidence about the
-execution it names and about nothing else.
+Only if absence were treated as a mismatch, which is why it is not. The
+refusal requires a live claim _and_ two present, differing identities. A
+worker with no id, a task with no id, a lapsed claim, a task that is not
+running — all take the path they took before the column existed.
 
-### 3. "The listing should answer from the task row now that there is one"
+### 3. "A 409 loses the event, so something will be miscounted"
 
-The listing was never answering a question about the present, and the
-table does not change that. A cascading cancel releases claims so the next
-build can take the tasks over, and from that moment the task row names the
-new execution while the old one, still running, is unreachable by status.
-The listing reads this build's rows because the past is what it is asking
-about.
+The opposite, and this is the lesson of the interruption work applied
+early: nothing is written, so no attempt is spent and no
+recorded-but-refused bookkeeping is needed. It is the _silent_ refusals
+that cost, because every consumer of the event has to be found again.
 
-### 4. "A claim with no reference is an execution with missing fields"
+### 4. "The identity means a task can only ever have one execution"
 
-It is an execution whose reference does not exist yet, which is a
-different thing and a reachable state with its own handling: a scheduler
-that dies between claiming and spawning leaves exactly that shape, and the
-claim's expiry — not a locally configured guess — is what eventually
-resolves it. Giving it a row makes the window visible for the first time.
-Listing it for the drain would still be wrong: there is nothing to cancel.
-
-### 5. "The cursor has to be keyed on the task"
-
-It had to be, because the listing's rows were derived — a newer start
-re-ranked the same logical row onto the far side of the cursor and it was
-then skipped entirely, and on a terminal build, whose drain has no second
-chance, that is a container left running. A real row's start time never
-changes, so it cannot be re-ranked, and the cursor can order by it. The
-constraint was a property of the reconstruction, not of the problem.
+It means a task is _running under_ one execution. Others may still be
+alive; the server cannot stop anything, and a container whose execution
+is no longer named is not thereby dead. Reading the column as a liveness
+claim is the same mistake as reading the task row as one.
 
 ## Open questions
 
-- Should an _attempt_ simply be an execution? It is currently derived by a
-  window function over consecutive start events in a build, with a Python
-  twin that must agree with it — a third reconstruction of a nearby
-  question, and one this table is shaped to answer. Not changed here,
-  because the retry and resumption budgets are counted from it.
-- Should the reference-less claim window be listed anywhere? It has a row
-  now, but nothing can act on it except by waiting out the claim.
-- Does the row make the backend probe cheaper to reason about, or merely
-  cheaper to reach? The probe remains better evidence than anything stored,
-  and nothing here changes that.
+- Should an _attempt_ be an execution? It is currently derived by a window
+  function over consecutive start events in a build, with a Python twin
+  that must agree with it — a nearby reconstruction that this identity is
+  shaped to answer. Not changed here, because the retry and resumption
+  budgets are counted from it.
+- Does cooperative cancellation want the identity exposed to task code, so
+  a long-running task can ask "am I still wanted?" without the framework
+  asking for it at fixed checkpoints?
+- If the table is ever revived, is the drain still the only consumer that
+  wanted it? That was true when it was costed; it is worth re-asking
+  rather than assuming.

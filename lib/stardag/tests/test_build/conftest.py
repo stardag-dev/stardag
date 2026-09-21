@@ -163,6 +163,7 @@ class RecordingRegistry(NoOpRegistry):
         executor_ref: str | None = None,
         executor_metadata: dict | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         self._record(
             "task_start_aio",
@@ -215,6 +216,7 @@ class RecordingRegistry(NoOpRegistry):
         task: BaseTask,
         reason: str | None = None,
         executor_ref: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         self._record("task_interrupt_aio", task.id, reason=reason)
         await super().task_interrupt_aio(build_id, task, reason, executor_ref)

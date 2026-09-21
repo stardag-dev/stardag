@@ -74,6 +74,7 @@ class RecordingRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ) -> None:
         self.calls.append(("task_start", {"executor_ref": executor_ref}))
 
@@ -83,12 +84,16 @@ class RecordingRegistry(NoOpRegistry):
     def task_fail(self, build_id, task, error_message=None) -> None:
         self.calls.append(("task_fail", {"error_message": error_message}))
 
-    def task_interrupt(self, build_id, task, reason=None, executor_ref=None) -> None:
+    def task_interrupt(
+        self, build_id, task, reason=None, executor_ref=None, execution_id=None
+    ) -> None:
         self.calls.append(
             ("task_interrupt", {"reason": reason, "executor_ref": executor_ref})
         )
 
-    def task_preempt(self, build_id, task, reason=None, executor_ref=None) -> None:
+    def task_preempt(
+        self, build_id, task, reason=None, executor_ref=None, execution_id=None
+    ) -> None:
         self.calls.append(
             ("task_preempt", {"reason": reason, "executor_ref": executor_ref})
         )

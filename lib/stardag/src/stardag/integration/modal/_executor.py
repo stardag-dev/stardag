@@ -33,6 +33,7 @@ from stardag.integration.modal._metadata import (
     STARDAG_BUILD_CONFIG_ENV,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
+    STARDAG_EXECUTION_ID_ENV,
     STARDAG_SCOPE_KEY_ENV,
     STARDAG_MODAL_APP_ID_ENV,
     STARDAG_MODAL_APP_NAME_ENV,
@@ -318,7 +319,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         return float(timeout) if timeout is not None else None
 
     async def _prepare_invocation(
-        self, task: BaseTask
+        self, task: BaseTask, execution_id: UUID | None = None
     ) -> tuple[modal.Function, dict[str, str] | None, dict[str, typing.Any] | None]:
         """Resolve the worker function, env overrides, and executor metadata.
 
@@ -362,6 +363,12 @@ class ModalTaskExecutor(TaskExecutorABC):
                 # See STARDAG_MODAL_FUNCTION_TIMEOUT_ENV. Same source the
                 # claim TTL is derived from, forwarded raw rather than
                 # re-derived from the TTL (which has grace folded in).
+                if execution_id is not None:
+                    # The identity of the execution this container is, so
+                    # its self-reported start and any interruption report
+                    # can name it. Only sent when the worker reports:
+                    # nothing else in the container reads it.
+                    env_overrides[STARDAG_EXECUTION_ID_ENV] = str(execution_id)
                 timeout_seconds = self.execution_timeout_seconds(task)
                 if timeout_seconds is not None:
                     env_overrides[STARDAG_MODAL_FUNCTION_TIMEOUT_ENV] = str(
@@ -498,13 +505,15 @@ class ModalTaskExecutor(TaskExecutorABC):
             executor_metadata=executor_metadata,
         )
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         """Spawn the task on its worker function; return a re-attachable handle."""
         (
             worker_function,
             env_overrides,
             executor_metadata,
-        ) = await self._prepare_invocation(task)
+        ) = await self._prepare_invocation(task, execution_id)
         function_call = await worker_function.spawn.aio(
             task, env_overrides=env_overrides
         )

@@ -69,7 +69,9 @@ class FakeDetachedExecutor(TaskExecutorABC):
     def supports_detached(self, task: BaseTask) -> bool:
         return self.detached
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         if self.spawn_error is not None:
             raise self.spawn_error
         self.spawn_calls.append(task.id)
@@ -328,7 +330,9 @@ class MetadataDetachedExecutor(FakeDetachedExecutor):
 
     METADATA = {"kind": "fake", "app_name": "meta-app", "workspace": "acme"}
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         handle = await super().submit_detached(task)
         return DetachedHandle(
             executor=handle.executor,

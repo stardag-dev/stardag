@@ -69,6 +69,27 @@ scheduler after terminal events; there is no resident orchestrator to do
 either.
 """
 
+STARDAG_EXECUTION_ID_ENV = "STARDAG_EXECUTION_ID"
+"""Env var carrying the identity of the execution this container *is*.
+
+Minted by the orchestrator before it claimed the task — the claim is
+taken before the spawn, so the executor ref does not exist yet — and
+forwarded per call so the worker can name its own execution when it
+reports.
+
+Two rules depend on the worker sending it back. Its own TASK_STARTED is
+non-claiming and the registry refuses one that names an execution the
+task no longer runs under, which is what stops a late restart from
+evicting the build that took the task over meanwhile. And its
+interruption and preemption reports are honoured only while the task
+still holds the execution they name.
+
+Absent (an orchestrator predating it), the worker reports without one and
+the registry falls back to the ``(executor, executor_ref)`` pair — the
+behaviour of every release before this, so a rolling deploy is safe in
+both directions.
+"""
+
 STARDAG_CLAIM_TTL_SECONDS_ENV = "STARDAG_CLAIM_TTL_SECONDS"
 """Env var carrying the claim TTL the orchestrator derived for this task.
 

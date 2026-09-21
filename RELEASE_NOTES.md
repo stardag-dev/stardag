@@ -127,6 +127,48 @@ word, which is how a grace period becomes a concurrency bound. This
 release inserts exactly such a field (`worker_report_grace_seconds`, next
 to the two budgets), which is what surfaced it.
 
+### An execution carries an identity
+
+Both engines claim a task **before** spawning it — the claim and any
+concurrency-limit slots are acquired in one transaction, so a denied task
+never occupies a worker — which means there is no executor reference at
+claim time and never was. Two things needed one and had to guess without
+it: a retried claiming start was refused as though it were a second
+attempt (so a worker stood down from a task it held the claim on, and the
+task sat claimed and not running until the claim expired), and a worker's
+own start could evict a live holder if its claim had lapsed and a
+neighbour had taken the task over.
+
+`execution_id` is that identity, minted by the caller before it claims
+and repeated on every call about the same execution. **Nothing is
+required of you**: it is optional on every method, sending none behaves
+exactly as before, and both built-in engines mint one for you. It needs a
+registry at `server-v0.5.0` or newer to have any effect; against an older
+one it is ignored, which is simply the previous behaviour.
+
+#### Breaking, for custom executors only
+
+`TaskExecutorABC.submit_detached` now takes a keyword-only
+`execution_id`, and the build engines pass it. A custom executor whose
+override does not accept it will raise `TypeError` at spawn time:
+
+```python
+# before
+async def submit_detached(self, task: BaseTask) -> DetachedHandle: ...
+
+
+# after
+async def submit_detached(
+    self, task: BaseTask, *, execution_id: UUID | None = None
+) -> DetachedHandle: ...
+```
+
+Accepting and ignoring it is valid and costs only the two protections
+above. An executor whose workers report their own lifecycle should
+forward it into the execution, so the worker can name its own execution
+when it reports — the built-in Modal executor does this through the
+`STARDAG_EXECUTION_ID` environment variable.
+
 ---
 
 ## v0.24.0 — Dependency structure belongs to the code, not the task id

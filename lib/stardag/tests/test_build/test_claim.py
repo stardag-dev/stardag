@@ -72,6 +72,7 @@ class ClaimRegistry(RecordingRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        execution_id=None,
         *,
         claim=True,
     ) -> StartClaimResult:
@@ -105,6 +106,7 @@ class ClaimRegistry(RecordingRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ):
         await super().task_start_aio(
             build_id,

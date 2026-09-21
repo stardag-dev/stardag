@@ -6,7 +6,7 @@ import typing
 from datetime import datetime, timezone
 from functools import partial
 from typing import Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from stardag import (
     BaseTask,
@@ -961,12 +961,27 @@ async def _act_on_frontier(
         # start, so omitting it there would hand the claim straight back to
         # the registry's generic default and undo the derivation.
         ttl_seconds = claim_ttl_seconds(task, task_executor)
+        # The execution's identity, minted here because here is the
+        # earliest point it can be: the claim goes in before the spawn, so
+        # the executor ref does not exist yet, and until something did the
+        # claim had nothing to name itself by.
+        #
+        # One id for this whole execution -- the claim, the post-spawn
+        # start that records the ref, and the worker's own reports from
+        # inside the container. That is what makes the claim's retry
+        # idempotent: the registry client retries a POST whose response
+        # was lost, and a repeat carrying this same id is the same
+        # execution asking again rather than a second attempt to refuse.
+        # A genuine second attempt runs this line again and gets a new
+        # one, which is the distinction the build id alone cannot make.
+        execution_id = uuid4()
         claim_result = await registry.task_start_claim_aio(
             build_id,
             task,
             executor_metadata=acquire_metadata,
             limit_keys=limit_keys or None,
             claim_ttl_seconds=ttl_seconds,
+            execution_id=execution_id,
         )
         if not claim_result.started:
             if claim_result.denied_reason == "limit":
@@ -988,7 +1003,9 @@ async def _act_on_frontier(
             denied_this_round += 1
             return
         try:
-            handle = await task_executor.submit_detached(task)
+            handle = await task_executor.submit_detached(
+                task, execution_id=execution_id
+            )
         except Exception as e:
             logger.error(f"Failed to spawn task {task.id}: {e}")
             # The one failure no execution backend can retry for us: there
@@ -1015,6 +1032,7 @@ async def _act_on_frontier(
             executor_ref=handle.ref,
             executor_metadata=handle.executor_metadata,
             claim_ttl_seconds=ttl_seconds,
+            execution_id=execution_id,
         )
         summary.spawned += 1
         if task.id in resumption_requests:

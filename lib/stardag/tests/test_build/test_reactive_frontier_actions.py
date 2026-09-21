@@ -7,7 +7,7 @@ import asyncio
 import logging
 import typing
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 
 import pytest
@@ -1193,7 +1193,9 @@ class TestExecutorMetadataRecording:
     class MetadataTickExecutor(FakeTickExecutor):
         METADATA = {"kind": "modal", "app_name": "tick-app"}
 
-        async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+        async def submit_detached(
+            self, task: BaseTask, *, execution_id: UUID | None = None
+        ) -> DetachedHandle:
             handle = await super().submit_detached(task)
             return DetachedHandle(
                 executor=handle.executor,
@@ -1246,6 +1248,7 @@ class TestAcquiringStartExecutorMetadata:
             executor_metadata=None,
             limit_keys=None,
             claim_ttl_seconds=None,
+            execution_id=None,
         ):
             self.acquire_metadata[str(task.id)] = executor_metadata
             return await super()._acquire_limits(
@@ -1256,6 +1259,7 @@ class TestAcquiringStartExecutorMetadata:
                 executor_metadata=executor_metadata,
                 limit_keys=limit_keys,
                 claim_ttl_seconds=claim_ttl_seconds,
+                execution_id=execution_id,
             )
 
     async def test_acquiring_start_carries_metadata(
@@ -1306,6 +1310,7 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        execution_id=None,
         *,
         claim=True,
     ):
@@ -1422,7 +1427,9 @@ class InstrumentedTickExecutor(FakeTickExecutor):
         self.in_flight = 0
         self.max_in_flight = 0
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:

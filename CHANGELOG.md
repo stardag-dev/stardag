@@ -78,6 +78,60 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   into a concurrency bound. A positional call is now a `TypeError` instead.
   See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the migration.
 
+- **An execution carries an identity, minted before it exists.** Both
+  engines claim a task _before_ spawning it — the claim and any
+  concurrency-limit slots are acquired in one transaction, so a denied
+  task never occupies a worker — which means there is no executor
+  reference at claim time and never was. Two things needed one and had to
+  guess without it.
+
+  A retried claiming start could not be told from a genuine second
+  attempt of the same build. The registry client retries a POST whose
+  response was lost, so the repeat was refused by the state its own first
+  attempt created, and a worker stood down from a task it held the claim
+  on; the task then sat claimed and not running until the claim expired.
+
+  And a worker's own start is non-claiming, so it was applied
+  unconditionally. Since a preemption brings the claim's expiry forward to
+  a short restart grace, a late restart now has time to find its claim
+  lapsed and the task taken over — and its start would take the task back
+  from the live holder, which is the double execution claims exist to
+  prevent.
+
+  `task_start`, `task_start_claim`, `task_interrupt` and `task_preempt`
+  (and their `_aio` twins) take an optional `execution_id`, minted by the
+  caller and repeated on every call about the same execution;
+  `TaskExecutorABC.submit_detached` takes it too and must forward it into
+  the execution, which the Modal executor does through
+  `STARDAG_EXECUTION_ID`. Both engines mint one per claim attempt. Sending
+  none is fully supported and behaves exactly as before.
+
+### Registry API
+
+- **`tasks.latest_execution_id`**: the execution a task is currently
+  running under, as minted by the caller that claimed it. One nullable
+  column, no index, no backfill.
+
+  A claiming start naming the id the task already holds is the same
+  execution asking again and is granted — closing the retried-claim hole,
+  which the `(executor, executor_ref)` pair could not, because a claim is
+  taken before the spawn and has no reference yet. A different id from the
+  same build while the claim is live is refused as before.
+
+  A **non-claiming** start naming an execution the task demonstrably no
+  longer runs under is refused with `409 execution_superseded`, so a
+  restart that arrives after its claim lapsed cannot evict the build that
+  took the task over. Nothing is written, so no attempt is spent.
+
+  Absence is never a mismatch, in either rule: a caller that sends no id
+  falls back to the `(executor, executor_ref)` pair, and a task claimed
+  before the column existed has no opinion to contradict. Both directions
+  of a rolling deploy are therefore safe and no `minimum_version` bump is
+  needed. `execution_id` is echoed on every task-event response, and named
+  on an `already_running` denial. See
+  `docs/design/executions-as-records.md`, which also records the
+  `executions` table this replaces and why it is not being built.
+
 ## [0.24.0] — 2026-09-20
 
 ### SDK

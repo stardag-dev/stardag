@@ -40,6 +40,7 @@ from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
+    STARDAG_EXECUTION_ID_ENV,
     STARDAG_MODAL_APP_ID_ENV,
     STARDAG_MODAL_APP_NAME_ENV,
     STARDAG_MODAL_ENVIRONMENT_ENV,
@@ -437,6 +438,24 @@ def _worker_scope_preflight(env_overrides: dict[str, str] | None) -> str | None:
     return worker_scope_key(_get(STARDAG_SCOPE_KEY_ENV), build_id)
 
 
+def _parsed_execution_id(raw: str | None) -> UUID | None:
+    """The forwarded execution identity, or None if it is unusable.
+
+    Malformed values are dropped rather than raised on, for the reason
+    the claim TTL is: this decides whether a report can name its
+    execution, and no worker should fail to report its own start over it.
+    Dropping it costs only the identity-based rules, which is how a
+    worker behaved before they existed.
+    """
+    if not raw:
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        logger.warning(f"Invalid {STARDAG_EXECUTION_ID_ENV}: {raw!r}")
+        return None
+
+
 class _WorkerLifecycleReporter:
     """Reports a task's lifecycle events from inside a Modal worker.
 
@@ -464,6 +483,7 @@ class _WorkerLifecycleReporter:
         executor_metadata: dict[str, typing.Any] | None = None,
         claim_ttl_seconds: int | None = None,
         scope_key: str | None = None,
+        execution_id: UUID | None = None,
     ):
         self.registry = registry
         self.build_id = build_id
@@ -476,6 +496,12 @@ class _WorkerLifecycleReporter:
         # id with the config half of the build's scope (see
         # :func:`worker_scope_key`). None leaves it to the server.
         self.scope_key = scope_key
+        # The execution this container *is*, as the orchestrator minted it
+        # before claiming the task. Named on this worker's own start and
+        # on its end-of-execution reports, which is what lets the registry
+        # tell them from a superseded execution's. None on an older
+        # orchestrator: the reports then fall back to the executor ref.
+        self.execution_id = execution_id
 
     @classmethod
     def create(
@@ -556,6 +582,7 @@ class _WorkerLifecycleReporter:
             executor_metadata=executor_metadata,
             claim_ttl_seconds=ttl_seconds,
             scope_key=scope_key,
+            execution_id=_parsed_execution_id(_get(STARDAG_EXECUTION_ID_ENV)),
         )
 
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
@@ -601,6 +628,7 @@ class _WorkerLifecycleReporter:
                 executor_ref=self._executor_ref(),
                 executor_metadata=self.executor_metadata,
                 claim_ttl_seconds=self.claim_ttl_seconds,
+                execution_id=self.execution_id,
             )
 
         self._guard(_do, "start")
@@ -659,7 +687,11 @@ class _WorkerLifecycleReporter:
         ref = self._executor_ref()
         self._report_in_grace_window(
             lambda: self.registry.task_interrupt(
-                self.build_id, self.task, reason=reason, executor_ref=ref
+                self.build_id,
+                self.task,
+                reason=reason,
+                executor_ref=ref,
+                execution_id=self.execution_id,
             ),
             label="interrupt",
             what="interruption",
@@ -684,7 +716,11 @@ class _WorkerLifecycleReporter:
         ref = self._executor_ref()
         self._report_in_grace_window(
             lambda: self.registry.task_preempt(
-                self.build_id, self.task, reason=reason, executor_ref=ref
+                self.build_id,
+                self.task,
+                reason=reason,
+                executor_ref=ref,
+                execution_id=self.execution_id,
             ),
             label="preempt",
             what="preemption",
