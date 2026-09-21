@@ -114,9 +114,10 @@ TickConfig(
 )
 ```
 
-Keyword arguments — how every documented example, every `tick_kwargs`
-payload and every call inside stardag already builds these — are
-unaffected. Nothing else about the two changes.
+Keyword arguments are unaffected, and that is how every documented
+example, every `tick_kwargs` payload and every call inside stardag
+already builds these. Nothing else about either class changes: same
+fields, same defaults, same behaviour.
 
 The reason is the silent failure this replaces with a loud one. The
 config's fields are grouped by what they mean, so a new knob belongs
