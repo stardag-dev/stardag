@@ -97,6 +97,36 @@ written again and can be deleted at your convenience. Stardag will not
 delete them: a target root may be immutable or append-only, and the SDK has
 no business assuming otherwise.
 
+### Breaking: `TickConfig` and `TickSummary` are keyword-only
+
+Both reactive-scheduler dataclasses are now `@dataclass(kw_only=True)`, so
+any **positional** construction raises `TypeError`:
+
+```python
+# Before — worked, and would silently re-bind on the next inserted field
+TickConfig(120.0, 3.0, FailMode.FAIL_FAST)
+
+# Now
+TickConfig(
+    linger_seconds=120.0,
+    poll_interval_seconds=3.0,
+    fail_mode=FailMode.FAIL_FAST,
+)
+```
+
+Keyword arguments are unaffected, and that is how every documented
+example, every `tick_kwargs` payload and every call inside stardag
+already builds these. Nothing else about either class changes: same
+fields, same defaults, same behaviour.
+
+The reason is the silent failure this replaces with a loud one. The
+config's fields are grouped by what they mean, so a new knob belongs
+beside its relatives rather than appended to the end; an insertion ahead
+of existing fields re-binds a positional caller's arguments without a
+word, which is how a grace period becomes a concurrency bound. This
+release inserts exactly such a field (`worker_report_grace_seconds`, next
+to the two budgets), which is what surfaced it.
+
 ---
 
 ## v0.24.0 — Dependency structure belongs to the code, not the task id
