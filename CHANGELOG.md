@@ -98,9 +98,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   from the live holder, which is the double execution claims exist to
   prevent.
 
-  `task_start`, `task_start_claim`, `task_interrupt` and `task_preempt`
-  (and their `_aio` twins) take an optional `execution_id`, minted by the
-  caller and repeated on every call about the same execution;
+  `task_start`, `task_interrupt` and `task_preempt` (and their `_aio`
+  twins), and `task_start_claim_aio`, take an optional `execution_id`,
+  minted by the caller and repeated on every call about the same
+  execution;
   `TaskExecutorABC.submit_detached` takes it too and must forward it into
   the execution, which the Modal executor does through
   `STARDAG_EXECUTION_ID`. Both engines mint one per claim attempt. Sending
@@ -122,6 +123,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   longer runs under is refused with `409 execution_superseded`, so a
   restart that arrives after its claim lapsed cannot evict the build that
   took the task over. Nothing is written, so no attempt is spent.
+
+  **What this does not do is stop anything.** A refused worker logs the
+  409 and runs on, so a superseded container still finishes and its
+  completion still lands — harmless for a content-addressed output, and
+  the same as before the rule existed. What the rule protects is the
+  registry's answer to "which execution is this task running under", not
+  the container. Acting on the refusal is cooperative cancellation's job.
 
   Absence is never a mismatch, in either rule: a caller that sends no id
   falls back to the `(executor, executor_ref)` pair, and a task claimed

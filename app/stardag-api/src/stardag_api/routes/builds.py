@@ -703,40 +703,42 @@ def _report_identity(
     return metadata or None
 
 
-def _supersedes_the_live_execution(
-    db_task: Task, *, build_id: UUID, extra_metadata: dict | None
-) -> bool:
+def _supersedes_the_live_execution(db_task: Task, extra_metadata: dict | None) -> bool:
     """Whether a non-claiming start names an execution that has been replaced.
 
     True only when the task holds a *live* claim, both sides name an
-    execution, and the request is not that same execution reporting for
-    itself. Every other shape is either a task nobody holds, a caller
-    with no identity to compare, or the current execution re-recording
-    itself — see the call site for why each condition is load-bearing.
+    execution, and they are different ones. Every other shape is either
+    a task nobody holds, a caller with no identity to compare, or the
+    current execution re-recording itself — see the call site for why
+    each of the three conditions is load-bearing.
 
-    **The build is part of the test, not just the id.** The id is minted
-    by the caller, so it is an identity this endpoint is handed rather
-    than one it issued: a second build naming the holder's execution
-    would otherwise satisfy the match and take the task over through the
-    one start path that does no arbitration at all. Unreachable by
-    accident with a v4 UUID, and the claiming path has always checked
-    ownership — which is the argument for checking it here too, rather
-    than against.
+    **Ownership is deliberately not part of this test, having been tried
+    and removed.** Requiring the reporting build to be the row's owner
+    looks like the obvious hardening — it would refuse a second build
+    that named the holder's execution — but the row's owner cannot
+    distinguish that impostor from the genuine holder, because in both
+    cases the sender is not the recorded owner.
 
-    A NULL owner is permitted, as it is for revocation authority: the
-    owning build row is gone (the FK is ``ON DELETE SET NULL``), so
-    nobody is left to contradict the report, and refusing would strand
-    the task.
+    The genuine case is reachable through the SDK and the impostor is
+    not. A resident build whose claim is *denied* re-attaches to the
+    winner and still records a non-claiming start of its own, which
+    flips ``latest_status_build_id`` to the loser while leaving the
+    identity alone. The winner's own worker then checks in naming the
+    execution it really is running, and an ownership test refuses it —
+    so the row stays with the loser, the winner's later reports are
+    dropped by the authority rule's own ownership half, and its executor
+    ref is never re-recorded, leaving nothing able to address its
+    container. Refusing the true holder is the failure this whole rule
+    exists to avoid, and it buys protection only against a caller
+    sending an id it did not mint, which no SDK path does and which this
+    data cannot identify anyway.
     """
     asking_execution = (extra_metadata or {}).get("execution_id")
     if asking_execution is None or db_task.latest_execution_id is None:
         return False
     if not claim_is_live(db_task):
         return False
-    if str(asking_execution) != str(db_task.latest_execution_id):
-        return True
-    owner = db_task.latest_status_build_id
-    return owner is not None and owner != build_id
+    return str(asking_execution) != str(db_task.latest_execution_id)
 
 
 async def _create_task_event(
@@ -841,9 +843,7 @@ async def _create_task_event(
     if (
         event_type == EventType.TASK_STARTED
         and not claim
-        and _supersedes_the_live_execution(
-            db_task, build_id=build_id, extra_metadata=extra_metadata
-        )
+        and _supersedes_the_live_execution(db_task, extra_metadata)
     ):
         # A start from an execution the task is demonstrably no longer
         # running under, refused rather than applied.
@@ -879,12 +879,18 @@ async def _create_task_event(
         # as are the tick's ref-recording start and the worker's own first
         # self-report, which carry the id the claim was taken with.
         #
-        # A 409 rather than a silently dropped event, because the two are
-        # not the same to the caller: a worker told its execution has been
-        # superseded knows it is no longer wanted, which is the signal
-        # cooperative cancellation is built on. And because nothing is
-        # written, no attempt is spent and no refused-report bookkeeping is
-        # needed -- the transaction simply rolls back.
+        # A 409 rather than a silently dropped event, for two reasons.
+        # Nothing is written, so no attempt is spent and no
+        # refused-report bookkeeping is needed -- the transaction simply
+        # rolls back. And it tells the caller *why*, which a dropped
+        # event does not.
+        #
+        # What it does not yet do is stop anything. Today's worker logs
+        # the refusal and runs on, so a superseded container still
+        # finishes and its completion still lands -- harmless for a
+        # content-addressed output, and the same as before this rule
+        # existed. Making the refusal a signal a worker acts on is
+        # cooperative cancellation's job, not this endpoint's.
         raise HTTPException(
             status_code=409,
             detail={

@@ -357,18 +357,18 @@ class ModalTaskExecutor(TaskExecutorABC):
                 ttl_seconds = claim_ttl_seconds(task, self)
                 if ttl_seconds is not None:
                     env_overrides[STARDAG_CLAIM_TTL_SECONDS_ENV] = str(ttl_seconds)
-                # The worker function's own ``timeout``, so the worker can
-                # tell a timeout from a cancellation — the two are
-                # indistinguishable from inside the container without it.
-                # See STARDAG_MODAL_FUNCTION_TIMEOUT_ENV. Same source the
-                # claim TTL is derived from, forwarded raw rather than
-                # re-derived from the TTL (which has grace folded in).
                 if execution_id is not None:
                     # The identity of the execution this container is, so
                     # its self-reported start and any interruption report
                     # can name it. Only sent when the worker reports:
                     # nothing else in the container reads it.
                     env_overrides[STARDAG_EXECUTION_ID_ENV] = str(execution_id)
+                # The worker function's own ``timeout``, so the worker can
+                # tell a timeout from a cancellation — the two are
+                # indistinguishable from inside the container without it.
+                # See STARDAG_MODAL_FUNCTION_TIMEOUT_ENV. Same source the
+                # claim TTL is derived from, forwarded raw rather than
+                # re-derived from the TTL (which has grace folded in).
                 timeout_seconds = self.execution_timeout_seconds(task)
                 if timeout_seconds is not None:
                     env_overrides[STARDAG_MODAL_FUNCTION_TIMEOUT_ENV] = str(

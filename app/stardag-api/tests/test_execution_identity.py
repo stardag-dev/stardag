@@ -447,27 +447,50 @@ async def test_a_claiming_start_is_never_refused_as_superseded(
     )
 
 
-async def test_a_matching_id_from_another_build_is_still_refused(
+async def test_the_holder_is_accepted_after_a_loser_flipped_the_owner(
     client: AsyncClient, async_session: AsyncSession
 ):
-    """The id is minted by the caller, so a match is not by itself
-    authority. A second build naming the holder's execution would
-    otherwise take the task over through the one start path that does no
-    arbitration — the claiming path has always checked ownership, and
-    this one has to as well."""
+    """Ownership is not part of the supersession test, and this is why.
+
+    A resident build whose claim is *denied* re-attaches to the winner
+    and still records a non-claiming start of its own, which flips the
+    recorded owner to the loser while leaving the identity alone. The
+    winner's own worker then checks in naming the execution it really is
+    running. Refusing that — which an ownership test does, since the
+    sender is no longer the recorded owner — leaves the row with the
+    loser, gets the winner's later reports dropped by the authority
+    rule, and loses the executor ref that is the only way to address its
+    container.
+    """
     execution_id = _eid()
-    build_a, _ = await _claimed(client, "cross-build-id", execution_id)
+    build_a, _ = await _claimed(client, "owner-flipped", execution_id)
     build_b = await _new_build(client)
 
-    impostor = await _start(
-        client, build_b, "cross-build-id", execution_id=execution_id
+    # B lost the claim, re-attached, and recorded a start of its own.
+    loser = await _start(client, build_b, "owner-flipped")
+    assert loser.status_code == 200, loser.text
+    row = await _task_row(async_session, "owner-flipped")
+    assert str(row.latest_status_build_id) == build_b, "precondition"
+    assert str(row.latest_execution_id) == execution_id
+
+    # A's worker checks in for the execution it is actually running.
+    holder = await _start(
+        client,
+        build_a,
+        "owner-flipped",
+        execution_id=execution_id,
+        executor="modal",
+        executor_ref="fc-a",
     )
 
-    assert impostor.status_code == 409, impostor.text
-    assert impostor.json()["detail"]["error_code"] == "execution_superseded"
-    row = await _task_row(async_session, "cross-build-id")
+    assert holder.status_code == 200, holder.text
+    row = await _task_row(async_session, "owner-flipped")
     assert str(row.latest_status_build_id) == build_a, (
-        "a second build took the task over by naming the holder's execution"
+        "the real holder could not take its own task back, so its later "
+        "reports will be dropped by the authority rule"
+    )
+    assert row.latest_executor_ref == "fc-a", (
+        "the ref was never re-recorded, so nothing can address the container"
     )
 
 

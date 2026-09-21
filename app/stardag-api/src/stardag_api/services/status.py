@@ -260,19 +260,22 @@ def _names_the_execution(
     construction still the same execution, and reuses both.
 
     **The one gap left, stated rather than papered over.** A report that
-    names an id, against a task whose id is NULL and whose ref is NULL,
-    is accepted — there is nothing to compare on either axis. Reaching
-    it needs a *pre-identity* claiming start to have replaced an
-    identity-aware execution **inside one build** (so the owner still
-    matches), which means an SDK rollback mid-build, *and* a report that
-    carries no executor ref (Modal's reporter omits it only when
-    ``current_function_call_id()`` is unavailable). Closing it would mean
-    minting a server-side placeholder identity for claims that bring
-    none — inventing a value for a caller-minted field, and making the
-    echoed ``execution_id`` something the caller never sent. Both
-    conditions are version-skew-only and the pre-identity behaviour here
-    was to accept every such report, so this is strictly narrower than
-    what it replaces rather than a hole it opens.
+    names an id is accepted when the task carries neither identity to
+    compare it against — its id NULL *and* its ref NULL. Note which side
+    that is: the **task's** missing ref, not the report's. A report
+    naming a ref is accepted just the same, because there is nothing on
+    the row to contradict it.
+
+    A claiming start leaves exactly that state when it brings no id, so
+    reaching the gap needs a *pre-identity* claiming start to have
+    replaced an identity-aware execution, which within one environment
+    means an SDK rollback mid-build. Closing it would mean minting a
+    server-side placeholder identity for claims that bring none —
+    inventing a value for a caller-minted field, and making the echoed
+    ``execution_id`` something the caller never sent. It is
+    version-skew-only, and the behaviour it replaces accepted every such
+    report, so this is strictly narrower than what came before rather
+    than a hole it opens.
     """
     metadata = event.event_metadata or {}
     reported_execution = metadata.get("execution_id")

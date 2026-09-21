@@ -20,7 +20,7 @@ from stardag.build._task_modules import (
     import_failure_note,
 )
 from stardag._core.rehydrate import TaskRehydrationError
-from stardag.exceptions import NotFoundError, is_missing_route_error
+from stardag.exceptions import APIError, NotFoundError, is_missing_route_error
 from stardag.registry import (
     BuildFrontier,
     FrontierTaskRef,
@@ -1025,15 +1025,51 @@ async def _act_on_frontier(
             )
             acted = True
             return
-        await registry.task_start_aio(
-            build_id,
-            task,
-            executor=handle.executor,
-            executor_ref=handle.ref,
-            executor_metadata=handle.executor_metadata,
-            claim_ttl_seconds=ttl_seconds,
-            execution_id=execution_id,
-        )
+        try:
+            await registry.task_start_aio(
+                build_id,
+                task,
+                executor=handle.executor,
+                executor_ref=handle.ref,
+                executor_metadata=handle.executor_metadata,
+                claim_ttl_seconds=ttl_seconds,
+                execution_id=execution_id,
+            )
+        except APIError as start_err:
+            if not _execution_superseded(start_err):
+                raise
+            # We lost the task while the spawn was in flight -- the claim
+            # lapsed, or a cascading cancel released it, and somebody
+            # else claimed it. The registry is right to refuse: recording
+            # this ref now would stamp our execution over the live
+            # holder's.
+            #
+            # Caught rather than propagated because this coroutine runs
+            # in a TaskGroup: an escaping error cancels every sibling
+            # spawn in the pass and kills the tick, which would leave
+            # those siblings claimed and never spawned until their claims
+            # expire. The claim's own "you lost" answer is handled
+            # gracefully a few lines above; this is the same answer
+            # arriving later, and deserves the same treatment.
+            #
+            # The container is already running and its ref was never
+            # recorded, so nothing else can find it -- stop it here,
+            # best-effort, while we still hold the handle.
+            logger.warning(
+                f"Task {task.id} was taken over while its execution was "
+                f"being spawned; the registry refused the ref. Stopping "
+                f"the orphaned execution {handle.ref!r}."
+            )
+            try:
+                await task_executor.cancel_detached(task, handle.executor, handle.ref)
+            except Exception as cancel_err:
+                logger.warning(
+                    f"Failed to stop orphaned execution {handle.ref!r} for "
+                    f"task {task.id}; it will run to completion: {cancel_err}"
+                )
+            summary.claim_denied += 1
+            denied_this_round += 1
+            return
         summary.spawned += 1
         if task.id in resumption_requests:
             # Counted here rather than where the request was read, so a
@@ -1044,6 +1080,19 @@ async def _act_on_frontier(
 
     await _run_bounded([partial(spawn, task) for task in spawn_candidates], semaphore)
     return acted, denied_this_round, awaiting_backend
+
+
+def _execution_superseded(error: APIError) -> bool:
+    """Whether the registry refused a start because we lost the task.
+
+    The 409 a non-claiming start gets when the execution it names is no
+    longer the one the task runs under. Matched on the error code rather
+    than the status, since 409 also carries the claim denials, and those
+    arrive as a ``StartClaimResult`` rather than an exception.
+    """
+    if error.status_code != 409:
+        return False
+    return (error.payload or {}).get("error_code") == "execution_superseded"
 
 
 def _claim_has_lapsed(expires_at: datetime | None, now: datetime) -> bool:

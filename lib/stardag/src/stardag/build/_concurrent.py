@@ -1452,6 +1452,17 @@ async def build_aio(
                         f"Claim start failed for task {task.id}",
                         on_registry_failure,
                     )
+                    # Nothing is assumed recorded on this path, so
+                    # nothing should be asserted either: the fallback
+                    # start goes out with no identity, as it did before
+                    # identities existed. Keeping the minted id would
+                    # have the start claim an execution whose claim may
+                    # never have committed -- and against another
+                    # build's live claim that is a 409, which
+                    # ``handle_registry_error`` turns into a task failure
+                    # in the default mode, on the one path whose whole
+                    # purpose is to carry on when the claim call failed.
+                    state.execution_id = None
                     return ("unclaimed", None)
                 if result.started:
                     return ("granted", None)

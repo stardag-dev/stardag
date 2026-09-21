@@ -409,18 +409,16 @@ class FakeReactiveRegistry(NoOpRegistry):
     ):
         tid = str(task.id)
         held = self.execution_ids.get(tid)
-        owner = self.status_build_id.get(tid)
         if (
             execution_id is not None
             and held is not None
             and self.statuses.get(tid) == "running"
-            # The whole server rule, not half of it: a *different* id, or
-            # the *right* id from a build that does not hold the task.
-            # The id is minted by the caller, so a match is not by itself
-            # authority -- and a double that checked only the id would
-            # accept a cross-build impostor the server refuses, which is
-            # the exact kind of divergence this file exists not to have.
-            and (str(execution_id) != held or (owner is not None and owner != build_id))
+            # The id alone, matching the server. Ownership was tried
+            # there and removed: on a match the recorded owner cannot
+            # tell an impostor from the genuine holder, and a build
+            # whose claim was denied legitimately flips it by
+            # re-attaching, so requiring it refused the real holder.
+            and str(execution_id) != held
         ):
             # The server's supersession rule: a non-claiming start naming
             # an execution the task no longer runs under is refused, so a

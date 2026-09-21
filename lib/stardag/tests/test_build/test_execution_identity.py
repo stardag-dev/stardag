@@ -103,6 +103,52 @@ class TestTheReactiveTickMintsOne:
             "registry would read it as a retry and grant the claim twice"
         )
 
+    async def test_losing_the_task_during_the_spawn_does_not_kill_the_tick(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The post-spawn start can be refused, and must not propagate.
+
+        Between the claim and the start that records the ref, the claim
+        can lapse or be cancel-released and the task taken over. The
+        registry then refuses the ref — correctly, since recording it
+        would stamp our execution over the live holder's.
+
+        That refusal arrives inside a ``TaskGroup``, so letting it escape
+        cancels every sibling spawn in the pass and kills the tick,
+        leaving those siblings claimed and never spawned until their
+        claims expire. And the container is already running with its ref
+        unrecorded, so nothing else can find it: the pass has to stop it
+        while it still holds the handle.
+        """
+        (root,) = _chain("spawn-race-root")
+        registry, executor = _setup([root], auto_complete=False)
+        tid = str(root.id)
+        stolen = uuid4()
+
+        original = executor.submit_detached
+
+        async def steal_during_spawn(task, *, execution_id=None):
+            handle = await original(task, execution_id=execution_id)
+            # Somebody else takes the task over while we are spawning.
+            registry.execution_ids[tid] = str(stolen)
+            return handle
+
+        executor.submit_detached = steal_during_spawn  # type: ignore[assignment]
+
+        summary = await run_tick_aio(
+            uuid4(), registry=registry, task_executor=executor, config=FAST_TICK
+        )
+
+        assert summary.outcome != "error", (
+            f"the refused ref killed the tick: {summary.error_message}"
+        )
+        assert summary.spawned == 0, "a lost task must not count as spawned"
+        assert summary.claim_denied == 1
+        assert executor.cancelled_refs, (
+            "the orphaned container was left running with no recorded ref, "
+            "so nothing can ever address it"
+        )
+
 
 class TestTheRegistryRulesTheFakeModels:
     async def test_a_retried_claim_is_granted(
@@ -165,37 +211,6 @@ class TestTheRegistryRulesTheFakeModels:
             raise AssertionError(
                 "a start from the superseded execution was accepted, so the "
                 "live holder's claim was evicted"
-            )
-
-    async def test_a_matching_id_from_another_build_is_refused(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The half of the rule a double is most likely to leave out.
-
-        The id is minted by the caller, so a match is not by itself
-        authority — the server requires the reporting build to hold the
-        task as well. A double that compared only the id would accept a
-        cross-build impostor the server refuses, and every test written
-        against it would agree with the wrong answer.
-        """
-        from stardag.exceptions import APIError
-
-        (root,) = _chain("cross-build-root")
-        registry, _ = _setup([root], auto_complete=False)
-        build_a, build_b = uuid4(), uuid4()
-        execution_id = uuid4()
-
-        await registry.task_start_aio(build_a, root, execution_id=execution_id)
-
-        try:
-            await registry.task_start_aio(build_b, root, execution_id=execution_id)
-        except APIError as e:
-            assert e.status_code == 409
-            assert (e.payload or {}).get("error_code") == "execution_superseded"
-        else:
-            raise AssertionError(
-                "a second build took the task over by naming the holder's "
-                "execution, through the one start path that arbitrates nothing"
             )
 
     async def test_a_granted_claim_inherits_no_identity(
