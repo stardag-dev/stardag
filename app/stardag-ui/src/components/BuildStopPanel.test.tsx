@@ -186,6 +186,44 @@ describe("BuildStopPanel", () => {
     expect(screen.queryByLabelText("Executor")).not.toBeInTheDocument();
   });
 
+  it("offers no command when the ticked rows are filtered away", async () => {
+    // The regression this pins is a widening, which is the worst
+    // direction: ticks survive a filter change, so the dropdowns can be
+    // moved until no ticked row is shown. "No ids" is not a narrower
+    // request — a command with no filters stops *everything* the build
+    // holds, so the operator who ticked one row would copy a command that
+    // kills all of them.
+    answerWith([
+      makeTask({
+        task_id: "gpu-task",
+        task_name: "Featurise",
+        latest_executor_metadata: { function_name: "worker_gpu" },
+      }),
+      makeTask({
+        task_id: "cpu-task",
+        task_name: "Aggregate",
+        latest_executor_metadata: { function_name: "worker_cpu" },
+      }),
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+
+    await user.click(screen.getByRole("checkbox", { name: /Include Featurise/ }));
+    expect(
+      screen.getByText(`stardag builds stop ${BUILD} --task-id gpu-task`),
+    ).toBeInTheDocument();
+
+    // Now filter the ticked row out of view.
+    await user.selectOptions(screen.getByLabelText("Worker"), "cpu");
+
+    expect(screen.queryByText(`stardag builds stop ${BUILD}`)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy" })).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/None of the rows you ticked match these filters/),
+    ).toBeInTheDocument();
+  });
+
   it("copies the command as shown", async () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();

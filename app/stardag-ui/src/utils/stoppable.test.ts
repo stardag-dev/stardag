@@ -292,6 +292,13 @@ describe("stopCommand", () => {
     );
   });
 
+  it("refuses an empty task-id list rather than widening", () => {
+    // Loud rather than quiet: emitting no `--task-id` flags would produce
+    // a command with no filters at all, which stops every execution the
+    // build holds. There is no command string meaning "stop nothing".
+    expect(() => stopCommand(BUILD, { taskIds: [] })).toThrow(/stop nothing/);
+  });
+
   it("renders durations the way --older-than takes them", () => {
     expect(stopCommand(BUILD, { olderThanSeconds: 300 })).toContain("--older-than 5m");
     expect(stopCommand(BUILD, { olderThanSeconds: 7200 })).toContain("--older-than 2h");

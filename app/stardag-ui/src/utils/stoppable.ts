@@ -69,6 +69,14 @@ export interface StopFilters {
    * Exact task ids, from ticking individual rows. When set it is the whole
    * selection — the CLI's `--task-id` is exact and repeatable, so a list of
    * ids names the set on its own and the other flags would only restate it.
+   *
+   * **Must be non-empty when present.** An empty list is not "select
+   * nothing": `stopCommand` would emit no `--task-id` flags at all, and a
+   * command with no filters means *every* execution the build holds — so
+   * an empty selection would silently widen into the broadest possible
+   * action. There is no command string that means "stop nothing", so the
+   * caller must not ask for one; see `BuildStopPanel`, which renders the
+   * reason instead of a command.
    */
   taskIds?: string[];
 }
@@ -266,7 +274,16 @@ export function formatDurationFlag(seconds: number): string {
  */
 export function stopCommand(buildId: string, filters: StopFilters): string {
   const parts = ["stardag builds stop", buildId];
-  if (filters.taskIds?.length) {
+  if (filters.taskIds) {
+    if (filters.taskIds.length === 0) {
+      // Unreachable through the panel, which never builds this. Loud
+      // rather than quiet because the quiet version is a command that
+      // stops everything — see the field's own note.
+      throw new Error(
+        "stopCommand: taskIds is present but empty. There is no command " +
+          "that means 'stop nothing'; do not offer one.",
+      );
+    }
     // Exact ids name the set on their own, so they replace the narrowing
     // flags rather than joining them — the CLI's filters are conjunctive,
     // and restating them would only invite the two to drift apart.

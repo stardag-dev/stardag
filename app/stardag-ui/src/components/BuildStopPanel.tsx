@@ -135,12 +135,21 @@ export function BuildStopPanel({
   );
   // The command targets exactly what is chosen, which is why ticking
   // replaces the narrowing flags with ids rather than adding to them.
-  const filters: StopFilters = ticked.size
-    ? { taskIds: chosen.map((execution) => execution.taskId) }
-    : narrowed;
+  //
+  // The third case is the one that has to be a case rather than a
+  // fallback: ticks survive a filter change, so the dropdowns can be moved
+  // until none of the ticked rows are shown. "No ids" is then not a
+  // narrower request, it is the *broadest* one — a command with no filters
+  // stops everything the build holds. There is no command string meaning
+  // "stop nothing", so none is offered.
+  const filters: StopFilters | null = !ticked.size
+    ? narrowed
+    : chosen.length
+      ? { taskIds: chosen.map((execution) => execution.taskId) }
+      : null;
   const workers = useMemo(() => workersIn(executions), [executions]);
   const executors = useMemo(() => executorsIn(executions), [executions]);
-  const command = stopCommand(buildId, filters);
+  const command = filters === null ? null : stopCommand(buildId, filters);
 
   const toggle = useCallback((taskId: string, on: boolean) => {
     setTicked((previous) => {
@@ -152,6 +161,7 @@ export function BuildStopPanel({
   }, []);
 
   const handleCopy = useCallback(async () => {
+    if (command === null) return;
     try {
       await navigator.clipboard.writeText(command);
       setCopied(true);
@@ -321,9 +331,9 @@ export function BuildStopPanel({
           <ExecutionTable executions={shown} ticked={ticked} onToggle={toggle} />
 
           <p className="text-xs text-gray-600 dark:text-gray-400">
-            {ticked.size > 0
-              ? `The command below names the ${ticked.size} you ticked.`
-              : "Nothing ticked — the command below targets every execution listed. Tick rows to narrow it to those."}
+            {ticked.size === 0
+              ? "Nothing ticked — the command below targets every execution listed. Tick rows to narrow it to those."
+              : `The command below names the ${chosen.length} you ticked.`}
           </p>
 
           {unstoppable > 0 && (
@@ -334,32 +344,40 @@ export function BuildStopPanel({
             </p>
           )}
 
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded bg-gray-900 px-2 py-1 font-mono text-[11px] text-gray-100">
-                {command}
-              </code>
-              <button
-                type="button"
-                onClick={handleCopy}
-                className="flex-shrink-0 rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
-              >
-                {copied ? "Copied" : "Copy"}
-              </button>
-            </div>
-            <p className="text-xs text-gray-600 dark:text-gray-400">
-              It stops these calls first and cancels the build afterwards, in that
-              order. Add <code>--dry-run</code> to see its own list before anything
-              happens.
-              {excluded > 0 && (
-                <>
-                  {" "}
-                  The {excluded} execution{excluded === 1 ? "" : "s"} it does not name
-                  will keep running once the build is cancelled.
-                </>
-              )}
+          {command === null ? (
+            <p role="status" className="text-xs text-amber-800 dark:text-amber-300">
+              None of the rows you ticked match these filters, so there is nothing to
+              stop. Clear the ticks or widen the filters — no command is offered,
+              because one with no targets would stop everything.
             </p>
-          </div>
+          ) : (
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded bg-gray-900 px-2 py-1 font-mono text-[11px] text-gray-100">
+                  {command}
+                </code>
+                <button
+                  type="button"
+                  onClick={handleCopy}
+                  className="flex-shrink-0 rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
+                >
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+              <p className="text-xs text-gray-600 dark:text-gray-400">
+                It stops these calls first and cancels the build afterwards, in that
+                order. Add <code>--dry-run</code> to see its own list before anything
+                happens.
+                {excluded > 0 && (
+                  <>
+                    {" "}
+                    The {excluded} execution{excluded === 1 ? "" : "s"} it does not name
+                    will keep running once the build is cancelled.
+                  </>
+                )}
+              </p>
+            </div>
+          )}
 
           {truncated && (
             <p className="text-xs text-amber-800 dark:text-amber-300">

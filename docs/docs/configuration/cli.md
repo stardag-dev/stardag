@@ -354,8 +354,9 @@ abandoned by a process that died.
     stardag builds show <build-id>
     stardag builds frontier <build-id>
     stardag builds ticks <build-id> [--limit N]
-    stardag builds stop <build-id> [--worker NAME] [--namespace PREFIX]
-        [--older-than 30m] [--task-id ID ...] [--dry-run] [--yes]
+    stardag builds stop <build-id> [--worker NAME] [--executor modal]
+        [--namespace PREFIX] [--older-than 30m] [--task-id ID ...]
+        [--dry-run] [--yes] [--json]
     stardag builds cancel <build-id> [--yes]
     stardag builds cleanup [--older-than 24h] [--build-id ID ...] [--apply] [--yes]
 
@@ -371,7 +372,9 @@ abandoned by a process that died.
     uv run stardag builds show <build-id>
     uv run stardag builds frontier <build-id>
     uv run stardag builds ticks <build-id> [--limit N]
-    uv run stardag builds stop <build-id> [--worker NAME] [--dry-run] [--yes]
+    uv run stardag builds stop <build-id> [--worker NAME] [--executor modal]
+        [--namespace PREFIX] [--older-than 30m] [--task-id ID ...]
+        [--dry-run] [--yes] [--json]
     uv run stardag builds cancel <build-id> [--yes]
     uv run stardag builds cleanup [--older-than 24h] [--apply] [--yes]
 
@@ -435,8 +438,8 @@ rows from a page chosen wrong and under-report exactly the oldest builds.
 ### JSON output
 
 The read-only commands — `builds list`, `builds show`, `builds frontier`,
-`builds ticks`, `builds cleanup` (whose default dry run writes nothing) and
-`tasks list` — take `--json`. In that mode **stdout carries exactly one JSON
+`builds ticks`, `builds cleanup` (whose default dry run writes nothing),
+`builds stop` and `tasks list` — take `--json`. In that mode **stdout carries exactly one JSON
 document and nothing else**; every hint, warning and prompt goes to stderr, so
 piping is safe:
 
@@ -448,6 +451,11 @@ The document is the SDK's model of the API payload: the same field names and
 nesting as the REST response, minus any field this SDK version does not model.
 `builds cleanup --json --apply` requires `--yes`, since it cannot prompt
 without contaminating the output.
+
+`builds stop --json` emits its selection — `selected` and
+`excluded_by_filter` — and then acts. Without `--dry-run` it likewise requires
+`--yes`, and the refusal comes **before** anything reaches stdout, so a run
+that stopped nothing never leaves a successful-looking document behind.
 
 ### Reading the frontier
 
