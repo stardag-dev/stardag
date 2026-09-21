@@ -150,6 +150,34 @@ What `builds stop` gives you beyond the ordering:
   new **Stop running tasks** panel — the same list, the same filters, the
   command to copy — links each call straight to it.
 
+### A retried claim is no longer mistaken for a second attempt
+
+Both engines claim a task **before** spawning it — the claim and any
+concurrency-limit slots are acquired in one transaction, so a denied task
+never occupies a worker — which means there is no executor reference at
+claim time and never was. Without one, a retried claiming start and a
+genuine second attempt of the same build looked identical.
+
+The registry client retries a POST whose response was lost, so that
+happened: the repeat was refused by the state its own first attempt
+created. A refusal means somebody else holds the task, which is a correct
+reason for a worker to stand down — so it did, while itself holding the
+claim, and the task then sat claimed and not running until the claim
+expired.
+
+`task_start_claim_aio` now takes an optional `execution_id`. Mint one
+before claiming and re-send the same value if the request is retried;
+the registry grants the repeat and denies a different id from the same
+build, as it always denied a second attempt. **Nothing is required of
+you** — it is optional, the reactive tick does it for you, and sending
+none behaves exactly as before. It needs a registry at `server-v0.5.0`
+or newer to have any effect; against an older one it is ignored, which
+is simply the previous behaviour.
+
+Only the claim carries an identity in this release. Forwarding it into
+the worker, so a container can name its own execution when it reports,
+arrives with cooperative cancellation.
+
 ### Breaking: `TickConfig` and `TickSummary` are keyword-only
 
 Both reactive-scheduler dataclasses are now `@dataclass(kw_only=True)`, so

@@ -46,6 +46,7 @@ class CountingLimitRegistry(NoOpRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        execution_id=None,
         *,
         claim=True,
     ) -> StartClaimResult:

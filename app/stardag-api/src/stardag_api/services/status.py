@@ -141,6 +141,26 @@ def starts_new_attempt(event_type: str | None, prev_event_type: str | None) -> b
     )
 
 
+def _as_uuid(value: object) -> UUID | None:
+    """Coerce a JSON-carried claim identity to a UUID, or None.
+
+    Event metadata is JSON, so the id arrives as a string however the
+    route parsed it. A value that is not a UUID is treated as absent
+    rather than raised on: this runs inside the transition that is
+    already writing the event, and a malformed id is a client bug that
+    must not cost the task its start. The route validates the
+    parameter, so the only way here is a hand-written row.
+    """
+    if value is None:
+        return None
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 def _reports_on_the_current_execution(task: Task, event: Event) -> bool:
     """Whether a worker's end-of-execution report still applies.
 
@@ -658,6 +678,20 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_executor = metadata.get("executor")
         task.latest_executor_ref = metadata.get("executor_ref")
         task.latest_executor_metadata = metadata.get("executor_metadata")
+        # The claim's identity -- set when the start names one, and
+        # otherwise **left alone**. Deliberately not the set-or-clear of
+        # the three fields above.
+        #
+        # Silence is not a statement, and here it is load-bearing: the
+        # tick records a second, ref-bearing start as soon as the spawn
+        # returns, and that start names no identity. Clearing on it
+        # would drop the id moments after the claim recorded it, so a
+        # retried claim arriving even slightly late would be read as a
+        # second attempt and refused -- which is the failure this column
+        # exists to close. TASK_RETRIED below is the reset.
+        recorded_execution = _as_uuid(metadata.get("execution_id"))
+        if recorded_execution is not None:
+            task.latest_execution_id = recorded_execution
         # Grant (or re-grant) the claim's expiry alongside the executor
         # fields, from the same event. Doing both here is what makes a
         # re-claim of an expired claim coherent: the new holder's ref, its
@@ -687,6 +721,10 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
             task.latest_executor = None
             task.latest_executor_ref = None
             task.latest_executor_metadata = None
+            # And the claim's identity with them. A retry re-runs from
+            # scratch, so the next attempt is a new claim and must not
+            # be granted as a repeat of the one that failed.
+            task.latest_execution_id = None
     elif et == EventType.TASK_RESUMED:
         task.latest_status = TaskStatus.RUNNING
         task.latest_status_at = event.created_at

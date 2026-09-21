@@ -134,6 +134,50 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   collide; a legacy `hash_exclude=True` field does not count, since it is
   still passable at init.
 
+- **A claim can say which attempt it is.** Both engines claim a task
+  _before_ spawning it — the claim and any concurrency-limit slots are
+  acquired in one transaction, so a denied task never occupies a worker
+  — which means there is no executor reference at claim time and never
+  was. Without one, a retried claiming start could not be told from a
+  genuine second attempt of the same build.
+
+  That mattered because the registry client retries a POST whose
+  response was lost. The repeat was refused by the state its own first
+  attempt created, and a refusal is a correct reason for a worker to
+  stand down — so it did, while itself holding the claim, and the task
+  then sat claimed and not running until the claim expired.
+
+  `task_start_claim_aio` takes an optional `execution_id`: mint one
+  before claiming and re-send the same value if the request is retried.
+  The reactive tick does this for you. Sending none is fully supported
+  and behaves exactly as before.
+
+### Registry API
+
+- **`tasks.latest_execution_id`**: the identity of the claim a task is
+  held under, as minted by the caller. One nullable column, no index,
+  no backfill.
+
+  A claiming start repeating the id the task already holds is the same
+  attempt asking again and is granted; a different id from the same
+  build while the claim is live is denied, as any second attempt is.
+  With no id sent, the `(executor, executor_ref)` pair decides and a
+  request naming neither is denied — unchanged.
+
+  The identity is set by a start that names one and **left alone** by
+  one that does not. That is deliberate rather than tidy: the tick
+  records a second, ref-bearing start as soon as the spawn returns and
+  that start names no identity, so clearing on it would drop the id
+  moments after the claim recorded it and a slightly late retry would
+  be refused — the failure this closes. `TASK_RETRIED` is the reset.
+
+  Absence is never a mismatch, so both directions of a rolling deploy
+  are safe and no `minimum_version` bump is needed. `execution_id` is
+  echoed on every task-event response and named on an
+  `already_running` denial. See `docs/design/executions-as-records.md`,
+  which also records the `executions` table this replaces, why it is
+  not being built, and which half of the identity is still to come.
+
 ### UI
 
 - **A "Stop running tasks" panel on the build page**, showing the same
