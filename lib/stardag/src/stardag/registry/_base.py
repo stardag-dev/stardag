@@ -27,6 +27,9 @@ class FrontierTaskRef(StardagBaseModel):
     # Executor-descriptive metadata recorded with the latest start (e.g.
     # Modal app/workspace/environment). None on servers predating the field.
     latest_executor_metadata: dict[str, Any] | None = None
+    # The execution the task is currently running under, as minted by
+    # whoever claimed it. None from a registry predating it.
+    latest_execution_id: UUID | None = None
     # When the current status was recorded (None on servers predating the
     # field).
     latest_status_at: datetime | None = None
@@ -594,6 +597,9 @@ class TaskSummary(StardagBaseModel):
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict[str, Any] | None = None
+    # The execution the task is currently running under, as minted by
+    # whoever claimed it. None from a registry predating it.
+    latest_execution_id: UUID | None = None
 
 
 class TaskListPage(StardagBaseModel):

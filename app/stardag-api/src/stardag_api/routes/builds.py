@@ -787,6 +787,16 @@ async def _create_task_event(
                     "error_code": "task_already_running",
                     "executor": db_task.latest_executor,
                     "executor_ref": db_task.latest_executor_ref,
+                    # Which execution won. The loser can log it, and a
+                    # caller that sent its own id can tell "somebody else
+                    # holds this" from "my retry was not recognised" --
+                    # the two used to be one answer, and the second is a
+                    # bug in this endpoint rather than a race.
+                    "execution_id": (
+                        str(db_task.latest_execution_id)
+                        if db_task.latest_execution_id
+                        else None
+                    ),
                     "latest_status_at": (
                         db_task.latest_status_at.isoformat()
                         if db_task.latest_status_at
@@ -2814,6 +2824,7 @@ async def get_build_frontier(
             latest_executor=t.latest_executor,
             latest_executor_ref=t.latest_executor_ref,
             latest_executor_metadata=t.latest_executor_metadata,
+            latest_execution_id=t.latest_execution_id,
             # Schedulers bound staleness with this (e.g. "RUNNING for too
             # long with no executor ref"); omitting it silently disabled
             # those guards, since the field defaults to None.
@@ -3828,6 +3839,7 @@ async def register_task(
         latest_executor=db_task.latest_executor,
         latest_executor_ref=db_task.latest_executor_ref,
         latest_executor_metadata=db_task.latest_executor_metadata,
+        latest_execution_id=db_task.latest_execution_id,
         latest_status=db_task.latest_status,
         latest_status_at=db_task.latest_status_at,
         latest_status_build_id=db_task.latest_status_build_id,
@@ -4272,6 +4284,7 @@ async def register_tasks_bulk(
                 latest_executor=db_task.latest_executor,
                 latest_executor_ref=db_task.latest_executor_ref,
                 latest_executor_metadata=db_task.latest_executor_metadata,
+                latest_execution_id=db_task.latest_execution_id,
                 latest_status=db_task.latest_status,
                 latest_status_at=db_task.latest_status_at,
                 latest_status_build_id=db_task.latest_status_build_id,
@@ -5139,6 +5152,7 @@ async def list_tasks_in_build(
                 latest_executor=task.latest_executor,
                 latest_executor_ref=task.latest_executor_ref,
                 latest_executor_metadata=task.latest_executor_metadata,
+                latest_execution_id=task.latest_execution_id,
                 status=status,
                 started_at=started_at,
                 completed_at=completed_at,

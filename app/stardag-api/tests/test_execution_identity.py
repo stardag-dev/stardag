@@ -157,7 +157,12 @@ async def test_a_second_attempt_of_the_same_build_is_still_refused(
     )
 
     assert again.status_code == 409, again.text
-    assert again.json()["detail"]["error_code"] == "task_already_running"
+    detail = again.json()["detail"]
+    assert detail["error_code"] == "task_already_running"
+    # The denial names the execution that holds the claim. Without it a
+    # caller cannot tell "somebody else is running this" from "my own
+    # retry was not recognised", and only the second is a bug.
+    assert detail["execution_id"] is not None
 
 
 async def test_a_second_attempt_after_a_failed_spawn_is_still_refused(

@@ -321,6 +321,11 @@ class TaskResponse(BaseModel):
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict | None = None
+    # The execution the task is currently running under. Alongside the
+    # reference rather than instead of it: the reference addresses a
+    # container at a backend, this names the execution across the whole
+    # of its life, including the window before the spawn returned one.
+    latest_execution_id: UUID | None = None
     # Denormalised *global* status of the task — the environment-wide state,
     # not "the state within some build". A task row is unique per
     # (environment_id, task_id), so a task left RUNNING by any build denies
@@ -392,6 +397,11 @@ class FrontierTaskRef(BaseModel):
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict | None = None
+    # The execution the task is currently running under. Alongside the
+    # reference rather than instead of it: the reference addresses a
+    # container at a backend, this names the execution across the whole
+    # of its life, including the window before the spawn returned one.
+    latest_execution_id: UUID | None = None
     # When the current status was recorded — lets schedulers apply
     # staleness bounds (e.g. fail a long-RUNNING task with no executor
     # ref, which would otherwise hold concurrency-limit slots forever).
@@ -682,6 +692,11 @@ class ConcurrencyLimitHolder(BaseModel):
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict | None = None
+    # The execution the task is currently running under. Alongside the
+    # reference rather than instead of it: the reference addresses a
+    # container at a backend, this names the execution across the whole
+    # of its life, including the window before the spawn returned one.
+    latest_execution_id: UUID | None = None
 
 
 class ConcurrencyLimitHoldersResponse(BaseModel):
@@ -1264,6 +1279,11 @@ class TaskSearchResult(BaseModel):
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict | None = None
+    # The execution the task is currently running under. Alongside the
+    # reference rather than instead of it: the reference addresses a
+    # container at a backend, this names the execution across the whole
+    # of its life, including the window before the spawn returned one.
+    latest_execution_id: UUID | None = None
 
 
 class TaskSearchResponse(BaseModel):

@@ -275,6 +275,7 @@ async def list_concurrency_limit_holders(
                 latest_executor=t.latest_executor,
                 latest_executor_ref=t.latest_executor_ref,
                 latest_executor_metadata=t.latest_executor_metadata,
+                latest_execution_id=t.latest_execution_id,
             )
             for t in holders
         ],

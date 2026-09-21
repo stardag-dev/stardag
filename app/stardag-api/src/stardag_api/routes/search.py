@@ -776,6 +776,7 @@ async def search_tasks(
                 latest_executor=task.latest_executor,
                 latest_executor_ref=task.latest_executor_ref,
                 latest_executor_metadata=task.latest_executor_metadata,
+                latest_execution_id=task.latest_execution_id,
             )
         )
 
