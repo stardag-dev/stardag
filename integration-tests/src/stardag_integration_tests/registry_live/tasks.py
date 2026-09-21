@@ -304,3 +304,87 @@ class ConfiguredFanOut(sd.Task[list[int]]):
         # or two builds with different configs would disagree on the output
         # behind one task id.
         self._save(sorted({len(kid.load()) for kid in kids}))
+
+
+@sd.task(name="SlowOnWorker")
+def slow_on_worker(
+    values: sd.Depends[list[int]], seconds: int, worker: str = "default"
+) -> list[int]:
+    """``Slow``, but routed to a named worker by the app's selector.
+
+    A separate task rather than a ``worker`` field on ``Slow``, and that is
+    the point of it: a task id is derived from its parameters, so adding a
+    field to ``Slow`` would move the ids of every task in every other
+    scenario. This one is new, so it moves nothing.
+
+    Read by ``selectors.registry_live_worker``, which routes it to that
+    Modal function. What the stop scenario needs from that is the
+    *execution metadata*: the function name is what the registry records
+    alongside the call ref, and therefore what ``stardag builds stop
+    --worker`` selects on.
+
+    ``seconds`` has to outlive the stop -- the tasks that are not stopped
+    must still be running when the command releases the claims, so that
+    "they finish afterwards" is a thing that can be observed rather than a
+    race the scenario happened to win.
+    """
+    import time
+
+    del worker  # read off the task by the app's worker selector
+    time.sleep(seconds)
+    return values
+
+
+class WorkerFanIn(sd.Task[int]):
+    """A root over several ``SlowOnWorker`` upstreams, split across workers.
+
+    The shape ``stardag builds stop --worker`` needs and nothing else here
+    produces: one build holding several live executions at once, on more
+    than one Modal function, all started within a few seconds of each
+    other.
+
+    ``stopped_seconds`` is deliberately the *shorter* sleep, and that is
+    the whole evidence the scenario rests on. Both groups start together,
+    so if a stopped container had survived its cancellation it would reach
+    completion *before* the untouched ones do — and COMPLETED is sticky.
+    Waiting for the untouched group and then finding the stopped group
+    still not completed is therefore proof the container is gone, rather
+    than a race the scenario happened to win.
+
+    ``salt`` reaches the leaf and through it every task id here -- see the
+    note on ``get_range``.
+    """
+
+    salt: str
+    stopped_worker: str = "alt"
+    stopped_seconds: int = 60
+    kept_seconds: int = 150
+    per_worker: int = 2
+
+    def requires(self):
+        return self.stopped_tasks() + self.kept_tasks()
+
+    def stopped_tasks(self) -> list:
+        """The upstreams the scenario will stop. Nameable before they run."""
+        leaf = get_range(limit=2, salt=self.salt)
+        return [
+            slow_on_worker(
+                values=leaf,
+                seconds=self.stopped_seconds + index,
+                worker=self.stopped_worker,
+            )
+            for index in range(self.per_worker)
+        ]
+
+    def kept_tasks(self) -> list:
+        """The upstreams that must run on undisturbed and finish."""
+        leaf = get_range(limit=2, salt=self.salt)
+        return [
+            slow_on_worker(
+                values=leaf, seconds=self.kept_seconds + index, worker="default"
+            )
+            for index in range(self.per_worker)
+        ]
+
+    def run(self):
+        self._save(sum(len(upstream.load()) for upstream in self.requires()))

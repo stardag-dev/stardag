@@ -110,7 +110,10 @@ export interface Build {
 }
 
 // Response of POST /builds/{id}/cancel — a superset of Build. The cascade
-// fields are empty/zero unless the call passed cascade=true.
+// fields are always empty/zero from this client: it never passes
+// `cascade`, because stopping a build's containers has to happen before
+// its claims are released, and only the operator's own credentials can do
+// that. Kept on the type because the server still reports them.
 export interface BuildCancelResult extends Build {
   cascaded_task_ids: string[];
   cascaded_task_count: number;

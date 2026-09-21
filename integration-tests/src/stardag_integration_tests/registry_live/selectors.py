@@ -35,3 +35,22 @@ def registry_live_limit_keys(task: sd.BaseTask) -> list[str]:
     """
     key = getattr(task, "limit_key", "")
     return [key] if key else []
+
+
+# The app's second worker, beside "default". Named here for the same reason
+# as the limit key: the scenario that routes onto it and the app that
+# declares it must not drift.
+ALT_WORKER = "alt"
+
+
+def registry_live_worker(task: sd.BaseTask) -> str:
+    """The worker a task asked for, or the default.
+
+    Opt-in by field rather than by task name, and for the same reason the
+    limit key is: the scenarios share one environment and one deployed app,
+    so anything applied by class would change where every other scenario's
+    tasks run. A task that declares no ``worker`` keeps landing on
+    "default", which is every task that existed before this.
+    """
+    worker = getattr(task, "worker", "")
+    return worker if worker else "default"

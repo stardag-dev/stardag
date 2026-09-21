@@ -354,7 +354,9 @@ abandoned by a process that died.
     stardag builds show <build-id>
     stardag builds frontier <build-id>
     stardag builds ticks <build-id> [--limit N]
-    stardag builds cancel <build-id> [--cascade] [--yes]
+    stardag builds stop <build-id> [--worker NAME] [--namespace PREFIX]
+        [--older-than 30m] [--task-id ID ...] [--dry-run] [--yes]
+    stardag builds cancel <build-id> [--yes]
     stardag builds cleanup [--older-than 24h] [--build-id ID ...] [--apply] [--yes]
 
     stardag tasks list [--status running] [--older-than 1h]
@@ -369,7 +371,8 @@ abandoned by a process that died.
     uv run stardag builds show <build-id>
     uv run stardag builds frontier <build-id>
     uv run stardag builds ticks <build-id> [--limit N]
-    uv run stardag builds cancel <build-id> [--cascade] [--yes]
+    uv run stardag builds stop <build-id> [--worker NAME] [--dry-run] [--yes]
+    uv run stardag builds cancel <build-id> [--yes]
     uv run stardag builds cleanup [--older-than 24h] [--apply] [--yes]
 
     uv run stardag tasks list [--status running] [--older-than 1h]
@@ -389,8 +392,11 @@ profile / environment other than the active one.
 - `builds ticks` — the scheduler's own account of its recent ticks, crashed
   ones included. Reactive builds are driven by many short-lived ticks, each in
   its own container; this is where their reasoning is kept.
-- `builds cancel` — cancel one build. `--cascade` also cancels its
-  RUNNING/SUSPENDED tasks, releasing their execution claims.
+- `builds stop` — end a build that is still running something: stop its live
+  executions, then cancel it (see
+  [Stopping a build that is still running](#stopping-a-build-that-is-still-running)).
+- `builds cancel` — cancel one build and nothing else. No claim is released
+  and nothing is stopped; for a build you believe is already dead.
 - `builds cleanup` — find and cancel abandoned builds (see
   [Cleaning up abandoned builds](#cleaning-up-abandoned-builds)).
 - `tasks list` — tasks by their environment-global status. `--status running`
@@ -542,8 +548,10 @@ Notes on step 5/6:
 - **Idleness is measured on activity**, not on the column the list is ordered
   by — task events deliberately do not touch that column, so filtering on it
   would call a build that has been running tasks for three days "idle".
-- **Cascade is on by default** for `cleanup` (and off by default for a single
-  `builds cancel`): releasing leaked claims is the point of a cleanup pass.
+- **Cascade is on by default** for `cleanup`: releasing leaked claims is the
+  point of a cleanup pass, and these builds are dead by selection — nothing is
+  running to be stopped first. (A single live build is the opposite case, and
+  is what `builds stop` is for.)
 - **Reactive builds are excluded** unless you pass `--include-reactive` or
   `--reactive-app NAME`. A reactive build is quiet between ticks by design, and
   already has a watchdog for the case where it wedges.
@@ -555,7 +563,77 @@ Notes on step 5/6:
 `stardag builds cleanup` cannot stop anything that is still executing: like
 every other status write it rewrites the registry's view, and a worker whose
 task is cancelled keeps running until it notices (a completion that lands
-afterwards wins). Clean up builds you believe are dead.
+afterwards wins). Clean up builds you believe are dead; for one that is still
+working, see below.
+
+### Stopping a build that is still running
+
+**Stop first, cancel second.** That order is the entire point of
+`stardag builds stop`, and doing it the other way round is the mistake the
+command exists to prevent.
+
+Cancelling a build releases the execution claims its tasks hold. That is what
+lets the next build take those tasks over — and it can do so within seconds,
+long before anything has stopped the containers the cancelled build started.
+From that instant the task row names _somebody else's_ execution, so every
+query about the present gives the wrong answer: acting on it either misses the
+container you meant to stop or kills one you do not own.
+
+While the claims are still held, none of that is possible. The task row names
+this build, this build's executor and this build's call id, and that is all the
+command needs:
+
+```sh
+# 1. What is this build actually running? Nothing is stopped or cancelled.
+stardag builds stop <build-id> --dry-run
+
+# 2. Stop those calls, then cancel the build (in that order).
+stardag builds stop <build-id>
+```
+
+It prints one row per execution — task id, `namespace.Name`, executor, call
+ref, worker and how long it has been running — then asks for confirmation,
+cancels each Modal call, reports each one, and only then cancels the build.
+
+**Filters** narrow what gets stopped. They compose, and the command it runs is
+exactly what the list showed:
+
+```sh
+stardag builds stop <build-id> --worker gpu          # one worker's calls
+stardag builds stop <build-id> --namespace acme      # a namespace prefix
+stardag builds stop <build-id> --older-than 2h       # long-running ones
+stardag builds stop <build-id> --task-id <id> --task-id <id>
+```
+
+Anything a filter excludes **keeps running** once the build is cancelled — it
+simply no longer holds a claim, so its result still lands if it finishes
+(`COMPLETED` is sticky). That is usually what you want when you are stopping
+one runaway worker; it is not what you want if you meant to stop everything.
+The confirmation prompt says how many are being left.
+
+Things worth knowing:
+
+- **Only Modal executions can be stopped from here.** Anything else is listed —
+  so nothing is invisible — and marked "not stoppable here". Stardag reaches
+  Modal and nothing else, and the registry reaches no backend at all.
+- **The Modal profile matters.** The call ids are resolved with whatever
+  credentials the active Modal profile provides, so a call started in another
+  workspace is simply not found. The command prints the workspaces the listed
+  executions were started in; check yours matches.
+- **Hard kills are the Modal dashboard's job.** A cancelled function call that
+  ignores the cancellation, or a container that has stopped responding, is
+  outside what stardag can reach. Each call in the registry UI's
+  **Stop running tasks** panel links straight to its Modal dashboard page.
+- **The registry UI shows the same list** on the build page, with the same
+  filters and the exact command to copy. It never stops anything itself: the
+  server cannot reach Modal, and deliberately never will.
+- `--dry-run` writes nothing at all — not the stop, not the cancel.
+- An execution that ends between the list and the stop is not an error. The
+  cancel is idempotent, and an already-finished call reports as stopped.
+
+For a build you believe is **already dead** — an orchestrator that crashed, a
+CI job that was killed — there is nothing to stop, and `stardag builds cancel`
+(or `builds cleanup`, for a batch) is the command.
 
 ## Concurrency Limit Commands
 

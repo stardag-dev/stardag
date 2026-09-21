@@ -15,7 +15,6 @@ from typer.testing import CliRunner
 from stardag._cli.builds import app
 from stardag.exceptions import APIError, NotFoundError, SDKVersionUnsupportedError
 from stardag.registry import (
-    BuildCancelResult,
     BuildFrontier,
     BuildListPage,
     BuildSummary,
@@ -396,35 +395,9 @@ class TestTicks:
 
 
 class TestCancel:
-    def test_cascade_reports_released_claims(self):
-        registry = _mock_registry(
-            build_cancel=BuildCancelResult.model_validate(
-                {
-                    "id": BUILD_ID,
-                    "name": "spring-otter-42",
-                    "cascaded_task_ids": ["task-a", "task-b"],
-                    "cascaded_task_count": 2,
-                }
-            )
-        )
-        with _patch_resolve(registry):
-            result = runner.invoke(app, ["cancel", BUILD_ID, "--cascade", "--yes"])
-        assert result.exit_code == 0, result.output
-        assert "Released 2 task claim(s)" in result.output
-        assert "task-a" in result.output
-        registry.build_cancel.assert_called_once()
-        assert registry.build_cancel.call_args.kwargs == {"cascade": True}
-
-    def test_cascade_with_nothing_to_release_says_so(self):
-        registry = _mock_registry(
-            build_cancel=BuildCancelResult.model_validate(
-                {"id": BUILD_ID, "name": "spring-otter-42"}
-            )
-        )
-        with _patch_resolve(registry):
-            result = runner.invoke(app, ["cancel", BUILD_ID, "--cascade", "-y"])
-        assert result.exit_code == 0, result.output
-        assert "No task claims to release" in result.output
+    """Plain cancel only. The cascade, and its replacement, live in
+    ``test_stop.py`` — which is also where the ordering they differ on is
+    asserted."""
 
     def test_aborts_without_confirm(self):
         registry = _mock_registry()
@@ -432,13 +405,6 @@ class TestCancel:
             result = runner.invoke(app, ["cancel", BUILD_ID], input="n\n")
         assert result.exit_code != 0
         registry.build_cancel.assert_not_called()
-
-    def test_no_cascade_by_default(self):
-        registry = _mock_registry(build_cancel=None)
-        with _patch_resolve(registry):
-            result = runner.invoke(app, ["cancel", BUILD_ID, "--yes"])
-        assert result.exit_code == 0, result.output
-        assert registry.build_cancel.call_args.kwargs == {"cascade": False}
 
 
 def _bulk_result(*, dry_run: bool, **overrides) -> BulkCancelResult:
@@ -649,7 +615,7 @@ class TestRegistryTooOld:
         assert "bulk-cancel endpoint is missing" in result.output
         # A one-at-a-time workaround exists, so say so rather than leaving
         # the user with only "upgrade".
-        assert "stardag builds cancel" in result.output
+        assert "stardag builds stop" in result.output
         registry.close.assert_called_once()
 
     def test_a_real_missing_build_still_reads_as_not_found(self):

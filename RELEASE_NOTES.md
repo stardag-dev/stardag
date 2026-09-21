@@ -97,6 +97,59 @@ written again and can be deleted at your convenience. Stardag will not
 delete them: a target root may be immutable or append-only, and the SDK has
 no business assuming otherwise.
 
+### Stopping a build: `stardag builds stop`, and the end of `--cascade`
+
+Ending a build that is still running something is now one command, and it
+does the two halves in the order that makes them safe:
+
+```sh
+stardag builds stop <build-id> --dry-run     # what it holds; nothing else
+stardag builds stop <build-id>               # stop the calls, then cancel
+```
+
+**Why the order is the whole design.** Cancelling a build releases the
+execution claims its tasks hold, which is precisely what lets the next
+build take those tasks over — within seconds, long before anything has
+stopped the containers the cancelled build started. From that instant the
+task row names _somebody else's_ execution, so acting on it either misses
+the container you meant to stop or kills one you do not own. Both have
+happened in production.
+
+While the claims are still held, none of that is reachable. The row names
+this build, its executor and its call id, and the whole selection is that
+one check — no event-log reconstruction, no ranking, no authority rules.
+
+`stardag builds cancel --cascade` did it the other way round and is
+**removed**. Passing it now exits with the replacement command line for
+the same build rather than quietly meaning something new:
+
+```
+$ stardag builds cancel <build-id> --cascade
+Error: --cascade has been removed. ...
+Use: stardag builds stop <build-id>
+```
+
+Plain `stardag builds cancel` is unchanged: a build-level event and
+nothing else, for a build you already believe is dead. `stardag builds
+cleanup` is unchanged too — it selects builds that have been idle for
+hours, where there is nothing left to stop.
+
+What `builds stop` gives you beyond the ordering:
+
+- **Filters**, all composable: `--worker`, `--executor`, `--namespace` (a
+  prefix), `--older-than`, and repeatable `--task-id`. An execution a
+  filter excludes keeps running once the build is cancelled — it just no
+  longer holds a claim, and its result still lands if it finishes. The
+  confirmation prompt says how many are being left.
+- **`--dry-run`**, which writes nothing at all, and **`--json`** for the
+  selection.
+- **Nothing hidden.** An execution on a non-Modal executor is listed and
+  marked "not stoppable here" rather than dropped. Stardag reaches Modal
+  and nothing else; the registry reaches no execution backend at all, by
+  design. A hard kill is the Modal dashboard's job, and the registry UI's
+  new **Stop running tasks** panel — the same list, the same filters, the
+  command to copy — links each call straight to it.
+
 ### Breaking: `TickConfig` and `TickSummary` are keyword-only
 
 Both reactive-scheduler dataclasses are now `@dataclass(kw_only=True)`, so

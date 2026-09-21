@@ -69,6 +69,37 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `TickSummary` counters make it legible — `executions_awaiting_report`,
   and `report_window_expired` for the windows that closed unanswered.
 
+- **`stardag builds stop`: stop a build's executions, then cancel it.** A
+  cancel releases the claims the build's tasks hold, and from that instant
+  another build may take a task over — so the task row names a successor's
+  execution while the old container is still running, and every query about
+  the present gives the wrong answer. Doing it the other way round is what
+  the new command is: it lists the executions the build holds _while the
+  claims still make that list exact_ (straight off the task row — no event
+  walk, no ranking), cancels the selected Modal calls, and cancels the
+  build last.
+
+  ```sh
+  stardag builds stop <build-id> --dry-run     # the list, and nothing else
+  stardag builds stop <build-id> --worker gpu  # stop one worker's calls
+  ```
+
+  Filters — `--worker`, `--executor`, `--namespace` (a prefix),
+  `--older-than`, repeatable `--task-id` — narrow what is stopped;
+  `--dry-run` prints and exits, and `--json` emits the selection. An
+  execution a filter excludes keeps running after the build is cancelled,
+  and the prompt says how many. Executions on a non-Modal executor are
+  listed as "not stoppable here" rather than dropped: stardag reaches
+  Modal and nothing else, and the registry reaches no backend at all. A
+  hard kill is the Modal dashboard's, which the registry UI deep-links to.
+
+- **Breaking: `stardag builds cancel --cascade` is removed.** It released
+  the build's claims and left its containers running, which is the ordering
+  above, inverted. The flag now exits with the `builds stop` command line
+  for the same build rather than silently changing meaning. Plain
+  `builds cancel` is unchanged and still records an event and nothing else
+  — the command for a build already believed dead.
+
 - **Breaking: `TickConfig` and `TickSummary` are keyword-only.** Both are
   now `@dataclass(kw_only=True)`. Their fields are grouped by meaning — the
   two budgets together, the fan-out throttles together — so a new knob is
@@ -102,6 +133,21 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   build-config field are indexed, so a class no config can name cannot
   collide; a legacy `hash_exclude=True` field does not count, since it is
   still passable at init.
+
+### UI
+
+- **A "Stop running tasks" panel on the build page**, showing the same
+  list `stardag builds stop` acts on — with the same filters, and the
+  exact command to copy, carrying whatever the filters were set to. It
+  never stops anything itself: the server cannot reach the execution
+  backend and deliberately never will, so the credentials that can stop a
+  container are the operator's. Each call links straight to its Modal
+  dashboard page for a hard kill. The panel is absent unless the build
+  holds live executions.
+
+- The build page's **"Cancel & Release Claims"** action is gone, for the
+  reason the `--cascade` flag is: it released the claims first and stopped
+  nothing. Plain **Cancel** is unchanged.
 
 ## [0.24.0] — 2026-09-20
 
