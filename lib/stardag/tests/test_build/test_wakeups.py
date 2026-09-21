@@ -30,7 +30,7 @@ from tests.test_build.reactive_fakes import (
     FAST_TICK,
     FakeReactiveRegistry,
     FakeTickExecutor,
-    InMemoryTaskStore,
+    registry_body,
     _chain,
 )
 
@@ -103,10 +103,9 @@ def _tick_setup(
             str(task.id),
             upstreams={str(d.id) for d in flatten_task_struct(task.requires())},
         )
-    store = InMemoryTaskStore(uuid4())
-    store.save_tasks(tasks)
+        registry.metadata_bodies[str(task.id)] = registry_body(task)
     registry.lease_acquired = lease_acquired
-    return registry, FakeTickExecutor(), store
+    return registry, FakeTickExecutor()
 
 
 # --- the helper itself -------------------------------------------------------
@@ -177,7 +176,7 @@ class TestTickDrainsNeighbours:
         """A pass that spawned or healed something may have flagged a
         neighbour; the tick asks right then, not minutes later at exit."""
         tasks = _chain("leaf", "root")
-        registry, executor, store = _tick_setup(tasks, auto_complete=False)
+        registry, executor = _tick_setup(tasks, auto_complete=False)
         neighbour = _candidate()
         registry.candidates = [neighbour]
         spawned, spawn = _spawner()
@@ -186,7 +185,6 @@ class TestTickDrainsNeighbours:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
 
@@ -203,7 +201,7 @@ class TestTickDrainsNeighbours:
         """The finishing build's last completion is often exactly what
         unblocked a neighbour, so terminal is not exempt from the drain."""
         (root,) = _chain("done-root")
-        registry, executor, store = _tick_setup([root])
+        registry, executor = _tick_setup([root])
         registry.statuses[str(root.id)] = "completed"
         neighbour = _candidate()
         registry.candidates = [neighbour]
@@ -213,7 +211,6 @@ class TestTickDrainsNeighbours:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
 
@@ -225,7 +222,7 @@ class TestTickDrainsNeighbours:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         (root,) = _chain("waiting-root")
-        registry, executor, store = _tick_setup([root], auto_complete=False)
+        registry, executor = _tick_setup([root], auto_complete=False)
         registry.add_task(
             str(root.id), status="running", executor="fake", executor_ref="r"
         )
@@ -237,7 +234,6 @@ class TestTickDrainsNeighbours:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
 
@@ -250,7 +246,7 @@ class TestTickDrainsNeighbours:
         """The holder drains on its own passes; a no-op tick asking too
         would only race it for the same hand-out."""
         (root,) = _chain("held-root")
-        registry, executor, store = _tick_setup([root], lease_acquired=False)
+        registry, executor = _tick_setup([root], lease_acquired=False)
         registry.candidates = [_candidate()]
         spawned, spawn = _spawner()
 
@@ -258,7 +254,6 @@ class TestTickDrainsNeighbours:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
 
@@ -272,7 +267,7 @@ class TestTickDrainsNeighbours:
         """No ``spawn_tick`` means no way to act on an answer, so the
         question is not asked — the same rule as the exit hand-off."""
         (root,) = _chain("spawnerless-root")
-        registry, executor, store = _tick_setup([root])
+        registry, executor = _tick_setup([root])
         registry.statuses[str(root.id)] = "completed"
         registry.candidates = [_candidate()]
 
@@ -280,7 +275,6 @@ class TestTickDrainsNeighbours:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -294,7 +288,7 @@ class TestTickDrainsNeighbours:
         runs first and spawns it — counted as the successor it is — and the
         hand-off must then NOT spawn a second one."""
         (root,) = _chain("drained-own-root")
-        registry, executor, store = _tick_setup([root], auto_complete=False)
+        registry, executor = _tick_setup([root], auto_complete=False)
         registry.add_task(
             str(root.id), status="running", executor="fake", executor_ref="r"
         )
@@ -314,7 +308,6 @@ class TestTickDrainsNeighbours:
             build_id,
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
 
@@ -328,7 +321,7 @@ class TestTickDrainsNeighbours:
         """The exit hand-off shares the spawner with the drain, so it has
         to name the app: the build's own, read off the frontier."""
         (root,) = _chain("handoff-root")
-        registry, executor, store = _tick_setup([root], auto_complete=False)
+        registry, executor = _tick_setup([root], auto_complete=False)
         registry.add_task(
             str(root.id), status="running", executor="fake", executor_ref="r"
         )
@@ -341,7 +334,6 @@ class TestTickDrainsNeighbours:
             build_id,
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=dataclasses.replace(FAST_TICK, spawn_tick=spawn),
         )
 

@@ -511,37 +511,43 @@ unschedulable for as long as its timeout allows. See
 **Local discovery.** `StardagApp(reactive_discovery="local")` runs the
 bootstrap in the triggering process — for an app deployed before the
 `bootstrap` function existed, or a target root reachable from your machine
-but not from Modal. It puts the task-module coverage check on your local
-app definition rather than the deployed one.
+but not from Modal. It puts the rehydration pre-flight on your local app
+definition rather than the deployed one.
 
-**Redeploying mid-build.** Task objects are persisted as pickles for the
-ticks; if a redeploy invalidates one, the tick rebuilds the task from the
-registry's stored data, which works as long as the class is importable
-(declare [`task_modules`](#declaring-your-task-modules-recommended)). Only
-if both fail is the task failed — never silently stalled.
+**Redeploying mid-build.** A tick rebuilds every task it schedules from
+the registry's stored data, so a redeploy invalidates nothing — the running
+build simply re-plans under the new code at its next pass (see
+[Evolving DAGs](evolve-dags.md)). What it needs is that the class is
+importable in the new deployment, which is what
+[`task_modules`](#declaring-your-task-modules-required-for-reactive-builds)
+declares. A task whose class the deployment cannot resolve is failed with
+that reason — never silently stalled.
 
 **Seeing what a tick decided.** `stardag builds ticks <build-id>` lists
 every tick's summary — outcome, spawns, retries, neighbours woken, a
 crashed tick's exception. `stardag builds frontier <build-id>` shows what
 a build is waiting on and which build owns it.
 
-#### Declaring your task modules (recommended)
+#### Declaring your task modules (required for reactive builds)
 
 A scheduler tick is a fresh, short-lived process. It learns _which_ tasks
 are actionable from the registry, but to spawn a worker it needs the actual
-task _object_ — and it has two ways to get one:
+task _object_ — and there is exactly one way to get one: rebuild it from
+the payload the registry already stores at registration.
 
-1. unpickle it from the build task store (needs target-root access, and is
-   only valid for the deployment that wrote it), or
-2. rebuild it from the payload the registry already stores.
+That payload is the task's **identity parameters only**, which is what
+makes it safe: nothing a rebuilt task carries came from the process that
+registered it, so its `dependencies_only` / `execution_only` fields resolve
+from the build config installed in the tick, under the code running in the
+tick. It is also why a running build can follow a redeploy (see
+[Evolving DAGs](evolve-dags.md)).
 
-The second path is the good one, but it has a catch: rebuilding a task
-resolves its class through stardag's polymorphic registry, and classes land
-in that registry **as a side effect of importing the module that defines
-them**. A pickle carries `module.QualName` and self-imports; the registry
-payload carries no module locator at all. So the tick can only rebuild
-classes whose modules its container happened to import — which, without
-help, is essentially arbitrary.
+But rebuilding a task resolves its class through stardag's polymorphic
+registry, and classes land in that registry **as a side effect of importing
+the module that defines them**. The registry payload carries no module
+locator at all. So a tick can only rebuild classes whose modules its
+container happened to import — which, without help, is essentially
+arbitrary.
 
 `task_modules` is that help:
 
@@ -553,7 +559,7 @@ app = sd_modal.StardagApp(
     watchdog_period_minutes=5,
     # Modules whose import registers the task classes this app may
     # schedule. Default: the root package of the module defining the app.
-    # Pass [] to opt out (resident builds never need this).
+    # Pass [] to opt out — which makes the app resident-only.
     task_modules=["my_pkg.tasks.*", "my_pkg.pipelines.*"],
 )
 ```
@@ -564,9 +570,16 @@ wildcard (`"my_pkg.tasks.*"`, matching `my_pkg.tasks` and everything below
 it). A `*` anywhere but the final component, or a malformed path, raises
 from `StardagApp(...)` — a typo must not degrade into a silent no-match.
 Left unset, the default is `"<root package of the module defining the
-app>.*"`; if the app lives in `__main__` or a loose script (no importable
-package), inference is impossible and stardag warns and falls back to the
-pickle path.
+app>.*"`, which is right for most apps; the inferred value is the real
+declaration, not merely an observation.
+
+**An app with no task modules is resident-only.** If the app lives in
+`__main__` or a loose script there is no importable package to infer from,
+so `StardagApp(...)` warns and opts out — and `build_trigger(reactive=True)`
+on such an app raises immediately, before a build id is minted. Resident
+builds (`build_spawn`, or `build_trigger` without `reactive=True`) are
+unaffected: a resident orchestrator holds the real task objects and never
+needs an import path back to their classes.
 
 **A redeploy is required** when you add or move task classes. The patterns
 are expanded to a concrete module list at deploy time and baked into the
@@ -582,54 +595,52 @@ by default but **warn-only** — your deploy environment may lack extras the
 image has, so a local import failure never fails the deploy. Pass
 `--no-check-task-modules` to skip the check and report names only.
 
-**What you get.** Once you declare `task_modules` explicitly, every
-discovered task whose class is covered _and_ whose payload round-trips to
-the same task id is persisted **without a pickle**. A build whose classes
-are all covered writes nothing to the target root at all. Set
-`require_pickle_free=True` to turn the fallback into a hard error that
-names every task that would have needed a pickle and why — gated in
-the `bootstrap` container, where the task store is written, and loud:
-it fails the build in the registry _and_ propagates on
-`result.function_call.get()`. Ticks of such an app also get a task store
-that refuses every write, so the flag means "no pickles" for the life of
-the build and not merely at its start: a tick that rebuilds a task from
-registry data would otherwise cache it back as a pickle, on a target root
-you asked it never to write to. The one remaining exception is a
-**dynamic dependency whose class is not covered** — registered from
-inside a worker whose task has already run, where failing the bookkeeping
-to enforce a storage preference would be the worse outcome, so it still
-gets its pickle.
+**The pre-flight refuses a build it could not drive.** Because there is no
+second way to get a task object, "can a tick rebuild this class?" is a
+precondition rather than a preference. The reactive bootstrap dry-runs the
+reconstruction over the whole discovered set — reconstructing each task
+from exactly the payload registration stored — and if any task fails, the
+build is **refused**: a `TaskModulesError` naming every offending class,
+its task id, the reason, and the `task_modules` entry that would cover it.
+It is loud on both sides: the build is failed in the registry _and_ the
+error propagates on `result.function_call.get()`.
 
-**Skipping pickles requires the explicit declaration** — the inferred
-default never elides on its own. Inference happens for every app,
-including apps written before this feature existed. If inference alone
-skipped pickles, upgrading stardag would silently start dropping pickles
-that an app deployed by an older version has no baked-in module list to
-compensate for. Requiring you to write the argument is what puts the
-redeploy requirement in front of you at the moment it matters. Inference
-still drives the coverage warning below, which only observes.
+It runs wherever discovery runs — the `bootstrap` container by default —
+over the real discovered set, against the module list **the deployment
+baked in**, so "you changed `task_modules` but didn't redeploy" is visible
+rather than silently agreeable. The trigger additionally prints a labelled,
+roots-only advisory before spawning, so the common "I never declared my
+package" case shows up in your terminal rather than only in the bootstrap's
+Modal logs; it is by construction a subset of the real check, never a
+substitute for it.
 
-Some payloads stay pickle-bound by design, and always will:
+Only **incomplete** tasks are checked. Discovery stops at complete ones and
+a tick only ever rebuilds a task it might schedule, so a completed
+dependency's class is irrelevant.
+
+**What is not reconstructable**, and so cannot appear incomplete in a
+reactive build:
 
 - **`AliasTask`**, whose `loads_type` is pickled bytes — auto-unpickling
   registry-supplied bytes inside a scheduler tick would be a remote code
-  execution vector, so rehydration refuses those payloads outright;
+  execution vector, so rehydration refuses those payloads outright. This
+  costs nothing in practice: an `AliasTask` has no `run()`, so a complete
+  one never reaches the frontier and an incomplete one is a build that
+  could not proceed either way.
 - **dynamically generated or otherwise non-importable classes**;
 - **anything whose serialization is not losslessly round-trippable** (in
   particular, nested task fields must use `sd.TaskLoads` / `sd.SubClass`
   annotations — a plain task-typed annotation validates children into the
   abstract base class).
 
-**The coverage check** warns — naming the class, the pattern to add, and
-the redeploy requirement — for any discovered class the patterns don't
-cover. It is a warning rather than an error because an uncovered class
-still works via the pickle path, exactly as before this feature existed.
-It runs wherever discovery runs, i.e. in the `bootstrap` container, over
-the real discovered set, against the module list **the deployment baked
-in**. The trigger additionally prints a labelled, roots-only advisory
-before spawning, so the common "I never declared my package" case shows
-up in your terminal rather than only in the bootstrap's Modal logs; it is
-by construction a subset of the real check, never a substitute for it.
+**Dynamic dependencies are the one case that warns instead of raising.**
+A dependency yielded from inside a worker does not exist until its parent
+runs, so the bootstrap's pre-flight structurally cannot see it. The worker
+re-runs the coverage check on what it yielded and warns, once per class per
+process. It does not raise: the parent has already run, and failing its
+bookkeeping would throw that work away and still leave the dependency
+unschedulable. A tick that reaches such a dependency fails it with the same
+reason — the warning just says so a container earlier.
 
 Two caveats worth designing around:
 
@@ -639,17 +650,10 @@ Two caveats worth designing around:
   it directly buys tick cold-start latency.
 - **Redeploy whenever you change `task_modules`**, before triggering —
   which reactive mode already requires for other reasons (see the
-  requirements above). The coverage check now reads the _deployed_ list,
-  so adding a pattern without redeploying is visible rather than silently
-  agreeable — but the elision decision is made from that same deployed
-  list, so until you redeploy nothing changes. (With
-  `reactive_discovery="local"` the check reads your local app definition
-  instead and the old stale-deploy blind spot returns: the pre-flight goes
-  quiet while the tick still can't resolve the class, with no pickle left
-  as a fallback.) Upgrading stardag alone is safe: elision only follows an
-  explicit declaration, so a newer SDK triggering against an app deployed
-  by an older one still writes pickles. Passing `task_modules=[]` restores
-  the pre-feature behaviour unconditionally.
+  requirements above). With `reactive_discovery="local"` the pre-flight
+  reads your local app definition instead of the deployed one, so a
+  stale-deploy blind spot returns: the check passes while the deployed tick
+  still cannot resolve the class, and it fails the task instead.
 
 Named concurrency limits are enforced registry-side in reactive mode —
 across builds, not just within one. Configure caps per environment
@@ -694,8 +698,8 @@ several apps deployed in one environment, each app's watchdog sweeps only
 the builds that app owns. A tick from a non-owning app can still be
 triggered — typically a wake-up from a worker still running under a
 previous owner — and it never drives the build with its own commit's code
-and selectors (or unpickles the owner's task store, which may not match
-its code). Instead it **forwards**: it spawns the owner app's tick
+and selectors, against a build planned by the owner's code. Instead it
+**forwards**: it spawns the owner app's tick
 (best-effort) and returns `outcome="foreign_app"` — so wake-ups that land
 on the wrong app are not lost (the owner-side scheduler lease collapses
 duplicate forwards). Redeploying the **same** app name is the normal

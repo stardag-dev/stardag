@@ -4,6 +4,38 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **The pickle-based build task store is retired.** A task is rebuilt from
+  the registry's identity-level `task_data` and the deployment's importable
+  code, always. A pickle carried the `dependencies_only` /
+  `execution_only` values the _writing_ code resolved, which is state no
+  rollover could refresh — the reason 0.24.0 had to refuse a rollover for
+  any deployment that might have stored one.
+
+  Consequences: `task_modules` is required for reactive builds (the
+  inferred default now counts as the declaration);
+  `build_trigger(reactive=True)` on an app with none raises before a build
+  is minted; the reactive bootstrap **refuses** a build whose incomplete
+  tasks it could not rebuild, naming each one; rollover's only remaining
+  precondition is the recorded deployment; and no reactive build needs
+  target-root write access at plan time.
+
+  API: `BuildTaskStore` removed from `stardag.build`, `run_tick_aio` no
+  longer takes `task_store`, `plan_pickle_elision` / `PickleElisionPlan`
+  renamed to `plan_rehydration` / `RehydrationPlan`, and
+  `StardagApp(require_pickle_free=...)` is a deprecated no-op. See
+  [RELEASE_NOTES.md](RELEASE_NOTES.md) for the in-flight-build upgrade
+  rule.
+
+- Fixed: the pre-flight's round-trip dry run used `model_dump(mode="json")`
+  while registration has stored the **registry-mode** dump since 0.24.0, so
+  it checked a payload the registry does not hold. Harmless while it only
+  drove a warning; not harmless now that it decides whether a build is
+  armed.
+
 ## [0.24.0] — 2026-09-20
 
 ### SDK

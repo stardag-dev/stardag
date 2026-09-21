@@ -17,7 +17,6 @@ from stardag import (
     flatten_task_struct,
 )
 from stardag.build import (
-    BuildTaskStore,
     DetachedExecutionStatus,
     DetachedHandle,
     FailMode,
@@ -34,7 +33,7 @@ from tests.test_build.reactive_fakes import (
     FAST_TICK,
     FakeReactiveRegistry,
     FakeTickExecutor,
-    InMemoryTaskStore,
+    registry_body,
     _chain,
     _setup,
 )
@@ -48,9 +47,7 @@ class TestRunningTaskResolution:
         executor = FakeTickExecutor(
             statuses={"fc-live": DetachedExecutionStatus.RUNNING}
         )
-        registry, executor, store = _setup(
-            [root], auto_complete=False, executor=executor
-        )
+        registry, executor = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id), status="running", executor="fake", executor_ref="fc-live"
         )
@@ -59,7 +56,6 @@ class TestRunningTaskResolution:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -75,7 +71,7 @@ class TestRunningTaskResolution:
         finishes."""
         (root,) = _chain("heal-root")
         root.run()  # target now exists
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id), status="running", executor="fake", executor_ref="fc-gone"
         )
@@ -84,7 +80,6 @@ class TestRunningTaskResolution:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -101,7 +96,7 @@ class TestRunningTaskResolution:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -117,7 +112,6 @@ class TestRunningTaskResolution:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -131,7 +125,7 @@ class TestRunningTaskResolution:
     ):
         """UNKNOWN probe status → conservatively leave (no duplicate spawn)."""
         (root,) = _chain("unknown-ref-root")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
@@ -143,7 +137,6 @@ class TestRunningTaskResolution:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -216,7 +209,7 @@ class TestWorkerReportWindow:
                 return DetachedExecutionStatus.FAILED
 
         executor = ReportingExecutor()
-        registry, _, store = _setup([root], auto_complete=True, executor=executor)
+        registry, _ = _setup([root], auto_complete=True, executor=executor)
         ReportingExecutor.registry = registry
         registry.add_task(
             str(root.id),
@@ -229,7 +222,6 @@ class TestWorkerReportWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=self._config(linger_seconds=1.0, grace=self.LONG_GRACE),
         )
 
@@ -260,7 +252,7 @@ class TestWorkerReportWindow:
         """
         (root,) = _chain("no-report")
         executor = FakeTickExecutor(statuses={"fc-oom": DetachedExecutionStatus.FAILED})
-        registry, _, store = _setup([root], auto_complete=True, executor=executor)
+        registry, _ = _setup([root], auto_complete=True, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -273,7 +265,6 @@ class TestWorkerReportWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=self._config(linger_seconds=1.0, grace=0.1),
         )
 
@@ -306,7 +297,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -320,7 +311,6 @@ class TestWorkerReportWindow:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=self._config(linger_seconds=5.0, grace=0.1),
             ),
             timeout=3,
@@ -347,7 +337,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -360,7 +350,6 @@ class TestWorkerReportWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=self._config(linger_seconds=0.05, grace=0.4),
         )
 
@@ -388,7 +377,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -401,7 +390,6 @@ class TestWorkerReportWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=self._config(linger_seconds=0, grace=0.1),
         )
 
@@ -424,7 +412,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-live": DetachedExecutionStatus.RUNNING}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -437,7 +425,6 @@ class TestWorkerReportWindow:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=self._config(linger_seconds=0, grace=self.LONG_GRACE),
             ),
             timeout=5,
@@ -469,7 +456,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -483,7 +470,6 @@ class TestWorkerReportWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=self._config(linger_seconds=1.0, grace=0.1),
         )
 
@@ -512,7 +498,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -527,7 +513,6 @@ class TestWorkerReportWindow:
                     uuid4(),
                     registry=registry,
                     task_executor=executor,
-                    task_store=store,
                     config=self._config(
                         linger_seconds=0.2,
                         grace=self.LONG_GRACE,
@@ -564,7 +549,7 @@ class TestWorkerReportWindow:
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
         )
-        registry, _, store = _setup([root], auto_complete=False, executor=executor)
+        registry, _ = _setup([root], auto_complete=False, executor=executor)
         registry.add_task(
             str(root.id),
             status="running",
@@ -578,7 +563,6 @@ class TestWorkerReportWindow:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=self._config(
                     linger_seconds=0.2,
                     grace=self.LONG_GRACE,
@@ -653,48 +637,25 @@ class TestReportWindowBookkeeping:
         assert not zero.due()
 
 
-class TestBuildTaskStoreRoundTrip:
-    def test_pickle_round_trip(
+class TestUnreconstructableTask:
+    async def test_a_task_with_no_registry_data_is_failed_not_stalled(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        # The store is pickle-only; the reactive marker/config live in the
-        # registry, not here.
-        build_id = uuid4()
-        store = BuildTaskStore(build_id)
-
-        task = SyncOnlyTask(name="store-roundtrip")
-        store.save_tasks([task])
-
-        loaded = store.load_task(task.id)
-        assert loaded is not None
-        assert loaded.id == task.id
-        assert isinstance(loaded, SyncOnlyTask)
-        assert loaded.name == "store-roundtrip"
-
-    def test_load_missing_task_returns_none(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        store = BuildTaskStore(uuid4())
-        assert store.load_task(uuid4()) is None
-
-
-class TestMissingTaskStoreEntry:
-    async def test_missing_pickle_fails_task_instead_of_stalling(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """A pending actionable task whose object is missing from the store
-        can never be scheduled — the tick fails it (and thereby the build)
-        rather than leaving it in the frontier forever, where endless
-        watchdog ticks would do nothing."""
-        (root,) = _chain("missing-pickle-root")
-        registry, executor, store = _setup([root], auto_complete=False)
-        store._tasks.clear()  # simulate a lost/never-written pickle
+        """A pending actionable task the tick cannot rebuild can never be
+        scheduled — the tick fails it (and thereby the build) rather than
+        leaving it in the frontier forever, where endless watchdog ticks
+        would do nothing."""
+        (root,) = _chain("unreconstructable-root")
+        registry, executor = _setup([root], auto_complete=False)
+        # No ``task_data``: the fake's stand-in for a class this process
+        # cannot resolve, which is what the bootstrap pre-flight exists to
+        # catch before a build ever reaches this state.
+        registry.metadata_bodies.clear()
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -715,14 +676,13 @@ class TestConcurrencyLimits:
         a = SyncOnlyTask(name="lim-a")
         b = SyncOnlyTask(name="lim-b")
         root = SyncOnlyTask(name="lim-root", deps=(a, b))
-        registry, executor, store = _setup([a, b, root], auto_complete=False)
+        registry, executor = _setup([a, b, root], auto_complete=False)
         registry.limits["one-slot"] = 1
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
                 poll_interval_seconds=0.01,
@@ -748,14 +708,13 @@ class TestConcurrencyLimits:
         a = SyncOnlyTask(name="rel-a")
         b = SyncOnlyTask(name="rel-b")
         root = SyncOnlyTask(name="rel-root", deps=(a, b))
-        registry, executor, store = _setup([a, b, root])
+        registry, executor = _setup([a, b, root])
         registry.limits["one-slot"] = 1
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.5,
                 poll_interval_seconds=0.01,
@@ -775,13 +734,12 @@ class TestConcurrencyLimits:
         exactly-once arbitration), but carries no limit keys — so nothing
         is enforced and no slot is held."""
         (root,) = _chain("nolim-root")
-        registry, executor, store = _setup([root])
+        registry, executor = _setup([root])
 
         await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -801,7 +759,7 @@ class TestRunningWithoutRef:
         # Default: at the default 2-attempt budget, so a lapsed claim ends
         # as a plain failure. Pass a lower count to exercise the retry.
         (root,) = _chain(f"noref-root-{expires_at}-{attempt_count}")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
@@ -813,7 +771,6 @@ class TestRunningWithoutRef:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
         return summary, executor, registry, root
@@ -886,14 +843,13 @@ class TestDerivedClaimTtl:
         from stardag.build._reactive import _CLAIM_TTL_GRACE_SECONDS
 
         (root,) = _chain("ttl-root")
-        registry, _, store = _setup([root])
+        registry, _ = _setup([root])
         executor = FakeTickExecutor(timeout_seconds=3600.0)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -908,13 +864,12 @@ class TestDerivedClaimTtl:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         (root,) = _chain("ttl-none-root")
-        registry, executor, store = _setup([root])
+        registry, executor = _setup([root])
 
         await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,  # no timeout
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -956,52 +911,81 @@ class TestDerivedClaimTtl:
         assert claim_ttl_seconds(task, _Raising()) is None
 
 
-class TestRehydrationFallback:
-    async def test_store_miss_rehydrates_from_registry(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """A task missing from the pickle store is reconstructed from the
-        registry's stored task_data and scheduled — instead of being failed."""
+async def _load_task_raises(registry, task_id: str) -> bool:
+    """True if ``_load_task`` propagated rather than returning None."""
+    from stardag.exceptions import NotFoundError
+
+    try:
+        await frontier_module._load_task(task_id, registry)
+    except NotFoundError:
+        return True
+    return False
+
+
+class TestRehydration:
+    """A tick rebuilds every task it schedules from the registry's stored
+    ``task_data``, and from nothing else."""
+
+    @staticmethod
+    def _decorator_built_dag():
+        """A DAG whose class is rehydratable but NOT picklable by reference.
+
+        ``@sd.task`` generates a class whose name differs from the module
+        attribute holding it, so ``pickle.dumps`` fails on it. That used to
+        be the shape that made the retired store's write-back audible; it
+        is kept because it is also the sharpest proof that rehydration owes
+        pickle nothing — it is a lookup in the polymorphic registry.
+        """
         import stardag as sd
 
-        @sd.task(name="RehydrateFallbackTask")
-        def fallback_task(limit: int) -> list[int]:
+        @sd.task(name="RehydrateTask")
+        def rehydrate_task(limit: int) -> list[int]:
             return list(range(limit))
 
-        root = fallback_task(limit=3)
+        return rehydrate_task(limit=3)
+
+    @staticmethod
+    def _registry_for(root):
         registry = FakeReactiveRegistry(
             root_task_ids=[str(root.id)], auto_complete=True
         )
         registry.add_task(str(root.id))
-        registry.metadata_bodies[str(root.id)] = root.model_dump(mode="json")
-        store = InMemoryTaskStore(uuid4())  # empty: no pickle for the task
+        registry.metadata_bodies[str(root.id)] = registry_body(root)
+        return registry
+
+    async def test_a_task_is_rebuilt_from_registry_data_and_scheduled(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        root = self._decorator_built_dag()
+        registry = self._registry_for(root)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=(executor := FakeTickExecutor()),
-            task_store=store,
             config=FAST_TICK,
         )
 
         assert executor.spawned == [root.id]
         assert summary.terminal_status == "completed"
         assert summary.failed_recorded == 0
-        # Healed back into the store for subsequent ticks.
-        assert store.load_task(root.id) is not None
 
-    async def test_a_pickle_of_a_covered_class_is_rebound_to_this_code(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        """A store hit for a class the deployment's task modules cover is
-        re-bound to this code's defaults — a pickle an earlier deployment
-        wrote carries the level 2/3 values *its* code resolved, and a build
-        that rolled over must not schedule from those."""
+    async def test_level_2_values_come_from_the_config_installed_here(self):
+        """The property that replaced the store's rebind-on-load rule.
+
+        ``task_data`` is the registry-mode dump — identity parameters only
+        — so a rebuilt task reads its ``dependencies_only`` /
+        ``execution_only`` fields from the build config installed in *this*
+        process, under *this* code. That is what makes a build safe to
+        re-plan under a new deployment, and it is exactly what a pickle
+        could not do: a pickle restored the values the writing code
+        resolved.
+        """
         import stardag as sd
         from stardag.base_model import StardagField
         from stardag.build_config import build_config_scope
 
-        class Covered(sd.Task[int]):
+        class Configured(sd.Task[int]):
             __namespace__ = "frontier_tests"
             key: str
             width: typing.Annotated[
@@ -1011,163 +995,131 @@ class TestRehydrationFallback:
             def run(self) -> None:
                 pass
 
-        # The pickle: written under another config, so it carries width=9.
-        with build_config_scope({"frontier_tests.Covered": {"width": 9}}):
-            stale = Covered(key="k")
-        assert stale.width == 9
-        store = InMemoryTaskStore(uuid4())
-        store.save_task(stale)
-        registry = FakeReactiveRegistry(root_task_ids=[str(stale.id)])
+        # Registered by a process that had width=9 configured.
+        with build_config_scope({"frontier_tests.Configured": {"width": 9}}):
+            registered = Configured(key="k")
+        assert registered.width == 9
+        registry = FakeReactiveRegistry(root_task_ids=[str(registered.id)])
+        registry.metadata_bodies[str(registered.id)] = registry_body(registered)
 
-        # Not covered, no config installed: left as pickled.
-        monkeypatch.setattr(frontier_module, "declared_task_module_patterns", tuple)
-        loaded = await frontier_module._load_task(str(stale.id), registry, store)
-        assert isinstance(loaded, Covered) and loaded.width == 9
-
-        # Covered: re-bound, so this code's default applies.
-        monkeypatch.setattr(
-            frontier_module,
-            "declared_task_module_patterns",
-            lambda: (Covered.__module__,),
-        )
-        loaded = await frontier_module._load_task(str(stale.id), registry, store)
-        assert isinstance(loaded, Covered)
-        assert loaded.id == stale.id
+        # Rebuilt with no config installed: this code's default applies,
+        # and the id is unchanged, because width is not identity.
+        loaded = await frontier_module._load_task(str(registered.id), registry)
+        assert isinstance(loaded, Configured)
+        assert loaded.id == registered.id
         assert loaded.width == 4
 
-    async def test_store_miss_and_no_metadata_still_fails_task(
+        # Rebuilt under a different config: that config's value applies.
+        with build_config_scope({"frontier_tests.Configured": {"width": 7}}):
+            loaded = await frontier_module._load_task(str(registered.id), registry)
+        assert isinstance(loaded, Configured) and loaded.width == 7
+
+    async def test_no_registry_data_fails_the_task(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """Without rehydratable data either, the stall-prevention failure
-        path is preserved."""
+        """Without rehydratable data the stall-prevention failure path is
+        preserved."""
         (root,) = _chain("no-rehydrate-root")
-        registry, executor, store = _setup([root], auto_complete=False)
-        store._tasks.clear()
-        # no metadata_bodies entry -> fallback raises -> task failed
+        registry, executor = _setup([root], auto_complete=False)
+        registry.metadata_bodies.clear()
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
         assert summary.failed_recorded == 1
         assert summary.terminal_status == "failed"
 
-
-class TestRehydrationOnAPickleFreeBuild:
-    """``require_pickle_free`` binds the tick too, not just the trigger.
-
-    The trigger-time gate (``PickleElisionPlan.require_pickle_free_error``)
-    only ever inspected the DAG before the build started. The tick is a
-    *writer* of the same store — a rehydrated task was written straight back
-    — so on a writable target root a build that declared it writes no
-    pickles quietly accumulated them anyway, one per task, the first time
-    each was rehydrated.
-    """
-
-    @staticmethod
-    def _decorator_built_dag():
-        """A DAG whose class is rehydratable but NOT picklable by reference.
-
-        ``@sd.task`` generates a class whose name differs from the module
-        attribute holding it, so ``pickle.dumps`` fails on it — which is what
-        made the write-back audible (a warning every tick) rather than merely
-        wrong. Registry-data rehydration is unaffected: it is a lookup in the
-        polymorphic registry, not a pickle.
-        """
-        import stardag as sd
-
-        @sd.task(name="PickleFreeRehydrateTask")
-        def pickle_free_task(limit: int) -> list[int]:
-            return list(range(limit))
-
-        return pickle_free_task(limit=3)
-
-    @staticmethod
-    def _registry_for(root):
-        registry = FakeReactiveRegistry(
-            root_task_ids=[str(root.id)], auto_complete=True
-        )
-        registry.add_task(str(root.id))
-        registry.metadata_bodies[str(root.id)] = root.model_dump(mode="json")
-        return registry
-
-    async def test_the_rehydrated_task_is_not_written_back(
+    async def test_a_transient_registry_error_is_not_a_verdict_on_the_task(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        root = self._decorator_built_dag()
-        registry = self._registry_for(root)
-        store = InMemoryTaskStore(uuid4(), pickle_free=True)
+        """A 500 must not permanently fail a task — or, via fail_mode, a build.
 
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=(executor := FakeTickExecutor()),
-            task_store=store,
-            config=FAST_TICK,
-        )
+        ``_load_task`` is the only way to get a task object now, so it sits
+        on the critical path for every actionable task, and the caller marks
+        what it reports as NON-retryable. Swallowing an outage there would
+        turn a registry blip into a dead build. It must propagate instead:
+        the tick ends as ``outcome="error"``, which is reported, diagnosable
+        and retried by the next tick.
+        """
+        from stardag.exceptions import APIError
 
-        # Rehydration still works and the task is still scheduled — the
-        # write-back was only ever a cache over an object already in hand.
-        assert executor.spawned == [root.id]
-        assert summary.terminal_status == "completed"
-        # ...and the build kept the property it declared.
-        assert store.load_task(root.id) is None
+        (root,) = _chain("transient-error-root")
+        registry, executor = _setup([root], auto_complete=False)
 
-    async def test_no_warning_is_logged(
+        async def boom(task_id):
+            raise APIError("upstream timeout", status_code=500)
+
+        registry.task_get_metadata_aio = boom  # type: ignore[method-assign]
+
+        with pytest.raises(APIError):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                config=FAST_TICK,
+            )
+
+        # The task was NOT failed, and no attempt was spent on it.
+        assert registry.statuses[str(root.id)] == "pending"
+        assert registry.build_status != "failed"
+
+    async def test_a_missing_route_404_propagates_but_a_missing_task_does_not(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The two 404s mean opposite things.
+
+        A resource 404 is a fact about this task and is deterministic; a
+        route 404 means the server has no such endpoint, which is a fact
+        about the deployment and says nothing about the task.
+        """
+        from stardag.exceptions import NotFoundError
+
+        (root,) = _chain("route-404-root")
+        registry, executor = _setup([root], auto_complete=False)
+
+        async def missing_route(task_id):
+            raise NotFoundError("Not Found", detail="Not Found")
+
+        registry.task_get_metadata_aio = missing_route  # type: ignore[method-assign]
+        assert await _load_task_raises(registry, str(root.id))
+
+        # ...whereas a resource 404 resolves to None and fails the task.
+        registry2, _ = _setup([root], auto_complete=False)
+        registry2.metadata_bodies.clear()
+        assert await frontier_module._load_task(str(root.id), registry2) is None
+
+    async def test_a_successful_rebuild_logs_nothing_above_debug(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         caplog: pytest.LogCaptureFixture,
     ):
-        """The visible half of the bug: a failed write-back warned per tick.
+        """Rehydration is the designed path, not an exception to report.
 
-        On a build of unpicklable-by-reference classes the write could not
-        succeed, so the cost was log noise — which matters most exactly where
-        this configuration is used, in CI, where it competed with real signal.
+        It happens for every task on every tick, so reporting it at INFO
+        would train readers to skim the scheduler's log lines — which
+        matters most exactly where this runs most, in CI, where it would
+        compete with real signal.
         """
         root = self._decorator_built_dag()
         registry = self._registry_for(root)
-        store = InMemoryTaskStore(uuid4(), pickle_free=True)
 
         with caplog.at_level(logging.DEBUG):
             await run_tick_aio(
                 uuid4(),
                 registry=registry,
                 task_executor=FakeTickExecutor(),
-                task_store=store,
                 config=FAST_TICK,
             )
 
         loader = "stardag.build._reactive._frontier_actions"
         records = [r for r in caplog.records if r.name == loader]
         assert [r for r in records if r.levelno >= logging.WARNING] == []
-        # Rehydration is the designed path here, not an exception to report:
-        # it happens for every task on every tick, so it is DEBUG, not INFO.
-        rehydrated = [r for r in records if "Rehydrated task" in r.getMessage()]
-        assert rehydrated and all(r.levelno == logging.DEBUG for r in rehydrated)
-
-    async def test_an_ordinary_build_still_caches_the_rehydration(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The skip is opt-in. A build that did not declare pickle-freedom
-        still heals its store, which is the whole point of the write-back:
-        there, a miss means a pickle was expected and was not there."""
-        root = self._decorator_built_dag()
-        registry = self._registry_for(root)
-        store = InMemoryTaskStore(uuid4())
-
-        await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=FakeTickExecutor(),
-            task_store=store,
-            config=FAST_TICK,
-        )
-
-        assert store.load_task(root.id) is not None
+        rebuilt = [r for r in records if "Rebuilt task" in r.getMessage()]
+        assert rebuilt and all(r.levelno == logging.DEBUG for r in rebuilt)
 
 
 class TestRehydrationDiagnostics:
@@ -1195,20 +1147,19 @@ class TestRehydrationDiagnostics:
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
     ):
         (root,) = _chain("diagnostic-root")
-        registry, executor, store = _setup([root], auto_complete=False)
-        store._tasks.clear()  # neither a pickle nor rehydratable metadata
+        registry, executor = _setup([root], auto_complete=False)
+        registry.metadata_bodies.clear()  # nothing to rebuild the task from
 
         with caplog.at_level("WARNING"):
             await run_tick_aio(
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=FAST_TICK,
             )
 
         messages = "\n".join(record.getMessage() for record in caplog.records)
-        assert "could not be rehydrated from registry data" in messages
+        assert "could not be rebuilt from its registry data" in messages
         assert "stardag_no_such_declared_task_module" in messages
         assert "likely cause" in messages
 
@@ -1219,20 +1170,19 @@ class TestRehydrationDiagnostics:
 
         _reset_import_state_for_tests()
         (root,) = _chain("diagnostic-clean-root")
-        registry, executor, store = _setup([root], auto_complete=False)
-        store._tasks.clear()
+        registry, executor = _setup([root], auto_complete=False)
+        registry.metadata_bodies.clear()
 
         with caplog.at_level("WARNING"):
             await run_tick_aio(
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=FAST_TICK,
             )
 
         messages = "\n".join(record.getMessage() for record in caplog.records)
-        assert "could not be rehydrated from registry data" in messages
+        assert "could not be rebuilt from its registry data" in messages
         assert "failed to import" not in messages
 
 
@@ -1256,13 +1206,12 @@ class TestExecutorMetadataRecording:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         (root,) = _chain("meta-root")
-        registry, _, store = _setup([root])
+        registry, _ = _setup([root])
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=self.MetadataTickExecutor(),
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -1318,8 +1267,7 @@ class TestAcquiringStartExecutorMetadata:
         )
         registry.add_task(str(root.id))
         registry.limits["gpu"] = 1
-        store = InMemoryTaskStore(uuid4())
-        store.save_tasks([root])
+        registry.metadata_bodies[str(root.id)] = registry_body(root)
         config = TickConfig(
             linger_seconds=0.3,
             poll_interval_seconds=0.01,
@@ -1330,7 +1278,6 @@ class TestAcquiringStartExecutorMetadata:
             uuid4(),
             registry=registry,
             task_executor=self.PreSpawnMetadataExecutor(),
-            task_store=store,
             config=config,
         )
 
@@ -1406,15 +1353,13 @@ class TestTickClaims:
         )
         registry.add_task(str(root.id))
         registry.claim_race_once.add(str(root.id))
-        store = InMemoryTaskStore(uuid4())
-        store.save_tasks([root])
+        registry.metadata_bodies[str(root.id)] = registry_body(root)
         executor = FakeTickExecutor()
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -1440,16 +1385,14 @@ class TestTickClaims:
                 str(task.id),
                 upstreams={str(d.id) for d in flatten_task_struct(task.requires())},
             )
+            registry.metadata_bodies[str(task.id)] = registry_body(task)
         registry.limits["one-slot"] = 1
-        store = InMemoryTaskStore(uuid4())
-        store.save_tasks([a, b, root])
         executor = FakeTickExecutor()
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.5,
                 poll_interval_seconds=0.01,
@@ -1516,14 +1459,13 @@ class TestFanOutConcurrency:
         """
         width, bound = 200, 5
         leaves, root = _wide_layer("fanout", width)
-        registry, _, store = _setup([*leaves, root], auto_complete=False)
+        registry, _ = _setup([*leaves, root], auto_complete=False)
         executor = InstrumentedTickExecutor(call_log=registry.calls)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.0,
                 poll_interval_seconds=0.01,
@@ -1548,14 +1490,13 @@ class TestFanOutConcurrency:
         exist yet)."""
         width = 40
         leaves, root = _wide_layer("order", width)
-        registry, _, store = _setup([*leaves, root], auto_complete=False)
+        registry, _ = _setup([*leaves, root], auto_complete=False)
         executor = InstrumentedTickExecutor(call_log=registry.calls)
 
         await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.0,
                 poll_interval_seconds=0.01,
@@ -1589,7 +1530,7 @@ class TestFanOutConcurrency:
         root = SyncOnlyTask(
             name="count-root", deps=tuple([*spawnable, *healed, *dead, *lost])
         )
-        registry, _, store = _setup(
+        registry, _ = _setup(
             [*spawnable, *healed, *dead, *lost, root], auto_complete=False
         )
         executor = InstrumentedTickExecutor(call_log=registry.calls)
@@ -1611,13 +1552,13 @@ class TestFanOutConcurrency:
             )
             executor.probe_statuses[f"dead-{index}"] = DetachedExecutionStatus.FAILED
         for task in lost:
-            store._tasks.pop(str(task.id), None)  # no pickle, no registry data
+            # Nothing to rebuild the object from: the tick cannot probe it.
+            registry.metadata_bodies.pop(str(task.id), None)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.0,
                 poll_interval_seconds=0.01,
@@ -1643,7 +1584,7 @@ class TestFanOutConcurrency:
         acquires and spawns, and no denied task is ever submitted."""
         width = 10
         leaves, root = _wide_layer("denied", width)
-        registry, _, store = _setup([*leaves, root], auto_complete=False)
+        registry, _ = _setup([*leaves, root], auto_complete=False)
         executor = InstrumentedTickExecutor(call_log=registry.calls)
         registry.limits["one-slot"] = 1
 
@@ -1651,7 +1592,6 @@ class TestFanOutConcurrency:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.05,
                 poll_interval_seconds=0.01,
@@ -1685,13 +1625,12 @@ class TestSpawnCap:
         A cap that "just truncated" would leave 20 of the 30 unspawned."""
         width, cap = 30, 10
         leaves, root = _wide_layer("cap", width)
-        registry, executor, store = _setup([*leaves, root], auto_complete=False)
+        registry, executor = _setup([*leaves, root], auto_complete=False)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.0,
                 poll_interval_seconds=30.0,  # never reached: no lingering
@@ -1713,13 +1652,12 @@ class TestSpawnCap:
         goes out in a single acting pass."""
         width = 30
         leaves, root = _wide_layer("uncapped", width)
-        registry, executor, store = _setup([*leaves, root], auto_complete=False)
+        registry, executor = _setup([*leaves, root], auto_complete=False)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(linger_seconds=0.0, poll_interval_seconds=30.0),
         )
 
@@ -1733,7 +1671,7 @@ class TestSpawnCap:
         truncates it, rather than only being readable in _spawn_cap."""
         width = 200
         leaves, root = _wide_layer("tick-timeout", width)
-        registry, executor, store = _setup([*leaves, root], auto_complete=False)
+        registry, executor = _setup([*leaves, root], auto_complete=False)
         # A tiny container: min cap (50) per pass, so 200 leaves take four.
         config = TickConfig(
             linger_seconds=0.0,
@@ -1752,7 +1690,6 @@ class TestSpawnCap:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=config,
         )
 
@@ -1768,14 +1705,13 @@ class TestSpawnCap:
         very different inputs, so a truncating tick is only diagnosable if
         the log says which one was read."""
         leaves, root = _wide_layer("cap-log", 3)
-        registry, executor, store = _setup([*leaves, root], auto_complete=False)
+        registry, executor = _setup([*leaves, root], auto_complete=False)
 
         with caplog.at_level(logging.INFO, logger="stardag.build._reactive"):
             await run_tick_aio(
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=TickConfig(
                     linger_seconds=0.0,
                     poll_interval_seconds=30.0,

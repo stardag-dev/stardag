@@ -103,8 +103,9 @@ def build_scenario_app(app_name: str) -> sd_modal.StardagApp:
         watchdog_period_minutes=None,
         # A tick must be able to rebuild these from registry data alone,
         # having imported only what the app declared -- see the tasks
-        # module.
+        # module. This is the app's ONLY reactive-scheduling declaration:
+        # there is no pickle store and no require_pickle_free any more, so
+        # declaring the modules is the whole contract (STA-69).
         task_modules=["stardag_integration_tests.registry_live.tasks"],
-        require_pickle_free=True,
         limit_key_selector=registry_live_limit_keys,
     )

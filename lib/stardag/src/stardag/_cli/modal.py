@@ -521,8 +521,9 @@ def _report_task_modules(
     if not task_modules:
         if not patterns:
             console.print(
-                "[dim]  task modules: none declared — reactive scheduler "
-                "ticks will rely on task-store pickles[/dim]"
+                "[yellow]  task modules: none declared — this app can only "
+                "run RESIDENT builds; build_trigger(reactive=True) will be "
+                "refused[/yellow]"
             )
         return
 

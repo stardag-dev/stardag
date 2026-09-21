@@ -23,7 +23,6 @@ from uuid import UUID
 
 
 from stardag.build import (
-    BuildTaskStore,
     FailMode,
     RollOverFailed,
     TickConfig,
@@ -254,21 +253,7 @@ class _TickDeployment:
         task_module_patterns: The patterns behind that list — declared, or
             inferred when the app declared none — published for the
             coverage checks that report against patterns rather than
-            expansions.
-        elide_pickles: Whether the deployment writes no task pickles for
-            covered classes: ``task_modules`` *declared* (inference is
-            observation-only and leaves the store in use), or
-            ``require_pickle_free``. The rollover gate reads this, not the
-            patterns, which are non-empty for an inferring app too.
-        require_pickle_free: The app's ``require_pickle_free``, which the
-            tick needs because it is a *writer* of the build task store —
-            rehydrating a task writes it back — and the flag's promise is
-            that the build writes no pickles at all. Deploy-time like the
-            module list beside it, and for the same reason: the flag
-            describes the deployment (an immutable target root, or a
-            redeploy that makes stored pickles a liability), and the
-            trigger's own copy is the caller's local app definition rather
-            than the one the ticks were built from.
+            expansions, and for a rollover's re-plan.
     """
 
     app_name: str
@@ -279,8 +264,6 @@ class _TickDeployment:
     tick_timeout_seconds: float | None
     task_modules: tuple[str, ...]
     task_module_patterns: tuple[str, ...]
-    require_pickle_free: bool
-    elide_pickles: bool = False
 
 
 async def _run_deployed_tick_aio(
@@ -317,7 +300,6 @@ async def _run_deployed_tick_aio(
     _setup_logging()
     app_name = deployment.app_name
     build_uuid = UUID(build_id)
-    task_store = BuildTaskStore(build_uuid, pickle_free=deployment.require_pickle_free)
     registry = registry_provider.get()
     # The reactive marker/owner/config live in the registry (not on
     # the target root): read them with the lighter GET /builds/{id}
@@ -350,8 +332,8 @@ async def _run_deployed_tick_aio(
     # every app's watchdog sweeps ALL running reactive builds — but
     # only the app recorded at trigger time may drive a build.
     # A foreign app's tick would schedule with ITS commit (its
-    # workers, its selectors) and unpickle the owning app's task
-    # store (pickle skew across commits), so it must not run the
+    # workers, its selectors) and its own task modules, against a
+    # build planned by the owner's code, so it must not run the
     # tick loop itself. Instead it FORWARDS: best-effort spawn of
     # the owner's tick, so wake-ups that land on the wrong app
     # (e.g. a still-running worker of the previous owner after a
@@ -359,7 +341,7 @@ async def _run_deployed_tick_aio(
     # doubles as cross-app coverage. The owner-side single-flight
     # lease collapses duplicate forwards. Explicit takeover =
     # re-trigger from the new app (updates reactive_app_name and
-    # re-persists the task objects under the new code).
+    # re-plans the build under the new code).
     owner_app = reactive_app_name
     if owner_app != app_name:
         forwarded = False
@@ -438,11 +420,10 @@ async def _run_deployed_tick_aio(
     # tick reconstructs anything: rehydrating a task from registry
     # data is a dict lookup in the polymorphic registry, which is
     # populated only as a side effect of importing the defining
-    # modules (unlike pickle, which self-imports). The list was
-    # expanded and frozen at deploy time; the import is cached per
-    # module list, so a container serving many ticks pays it once.
-    # Failures warn rather than abort — and are retained, so a
-    # later "could not rehydrate" error can name them.
+    # modules. The list was expanded and frozen at deploy time; the
+    # import is cached per module list, so a container serving many
+    # ticks pays it once. Failures warn rather than abort — and are
+    # retained, so a later "could not rebuild" error can name them.
     if deployment.task_modules:
         set_declared_task_module_patterns(deployment.task_module_patterns)
         # Stays ON the loop, unlike the forward above, and that is a
@@ -499,7 +480,6 @@ async def _run_deployed_tick_aio(
         build_uuid,
         registry=registry,
         task_executor=executor,
-        task_store=task_store,
         config=config,
         # Only a build with a real scope can be planned by other code; the
         # server's placeholder (an older SDK's build) is driven as it is.
@@ -550,19 +530,6 @@ async def _roll_over_build_aio(
     fails rather than shrugs when it cannot record — the remedy is in the
     log line here and in the command's error.
 
-    **A rollover needs a pickle-free task store.** The store is write-once
-    and a pickle carries the state the old code resolved — every level 2/3
-    value as that code's defaults had it — which no rollover can refresh
-    unless the class is importable by name here, so the object can be
-    rebuilt from its identity data. A deployment that declared
-    ``task_modules`` (or ``require_pickle_free``) can: every covered task is
-    rebuilt from registry data, or re-bound when an earlier deployment's
-    pickle is found (``_frontier_actions._load_task``). One that declares
-    neither would carry old state into the new plan for every non-root task
-    it re-uses. So the rollover is refused for such a deployment, with the
-    remedy in the message, and the build is failed like any other rollover
-    that cannot happen.
-
     The build's edges were evaluated by the code its scope names; this
     deployment runs other code, so it plans the build again under its own
     scope — rehydrating the roots from the registry, walking discovery with
@@ -572,25 +539,24 @@ async def _roll_over_build_aio(
     started finish on their own; a tick still lingering on the old code
     exits as superseded when it sees the scope move.
 
-    **Roots come from the registry, never from the build's task store.**
-    The store holds pickles the old code wrote, write-once, and a pickle
-    restores the level 2/3 values the old code resolved. Registry data is
-    identity parameters only; rebuilt here, under this code with the build's
-    config installed, a root is exactly what this deployment would
-    construct. The same holds for every task the tick loads afterwards: a
-    pickle it does find for a class the deployment's task modules cover, or
-    when a config is installed, is re-bound to this code and config (see
-    ``_frontier_actions._load_task``), and a deployment that declared its
-    task modules writes no pickles of its own — which is what makes a
-    rollover code-safe for every covered class.
+    **Everything comes from the registry.** Registry ``task_data`` is
+    identity parameters only; rebuilt here, under this code with the
+    build's config installed, a root — and every task the tick loads
+    afterwards — is exactly what this deployment would construct. Nothing
+    carries state from the code that planned the build, which is what makes
+    a rollover code-safe. That is the whole reason the pickle store was
+    retired; a pickle restored the level 2/3 values the *old* code
+    resolved, and no rollover could refresh them.
 
     Runs inside the tick, under the build's lease, once (see ``RollOver``).
 
     Returns the new scope key, or the tick's outcome dict when the build
-    cannot roll over. The one such case is a root the new code cannot
-    rehydrate — its class is gone, or its identity parameters changed — and
-    then the build is failed with the remedy in its message: re-trigger it
-    as a new build. See ``docs/design/scope-keyed-dependency-structure.md``.
+    cannot roll over. Those cases are a task the new code cannot rebuild
+    from registry data — its class is gone, no longer covered by this
+    deployment's ``task_modules``, or its identity parameters changed — and
+    a stored build config that does not fit this code. Then the build is
+    failed with the remedy in its message: re-trigger it as a new build.
+    See ``docs/design/scope-keyed-dependency-structure.md``.
     """
     from stardag._core.rehydrate import task_from_registry_data
     from stardag.build._scope import structure_scope_key
@@ -643,27 +609,6 @@ async def _roll_over_build_aio(
             "re-run it if the last deploy could not reach the registry."
         )
         return None
-    if not deployment.elide_pickles:
-        # Declared task modules or require_pickle_free — not the patterns,
-        # which an app that declared nothing still carries by inference
-        # while writing pickles for every class.
-        message = (
-            f"Rollover of build {build_id} to code {own_code_id!r} refused: "
-            "this deployment stores task pickles, which a rollover cannot "
-            "refresh (a pickle carries the code it was written by). Declare "
-            "task_modules on the StardagApp, or set require_pickle_free=True, "
-            "to make builds follow redeploys; or re-trigger this build as a "
-            "new build."
-        )
-        logger.error(message)
-        _fail_build_best_effort(registry, build_id, RuntimeError(message))
-        return {
-            "outcome": "rollover_failed",
-            "build_id": str(build_id),
-            "from_scope_key": build_info.scope_key,
-            "code_id": own_code_id,
-            "error": message,
-        }
     try:
         new_scope = structure_scope_key(own_code_id, build_info.build_config)
     except Exception as e:
@@ -686,13 +631,15 @@ async def _roll_over_build_aio(
             scope_key=new_scope,
             build_config=build_info.build_config,
             task_module_patterns=deployment.task_module_patterns,
-            elide_pickles=bool(deployment.task_module_patterns)
-            or deployment.require_pickle_free,
-            require_pickle_free=deployment.require_pickle_free,
             limit_key_selector=deployment.limit_key_selector,
             retry_failed=False,
         )
     except Exception as e:
+        # Includes the rehydration pre-flight refusing the new plan: under
+        # this deployment's ``task_modules`` some task of the build is not
+        # reconstructable, so a tick of this code could never schedule it.
+        # A build failed here is the same answer the trigger would have
+        # given, arriving a redeploy later.
         return _failed("planning under this code failed", e)
     logger.info(
         f"Tick for build {build_id}: rolled over from scope "

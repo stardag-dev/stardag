@@ -17,12 +17,10 @@ from stardag.build._base import (
     TaskExecutorABC,
 )
 from stardag.build._task_modules import (
-    declared_task_module_patterns,
     import_failure_note,
-    module_is_covered,
 )
-from stardag.build_config import get_build_config, rebind_to_build_config
-from stardag.build._task_store import BuildTaskStore
+from stardag._core.rehydrate import TaskRehydrationError
+from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.registry import (
     BuildFrontier,
     FrontierTaskRef,
@@ -49,8 +47,8 @@ logger = logging.getLogger(__name__)
 
 
 class _MissingTaskRef(typing.NamedTuple):
-    """Stand-in passed to lifecycle registry calls for a task whose pickle
-    is missing from the build task store. Registry backends only use
+    """Stand-in passed to lifecycle registry calls for a task that could
+    not be rebuilt from its registry data. Registry backends only use
     ``task.id`` to address lifecycle endpoints."""
 
     id: UUID
@@ -115,12 +113,11 @@ _CLAIM_TTL_GRACE_SECONDS = 900.0
 # second pass on a fresh frontier all have to fit in the same container.
 _SPAWN_BUDGET_FRACTION = 0.25
 
-# Wall-clock cost of putting ONE actionable task on a worker: a task-store
-# read, the acquiring start, the executor spawn, and the ref-recording
-# start — three network round-trips and a local read. Deliberately
-# pessimistic (a p99 round-trip, not a median), because underestimating it
-# inflates the cap, and an inflated cap is the failure this exists to
-# prevent.
+# Wall-clock cost of putting ONE actionable task on a worker: the metadata
+# read it is rebuilt from, the acquiring start, the executor spawn, and the
+# ref-recording start — four network round-trips. Deliberately pessimistic
+# (a p99 round-trip, not a median), because underestimating it inflates the
+# cap, and an inflated cap is the failure this exists to prevent.
 _SECONDS_PER_SPAWN = 2.0
 
 # Used when NO wall-clock limit is known at all — neither the tick's own
@@ -194,94 +191,79 @@ def claim_ttl_seconds(task: BaseTask, task_executor: TaskExecutorABC) -> int | N
 async def _load_task(
     task_id: str,
     registry: RegistryABC,
-    task_store: BuildTaskStore,
     *,
     quiet: bool = False,
 ) -> BaseTask | None:
-    """Load a task object: store pickle first, registry rehydration second.
+    """Rebuild a task object from the registry's stored ``task_data``.
 
-    The pickle-free fallback reconstructs the task from the registry's
-    stored ``task_data`` (see ``stardag.task_from_registry_data``) — which
-    also survives cases the pickle store can't (e.g. an app redeploy with
-    compatible task definitions invalidating stored pickles).
+    The only way a scheduler tick gets a task object. ``task_data`` is the
+    registry-mode dump — identity parameters only — so the object this
+    produces carries no state from the process that registered it: its
+    ``dependencies_only`` / ``execution_only`` fields resolve from the
+    build config installed *here*, under the code running *here*. That is
+    what makes a build safe to re-plan under a new deployment, and it is
+    why the pickle store this used to consult first is gone (see
+    ``RELEASE_NOTES.md`` and ``docs/design/scope-keyed-dependency-structure.md``).
 
-    Successful rehydrations are written back to the store, so a build that
-    fell back once does not keep paying for it. Two qualifications, in
-    this order:
+    Returns None **only for a deterministic failure** — the registry has no
+    metadata for this task, or the payload cannot be validated back into
+    its class. The caller decides what that means, and the two cases
+    differ: a RUNNING task resolves itself through its worker's
+    self-reporting, while a pending one can never be scheduled and is
+    failed, permanently and without spending an attempt.
 
-    * **Not on a pickle-free store.** A build whose app declared
-      ``require_pickle_free`` gets a store that refuses every write, so
-      this call is a no-op there — the cache would otherwise leave pickles
-      on a target root the build promised never to write to, silently and
-      on a build where rehydration is the *designed* path rather than a
-      fallback. The guard lives in ``BuildTaskStore.save_task_aio``, which
-      is why no argument is threaded down here.
-    * **Best-effort when it does write.** The task object is already in
-      hand, so a store error must not abort the caller.
+    **Everything else propagates**, and the distinction is load-bearing
+    now that this is the only way to get a task object. A timeout, a 500,
+    an expired key or a server too old for the endpoint says nothing about
+    the task; swallowing one would turn a registry blip into a permanently
+    failed task and, through ``fail_mode``, a permanently failed build. A
+    raised error instead ends the tick as ``outcome="error"`` — reported,
+    diagnosable, and retried by the next tick — which is exactly the
+    behaviour an outage should get. That is also what lets the caller mark
+    the failure non-retryable in good conscience: by then it is known to be
+    a property of the data, not of the network.
 
-    With ``quiet=True`` a rehydration failure logs a single warning without
-    the stack trace — for callers where a missing object is tolerated (a
-    RUNNING task resolves via its worker's self-reporting), the repeated
-    per-tick ``logger.exception`` would be noise.
+    With ``quiet=True`` the failure logs a single warning without the stack
+    trace, for those tolerant callers; the repeated per-tick
+    ``logger.exception`` would be noise.
 
-    A rehydration failure is annotated with any declared task modules that
-    failed to import in this process (see
-    ``stardag.build._task_modules``): "no task class registered for X" and
-    "the module defining X blew up on import" are the same incident seen
-    from two ends, and only the annotation connects them. The annotation is
-    read from the task-module registry rather than plumbed through
-    ``rehydrate.py``, which stays a pure reconstruction primitive with no
-    notion of how its classes got imported.
+    A failure is annotated with any declared task modules that failed to
+    import in this process (see ``stardag.build._task_modules``): "no task
+    class registered for X" and "the module defining X blew up on import"
+    are the same incident seen from two ends, and only the annotation
+    connects them. The annotation is read from the task-module registry
+    rather than plumbed through ``rehydrate.py``, which stays a pure
+    reconstruction primitive with no notion of how its classes got
+    imported.
     """
-    task = await task_store.load_task_aio(task_id)
-    if task is not None:
-        # A pickle restores the level 2/3 values the writer's code resolved,
-        # not this process's: a build that rolled over to a newer deployment
-        # would otherwise schedule tasks carrying the old code's defaults,
-        # from pickles an earlier deployment wrote before this one declared
-        # its task modules. Re-binding re-validates the identity data under
-        # the installed build config and this code — the same object a
-        # registry rehydration would produce, so for a re-bound task the
-        # pickle is only a cache of the identity data. Done whenever there is
-        # a config to resolve, and for every class the deployment's task
-        # modules cover (importable by name here, by declaration). A class
-        # outside both is left as pickled: with no config there is nothing
-        # to resolve, and a re-validated instance of a dynamically
-        # parametrised class may resolve to one pickle cannot find by name —
-        # the bootstrap's rule, for the same reason.
-        if get_build_config() or module_is_covered(
-            type(task).__module__, declared_task_module_patterns()
-        ):
-            task = rebind_to_build_config(task)
-        return task
     try:
         metadata = await registry.task_get_metadata_aio(UUID(task_id))
-        task = task_from_registry_data(metadata.body, expected_task_id=task_id)
-    except Exception as e:
-        message = (
-            f"Task {task_id} is missing from the task store and could not "
-            f"be rehydrated from registry data"
-        )
-        note = import_failure_note()
-        if quiet:
-            logger.warning(f"{message}: {e}{note}")
-        else:
-            logger.exception(f"{message}.{note}")
+    except NotFoundError as e:
+        # A *resource* 404 is a fact about this task: the registry has no
+        # metadata for it, and no retry changes that. A *route* 404 is a
+        # fact about the server (too old for this endpoint), which is an
+        # outage, not a verdict on the task — propagate it.
+        if is_missing_route_error(e):
+            raise
+        _log_unrebuildable(task_id, e, quiet=quiet)
         return None
-    # DEBUG on a pickle-free build, INFO otherwise: there, a store miss is
-    # the expected path for every task on every tick, and reporting it at
-    # INFO trains readers to skim the scheduler's log lines on the very
-    # configuration the feature recommends. Elsewhere a miss means a pickle
-    # was expected and was not there, which is worth a line.
-    if task_store.pickle_free:
-        logger.debug(f"Rehydrated task {task_id} from registry data.")
-    else:
-        logger.info(f"Rehydrated task {task_id} from registry data.")
     try:
-        await task_store.save_task_aio(task)
-    except Exception as e:
-        logger.warning(f"Failed to write rehydrated task {task_id} back: {e}")
+        task = task_from_registry_data(metadata.body, expected_task_id=task_id)
+    except TaskRehydrationError as e:
+        _log_unrebuildable(task_id, e, quiet=quiet)
+        return None
+    logger.debug(f"Rebuilt task {task_id} from registry data.")
     return task
+
+
+def _log_unrebuildable(task_id: str, error: Exception, *, quiet: bool) -> None:
+    """Report a task this process cannot rebuild — see :func:`_load_task`."""
+    message = f"Task {task_id} could not be rebuilt from its registry data"
+    note = import_failure_note()
+    if quiet:
+        logger.warning(f"{message}: {error}{note}")
+    else:
+        logger.exception(f"{message}.{note}")
 
 
 class _SpawnCap(typing.NamedTuple):
@@ -393,7 +375,6 @@ async def _act_on_frontier(
     build_id: UUID,
     registry: RegistryABC,
     task_executor: TaskExecutorABC,
-    task_store: BuildTaskStore,
     config: TickConfig,
     summary: TickSummary,
     report_window: _ReportWindow,
@@ -443,12 +424,12 @@ async def _act_on_frontier(
       lapsed with no ref to probe → retryable. OOM kills, preemptions and
       workers that died mid-write all land here, and every one of them is
       transient by nature.
-    - a task whose **object cannot be resolved** (no stored pickle and no
-      rehydratable registry data) → *not* retryable. The inputs to that
-      failure are the task store and the imported task classes; neither
-      changes between two passes of the same tick, so a retry re-reads the
-      same absence and fails identically, having spent the budget that a
-      genuinely transient failure elsewhere in the build might have needed.
+    - a task whose **object cannot be rebuilt** from its registry data →
+      *not* retryable. The inputs to that failure are the stored
+      ``task_data`` and the imported task classes; neither changes between
+      two passes of the same tick, so a retry re-reads the same absence and
+      fails identically, having spent the budget that a genuinely transient
+      failure elsewhere in the build might have needed.
 
     Note what is absent: an exception *inside* a task never appears here.
     The worker self-reports TASK_FAILED, which takes the task out of the
@@ -520,7 +501,6 @@ async def _act_on_frontier(
         task = await _load_task(
             item.task_id,
             registry,
-            task_store,
             quiet=item.latest_status in _RUNNING_STATUSES,
         )
         if task is not None:
@@ -530,33 +510,35 @@ async def _act_on_frontier(
             # Can't probe without the object, but the worker reports its
             # own terminal events — leave it to resolve itself.
             return
-        # A pending/suspended task with no stored object AND no
-        # rehydratable registry data can never be scheduled: fail it
-        # (rather than leaving it in the frontier forever, where it
-        # would block terminal detection and stall the build across
-        # endless watchdog ticks).
+        # A pending/suspended task this process cannot rebuild can never
+        # be scheduled: fail it (rather than leaving it in the frontier
+        # forever, where it would block terminal detection and stall the
+        # build across endless watchdog ticks).
         logger.error(
-            f"Task {item.task_id} of build {build_id} has no stored "
-            "task object and could not be rehydrated; failing it."
+            f"Task {item.task_id} of build {build_id} could not be rebuilt "
+            "from its registry data; failing it."
         )
         try:
             await _record_task_failure(
                 typing.cast(BaseTask, _MissingTaskRef(id=UUID(item.task_id))),
-                "Task object missing from the build task store",
+                "Task object could not be rebuilt from registry data",
                 build_id=build_id,
                 registry=registry,
                 config=config,
                 summary=summary,
-                # Deterministic: neither the task store nor this process's
-                # imported task classes change between passes, so a retry
-                # buys a second identical failure at the cost of an
-                # attempt. Fail it once and let the build say so.
+                # Deterministic, and known to be: ``_load_task`` returns
+                # None only for a missing record or an invalid payload, and
+                # re-raises anything that might be transient. Neither the
+                # stored task_data nor this process's imported task classes
+                # change between passes, so a retry buys a second identical
+                # failure at the cost of an attempt. Fail it once and let
+                # the build say so.
                 retryable=False,
             )
             acted = True
         except Exception as e:
             logger.error(
-                f"Failed to record store-missing failure for task {item.task_id}: {e}"
+                f"Failed to record the rehydration failure of task {item.task_id}: {e}"
             )
 
     await _run_bounded(

@@ -28,7 +28,11 @@ from stardag.build._task_modules import (
     import_task_modules,
     last_import_failures,
     module_is_covered,
-    plan_pickle_elision,
+    module_is_main,
+    _MAIN_MODULE_REASON,
+    _MAX_LISTED_GROUPS,
+    RehydrationPlan,
+    plan_rehydration,
     set_declared_task_module_patterns,
     suggested_pattern_for,
     uncovered_task_classes,
@@ -385,6 +389,23 @@ class TestCoverage:
 # =============================================================================
 
 
+class TestMainModules:
+    """``__main__`` is unreachable, and knowably so — which is the point."""
+
+    @pytest.mark.parametrize("module", ["__main__", "my_pkg.__main__", "a.b.__main__"])
+    def test_recognised(self, module: str):
+        assert module_is_main(module)
+        # ...and therefore never covered, by any pattern.
+        assert not module_is_covered(module, [suggested_pattern_for(module)])
+        assert not module_is_covered(module, [module])
+
+    @pytest.mark.parametrize(
+        "module", ["__main__x", "my_pkg.main", "my_pkg.__main__x", "main"]
+    )
+    def test_not_confused_with_ordinary_modules(self, module: str):
+        assert not module_is_main(module)
+
+
 class TestDeclaredPatterns:
     def test_set_and_read_back(self):
         previous = declared_task_module_patterns()
@@ -404,67 +425,215 @@ class TestDeclaredPatterns:
 
 
 # =============================================================================
-# Pickle elision planning
+# The rehydration pre-flight
 # =============================================================================
 
 
-class TestPlanPickleElision:
-    def test_covered_and_round_tripping_task_needs_no_pickle(self):
-        task = SyncOnlyTask(name="elide-me")
-        plan = plan_pickle_elision([task], [SyncOnlyTask.__module__])
-        assert plan.pickle_free == (task,)
-        assert plan.pickled == ()
-        assert plan.require_pickle_free_error() is None
-        assert "1 task(s) pickle-free, 0 pickled" in plan.summary()
+class TestPlanRehydration:
+    def test_a_covered_round_tripping_task_is_reconstructable(self):
+        task = SyncOnlyTask(name="rebuild-me")
+        plan = plan_rehydration([task], [SyncOnlyTask.__module__])
+        assert plan.reconstructable == (task,)
+        assert plan.unreconstructable == ()
+        assert plan.error([SyncOnlyTask.__module__]) is None
+        assert "1 task(s) reconstructable, 0 not" in plan.summary()
 
-    def test_uncovered_class_keeps_its_pickle(self):
-        task = SyncOnlyTask(name="keep-me")
-        plan = plan_pickle_elision([task], ["unrelated_pkg.*"])
-        assert plan.pickle_free == ()
-        assert [reason for _, reason in plan.pickled] == [
+    def test_an_uncovered_class_is_not(self):
+        task = SyncOnlyTask(name="unreachable")
+        plan = plan_rehydration([task], ["unrelated_pkg.*"])
+        assert plan.reconstructable == ()
+        assert [reason for _, reason in plan.unreconstructable] == [
             "task class not covered by task_modules"
         ]
         assert "not covered" in plan.summary()
 
-    def test_alias_task_payload_stays_pickle_bound(self, default_in_memory_fs_target):
+    def test_alias_task_payloads_are_refused(self, default_in_memory_fs_target):
         """AliasTask embeds a pickled ``loads_type``; rehydration refuses it
         (auto-unpickling registry bytes in a scheduler is an RCE vector), so
-        the self-check fails and the pickle is written — by design."""
+        the self-check fails — which now means a reactive build containing an
+        incomplete AliasTask is refused at the trigger. That loses nothing: an
+        AliasTask has no ``run()``, so a tick could never have scheduled it."""
         import stardag as sd
 
-        class ElisionAliasSource(sd.Task[int]):
+        class PreflightAliasSource(sd.Task[int]):
             def run(self) -> None:
                 self._save(42)
 
-        source = ElisionAliasSource()
+        source = PreflightAliasSource()
         alias = sd.AliasTask[int](aliased=sd.AliasedMetadata.from_task(source))
-        plan = plan_pickle_elision([alias], [type(alias).__module__, __name__])
+        plan = plan_rehydration([alias], [type(alias).__module__, __name__])
 
-        assert plan.pickle_free == ()
-        assert len(plan.pickled) == 1
-        assert "round-trip failed" in plan.pickled[0][1]
-        assert "__aliased" in plan.pickled[0][1]
+        assert plan.reconstructable == ()
+        assert len(plan.unreconstructable) == 1
+        assert "round-trip failed" in plan.unreconstructable[0][1]
+        assert "__aliased" in plan.unreconstructable[0][1]
 
-    def test_require_pickle_free_error_names_every_task_and_reason(self):
+    def test_the_error_names_the_class_the_reason_and_the_remedy(self):
         tasks = [SyncOnlyTask(name="x"), SyncOnlyTask(name="y")]
-        plan = plan_pickle_elision(tasks, ["unrelated_pkg.*"])
-        error = plan.require_pickle_free_error()
+        plan = plan_rehydration(tasks, ["unrelated_pkg.*"])
+        error = plan.error(["unrelated_pkg.*"])
         assert error is not None
         assert "2 task(s)" in error
-        for task in tasks:
-            assert str(task.id) in error
+        assert f"{SyncOnlyTask.__module__}.{SyncOnlyTask.__qualname__}" in error
         assert "not covered by task_modules" in error
+        # The remedy: the narrowest pattern that would cover the class.
+        assert suggested_pattern_for(SyncOnlyTask.__module__) in error
+        assert "['unrelated_pkg.*']" in error
+
+    def test_the_listing_is_grouped_with_one_example_task(self):
+        """One broken class over a fan-out is the normal shape of a refusal.
+
+        Listing every task would put thousands of identical lines in the
+        log and in the ``error_message`` recorded on the build; one example
+        id per (class, reason) is what makes it diagnosable.
+        """
+        tasks = [SyncOnlyTask(name=f"t{i}") for i in range(50)]
+        plan = plan_rehydration(tasks, ["unrelated_pkg.*"])
+        error = plan.error(["unrelated_pkg.*"])
+        assert error is not None
+        listed = [line for line in error.splitlines() if line.startswith("  - ")]
+        assert len(listed) == 1
+        assert "(and 49 more task(s), same reason)" in error
+        # The example is a real task of the build.
+        assert any(str(task.id) in error for task in tasks)
+
+    def test_one_class_with_task_specific_reasons_is_not_collapsed(self):
+        """Grouping by class alone would pick one arbitrary reason and then
+        attach the whole class's count to it.
+
+        A round-trip reason embeds the exception, so two tasks of one class
+        can genuinely fail differently. Built directly rather than through
+        `plan_rehydration`, because that is the surface under test: the
+        message must not claim a count spans a reason it does not.
+        """
+        a, b, c = (SyncOnlyTask(name=n) for n in ("a", "b", "c"))
+        plan = RehydrationPlan(
+            unreconstructable=(
+                (a, "registry-data round-trip failed (field x)"),
+                (b, "registry-data round-trip failed (field x)"),
+                (c, "registry-data round-trip failed (field y)"),
+            )
+        )
+        error = plan.error(["some_pkg.*"])
+        assert error is not None
+        listed = [line for line in error.splitlines() if line.startswith("  - ")]
+        assert len(listed) == 2
+        assert "(field x)" in error and "(field y)" in error
+        # The count belongs to the reason it is printed beside.
+        assert "(and 1 more task(s), same reason)" in error
+        assert "(and 2 more" not in error
+        # A round-trip failure has no one-line remedy; don't invent one.
+        assert "Add [" not in error
+
+    def test_many_distinct_classes_truncate(self):
+        import stardag as sd
+
+        classes = [
+            type(
+                f"TruncatedTask{i}",
+                (sd.Task[int],),
+                {"__module__": "acme_unreachable.tasks", "run": lambda self: None},
+            )
+            for i in range(_MAX_LISTED_GROUPS + 5)
+        ]
+        plan = plan_rehydration([cls() for cls in classes], ["unrelated_pkg.*"])
+        error = plan.error(["unrelated_pkg.*"])
+        assert error is not None
+        listed = [line for line in error.splitlines() if line.startswith("  - ")]
+        assert len(listed) == _MAX_LISTED_GROUPS + 1  # + the "...and N more" line
+        assert "...and 5 further class/reason group(s)." in error
 
     def test_summary_aggregates_repeated_reasons(self):
         tasks = [SyncOnlyTask(name=f"t{i}") for i in range(3)]
-        plan = plan_pickle_elision(tasks, ["unrelated_pkg.*"])
+        plan = plan_rehydration(tasks, ["unrelated_pkg.*"])
         assert "(x3)" in plan.summary()
 
-    def test_no_patterns_means_everything_pickled(self):
+    def test_a_main_module_class_gets_its_own_reason(self):
+        """Not plain non-coverage: no pattern reaches a ``__main__`` module.
+
+        ``module_is_covered`` excludes one outright, so the generic remedy
+        would be a lie — and the ``my_pkg.__main__`` shape is the dangerous
+        one, because ``suggested_pattern_for`` produces ``my_pkg.*``, which
+        reads as plausible and changes nothing.
+        """
+        import stardag as sd
+
+        entrypoint_task = type(
+            "EntrypointTask",
+            (sd.Task[int],),
+            {"__module__": "my_pkg.__main__", "run": lambda self: None},
+        )()
+        plan = plan_rehydration([entrypoint_task], ["my_pkg.*"])
+
+        assert plan.reconstructable == ()
+        assert [reason for _, reason in plan.unreconstructable] == [_MAIN_MODULE_REASON]
+        error = plan.error(["my_pkg.*"])
+        assert error is not None
+        assert "cannot be covered by any pattern" in error
+        assert "my_pkg.__main__" in error
+        # ...and it must NOT tell them to add the pattern they already have.
+        assert "Add [" not in error
+
+    def test_main_and_ordinary_uncovered_classes_each_get_their_remedy(self):
+        import stardag as sd
+
+        entrypoint_task = type(
+            "BothEntrypointTask",
+            (sd.Task[int],),
+            {"__module__": "__main__", "run": lambda self: None},
+        )()
+        plan = plan_rehydration(
+            [entrypoint_task, SyncOnlyTask(name="ordinary")], ["unrelated_pkg.*"]
+        )
+        error = plan.error(["unrelated_pkg.*"])
+        assert error is not None
+        assert suggested_pattern_for(SyncOnlyTask.__module__) in error
+        assert "cannot be covered by any pattern" in error
+        assert "'__main__'" in error
+
+    def test_no_patterns_means_nothing_is_reconstructable(self):
         task = SyncOnlyTask(name="no-patterns")
-        plan = plan_pickle_elision([task], [])
-        assert plan.pickle_free == ()
-        assert len(plan.pickled) == 1
+        plan = plan_rehydration([task], [])
+        assert plan.reconstructable == ()
+        assert len(plan.unreconstructable) == 1
+        assert "not declared" in (plan.error([]) or "")
+
+    def test_the_dry_run_uses_the_payload_registration_stores(self):
+        """The registry-mode dump, not a full one.
+
+        ``task_data`` holds identity parameters only; a task's level 2/3
+        fields are resolved from the build config wherever it is rebuilt.
+        Round-tripping a *full* dump would check a payload the registry does
+        not hold — and would reject a task whose non-identity field does not
+        round-trip, even though a tick never sees that field in the data.
+        """
+        import typing as t
+
+        import stardag as sd
+        from stardag.base_model import StardagField
+
+        class NotRoundTrippable:
+            """Serializes to a string, validates from anything but one."""
+
+        class PreflightConfigured(sd.Task[int]):
+            __namespace__ = "preflight_tests"
+            key: str
+            width: t.Annotated[int, StardagField(significance="dependencies_only")] = 4
+
+            def run(self) -> None:
+                pass
+
+        from stardag.build_config import build_config_scope
+
+        with build_config_scope({"preflight_tests.PreflightConfigured": {"width": 9}}):
+            task = PreflightConfigured(key="k")
+        assert task.width == 9
+
+        # No config installed here, so a rebuilt task gets width=4. The dry
+        # run must still pass: width is not part of the identity, so the id
+        # is unchanged and the payload round-trips.
+        plan = plan_rehydration([task], [PreflightConfigured.__module__])
+        assert plan.reconstructable == (task,)
 
 
 def test_base_task_registry_exposes_registered_classes():

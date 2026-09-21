@@ -75,8 +75,8 @@ trigger (cheap, no target I/O):
 bootstrap (one container, once per trigger):
   fix the build's structure scope (this deployment's code id + the
   dependencies_only config) and install the build config; discover the
-  DAG next to the target root; register it; persist task objects; arm
-  the build; spawn the first tick
+  DAG next to the target root; register it; check every incomplete task
+  can be rebuilt from registry data; arm the build; spawn the first tick
 
 tick (short-lived, single-flighted per build):
   acquire the build's scheduler lease (held → exit)
@@ -94,6 +94,19 @@ registered, so no tick ever sees a half-registered build. Discovery runs
 inside Modal because it is target I/O — a mounted volume there, a
 rate-limited API from a laptop — so triggering needs registry credentials
 only.
+
+**A tick rebuilds every task it schedules from the registry's stored
+`task_data`, and from nothing else.** That is what makes a running build
+safe to re-plan under new code — the payload is identity parameters only,
+so nothing carries over from the process that registered it. It is also a
+hard requirement on the app: rebuilding resolves a class through stardag's
+polymorphic registry, which is populated by _importing_ the defining
+module, so the app must declare
+[`task_modules`](../how-to/integrate-modal.md#declaring-your-task-modules-required-for-reactive-builds).
+The default infers it from the app's own package; an app where inference is
+impossible (`__main__`, a loose script) is resident-only and its reactive
+trigger is refused. The bootstrap dry-runs the reconstruction over the
+whole discovered DAG and refuses a build it could not drive.
 
 A tick's fan-out is bounded (`max_concurrent_actions`, default 50) and the
 work one pass commits to is capped by a duration budget derived from the
@@ -277,11 +290,13 @@ A rollover only moves _forward_: the tick asks the registry which code is
 the current deployment of its app and re-plans only if that is its own, so a
 tick of an older deployment that wins the lease late exits `superseded`
 instead of moving the build back. That is why `stardag modal deploy` records
-every deploy and exits non-zero if it cannot. It also requires a pickle-free
-task store (`task_modules` or `require_pickle_free=True`): a pickle carries
-the code it was written by. What cannot roll over fails the build with
-`rollover_failed` — a root whose _identity_ parameters changed, or a
-deployment that may store pickles — and the remedy is a new build.
+every deploy and exits non-zero if it cannot. What makes the re-plan safe is
+that a task is rebuilt from the registry's identity-level `task_data` and
+the new deployment's own code, so it carries nothing from the code that
+planned the build. What cannot roll over fails the build with
+`rollover_failed` — a root whose _identity_ parameters changed, or a task
+the new deployment cannot rebuild (its class gone, or outside its
+`task_modules`) — and the remedy is a new build.
 
 A **branch deployment** is simply another app: give it its own name and it
 has its own single live version.

@@ -24,11 +24,10 @@ import modal
 
 from stardag import BaseTask, TaskStruct, flatten_task_struct
 from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
-from stardag.build import BuildTaskStore, discover_and_register_aio
+from stardag.build import discover_and_register_aio
 from stardag.build._task_modules import (
     declared_task_module_patterns,
     format_uncovered_message,
-    plan_pickle_elision,
     uncovered_task_classes,
 )
 from stardag.integration.modal._limit_keys import deployed_limit_key_selector
@@ -622,10 +621,11 @@ class _WorkerLifecycleReporter:
 
     def suspended(self, task_struct: TaskStruct | None = None) -> None:
         if self.reactive and task_struct is not None:
-            # No resident orchestrator to pick up the yielded deps: register
-            # them (with their requires() subtrees), persist their pickles
-            # for the scheduler, and record the dynamic edges — BEFORE the
-            # suspend event, so the frontier is consistent when a tick runs.
+            # No resident orchestrator to pick up the yielded deps:
+            # register them (with their requires() subtrees) — which is
+            # also what a later tick rebuilds them from — and record the
+            # dynamic edges, BEFORE the suspend event, so the frontier is
+            # consistent when a tick runs.
             self._guard(
                 lambda: self._register_dynamic_deps(task_struct), "dynamic-deps"
             )
@@ -746,18 +746,18 @@ class _WorkerLifecycleReporter:
                 scope_key=self.scope_key,
             )
         )
-        store = BuildTaskStore(self.build_id)
-        # The trigger's pre-flight structurally cannot see dynamically
+        # The bootstrap's pre-flight structurally cannot see dynamically
         # yielded deps — they don't exist until their parent runs — so the
-        # coverage check is re-run here, on the app's patterns as published
-        # by the deployed worker wrapper. Once per class per process: this
-        # runs on every suspending worker invocation.
+        # check is re-run here, on the app's patterns as published by the
+        # deployed worker wrapper. Once per class per process: this runs on
+        # every suspending worker invocation.
         #
-        # The same elision applies (see
-        # :func:`stardag.integration.modal._bootstrap._persist_discovered_tasks`):
-        # without it the pickle-free property would hold only until a task
-        # yielded its first dynamic dependency, and a build with dynamic
-        # deps would still need target-root write access.
+        # **A warning, not a raise**, unlike the bootstrap's. The parent
+        # task has already run; failing its bookkeeping now would throw
+        # that work away and still leave the dependency unschedulable.
+        # The tick that reaches such a dep fails it with the same reason,
+        # which is the loss this warning is announcing in advance — the
+        # remedy either way is to widen ``task_modules`` and redeploy.
         patterns = declared_task_module_patterns()
         if patterns:
             uncovered = uncovered_task_classes(
@@ -770,18 +770,12 @@ class _WorkerLifecycleReporter:
                         patterns,
                         remedy=(
                             "These were registered as dynamic dependencies, "
-                            "so the trigger's pre-flight could not see them."
+                            "so the bootstrap's pre-flight could not see "
+                            "them; a scheduler tick will fail each one it "
+                            "reaches."
                         ),
                     )
                 )
-            plan = plan_pickle_elision(result.incomplete.values(), patterns)
-            store.save_tasks(task for task, _ in plan.pickled)
-            logger.info(
-                f"Build {self.build_id} dynamic deps of task "
-                f"{self.task.id}: {plan.summary()}"
-            )
-        else:
-            store.save_tasks(result.incomplete.values())
         deps = flatten_task_struct(task_struct)
         self.registry.task_add_dependencies(
             self.build_id, self.task, deps, is_dynamic=True, scope_key=self.scope_key

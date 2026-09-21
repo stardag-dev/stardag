@@ -28,8 +28,8 @@ Granular concurrency limiting:
 Task-module declaration (reactive scheduling only):
 - expand_task_module_patterns()/import_task_modules(): make a scheduler
     process able to reconstruct a build's task classes from registry data
-- plan_pickle_elision(): decide which tasks still need a build-task-store
-    pickle (see stardag.build._task_modules for the full rationale)
+- plan_rehydration(): decide which tasks a scheduler tick could rebuild
+    from registry data (see stardag.build._task_modules for the rationale)
 """
 
 from stardag.build._base import (
@@ -64,9 +64,8 @@ from stardag.build._reactive import (
     discover_and_register_aio,
     run_tick_aio,
 )
-from stardag.build._task_store import BuildTaskStore
 from stardag.build._task_modules import (
-    PickleElisionPlan,
+    RehydrationPlan,
     TaskModuleImportReport,
     TaskModulesError,
     declared_task_module_patterns,
@@ -74,7 +73,8 @@ from stardag.build._task_modules import (
     import_task_modules,
     last_import_failures,
     module_is_covered,
-    plan_pickle_elision,
+    module_is_main,
+    plan_rehydration,
     set_declared_task_module_patterns,
     uncovered_task_classes,
     validate_task_module_patterns,
@@ -129,9 +129,8 @@ __all__ = [
     "HybridConcurrentTaskExecutor",
     "RoutedTaskExecutor",
     "TaskExecutionError",
-    "BuildTaskStore",
     # Task-module declaration (reactive scheduling)
-    "PickleElisionPlan",
+    "RehydrationPlan",
     "TaskModuleImportReport",
     "TaskModulesError",
     "declared_task_module_patterns",
@@ -139,7 +138,8 @@ __all__ = [
     "import_task_modules",
     "last_import_failures",
     "module_is_covered",
-    "plan_pickle_elision",
+    "module_is_main",
+    "plan_rehydration",
     "set_declared_task_module_patterns",
     "uncovered_task_classes",
     "validate_task_module_patterns",

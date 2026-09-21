@@ -32,6 +32,7 @@ from tests.test_build.reactive_fakes import (
     FAST_TICK,
     _chain,
     _setup,
+    registry_body,
 )
 
 
@@ -40,7 +41,7 @@ class TestTerminalHandling:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         (root,) = _chain("cancelled-root")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id), status="running", executor="fake", executor_ref="fc-run"
         )
@@ -50,7 +51,6 @@ class TestTerminalHandling:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -65,14 +65,13 @@ class TestTerminalHandling:
         """CONTINUE mode with a failed upstream: nothing runnable/running →
         the tick fails the build rather than idling forever."""
         dep, root = _chain("blocked-dep", "blocked-root")
-        registry, executor, store = _setup([dep, root], auto_complete=False)
+        registry, executor = _setup([dep, root], auto_complete=False)
         registry.add_task(str(dep.id), status="failed")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
@@ -89,8 +88,8 @@ class TestTerminalHandling:
     ):
         dep, root = _chain("ff-dep", "ff-root")
         other = SyncOnlyTask(name="ff-other")
-        registry, executor, store = _setup([dep, root], auto_complete=False)
-        store.save_task(other)
+        registry, executor = _setup([dep, root], auto_complete=False)
+        registry.metadata_bodies[str(other.id)] = registry_body(other)
         registry.add_task(str(dep.id), status="failed")
         registry.add_task(
             str(other.id), status="running", executor="fake", executor_ref="fc-x"
@@ -101,7 +100,6 @@ class TestTerminalHandling:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,  # FAIL_FAST default
         )
 
@@ -120,8 +118,8 @@ class TestAddedRootsTerminalDetection:
         re-triggered subtrees)."""
         (r1,) = _chain("roots-r1")
         r2 = SyncOnlyTask(name="roots-r2")
-        registry, executor, store = _setup([r1])
-        store.save_task(r2)
+        registry, executor = _setup([r1])
+        registry.metadata_bodies[str(r2.id)] = registry_body(r2)
         # Original root completed already; new root appended (as the
         # re-trigger path does server-side) but still pending.
         registry.statuses[str(r1.id)] = "completed"
@@ -132,7 +130,6 @@ class TestAddedRootsTerminalDetection:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
         # r2 was spawned (auto-completes) and only then the build completed.
@@ -148,7 +145,7 @@ class TestCancelDynamicDepWindow:
         → not actionable) is still cancelled on build cancellation."""
         blocker = SyncOnlyTask(name="cxl-blocker")
         runner = SyncOnlyTask(name="cxl-runner")
-        registry, executor, store = _setup([blocker, runner], auto_complete=False)
+        registry, executor = _setup([blocker, runner], auto_complete=False)
         registry.add_task(
             str(runner.id),
             status="running",
@@ -162,7 +159,6 @@ class TestCancelDynamicDepWindow:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -186,7 +182,7 @@ class TestCancelAuthority:
         RUNNING, but under another build: killing it would take out a live
         worker and release a claim this build never held."""
         (root,) = _chain("shared-root")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         neighbour = uuid4()
         # Started by the neighbour, not by us: the execution is theirs, and
         # the listing has to attribute it to them rather than to whoever
@@ -205,7 +201,6 @@ class TestCancelAuthority:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -232,7 +227,7 @@ class TestCancelAuthority:
         catch it. That is why this test is here and not only there.
         """
         (root,) = _chain("taken-over-root")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         mine = uuid4()
         successor = uuid4()
         # I started it...
@@ -251,7 +246,6 @@ class TestCancelAuthority:
             mine,
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -270,7 +264,7 @@ class TestCancelAuthority:
         was released and the execution was not stopped — which is what let a
         second build run the same task concurrently."""
         (root,) = _chain("cascaded-root")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id), status="cancelled", executor="fake", executor_ref="fc-mine"
         )
@@ -280,7 +274,6 @@ class TestCancelAuthority:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -304,7 +297,7 @@ class TestCancelAuthority:
         tasks: list[BaseTask] = [
             SyncOnlyTask(name=f"wide-{index}") for index in range(5)
         ]
-        registry, executor, store = _setup(tasks, auto_complete=False)
+        registry, executor = _setup(tasks, auto_complete=False)
         registry.executions_page_size = 2
         for index, task in enumerate(tasks):
             registry.add_task(
@@ -319,7 +312,6 @@ class TestCancelAuthority:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -335,7 +327,7 @@ class TestCancelAuthority:
         re-lists until nothing new comes back, rather than stopping what one
         listing happened to contain."""
         first, second = SyncOnlyTask(name="drain-a"), SyncOnlyTask(name="drain-b")
-        registry, executor, store = _setup([first, second], auto_complete=False)
+        registry, executor = _setup([first, second], auto_complete=False)
         registry.add_task(
             str(first.id), status="running", executor="fake", executor_ref="fc-a"
         )
@@ -362,7 +354,6 @@ class TestCancelAuthority:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -383,7 +374,7 @@ class TestCancelAuthority:
         where it is visible and the cancel can be re-issued.
         """
         (root,) = _chain("transient-root")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id), status="cancelled", executor="fake", executor_ref="fc-mine"
         )
@@ -395,7 +386,6 @@ class TestCancelAuthority:
                 uuid4(),
                 registry=registry,
                 task_executor=executor,
-                task_store=store,
                 config=FAST_TICK,
             )
 
@@ -410,7 +400,7 @@ class TestCancelAuthority:
         """No executions route, but the frontier does report who holds each
         task — so the tick filters it itself rather than giving up."""
         mine, theirs = SyncOnlyTask(name="mine"), SyncOnlyTask(name="theirs")
-        registry, executor, store = _setup([mine, theirs], auto_complete=False)
+        registry, executor = _setup([mine, theirs], auto_complete=False)
         registry.serves_executions = False
         for task, ref in ((mine, "fc-mine"), (theirs, "fc-theirs")):
             registry.add_task(
@@ -423,7 +413,6 @@ class TestCancelAuthority:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -438,7 +427,7 @@ class TestCancelAuthority:
         build against an old registry unable to stop anything at all, which
         is strictly worse than what it does today."""
         (root,) = _chain("unknowable-root")
-        registry, executor, store = _setup([root], auto_complete=False)
+        registry, executor = _setup([root], auto_complete=False)
         registry.serves_executions = False
         registry.serves_status_build_id = False
         registry.add_task(
@@ -450,7 +439,6 @@ class TestCancelAuthority:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
@@ -466,14 +454,13 @@ class TestSkipBlockedOnFailure:
         bad = SyncOnlyTask(name="skip-bad")
         mid = SyncOnlyTask(name="skip-mid", deps=(bad,))
         root = SyncOnlyTask(name="skip-root", deps=(mid,))
-        registry, executor, store = _setup([bad, mid, root], auto_complete=False)
+        registry, executor = _setup([bad, mid, root], auto_complete=False)
         registry.add_task(str(bad.id), status="failed")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,  # FAIL_FAST default
         )
 
@@ -493,7 +480,7 @@ class TestSkipBlockedOnFailure:
         long_running = SyncOnlyTask(name="cb-running")
         downstream = SyncOnlyTask(name="cb-downstream", deps=(long_running,))
         root = SyncOnlyTask(name="cb-root", deps=(bad, downstream))
-        registry, executor, store = _setup(
+        registry, executor = _setup(
             [bad, long_running, downstream, root], auto_complete=False
         )
         registry.add_task(str(bad.id), status="failed")
@@ -503,13 +490,12 @@ class TestSkipBlockedOnFailure:
             executor="fake",
             executor_ref="ref-live",
         )
-        store.save_task(long_running)
+        registry.metadata_bodies[str(long_running.id)] = registry_body(long_running)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,  # FAIL_FAST default
         )
 
@@ -523,14 +509,13 @@ class TestSkipBlockedOnFailure:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         dep, root = _chain("skip-cont-dep", "skip-cont-root")
-        registry, executor, store = _setup([dep, root], auto_complete=False)
+        registry, executor = _setup([dep, root], auto_complete=False)
         registry.add_task(str(dep.id), status="failed")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
                 poll_interval_seconds=0.01,
@@ -589,10 +574,10 @@ class TestRevokedTasksInPlan:
 
     def _revoked_build(
         self, *, status: str = "cancelled", attempts: int = 0
-    ) -> tuple[BaseTask, BaseTask, typing.Any, typing.Any, typing.Any]:
+    ) -> tuple[BaseTask, BaseTask, typing.Any, typing.Any]:
         """A real two-task chain whose upstream another build left ``status``."""
         blocker, root = _chain("revoked-blocker", "revoked-root")
-        registry, executor, store = _setup([blocker, root], auto_complete=False)
+        registry, executor = _setup([blocker, root], auto_complete=False)
         registry.add_blocking_task(
             str(blocker.id),
             blocks={str(root.id)},
@@ -602,7 +587,7 @@ class TestRevokedTasksInPlan:
             namespace="pipelines",
             name="Ingest",
         )
-        return blocker, root, registry, executor, store
+        return blocker, root, registry, executor
 
     async def test_cancelled_task_in_plan_is_reset_and_run_in_the_same_pass(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -619,13 +604,12 @@ class TestRevokedTasksInPlan:
         skips the build whose own event caused a change, so a tick that reset
         the task and lingered would wait for news it had already heard.
         """
-        blocker, _, registry, executor, store = self._revoked_build()
+        blocker, _, registry, executor = self._revoked_build()
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
                 poll_interval_seconds=0.01,
@@ -657,14 +641,13 @@ class TestRevokedTasksInPlan:
         long as the retry keeps failing, which one transient registry error
         is enough to start.
         """
-        blocker, _, registry, executor, store = self._revoked_build()
+        blocker, _, registry, executor = self._revoked_build()
         registry.retry_error = RuntimeError("registry unavailable")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
                 poll_interval_seconds=0.01,
@@ -686,9 +669,9 @@ class TestRevokedTasksInPlan:
     ):
         """A cancelled upstream shared by several of this build's tasks is one
         actionable entry, so one reset — however many dependents it gates."""
-        blocker, root, registry, executor, store = self._revoked_build()
+        blocker, root, registry, executor = self._revoked_build()
         sibling = SyncOnlyTask(name="shared-blocker-sibling")
-        store.save_task(sibling)
+        registry.metadata_bodies[str(sibling.id)] = registry_body(sibling)
         registry.add_task(str(sibling.id), status="pending")
         registry.upstreams.setdefault(str(sibling.id), set()).add(str(blocker.id))
 
@@ -696,7 +679,6 @@ class TestRevokedTasksInPlan:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
                 poll_interval_seconds=0.01,
@@ -722,13 +704,12 @@ class TestRevokedTasksInPlan:
         build fails once nothing else can run — naming the task and the
         remedy (a re-trigger starts a new round).
         """
-        blocker, _, registry, executor, store = self._revoked_build(attempts=5)
+        blocker, _, registry, executor = self._revoked_build(attempts=5)
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
                 poll_interval_seconds=0.01,
@@ -754,13 +735,12 @@ class TestRevokedTasksInPlan:
         build reset and completed it — the reason for the skip is gone, and
         leaving the task skipped would wedge the build until a re-trigger.
         """
-        blocker, _, registry, executor, store = self._revoked_build(status="skipped")
+        blocker, _, registry, executor = self._revoked_build(status="skipped")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
                 poll_interval_seconds=0.01,
@@ -780,7 +760,7 @@ class TestRevokedTasksInPlan:
         skipped task with a FAILED upstream is not actionable, and the build
         fails on the result its fail_mode owns."""
         dep, mid, root = _chain("skip-dep", "skip-mid", "skip-root")
-        registry, executor, store = _setup([dep, mid, root], auto_complete=False)
+        registry, executor = _setup([dep, mid, root], auto_complete=False)
         registry.add_task(str(dep.id), status="failed")
         registry.add_task(str(mid.id), status="skipped")
 
@@ -788,7 +768,6 @@ class TestRevokedTasksInPlan:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
                 poll_interval_seconds=0.01,
@@ -812,13 +791,12 @@ class TestRevokedTasksInPlan:
         the ``fail_mode`` B was triggered with. B fails instead, and the
         message says a re-trigger — where the user *does* ask — resets it.
         """
-        blocker, _, registry, executor, store = self._revoked_build(status="failed")
+        blocker, _, registry, executor = self._revoked_build(status="failed")
 
         summary = await run_tick_aio(
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=TickConfig(
                 linger_seconds=0.2,
                 poll_interval_seconds=0.01,
@@ -843,7 +821,7 @@ class TestRevokedTasksInPlan:
         plan and RUNNING, so it shows up in ``running`` and the tick waits on
         it like any execution of its own. No blocker classification, no owner
         lookup: the claim's expiry is the whole answer, read by the probe."""
-        blocker, root, registry, executor, store = self._revoked_build(status="running")
+        blocker, root, registry, executor = self._revoked_build(status="running")
         registry.refs[str(blocker.id)] = ("fake", "fc-other-build")
         registry.expires_at[str(blocker.id)] = datetime.now(timezone.utc) + timedelta(
             hours=1
@@ -854,7 +832,6 @@ class TestRevokedTasksInPlan:
             uuid4(),
             registry=registry,
             task_executor=executor,
-            task_store=store,
             config=FAST_TICK,
         )
 
