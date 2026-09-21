@@ -25,10 +25,12 @@ none of, and ``testpaths`` in ``pyproject.toml`` still points only at
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
 from stardag_integration_tests.registry_live._diagnostics import (
+    record_non_timeout_failure,
     record_transport_timeout,
     transport_timeout,
 )
@@ -92,42 +94,70 @@ def pytest_configure(config: pytest.Config) -> None:
     _deployment = deployment
 
 
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> None:
-    """Diagnose a transport timeout at the instant it happens.
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
+    """Classify every failure, at the instant it happens.
 
-    Here rather than in a fixture, and for the "call" phase only, because
-    the timing is the whole value of it. The probe asks whether the
-    registry is answering *while the scenario's own request is timing
-    out*; a finaliser would run after the scenario's other teardown, by
-    which time the contention has passed and the registry answers
-    everything in milliseconds. Every occurrence would then read as the
-    same reassuring nothing.
+    Two records come out of this, and CI needs both: a transport timeout
+    is what buys a run its one retry, and anything else is what forbids
+    one. The tier runs twelve scenarios at once, so "somebody timed out"
+    and "somebody failed for real" are routinely both true of the same
+    run, and only the second may decide it.
 
-    It also runs before the autouse ``_registry_survived`` check below,
+    **Here rather than in a fixture, because the timing is the value.**
+    The probe asks whether the registry is answering *while the
+    scenario's own request is timing out*. A finaliser would run after
+    the scenario's other teardown -- including the autouse check below,
     which spends up to a hundred seconds retrying the boot read when the
-    registry is unreachable -- the probe would be measuring that delay
-    rather than the failure.
+    registry is unreachable -- by which time the contention has passed
+    and the registry answers everything in milliseconds. Every occurrence
+    would read as the same reassuring nothing.
 
-    The teardown phase is deliberately left out. The only registry call
-    there is ``assert_same_container``'s boot read, which already retries
-    six times over a hundred seconds -- so a timeout raised from it *is*
-    the probe, and re-probing would add nothing but delay.
+    **A wrapper rather than a plain hook**, so the decision is made on
+    pytest's own report. ``call.excinfo`` alone is set for a skip and for
+    an xfail as well as for a failure, and recording either as a real
+    failure would silently forbid a retry the run was entitled to.
 
-    The hook returns ``None`` throughout, so the report is still built by
-    pytest's own implementation. Under xdist this runs in the worker
-    process; the files it writes are on the runner's disk, which is what
-    CI reads back.
+    The teardown phase contributes timeouts but never failures. The only
+    registry call there is ``assert_same_container``'s boot read: a
+    timeout from it is this issue's failure class and is recorded (without
+    re-probing -- it just read that endpoint six times), while an
+    ``AssertionError`` from it is the recycle check firing, which has its
+    own marker and its own re-provisioning retry.
+
+    Nothing raised in here may reach pytest: a diagnostic that breaks
+    reporting would cost the run the very evidence it exists to collect.
+    Under xdist this runs in the worker process; the files it writes are
+    on the runner's disk, which is what CI reads back.
     """
-    if call.when != "call" or call.excinfo is None or _deployment is None:
-        return None
+    report = yield
+    try:
+        _classify(item, call, report)
+    except Exception as error:  # pragma: no cover - diagnostics only
+        print(f"[harness] failure classification errored: {error!r}", file=sys.stderr)
+    return report
+
+
+def _classify(
+    item: pytest.Item, call: pytest.CallInfo[None], report: pytest.TestReport
+) -> None:
+    if not report.failed or call.excinfo is None or _deployment is None:
+        return
+    if report.when not in ("call", "teardown"):
+        return
+
     error = call.excinfo.value
     timeout = transport_timeout(error)
-    if timeout is None:
-        return None
-    record_transport_timeout(
-        _deployment, nodeid=item.nodeid, error=error, timeout=timeout
-    )
-    return None
+    if timeout is not None:
+        record_transport_timeout(
+            _deployment,
+            nodeid=item.nodeid,
+            error=error,
+            timeout=timeout,
+            probe_now=report.when == "call",
+        )
+    elif report.when == "call":
+        record_non_timeout_failure(nodeid=item.nodeid, error=error)
 
 
 @pytest.fixture(autouse=True)

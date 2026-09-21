@@ -281,10 +281,13 @@ a query rather than a memory:
 
 ```bash
 gh api repos/stardag-dev/stardag/actions/runs/<run-id>/jobs \
-  -q '.jobs[] | select(.name=="Registry-live tier") | .id' \
-  | xargs -I{} gh api repos/stardag-dev/stardag/check-runs/{}/annotations \
+  -q '.jobs[] | select(.name=="Registry-live tier") | .check_run_url' \
+  | xargs -I{} gh api {}/annotations \
       -q '.[] | select(.annotation_level=="warning") | .title'
 ```
+
+The job's own `check_run_url` rather than its `id`: the two happen to be equal
+for Actions today, and nothing says they must stay so.
 
 If the rate does not fall once a cause is found and fixed, the answer is to
 escalate — never to widen what the retry accepts.

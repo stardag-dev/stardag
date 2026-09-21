@@ -34,6 +34,7 @@ import re
 import secrets
 import subprocess
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -443,10 +444,36 @@ def _scenario_apps() -> list[tuple[str, str]]:
 # about 3,300 entries against the registry.
 LOG_WINDOW = "3h"
 LOG_MAX_ENTRIES = 20000
-# Fetch-and-exit is the default (`-f` is what follows), so this bounds a
-# hung call rather than a streaming one. Generous, because the alternative
-# to a slow dump is no evidence at all.
-LOG_FETCH_TIMEOUT_SECONDS = 300
+
+# A deadline for the *whole* dump, not a timeout per app, and that is the
+# point of it. The registry-live job has thirty minutes, of which a first
+# run and a retry can already take twenty; four apps each free to hang for
+# minutes would end the job before the upload step, losing exactly the
+# evidence this exists to keep. Whatever is collected when the budget runs
+# out is what gets uploaded, and the apps that did not fit say so in their
+# own files. Measured: four apps take a few seconds each against a live
+# stack, so the budget is slack rather than a target.
+LOG_BUDGET_SECONDS = 240.0
+LOG_PER_APP_TIMEOUT_SECONDS = 120.0
+
+
+def _loggable_apps() -> list[str]:
+    """Every app whose logs are worth having, which is not the deployed set.
+
+    `_scenario_apps` drives deploy *and* stop, so an app may only be in it
+    if provisioning owns its lifecycle. `registry-live-rollover` does not
+    qualify -- ``test_rollover`` deploys it itself, twice, under two code
+    ids -- but it runs real workers, and a red rollover scenario with no
+    worker logs is the case this dump exists for. Hence a separate list,
+    with the difference stated rather than left to be noticed.
+    """
+    from .rollover_app import APP_NAME as ROLLOVER_APP
+
+    return [
+        DEFAULT_REGISTRY_APP,
+        *(name for _, name in _scenario_apps()),
+        ROLLOVER_APP,
+    ]
 
 
 def logs(modal_environment: str, output_dir: Path) -> None:
@@ -456,9 +483,8 @@ def logs(modal_environment: str, output_dir: Path) -> None:
     teardown runs ``modal environment delete`` once both tiers finish, and
     that takes the registry container, the scenario apps and all their logs
     together. Three separate occurrences on this tier were diagnosable only
-    because somebody happened to pull the logs by hand while the other tier
-    was still running, and one cause is still only a hypothesis because
-    nobody did.
+    because somebody pulled the logs by hand while the other tier was still
+    running, and one cause is still only a hypothesis because nobody did.
 
     So CI calls this before teardown can run and uploads the directory as a
     workflow artifact. Timestamps and container ids are asked for
@@ -466,14 +492,17 @@ def logs(modal_environment: str, output_dir: Path) -> None:
     container doing at the moment the client gave up", and neither the time
     nor which container served is in the default line format.
 
-    Deliberately forgiving. A failure here must never decide whether the
-    tier passed -- it is the diagnosis of a verdict already reached -- so
-    an app that cannot be read leaves its error in its own file and the
-    next app is still tried.
+    Deliberately forgiving, and bounded. A failure here must never decide
+    whether the tier passed -- it is the diagnosis of a verdict already
+    reached -- so an app that cannot be read leaves its error in its own
+    file and the next app is still tried, and the whole dump gives up at
+    ``LOG_BUDGET_SECONDS`` rather than risking the job's own deadline.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    for app_name in (DEFAULT_REGISTRY_APP, *(name for _, name in _scenario_apps())):
+    deadline = time.monotonic() + LOG_BUDGET_SECONDS
+    for app_name in _loggable_apps():
         destination = output_dir / f"{app_name}.log"
+        remaining = deadline - time.monotonic()
         command = [
             modal_cli(),
             "app",
@@ -488,21 +517,28 @@ def logs(modal_environment: str, output_dir: Path) -> None:
             "--timestamps",
             "--show-container-id",
         ]
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=LOG_FETCH_TIMEOUT_SECONDS,
+        if remaining <= 0:
+            body = ""
+            status = (
+                f"skipped: the {LOG_BUDGET_SECONDS:.0f}s budget for the whole "
+                f"dump was spent on the apps above"
             )
-            body = (result.stdout or "") + (result.stderr or "")
-            status = f"exit {result.returncode}"
-        except subprocess.TimeoutExpired:
-            body = ""
-            status = f"the fetch itself timed out after {LOG_FETCH_TIMEOUT_SECONDS}s"
-        except OSError as error:
-            body = ""
-            status = f"could not run the Modal CLI: {error}"
+        else:
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=min(remaining, LOG_PER_APP_TIMEOUT_SECONDS),
+                )
+                body = (result.stdout or "") + (result.stderr or "")
+                status = f"exit {result.returncode}"
+            except subprocess.TimeoutExpired:
+                body = ""
+                status = "the fetch itself timed out"
+            except OSError as error:
+                body = ""
+                status = f"could not run the Modal CLI: {error}"
 
         destination.write_text(
             f"# {app_name} in Modal environment {modal_environment}\n"

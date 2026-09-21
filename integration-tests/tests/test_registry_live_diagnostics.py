@@ -19,7 +19,10 @@ import pytest
 from stardag.exceptions import APIError
 
 from stardag_integration_tests.registry_live._diagnostics import (
+    BOOT_PROBE_PROMPT_SECONDS,
+    NON_TIMEOUT_MARKER_NAME,
     BootProbe,
+    record_non_timeout_failure,
     transport_timeout,
 )
 
@@ -27,7 +30,12 @@ _REQUEST = httpx.Request("GET", "https://registry.invalid/api/v1/builds")
 
 
 def _raised(error: BaseException) -> BaseException:
-    """``error`` with the ``__traceback__`` and links a real raise gives it."""
+    """Raise and catch ``error``, so it carries what a real raise gives it.
+
+    A bare instance has no ``__traceback__`` and no ``__context__``; the
+    discriminator walks both, so every test here hands it an exception
+    that has actually been through a ``raise``.
+    """
     try:
         raise error
     except BaseException as caught:  # noqa: BLE001 - that is the point
@@ -112,21 +120,82 @@ def test_a_circular_context_chain_terminates() -> None:
     assert transport_timeout(second) is first
 
 
+_SLOW = BOOT_PROBE_PROMPT_SECONDS + 1.0
+
+
 @pytest.mark.parametrize(
     ("probe", "expected"),
     [
-        (
+        pytest.param(
             BootProbe(answered=True, elapsed=0.2, boot_id="abc", error=None),
             "HYPOTHESIS B",
+            id="prompt-answer-means-the-database-path-is-blocked",
         ),
-        (
+        pytest.param(
             BootProbe(answered=False, elapsed=15.0, boot_id=None, error="x"),
             "HYPOTHESIS A",
+            id="no-answer-means-nothing-is-serving",
         ),
-        (BootProbe(answered=True, elapsed=0.2, boot_id="def", error=None), "RECYCLE"),
+        # The finding the threshold exists for: an endpoint returning a
+        # string held in a closure, after several seconds, is evidence of a
+        # starved container -- not of a healthy one behind a blocked
+        # database. "It answered" is not the question.
+        pytest.param(
+            BootProbe(answered=True, elapsed=_SLOW, boot_id="abc", error=None),
+            "HYPOTHESIS A",
+            id="slow-answer-is-starvation-not-a-blocked-database",
+        ),
+        pytest.param(
+            BootProbe(answered=True, elapsed=0.2, boot_id="def", error=None),
+            "RECYCLE",
+            id="a-different-boot-id-outranks-both",
+        ),
     ],
 )
 def test_the_probe_names_the_hypothesis_it_supports(
     probe: BootProbe, expected: str
 ) -> None:
     assert probe.label("abc") == expected
+
+
+def test_the_verdict_prose_cannot_disagree_with_the_counted_label() -> None:
+    """The artifact's sentence and CI's word are one decision, not two."""
+    for probe in (
+        BootProbe(answered=True, elapsed=0.2, boot_id="abc", error=None),
+        BootProbe(answered=True, elapsed=_SLOW, boot_id="abc", error=None),
+        BootProbe(answered=False, elapsed=15.0, boot_id=None, error="x"),
+        BootProbe(answered=True, elapsed=0.2, boot_id="def", error=None),
+    ):
+        assert probe.verdict("abc").startswith(probe.label("abc") + " -- ")
+
+
+def test_a_non_timeout_failure_is_named_where_ci_will_refuse_the_retry(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Twelve workers share a run; one of these must end it for all of them."""
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    record_non_timeout_failure(
+        nodeid="tests_registry_live/test_x.py::test_a",
+        error=AssertionError("the build never completed"),
+    )
+    record_non_timeout_failure(
+        nodeid="tests_registry_live/test_y.py::test_b",
+        error=RuntimeError("boom"),
+    )
+
+    # Appended rather than rewritten: each xdist worker is its own process,
+    # and a whole-file write would leave only whichever failed last.
+    lines = (tmp_path / NON_TIMEOUT_MARKER_NAME).read_text().splitlines()
+    assert lines == [
+        "tests_registry_live/test_x.py::test_a -- AssertionError",
+        "tests_registry_live/test_y.py::test_b -- RuntimeError",
+    ]
+
+
+def test_nothing_is_written_when_no_diagnostics_directory_is_configured(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A developer running the tier locally configures none of this."""
+    monkeypatch.delenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", raising=False)
+    record_non_timeout_failure(nodeid="x::y", error=AssertionError("boom"))
+    assert list(tmp_path.iterdir()) == []

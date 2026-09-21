@@ -57,6 +57,16 @@ DIAGNOSTICS_DIR_ENV = "STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR"
 # its retry is just the tier again.
 TIMEOUT_MARKER_NAME = "transport-timeouts"
 
+# Its counterweight, and the reason the retry cannot launder a product
+# failure. The tier runs twelve scenarios at once, so one worker meeting a
+# transport timeout says nothing about what the other eleven met: without
+# this, a run where one scenario timed out and another failed an assertion
+# would be retried whole, and a flaky assertion passing the second time
+# would turn the check green over a real failure. Every call-phase failure
+# that is *not* a transport timeout is named here, and CI refuses to retry
+# a run that has any.
+NON_TIMEOUT_MARKER_NAME = "non-timeout-failures"
+
 # Short on purpose. The question the probe asks is not "does the registry
 # work" but "did it answer *promptly* while a real call was timing out",
 # and a generous timeout blurs exactly that distinction. Fifteen seconds
@@ -64,6 +74,17 @@ TIMEOUT_MARKER_NAME = "transport-timeouts"
 # a closure) and far shorter than the 30s the SDK client had already spent
 # per attempt before giving up.
 BOOT_PROBE_TIMEOUT_SECONDS = 15.0
+
+# What counts as answering *promptly*, which is the word the whole
+# discrimination rests on. "It answered at all" is not the question: a
+# probe that comes back after fourteen of its fifteen seconds is itself
+# evidence of a starved container, not of a healthy one behind a blocked
+# database. A healthy probe against a live stack measured about 0.5s
+# including TLS and the Modal edge; three seconds is six times that and
+# still a twentieth of the client timeout the real call had already blown
+# through, so the band in between is wide enough that neither verdict is
+# reached by a near miss.
+BOOT_PROBE_PROMPT_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -81,36 +102,54 @@ class BootProbe:
             return "HYPOTHESIS A"
         if self.boot_id != expected_boot_id:
             return "RECYCLE"
+        if self.elapsed > BOOT_PROBE_PROMPT_SECONDS:
+            return "HYPOTHESIS A"
         return "HYPOTHESIS B"
 
     def verdict(self, expected_boot_id: str) -> str:
-        """Which hypothesis this probe supports, in one sentence."""
-        if not self.answered:
-            return (
-                f"HYPOTHESIS A -- the boot probe also failed after "
-                f"{self.elapsed:.1f}s ({self.error}). Nothing answered at "
-                f"all, so the block is not in the database path: the "
-                f"container is starved, throttled or wedged -- or, since the "
-                f"probe runs in the stalled process, the runner itself is. "
-                f"The levers are the container's resources and the tier's "
-                f"worker count."
+        """The same judgement in a sentence, derived from ``label``.
+
+        Derived rather than decided again, so the artifact's prose and the
+        word CI counts cannot come apart.
+        """
+        label = self.label(expected_boot_id)
+        if label == "RECYCLE":
+            detail = (
+                f"the boot probe answered in {self.elapsed:.1f}s with a "
+                f"*different* boot id ({expected_boot_id} -> {self.boot_id}), "
+                f"so the container was replaced. This is the recycle case; "
+                f"the post-scenario check records it separately and CI "
+                f"re-provisions before retrying."
             )
-        if self.boot_id != expected_boot_id:
-            return (
-                f"NEITHER -- the boot probe answered in {self.elapsed:.1f}s "
-                f"with a *different* boot id ({expected_boot_id} -> "
-                f"{self.boot_id}), so the container was replaced. This is the "
-                f"recycle case; the post-scenario check records it separately "
-                f"and CI re-provisions before retrying."
+        elif label == "HYPOTHESIS A" and self.answered:
+            detail = (
+                f"the boot probe answered, but took {self.elapsed:.1f}s to "
+                f"return a string held in a closure -- over the "
+                f"{BOOT_PROBE_PROMPT_SECONDS:.0f}s this treats as prompt. A "
+                f"slow answer is not evidence of a blocked database path; it "
+                f"is evidence that the container, or the runner the probe "
+                f"ran on, is starved or throttled. The levers are the "
+                f"container's resources and the tier's worker count."
             )
-        return (
-            f"HYPOTHESIS B -- the boot probe answered in {self.elapsed:.1f}s, "
-            f"from the same container ({self.boot_id}). The process is alive "
-            f"and serving HTTP, so what timed out is the *database* path: "
-            f"pool exhaustion or lock waits under concurrent clients. That "
-            f"makes this a product signal, and the lever is upstream in the "
-            f"registry's locking."
-        )
+        elif label == "HYPOTHESIS A":
+            detail = (
+                f"the boot probe also failed, after {self.elapsed:.1f}s "
+                f"({self.error}). Nothing answered at all, so the block is "
+                f"not in the database path: the container is starved, "
+                f"throttled or wedged -- or, since the probe runs in the "
+                f"stalled process, the runner itself is. The levers are the "
+                f"container's resources and the tier's worker count."
+            )
+        else:
+            detail = (
+                f"the boot probe answered in {self.elapsed:.1f}s, from the "
+                f"same container ({self.boot_id}). The process is alive and "
+                f"serving HTTP promptly, so what timed out is the *database* "
+                f"path: pool exhaustion or lock waits under concurrent "
+                f"clients. That makes this a product signal, and the lever "
+                f"is upstream in the registry's locking."
+            )
+        return f"{label} -- {detail}"
 
 
 def probe_boot(
@@ -237,14 +276,34 @@ def record_transport_timeout(
     nodeid: str,
     error: BaseException,
     timeout: BaseException,
+    probe_now: bool = True,
 ) -> BootProbe:
     """Probe the registry, print the finding, and leave it for CI to read.
 
     Called at the moment a scenario fails, which is the only moment the
     probe answers a useful question: a minute later the contention that
     caused the timeout has passed and the registry answers everything.
+
+    ``probe_now=False`` is for the one caller that has already asked the
+    question -- a timeout raised out of ``assert_same_container``, which
+    read the boot endpoint six times over a hundred seconds before giving
+    up. That *is* the probe, and a seventh read would only add delay, so
+    the record carries the failed reads as the probe's own result.
     """
-    probe = probe_boot(deployment.api_url)
+    probe = (
+        probe_boot(deployment.api_url)
+        if probe_now
+        else BootProbe(
+            answered=False,
+            elapsed=0.0,
+            boot_id=None,
+            error=(
+                "not probed again: this timeout was raised by the "
+                "post-scenario boot check, which had already read the "
+                "endpoint six times over a hundred seconds without an answer"
+            ),
+        )
+    )
     record = _render(
         deployment, nodeid=nodeid, error=error, timeout=timeout, probe=probe
     )
@@ -277,6 +336,35 @@ def record_transport_timeout(
             file=sys.stderr,
         )
     return probe
+
+
+def record_non_timeout_failure(*, nodeid: str, error: BaseException) -> None:
+    """Name a failure that the retry must not be allowed to paper over.
+
+    The other half of the discriminator, and the half that only matters
+    because twelve scenarios share a run. A transport timeout in one
+    worker says nothing about what the other eleven met; CI reads this
+    file and refuses to retry a run that holds any, so a real failure
+    cannot be carried to green on the back of somebody else's timeout.
+
+    Only the call phase writes here. A teardown ``AssertionError`` is the
+    recycled-container check firing, which has its own marker and its own
+    retry -- and that retry re-provisions precisely because the recycle
+    explains *every* failure in the run, which a transport timeout does
+    not.
+    """
+    directory = _diagnostics_dir()
+    if directory is None:
+        return
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / NON_TIMEOUT_MARKER_NAME).open("a") as marker:
+            marker.write(f"{nodeid} -- {type(error).__name__}\n")
+    except OSError as failure:  # pragma: no cover - diagnostics only
+        print(
+            f"Could not write the failure marker to {directory}: {failure}",
+            file=sys.stderr,
+        )
 
 
 def _diagnostics_dir() -> Path | None:

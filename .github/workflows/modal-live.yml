@@ -368,6 +368,18 @@ jobs:
       #    well -- `_diagnostics.transport_timeout`. Its retry does *not*
       #    re-provision, because the stack is intact.
       #
+      #    **And it is refused outright if anything else failed in the same
+      #    run.** Twelve scenarios run at once, so one worker timing out
+      #    says nothing about what the other eleven met; retrying on the
+      #    strength of the timeout alone would let a flaky real failure
+      #    pass on the second attempt and turn the check green over it.
+      #    The harness names every call-phase failure that was *not* a
+      #    timeout in a second marker, and the presence of that marker ends
+      #    the run. The recycle branch above is deliberately not gated the
+      #    same way: a lost database explains *every* failure in the run,
+      #    which is why its retry re-provisions, whereas one scenario's
+      #    timeout explains only that scenario.
+      #
       # Every retry emits a workflow warning and is counted there, so this
       # measures the problem rather than silencing it. If the count does
       # not fall, the answer is to escalate, never to widen the retry.
@@ -387,6 +399,7 @@ jobs:
           rm -rf "$diag"
           mkdir -p "$diag"
           timeouts="$diag/transport-timeouts"
+          others="$diag/non-timeout-failures"
 
           if tox -e registry-modal-live $POSARGS 2>&1 \
                | tee "$diag/pytest-attempt-1.log"; then
@@ -404,13 +417,21 @@ jobs:
               "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER") -- the run's database" \
               "went with it. Re-provisioning and running the tier once more."
             reprovision=yes
-          elif [ -f "$timeouts" ]; then
+          elif [ -f "$timeouts" ] && [ ! -f "$others" ]; then
             echo "::warning title=Registry transport timeout::$(tr '\n' ';' \
               < "$timeouts") -- no HTTP response arrived, so no assertion" \
               "was evaluated. Running the tier once more; the boot probe in" \
               "the diagnostics artifact says whether the container was" \
               "answering at the time (STA-86)."
             reprovision=no
+          elif [ -f "$timeouts" ]; then
+            echo "A scenario hit a transport timeout, but this run also" \
+                 "failed for reasons that are not one:"
+            sed 's/^/  /' "$others"
+            echo "Not retried. A retry could only decide the run by letting" \
+                 "those failures pass on a second attempt, which is the" \
+                 "outcome the discriminator exists to prevent."
+            exit 1
           else
             echo "The tier failed against the registry container it started" \
                  "with, and no scenario reported a transport timeout. A real" \
@@ -455,6 +476,11 @@ jobs:
       - name: Dump the Modal logs for the run
         if: failure() || steps.scenarios.outputs.diagnose == 'true'
         continue-on-error: true
+        # Belt and braces with the dump's own budget. Both exist because
+        # the job's deadline is the one thing that would take the artifact
+        # down with it, and this step is the last thing standing between a
+        # red run and its evidence.
+        timeout-minutes: 6
         run: |
           uv run --project integration-tests --python 3.12 \
             python -m stardag_integration_tests.registry_live.provision logs \
