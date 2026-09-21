@@ -959,6 +959,21 @@ class TaskEventResponse(BaseModel):
     # see ``FrontierTaskRef``. Always populated, on every endpoint
     # returning this model.
     attempt_count: int = 0
+    # The execution the task is now recorded as running under, echoed back
+    # on every endpoint returning this model.
+    #
+    # Its first job is confirmation: a caller that sent an
+    # ``execution_id`` and reads its own back knows the server honoured
+    # it, where a server predating the field answers ``None`` and the
+    # caller can log that it is running without the protections the id
+    # buys. Deliberately not an error — unlike a structure scope, an
+    # unrecognised execution id costs only those protections, which is
+    # the behaviour of every release before this one, so refusing would
+    # turn a version skew into an outage for no correctness gain.
+    #
+    # Its second is diagnostic: on a claim the caller lost, this names
+    # the execution that won.
+    execution_id: UUID | None = None
 
 
 class TaskListResponse(BaseModel):

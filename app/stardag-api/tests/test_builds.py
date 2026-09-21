@@ -3218,6 +3218,10 @@ async def test_evict_holder_frees_slot(client: AsyncClient):
         "latest_status": "failed",
         # The eviction ends the one attempt the holder made.
         "attempt_count": 1,
+        # These holders were started without an execution identity, and
+        # an eviction records a failure rather than a start, so there is
+        # none to echo.
+        "execution_id": None,
     }
 
     # Failure recorded with the evictor identity (mocked auth user).
@@ -3406,6 +3410,10 @@ async def test_evicted_then_worker_completes_sticky_completed(client: AsyncClien
         "latest_status": "failed",
         # The eviction ends the one attempt the holder made.
         "attempt_count": 1,
+        # These holders were started without an execution identity, and
+        # an eviction records a failure rather than a start, so there is
+        # none to echo.
+        "execution_id": None,
     }
 
     # The (still-alive) worker reports completion afterwards.
@@ -3527,6 +3535,10 @@ async def test_evict_admin_allowed_and_records_admin_identity(client: AsyncClien
         "latest_status": "failed",
         # The eviction ends the one attempt the holder made.
         "attempt_count": 1,
+        # These holders were started without an execution identity, and
+        # an eviction records a failure rather than a start, so there is
+        # none to echo.
+        "execution_id": None,
     }
 
 

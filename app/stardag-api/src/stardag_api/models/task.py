@@ -228,6 +228,38 @@ class Task(Base, TimestampMixin):
     )
     latest_commit_hash: Mapped[str | None] = mapped_column(String(64))
 
+    # Identity of the execution the task currently holds, minted by the
+    # client that is about to run it and carried on every call about that
+    # execution: the claiming start, the tick's ref-recording start, the
+    # worker's own self-report, and its interruption/preemption reports.
+    #
+    # It exists because the claim is taken BEFORE the spawn, so there is no
+    # executor ref yet, and until there was an identity two things could not
+    # be told apart:
+    #
+    # - a retried claiming start (the client re-sending a POST whose response
+    #   was lost) from a genuine second attempt of the same build. Refusing
+    #   the retry told a worker somebody else held the task, so it stood down
+    #   from a task it held the claim on, and the task sat claimed and not
+    #   running until the claim expired.
+    # - a worker's self-report for the execution the task still holds from
+    #   one whose claim lapsed and was taken over meanwhile. The latter must
+    #   not re-grant a claim over the live holder.
+    #
+    # Set (or cleared) on every TASK_STARTED from that event's metadata, the
+    # same semantics as the executor columns below, and cleared by
+    # TASK_RETRIED with them. NULL means "no execution identity known" —
+    # every rule treats that as the pre-identity behaviour, so the column is
+    # additive by construction and an SDK predating it is unaffected.
+    #
+    # NOT a claim, and the distinction is the one to keep hold of: the claim
+    # (``latest_status == RUNNING`` plus its expiry) says who may run the
+    # task next; this says which execution it is currently running under.
+    # A container whose execution is no longer named here may well still be
+    # running — the server cannot stop anything — which is why nothing here
+    # concludes a container is gone.
+    latest_execution_id: Mapped[UUID | None] = mapped_column(Uuid)
+
     # Executor reference of the most recent TASK_STARTED event (e.g.
     # executor="modal", executor_ref=<Modal function call id>). Lets a
     # resumed build re-attach to a detached execution that is still running
