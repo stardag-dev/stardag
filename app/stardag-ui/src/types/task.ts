@@ -137,8 +137,11 @@ export interface BulkCancelBuildsRequest {
   idle_for_seconds?: number;
   reactive_app_name?: string | null;
   include_reactive?: boolean;
-  // Also cancel the build's RUNNING/SUSPENDED tasks, releasing the
-  // execution claims and concurrency slots they hold.
+  // Also cancel the tasks each build *owns* — RUNNING, SUSPENDED or
+  // INTERRUPTED, and only where that build produced the current status —
+  // releasing the execution claims and concurrency slots they hold. The
+  // ownership scope is what keeps it from declaring another build's live
+  // worker dead; see `services.claims.BUILD_OWNED_STATUSES`.
   cascade?: boolean;
   dry_run?: boolean;
   limit?: number;
