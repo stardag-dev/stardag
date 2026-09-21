@@ -419,11 +419,12 @@ class TestStopCommand:
             "interrupted",
         }
 
-    def test_json_stdout_stays_one_document_through_a_real_run(self):
-        """Per-call progress must not join the payload on stdout."""
+    def test_json_document_reports_what_happened(self):
+        """Written after the run, so every field is about the past."""
         import json
 
-        registry = _mock_registry([_row()])
+        row = _row()
+        registry = _mock_registry([row])
         with (
             _patch_resolve(registry),
             mock.patch.object(
@@ -437,7 +438,63 @@ class TestStopCommand:
         assert result.exit_code == 0, result.output
         payload = json.loads(result.stdout)
         assert payload["dry_run"] is False
-        assert "stopped" not in result.stdout
+        assert payload["build_cancelled"] is True
+        assert payload["stopped_count"] == 1
+        assert payload["stop_results"] == [
+            {
+                "task_id": row.task_id,
+                "executor_ref": row.latest_executor_ref,
+                "stopped": True,
+                "error": None,
+            }
+        ]
+
+    def test_an_aborted_run_writes_no_document_at_all(self):
+        """The failure this replaces: a complete-looking document from a
+        run that stopped nothing and cancelled nothing. A caller reading
+        stdout cannot see an exit code, so the document must not exist
+        unless it is true."""
+        registry = _mock_registry([_row()])
+        with (
+            _patch_resolve(registry),
+            mock.patch.object(
+                _stop,
+                "cancel_modal_calls",
+                side_effect=_stop.ModalUnavailable("no modal"),
+            ),
+        ):
+            result = runner.invoke(app, ["stop", BUILD_ID, "--json", "--yes"])
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        registry.build_cancel.assert_not_called()
+
+    def test_a_call_that_could_not_be_stopped_is_in_the_document(self):
+        # The build is still cancelled -- refusing to release the claims
+        # over one unreachable call would strand every other task -- so
+        # the per-call entry is the only place a partial stop is visible.
+        import json
+
+        registry = _mock_registry([_row(), _row()])
+
+        def _cancel_calls(executions):
+            return [
+                _stop.CancelOutcome(executions[0], error="NotFoundError: gone"),
+                _stop.CancelOutcome(executions[1]),
+            ]
+
+        with (
+            _patch_resolve(registry),
+            mock.patch.object(_stop, "cancel_modal_calls", side_effect=_cancel_calls),
+        ):
+            result = runner.invoke(app, ["stop", BUILD_ID, "--json", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["build_cancelled"] is True
+        assert payload["stopped_count"] == 1
+        assert [r["stopped"] for r in payload["stop_results"]] == [False, True]
+        assert payload["stop_results"][0]["error"] == "NotFoundError: gone"
 
     def test_json_refuses_to_prompt_before_writing_anything(self):
         # The refusal has to come *before* the document: a caller parsing

@@ -237,6 +237,28 @@ describe("BuildStopPanel", () => {
     );
   });
 
+  it("does not leave the copied-flash timer running after unmount", async () => {
+    // Unmounting mid-flash would set state on a dead component; a second
+    // copy inside the flash would let the first timer clear the label
+    // early. One tracked timer, cleared on both paths.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      answerWith([makeTask()]);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const { unmount } = renderPanel();
+      await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+      await user.click(screen.getByRole("button", { name: "Copy" }));
+      expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+
+      unmount();
+      // Would warn about a state update on an unmounted component if the
+      // timer still fired into the dead tree.
+      vi.advanceTimersByTime(5000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("pages until the server says it is done", async () => {
     // One page is not enough: a build's executions can sit entirely on
     // later pages, and finding none is what this panel renders as absent.

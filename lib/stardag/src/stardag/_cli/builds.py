@@ -782,27 +782,34 @@ def builds_stop(
             )
             raise typer.Exit(1)
 
-        if json_output:
-            _emit_json(
-                {
-                    "build_id": str(parsed),
-                    "selected": [_stop_json(e) for e in selected],
-                    "excluded_by_filter": [_stop_json(e) for e in excluded],
-                    "dry_run": dry_run,
-                }
-            )
-            if dry_run:
-                return
-        else:
-            _render_executions(selected, excluded, build_id)
+        # The document describes the *whole run*, and is therefore written
+        # once, at the end of it — after the calls have been stopped and
+        # the build cancelled. Emitting the selection up front and acting
+        # afterwards is what left a complete, successful-looking document
+        # on stdout for a run that aborted partway (Modal not importable,
+        # say) and stopped nothing. A caller reading stdout cannot see an
+        # exit code, so the document must not exist unless it is true.
+        payload: dict[str, Any] = {
+            "build_id": str(parsed),
+            "selected": [_stop_json(e) for e in selected],
+            "excluded_by_filter": [_stop_json(e) for e in excluded],
+            "dry_run": dry_run,
+        }
 
         if dry_run:
-            if not json_output:
+            # Nothing happens, so there is nothing to wait for.
+            if json_output:
+                _emit_json(payload)
+            else:
+                _render_executions(selected, excluded, build_id)
                 console.print(
                     "\n[bold]Dry run — nothing was stopped and the build "
                     "was not cancelled.[/bold]"
                 )
             return
+
+        if not json_output:
+            _render_executions(selected, excluded, build_id)
 
         if not yes:
             # --json with no --yes already exited above, before anything
@@ -812,10 +819,10 @@ def builds_stop(
                 abort=True,
             )
 
-        # Everything from here is progress reporting, and in --json mode it
-        # goes to stderr: the document is already on stdout, and the
-        # contract for --json is that nothing else joins it there.
+        # Progress reporting; in --json mode it goes to stderr so that
+        # stdout stays the one document.
         report = error_console if json_output else console
+        stop_results: list[dict[str, Any]] = []
 
         if stoppable:
             try:
@@ -829,6 +836,15 @@ def builds_stop(
                 )
                 raise typer.Exit(1)
             _render_cancel_outcomes(outcomes, report)
+            stop_results = [
+                {
+                    "task_id": o.execution.task_id,
+                    "executor_ref": o.execution.executor_ref,
+                    "stopped": o.ok,
+                    "error": o.error,
+                }
+                for o in outcomes
+            ]
             if any(not o.ok for o in outcomes):
                 # Reported, not fatal. Every failure here is "this one call
                 # could not be reached"; refusing to release the claims
@@ -844,6 +860,14 @@ def builds_stop(
             registry.build_cancel(parsed, cascade=True)
         except StardagError as e:
             _fail(e)
+
+        if json_output:
+            # Now, and only now: every field below is a statement about
+            # something that has already happened.
+            payload["stop_results"] = stop_results
+            payload["stopped_count"] = sum(1 for r in stop_results if r["stopped"])
+            payload["build_cancelled"] = True
+            _emit_json(payload)
     finally:
         registry.close()
 

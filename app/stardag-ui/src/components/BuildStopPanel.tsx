@@ -85,6 +85,18 @@ export function BuildStopPanel({
   // A slow response from a previous build or environment must not
   // overwrite the current one's list.
   const epochRef = useRef(0);
+  // The "Copied" flash's timer, so it can be cancelled. Two reasons it
+  // needs to be: unmounting mid-flash would set state on a dead
+  // component, and a second copy before the first flash expires would
+  // otherwise leave the earlier timer to clear the label early.
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (copiedTimer.current !== null) clearTimeout(copiedTimer.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!buildId || !environmentId) return;
@@ -165,7 +177,11 @@ export function BuildStopPanel({
     try {
       await navigator.clipboard.writeText(command);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      if (copiedTimer.current !== null) clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => {
+        copiedTimer.current = null;
+        setCopied(false);
+      }, 2000);
     } catch (err) {
       console.error("Failed to copy:", err);
     }

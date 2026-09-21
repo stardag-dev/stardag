@@ -454,12 +454,20 @@ nesting as the REST response, minus any field this SDK version does not model.
 `builds cleanup --json --apply` requires `--yes`, since it cannot prompt
 without contaminating the output.
 
-`builds stop --json` emits its selection — `selected` and
-`excluded_by_filter` — and then acts on it, so a document on stdout means
-the stop went ahead. Pair it with `--dry-run` for the read-only form.
-Without `--dry-run` it likewise requires `--yes`, and the refusal comes
-**before** anything reaches stdout, so a run that stopped nothing never
-leaves a successful-looking document behind.
+`builds stop --json` writes its document **after** it has acted, not
+before, so the document is a statement about what happened rather than
+about what was intended. On a real run it carries the selection
+(`selected`, `excluded_by_filter`) plus `stop_results` — one entry per
+call, with `stopped` and any `error` — `stopped_count` and
+`build_cancelled`. With `--dry-run` it carries the selection and
+`dry_run: true`, and nothing has happened.
+
+A run that aborts partway — `modal` not importable, the cancel refused —
+writes **no document at all** and exits non-zero. So stdout being empty is
+the honest signal that nothing completed, and `stop_results` is where a
+partial stop shows up: the build is still cancelled when an individual
+call could not be reached, and that entry says so. Check the exit code
+first either way; a document is not a claim that every call died.
 
 ### Reading the frontier
 
