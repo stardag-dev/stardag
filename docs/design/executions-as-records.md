@@ -130,8 +130,10 @@ correct state — is the record that is not being built.
 
 ## What the identity decides, and what it refuses to
 
-Minted by the caller before it claims. **Today it is sent with one
-call, the claiming start**; repeating it on the start that records the
+Minted by the caller before it claims — by **both** engines, the
+resident one re-sending it on every iteration of its wait-and-retry
+loop, since all of those iterations are one logical attempt.
+**Today it is sent with one call, the claiming start**; repeating it on the start that records the
 reference, on the worker's own self-report and on its interruption and
 preemption reports is the worker half, and arrives with STA-79.
 

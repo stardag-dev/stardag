@@ -149,8 +149,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
   `task_start_claim_aio` takes an optional `execution_id`: mint one
   before claiming and re-send the same value if the request is retried.
-  The reactive tick does this for you. Sending none is fully supported
-  and behaves exactly as before.
+  **Both engines do this for you.** Sending none is fully supported and
+  behaves exactly as before.
+
+  The resident engine is the more affected of the two, not the lesser:
+  its claim sits inside a wait-and-retry loop that polls until another
+  build's claim frees up, so a lost response is followed by another
+  attempt _by construction_, where the reactive engine claims once per
+  tick pass and needs the HTTP client's own retry to reach the same
+  failure. Its identity is minted once per `acquire_claim` call and
+  re-sent on every iteration — one logical attempt, one identity.
 
 ### Registry API
 

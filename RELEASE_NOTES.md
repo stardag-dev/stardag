@@ -169,8 +169,14 @@ expired.
 before claiming and re-send the same value if the request is retried;
 the registry grants the repeat and denies a different id from the same
 build, as it always denied a second attempt. **Nothing is required of
-you** — it is optional, the reactive tick does it for you, and sending
-none behaves exactly as before. It needs a registry at `server-v0.5.0`
+you** — it is optional, **both engines do it for you**, and sending none
+behaves exactly as before.
+
+The resident engine is the more affected of the two. Its claim sits in a
+wait-and-retry loop that polls until another build's claim frees up, so
+a lost response is followed by another attempt by construction; the
+reactive engine claims once per tick pass and needs the HTTP client's
+own retry to reach the same failure. It needs a registry at `server-v0.5.0`
 or newer to have any effect; against an older one it is ignored, which
 is simply the previous behaviour.
 

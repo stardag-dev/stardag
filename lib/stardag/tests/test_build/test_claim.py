@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import typing
+from uuid import uuid4
 
 import pytest
 
@@ -50,6 +51,17 @@ class ClaimRegistry(RecordingRegistry):
         self.statuses: dict[str, str] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
         self.expires_at: dict[str, str] = {}
+        # Per task, the identity of the claim it is held under -- the
+        # API's ``tasks.latest_execution_id``.
+        self.execution_ids: dict[str, str | None] = {}
+        # Every identity this registry was sent on a claim, in order.
+        self.claim_execution_ids: list[str | None] = []
+        # Simulates a lost response: the first claim commits server-side
+        # and the caller is told ``already_running`` -- what the client's
+        # own transport retry sees when the original answer never
+        # arrived. The resident engine then re-asks by construction,
+        # because its claim sits in a wait-and-retry loop.
+        self.lose_first_response = False
 
     def seed_running(
         self,
@@ -78,12 +90,31 @@ class ClaimRegistry(RecordingRegistry):
     ) -> StartClaimResult:
         tid = str(task.id)
         self._record("task_start_claim_aio", task.id)
+        self.claim_execution_ids.append(
+            None if execution_id is None else str(execution_id)
+        )
+        if claim and self.lose_first_response:
+            # Commit, then answer as though the response was lost and
+            # the client's retry met its own claim.
+            self.lose_first_response = False
+            self.statuses[tid] = "running"
+            self.execution_ids[tid] = (
+                None if execution_id is None else str(execution_id)
+            )
+            return StartClaimResult(
+                started=False,
+                denied_reason="already_running",
+                execution_id=self.execution_ids[tid],
+            )
         status = self.statuses.get(tid)
         # Both denials are the *claim's*, and the server gates them on it
         # (routes/builds.py). A double that denied regardless could not
         # emulate the limiter's unclaiming acquire, which starts a task its
         # own build has already claimed.
-        if claim and status == "running":
+        held = self.execution_ids.get(tid)
+        # The same attempt asking again -- the server's rule.
+        same_attempt = execution_id is not None and held == str(execution_id)
+        if claim and status == "running" and not same_attempt:
             stored_executor, stored_ref = self.refs.get(tid, (None, None))
             return StartClaimResult(
                 started=False,
@@ -91,12 +122,22 @@ class ClaimRegistry(RecordingRegistry):
                 executor=stored_executor,
                 executor_ref=stored_ref,
                 latest_status_expires_at=self.expires_at.get(tid),
+                execution_id=held,
             )
         if claim and status == "completed":
             return StartClaimResult(started=False, denied_reason="already_completed")
         self.statuses[tid] = "running"
         self.refs[tid] = (executor, executor_ref)
-        return StartClaimResult(started=True)
+        if claim:
+            # A granted claim records its identity, including recording
+            # none: it is a new attempt and inherits nothing.
+            self.execution_ids[tid] = (
+                None if execution_id is None else str(execution_id)
+            )
+        return StartClaimResult(
+            started=True,
+            execution_id=None if execution_id is None else str(execution_id),
+        )
 
     async def task_start_aio(
         self,
@@ -230,6 +271,68 @@ class TestClaimWinner:
         assert task.complete()
         # The engine's own ref-carrying start still lands.
         assert registry.has_call("task_start_aio", task.id)
+
+
+class TestClaimIdentity:
+    """The resident engine's claim carries an identity, minted once per
+    attempt and re-sent on every iteration of its wait-and-retry loop.
+
+    This is the *more* reachable of the two engines, not the lesser one.
+    The reactive engine claims once per tick pass, so a lost response
+    there needs the HTTP client's own retry to become the failure; here
+    the claim sits inside a ``while True:`` loop that polls until
+    another build's claim frees up, so another attempt follows by
+    construction.
+    """
+
+    async def test_a_lost_response_is_recovered_on_the_next_iteration(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The claim commits, its answer is lost, and the re-ask meets
+        the build's own claim. Without an identity that is
+        ``already_running`` — indistinguishable from a real loss — so the
+        build waits out a claim it holds itself and then fails the task.
+        """
+        task = SyncOnlyTask(name="claim-lost-response")
+        registry = ClaimRegistry()
+        registry.lose_first_response = True
+
+        summary = await build_aio(
+            [task],
+            task_executor=FakeDetachedExecutor(),
+            registry=registry,
+            # Bounded so a regression fails in seconds rather than
+            # hanging: minting inside the loop makes the build wait out
+            # a claim it holds itself, which is the production symptom
+            # and, untimed, a five-minute test.
+            claim_config=FAST_CLAIM,
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.complete()
+        sent = registry.claim_execution_ids
+        assert len(sent) >= 2, f"the loop did not re-ask: {sent}"
+        assert sent[0] is not None, "the claim went out with no identity"
+        assert len(set(sent)) == 1, (
+            "the loop minted a new identity per iteration, so the re-ask "
+            f"looked like a second attempt and would be refused: {sent}"
+        )
+
+    async def test_a_second_attempt_is_still_refused(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The property the identity must not cost: a different id from
+        the same build is a second attempt and is denied, exactly as a
+        neighbour's claim is."""
+        task = SyncOnlyTask(name="claim-second-attempt")
+        registry = ClaimRegistry()
+
+        won = await registry.task_start_claim_aio(uuid4(), task, execution_id=uuid4())
+        again = await registry.task_start_claim_aio(uuid4(), task, execution_id=uuid4())
+
+        assert won.started
+        assert not again.started
+        assert again.denied_reason == "already_running"
 
 
 class TestClaimLoser:
