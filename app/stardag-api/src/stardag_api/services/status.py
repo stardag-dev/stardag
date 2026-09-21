@@ -261,11 +261,35 @@ def _names_the_execution(
     """
     metadata = event.event_metadata or {}
     reported_execution = metadata.get("execution_id")
-    if reported_execution is not None:
-        if current_execution_id is None:
-            return True
-        return str(reported_execution) == str(current_execution_id)
     reported_ref = metadata.get("executor_ref")
+    if reported_execution is not None:
+        if current_execution_id is not None and str(reported_execution) != str(
+            current_execution_id
+        ):
+            return False
+        # The id matched, or the task has none to compare. Either way the
+        # ref still gets a vote when both sides have one, because the two
+        # are facts about the same execution and a report that agrees
+        # with one while contradicting the other is not about the
+        # execution running now.
+        #
+        # That is not belt-and-braces. A start carrying no id leaves the
+        # recorded one in place (see the fold), so an id-less
+        # *replacement* -- an older SDK re-claiming a lapsed task inside
+        # the same build, which a rollover or a rollback makes reachable
+        # -- inherits its predecessor's id along with the predecessor's
+        # build. The id and the owner would then both match a late report
+        # from the execution that is actually gone, and only the ref has
+        # moved on. Clearing instead of preserving would not help: the
+        # report would land on a NULL id and take the no-opinion branch
+        # above.
+        if (
+            reported_ref is not None
+            and current_ref is not None
+            and str(reported_ref) != str(current_ref)
+        ):
+            return False
+        return True
     if reported_ref is None:
         return True
     return str(reported_ref) == str(current_ref)

@@ -585,6 +585,68 @@ async def test_a_preemption_restart_under_the_same_id_re_grants_the_claim(
     )
 
 
+async def test_an_inherited_id_does_not_let_a_dead_execution_report(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """A stale id plus a stale owner is still not the current execution.
+
+    The reachable shape, and the reason the ref keeps a vote. A start
+    carrying no id leaves the recorded one in place, so an id-less
+    *replacement* inside the same build — an older SDK re-claiming a
+    lapsed task, which a rollover or a rollback makes possible mid-build
+    — inherits its predecessor's identity along with its build. Id and
+    owner then both match a late report from the execution that is
+    actually gone, and only the executor ref has moved on.
+
+    Clearing the id on an id-less start instead of preserving it would
+    not help: the report would land on a NULL id and be accepted by the
+    no-opinion branch. Comparing both identities is what closes it.
+    """
+    execution_id = _eid()
+    build_id, _ = await _claimed(client, "inherited-id", execution_id)
+    # The identity-aware execution records its ref.
+    await _start(
+        client,
+        build_id,
+        "inherited-id",
+        execution_id=execution_id,
+        executor="modal",
+        executor_ref="fc-old",
+    )
+    await _expire(async_session, "inherited-id")
+
+    # An id-less replacement re-claims it, in the same build.
+    replacement = await _start(
+        client,
+        build_id,
+        "inherited-id",
+        claim="true",
+        executor="modal",
+        executor_ref="fc-new",
+    )
+    assert replacement.status_code == 200, replacement.text
+    row = await _task_row(async_session, "inherited-id")
+    assert str(row.latest_execution_id) == execution_id, (
+        "precondition: the id-less start inherited the recorded identity"
+    )
+
+    # The original worker reports late, naming the execution it is.
+    await client.post(
+        f"{BUILDS}/{build_id}/tasks/inherited-id/interrupt",
+        params={
+            "execution_id": execution_id,
+            "executor_ref": "fc-old",
+            "reason": "timeout",
+        },
+    )
+
+    row = await _task_row(async_session, "inherited-id")
+    assert row.latest_status == "running", (
+        "a dead execution interrupted its replacement by inheriting its id"
+    )
+    assert row.latest_executor_ref == "fc-new"
+
+
 # --- Dialect ------------------------------------------------------------
 
 
