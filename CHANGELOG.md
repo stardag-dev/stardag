@@ -36,6 +36,48 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   drove a warning; not harmless now that it decides whether a build is
   armed.
 
+- **The worker classifies its own execution; a tick's probe waits for it.**
+  A probe answers one question — is this execution still running on the
+  backend? — and "no" is not a classification. The platform ending an input
+  is an _interruption_ when the task caught it and checkpointed (resumed on
+  `max_interruptions`, no attempt spent) and a _failure_ when it did not
+  (retried on `max_attempts`). Only the dying worker knows which, and it
+  reports from the grace window the platform gives it — which is exactly
+  the window a probe can land inside.
+
+  So whoever looked first decided, and under load that was the tick: a
+  cancelled input was recorded as a failure, spent an attempt the task
+  never asked to spend, and the worker's own report was then refused as a
+  statement about an execution the task no longer held. The build still
+  completed, by the retry route rather than the resumption, so only the
+  accounting said what had happened.
+
+  A probe that finds an execution gone now opens a **report window** of
+  `TickConfig.worker_report_grace_seconds` (default 30) instead of acting,
+  and records the failure only if the window closes with nothing reported —
+  the silent-death case the probe exists for. The window closes early the
+  moment the task stops being `RUNNING` under that ref, which is what the
+  worker's report does, and is skipped only where no report can be coming:
+  a `RUNNING` task with no executor ref, whose whole claim has already been
+  waited out. Every tick honours it, including the one-pass tick a watchdog
+  sweep spawns — the window lives in the tick's memory, so a tick that
+  exits instead of waiting is a tick that classifies synchronously.
+
+  The wait never outlives its own container: it is trimmed at startup to
+  what `tick_timeout_seconds` can honour, less a reserve for the tick's
+  exit, so a window always closes inside the tick that opened it. Two new
+  `TickSummary` counters make it legible — `executions_awaiting_report`,
+  and `report_window_expired` for the windows that closed unanswered.
+
+- **Breaking: `TickConfig` and `TickSummary` are keyword-only.** Both are
+  now `@dataclass(kw_only=True)`. Their fields are grouped by meaning — the
+  two budgets together, the fan-out throttles together — so a new knob is
+  inserted beside its relatives, and that is only safe if position carries
+  no meaning: inserting a field ahead of existing ones would otherwise
+  re-bind a positional caller's arguments silently, turning a grace period
+  into a concurrency bound. A positional call is now a `TypeError` instead.
+  See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the migration.
+
 ## [0.24.0] — 2026-09-20
 
 ### SDK
