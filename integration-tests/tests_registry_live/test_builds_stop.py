@@ -1,40 +1,36 @@
-"""``stardag builds stop`` stops what it selected, and only that.
+"""``stardag builds stop`` selects, stops and cancels, in that order.
 
-The command's contract has three parts and they are only meaningful
-together, against real containers:
+What only a live run can show is that the command reaches Modal at all:
+that it reads a real registry's task rows, picks the executions its
+filters name, ends the corresponding function calls, and cancels the build
+afterwards. The selection *rules* are pinned in
+``tests/test__cli/test_stop.py``, including the one that matters most --
+that only the selected executions are handed to the canceller.
 
-1. The list is read off the task rows *while the build still holds their
-   claims*, so it names this build's executions and nobody else's.
-2. The calls it selected are cancelled -- actually cancelled, in Modal,
-   not merely recorded as cancelled in the registry.
-3. The build is cancelled **afterwards**, releasing the claims.
+**What this scenario deliberately does not assert, and why.** The obvious
+companion claim -- that the executions a filter excluded are left running
+-- is not observable here yet. A tick of a *terminal* build still runs the
+automated cancel drain, which cancels every execution the build started,
+excluded ones included. An earlier version of this scenario asserted the
+excluded calls were still live immediately after the command returned; it
+passed twice locally and failed in CI, where a lingering tick polling
+every three seconds noticed the cancelled build first and drained all four
+(``cancelled_refs=4`` in its summary). That is a race against a component
+this issue does not change, and a flaky scenario is worth less than a
+narrow one.
 
-The selection rules are pinned in ``tests/test__cli/test_stop.py``; what
-cannot be pinned there is whether a container actually died, which is the
-entire question. So the assertion is made against Modal itself: after the
-command returns, the calls it named are asked whether they are still
-running, and so are the calls it left alone.
+The drain is STA-81's to delete, immediately after this merges. **When it
+goes, this scenario should grow the assertion back**, and in its strongest
+form: wait for the excluded upstreams to reach COMPLETED, which proves
+both that they were never touched and that a result landing after the
+build was cancelled still counts. Until then that guarantee rests on the
+unit test that pins exactly which executions reach ``cancel_modal_calls``.
 
-**Why Modal and not the task rows.** The registry says CANCELLED for every
-one of these the moment the build is cancelled, whether or not anything
-stopped -- that is the whole reason this command exists. The one place the
-difference between "stopped" and "recorded as stopped" is visible is the
-backend, so that is where it is looked for.
-
-**Why the window is narrow, for now.** A tick of a terminal build still
-runs the automated cancel drain, which cancels *every* execution the build
-started -- including the ones a filter deliberately left alone. That is
-STA-81's to delete, after this merges, and until then "the rest run on to
-completion" is not observable end to end. The probe below is taken at the
-one moment that is unambiguous: immediately after the command returns,
-before any tick can reach the build. When the drain goes, this scenario
-should grow the other half -- wait for the excluded upstreams to reach
-COMPLETED, which proves both that they were untouched and that a result
-landing after the cancel still counts.
-
-Against a command that cancelled the build first, this fails from both
-ends at once: the list would be taken after the claims were released, and
-the stopped containers would still be running when it returned.
+Note the same drain also weakens the "the selected calls stopped" check
+below into a liveness test rather than an exclusivity one: it would have
+stopped them too. It is kept because it is the only place the path from
+CLI to a real Modal cancellation is exercised end to end, and because it
+fails loudly if that path breaks.
 """
 
 from __future__ import annotations
@@ -149,21 +145,13 @@ def test_stop_cancels_only_the_selected_workers_calls() -> None:
         f"{result.output}\n{describe(build_id)}"
     )
 
-    # The half a unit test cannot reach: the containers the command left
-    # alone are still running, right now, with their claims already
-    # released. Asserted before the wait below, because it is the one that
-    # is only true in this window.
-    still_running = {
-        task_id: _call_is_running(ref) for task_id, ref in excluded_refs.items()
-    }
-    assert all(still_running.values()), (
-        "An execution the worker filter excluded is no longer running on "
-        "Modal, so 'builds stop' stopped more than it selected.\n"
-        f"{still_running}\n{describe(build_id)}"
-    )
-
-    # ...and the ones it did select are gone. Polled rather than asserted
+    # The selected calls are gone from Modal. Polled rather than asserted
     # once: the cancel reaches Modal's scheduler promptly, not atomically.
+    #
+    # A liveness check rather than an exclusivity one -- the terminal
+    # build's cancel drain would stop these too (see the module docstring)
+    # -- but it is the only place the path from this CLI to a real Modal
+    # cancellation is exercised, and it fails loudly if that path breaks.
     wait_until(
         lambda: not any(_call_is_running(ref) for ref in selected_refs.values()),
         build_id=build_id,

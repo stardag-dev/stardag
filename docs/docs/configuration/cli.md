@@ -437,10 +437,12 @@ rows from a page chosen wrong and under-report exactly the oldest builds.
 
 ### JSON output
 
-The read-only commands — `builds list`, `builds show`, `builds frontier`,
-`builds ticks`, `builds cleanup` (whose default dry run writes nothing),
-`builds stop` and `tasks list` — take `--json`. In that mode **stdout carries exactly one JSON
-document and nothing else**; every hint, warning and prompt goes to stderr, so
+`--json` is available on the read-only commands — `builds list`,
+`builds show`, `builds frontier`, `builds ticks`, `tasks list` and
+`builds cleanup`, whose default dry run writes nothing — and on
+`builds stop`, which is **not** read-only: it emits its selection and then
+stops and cancels. In that mode **stdout carries exactly one JSON document
+and nothing else**; every hint, warning and prompt goes to stderr, so
 piping is safe:
 
 ```sh
@@ -453,9 +455,11 @@ nesting as the REST response, minus any field this SDK version does not model.
 without contaminating the output.
 
 `builds stop --json` emits its selection — `selected` and
-`excluded_by_filter` — and then acts. Without `--dry-run` it likewise requires
-`--yes`, and the refusal comes **before** anything reaches stdout, so a run
-that stopped nothing never leaves a successful-looking document behind.
+`excluded_by_filter` — and then acts on it, so a document on stdout means
+the stop went ahead. Pair it with `--dry-run` for the read-only form.
+Without `--dry-run` it likewise requires `--yes`, and the refusal comes
+**before** anything reaches stdout, so a run that stopped nothing never
+leaves a successful-looking document behind.
 
 ### Reading the frontier
 
