@@ -312,7 +312,15 @@ class StardagBaseModel(BaseModel):
         abstract base, a family root — would otherwise answer with their
         nearest registered ancestor's key, which belongs to a different
         class.
+
+        A parameterised generic alias (``Box[int]``) answers with its
+        origin's key. The alias is not indexed — it is not a real class —
+        but it *can* be constructed, and its fields are the origin's, so
+        the key it resolves against has to be the one the origin holds.
         """
+        origin = cls.__pydantic_generic_metadata__.get("origin")
+        if origin is not None:
+            cls = origin
         if "__type_id__" in cls.__dict__:
             get_namespace = getattr(cls, "get_namespace", None)
             get_name = getattr(cls, "get_name", None)

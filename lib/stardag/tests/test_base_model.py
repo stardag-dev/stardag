@@ -696,7 +696,11 @@ class TestBuildConfigRegistration:
 
         assert get_build_config_class("LegacyOnly") is None
 
-    def test_a_parameterized_generic_alias_is_not_registered(self):
+    def test_a_parameterized_generic_alias_resolves_through_its_origin(self):
+        """The alias is not indexed — it is not a real class — but it can
+        be constructed, and its fields are the origin's, so it has to
+        resolve against the key the origin holds. Keying it by its own
+        ``__name__`` would make ``Box[int]`` silently unconfigurable."""
         T = TypeVar("T")
 
         class Box(StardagBaseModel, Generic[T]):
@@ -706,6 +710,10 @@ class TestBuildConfigRegistration:
         assert Box[int].__name__ == "Box[int]"
         assert get_build_config_class("Box") is Box
         assert get_build_config_class("Box[int]") is None
+        assert Box[int]._build_config_key() == "Box"
+        with build_config_scope({"Box": {"threads": 8}}):
+            assert Box(item=1).threads == 8
+            assert Box[int](item=1).threads == 8
 
     def test_a_task_class_is_left_to_the_task_registry(self):
         assert get_build_config_class(KEY) is None
@@ -775,18 +783,29 @@ class TestBuildConfigRegistration:
         assert "__namespace__" in message
 
     def test_a_namespace_resolves_a_collision(self):
-        class Separated(StardagBaseModel):
-            threads: Annotated[int, StardagField(significance="execution_only")] = 1
+        """The same two definitions as above — one class name, two
+        qualified names — except that the second carries a namespace. That
+        is the whole difference between the error and this."""
 
-        class Separated2(StardagBaseModel):
-            __namespace__ = "other_ns"
-            threads: Annotated[int, StardagField(significance="execution_only")] = 2
+        def plain():
+            class Separated(StardagBaseModel):
+                threads: Annotated[int, StardagField(significance="execution_only")] = 1
 
-        # Same class name, different keys: rename the second to match the
-        # first and only the namespace keeps them apart.
-        Separated2.__name__ = "Separated"
-        assert get_build_config_class("Separated") is Separated
-        assert get_build_config_class("other_ns.Separated2") is Separated2
+            return Separated
+
+        def namespaced():
+            class Separated(StardagBaseModel):
+                __namespace__ = "other_ns"
+                threads: Annotated[int, StardagField(significance="execution_only")] = 2
+
+            return Separated
+
+        first, second = plain(), namespaced()
+        assert get_build_config_class("Separated") is first
+        assert get_build_config_class("other_ns.Separated") is second
+        with build_config_scope({"other_ns.Separated": {"threads": 9}}):
+            assert second().threads == 9
+            assert first().threads == 1
 
     def test_a_class_recreated_under_the_same_name_replaces_it(self):
         """What cloudpickle does to a by-value class in a worker: the class
