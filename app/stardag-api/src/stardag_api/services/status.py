@@ -690,7 +690,13 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # second attempt and refused -- which is the failure this column
         # exists to close. TASK_RETRIED below is the reset.
         recorded_execution = _as_uuid(metadata.get("execution_id"))
-        if recorded_execution is not None:
+        if recorded_execution is not None or metadata.get("claim"):
+            # A *granted claim* always writes, including a clear: it won
+            # arbitration, so it is a new attempt and inherits nothing.
+            # Without that, a no-id claim taking over an expired one
+            # would keep its predecessor's id, and a late retry carrying
+            # that id would then be granted alongside the attempt now
+            # running. Every other start writes only when it names one.
             task.latest_execution_id = recorded_execution
         # Grant (or re-grant) the claim's expiry alongside the executor
         # fields, from the same event. Doing both here is what makes a

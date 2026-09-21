@@ -256,6 +256,39 @@ async def test_the_ref_recording_start_does_not_erase_the_identity(
     assert late_retry.status_code == 200, late_retry.text
 
 
+async def test_a_granted_claim_inherits_no_identity(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """A claim that brings no identity leaves none behind.
+
+    The other half of the preserve rule, and the reason it is not
+    simply "always preserve". A *granted claim* won arbitration, so it
+    is a new attempt and inherits nothing. Were it to keep its
+    predecessor's id, a late retry carrying that id would pass the
+    same-build-and-same-id test and be granted alongside the attempt
+    now running.
+    """
+    execution_id = _eid()
+    build_id, _ = await _claimed(client, "claim-clears", execution_id)
+    await _expire(async_session, "claim-clears")
+
+    # An id-less claim takes the lapsed one over, in the same build.
+    replacement = await _start(client, build_id, "claim-clears", claim="true")
+    assert replacement.status_code == 200, replacement.text
+
+    row = await _task_row(async_session, "claim-clears")
+    assert row.latest_execution_id is None, (
+        "the replacement claim inherited the identity it replaced"
+    )
+
+    # ...so the dead attempt's late retry is refused rather than granted
+    # alongside the one now running.
+    late = await _start(
+        client, build_id, "claim-clears", claim="true", execution_id=execution_id
+    )
+    assert late.status_code == 409, late.text
+
+
 async def test_a_retry_clears_the_identity(
     client: AsyncClient, async_session: AsyncSession
 ):

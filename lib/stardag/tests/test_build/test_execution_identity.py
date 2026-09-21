@@ -66,9 +66,17 @@ class TestTheTickMintsOne:
         )
         first = registry.sent_execution_ids[tid][0]
 
-        # The task is reset and a later pass claims it again.
-        registry.statuses[tid] = "pending"
-        registry.execution_ids[tid] = None
+        # The task fails and is retried, which resets it and clears the
+        # identity with it -- through the double's own retry path, so
+        # the reset is modelled rather than arranged here. RUNNING is
+        # deliberately not retryable (it holds a live claim), so the
+        # failure is part of the sequence, not scaffolding.
+        registry.statuses[tid] = "failed"
+        await registry.task_retry_aio(uuid4(), root)
+        assert registry.execution_ids.get(tid) is None, (
+            "the double kept an identity across a retry, where the "
+            "server's TASK_RETRIED fold clears it"
+        )
         await run_tick_aio(
             uuid4(), registry=registry, task_executor=executor, config=config
         )

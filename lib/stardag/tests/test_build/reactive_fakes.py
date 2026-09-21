@@ -493,10 +493,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         )
         if not started:
             return StartClaimResult(started=False, denied_reason="limit")
-        # A granted claim records its identity, which is what the next
-        # delivery of the same request compares against.
-        if execution_id is not None:
-            self.execution_ids[tid] = str(execution_id)
+        # A granted claim records its identity -- including recording
+        # none, since it is a new attempt and inherits nothing. That is
+        # the server's fold; an ordinary start preserves instead.
+        self.execution_ids[tid] = None if execution_id is None else str(execution_id)
         return StartClaimResult(
             started=True,
             execution_id=None if execution_id is None else str(execution_id),
@@ -559,6 +559,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         if self.statuses.get(task_id) in _RETRYABLE_STATUSES:
             self.statuses[task_id] = "pending"
             self.refs.pop(task_id, None)
+            # The server's TASK_RETRIED fold clears the identity too: a
+            # retry re-runs from scratch, so the next attempt is a new
+            # claim and must not be granted as a repeat of this one.
+            self.execution_ids.pop(task_id, None)
 
     async def task_retry_aio(self, build_id, task):
         tid = str(task.id)
@@ -572,6 +576,8 @@ class FakeReactiveRegistry(NoOpRegistry):
         if self.statuses.get(tid) in _RETRYABLE_STATUSES:
             self.statuses[tid] = "pending"
             self.refs.pop(tid, None)
+            # See the twin above: the identity goes with the reset.
+            self.execution_ids.pop(tid, None)
 
     async def build_add_roots_aio(self, build_id, root_task_ids):
         self.calls.append(("add_roots", ",".join(root_task_ids)))
