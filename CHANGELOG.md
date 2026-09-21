@@ -138,12 +138,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 - **A "Stop running tasks" panel on the build page**, showing the same
   list `stardag builds stop` acts on — with the same filters, and the
-  exact command to copy, carrying whatever the filters were set to. It
+  exact command to copy, carrying whatever the filters were set to. Rows
+  can be ticked individually, which the command carries as `--task-id`. It
   never stops anything itself: the server cannot reach the execution
   backend and deliberately never will, so the credentials that can stop a
   container are the operator's. Each call links straight to its Modal
   dashboard page for a hard kill. The panel is absent unless the build
-  holds live executions.
+  holds live executions — except where the claim-holder scan gave up
+  early, which it reports rather than passing off as "nothing running".
 
 - The build page's **"Cancel & Release Claims"** action is gone, for the
   reason the `--cascade` flag is: it released the claims first and stopped

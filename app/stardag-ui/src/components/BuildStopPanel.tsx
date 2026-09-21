@@ -1,25 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchTasks } from "../api/tasks";
-import type { Task } from "../types/task";
 import { modalFunctionCallUrl } from "../utils/modalLinks";
 import {
-  executionsForBuild,
+  CLAIM_PAGE_SIZE,
+  collectExecutions,
   executorsIn,
   matchesFilters,
   stopCommand,
   workersIn,
+  MAX_CLAIM_PAGES,
   STOPPABLE_STATUSES,
   type StopFilters,
   type StoppableExecution,
 } from "../utils/stoppable";
 import { formatAbsoluteTime, formatDuration } from "../utils/time";
 import { StatusBadge } from "./StatusBadge";
-
-// One page of the environment's claim holders, at the server's maximum.
-// The population is "tasks holding a claim", not "tasks", so one page
-// covers all but the largest environments; if the server says there are
-// more, the panel says so rather than quietly showing a prefix.
-const PAGE_SIZE = 100;
+import { Checkbox } from "./ui/Checkbox";
 
 // The staleness options the filter offers, in seconds. Round numbers an
 // operator would actually type after `--older-than`.
@@ -71,8 +67,9 @@ export function BuildStopPanel({
   environmentId,
   refreshToken = 0,
 }: BuildStopPanelProps) {
-  const [tasks, setTasks] = useState<Task[] | null>(null);
+  const [held, setHeld] = useState<StoppableExecution[] | null>(null);
   const [total, setTotal] = useState(0);
+  const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -81,6 +78,9 @@ export function BuildStopPanel({
   const [executor, setExecutor] = useState("");
   const [namespace, setNamespace] = useState("");
   const [olderThanSeconds, setOlderThanSeconds] = useState(0);
+  // Rows the operator ticked. Empty means "everything the filters show",
+  // which is the state the panel opens in.
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
 
   // A slow response from a previous build or environment must not
   // overwrite the current one's list.
@@ -89,15 +89,21 @@ export function BuildStopPanel({
   useEffect(() => {
     if (!buildId || !environmentId) return;
     const epoch = ++epochRef.current;
-    fetchTasks({
-      status: STOPPABLE_STATUSES,
-      page_size: PAGE_SIZE,
-      environment_id: environmentId,
-    })
-      .then((page) => {
+    collectExecutions(
+      (page) =>
+        fetchTasks({
+          status: STOPPABLE_STATUSES,
+          page,
+          page_size: CLAIM_PAGE_SIZE,
+          environment_id: environmentId,
+        }),
+      buildId,
+    )
+      .then((result) => {
         if (epochRef.current !== epoch) return;
-        setTasks(page.tasks);
-        setTotal(page.total);
+        setHeld(result.executions);
+        setTotal(result.total);
+        setTruncated(result.truncated);
         setError(null);
       })
       .catch((err: unknown) => {
@@ -106,11 +112,8 @@ export function BuildStopPanel({
       });
   }, [buildId, environmentId, refreshToken]);
 
-  const held = useMemo(
-    () => executionsForBuild(tasks ?? [], buildId),
-    [tasks, buildId],
-  );
-  const filters: StopFilters = useMemo(
+  const executions = useMemo(() => held ?? [], [held]);
+  const narrowed: StopFilters = useMemo(
     () => ({
       worker: worker || undefined,
       executor: executor || undefined,
@@ -119,13 +122,34 @@ export function BuildStopPanel({
     }),
     [worker, executor, namespace, olderThanSeconds],
   );
-  const selected = useMemo(
-    () => held.filter((execution) => matchesFilters(execution, filters)),
-    [held, filters],
+  // What the table shows: the dropdowns narrow, and ticking picks within
+  // that. Ticking deliberately does not hide the rows it leaves out — a
+  // selection whose alternatives are off-screen is not a selection.
+  const shown = useMemo(
+    () => executions.filter((execution) => matchesFilters(execution, narrowed)),
+    [executions, narrowed],
   );
-  const workers = useMemo(() => workersIn(held), [held]);
-  const executors = useMemo(() => executorsIn(held), [held]);
+  const chosen = useMemo(
+    () => (ticked.size ? shown.filter((e) => ticked.has(e.taskId)) : shown),
+    [shown, ticked],
+  );
+  // The command targets exactly what is chosen, which is why ticking
+  // replaces the narrowing flags with ids rather than adding to them.
+  const filters: StopFilters = ticked.size
+    ? { taskIds: chosen.map((execution) => execution.taskId) }
+    : narrowed;
+  const workers = useMemo(() => workersIn(executions), [executions]);
+  const executors = useMemo(() => executorsIn(executions), [executions]);
   const command = stopCommand(buildId, filters);
+
+  const toggle = useCallback((taskId: string, on: boolean) => {
+    setTicked((previous) => {
+      const next = new Set(previous);
+      if (on) next.add(taskId);
+      else next.delete(taskId);
+      return next;
+    });
+  }, []);
 
   const handleCopy = useCallback(async () => {
     try {
@@ -150,10 +174,28 @@ export function BuildStopPanel({
       </div>
     );
   }
-  if (tasks === null || held.length === 0) return null;
+  if (held === null) return null;
+  if (executions.length === 0) {
+    // Nothing found. That is the normal, healthy state and the panel stays
+    // out of the way — *unless* the scan gave up early, in which case
+    // "found none" and "stopped looking" are the same screen, and the
+    // difference is a build whose live executions nobody was shown.
+    if (!truncated) return null;
+    return (
+      <div
+        role="status"
+        className="rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-900/10 dark:text-amber-200"
+      >
+        This environment has {total} tasks holding an execution claim — more than this
+        page will scan, so whether this build has live executions could not be
+        determined here. <code>stardag builds stop {buildId} --dry-run</code> pages
+        through all of them.
+      </div>
+    );
+  }
 
-  const excluded = held.length - selected.length;
-  const unstoppable = selected.filter((execution) => !execution.stoppable).length;
+  const excluded = executions.length - chosen.length;
+  const unstoppable = chosen.filter((execution) => !execution.stoppable).length;
 
   return (
     <div className="rounded-md border border-amber-200 bg-amber-50/60 dark:border-amber-900/60 dark:bg-amber-900/10">
@@ -183,7 +225,8 @@ export function BuildStopPanel({
           Stop running tasks
         </span>
         <span className="text-amber-800/80 dark:text-amber-300/80">
-          {held.length} execution{held.length === 1 ? "" : "s"} held by this build
+          {executions.length} execution{executions.length === 1 ? "" : "s"} held by this
+          build
         </span>
       </button>
 
@@ -261,12 +304,27 @@ export function BuildStopPanel({
             </label>
             {excluded > 0 && (
               <span className="text-gray-600 dark:text-gray-400">
-                {excluded} excluded by these filters
+                {excluded} not selected
               </span>
+            )}
+            {ticked.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setTicked(new Set())}
+                className="rounded border border-gray-300 px-1.5 py-0.5 text-gray-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
+              >
+                Clear {ticked.size} tick{ticked.size === 1 ? "" : "s"}
+              </button>
             )}
           </div>
 
-          <ExecutionTable executions={selected} />
+          <ExecutionTable executions={shown} ticked={ticked} onToggle={toggle} />
+
+          <p className="text-xs text-gray-600 dark:text-gray-400">
+            {ticked.size > 0
+              ? `The command below names the ${ticked.size} you ticked.`
+              : "Nothing ticked — the command below targets every execution listed. Tick rows to narrow it to those."}
+          </p>
 
           {unstoppable > 0 && (
             <p className="text-xs text-gray-600 dark:text-gray-400">
@@ -296,17 +354,19 @@ export function BuildStopPanel({
               {excluded > 0 && (
                 <>
                   {" "}
-                  The {excluded} execution{excluded === 1 ? "" : "s"} your filters
-                  exclude will keep running once the build is cancelled.
+                  The {excluded} execution{excluded === 1 ? "" : "s"} it does not name
+                  will keep running once the build is cancelled.
                 </>
               )}
             </p>
           </div>
 
-          {total > (tasks?.length ?? 0) && (
+          {truncated && (
             <p className="text-xs text-amber-800 dark:text-amber-300">
-              This environment has {total} tasks holding a claim, more than one page —
-              the list above may be incomplete. The CLI pages through them all.
+              This environment has {total} tasks holding a claim, more than the{" "}
+              {MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE} this page scans —{" "}
+              <strong>the list above may be incomplete.</strong> The CLI pages through
+              all of them.
             </p>
           )}
         </div>
@@ -315,7 +375,24 @@ export function BuildStopPanel({
   );
 }
 
-function ExecutionTable({ executions }: { executions: StoppableExecution[] }) {
+interface ExecutionTableProps {
+  executions: StoppableExecution[];
+  ticked: Set<string>;
+  onToggle: (taskId: string, on: boolean) => void;
+}
+
+/**
+ * Boxes reflect `ticked` literally, so none are checked until someone
+ * ticks one — and no tick at all means the command targets every row
+ * shown.
+ *
+ * The alternative, rendering them all checked to match what the command
+ * does, inverts the first click: on a table of checked boxes, clicking one
+ * reads as "not that one" while it would have to mean "only that one".
+ * Better to say what "nothing ticked" means in words, once, than to have
+ * the first click do the opposite of what it looks like.
+ */
+function ExecutionTable({ executions, ticked, onToggle }: ExecutionTableProps) {
   if (executions.length === 0) {
     return (
       <p className="text-xs text-gray-600 dark:text-gray-400">
@@ -327,6 +404,9 @@ function ExecutionTable({ executions }: { executions: StoppableExecution[] }) {
     <table className="w-full text-left text-xs">
       <thead className="text-gray-600 dark:text-gray-400">
         <tr>
+          <th className="w-6 py-1 pr-2 font-medium">
+            <span className="sr-only">Include</span>
+          </th>
           <th className="py-1 pr-2 font-medium">Task</th>
           <th className="py-1 pr-2 font-medium">Status</th>
           <th className="py-1 pr-2 font-medium">Worker</th>
@@ -345,6 +425,13 @@ function ExecutionTable({ executions }: { executions: StoppableExecution[] }) {
               key={execution.taskId}
               className="border-t border-amber-200/60 dark:border-amber-900/40"
             >
+              <td className="py-1 pr-2">
+                <Checkbox
+                  checked={ticked.has(execution.taskId)}
+                  onChange={(on) => onToggle(execution.taskId, on)}
+                  label={`Include ${execution.qualifiedName}`}
+                />
+              </td>
               <td className="py-1 pr-2">
                 <span
                   title={execution.taskId}

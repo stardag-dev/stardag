@@ -65,7 +65,32 @@ export interface StopFilters {
   executor?: string;
   namespace?: string;
   olderThanSeconds?: number;
+  /**
+   * Exact task ids, from ticking individual rows. When set it is the whole
+   * selection — the CLI's `--task-id` is exact and repeatable, so a list of
+   * ids names the set on its own and the other flags would only restate it.
+   */
+  taskIds?: string[];
 }
+
+/** One page of `GET /tasks`, as the panel's fetcher returns it. */
+export interface ClaimHolderPage {
+  tasks: Task[];
+  total: number;
+}
+
+/** Rows per page — the server's maximum. */
+export const CLAIM_PAGE_SIZE = 100;
+
+/**
+ * How many pages the panel will walk before it gives up and says so.
+ *
+ * Far lower than the CLI's cap, and deliberately: this runs in a browser
+ * on every refresh, where two thousand claim holders is already an absurd
+ * amount of sequential requests to make on someone's behalf. Reaching it
+ * is reported rather than hidden — see `collectExecutions`.
+ */
+export const MAX_CLAIM_PAGES = 20;
 
 function qualify(namespace: string, name: string): string {
   return namespace ? `${namespace}.${name}` : name;
@@ -146,6 +171,41 @@ export function executionsForBuild(
 }
 
 /**
+ * Page through the environment's claim holders and keep this build's.
+ *
+ * `GET /tasks` has no build filter, so the scan is environment-wide and
+ * narrowed here — the same shape as the CLI's collector, and for the same
+ * reason: the population is "tasks holding a claim", not "tasks".
+ *
+ * **One page is not enough, and the failure is silent.** A build's
+ * executions can sit entirely on later pages, in which case a single-page
+ * read finds none — and "none" is exactly what this panel renders as
+ * *absent*. So the truncation flag is not a nicety: without it, "we
+ * stopped looking" and "there is nothing running" are the same screen.
+ */
+export async function collectExecutions(
+  fetchPage: (page: number) => Promise<ClaimHolderPage>,
+  buildId: string,
+): Promise<{ executions: StoppableExecution[]; total: number; truncated: boolean }> {
+  const executions: StoppableExecution[] = [];
+  let total = 0;
+  let page = 1;
+  for (;;) {
+    const result = await fetchPage(page);
+    total = result.total;
+    executions.push(...executionsForBuild(result.tasks, buildId));
+    const seen = (page - 1) * CLAIM_PAGE_SIZE + result.tasks.length;
+    if (result.tasks.length === 0 || seen >= result.total) {
+      return { executions, total, truncated: false };
+    }
+    if (page >= MAX_CLAIM_PAGES) {
+      return { executions, total, truncated: true };
+    }
+    page += 1;
+  }
+}
+
+/**
  * Whether an execution survives every filter that is set.
  *
  * Conjunctive, and `namespace` is a *prefix* match — `acme` covers
@@ -158,6 +218,7 @@ export function matchesFilters(
   filters: StopFilters,
   now: number = Date.now(),
 ): boolean {
+  if (filters.taskIds && !filters.taskIds.includes(execution.taskId)) return false;
   if (filters.executor && execution.executor !== filters.executor) return false;
   if (filters.namespace && !execution.namespace.startsWith(filters.namespace)) {
     return false;
@@ -205,6 +266,13 @@ export function formatDurationFlag(seconds: number): string {
  */
 export function stopCommand(buildId: string, filters: StopFilters): string {
   const parts = ["stardag builds stop", buildId];
+  if (filters.taskIds?.length) {
+    // Exact ids name the set on their own, so they replace the narrowing
+    // flags rather than joining them — the CLI's filters are conjunctive,
+    // and restating them would only invite the two to drift apart.
+    for (const taskId of filters.taskIds) parts.push(`--task-id ${taskId}`);
+    return parts.join(" ");
+  }
   if (filters.worker) parts.push(`--worker ${filters.worker}`);
   if (filters.executor) parts.push(`--executor ${filters.executor}`);
   if (filters.namespace) parts.push(`--namespace ${filters.namespace}`);

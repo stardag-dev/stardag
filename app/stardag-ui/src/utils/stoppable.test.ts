@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Task, TaskStatus } from "../types/task";
 import {
+  CLAIM_PAGE_SIZE,
+  MAX_CLAIM_PAGES,
+  collectExecutions,
   executionFromTask,
   executionsForBuild,
   executorsIn,
@@ -190,6 +193,63 @@ describe("workersIn", () => {
   });
 });
 
+describe("collectExecutions", () => {
+  const page = (tasks: Task[], total: number) => ({ tasks, total });
+
+  it("stops once the server's total is accounted for", async () => {
+    const fetchPage = vi.fn(async () => page([makeTask()], 1));
+    const result = await collectExecutions(fetchPage, BUILD);
+    expect(fetchPage).toHaveBeenCalledTimes(1);
+    expect(result.executions).toHaveLength(1);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("keeps paging while the total says there is more", async () => {
+    // The whole reason this exists: a build's executions can sit entirely
+    // on a later page, and a single-page read would report none — which
+    // the panel renders as "nothing running".
+    const others = Array.from({ length: CLAIM_PAGE_SIZE }, (_, i) =>
+      makeTask({ task_id: `other-${i}`, latest_status_build_id: OTHER_BUILD }),
+    );
+    const fetchPage = vi
+      .fn()
+      .mockResolvedValueOnce(page(others, CLAIM_PAGE_SIZE + 1))
+      .mockResolvedValueOnce(
+        page([makeTask({ task_id: "mine" })], CLAIM_PAGE_SIZE + 1),
+      );
+
+    const result = await collectExecutions(fetchPage, BUILD);
+
+    expect(fetchPage.mock.calls.map((c) => c[0])).toEqual([1, 2]);
+    expect(result.executions.map((e) => e.taskId)).toEqual(["mine"]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("gives up after the cap and says it did", async () => {
+    // Reported, never silent: "found none" and "stopped looking" have to
+    // be different answers, because only one of them is safe to act on.
+    const full = Array.from({ length: CLAIM_PAGE_SIZE }, (_, i) =>
+      makeTask({ task_id: `other-${i}`, latest_status_build_id: OTHER_BUILD }),
+    );
+    const fetchPage = vi.fn(async () => page(full, 10_000_000));
+
+    const result = await collectExecutions(fetchPage, BUILD);
+
+    expect(fetchPage).toHaveBeenCalledTimes(MAX_CLAIM_PAGES);
+    expect(result.truncated).toBe(true);
+    expect(result.executions).toHaveLength(0);
+  });
+
+  it("stops on a short page even if the total disagrees", async () => {
+    // A total that overcounts (rows finishing under the scan) must not
+    // turn into an endless walk of empty pages.
+    const fetchPage = vi.fn(async () => page([], 500));
+    const result = await collectExecutions(fetchPage, BUILD);
+    expect(fetchPage).toHaveBeenCalledTimes(1);
+    expect(result.truncated).toBe(false);
+  });
+});
+
 describe("executorsIn", () => {
   it("lists the distinct executors, sorted", () => {
     const rows = [
@@ -220,6 +280,15 @@ describe("stopCommand", () => {
     ).toBe(
       `stardag builds stop ${BUILD} --worker gpu --executor modal ` +
         `--namespace acme --older-than 30m`,
+    );
+  });
+
+  it("names exact task ids instead of the narrowing flags", () => {
+    // The CLI's filters are conjunctive and --task-id is exact, so a list
+    // of ids is the whole selection; restating the others would only
+    // invite the two to drift apart.
+    expect(stopCommand(BUILD, { worker: "gpu", taskIds: ["one", "two"] })).toBe(
+      `stardag builds stop ${BUILD} --task-id one --task-id two`,
     );
   });
 

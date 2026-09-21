@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Task, TaskStatus } from "../types/task";
+import { CLAIM_PAGE_SIZE, MAX_CLAIM_PAGES } from "../utils/stoppable";
 import { BuildStopPanel } from "./BuildStopPanel";
 
 vi.mock("../api/tasks", () => ({ fetchTasks: vi.fn() }));
@@ -47,6 +48,14 @@ function makeTask(overrides: Partial<Task> = {}): Task {
   };
 }
 
+/**
+ * Serve `tasks` as page 1 and claim a `total`.
+ *
+ * `total` larger than what is served is how a truncated scan is simulated:
+ * the panel keeps asking for pages, and this keeps handing back the same
+ * one, which is exactly the shape of an environment with more claim
+ * holders than the panel will walk.
+ */
 function answerWith(tasks: Task[], total = tasks.length) {
   vi.mocked(fetchTasks).mockResolvedValue({
     tasks,
@@ -136,7 +145,7 @@ describe("BuildStopPanel", () => {
     expect(
       screen.getByText(`stardag builds stop ${BUILD} --worker gpu`),
     ).toBeInTheDocument();
-    expect(screen.getByText(/1 excluded by these filters/)).toBeInTheDocument();
+    expect(screen.getByText(/1 not selected/)).toBeInTheDocument();
     expect(
       screen.getByText(/will keep running once the build is cancelled/),
     ).toBeInTheDocument();
@@ -190,15 +199,80 @@ describe("BuildStopPanel", () => {
     );
   });
 
-  it("says when the environment has more claim holders than one page", async () => {
-    // Under-reporting here is the dangerous direction: an execution the
-    // operator never saw is one that keeps running after the claims go.
-    answerWith([makeTask()], 250);
+  it("pages until the server says it is done", async () => {
+    // One page is not enough: a build's executions can sit entirely on
+    // later pages, and finding none is what this panel renders as absent.
+    vi.mocked(fetchTasks)
+      .mockResolvedValueOnce({
+        tasks: Array.from({ length: 100 }, (_, i) =>
+          makeTask({ task_id: `other-${i}`, latest_status_build_id: OTHER_BUILD }),
+        ),
+        total: 101,
+        page: 1,
+        page_size: 100,
+      })
+      .mockResolvedValueOnce({
+        tasks: [makeTask({ task_name: "OnPageTwo" })],
+        total: 101,
+        page: 2,
+        page_size: 100,
+      });
+
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+
+    expect(vi.mocked(fetchTasks).mock.calls.map((c) => c[0]?.page)).toEqual([1, 2]);
+    expect(screen.getByText("OnPageTwo")).toBeInTheDocument();
+  });
+
+  it("says so rather than vanishing when the scan gives up early", async () => {
+    // The dangerous direction: finding nothing and having stopped looking
+    // are the same screen otherwise, and one of them is a build whose live
+    // executions nobody was shown.
+    answerWith(
+      [makeTask({ latest_status_build_id: OTHER_BUILD })],
+      MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
+    );
+    renderPanel();
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /could not be determined here/,
+    );
+  });
+
+  it("warns when a truncated scan did find some of this build's work", async () => {
+    answerWith([makeTask()], MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500);
     const user = userEvent.setup();
     renderPanel();
     await user.click(await screen.findByRole("button", { name: /Stop running/ }));
 
     expect(screen.getByText(/may be incomplete/)).toBeInTheDocument();
+  });
+
+  it("ticking rows narrows the command to those task ids", async () => {
+    // Parity with the CLI's repeatable --task-id, and the reason ids
+    // replace the other flags: they name the set exactly on their own.
+    answerWith([
+      makeTask({ task_id: "keep-me", task_name: "Featurise" }),
+      makeTask({ task_id: "leave-me", task_name: "Aggregate" }),
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+
+    // Nothing ticked means the command targets everything listed.
+    expect(screen.getByText(`stardag builds stop ${BUILD}`)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: /Include Featurise/ }));
+
+    expect(
+      screen.getByText(`stardag builds stop ${BUILD} --task-id keep-me`),
+    ).toBeInTheDocument();
+    // The row that was not ticked stays on screen — a selection whose
+    // alternatives are off-screen is not a selection.
+    expect(screen.getByText("Aggregate")).toBeInTheDocument();
+    expect(screen.getByText(/1 not selected/)).toBeInTheDocument();
   });
 
   it("marks an execution stardag cannot stop rather than hiding it", async () => {
