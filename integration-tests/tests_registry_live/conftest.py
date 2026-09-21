@@ -35,7 +35,10 @@ from stardag_integration_tests.registry_live._diagnostics import (
     transport_timeout,
 )
 from stardag_integration_tests.registry_live._guard import ENV_API_URL, is_enabled
-from stardag_integration_tests.registry_live._harness import Deployment
+from stardag_integration_tests.registry_live._harness import (
+    Deployment,
+    RegistryContainerRecycled,
+)
 from stardag_integration_tests.registry_live.provision import (
     default_environment_name,
     load_coordinates,
@@ -118,18 +121,19 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
     an xfail as well as for a failure, and recording either as a real
     failure would silently forbid a retry the run was entitled to.
 
-    **Setup and call are classified in full; teardown contributes
-    timeouts but never failures.** Setup is not a formality: fixtures here
-    talk to the registry -- ``test_limit_slot_wake``'s ``slot_limit`` sets
-    a concurrency limit before the scenario begins -- so a setup timeout
-    is this failure class, and a setup failure that is *not* one must
-    forbid the retry exactly as a call-phase one does. Teardown is the
-    exception because only one thing runs there: ``assert_same_container``
-    raises a timeout when the registry has stopped answering, which is
-    recorded, or an ``AssertionError`` when the container was replaced,
-    which is the recycle check firing and has its own marker and its own
-    re-provisioning retry. Recording that as a real failure would disarm
-    it.
+    **Every phase is classified, and exactly one failure is exempt.**
+    Setup and teardown are not formalities here: fixtures talk to the
+    registry at both ends -- ``test_limit_slot_wake``'s ``slot_limit``
+    sets a concurrency limit before the scenario and deletes it in a
+    ``finally`` afterwards -- so a failure at either end is as real as one
+    in the body, and must forbid the retry just the same.
+
+    The exemption is ``RegistryContainerRecycled`` and nothing else. That
+    one has its own marker and its own retry, which re-provisions because
+    the replacement's database is empty; recording it here would disarm
+    the recovery that exists for it. Exempting it by *type* rather than by
+    phase is the point -- an earlier version exempted all of teardown,
+    which also exempted a fixture's own teardown failing for real.
 
     Nothing raised in here may reach pytest: a diagnostic that breaks
     reporting would cost the run the very evidence it exists to collect.
@@ -162,7 +166,7 @@ def _classify(
             error=error,
             timeout=timeout,
         )
-    elif report.when != "teardown":
+    elif not isinstance(error, RegistryContainerRecycled):
         record_non_timeout_failure(nodeid=item.nodeid, phase=report.when, error=error)
 
 

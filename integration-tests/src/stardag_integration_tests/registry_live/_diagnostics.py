@@ -390,13 +390,13 @@ def record_non_timeout_failure(
     file and refuses to retry a run that holds any, so a real failure
     cannot be carried to green on the back of somebody else's timeout.
 
-    Setup and call both write here; teardown never does. A teardown
-    ``AssertionError`` is the recycled-container check firing, which has
-    its own marker and its own retry -- and that retry re-provisions
-    precisely because the recycle explains *every* failure in the run,
-    which a transport timeout does not. Setup does write, because
-    fixtures here talk to the registry and a fixture that fails for real
-    must end the run exactly as a scenario body would.
+    Every phase writes here, because fixtures talk to the registry at
+    both ends of a scenario and a fixture failing for real must end the
+    run exactly as a scenario body would. One failure is exempt and it is
+    exempt by type, not by phase: ``RegistryContainerRecycled`` has its
+    own marker and its own retry, which re-provisions precisely because a
+    lost database explains *every* failure in the run -- which a
+    transport timeout does not.
     """
     directory = _diagnostics_dir()
     if directory is None:

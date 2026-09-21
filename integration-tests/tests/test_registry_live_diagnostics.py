@@ -28,7 +28,10 @@ from stardag_integration_tests.registry_live._diagnostics import (
     record_transport_timeout,
     transport_timeout,
 )
-from stardag_integration_tests.registry_live._harness import Deployment
+from stardag_integration_tests.registry_live._harness import (
+    Deployment,
+    RegistryContainerRecycled,
+)
 
 _REQUEST = httpx.Request("GET", "https://registry.invalid/api/v1/builds")
 
@@ -107,6 +110,20 @@ def test_an_assertion_is_never_retried_even_after_a_timeout() -> None:
             raise AssertionError("the build never reached a terminal status")
     except AssertionError as error:
         assert transport_timeout(error) is None
+
+
+def test_the_recycle_assertion_is_exempt_by_type_not_by_phase() -> None:
+    """The one failure CI must still be allowed to retry over.
+
+    Named by its own type because the phase cannot identify it: fixtures
+    tear down through the registry too, so an ordinary teardown failure
+    has to forbid the retry while this one must not.
+    """
+    error = _raised(RegistryContainerRecycled("boot id changed"))
+    assert isinstance(error, AssertionError)
+    # Still not a transport timeout, so the retry it enables is the
+    # recycle one and not this issue's.
+    assert transport_timeout(error) is None
 
 
 def test_a_connection_error_is_not_a_timeout() -> None:

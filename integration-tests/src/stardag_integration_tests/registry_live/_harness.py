@@ -114,6 +114,24 @@ def record_recycle(previous: str, current: str) -> None:
         )
 
 
+class RegistryContainerRecycled(AssertionError):
+    """The process holding the database was replaced mid-run.
+
+    Its own type because one consumer has to tell it apart from every
+    other teardown failure and cannot do so by phase. A non-timeout
+    failure in teardown normally *forbids* CI's retry -- fixtures here
+    tear down through the registry, and ``test_limit_slot_wake``'s
+    ``slot_limit`` deletes a concurrency limit in a ``finally`` -- but
+    this one must not, because it has its own marker and its own retry,
+    and that retry re-provisions. An earlier version exempted the whole
+    teardown phase instead, which was one exemption doing the work of
+    two.
+
+    An ``AssertionError`` subclass, so pytest reports it as before and
+    the transport-timeout discriminator keeps excluding it for free.
+    """
+
+
 @dataclass(frozen=True)
 class Deployment:
     """A live registry and the coordinates needed to talk to it."""
@@ -177,7 +195,7 @@ class Deployment:
         )
         if current != self.boot_id:
             record_recycle(self.boot_id, current)
-            raise AssertionError(
+            raise RegistryContainerRecycled(
                 f"The registry container was replaced mid-run (boot id "
                 f"{self.boot_id} -> {current}). Its Postgres is inside that "
                 f"container, so the database this scenario was writing to no "
