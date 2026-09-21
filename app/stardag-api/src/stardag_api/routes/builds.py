@@ -4392,16 +4392,26 @@ async def start_task(
         claim: Atomic per-task execution claim: reject the start with
             **409** when *another* execution already holds a live claim
             (error code ``task_already_running``, echoing the running
-            execution's
-            ``executor``/``executor_ref`` so the caller can re-attach, and
-            its ``latest_status_expires_at``) or is already COMPLETED
+            execution's ``executor``/``executor_ref`` so the caller can
+            re-attach, its ``execution_id``, and its
+            ``latest_status_expires_at``) or is already COMPLETED
             (``task_already_completed``). The check runs on the
             FOR-UPDATE-locked task row inside the start transaction, so
             concurrent claiming starts serialize — at most one wins. A
             denied claim records nothing (no event, no concurrency-limit
             slots). A claim whose expiry has passed denies nothing: this
             start takes it over, replacing the previous holder's build,
-            executor fields and expiry together.
+            executor fields, identity and expiry together.
+
+            **Not "another" by build alone.** A start repeating the
+            ``execution_id`` the task already holds is the same execution
+            asking again — a retried delivery — and is granted; a
+            different one from the same build is a second attempt and is
+            denied like anybody else's. With no id sent, the
+            ``(executor, executor_ref)`` pair decides, and a request
+            naming neither is always denied. A granted claim always
+            writes the identity, including clearing it when the claim
+            brought none: it is a new execution and inherits nothing.
 
             Neither does a claim this same execution already holds --
             same build, same ``executor`` *and* same ``executor_ref``. The

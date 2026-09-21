@@ -647,6 +647,34 @@ async def test_an_inherited_id_does_not_let_a_dead_execution_report(
     assert row.latest_executor_ref == "fc-new"
 
 
+async def test_an_eviction_names_the_execution_it_took_the_claim_from(
+    client: AsyncClient,
+):
+    """Every endpoint returning this model echoes the identity, and an
+    eviction is where an operator most wants it: it names the execution
+    whose claim was just taken away."""
+    execution_id = _eid()
+    build_id = await _registered(client, "evict-echo")
+    assert (
+        await _start(
+            client,
+            build_id,
+            "evict-echo",
+            claim="true",
+            execution_id=execution_id,
+            limit_key="evict-echo-key",
+            enforce_limits="true",
+        )
+    ).status_code == 200
+
+    evicted = await client.post(
+        "/api/v1/concurrency-limits/evict-echo-key/holders/evict-echo/evict"
+    )
+
+    assert evicted.status_code == 200, evicted.text
+    assert evicted.json()["execution_id"] == execution_id
+
+
 # --- Dialect ------------------------------------------------------------
 
 

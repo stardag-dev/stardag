@@ -408,4 +408,8 @@ async def evict_concurrency_limit_holder(
         status=db_task.latest_status,
         latest_status=db_task.latest_status,
         attempt_count=attempt_counts.get(db_task.id, 0),
+        # Every endpoint returning this model echoes the identity, and an
+        # eviction is where an operator most wants it: it names the
+        # execution whose claim was just taken away.
+        execution_id=db_task.latest_execution_id,
     )
