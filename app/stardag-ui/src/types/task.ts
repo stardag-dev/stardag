@@ -110,7 +110,10 @@ export interface Build {
 }
 
 // Response of POST /builds/{id}/cancel — a superset of Build. The cascade
-// fields are empty/zero unless the call passed cascade=true.
+// fields are always empty/zero from this client: it never passes
+// `cascade`, because stopping a build's containers has to happen before
+// its claims are released, and only the operator's own credentials can do
+// that. Kept on the type because the server still reports them.
 export interface BuildCancelResult extends Build {
   cascaded_task_ids: string[];
   cascaded_task_count: number;
@@ -134,8 +137,11 @@ export interface BulkCancelBuildsRequest {
   idle_for_seconds?: number;
   reactive_app_name?: string | null;
   include_reactive?: boolean;
-  // Also cancel the build's RUNNING/SUSPENDED tasks, releasing the
-  // execution claims and concurrency slots they hold.
+  // Also cancel the tasks each build *owns* — RUNNING, SUSPENDED or
+  // INTERRUPTED, and only where that build produced the current status —
+  // releasing the execution claims and concurrency slots they hold. The
+  // ownership scope is what keeps it from declaring another build's live
+  // worker dead; see `services.claims.BUILD_OWNED_STATUSES`.
   cascade?: boolean;
   dry_run?: boolean;
   limit?: number;

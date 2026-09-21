@@ -37,7 +37,7 @@ import modal
 
 import stardag.integration.modal as sd_modal
 
-from .selectors import registry_live_limit_keys
+from .selectors import ALT_WORKER, registry_live_limit_keys, registry_live_worker
 
 python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
 
@@ -85,7 +85,16 @@ def build_scenario_app(app_name: str) -> sd_modal.StardagApp:
         builder_settings=sd_modal.FunctionSettings(image=image, timeout=900),
         worker_settings={
             "default": sd_modal.FunctionSettings(image=image, timeout=600),
+            # A second worker so one scenario can stop *some* of a build's
+            # executions and watch the rest finish. Identical settings: what
+            # it exists to be is a different Modal function, because that is
+            # what ``stardag builds stop --worker`` selects on (the function
+            # name recorded in the execution metadata). Costs a deploy-time
+            # function registration and nothing at run time -- no task
+            # routes here unless it asks.
+            ALT_WORKER: sd_modal.FunctionSettings(image=image, timeout=600),
         },
+        worker_selector=registry_live_worker,
         tick_settings=sd_modal.FunctionSettings(
             image=image, timeout=TICK_TIMEOUT_SECONDS
         ),

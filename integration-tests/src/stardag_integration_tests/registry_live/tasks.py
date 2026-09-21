@@ -304,3 +304,92 @@ class ConfiguredFanOut(sd.Task[list[int]]):
         # or two builds with different configs would disagree on the output
         # behind one task id.
         self._save(sorted({len(kid.load()) for kid in kids}))
+
+
+@sd.task(name="SlowOnWorker")
+def slow_on_worker(
+    values: sd.Depends[list[int]], seconds: int, worker: str = "default"
+) -> list[int]:
+    """``Slow``, but routed to a named worker by the app's selector.
+
+    A separate task rather than a ``worker`` field on ``Slow``, and that is
+    the point of it: a task id is derived from its parameters, so adding a
+    field to ``Slow`` would move the ids of every task in every other
+    scenario. This one is new, so it moves nothing.
+
+    Read by ``selectors.registry_live_worker``, which routes it to that
+    Modal function. What the stop scenario needs from that is the
+    *execution metadata*: the function name is what the registry records
+    alongside the call ref, and therefore what ``stardag builds stop
+    --worker`` selects on.
+
+    ``seconds`` has to outlive the stop -- the tasks that are not stopped
+    must still be running when the command releases the claims, so that
+    "they finish afterwards" is a thing that can be observed rather than a
+    race the scenario happened to win.
+    """
+    import time
+
+    del worker  # read off the task by the app's worker selector
+    time.sleep(seconds)
+    return values
+
+
+class WorkerFanIn(sd.Task[int]):
+    """A root over several ``SlowOnWorker`` upstreams, split across workers.
+
+    The shape ``stardag builds stop --worker`` needs and nothing else here
+    produces: one build holding several live executions at once, on more
+    than one Modal function, all started within a few seconds of each
+    other.
+
+    **The sleep has to outlive the whole scenario**, and that is what the
+    duration is for rather than pacing. The evidence the scenario rests on
+    is a probe of Modal itself once the command has returned: the calls it
+    selected are no longer running and the ones it excluded still are. An
+    upstream that reached the end of its own sleep in the meantime would
+    answer "not running" for a reason that has nothing to do with the
+    cancel, and the assertion would pass having tested nothing.
+
+    It is sized for the container-start skew between the first upstream and
+    the last, plus the command's own run -- generously, but not unboundedly,
+    because every second past the scenario is a container still billing.
+    Getting it wrong is safe in the one direction that matters: an upstream
+    that outran its sleep is COMPLETED, not RUNNING, so the scenario's
+    "all four running" wait never comes true and it fails on that timeout
+    rather than passing vacuously.
+
+    ``salt`` reaches the leaf and through it every task id here -- see the
+    note on ``get_range``.
+    """
+
+    salt: str
+    stopped_worker: str = "alt"
+    seconds: int = 180
+    per_worker: int = 2
+
+    def requires(self):
+        return self.stopped_tasks() + self.kept_tasks()
+
+    def stopped_tasks(self) -> list:
+        """The upstreams the scenario will stop. Nameable before they run."""
+        return self._upstreams(self.stopped_worker)
+
+    def kept_tasks(self) -> list:
+        """The upstreams that must be left running by the same command."""
+        return self._upstreams("default")
+
+    def _upstreams(self, worker: str) -> list:
+        # The index gives ``per_worker`` distinct ids per worker; the worker
+        # name keeps the two groups apart, so all of them are separate
+        # tasks. The leaf's own ``limit`` is unrelated to that count -- it
+        # sizes the list every upstream reads, and one shared leaf feeds
+        # them all. Two is simply a small number of integers.
+        leaf = get_range(limit=2, salt=self.salt)
+        return [
+            slow_on_worker(values=leaf, seconds=self.seconds + index, worker=worker)
+            for index in range(self.per_worker)
+        ]
+
+    def run(self):
+        self._save(sum(len(upstream.load()) for upstream in self.requires()))

@@ -332,24 +332,22 @@ export async function fetchTaskEvents(
 // Build actions
 
 /**
- * Cancel a single build.
+ * Cancel a single build: a build-level event, and nothing else.
  *
- * ``cascade`` additionally emits TASK_CANCELLED for the build's
- * RUNNING/SUSPENDED tasks, releasing the execution claims and
- * concurrency-limit slots they hold. It defaults to false server-side, so
- * an omitted argument keeps the historical behaviour (a build-level event
- * and nothing else).
+ * Deliberately no cascade. Releasing the build's claims lets the next
+ * build take its tasks over, so from that moment the task row names a
+ * successor's execution while the old one is still running — which is why
+ * stopping comes first and is the operator's to do, from the CLI. See
+ * `BuildStopPanel` and `stardag builds stop`.
  */
 export async function cancelBuild(
   buildId: string,
   environmentId?: string,
   triggeredByUserId?: string,
-  cascade = false,
 ): Promise<BuildCancelResult> {
   const params = new URLSearchParams();
   if (environmentId) params.set("environment_id", environmentId);
   if (triggeredByUserId) params.set("triggered_by_user_id", triggeredByUserId);
-  if (cascade) params.set("cascade", "true");
 
   const url = `${API_BASE}/builds/${buildId}/cancel?${params.toString()}`;
   const response = await fetchWithAuth(url, { method: "POST" });

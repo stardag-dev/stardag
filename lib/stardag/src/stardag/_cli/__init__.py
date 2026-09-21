@@ -29,7 +29,10 @@ Usage:
     stardag builds show <build-id> [--json]
     stardag builds frontier <build-id> [--json]
     stardag builds ticks <build-id> [--limit N] [--json]
-    stardag builds cancel <build-id> [--cascade] [--yes]
+    stardag builds stop <build-id> [--worker name] [--executor modal]
+        [--namespace prefix] [--older-than 30m] [--task-id id ...]
+        [--dry-run] [--yes] [--json]
+    stardag builds cancel <build-id> [--yes]
     stardag builds cleanup [--older-than 24h] [--build-id id ...] [--apply] [--yes]
 
     stardag tasks list [--status running] [--older-than 1h] [--json]
