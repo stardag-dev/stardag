@@ -588,19 +588,19 @@ async def test_a_preemption_restart_under_the_same_id_re_grants_the_claim(
 async def test_an_inherited_id_does_not_let_a_dead_execution_report(
     client: AsyncClient, async_session: AsyncSession
 ):
-    """A stale id plus a stale owner is still not the current execution.
+    """A dead execution cannot report against its replacement.
 
-    The reachable shape, and the reason the ref keeps a vote. A start
-    carrying no id leaves the recorded one in place, so an id-less
-    *replacement* inside the same build — an older SDK re-claiming a
-    lapsed task, which a rollover or a rollback makes possible mid-build
-    — inherits its predecessor's identity along with its build. Id and
-    owner then both match a late report from the execution that is
-    actually gone, and only the executor ref has moved on.
+    The reachable shape: an id-less *replacement* inside the same build
+    — an older SDK re-claiming a lapsed task, which a rollback mid-build
+    makes possible — so the owner still matches and only the execution
+    has moved on.
 
-    Clearing the id on an id-less start instead of preserving it would
-    not help: the report would land on a NULL id and be accepted by the
-    no-opinion branch. Comparing both identities is what closes it.
+    Two things stop it, and both are needed. A granted claim writes the
+    identity even when it has none to write, so a new execution inherits
+    nothing (an ordinary start preserves instead, which is what keeps
+    the limiter's bookkeeping start from erasing a live identity). And a
+    report must contradict *neither* identity, so the stale executor ref
+    is refused here whatever the id says.
     """
     execution_id = _eid()
     build_id, _ = await _claimed(client, "inherited-id", execution_id)
@@ -626,8 +626,8 @@ async def test_an_inherited_id_does_not_let_a_dead_execution_report(
     )
     assert replacement.status_code == 200, replacement.text
     row = await _task_row(async_session, "inherited-id")
-    assert str(row.latest_execution_id) == execution_id, (
-        "precondition: the id-less start inherited the recorded identity"
+    assert row.latest_execution_id is None, (
+        "a granted claim is a new execution and must inherit no identity"
     )
 
     # The original worker reports late, naming the execution it is.

@@ -4444,8 +4444,16 @@ async def start_task(
         or limit_keys
         or claim_ttl_seconds is not None
         or execution_id is not None
+        or claim
     ):
         extra_metadata = {}
+        if claim:
+            # Recorded on the event, not just acted on, because the fold
+            # needs it and so do the per-build replays -- which see only
+            # events. A granted claim is a *new execution* by
+            # construction, and the identity fold treats it differently
+            # from an ordinary start for exactly that reason.
+            extra_metadata["claim"] = True
         if execution_id is not None:
             # Carried on the event for the same reason the TTL is: the
             # task row's identity is folded from the event that set it, so

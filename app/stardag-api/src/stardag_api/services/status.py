@@ -258,6 +258,21 @@ def _names_the_execution(
     Note what neither identity separates, correctly: a backend that
     restarts an input under the same call id — Modal's preemption — is by
     construction still the same execution, and reuses both.
+
+    **The one gap left, stated rather than papered over.** A report that
+    names an id, against a task whose id is NULL and whose ref is NULL,
+    is accepted — there is nothing to compare on either axis. Reaching
+    it needs a *pre-identity* claiming start to have replaced an
+    identity-aware execution **inside one build** (so the owner still
+    matches), which means an SDK rollback mid-build, *and* a report that
+    carries no executor ref (Modal's reporter omits it only when
+    ``current_function_call_id()`` is unavailable). Closing it would mean
+    minting a server-side placeholder identity for claims that bring
+    none — inventing a value for a caller-minted field, and making the
+    echoed ``execution_id`` something the caller never sent. Both
+    conditions are version-skew-only and the pre-identity behaviour here
+    was to accept every such report, so this is strictly narrower than
+    what it replaces rather than a hole it opens.
     """
     metadata = event.event_metadata or {}
     reported_execution = metadata.get("execution_id")
@@ -795,7 +810,13 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         # under a no-id start refuses the old execution's reports on the
         # owner test, not on the id. TASK_RETRIED remains the reset.
         recorded_execution = _as_uuid(metadata.get("execution_id"))
-        if recorded_execution is not None:
+        if recorded_execution is not None or metadata.get("claim"):
+            # A *granted claim* always writes, including a clear. It won
+            # arbitration, so it is a new execution by construction, and
+            # a new execution inherits nothing: letting it keep its
+            # predecessor's id would leave the old execution's own late
+            # report matching on an identity that has moved on. Every
+            # other start only writes when it names one.
             task.latest_execution_id = recorded_execution
         # Grant (or re-grant) the claim's expiry alongside the executor
         # fields, from the same event. Doing both here is what makes a
@@ -1177,10 +1198,9 @@ async def get_task_status_in_build(
             # Mirrors the fold: named, or left alone. A replay that
             # cleared where the row does not would disagree with it, and
             # the two answer the same question for different readers.
-            replayed_execution = _as_uuid(
-                (event.event_metadata or {}).get("execution_id")
-            )
-            if replayed_execution is not None:
+            start_metadata = event.event_metadata or {}
+            replayed_execution = _as_uuid(start_metadata.get("execution_id"))
+            if replayed_execution is not None or start_metadata.get("claim"):
                 current_execution_id = replayed_execution
         elif event.event_type == EventType.TASK_SUSPENDED:
             status = TaskStatus.SUSPENDED
@@ -1288,10 +1308,9 @@ async def get_all_task_statuses_in_build(
             status = TaskStatus.RUNNING
             started_at = event.created_at
             current_refs[task_id] = (event.event_metadata or {}).get("executor_ref")
-            replayed_execution = _as_uuid(
-                (event.event_metadata or {}).get("execution_id")
-            )
-            if replayed_execution is not None:
+            start_metadata = event.event_metadata or {}
+            replayed_execution = _as_uuid(start_metadata.get("execution_id"))
+            if replayed_execution is not None or start_metadata.get("claim"):
                 current_execution_ids[task_id] = replayed_execution
         elif event.event_type == EventType.TASK_SUSPENDED:
             status = TaskStatus.SUSPENDED
