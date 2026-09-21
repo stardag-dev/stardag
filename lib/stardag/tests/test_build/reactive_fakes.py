@@ -435,10 +435,12 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.statuses[tid] = "running"
         self.status_build_id[tid] = build_id
         self.refs[tid] = (executor, executor_ref)
-        # Set *or cleared* on every start, as the row fold does it: a
-        # start describes one execution completely, so one naming none
-        # leaves none behind rather than inheriting its predecessor's.
-        self.execution_ids[tid] = None if execution_id is None else str(execution_id)
+        # Set when named, left alone otherwise -- the row fold's rule,
+        # not set-or-clear. Silence is not a statement: the limiter's
+        # enforced start names no execution and must not erase the one
+        # the claim recorded, or the window between them is unprotected.
+        if execution_id is not None:
+            self.execution_ids[tid] = str(execution_id)
         # Per build, because that is what the event log records and what
         # the executions listing reads. ``refs`` alone is the *current*
         # execution, which stops being this build's the moment another one

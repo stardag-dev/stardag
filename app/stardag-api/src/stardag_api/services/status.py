@@ -746,17 +746,33 @@ def _apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_executor = metadata.get("executor")
         task.latest_executor_ref = metadata.get("executor_ref")
         task.latest_executor_metadata = metadata.get("executor_metadata")
-        # The execution's identity, on the same set-or-clear terms as the
-        # three above and for the same reason: a start describes one
-        # execution completely, so a start that names none leaves none
-        # behind rather than inheriting its predecessor's.
+        # The execution's identity — set when the start names one, and
+        # otherwise **left alone**. Deliberately not the set-or-clear of
+        # the three fields above, and the difference is the point.
         #
-        # Clearing is safe here in a way it is not for the ref, because a
-        # start reaching this point has already passed the supersession
-        # check in ``routes/builds.py``: a start carrying an id that
-        # contradicts the live claim never gets here, so the only starts
-        # that clear are ones with no identity to record.
-        task.latest_execution_id = _as_uuid(metadata.get("execution_id"))
+        # Silence is not a statement. A start carrying no identity is
+        # either an SDK predating them or a start that describes no
+        # execution at all: the concurrency limiter's enforced start,
+        # which exists to occupy slots and names no executor, no ref and
+        # no id. Clearing on those would discard a true answer in
+        # exchange for nothing — and it is not a harmless gap, because
+        # that start lands *between* the claim and the ref-recording
+        # start, so the whole window (and permanently, if the spawn then
+        # fails) would lose the protection this column exists for.
+        #
+        # It is the same reading absence gets everywhere else here: a
+        # missing id is no opinion rather than a contradiction. It would
+        # be incoherent for absence to be inert in every rule and
+        # destructive in the fold.
+        #
+        # What makes leaving it safe is that a stale id can only ever be
+        # *read* by a request that carries one, and such a request is
+        # judged on ownership too — so a task that moved to another build
+        # under a no-id start refuses the old execution's reports on the
+        # owner test, not on the id. TASK_RETRIED remains the reset.
+        recorded_execution = _as_uuid(metadata.get("execution_id"))
+        if recorded_execution is not None:
+            task.latest_execution_id = recorded_execution
         # Grant (or re-grant) the claim's expiry alongside the executor
         # fields, from the same event. Doing both here is what makes a
         # re-claim of an expired claim coherent: the new holder's ref, its
@@ -1134,9 +1150,14 @@ async def get_task_status_in_build(
             status = TaskStatus.RUNNING
             started_at = event.created_at
             current_ref = (event.event_metadata or {}).get("executor_ref")
-            current_execution_id = _as_uuid(
+            # Mirrors the fold: named, or left alone. A replay that
+            # cleared where the row does not would disagree with it, and
+            # the two answer the same question for different readers.
+            replayed_execution = _as_uuid(
                 (event.event_metadata or {}).get("execution_id")
             )
+            if replayed_execution is not None:
+                current_execution_id = replayed_execution
         elif event.event_type == EventType.TASK_SUSPENDED:
             status = TaskStatus.SUSPENDED
         elif event.event_type == EventType.TASK_RESUMED:
@@ -1243,9 +1264,11 @@ async def get_all_task_statuses_in_build(
             status = TaskStatus.RUNNING
             started_at = event.created_at
             current_refs[task_id] = (event.event_metadata or {}).get("executor_ref")
-            current_execution_ids[task_id] = _as_uuid(
+            replayed_execution = _as_uuid(
                 (event.event_metadata or {}).get("execution_id")
             )
+            if replayed_execution is not None:
+                current_execution_ids[task_id] = replayed_execution
         elif event.event_type == EventType.TASK_SUSPENDED:
             status = TaskStatus.SUSPENDED
         elif event.event_type == EventType.TASK_RESUMED:

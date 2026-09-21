@@ -366,7 +366,8 @@ async def test_a_start_with_no_id_is_never_refused(
     """Half a rolling deploy: the task was claimed with an id and the
     reporter has none. Nothing to compare is not a mismatch — refusing
     would turn a version skew into tasks that look unstarted."""
-    build_id, _ = await _claimed(client, "no-id-start", _eid())
+    execution_id = _eid()
+    build_id, _ = await _claimed(client, "no-id-start", execution_id)
 
     old_sdk = await _start(
         client, build_id, "no-id-start", executor="modal", executor_ref="fc-1"
@@ -374,7 +375,38 @@ async def test_a_start_with_no_id_is_never_refused(
 
     assert old_sdk.status_code == 200, old_sdk.text
     row = await _task_row(async_session, "no-id-start")
-    assert row.latest_execution_id is None, "a start with no id records none"
+    # And it does not *erase* the identity either. Silence is not a
+    # statement: a start naming no execution has said nothing about
+    # which one is running, and clearing would discard a true answer.
+    # This is not hypothetical — the concurrency limiter's enforced
+    # start is exactly such a start, and it lands between the claim and
+    # the ref-recording start, so clearing would leave that whole window
+    # (and permanently, if the spawn then failed) unprotected.
+    assert str(row.latest_execution_id) == execution_id
+
+
+async def test_the_limiters_bookkeeping_start_does_not_erase_the_identity(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """The resident engine's registry-backed limiter acquires its slot
+    *after* the claim, with a non-claiming, ref-less, id-less start whose
+    only job is to occupy slots. It must leave the identity the claim
+    recorded intact, or the protection is off for the whole
+    claim → slot → spawn window."""
+    execution_id = _eid()
+    build_id, _ = await _claimed(client, "limiter-start", execution_id)
+
+    slot_acquired = await _start(client, build_id, "limiter-start")
+
+    assert slot_acquired.status_code == 200, slot_acquired.text
+    row = await _task_row(async_session, "limiter-start")
+    assert str(row.latest_execution_id) == execution_id
+
+    # ...and the protection is still on: a superseded execution reporting
+    # through that window is still refused.
+    stale = await _start(client, build_id, "limiter-start", execution_id=_eid())
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["detail"]["error_code"] == "execution_superseded"
 
 
 async def test_a_start_with_an_id_on_a_task_holding_none_is_accepted(
