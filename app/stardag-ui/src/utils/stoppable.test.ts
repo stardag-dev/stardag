@@ -3,6 +3,7 @@ import type { Task, TaskStatus } from "../types/task";
 import {
   executionFromTask,
   executionsForBuild,
+  executorsIn,
   matchesFilters,
   stopCommand,
   workersIn,
@@ -189,6 +190,17 @@ describe("workersIn", () => {
   });
 });
 
+describe("executorsIn", () => {
+  it("lists the distinct executors, sorted", () => {
+    const rows = [
+      makeTask(),
+      makeTask({ latest_executor: "prefect" }),
+      makeTask({ latest_executor: null }),
+    ];
+    expect(executorsIn(executionsForBuild(rows, BUILD))).toEqual(["modal", "prefect"]);
+  });
+});
+
 describe("stopCommand", () => {
   it("is the bare command when nothing is filtered", () => {
     expect(stopCommand(BUILD, {})).toBe(`stardag builds stop ${BUILD}`);
@@ -201,11 +213,13 @@ describe("stopCommand", () => {
     expect(
       stopCommand(BUILD, {
         worker: "gpu",
+        executor: "modal",
         namespace: "acme",
         olderThanSeconds: 1800,
       }),
     ).toBe(
-      `stardag builds stop ${BUILD} --worker gpu --namespace acme --older-than 30m`,
+      `stardag builds stop ${BUILD} --worker gpu --executor modal ` +
+        `--namespace acme --older-than 30m`,
     );
   });
 

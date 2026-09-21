@@ -52,6 +52,7 @@ from uuid import UUID
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 # Selection and Modal cancellation for ``builds stop``, kept out of this
@@ -611,7 +612,11 @@ def builds_cancel(
     stardag_env: Optional[str] = _ENV_OPTION,
     cascade: bool = typer.Option(
         False,
-        "--cascade",
+        # Both spellings, so a script that passed either keeps parsing.
+        # ``--no-cascade`` asked for exactly today's behaviour, so failing
+        # it would be gratuitous; ``--cascade`` asked for something that no
+        # longer exists, and is refused below.
+        "--cascade/--no-cascade",
         help="Removed — use 'stardag builds stop' instead.",
         hidden=True,
     ),
@@ -767,6 +772,16 @@ def builds_stop(
         stoppable = [e for e in selected if e.stoppable]
         unstoppable = [e for e in selected if not e.stoppable]
 
+        if json_output and not dry_run and not yes:
+            # Before the document, not after: a caller parsing stdout would
+            # otherwise get a complete, successful-looking selection from a
+            # run that exited non-zero and stopped nothing.
+            error_console.print(
+                "[bold red]Error:[/bold red] refusing to prompt in --json "
+                "mode; pass --yes to confirm."
+            )
+            raise typer.Exit(1)
+
         if json_output:
             _emit_json(
                 {
@@ -790,12 +805,8 @@ def builds_stop(
             return
 
         if not yes:
-            if json_output:
-                error_console.print(
-                    "[bold red]Error:[/bold red] refusing to prompt in "
-                    "--json mode; pass --yes to confirm."
-                )
-                raise typer.Exit(1)
+            # --json with no --yes already exited above, before anything
+            # reached stdout.
             typer.confirm(
                 _stop_confirmation(build_id, stoppable, unstoppable, excluded),
                 abort=True,
@@ -968,7 +979,7 @@ def _stop_confirmation(
 
 
 def _render_cancel_outcomes(
-    outcomes: Sequence["_stop.CancelOutcome"], report: "Console"
+    outcomes: Sequence["_stop.CancelOutcome"], report: Console
 ) -> None:
     """Per-call result, because a partial stop has to be visible."""
     for outcome in outcomes:
@@ -977,7 +988,11 @@ def _render_cancel_outcomes(
         if outcome.ok:
             report.print(f"  [green]stopped[/green] {ref}  {name}")
         else:
-            report.print(f"  [red]failed[/red]  {ref}  {name}  {outcome.error}")
+            # Escaped: an exception message is arbitrary text, and a `[...]`
+            # in it would be eaten as rich markup.
+            report.print(
+                f"  [red]failed[/red]  {ref}  {name}  {escape(outcome.error or '')}"
+            )
 
 
 @app.command("cleanup")

@@ -439,7 +439,10 @@ class TestStopCommand:
         assert payload["dry_run"] is False
         assert "stopped" not in result.stdout
 
-    def test_json_refuses_to_prompt(self):
+    def test_json_refuses_to_prompt_before_writing_anything(self):
+        # The refusal has to come *before* the document: a caller parsing
+        # stdout would otherwise get a complete, successful-looking
+        # selection from a run that exited non-zero and stopped nothing.
         registry = _mock_registry([_row()])
         with (
             _patch_resolve(registry),
@@ -448,8 +451,31 @@ class TestStopCommand:
             result = runner.invoke(app, ["stop", BUILD_ID, "--json"])
 
         assert result.exit_code == 1
+        assert result.stdout == ""
         cancel.assert_not_called()
         registry.build_cancel.assert_not_called()
+
+    def test_a_cancel_failure_with_brackets_is_not_eaten_as_markup(self):
+        # An exception message is arbitrary text; rich would swallow a
+        # `[...]` in it, so the one line saying which call could not be
+        # stopped would come out mangled.
+        registry = _mock_registry([_row()])
+
+        def _cancel_calls(executions):
+            return [
+                _stop.CancelOutcome(
+                    executions[0], error="NotFoundError: [fc-abc] unknown id"
+                )
+            ]
+
+        with (
+            _patch_resolve(registry),
+            mock.patch.object(_stop, "cancel_modal_calls", side_effect=_cancel_calls),
+        ):
+            result = runner.invoke(app, ["stop", BUILD_ID, "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert "[fc-abc] unknown id" in result.output
 
 
 class TestCancelNoLongerCascades:
@@ -461,6 +487,16 @@ class TestCancelNoLongerCascades:
         assert result.exit_code == 1
         assert f"stardag builds stop {BUILD_ID}" in result.output
         registry.build_cancel.assert_not_called()
+
+    def test_no_cascade_still_parses(self):
+        # It asked for exactly today's behaviour, so failing a script that
+        # spells it out would be gratuitous.
+        registry = mock.MagicMock()
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["cancel", BUILD_ID, "--no-cascade", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        registry.build_cancel.assert_called_once_with(UUID(BUILD_ID))
 
     def test_plain_cancel_stops_nothing_and_says_so(self):
         registry = mock.MagicMock()

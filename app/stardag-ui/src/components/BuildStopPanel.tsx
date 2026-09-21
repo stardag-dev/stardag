@@ -4,6 +4,7 @@ import type { Task } from "../types/task";
 import { modalFunctionCallUrl } from "../utils/modalLinks";
 import {
   executionsForBuild,
+  executorsIn,
   matchesFilters,
   stopCommand,
   workersIn,
@@ -77,6 +78,7 @@ export function BuildStopPanel({
   const [copied, setCopied] = useState(false);
 
   const [worker, setWorker] = useState("");
+  const [executor, setExecutor] = useState("");
   const [namespace, setNamespace] = useState("");
   const [olderThanSeconds, setOlderThanSeconds] = useState(0);
 
@@ -111,16 +113,18 @@ export function BuildStopPanel({
   const filters: StopFilters = useMemo(
     () => ({
       worker: worker || undefined,
+      executor: executor || undefined,
       namespace: namespace || undefined,
       olderThanSeconds: olderThanSeconds || undefined,
     }),
-    [worker, namespace, olderThanSeconds],
+    [worker, executor, namespace, olderThanSeconds],
   );
   const selected = useMemo(
     () => held.filter((execution) => matchesFilters(execution, filters)),
     [held, filters],
   );
   const workers = useMemo(() => workersIn(held), [held]);
+  const executors = useMemo(() => executorsIn(held), [held]);
   const command = stopCommand(buildId, filters);
 
   const handleCopy = useCallback(async () => {
@@ -205,6 +209,26 @@ export function BuildStopPanel({
                 >
                   <option value="">all</option>
                   {workers.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {/* Both dropdowns appear only when there is something to
+                choose between — one worker or one executor is not a filter,
+                it is a fact the table already shows. */}
+            {executors.length > 1 && (
+              <label className="flex items-center gap-1">
+                <span className="text-gray-600 dark:text-gray-400">Executor</span>
+                <select
+                  value={executor}
+                  onChange={(e) => setExecutor(e.target.value)}
+                  className="rounded border border-gray-300 bg-white px-1.5 py-0.5 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                >
+                  <option value="">all</option>
+                  {executors.map((name) => (
                     <option key={name} value={name}>
                       {name}
                     </option>

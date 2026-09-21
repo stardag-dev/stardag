@@ -327,8 +327,11 @@ def cancel_modal_calls(executions: Sequence[Execution]) -> list[CancelOutcome]:
     except ImportError as error:  # pragma: no cover - environment-dependent
         raise ModalUnavailable(
             "Stopping a Modal execution needs the modal package: "
-            f"{error}. Install stardag[modal], or stop the calls from the "
-            "Modal dashboard and then run 'stardag builds cancel'."
+            f"{error}. Install stardag with its modal extra, which is the "
+            "fix. Failing that, stop the calls from the Modal dashboard and "
+            "release each claim with 'stardag tasks cancel <build-id> "
+            "<task-id>' — 'stardag builds cancel' on its own records the "
+            "build and leaves the claims to lapse on their own expiry."
         ) from error
 
     outcomes: list[CancelOutcome] = []

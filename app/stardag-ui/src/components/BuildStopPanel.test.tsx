@@ -142,6 +142,41 @@ describe("BuildStopPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("puts the executor filter into the command too", async () => {
+    // Parity with the CLI's own flags: every filter the panel offers has
+    // to be expressible in the command it hands over, or the two stop
+    // describing the same set.
+    answerWith([
+      makeTask({ task_id: "on-modal", task_name: "Featurise" }),
+      makeTask({
+        task_id: "elsewhere",
+        task_name: "Aggregate",
+        latest_executor: "prefect",
+      }),
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+
+    await user.selectOptions(screen.getByLabelText("Executor"), "modal");
+
+    expect(screen.getByText("Featurise")).toBeInTheDocument();
+    expect(screen.queryByText("Aggregate")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(`stardag builds stop ${BUILD} --executor modal`),
+    ).toBeInTheDocument();
+  });
+
+  it("offers no executor filter when there is only one", async () => {
+    // One executor is not a choice, it is a fact the table already states.
+    answerWith([makeTask()]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+
+    expect(screen.queryByLabelText("Executor")).not.toBeInTheDocument();
+  });
+
   it("copies the command as shown", async () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();

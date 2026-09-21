@@ -380,8 +380,11 @@ class WorkerFanIn(sd.Task[int]):
         return self._upstreams("default")
 
     def _upstreams(self, worker: str) -> list:
-        # The index gives two distinct ids per worker; the worker name
-        # keeps the two groups apart, so all four are separate tasks.
+        # The index gives ``per_worker`` distinct ids per worker; the worker
+        # name keeps the two groups apart, so all of them are separate
+        # tasks. The leaf's own ``limit`` is unrelated to that count -- it
+        # sizes the list every upstream reads, and one shared leaf feeds
+        # them all. Two is simply a small number of integers.
         leaf = get_range(limit=2, salt=self.salt)
         return [
             slow_on_worker(values=leaf, seconds=self.seconds + index, worker=worker)

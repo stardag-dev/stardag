@@ -625,8 +625,9 @@ Things worth knowing:
   outside what stardag can reach. Each call in the registry UI's
   **Stop running tasks** panel links straight to its Modal dashboard page.
 - **The registry UI shows the same list** on the build page, with the same
-  filters and the exact command to copy. It never stops anything itself: the
-  server cannot reach Modal, and deliberately never will.
+  filters and the exact command to copy — whatever the filters are set to is
+  what the command carries. It never stops anything itself: the server cannot
+  reach Modal, and deliberately never will.
 - `--dry-run` writes nothing at all — not the stop, not the cancel.
 - An execution that ends between the list and the stop is not an error. The
   cancel is idempotent, and an already-finished call reports as stopped.

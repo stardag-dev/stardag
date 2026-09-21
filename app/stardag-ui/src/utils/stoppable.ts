@@ -181,6 +181,11 @@ export function workersIn(executions: StoppableExecution[]): string[] {
   return [...names].sort();
 }
 
+/** The executors present in a list, for the filter dropdown. */
+export function executorsIn(executions: StoppableExecution[]): string[] {
+  return [...new Set(executions.map((execution) => execution.executor))].sort();
+}
+
 /** Render a duration in seconds the way the CLI's `--older-than` takes it. */
 export function formatDurationFlag(seconds: number): string {
   if (seconds % 86400 === 0) return `${seconds / 86400}d`;
