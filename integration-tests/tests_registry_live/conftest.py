@@ -28,6 +28,10 @@ import os
 
 import pytest
 
+from stardag_integration_tests.registry_live._diagnostics import (
+    record_transport_timeout,
+    transport_timeout,
+)
 from stardag_integration_tests.registry_live._guard import ENV_API_URL, is_enabled
 from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live.provision import (
@@ -86,6 +90,44 @@ def pytest_configure(config: pytest.Config) -> None:
     # reads its expectation from the thing it is checking proves nothing.
     os.environ[ENV_API_URL] = deployment.api_url
     _deployment = deployment
+
+
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> None:
+    """Diagnose a transport timeout at the instant it happens.
+
+    Here rather than in a fixture, and for the "call" phase only, because
+    the timing is the whole value of it. The probe asks whether the
+    registry is answering *while the scenario's own request is timing
+    out*; a finaliser would run after the scenario's other teardown, by
+    which time the contention has passed and the registry answers
+    everything in milliseconds. Every occurrence would then read as the
+    same reassuring nothing.
+
+    It also runs before the autouse ``_registry_survived`` check below,
+    which spends up to a hundred seconds retrying the boot read when the
+    registry is unreachable -- the probe would be measuring that delay
+    rather than the failure.
+
+    The teardown phase is deliberately left out. The only registry call
+    there is ``assert_same_container``'s boot read, which already retries
+    six times over a hundred seconds -- so a timeout raised from it *is*
+    the probe, and re-probing would add nothing but delay.
+
+    The hook returns ``None`` throughout, so the report is still built by
+    pytest's own implementation. Under xdist this runs in the worker
+    process; the files it writes are on the runner's disk, which is what
+    CI reads back.
+    """
+    if call.when != "call" or call.excinfo is None or _deployment is None:
+        return None
+    error = call.excinfo.value
+    timeout = transport_timeout(error)
+    if timeout is None:
+        return None
+    record_transport_timeout(
+        _deployment, nodeid=item.nodeid, error=error, timeout=timeout
+    )
+    return None
 
 
 @pytest.fixture(autouse=True)

@@ -2,6 +2,7 @@
 
     python -m stardag_integration_tests.registry_live.provision up
     python -m stardag_integration_tests.registry_live.provision status
+    python -m stardag_integration_tests.registry_live.provision logs
     python -m stardag_integration_tests.registry_live.provision stop
     python -m stardag_integration_tests.registry_live.provision down
 
@@ -433,19 +434,108 @@ def _scenario_apps() -> list[tuple[str, str]]:
     ]
 
 
+# Bounded by a time window first and an entry count second, and the order
+# matters. `--tail` counts *entries across every function in the app*, so a
+# chatty worker would crowd out the registry lines that explain the stall;
+# the window does not have that failure mode. Three hours covers a PR's whole
+# run with room for a retry, and the count is only there to keep the file
+# from being unbounded -- a full twenty-scenario run plus a retry measured
+# about 3,300 entries against the registry.
+LOG_WINDOW = "3h"
+LOG_MAX_ENTRIES = 20000
+# Fetch-and-exit is the default (`-f` is what follows), so this bounds a
+# hung call rather than a streaming one. Generous, because the alternative
+# to a slow dump is no evidence at all.
+LOG_FETCH_TIMEOUT_SECONDS = 300
+
+
+def logs(modal_environment: str, output_dir: Path) -> None:
+    """Write every app's Modal logs into ``output_dir``.
+
+    The evidence for a red run is deleted minutes after it goes red:
+    teardown runs ``modal environment delete`` once both tiers finish, and
+    that takes the registry container, the scenario apps and all their logs
+    together. Three separate occurrences on this tier were diagnosable only
+    because somebody happened to pull the logs by hand while the other tier
+    was still running, and one cause is still only a hypothesis because
+    nobody did.
+
+    So CI calls this before teardown can run and uploads the directory as a
+    workflow artifact. Timestamps and container ids are asked for
+    explicitly: the question these logs get read for is "what was this
+    container doing at the moment the client gave up", and neither the time
+    nor which container served is in the default line format.
+
+    Deliberately forgiving. A failure here must never decide whether the
+    tier passed -- it is the diagnosis of a verdict already reached -- so
+    an app that cannot be read leaves its error in its own file and the
+    next app is still tried.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for app_name in (DEFAULT_REGISTRY_APP, *(name for _, name in _scenario_apps())):
+        destination = output_dir / f"{app_name}.log"
+        command = [
+            modal_cli(),
+            "app",
+            "logs",
+            app_name,
+            "-e",
+            modal_environment,
+            "--since",
+            LOG_WINDOW,
+            "-n",
+            str(LOG_MAX_ENTRIES),
+            "--timestamps",
+            "--show-container-id",
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=LOG_FETCH_TIMEOUT_SECONDS,
+            )
+            body = (result.stdout or "") + (result.stderr or "")
+            status = f"exit {result.returncode}"
+        except subprocess.TimeoutExpired:
+            body = ""
+            status = f"the fetch itself timed out after {LOG_FETCH_TIMEOUT_SECONDS}s"
+        except OSError as error:
+            body = ""
+            status = f"could not run the Modal CLI: {error}"
+
+        destination.write_text(
+            f"# {app_name} in Modal environment {modal_environment}\n"
+            f"# {' '.join(command)}\n"
+            f"# {status}\n\n{body}"
+        )
+        print(f"[provision] wrote {destination} ({status}, {len(body)} bytes)")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="provision",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("action", choices=("up", "down", "stop", "status"))
+    parser.add_argument("action", choices=("up", "down", "stop", "status", "logs"))
     parser.add_argument(
         "--modal-env",
         default=os.environ.get("MODAL_ENVIRONMENT") or default_environment_name(),
         help="Modal environment for this stack (default: derived from the checkout)",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Where `logs` writes one file per deployed app",
+    )
     args = parser.parse_args(argv)
+
+    if args.action == "logs":
+        if args.output_dir is None:
+            parser.error("logs needs --output-dir")
+        logs(args.modal_env, args.output_dir)
+        return 0
 
     if args.action == "up":
         deployment = up(args.modal_env)

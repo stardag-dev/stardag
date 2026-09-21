@@ -342,56 +342,133 @@ jobs:
       # would drop the path and send pytest at the project's default
       # testpaths -- the docker-compose suite, which is not this tier.
       #
-      # Retried once, and only for a recycled registry container. The whole
-      # database lives inside that container, so losing it fails every
-      # scenario that was mid-flight -- and the failure reads as "this PR
-      # broke the reactive loop" on a PR that cannot reach a Modal worker.
-      # Ruling that out by hand cost a reviewer three runs once already.
+      # **Retried once, for two named harness failures and nothing else.**
+      # Each is identified by the harness rather than inferred from a red
+      # exit code, and each writes its own marker file; a scenario that
+      # failed on its own merits writes neither and is not retried. That
+      # discriminator is the entire design. Without it this is "run it
+      # again and hope", which is how a tier stops reporting product bugs
+      # -- and this one has reported three.
       #
-      # What makes this a targeted retry rather than the usual "run it
-      # again and hope": the harness *identifies* the event, by a nonce the
-      # registry container generates at boot, and writes the marker below
-      # only for that. A scenario that failed on its own merits leaves no
-      # marker and is not retried. The retry re-provisions first, because
-      # the replacement container's database is empty -- the run's
-      # workspace, target root and API key were in the one that went.
+      # 1. **A recycled registry container.** The whole database lives
+      #    inside it, so losing it fails every scenario that was
+      #    mid-flight, and the failure reads as "this PR broke the reactive
+      #    loop" on a PR that cannot reach a Modal worker. Identified by a
+      #    nonce the container generates at boot. Its retry re-provisions
+      #    first, because the replacement's database is empty -- the run's
+      #    workspace, target root and API key were in the one that went.
+      #
+      # 2. **A transport timeout**: a request that received *no HTTP
+      #    response at all*, so no assertion in that scenario was ever
+      #    evaluated. Five occurrences, five scenarios, five endpoints, and
+      #    the cause is still unidentified. Strictly a timeout: an
+      #    assertion failure and an HTTP error status are both real results
+      #    and fail immediately. Those two exclusions are what keep this
+      #    from masking a product bug, and they are stated in the code as
+      #    well -- `_diagnostics.transport_timeout`. Its retry does *not*
+      #    re-provision, because the stack is intact.
+      #
+      # Every retry emits a workflow warning and is counted there, so this
+      # measures the problem rather than silencing it. If the count does
+      # not fall, the answer is to escalate, never to widen the retry.
       - name: Run the registry-live scenarios
+        id: scenarios
         env:
-          STARDAG_REGISTRY_LIVE_RECYCLE_MARKER: ${{ runner.temp }}/registry-recycled
+          # One directory holds everything a red run should be diagnosed
+          # from -- both markers, the per-timeout records the harness
+          # writes, the pytest output, and the Modal logs dumped below --
+          # because it is uploaded whole as a single artifact.
+          STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR: ${{ runner.temp }}/registry-live-diagnostics
+          STARDAG_REGISTRY_LIVE_RECYCLE_MARKER: ${{ runner.temp }}/registry-live-diagnostics/registry-recycled
           POSARGS: ${{ inputs.serial && '-- -n0 tests_registry_live' || '' }}
         run: |
           set -uo pipefail
-          rm -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER"
+          diag="$STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR"
+          rm -rf "$diag"
+          mkdir -p "$diag"
+          timeouts="$diag/transport-timeouts"
 
-          if tox -e registry-modal-live $POSARGS; then
+          if tox -e registry-modal-live $POSARGS 2>&1 \
+               | tee "$diag/pytest-attempt-1.log"; then
             exit 0
           fi
 
-          if [ ! -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER" ]; then
+          # Set before the branches below, so it holds for a retry that
+          # goes green as well as for an outright failure. A green retry is
+          # the case this really buys: the check passes, and without the
+          # artifact nothing in the run records what the first attempt hit.
+          echo "diagnose=true" >> "$GITHUB_OUTPUT"
+
+          if [ -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER" ]; then
+            echo "::warning title=Registry container recycled::$(cat \
+              "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER") -- the run's database" \
+              "went with it. Re-provisioning and running the tier once more."
+            reprovision=yes
+          elif [ -f "$timeouts" ]; then
+            echo "::warning title=Registry transport timeout::$(tr '\n' ';' \
+              < "$timeouts") -- no HTTP response arrived, so no assertion" \
+              "was evaluated. Running the tier once more; the boot probe in" \
+              "the diagnostics artifact says whether the container was" \
+              "answering at the time (STA-86)."
+            reprovision=no
+          else
             echo "The tier failed against the registry container it started" \
-                 "with. Not a recycle, so not retried."
+                 "with, and no scenario reported a transport timeout. A real" \
+                 "failure: not retried."
             exit 1
           fi
 
-          echo "::warning title=Registry container recycled::$(cat \
-            "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER") -- the run's database" \
-            "went with it. Re-provisioning and running the tier once more."
-          rm -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER"
+          # Keep the first attempt's evidence. The retry writes fresh
+          # markers and records at the top level, so without this a green
+          # retry would leave nothing behind to explain the warning above.
+          mkdir -p "$diag/attempt-1"
+          find "$diag" -maxdepth 1 -type f -exec mv {} "$diag/attempt-1/" \;
 
-          # Checked explicitly: this step runs without `errexit`, so that
-          # the first tox failure can be inspected rather than ending the
-          # step -- which also means a failed re-provision would otherwise
-          # fall through to a second run against a stack that was never
-          # rebuilt.
-          if ! uv run --project integration-tests --python 3.12 \
-                 python -m stardag_integration_tests.registry_live.provision up
-          then
-            echo "Re-provisioning failed after a recycle; not re-running" \
-                 "the tier against a stack that was not rebuilt."
-            exit 1
+          if [ "$reprovision" = yes ]; then
+            # Checked explicitly: this step runs without `errexit`, so that
+            # the first tox failure can be inspected rather than ending the
+            # step -- which also means a failed re-provision would otherwise
+            # fall through to a second run against a stack that was never
+            # rebuilt.
+            if ! uv run --project integration-tests --python 3.12 \
+                   python -m stardag_integration_tests.registry_live.provision up
+            then
+              echo "Re-provisioning failed after a recycle; not re-running" \
+                   "the tier against a stack that was not rebuilt."
+              exit 1
+            fi
           fi
 
-          tox -e registry-modal-live $POSARGS
+          tox -e registry-modal-live $POSARGS 2>&1 \
+            | tee "$diag/pytest-attempt-2.log"
+
+      # Pulled before anything can delete them. The teardown job runs
+      # `modal environment delete` once both tiers finish, and that takes
+      # the registry container, the scenario apps and every line they
+      # logged -- minutes after the run went red. Three occurrences on this
+      # tier were diagnosable only because somebody happened to pull the
+      # logs by hand while the other tier was still running, and one cause
+      # is still only a hypothesis because nobody did.
+      #
+      # `continue-on-error` on both steps: this is the diagnosis of a
+      # verdict already reached, and it must never be what decides one.
+      - name: Dump the Modal logs for the run
+        if: failure() || steps.scenarios.outputs.diagnose == 'true'
+        continue-on-error: true
+        run: |
+          uv run --project integration-tests --python 3.12 \
+            python -m stardag_integration_tests.registry_live.provision logs \
+              --output-dir "${{ runner.temp }}/registry-live-diagnostics"
+
+      - name: Upload the registry-live diagnostics
+        if: failure() || steps.scenarios.outputs.diagnose == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: registry-live-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/registry-live-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
 
       # The scheduled run provisions into the *permanent* `ci-main`, which
       # no cleanup path can name: teardown is gated on the environment being

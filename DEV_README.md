@@ -239,6 +239,56 @@ assertion message tells you to provision again. The alternative, PGDATA on a
 Modal Volume, was considered and rejected; `_record_recycle` in `_harness.py`
 carries the reasoning.
 
+**A transport timeout is the second retryable failure, and the list ends
+there.** A request that receives _no HTTP response at all_ says nothing about
+the code under test, because no assertion in that scenario was ever evaluated.
+It has happened five times, in five scenarios against five endpoints, and the
+cause is still unidentified. CI runs the tier once more — without
+re-provisioning, since the stack is intact — and emits a workflow warning, so
+occurrences are counted rather than silenced. Strictly a timeout: an assertion
+failure and an HTTP error status are real results and fail immediately.
+`_diagnostics.transport_timeout` states both exclusions, and
+`tests/test_registry_live_diagnostics.py` holds them.
+
+**On a timeout the harness probes `/_harness/boot` before the scenario gives
+up**, and that probe is the point of the exercise. It returns a closure
+variable and touches no database, so an answer in half a second while a real
+endpoint has just timed out means the container is alive and the _database_
+path is what is blocked — which would make this a product signal rather than
+an infrastructure one. A probe that also times out means the container, or the
+runner the probe runs on, is starved. The verdict goes into the artifact in
+those words.
+
+**Everything a red run should be diagnosed from is uploaded as one artifact**,
+`registry-live-diagnostics-<attempt>`. That is not a convenience: `modal
+environment delete` takes the registry container, the scenario apps and every
+line they logged, minutes after the run goes red, and three separate
+occurrences were diagnosable only because somebody happened to pull the logs
+by hand while the other tier was still running. The artifact holds both marker
+files, one record per timeout with its boot probe, each attempt's pytest
+output, and `modal app logs` for all three apps with timestamps and container
+ids. Worth knowing when reading those: the registry's access log reports
+`duration` and `execution` separately per request, which is the line-level
+form of the same question — time spent queued against time spent in the
+handler.
+
+Locally none of that is configured and the record is printed to stderr
+instead. `provision logs --output-dir <dir>` is the log dump on its own.
+
+Both retries are counted as workflow annotations, titled
+`Registry transport timeout` and `Registry container recycled`, so the rate is
+a query rather than a memory:
+
+```bash
+gh api repos/stardag-dev/stardag/actions/runs/<run-id>/jobs \
+  -q '.jobs[] | select(.name=="Registry-live tier") | .id' \
+  | xargs -I{} gh api repos/stardag-dev/stardag/check-runs/{}/annotations \
+      -q '.[] | select(.annotation_level=="warning") | .title'
+```
+
+If the rate does not fall once a cause is found and fixed, the answer is to
+escalate — never to widen what the retry accepts.
+
 ##### Running it against your own Modal account
 
 You need Modal credentials and nothing else. Everything lands in a Modal
