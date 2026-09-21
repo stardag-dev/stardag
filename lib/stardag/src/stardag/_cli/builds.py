@@ -739,15 +739,31 @@ def builds_stop(
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
         try:
-            executions = _stop.collect_executions(registry, parsed)
+            executions, server_filtered = _stop.collect_executions(registry, parsed)
         except _stop.TooManyClaimHolders as e:
             error_console.print(f"[bold red]Error:[/bold red] {e}")
             raise typer.Exit(1)
         except StardagError as e:
             _fail(e)
 
-        selected = [e for e in executions if filters.matches(e)]
-        excluded = [e for e in executions if e not in selected]
+        # One evaluation per execution, and both lists read off it. Asking
+        # ``matches`` twice would re-read the clock, so an execution right
+        # on an ``--older-than`` boundary could land in both lists or in
+        # neither.
+        if not server_filtered:
+            # The list is still right — every row is re-checked client-side
+            # — but this registry scanned its whole task table to produce
+            # it, which is what the pause was.
+            error_console.print(
+                "[bold yellow]Warning:[/bold yellow] this registry does not "
+                "support filtering tasks by status, so the whole task table "
+                "was scanned. The list below is correct; upgrade "
+                "stardag-api to make it cheap."
+            )
+
+        verdicts = [(e, filters.matches(e)) for e in executions]
+        selected = [e for e, ok in verdicts if ok]
+        excluded = [e for e, ok in verdicts if not ok]
         stoppable = [e for e in selected if e.stoppable]
         unstoppable = [e for e in selected if not e.stoppable]
 
@@ -935,16 +951,20 @@ def _stop_confirmation(
     unstoppable: Sequence["_stop.Execution"],
     excluded: Sequence["_stop.Execution"],
 ) -> str:
-    """The prompt, saying exactly what is about to happen and to how many."""
-    parts = [f"Stop {len(stoppable)} execution(s) and cancel build {build_id}"]
+    """The prompt, saying exactly what is about to happen and to how many.
+
+    The count left running leads, because it is the part that is easy to
+    get wrong: a filter narrows what is *stopped*, never what the cancel
+    releases.
+    """
+    action = f"Stop {len(stoppable)} execution(s) and cancel build {build_id}?"
     left_running = len(unstoppable) + len(excluded)
-    if left_running:
-        parts.append(
-            f"? {left_running} execution(s) will be left running with their "
-            "claims released"
-        )
-        return "".join(parts)
-    return parts[0] + "?"
+    if not left_running:
+        return action
+    return (
+        f"{left_running} execution(s) will keep running with their claims "
+        f"released. {action}"
+    )
 
 
 def _render_cancel_outcomes(

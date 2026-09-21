@@ -104,7 +104,7 @@ class TestSelection:
         theirs = _row(latest_status_build_id=UUID(OTHER_BUILD_ID))
         registry = _mock_registry([mine, theirs])
 
-        collected = _stop.collect_executions(registry, UUID(BUILD_ID))
+        collected, _ = _stop.collect_executions(registry, UUID(BUILD_ID))
 
         assert [e.task_id for e in collected] == [mine.task_id]
 
@@ -117,10 +117,24 @@ class TestSelection:
             TaskListPage(tasks=second, total=105, page=2, page_size=100),
         ]
 
-        collected = _stop.collect_executions(registry, UUID(BUILD_ID))
+        collected, _ = _stop.collect_executions(registry, UUID(BUILD_ID))
 
         assert len(collected) == 105
         assert registry.task_list.call_count == 2
+
+    def test_a_server_that_ignores_the_status_filter_is_detected(self):
+        # It answers with every task rather than rejecting the unknown
+        # param, so the answer stays right (every row is re-checked) while
+        # the scan walks the whole table. The command says so.
+        registry = _mock_registry([_row(), _row(latest_status="completed")])
+        collected, server_filtered = _stop.collect_executions(registry, UUID(BUILD_ID))
+        assert len(collected) == 1
+        assert server_filtered is False
+
+        with _patch_resolve(_mock_registry([_row(), _row(latest_status="pending")])):
+            result = runner.invoke(app, ["stop", BUILD_ID, "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "does not support filtering tasks by status" in result.output
 
     def test_a_pathological_environment_refuses_rather_than_truncating(self):
         registry = mock.MagicMock()
@@ -351,7 +365,7 @@ class TestStopCommand:
         cancel.assert_not_called()
         registry.build_cancel.assert_not_called()
 
-    def test_the_prompt_says_how_many_are_left_running(self):
+    def test_the_prompt_leads_with_how_many_keep_running(self):
         registry = _mock_registry(
             [
                 _row(latest_executor_metadata={"function_name": "worker_gpu"}),
@@ -363,7 +377,7 @@ class TestStopCommand:
                 app, ["stop", BUILD_ID, "--worker", "gpu"], input="n\n"
             )
 
-        assert "1 execution(s) will be left running" in result.output
+        assert "1 execution(s) will keep running" in result.output
 
     def test_rejects_a_non_uuid_build_id(self):
         result = runner.invoke(app, ["stop", "not-a-uuid", "--dry-run"])

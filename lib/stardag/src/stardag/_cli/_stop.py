@@ -232,7 +232,9 @@ def execution_from_task(task: "TaskSummary") -> Execution | None:
     )
 
 
-def collect_executions(registry: "RegistryABC", build_id: UUID) -> list[Execution]:
+def collect_executions(
+    registry: "RegistryABC", build_id: UUID
+) -> tuple[list[Execution], bool]:
     """Every live execution the build currently holds, oldest claim first.
 
     Read from ``GET /tasks`` — the task row itself, denormalised columns
@@ -246,8 +248,16 @@ def collect_executions(registry: "RegistryABC", build_id: UUID) -> list[Executio
     The scan is environment-wide and filtered to the build here, because
     the endpoint has no build filter. That is affordable: the population
     is the environment's claim holders, not its tasks.
+
+    Returns the executions and whether the server honoured the ``status``
+    filter. A server that predates it *ignores* an unknown query param
+    rather than rejecting it, which leaves the answer correct — every row
+    is re-checked here — but turns the scan into a walk of every task in
+    the environment. Worth saying out loud rather than leaving as an
+    unexplained pause, or as a refusal below.
     """
     executions: list[Execution] = []
+    filtered_server_side = True
     page = 1
     while True:
         result = registry.task_list(
@@ -256,6 +266,8 @@ def collect_executions(registry: "RegistryABC", build_id: UUID) -> list[Executio
             status=STOPPABLE_STATUSES,
         )
         for task in result.tasks:
+            if task.latest_status not in STOPPABLE_STATUSES:
+                filtered_server_side = False
             if task.latest_status_build_id != build_id:
                 continue
             execution = execution_from_task(task)
@@ -274,7 +286,7 @@ def collect_executions(registry: "RegistryABC", build_id: UUID) -> list[Executio
                 "containers still running, so this refuses rather than "
                 "truncating."
             )
-    return executions
+    return executions, filtered_server_side
 
 
 @dataclass(frozen=True)
