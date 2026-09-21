@@ -129,7 +129,10 @@ declare level 2 and 3 fields of its own, and the config names it the same
 way. For a plain model the key is its `__namespace__` (usually unset) and
 class name; a model in a polymorphic family is keyed by the namespace and
 name it is _registered_ under, exactly as a task is. Two classes cannot
-share a key: the second one defined raises, and a `__namespace__`
+share a key. A model under a key another model or a task already holds
+raises where the model is defined; a task defined under a key a model
+already holds is refused when the config is used, since nothing checks
+this index as task classes are registered. A `__namespace__` on the model
 separates them.
 
 Why one mechanism and not two: if one downstream could pass a partition
