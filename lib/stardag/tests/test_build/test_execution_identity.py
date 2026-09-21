@@ -167,6 +167,57 @@ class TestTheRegistryRulesTheFakeModels:
                 "live holder's claim was evicted"
             )
 
+    async def test_a_matching_id_from_another_build_is_refused(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The half of the rule a double is most likely to leave out.
+
+        The id is minted by the caller, so a match is not by itself
+        authority — the server requires the reporting build to hold the
+        task as well. A double that compared only the id would accept a
+        cross-build impostor the server refuses, and every test written
+        against it would agree with the wrong answer.
+        """
+        from stardag.exceptions import APIError
+
+        (root,) = _chain("cross-build-root")
+        registry, _ = _setup([root], auto_complete=False)
+        build_a, build_b = uuid4(), uuid4()
+        execution_id = uuid4()
+
+        await registry.task_start_aio(build_a, root, execution_id=execution_id)
+
+        try:
+            await registry.task_start_aio(build_b, root, execution_id=execution_id)
+        except APIError as e:
+            assert e.status_code == 409
+            assert (e.payload or {}).get("error_code") == "execution_superseded"
+        else:
+            raise AssertionError(
+                "a second build took the task over by naming the holder's "
+                "execution, through the one start path that arbitrates nothing"
+            )
+
+    async def test_a_granted_claim_inherits_no_identity(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A claim that brings no identity leaves none behind, unlike an
+        ordinary start, which preserves. Mirroring both is what stops a
+        replacement inheriting the identity of what it replaced."""
+        (root,) = _chain("claim-clears-root")
+        registry, _ = _setup([root], auto_complete=False)
+        build_id = uuid4()
+        tid = str(root.id)
+
+        await registry.task_start_aio(build_id, root, execution_id=uuid4())
+        registry.statuses[tid] = "pending"
+        granted = await registry.task_start_claim_aio(build_id, root)
+
+        assert granted.started
+        assert registry.execution_ids[tid] is None, (
+            "the replacement claim inherited the identity it replaced"
+        )
+
 
 class TestTheWorkerReadsItsOwn:
     def test_the_reporter_takes_the_identity_from_its_environment(self):

@@ -409,11 +409,18 @@ class FakeReactiveRegistry(NoOpRegistry):
     ):
         tid = str(task.id)
         held = self.execution_ids.get(tid)
+        owner = self.status_build_id.get(tid)
         if (
             execution_id is not None
             and held is not None
-            and str(execution_id) != held
             and self.statuses.get(tid) == "running"
+            # The whole server rule, not half of it: a *different* id, or
+            # the *right* id from a build that does not hold the task.
+            # The id is minted by the caller, so a match is not by itself
+            # authority -- and a double that checked only the id would
+            # accept a cross-build impostor the server refuses, which is
+            # the exact kind of divergence this file exists not to have.
+            and (str(execution_id) != held or (owner is not None and owner != build_id))
         ):
             # The server's supersession rule: a non-claiming start naming
             # an execution the task no longer runs under is refused, so a
@@ -519,6 +526,11 @@ class FakeReactiveRegistry(NoOpRegistry):
         )
         if not started:
             return StartClaimResult(started=False, denied_reason="limit")
+        # A granted claim always writes the identity, including writing
+        # none -- it won arbitration, so it is a new execution and
+        # inherits nothing. The ordinary start above preserves instead;
+        # mirroring both is what keeps this double honest.
+        self.execution_ids[tid] = None if execution_id is None else str(execution_id)
         return StartClaimResult(
             started=True,
             execution_id=None if execution_id is None else str(execution_id),
