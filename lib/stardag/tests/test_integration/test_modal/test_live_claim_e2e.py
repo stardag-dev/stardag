@@ -132,7 +132,11 @@ class CountingModalExecutor(ModalTaskExecutor):
 
     async def submit_detached(self, task, *, execution_id=None):
         self.spawn_count += 1
-        return await super().submit_detached(task)
+        # Forwarded, not swallowed: this counts spawns, it does not
+        # change them. Dropping the identity would spawn workers without
+        # STARDAG_EXECUTION_ID, so their lifecycle reports could not
+        # exercise the propagation these live scenarios exist to cover.
+        return await super().submit_detached(task, execution_id=execution_id)
 
     async def reattach(self, task, executor, ref):
         handle = await super().reattach(task, executor, ref)
