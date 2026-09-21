@@ -246,11 +246,31 @@ class Task(Base, TimestampMixin):
     #   one whose claim lapsed and was taken over meanwhile. The latter must
     #   not re-grant a claim over the live holder.
     #
-    # Set (or cleared) on every TASK_STARTED from that event's metadata, the
-    # same semantics as the executor columns below, and cleared by
-    # TASK_RETRIED with them. NULL means "no execution identity known" —
-    # every rule treats that as the pre-identity behaviour, so the column is
-    # additive by construction and an SDK predating it is unaffected.
+    # **Set by a TASK_STARTED that names one, and left alone by one that
+    # does not** — deliberately NOT the set-or-clear of the executor
+    # columns below, which is the difference to keep hold of when
+    # changing either. TASK_RETRIED clears it, and is the only thing that
+    # does.
+    #
+    # Silence is not a statement. A start carrying no identity is either
+    # an SDK predating them or a start that describes no execution at
+    # all — the concurrency limiter's enforced start, which exists to
+    # occupy slots and names no executor, no ref and no id. That start
+    # lands *between* the claim and the ref-recording start, so clearing
+    # on silence switched this protection off for the whole window, and
+    # permanently when the spawn then failed. It is also the reading
+    # absence gets in every rule that reads this column: a missing id is
+    # no opinion, never a contradiction.
+    #
+    # What makes leaving a stale id safe is that it can only ever be
+    # *read* by a request that carries one, and such a request is judged
+    # on the holding build too — so a task that moved on under a no-id
+    # start refuses the old execution's reports on the owner test rather
+    # than on the id.
+    #
+    # NULL means "no execution identity known" — every rule treats that as
+    # the pre-identity behaviour, so the column is additive by
+    # construction and an SDK predating it is unaffected.
     #
     # NOT a claim, and the distinction is the one to keep hold of: the claim
     # (``latest_status == RUNNING`` plus its expiry) says who may run the
