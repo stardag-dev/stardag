@@ -301,17 +301,26 @@ class StardagBaseModel(BaseModel):
 
     @classmethod
     def _build_config_key(cls) -> str:
-        """The build-config key for this class. Polymorphic classes use their
-        registered namespace and name; anything else its ``__namespace__``
-        (usually unset) and class name — the same shape, and the escape
-        hatch when two plain models would otherwise share a bare name."""
-        get_namespace = getattr(cls, "get_namespace", None)
-        get_name = getattr(cls, "get_name", None)
-        if callable(get_namespace) and callable(get_name):
-            try:
-                return task_config_key(str(get_namespace()), str(get_name()))
-            except AttributeError:
-                pass
+        """The build-config key for this class. A class registered in a
+        polymorphic family uses the namespace and name it was registered
+        under; anything else its ``__namespace__`` (usually unset) and class
+        name — the same shape, and the escape hatch when two plain models
+        would otherwise share a bare name.
+
+        ``__type_id__`` has to be this class's own. It is inherited like any
+        class attribute, and the classes a family does not register — an
+        abstract base, a family root — would otherwise answer with their
+        nearest registered ancestor's key, which belongs to a different
+        class.
+        """
+        if "__type_id__" in cls.__dict__:
+            get_namespace = getattr(cls, "get_namespace", None)
+            get_name = getattr(cls, "get_name", None)
+            if callable(get_namespace) and callable(get_name):
+                try:
+                    return task_config_key(str(get_namespace()), str(get_name()))
+                except AttributeError:  # pragma: no cover - defensive
+                    pass
         return task_config_key(
             str(getattr(cls, "__namespace__", "") or ""), cls.__name__
         )

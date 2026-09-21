@@ -32,6 +32,7 @@ one asyncio program) each see their own.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -98,11 +99,14 @@ fail the moment the build's structure scope was hashed.
 def register_build_config_class(cls: type["BaseModel"]) -> None:
     """Index ``cls`` under its build-config key, if a config can name it.
 
-    Called for every ``StardagBaseModel`` subclass as it is defined. Three
+    Called for every ``StardagBaseModel`` subclass as it is defined. Four
     kinds of class are skipped:
 
     - a parameterised generic alias (``Model[int]``), which is not a real
       class — the concrete subclass that extends it carries the key;
+    - an abstract class, which no config can name either: a field is
+      resolved under the key of the class being *constructed*, so the key
+      of a class that cannot be constructed would never be consulted;
     - a class with no build-config field, which is most of them. Indexing
       every model would re-create the polymorphic family registry for
       classes no config can name, and make every ordinary ``Config``-style
@@ -123,6 +127,8 @@ def register_build_config_class(cls: type["BaseModel"]) -> None:
     # ``_non_identity_fields`` / ``_build_config_key`` are StardagBaseModel
     # classmethods; this module sits below it, so ``cls`` is typed loosely.
     if cls.__pydantic_generic_metadata__.get("origin"):  # type: ignore[attr-defined]
+        return
+    if _is_abstract(cls):
         return
     if not cls._non_identity_fields():  # type: ignore[attr-defined]
         return
@@ -181,6 +187,19 @@ def _task_class_for_key(key: str) -> type["BaseModel"] | None:
         return BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
     except KeyError:
         return None
+
+
+def _is_abstract(cls: type["BaseModel"]) -> bool:
+    """Whether ``cls`` cannot be constructed, and so can never be the class
+    a build config entry is resolved against.
+
+    ``__stardag_abstract__`` set directly on the class is the polymorphic
+    families' own marker (inherited, it would exclude every subclass);
+    :func:`inspect.isabstract` covers an unimplemented ``abstractmethod``.
+    """
+    return cls.__dict__.get(
+        "__stardag_abstract__", False
+    ) is True or inspect.isabstract(cls)
 
 
 def _is_task_class(cls: type["BaseModel"]) -> bool:

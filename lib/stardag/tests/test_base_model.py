@@ -652,6 +652,34 @@ class TestBuildConfigRegistration:
         with build_config_scope({"other_ns.Chunked": {"threads": 8}}):
             assert Chunked().threads == 8
 
+    def test_an_abstract_model_is_not_registered_and_keeps_its_own_name(self):
+        """A family does not register its abstract members, so they have no
+        ``__type_id__`` of their own — and reading the inherited one would
+        index them under their nearest registered ancestor's key. They are
+        not indexed at all: a field is resolved under the key of the class
+        being constructed, which an abstract class never is."""
+
+        class Strategy(PolymorphicRoot):
+            __namespace__ = "sig_tests"
+
+        class Registered(Strategy):
+            pass
+
+        class AbstractLeg(Registered):
+            __stardag_abstract__ = True
+            threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+        class Leg(AbstractLeg):
+            pass
+
+        assert AbstractLeg._build_config_key() == "sig_tests.AbstractLeg"
+        assert get_build_config_class("sig_tests.AbstractLeg") is None
+        assert get_build_config_class("sig_tests.Registered") is None
+        # The concrete subclass is the one a config can name.
+        assert get_build_config_class("sig_tests.Leg") is Leg
+        with build_config_scope({"sig_tests.Leg": {"threads": 6}}):
+            assert Leg().threads == 6
+
     def test_a_model_without_build_config_fields_is_not_registered(self):
         class Ordinary(StardagBaseModel):
             a: int = 0
