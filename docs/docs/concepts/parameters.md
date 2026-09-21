@@ -126,8 +126,11 @@ A key names a **class**, and not only a task class: a nested
 `sd.StardagBaseModel` held as a task parameter — where a chunk size or a
 worker count often lives more naturally than on the task itself — may
 declare level 2 and 3 fields of its own, and the config names it the same
-way, by its `__namespace__` and class name or by the bare class name when
-it has none.
+way. For a plain model the key is its `__namespace__` (usually unset) and
+class name; a model in a polymorphic family is keyed by the namespace and
+name it is _registered_ under, exactly as a task is. Two classes cannot
+share a key: the second one defined raises, and a `__namespace__`
+separates them.
 
 Why one mechanism and not two: if one downstream could pass a partition
 size to its upstream while another let the upstream read the config, there

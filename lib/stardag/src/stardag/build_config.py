@@ -110,6 +110,9 @@ def register_build_config_class(cls: type["BaseModel"]) -> None:
       does not count: it is passable at init and needs no config entry;
     - a task class, which the task registry owns.
 
+    A key a task class already holds is also refused: the lookup asks the
+    task registry first, so the model could never be reached through it.
+
     Two classes resolving to one key is a definition-time error naming
     both: a config entry could not say which it meant. Set ``__namespace__``
     on one of them to separate the keys. A class re-created under the same
@@ -127,6 +130,15 @@ def register_build_config_class(cls: type["BaseModel"]) -> None:
         return
 
     key: str = cls._build_config_key()  # type: ignore[attr-defined]
+    task = _task_class_for_key(key)
+    if task is not None:
+        raise BuildConfigError(
+            f"{cls.__module__}.{cls.__qualname__} resolves to the "
+            f"build-config key {key!r}, which task class "
+            f"{task.__module__}.{task.__qualname__} already holds. A config "
+            "entry under that key is resolved as the task, so the model "
+            "could never be configured. Set __namespace__ on the model."
+        )
     existing = _build_config_classes.get(key)
     if (
         existing is not None
@@ -148,6 +160,27 @@ def get_build_config_class(key: str) -> type["BaseModel"] | None:
     """The non-task model registered under ``key``, or None. See
     :data:`_build_config_classes`."""
     return _build_config_classes.get(key)
+
+
+def _task_class_for_key(key: str) -> type["BaseModel"] | None:
+    """The task class a build config would resolve ``key`` to, if any.
+
+    The two key spaces are one: :func:`canonical_structure_config` asks the
+    task registry first, so a model sharing a task's key could never be
+    configured. Checked when a model is defined, and again at lookup —
+    definition order decides which of the two exists first, and only the
+    lookup sees both.
+    """
+    try:
+        from stardag._core.base_task import BaseTask
+        from stardag.polymorphic import TypeId
+    except ImportError:  # pragma: no cover - only while base_task itself imports
+        return None
+    namespace, _, name = key.rpartition(".")
+    try:
+        return BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
+    except KeyError:
+        return None
 
 
 def _is_task_class(cls: type["BaseModel"]) -> bool:
@@ -276,6 +309,19 @@ def canonical_structure_config(config: BuildConfig | None) -> dict[str, dict[str
             cls: type[BaseModel] = BaseTask._registry().get_class(
                 TypeId(namespace=namespace, name=name)
             )
+            # A model registered under a task's key can never be reached
+            # through it. Caught when the second of the two is defined
+            # whenever that is the model, and here when it is the task —
+            # the task registry does not know about this one.
+            shadowed = get_build_config_class(key)
+            if shadowed is not None:
+                raise BuildConfigError(
+                    f"build_config key {key!r} names both task class "
+                    f"{cls.__module__}.{cls.__qualname__} and model "
+                    f"{shadowed.__module__}.{shadowed.__qualname__}. Set "
+                    "__namespace__ on the model so an entry can say which "
+                    "it means."
+                )
         except KeyError as e:
             # Tasks first, so an ordinary config keeps today's messages; then
             # the non-task models that declare build-config fields of their

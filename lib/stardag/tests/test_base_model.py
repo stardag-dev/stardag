@@ -687,6 +687,38 @@ class TestBuildConfigRegistration:
             KEY: {"partition_size": 7}
         }
 
+    def test_a_model_taking_a_task_s_key_is_refused_at_definition(self):
+        """The lookup asks the task registry first, so a model under a
+        task's key could never be reached through it."""
+        with pytest.raises(BuildConfigError) as excinfo:
+
+            class Fanout(StardagBaseModel):  # noqa: F811
+                __namespace__ = "sig_tests"
+                threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+        message = str(excinfo.value)
+        assert "'sig_tests.Fanout'" in message
+        assert "__namespace__" in message
+
+    def test_a_task_taking_a_model_s_key_is_refused_at_lookup(self):
+        """The other definition order: the task registry knows nothing
+        about this index, so the clash surfaces where the key is used."""
+
+        class Shadowed(StardagBaseModel):
+            __namespace__ = "sig_tests"
+            threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+        # The task is declared under the model's key by an override, since
+        # two same-named classes in one scope are a redeclaration.
+        class ShadowingTask(sd.Task[int], name_override="Shadowed"):
+            __namespace__ = "sig_tests"
+
+            def run(self) -> None:
+                return None
+
+        with pytest.raises(BuildConfigError, match="names both task class"):
+            canonical_structure_config({"sig_tests.Shadowed": {"threads": 2}})
+
     def test_two_models_with_one_key_are_refused_at_definition(self):
         # Two *different* classes with one key: different qualified names,
         # as two modules each defining a ``Duplicated`` would have. (Same
