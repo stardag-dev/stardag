@@ -50,6 +50,8 @@ class ClaimRegistry(RecordingRegistry):
         self.statuses: dict[str, str] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
         self.expires_at: dict[str, str] = {}
+        # Execution ids seen on plain (non-claiming) starts, in order.
+        self.started_execution_ids: list[str | None] = []
 
     def seed_running(
         self,
@@ -108,6 +110,9 @@ class ClaimRegistry(RecordingRegistry):
         claim_ttl_seconds=None,
         execution_id=None,
     ):
+        self.started_execution_ids.append(
+            None if execution_id is None else str(execution_id)
+        )
         await super().task_start_aio(
             build_id,
             task,
@@ -248,6 +253,17 @@ class TestClaimLoser:
         assert task.complete()
         assert executor.reattach_calls == [(task.id, "fake", "fc-winner")]
         assert executor.spawn_calls == []  # never spawned a duplicate
+        # And the start that records the re-attached ref asserts no
+        # execution identity. An id is minted per claim *attempt*, so a
+        # denied attempt leaves one behind; sending it would claim the
+        # winner's execution as ours, and a server that understands
+        # identities refuses exactly that -- so the re-attach would fail
+        # rather than proceed. Carrying none is how this path behaved
+        # before identities existed, which is the correct behaviour for a
+        # build that is watching somebody else's execution.
+        assert registry.started_execution_ids == [None], (
+            "the losing claim's identity rode out on the re-attach start"
+        )
 
     async def test_already_completed_resolves_as_previously_completed(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]

@@ -1476,6 +1476,21 @@ async def build_aio(
                             f"Claim for task {task.id} lost — re-attached to "
                             f"the winning execution {attach_handle.ref!r}."
                         )
+                        # We lost, so the execution now running is not one
+                        # we minted an identity for, and the id above
+                        # belongs to a claim that was refused. Dropping it
+                        # is what keeps the start this path still records
+                        # honest: it names the winner's ref with no
+                        # identity of its own, which is exactly how this
+                        # path behaved before identities existed.
+                        #
+                        # The alternative -- adopting the winner's id from
+                        # the denial -- looks tidier and is wrong twice
+                        # over: it would assert somebody else's execution
+                        # as ours, and the server refuses precisely that
+                        # (a matching id from a non-owning build), so the
+                        # re-attach would fail instead of proceeding.
+                        state.execution_id = None
                         return ("attach", attach_handle)
                     probe = await _probe_claimed_execution(
                         task, result.executor, result.executor_ref

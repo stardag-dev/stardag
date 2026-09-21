@@ -415,6 +415,54 @@ async def test_a_claiming_start_is_never_refused_as_superseded(
     )
 
 
+async def test_a_matching_id_from_another_build_is_still_refused(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """The id is minted by the caller, so a match is not by itself
+    authority. A second build naming the holder's execution would
+    otherwise take the task over through the one start path that does no
+    arbitration — the claiming path has always checked ownership, and
+    this one has to as well."""
+    execution_id = _eid()
+    build_a, _ = await _claimed(client, "cross-build-id", execution_id)
+    build_b = await _new_build(client)
+
+    impostor = await _start(
+        client, build_b, "cross-build-id", execution_id=execution_id
+    )
+
+    assert impostor.status_code == 409, impostor.text
+    assert impostor.json()["detail"]["error_code"] == "execution_superseded"
+    row = await _task_row(async_session, "cross-build-id")
+    assert str(row.latest_status_build_id) == build_a, (
+        "a second build took the task over by naming the holder's execution"
+    )
+
+
+async def test_the_holder_reporting_for_itself_is_accepted(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """The other side of the same rule: the build that *does* hold the
+    task re-records its own execution freely, which is the hot path (the
+    tick's ref-recording start and the worker's self-report both land
+    here)."""
+    execution_id = _eid()
+    build_id, _ = await _claimed(client, "owner-reports", execution_id)
+
+    own = await _start(
+        client,
+        build_id,
+        "owner-reports",
+        execution_id=execution_id,
+        executor="modal",
+        executor_ref="fc-own",
+    )
+
+    assert own.status_code == 200, own.text
+    row = await _task_row(async_session, "owner-reports")
+    assert row.latest_executor_ref == "fc-own"
+
+
 # --- Reports name their execution ---------------------------------------
 
 

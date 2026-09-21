@@ -703,21 +703,40 @@ def _report_identity(
     return metadata or None
 
 
-def _supersedes_the_live_execution(db_task: Task, extra_metadata: dict | None) -> bool:
+def _supersedes_the_live_execution(
+    db_task: Task, *, build_id: UUID, extra_metadata: dict | None
+) -> bool:
     """Whether a non-claiming start names an execution that has been replaced.
 
     True only when the task holds a *live* claim, both sides name an
-    execution, and they are different ones. Every other shape is either a
-    task nobody holds, a caller with no identity to compare, or the same
-    execution re-recording itself — see the call site for why each of the
-    three conditions is load-bearing.
+    execution, and the request is not that same execution reporting for
+    itself. Every other shape is either a task nobody holds, a caller
+    with no identity to compare, or the current execution re-recording
+    itself — see the call site for why each condition is load-bearing.
+
+    **The build is part of the test, not just the id.** The id is minted
+    by the caller, so it is an identity this endpoint is handed rather
+    than one it issued: a second build naming the holder's execution
+    would otherwise satisfy the match and take the task over through the
+    one start path that does no arbitration at all. Unreachable by
+    accident with a v4 UUID, and the claiming path has always checked
+    ownership — which is the argument for checking it here too, rather
+    than against.
+
+    A NULL owner is permitted, as it is for revocation authority: the
+    owning build row is gone (the FK is ``ON DELETE SET NULL``), so
+    nobody is left to contradict the report, and refusing would strand
+    the task.
     """
     asking_execution = (extra_metadata or {}).get("execution_id")
     if asking_execution is None or db_task.latest_execution_id is None:
         return False
     if not claim_is_live(db_task):
         return False
-    return str(asking_execution) != str(db_task.latest_execution_id)
+    if str(asking_execution) != str(db_task.latest_execution_id):
+        return True
+    owner = db_task.latest_status_build_id
+    return owner is not None and owner != build_id
 
 
 async def _create_task_event(
@@ -822,7 +841,9 @@ async def _create_task_event(
     if (
         event_type == EventType.TASK_STARTED
         and not claim
-        and _supersedes_the_live_execution(db_task, extra_metadata)
+        and _supersedes_the_live_execution(
+            db_task, build_id=build_id, extra_metadata=extra_metadata
+        )
     ):
         # A start from an execution the task is demonstrably no longer
         # running under, refused rather than applied.
