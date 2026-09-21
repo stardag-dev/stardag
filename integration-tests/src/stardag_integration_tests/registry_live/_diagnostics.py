@@ -41,7 +41,7 @@ from typing import Iterator
 
 import httpx
 
-from ._harness import Deployment, read_boot_id
+from ._harness import Deployment, read_boot_id, record_recycle
 
 # Where the harness leaves everything a failed run should be diagnosed
 # from. CI sets it to a directory it uploads as a workflow artifact, and
@@ -95,6 +95,12 @@ class BootProbe:
     elapsed: float
     boot_id: str | None
     error: str | None
+    # False for the one caller that had its answer already: a timeout out
+    # of ``assert_same_container``, which read this very endpoint six
+    # times over a hundred seconds and got nothing. The conclusion is the
+    # same as a failed probe's, but the artifact must not claim a probe
+    # ran, and an elapsed time of 0.0s would say exactly that.
+    probed: bool = True
 
     def label(self, expected_boot_id: str) -> str:
         """Which hypothesis this probe supports, as a word CI can count."""
@@ -130,6 +136,16 @@ class BootProbe:
                 f"is evidence that the container, or the runner the probe "
                 f"ran on, is starved or throttled. The levers are the "
                 f"container's resources and the tier's worker count."
+            )
+        elif label == "HYPOTHESIS A" and not self.probed:
+            detail = (
+                "no probe was run, and none was needed: this timeout came "
+                "out of the post-scenario boot check, which had already "
+                "read /_harness/boot six times over a hundred seconds "
+                "without an answer. Nothing is serving, so the block is "
+                "not in the database path: the container is starved, "
+                "throttled or wedged -- or the runner is. The levers are "
+                "the container's resources and the tier's worker count."
             )
         elif label == "HYPOTHESIS A":
             detail = (
@@ -274,9 +290,9 @@ def record_transport_timeout(
     deployment: Deployment,
     *,
     nodeid: str,
+    phase: str,
     error: BaseException,
     timeout: BaseException,
-    probe_now: bool = True,
 ) -> BootProbe:
     """Probe the registry, print the finding, and leave it for CI to read.
 
@@ -284,28 +300,36 @@ def record_transport_timeout(
     probe answers a useful question: a minute later the contention that
     caused the timeout has passed and the registry answers everything.
 
-    ``probe_now=False`` is for the one caller that has already asked the
-    question -- a timeout raised out of ``assert_same_container``, which
-    read the boot endpoint six times over a hundred seconds before giving
-    up. That *is* the probe, and a seventh read would only add delay, so
-    the record carries the failed reads as the probe's own result.
+    ``phase`` is the pytest phase the timeout came out of, and it does
+    three jobs. It keeps the two records a single test can produce from
+    overwriting each other -- fixture teardown still runs after a failed
+    call, so one scenario can time out twice. It goes into the record, so
+    a reader knows whether the scenario's own request or the
+    post-scenario check was the one that got no answer. And it decides
+    whether to probe at all: a timeout from ``teardown`` came out of
+    ``assert_same_container``, which has just read the boot endpoint six
+    times over a hundred seconds without an answer. That *is* the probe,
+    and a seventh read would add only delay.
     """
     probe = (
         probe_boot(deployment.api_url)
-        if probe_now
+        if phase != "teardown"
         else BootProbe(
             answered=False,
             elapsed=0.0,
             boot_id=None,
-            error=(
-                "not probed again: this timeout was raised by the "
-                "post-scenario boot check, which had already read the "
-                "endpoint six times over a hundred seconds without an answer"
-            ),
+            error=None,
+            probed=False,
         )
     )
+    label = probe.label(deployment.boot_id)
     record = _render(
-        deployment, nodeid=nodeid, error=error, timeout=timeout, probe=probe
+        deployment,
+        nodeid=nodeid,
+        phase=phase,
+        error=error,
+        timeout=timeout,
+        probe=probe,
     )
 
     # Always visible, marker or no marker. A developer running the tier
@@ -314,22 +338,39 @@ def record_transport_timeout(
     # captured output for a failing test, which this always is.
     print(record, file=sys.stderr)
 
+    # A probe that answers from a *different* container has not diagnosed
+    # this issue's failure class; it has identified a recycle, off the
+    # same boot nonce the post-scenario check uses. Say so where CI acts
+    # on it, because the two want different recoveries: a recycle's retry
+    # re-provisions, since the replacement's database is empty, and a
+    # transport timeout's does not. Leaving it to the post-scenario check
+    # to notice would be leaving it to a second read that may not get an
+    # answer either.
+    #
+    # It is kept *out* of the timeout marker for the same reason: that
+    # file is the count this issue escalates on, and a recycle counted as
+    # a transport timeout would make the count say the opposite of what
+    # happened.
+    if label == "RECYCLE":
+        assert probe.boot_id is not None
+        record_recycle(deployment.boot_id, probe.boot_id)
+
     directory = _diagnostics_dir()
     if directory is None:
         return probe
 
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / _record_name(nodeid)).write_text(record + "\n")
-        # One line per occurrence, appended: twelve xdist workers write
-        # this file, in separate processes, and a whole-file write would
-        # mean the last one to fail is the only one CI ever hears about.
-        # Appends of a single short line are atomic enough for that.
-        with (directory / TIMEOUT_MARKER_NAME).open("a") as marker:
-            marker.write(
-                f"{nodeid} -- {type(timeout).__name__} -- "
-                f"{probe.label(deployment.boot_id)}\n"
-            )
+        (directory / _record_name(nodeid, phase)).write_text(record + "\n")
+        if label != "RECYCLE":
+            # One line per occurrence, appended: twelve xdist workers write
+            # this file, in separate processes, and a whole-file write would
+            # mean the last one to fail is the only one CI ever hears about.
+            # Appends of a single short line are atomic enough for that.
+            with (directory / TIMEOUT_MARKER_NAME).open("a") as marker:
+                marker.write(
+                    f"{nodeid} [{phase}] -- {type(timeout).__name__} -- {label}\n"
+                )
     except OSError as failure:  # pragma: no cover - diagnostics only
         print(
             f"Could not write the timeout diagnostics to {directory}: {failure}",
@@ -338,7 +379,9 @@ def record_transport_timeout(
     return probe
 
 
-def record_non_timeout_failure(*, nodeid: str, error: BaseException) -> None:
+def record_non_timeout_failure(
+    *, nodeid: str, phase: str, error: BaseException
+) -> None:
     """Name a failure that the retry must not be allowed to paper over.
 
     The other half of the discriminator, and the half that only matters
@@ -347,11 +390,13 @@ def record_non_timeout_failure(*, nodeid: str, error: BaseException) -> None:
     file and refuses to retry a run that holds any, so a real failure
     cannot be carried to green on the back of somebody else's timeout.
 
-    Only the call phase writes here. A teardown ``AssertionError`` is the
-    recycled-container check firing, which has its own marker and its own
-    retry -- and that retry re-provisions precisely because the recycle
-    explains *every* failure in the run, which a transport timeout does
-    not.
+    Setup and call both write here; teardown never does. A teardown
+    ``AssertionError`` is the recycled-container check firing, which has
+    its own marker and its own retry -- and that retry re-provisions
+    precisely because the recycle explains *every* failure in the run,
+    which a transport timeout does not. Setup does write, because
+    fixtures here talk to the registry and a fixture that fails for real
+    must end the run exactly as a scenario body would.
     """
     directory = _diagnostics_dir()
     if directory is None:
@@ -359,7 +404,7 @@ def record_non_timeout_failure(*, nodeid: str, error: BaseException) -> None:
     try:
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / NON_TIMEOUT_MARKER_NAME).open("a") as marker:
-            marker.write(f"{nodeid} -- {type(error).__name__}\n")
+            marker.write(f"{nodeid} [{phase}] -- {type(error).__name__}\n")
     except OSError as failure:  # pragma: no cover - diagnostics only
         print(
             f"Could not write the failure marker to {directory}: {failure}",
@@ -372,16 +417,24 @@ def _diagnostics_dir() -> Path | None:
     return Path(path) if path else None
 
 
-def _record_name(nodeid: str) -> str:
-    """A filename per occurrence, unique across the tier's worker processes."""
+def _record_name(nodeid: str, phase: str) -> str:
+    """A filename per occurrence.
+
+    Node id, phase and pid together. The phase is not decoration: fixture
+    teardown runs after a failed call, so one scenario can produce a
+    call-phase record and a teardown-phase one, and without it the second
+    would overwrite the first -- losing the probe, which only the first
+    one carries.
+    """
     slug = "".join(char if char.isalnum() else "-" for char in nodeid).strip("-")
-    return f"timeout-{slug[:120]}-{os.getpid()}.txt"
+    return f"timeout-{phase}-{slug[:120]}-{os.getpid()}.txt"
 
 
 def _render(
     deployment: Deployment,
     *,
     nodeid: str,
+    phase: str,
     error: BaseException,
     timeout: BaseException,
     probe: BootProbe,
@@ -394,15 +447,20 @@ def _render(
             "so no assertion in this scenario was ever evaluated.",
             "=" * 72,
             f"  scenario:  {nodeid}",
+            f"  phase:     {phase}",
             f"  raised:    {type(error).__module__}.{type(error).__name__}: {error}",
             f"  timeout:   {type(timeout).__module__}.{type(timeout).__name__}",
             f"  registry:  {deployment.api_url}",
             f"  boot id:   {deployment.boot_id} (at provisioning time)",
             "",
-            f"  boot probe: {'answered' if probe.answered else 'no answer'} "
-            f"in {probe.elapsed:.1f}s"
-            + (f", boot id {probe.boot_id}" if probe.boot_id else "")
-            + (f", {probe.error}" if probe.error else ""),
+            "  boot probe: not run -- see below"
+            if not probe.probed
+            else (
+                f"  boot probe: {'answered' if probe.answered else 'no answer'} "
+                f"in {probe.elapsed:.1f}s"
+                + (f", boot id {probe.boot_id}" if probe.boot_id else "")
+                + (f", {probe.error}" if probe.error else "")
+            ),
             "",
             "  " + probe.verdict(deployment.boot_id),
             "=" * 72,

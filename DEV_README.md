@@ -236,7 +236,7 @@ tier — re-provisioning first, since the replacement container's database is
 empty — when and only when that boot nonce changed. A scenario that failed on
 its own merits is never retried. Locally the marker is not written and the
 assertion message tells you to provision again. The alternative, PGDATA on a
-Modal Volume, was considered and rejected; `_record_recycle` in `_harness.py`
+Modal Volume, was considered and rejected; `record_recycle` in `_harness.py`
 carries the reasoning.
 
 **A transport timeout is the second retryable failure, and the list ends
@@ -266,8 +266,9 @@ line they logged, minutes after the run goes red, and three separate
 occurrences were diagnosable only because somebody happened to pull the logs
 by hand while the other tier was still running. The artifact holds both marker
 files, one record per timeout with its boot probe, each attempt's pytest
-output, and `modal app logs` for all three apps with timestamps and container
-ids. Worth knowing when reading those: the registry's access log reports
+output, and `modal app logs` for all four apps — the registry, both scenario
+apps and the one `test_rollover` deploys for itself — with timestamps and
+container ids. Worth knowing when reading those: the registry's access log reports
 `duration` and `execution` separately per request, which is the line-level
 form of the same question — time spent queued against time spent in the
 handler.

@@ -63,8 +63,15 @@ BOOT_READ_TIMEOUT_SECONDS = 60.0
 BOOT_READ_ATTEMPTS = 6
 
 
-def _record_recycle(previous: str, current: str) -> None:
+def record_recycle(previous: str, current: str) -> None:
     """Leave the evidence of a recycle where a shell can read it.
+
+    Two callers, and neither is optional. The post-scenario check below
+    is the usual one. The other is the boot probe a transport timeout
+    runs (``_diagnostics``): if it answers from a *different* container,
+    it has identified a recycle off this same nonce, and saying so there
+    rather than waiting for a second read means the retry re-provisions
+    even when that second read gets no answer either.
 
     **Why a retry, and not a database that survives the container.** The
     obvious fix for "a recycle loses the whole database" is to put PGDATA on
@@ -169,7 +176,7 @@ class Deployment:
             attempts=BOOT_READ_ATTEMPTS, retry_pause=3.0, timeout=15.0
         )
         if current != self.boot_id:
-            _record_recycle(self.boot_id, current)
+            record_recycle(self.boot_id, current)
             raise AssertionError(
                 f"The registry container was replaced mid-run (boot id "
                 f"{self.boot_id} -> {current}). Its Postgres is inside that "
@@ -177,7 +184,7 @@ class Deployment:
                 f"longer exists. This is a harness failure and not a "
                 f"scheduling one: provision the stack again and re-run. CI "
                 f"does that by itself, once, off the marker this just "
-                f"wrote -- see _record_recycle for why that rather than a "
+                f"wrote -- see record_recycle for why that rather than a "
                 f"database outliving the container."
             )
 

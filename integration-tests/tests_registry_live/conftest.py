@@ -118,12 +118,18 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
     an xfail as well as for a failure, and recording either as a real
     failure would silently forbid a retry the run was entitled to.
 
-    The teardown phase contributes timeouts but never failures. The only
-    registry call there is ``assert_same_container``'s boot read: a
-    timeout from it is this issue's failure class and is recorded (without
-    re-probing -- it just read that endpoint six times), while an
-    ``AssertionError`` from it is the recycle check firing, which has its
-    own marker and its own re-provisioning retry.
+    **Setup and call are classified in full; teardown contributes
+    timeouts but never failures.** Setup is not a formality: fixtures here
+    talk to the registry -- ``test_limit_slot_wake``'s ``slot_limit`` sets
+    a concurrency limit before the scenario begins -- so a setup timeout
+    is this failure class, and a setup failure that is *not* one must
+    forbid the retry exactly as a call-phase one does. Teardown is the
+    exception because only one thing runs there: ``assert_same_container``
+    raises a timeout when the registry has stopped answering, which is
+    recorded, or an ``AssertionError`` when the container was replaced,
+    which is the recycle check firing and has its own marker and its own
+    re-provisioning retry. Recording that as a real failure would disarm
+    it.
 
     Nothing raised in here may reach pytest: a diagnostic that breaks
     reporting would cost the run the very evidence it exists to collect.
@@ -143,7 +149,7 @@ def _classify(
 ) -> None:
     if not report.failed or call.excinfo is None or _deployment is None:
         return
-    if report.when not in ("call", "teardown"):
+    if report.when not in ("setup", "call", "teardown"):
         return
 
     error = call.excinfo.value
@@ -152,12 +158,12 @@ def _classify(
         record_transport_timeout(
             _deployment,
             nodeid=item.nodeid,
+            phase=report.when,
             error=error,
             timeout=timeout,
-            probe_now=report.when == "call",
         )
-    elif report.when == "call":
-        record_non_timeout_failure(nodeid=item.nodeid, error=error)
+    elif report.when != "teardown":
+        record_non_timeout_failure(nodeid=item.nodeid, phase=report.when, error=error)
 
 
 @pytest.fixture(autouse=True)

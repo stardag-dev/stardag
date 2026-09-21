@@ -18,13 +18,17 @@ import httpx
 import pytest
 from stardag.exceptions import APIError
 
+from stardag_integration_tests.registry_live import _diagnostics
 from stardag_integration_tests.registry_live._diagnostics import (
     BOOT_PROBE_PROMPT_SECONDS,
     NON_TIMEOUT_MARKER_NAME,
+    TIMEOUT_MARKER_NAME,
     BootProbe,
     record_non_timeout_failure,
+    record_transport_timeout,
     transport_timeout,
 )
+from stardag_integration_tests.registry_live._harness import Deployment
 
 _REQUEST = httpx.Request("GET", "https://registry.invalid/api/v1/builds")
 
@@ -165,8 +169,20 @@ def test_the_verdict_prose_cannot_disagree_with_the_counted_label() -> None:
         BootProbe(answered=True, elapsed=_SLOW, boot_id="abc", error=None),
         BootProbe(answered=False, elapsed=15.0, boot_id=None, error="x"),
         BootProbe(answered=True, elapsed=0.2, boot_id="def", error=None),
+        BootProbe(answered=False, elapsed=0.0, boot_id=None, error=None, probed=False),
     ):
         assert probe.verdict("abc").startswith(probe.label("abc") + " -- ")
+
+
+def test_a_teardown_timeout_does_not_claim_a_probe_it_never_ran() -> None:
+    """Its conclusion is hypothesis A, but not on the strength of a 0.0s probe."""
+    probe = BootProbe(
+        answered=False, elapsed=0.0, boot_id=None, error=None, probed=False
+    )
+    verdict = probe.verdict("abc")
+    assert probe.label("abc") == "HYPOTHESIS A"
+    assert "no probe was run" in verdict
+    assert "0.0s" not in verdict
 
 
 def test_a_non_timeout_failure_is_named_where_ci_will_refuse_the_retry(
@@ -176,10 +192,14 @@ def test_a_non_timeout_failure_is_named_where_ci_will_refuse_the_retry(
     monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
     record_non_timeout_failure(
         nodeid="tests_registry_live/test_x.py::test_a",
+        phase="call",
         error=AssertionError("the build never completed"),
     )
+    # A fixture failing for real must end the run exactly as a scenario
+    # body would: fixtures here talk to the registry.
     record_non_timeout_failure(
         nodeid="tests_registry_live/test_y.py::test_b",
+        phase="setup",
         error=RuntimeError("boom"),
     )
 
@@ -187,8 +207,8 @@ def test_a_non_timeout_failure_is_named_where_ci_will_refuse_the_retry(
     # and a whole-file write would leave only whichever failed last.
     lines = (tmp_path / NON_TIMEOUT_MARKER_NAME).read_text().splitlines()
     assert lines == [
-        "tests_registry_live/test_x.py::test_a -- AssertionError",
-        "tests_registry_live/test_y.py::test_b -- RuntimeError",
+        "tests_registry_live/test_x.py::test_a [call] -- AssertionError",
+        "tests_registry_live/test_y.py::test_b [setup] -- RuntimeError",
     ]
 
 
@@ -197,5 +217,92 @@ def test_nothing_is_written_when_no_diagnostics_directory_is_configured(
 ) -> None:
     """A developer running the tier locally configures none of this."""
     monkeypatch.delenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", raising=False)
-    record_non_timeout_failure(nodeid="x::y", error=AssertionError("boom"))
+    record_non_timeout_failure(
+        nodeid="x::y", phase="call", error=AssertionError("boom")
+    )
     assert list(tmp_path.iterdir()) == []
+
+
+def _deployment(api_url: str = "https://registry.invalid") -> Deployment:
+    return Deployment(
+        api_url=api_url,
+        modal_environment="dev-test",
+        workspace_slug="w",
+        environment_slug="e",
+        workspace_id="wid",
+        environment_id="eid",
+        api_key="k",
+        boot_id="boot-one",
+    )
+
+
+def test_a_recycle_the_probe_finds_is_recorded_as_a_recycle(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different boot id is a recycle, whichever read noticed it.
+
+    The two failures want different recoveries — a recycle's retry
+    re-provisions, because the replacement's database is empty — so the
+    probe must say so where CI acts on it rather than leave it to the
+    post-scenario check, whose own read may get no answer either.
+    """
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    monkeypatch.setenv(
+        "STARDAG_REGISTRY_LIVE_RECYCLE_MARKER", str(tmp_path / "registry-recycled")
+    )
+    monkeypatch.setattr(
+        _diagnostics,
+        "probe_boot",
+        lambda *a, **k: BootProbe(
+            answered=True, elapsed=0.3, boot_id="boot-two", error=None
+        ),
+    )
+
+    record_transport_timeout(
+        _deployment(),
+        nodeid="tests_registry_live/test_x.py::test_a",
+        phase="call",
+        error=httpx.ReadTimeout("timed out", request=_REQUEST),
+        timeout=httpx.ReadTimeout("timed out", request=_REQUEST),
+    )
+
+    assert (tmp_path / "registry-recycled").read_text() == "boot-one -> boot-two\n"
+    # And deliberately *not* in the timeout marker: that file is the count
+    # this issue escalates on, and a recycle counted as a transport timeout
+    # would make the count say the opposite of what happened.
+    assert not (tmp_path / TIMEOUT_MARKER_NAME).exists()
+    assert len(list(tmp_path.glob("timeout-*.txt"))) == 1
+
+
+def test_two_phases_of_one_test_leave_two_records(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fixture teardown runs after a failed call, so one test can time out twice.
+
+    Only the call-phase record carries a probe, so a filename that did not
+    distinguish the phases would lose exactly the evidence worth keeping.
+    """
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        _diagnostics,
+        "probe_boot",
+        lambda *a, **k: BootProbe(
+            answered=True, elapsed=0.3, boot_id="boot-one", error=None
+        ),
+    )
+    timeout = httpx.ReadTimeout("timed out", request=_REQUEST)
+
+    for phase in ("call", "teardown"):
+        record_transport_timeout(
+            _deployment(),
+            nodeid="tests_registry_live/test_x.py::test_a",
+            phase=phase,
+            error=timeout,
+            timeout=timeout,
+        )
+
+    records = sorted(path.name for path in tmp_path.glob("timeout-*.txt"))
+    assert len(records) == 2
+    assert records[0].startswith("timeout-call-")
+    assert records[1].startswith("timeout-teardown-")
+    assert len((tmp_path / TIMEOUT_MARKER_NAME).read_text().splitlines()) == 2
