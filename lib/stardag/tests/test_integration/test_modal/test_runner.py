@@ -187,3 +187,33 @@ class TestRunnerAsyncDynamicDeps:
 
         with pytest.raises(StopAsyncIteration):
             runner(task)
+
+
+class TestWorkerBuildConfig:
+    """What the worker does with the config the orchestrator forwarded.
+
+    It checks the shape and installs it; it does not resolve the keys
+    against a class registry, so a key naming a non-task model needs
+    nothing extra here (STA-77). If a per-class check is ever added, it
+    has to accept both kinds of key or the two halves diverge again.
+    """
+
+    def test_a_non_task_key_is_installed_and_resolves(self):
+        import json
+        from typing import Annotated
+
+        import stardag as sd
+        from stardag.build_config import build_config_scope
+        from stardag.integration.modal._metadata import STARDAG_BUILD_CONFIG_ENV
+        from stardag.integration.modal._runner import _build_config_from_env
+
+        class WorkerOptions(sd.StardagBaseModel):
+            max_workers: Annotated[
+                int, sd.StardagField(significance="execution_only")
+            ] = 4
+
+        config = {"WorkerOptions": {"max_workers": 8}}
+        decoded = _build_config_from_env({STARDAG_BUILD_CONFIG_ENV: json.dumps(config)})
+        assert decoded == config
+        with build_config_scope(decoded):
+            assert WorkerOptions().max_workers == 8

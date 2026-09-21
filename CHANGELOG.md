@@ -78,6 +78,31 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   into a concurrency bound. A positional call is now a `TypeError` instead.
   See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the migration.
 
+- **A `significance=` field on a nested config model now survives a
+  build.** A `StardagBaseModel` that is not a task could already declare
+  `dependencies_only` / `execution_only` fields: init refused them, the
+  error named a build-config key, and that key resolved at validation. But
+  hashing the build's structure scope resolved every key through the
+  **task** registry, so the same key raised `UnknownTaskClassError` — the
+  feature worked under `build_config_scope` in a test and failed in
+  `sd.build` and on every deployed path. Guard-rail caps and worker counts
+  live on a nested config object as often as on the task holding it, and
+  those fields could not migrate off the deprecated `hash_exclude=True`.
+
+  A model that declares such a field is now indexed as it is defined, and
+  the scope hash falls back to that index when a key is not a task class.
+  Its key is the same shape as a task's: `__namespace__` and class name, or
+  the bare class name when it has none. Everything downstream is unchanged
+  — an `execution_only` override is validated and excluded from the hash, a
+  `dependencies_only` one is hashed under the model's key.
+
+  Two models resolving to one key is now an error where the second is
+  defined, naming both: a config entry could not have said which it meant.
+  Set `__namespace__` on one of them. Only models that declare a
+  build-config field are indexed, so a class no config can name cannot
+  collide; a legacy `hash_exclude=True` field does not count, since it is
+  still passable at init.
+
 ## [0.24.0] — 2026-09-20
 
 ### SDK

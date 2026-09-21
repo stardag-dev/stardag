@@ -40,7 +40,11 @@ from pydantic import (
 )
 from pydantic.fields import FieldInfo
 
-from stardag.build_config import resolve_field_value, task_config_key
+from stardag.build_config import (
+    register_build_config_class,
+    resolve_field_value,
+    task_config_key,
+)
 
 SerializationContextMode = Literal["hash", "registry", None]
 ValidationContextMode = Literal["compat", None]
@@ -287,17 +291,47 @@ class StardagBaseModel(BaseModel):
         return names
 
     @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        # A class the build config can name has to be findable by that name
+        # when the structure scope is hashed, not only when a field is
+        # resolved. Tasks are found through the task registry; this covers
+        # the rest. See ``stardag.build_config.register_build_config_class``.
+        register_build_config_class(cls)
+
+    @classmethod
     def _build_config_key(cls) -> str:
-        """The build-config key for this class. Polymorphic classes use their
-        registered namespace and name; anything else its class name."""
-        get_namespace = getattr(cls, "get_namespace", None)
-        get_name = getattr(cls, "get_name", None)
-        if callable(get_namespace) and callable(get_name):
-            try:
-                return task_config_key(str(get_namespace()), str(get_name()))
-            except AttributeError:
-                pass
-        return cls.__name__
+        """The build-config key for this class. A class registered in a
+        polymorphic family uses the namespace and name it was registered
+        under; anything else its ``__namespace__`` (usually unset) and class
+        name — the same shape, and the escape hatch when two plain models
+        would otherwise share a bare name.
+
+        ``__type_id__`` has to be this class's own. It is inherited like any
+        class attribute, and the classes a family does not register — an
+        abstract base, a family root — would otherwise answer with their
+        nearest registered ancestor's key, which belongs to a different
+        class.
+
+        A parameterised generic alias (``Box[int]``) answers with its
+        origin's key. The alias is not indexed — it is not a real class —
+        but it *can* be constructed, and its fields are the origin's, so
+        the key it resolves against has to be the one the origin holds.
+        """
+        origin = cls.__pydantic_generic_metadata__.get("origin")
+        if origin is not None:
+            cls = origin
+        if "__type_id__" in cls.__dict__:
+            get_namespace = getattr(cls, "get_namespace", None)
+            get_name = getattr(cls, "get_name", None)
+            if callable(get_namespace) and callable(get_name):
+                try:
+                    return task_config_key(str(get_namespace()), str(get_name()))
+                except AttributeError:  # pragma: no cover - defensive
+                    pass
+        return task_config_key(
+            str(getattr(cls, "__namespace__", "") or ""), cls.__name__
+        )
 
     @model_serializer(mode="wrap")
     def _wrap_serialize(self, handler, info: SerializationInfo):

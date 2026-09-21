@@ -530,8 +530,6 @@ class PolymorphicRoot(StardagBaseModel):
         namespace_override: str | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__pydantic_init_subclass__(**kwargs)
-
         # Direct child => new independent registry (new family)
         if PolymorphicRoot in cls.__bases__:
             cls.__registry__ = _TypeRegistry()
@@ -560,6 +558,11 @@ class PolymorphicRoot(StardagBaseModel):
         # mirror the origin class's fields, validated when the origin is defined.
         if not _is_parameterized_generic_alias(cls):
             _validate_and_index_polymorphic_fields(cls)
+
+        # Last, not first: ``StardagBaseModel``'s hook indexes a model the
+        # build config can name, and its key is ``__type_id__`` for a
+        # polymorphic class — which the registration above is what sets.
+        super().__pydantic_init_subclass__(**kwargs)
 
     def __class_getitem__(
         cls: Type[BaseModel],
