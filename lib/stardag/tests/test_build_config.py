@@ -17,10 +17,12 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 import pytest
-from pydantic import WrapSerializer
+from pydantic import ValidationError, WrapSerializer
 
 import stardag as sd
+from stardag import task_from_registry_data
 from stardag.base_model import CONTEXT_MODE_KEY, StardagField
+from stardag.build import build_sequential
 from stardag.build_config import (
     BuildConfigError,
     UnknownTaskClassError,
@@ -34,6 +36,7 @@ from stardag.build_config import (
     structure_config_hash,
     task_config_key,
 )
+from stardag.registry import NoOpRegistry
 from stardag.target import InMemoryTarget
 
 
@@ -105,8 +108,32 @@ class Outer(sd.Task[int]):
         return None
 
 
+class ParserOptions(sd.StardagBaseModel):
+    """A nested config object — not a task, and named by the build config in
+    its own right. Guard-rail caps and worker counts live on objects like
+    this as often as on the task holding them."""
+
+    pattern: str
+    chunk: Annotated[int, StardagField(significance="dependencies_only")] = 10
+    max_workers: Annotated[int, StardagField(significance="execution_only")] = 4
+
+
+class Parse(sd.Task[int]):
+    """Its only parameter is the nested config object."""
+
+    __namespace__ = "bc_tests"
+    options: ParserOptions
+
+    def run(self) -> None:
+        self.target().save(self.options.max_workers)
+
+    def target(self) -> InMemoryTarget[int]:  # type: ignore[override]
+        return InMemoryTarget(key=str(self.id))
+
+
 KEY = "bc_tests.Fanout"
 OTHER = "bc_tests.Other"
+OPTIONS = "ParserOptions"
 
 
 class TestTaskConfigKey:
@@ -361,3 +388,70 @@ class TestJsonableBuildConfig:
     def test_a_value_with_no_json_form_is_a_config_error(self):
         with pytest.raises(BuildConfigError, match="no JSON form"):
             jsonable_build_config({DATED: {"since": object()}})
+
+
+class TestNonTaskModelKeys:
+    """A ``StardagBaseModel`` that is not a task may declare level 2 and 3
+    fields too, and the build config names it by the same kind of key. The
+    validation side always worked; before the class was registered, the
+    *hash* side rejected the key, so the feature worked in a test and failed
+    in a build (STA-77)."""
+
+    def test_the_whole_path_holds_for_a_nested_model(self, default_in_memory_fs_target):
+        # 1. the field cannot be passed at init, and the error names a key...
+        with pytest.raises(ValidationError) as excinfo:
+            ParserOptions(pattern="*.log", max_workers=8)
+        assert '{"ParserOptions": {"max_workers": ...}}' in str(excinfo.value)
+
+        # 2. ...that resolves at validation...
+        with build_config_scope({OPTIONS: {"max_workers": 8}}):
+            assert ParserOptions(pattern="*.log").max_workers == 8
+
+        # 3. ...and that the structure scope can be hashed from.
+        assert canonical_structure_config({OPTIONS: {"max_workers": 8}}) == {}
+        assert structure_config_hash({OPTIONS: {"max_workers": 8}}) is not None
+
+        # 4. So a build carrying it runs, and the task reads the value.
+        task = Parse(options=ParserOptions(pattern="*.log"))
+        build_sequential(
+            [task],
+            registry=NoOpRegistry(),
+            build_config={OPTIONS: {"max_workers": 8}},
+        )
+        assert task.target().load() == 8
+
+    def test_dependencies_only_moves_the_hash_and_execution_only_does_not(self):
+        assert structure_config_hash({OPTIONS: {"max_workers": 8}}) == (
+            structure_config_hash(None)
+        )
+        assert structure_config_hash({OPTIONS: {"chunk": 50}}) != (
+            structure_config_hash(None)
+        )
+        assert canonical_structure_config({OPTIONS: {"chunk": 50}}) == {
+            OPTIONS: {"chunk": 50}
+        }
+        # The same per-class rules as a task: an override equal to the
+        # default is a no-op, and the other errors are unchanged.
+        assert canonical_structure_config({OPTIONS: {"chunk": 10}}) == {}
+        with pytest.raises(BuildConfigError, match="no such field"):
+            canonical_structure_config({OPTIONS: {"nope": 1}})
+        with pytest.raises(BuildConfigError, match="identity"):
+            canonical_structure_config({OPTIONS: {"pattern": "*.txt"}})
+
+    def test_a_still_unknown_key_names_both_kinds_of_class(self):
+        with pytest.raises(UnknownTaskClassError, match="nor as a model"):
+            canonical_structure_config({"NoSuchThing": {"x": 1}})
+
+    def test_a_rehydrated_task_reads_the_configured_nested_value(self):
+        """The registry stores identity data only, so the nested model's
+        level 3 value is not in the payload: it comes from the config
+        installed where the task is rebuilt."""
+        task = Parse(options=ParserOptions(pattern="*.log"))
+        data = task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
+        assert "max_workers" not in data["options"]
+
+        with build_config_scope({OPTIONS: {"max_workers": 8}}):
+            rebuilt = task_from_registry_data(data, expected_task_id=task.id)
+        assert isinstance(rebuilt, Parse)
+        assert rebuilt.options.max_workers == 8
+        assert rebuilt.id == task.id

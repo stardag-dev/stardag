@@ -1,6 +1,6 @@
 import enum
 import warnings
-from typing import Annotated, Any, Type
+from typing import Annotated, Any, Generic, Type, TypeVar
 
 import pytest
 from pydantic import ValidationError, WrapSerializer
@@ -355,10 +355,14 @@ def test_stardag_base_model_serialize(
 import stardag as sd  # noqa: E402
 from stardag.base_model import field_significance  # noqa: E402
 from stardag.build_config import (  # noqa: E402
+    BuildConfigError,
     build_config_scope,
+    canonical_structure_config,
     get_build_config,
+    get_build_config_class,
     rebind_to_build_config,
 )
+from stardag.polymorphic import PolymorphicRoot  # noqa: E402
 from stardag.target import InMemoryTarget  # noqa: E402
 
 
@@ -506,17 +510,19 @@ class TestSignificanceOnTheModel:
         assert field_significance(fields["compat"]) == "identity"
 
     def test_non_identity_fields_are_the_build_config_fields_and_cached(self):
+        # Not ``Mixed``: a model with a build-config field is indexed under
+        # its bare class name, and the one above already holds that key.
         with pytest.warns(DeprecationWarning):
 
-            class Mixed(StardagBaseModel):
+            class MixedCached(StardagBaseModel):
                 plain: int = 0
                 legacy: Annotated[int, StardagField(hash_exclude=True)] = 0
                 deps: Annotated[int, StardagField(significance="dependencies_only")] = 0
                 exec_: Annotated[int, StardagField(significance="execution_only")] = 0
 
-        first = Mixed._non_identity_fields()
+        first = MixedCached._non_identity_fields()
         assert first == ("deps", "exec_")
-        assert Mixed._non_identity_fields() is first
+        assert MixedCached._non_identity_fields() is first
 
     def test_registry_dump_drops_nested_non_identity_fields_too(self):
         """A configured task nested as a parameter is serialised by its own
@@ -600,3 +606,138 @@ class TestSignificanceIsChecked:
             StardagField(significance="dependencies-only")  # type: ignore[arg-type]
         assert "identity" in str(excinfo.value)
         assert "execution_only" in str(excinfo.value)
+
+
+class TestBuildConfigRegistration:
+    """Which classes a build config may name, and under which key.
+
+    A model that declares a level 2 or 3 field is looked up by key when the
+    build's structure scope is hashed, so it has to be findable then — not
+    only when a field is resolved at validation. Tasks are found through the
+    task registry; this is the other half (STA-77).
+    """
+
+    def test_a_model_with_a_build_config_field_is_registered_by_its_name(self):
+        class Indexed(StardagBaseModel):
+            a: int = 0
+            threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+        assert get_build_config_class("Indexed") is Indexed
+
+    def test_a_namespace_separates_the_key(self):
+        class Namespaced(StardagBaseModel):
+            __namespace__ = "sig_tests"
+            threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+        assert get_build_config_class("sig_tests.Namespaced") is Namespaced
+        assert get_build_config_class("Namespaced") is None
+        assert Namespaced._build_config_key() == "sig_tests.Namespaced"
+
+    def test_a_polymorphic_model_is_keyed_by_its_registered_type_id(self):
+        """A non-task polymorphic model is keyed like a task: the namespace
+        and name it was *registered* under, overrides included. That id is
+        set as the class is defined, so this index is filled after it."""
+
+        class Strategy(PolymorphicRoot):
+            __namespace__ = "sig_tests"
+
+        class Chunked(Strategy, namespace_override="other_ns"):
+            threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+        assert Chunked._build_config_key() == "other_ns.Chunked"
+        assert get_build_config_class("other_ns.Chunked") is Chunked
+        assert get_build_config_class("sig_tests.Chunked") is None
+        # ...and the scope hash resolves that key.
+        assert canonical_structure_config({"other_ns.Chunked": {"threads": 8}}) == {}
+        with build_config_scope({"other_ns.Chunked": {"threads": 8}}):
+            assert Chunked().threads == 8
+
+    def test_a_model_without_build_config_fields_is_not_registered(self):
+        class Ordinary(StardagBaseModel):
+            a: int = 0
+
+        assert get_build_config_class("Ordinary") is None
+
+    def test_a_legacy_hash_exclude_model_is_not_registered(self):
+        """``hash_exclude=True`` is passable at init and needs no config
+        entry, so it does not make the class nameable."""
+        with pytest.warns(DeprecationWarning):
+
+            class LegacyOnly(StardagBaseModel):
+                threads: Annotated[int, StardagField(hash_exclude=True)] = 1
+
+        assert get_build_config_class("LegacyOnly") is None
+
+    def test_a_parameterized_generic_alias_is_not_registered(self):
+        T = TypeVar("T")
+
+        class Box(StardagBaseModel, Generic[T]):
+            item: T
+            threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+        assert Box[int].__name__ == "Box[int]"
+        assert get_build_config_class("Box") is Box
+        assert get_build_config_class("Box[int]") is None
+
+    def test_a_task_class_is_left_to_the_task_registry(self):
+        assert get_build_config_class(KEY) is None
+        assert get_build_config_class("Fanout") is None
+        # ...and the config still resolves it, through that registry.
+        assert canonical_structure_config({KEY: {"partition_size": 7}}) == {
+            KEY: {"partition_size": 7}
+        }
+
+    def test_two_models_with_one_key_are_refused_at_definition(self):
+        # Two *different* classes with one key: different qualified names,
+        # as two modules each defining a ``Duplicated`` would have. (Same
+        # module and qualified name is a re-creation, below.)
+        def first():
+            class Duplicated(StardagBaseModel):
+                threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+            return Duplicated
+
+        def second():
+            class Duplicated(StardagBaseModel):
+                threads: Annotated[int, StardagField(significance="execution_only")] = 2
+
+            return Duplicated
+
+        first()
+        with pytest.raises(BuildConfigError) as excinfo:
+            second()
+
+        message = str(excinfo.value)
+        assert "'Duplicated'" in message
+        # Both classes are named, so the user can find the two definitions.
+        assert ".first.<locals>.Duplicated" in message
+        assert ".second.<locals>.Duplicated" in message
+        assert "__namespace__" in message
+
+    def test_a_namespace_resolves_a_collision(self):
+        class Separated(StardagBaseModel):
+            threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+        class Separated2(StardagBaseModel):
+            __namespace__ = "other_ns"
+            threads: Annotated[int, StardagField(significance="execution_only")] = 2
+
+        # Same class name, different keys: rename the second to match the
+        # first and only the namespace keeps them apart.
+        Separated2.__name__ = "Separated"
+        assert get_build_config_class("Separated") is Separated
+        assert get_build_config_class("other_ns.Separated2") is Separated2
+
+    def test_a_class_recreated_under_the_same_name_replaces_it(self):
+        """What cloudpickle does to a by-value class in a worker: the class
+        object is new, its module and qualified name are not."""
+
+        def define():
+            class Recreated(StardagBaseModel):
+                threads: Annotated[int, StardagField(significance="execution_only")] = 1
+
+            return Recreated
+
+        first, second = define(), define()
+        assert first is not second
+        assert get_build_config_class("Recreated") is second

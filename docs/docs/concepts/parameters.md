@@ -122,6 +122,13 @@ with sd.build_config_scope({"reports.Aggregate": {"num_threads": 2}}):
     task = Aggregate(period="2026-01")  # num_threads == 2
 ```
 
+A key names a **class**, and not only a task class: a nested
+`sd.StardagBaseModel` held as a task parameter — where a chunk size or a
+worker count often lives more naturally than on the task itself — may
+declare level 2 and 3 fields of its own, and the config names it the same
+way, by its `__namespace__` and class name or by the bare class name when
+it has none.
+
 Why one mechanism and not two: if one downstream could pass a partition
 size to its upstream while another let the upstream read the config, there
 would be two versions of one upstream in one build with one task ID. The

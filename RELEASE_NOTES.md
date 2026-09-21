@@ -127,6 +127,46 @@ word, which is how a grace period becomes a concurrency bound. This
 release inserts exactly such a field (`worker_report_grace_seconds`, next
 to the two budgets), which is what surfaced it.
 
+### A `significance=` field on a nested config model now works in a build
+
+Purely additive; nothing to change in existing code.
+
+A chunk size or a worker count often lives on a config object held as a
+task parameter rather than on the task itself. Declaring it there with
+`significance="execution_only"` looked supported — init refused the value
+and named a build-config key, and that key resolved under
+`sd.build_config_scope(...)` — but the key was rejected the moment a build
+hashed its structure scope, because only task classes were looked up. The
+feature passed a unit test and failed in `sd.build` and on Modal.
+
+Such a model is now findable by its key, which is the same shape as a
+task's: its `__namespace__` and class name, or the bare class name when it
+has none.
+
+```python
+class ParserOptions(sd.StardagBaseModel):
+    pattern: str
+    max_workers: Annotated[int, sd.StardagField(significance="execution_only")] = 4
+
+
+class Parse(sd.Task[int]):
+    __namespace__ = "demo"
+    options: ParserOptions
+
+    def run(self) -> None: ...
+
+
+sd.build(
+    Parse(options=ParserOptions(pattern="*.log")),
+    build_config={"ParserOptions": {"max_workers": 8}},
+)
+```
+
+One new error to know about: if two models with build-config fields
+resolve to the same key, the second definition raises, naming both
+classes. Give one of them a `__namespace__`. Models without such a field
+are not indexed and cannot collide.
+
 ---
 
 ## v0.24.0 — Dependency structure belongs to the code, not the task id

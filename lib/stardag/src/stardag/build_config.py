@@ -15,6 +15,13 @@ and 3 parameters of its whole upstream cone to keep any cache honest.
 Forbidding explicit init removes both problems by construction. See
 ``docs/design/scope-keyed-dependency-structure.md``.
 
+A key names a **class**, and usually a task class. It may also name a
+plain :class:`~stardag.base_model.StardagBaseModel` that declares level 2
+or 3 fields of its own — a nested config object held as a task parameter,
+where a guard-rail cap or a worker count naturally lives. Such a class is
+indexed in a small registry here when it is defined; see
+:func:`register_build_config_class`.
+
 The config is *installed* for a build — the trigger, the bootstrap, a tick
 and a worker each set it before any task of that build is constructed or
 rehydrated — and *read* by a field's default at validation time. It lives in
@@ -34,11 +41,15 @@ from typing import TYPE_CHECKING, Any
 from stardag.exceptions import StardagError
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
+
     from stardag._core.base_task import BaseTask
 
 BuildConfig = Mapping[str, Mapping[str, Any]]
 """``{"<namespace>.<Name>": {"<field>": value}}``. A task in the root
-namespace is keyed by its bare class name — see :func:`task_config_key`."""
+namespace is keyed by its bare class name — see :func:`task_config_key`. A
+non-task model is keyed the same way: its ``__namespace__`` and class name,
+or the bare class name when it has no namespace."""
 
 
 class BuildConfigError(StardagError):
@@ -46,7 +57,11 @@ class BuildConfigError(StardagError):
 
 
 class UnknownTaskClassError(BuildConfigError):
-    """The build config names a task class this process has not registered.
+    """The build config names a class this process has not registered.
+
+    A task class, or a non-task model declaring build-config fields — the
+    lookup tries both. The name predates the second kind and is kept: it is
+    public API, and an unimported upstream task is still the common case.
 
     Separate from the other config errors because it is the one a caller
     may legitimately be unable to judge: a trigger process that never
@@ -66,6 +81,82 @@ def task_config_key(namespace: str, name: str) -> str:
     """The build-config key for a task class: ``namespace.Name``, or ``Name``
     for the root namespace."""
     return f"{namespace}.{name}" if namespace else name
+
+
+_build_config_classes: dict[str, type["BaseModel"]] = {}
+"""Non-task models a build config may name, by build-config key.
+
+Task classes are *not* here: the task registry already indexes them, and
+:func:`canonical_structure_config` consults it first. This holds the other
+half — a plain ``StardagBaseModel`` that declares a ``dependencies_only``
+or ``execution_only`` field — so that half can be looked up at all. Without
+it a nested config model could resolve its fields at validation and still
+fail the moment the build's structure scope was hashed.
+"""
+
+
+def register_build_config_class(cls: type["BaseModel"]) -> None:
+    """Index ``cls`` under its build-config key, if a config can name it.
+
+    Called for every ``StardagBaseModel`` subclass as it is defined. Three
+    kinds of class are skipped:
+
+    - a parameterised generic alias (``Model[int]``), which is not a real
+      class — the concrete subclass that extends it carries the key;
+    - a class with no build-config field, which is most of them. Indexing
+      every model would re-create the polymorphic family registry for
+      classes no config can name, and make every ordinary ``Config``-style
+      class a collision candidate. A legacy ``hash_exclude=True`` field
+      does not count: it is passable at init and needs no config entry;
+    - a task class, which the task registry owns.
+
+    Two classes resolving to one key is a definition-time error naming
+    both: a config entry could not say which it meant. Set ``__namespace__``
+    on one of them to separate the keys. A class re-created under the same
+    module and qualified name — cloudpickle unpickling a by-value class in
+    a worker, or a module reloaded — replaces its predecessor rather than
+    colliding with it.
+    """
+    # ``_non_identity_fields`` / ``_build_config_key`` are StardagBaseModel
+    # classmethods; this module sits below it, so ``cls`` is typed loosely.
+    if cls.__pydantic_generic_metadata__.get("origin"):  # type: ignore[attr-defined]
+        return
+    if not cls._non_identity_fields():  # type: ignore[attr-defined]
+        return
+    if _is_task_class(cls):
+        return
+
+    key: str = cls._build_config_key()  # type: ignore[attr-defined]
+    existing = _build_config_classes.get(key)
+    if (
+        existing is not None
+        and existing is not cls
+        and (existing.__module__, existing.__qualname__)
+        != (cls.__module__, cls.__qualname__)
+    ):
+        raise BuildConfigError(
+            f"Two models resolve to the build-config key {key!r}: "
+            f"{existing.__module__}.{existing.__qualname__} and "
+            f"{cls.__module__}.{cls.__qualname__}. A build config names a "
+            "class by this key, so it could not say which one it meant. Set "
+            "__namespace__ on one of them."
+        )
+    _build_config_classes[key] = cls
+
+
+def get_build_config_class(key: str) -> type["BaseModel"] | None:
+    """The non-task model registered under ``key``, or None. See
+    :data:`_build_config_classes`."""
+    return _build_config_classes.get(key)
+
+
+def _is_task_class(cls: type["BaseModel"]) -> bool:
+    """Whether ``cls`` is a task class, whose key the task registry owns."""
+    try:
+        from stardag._core.base_task import BaseTask
+    except ImportError:  # pragma: no cover - only while base_task itself imports
+        return False
+    return issubclass(cls, BaseTask)
 
 
 def get_build_config() -> BuildConfig | None:
@@ -182,12 +273,21 @@ def canonical_structure_config(config: BuildConfig | None) -> dict[str, dict[str
     for key, fields in config.items():
         namespace, _, name = key.rpartition(".")
         try:
-            cls = BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
+            cls: type[BaseModel] = BaseTask._registry().get_class(
+                TypeId(namespace=namespace, name=name)
+            )
         except KeyError as e:
-            raise UnknownTaskClassError(
-                f"build_config names task class {key!r}, which is not "
-                "registered (is its module imported here?)."
-            ) from e
+            # Tasks first, so an ordinary config keeps today's messages; then
+            # the non-task models that declare build-config fields of their
+            # own — a nested config object is named by the same kind of key.
+            model = get_build_config_class(key)
+            if model is None:
+                raise UnknownTaskClassError(
+                    f"build_config names {key!r}, which is not registered as "
+                    "a task class, nor as a model declaring build-config "
+                    "fields (is its module imported here?)."
+                ) from e
+            cls = model
         for field_name, value in fields.items():
             field = cls.model_fields.get(field_name)
             if field is None:
