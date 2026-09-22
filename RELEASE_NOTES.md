@@ -6,7 +6,7 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## Unreleased
+## v0.25.0 — A task is rebuilt from the registry, never from a pickle
 
 ### Registry data is the only task representation
 
@@ -148,7 +148,10 @@ What `builds stop` gives you beyond the ordering:
   and nothing else; the registry reaches no execution backend at all, by
   design. A hard kill is the Modal dashboard's job, and the registry UI's
   new **Stop running tasks** panel — the same list, the same filters, the
-  command to copy — links each call straight to it.
+  command to copy — links each call straight to it. **The panel is part of
+  the registry UI, so it ships with the next server image rather than with
+  this SDK tag**; the CLI command is complete on its own and needs nothing
+  from the server.
 
 ### A retried claim is no longer mistaken for a second attempt
 
@@ -178,7 +181,10 @@ a lost response is followed by another attempt by construction; the
 reactive engine claims once per tick pass and needs the HTTP client's
 own retry to reach the same failure. It needs a registry at `server-v0.5.0`
 or newer to have any effect; against an older one it is ignored, which
-is simply the previous behaviour.
+is simply the previous behaviour. **Nothing is needed from you when that
+server lands either** — the id is already being sent, so the idempotent
+claim starts working for an existing install the moment its registry is
+upgraded, with no SDK change and no redeploy.
 
 Only the claim carries an identity in this release. Forwarding it into
 the worker, so a container can name its own execution when it reports,
