@@ -138,9 +138,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   itself and let it carry on.
 
   Reviving such a task is a _claim's_ job, after a reset, never a
-  report's. Scoped to starts that name an executor, a reference or an
-  identity, so the concurrency limiter's slot-occupying start — which
-  describes no execution at all — is untouched.
+  report's. **Scoped to starts that carry an execution identity**, and
+  only those, which is the line every other rule here draws: absence of
+  an identity is no opinion. That leaves the concurrency limiter's
+  slot-occupying start untouched, and with it the sequential engine, the
+  Prefect integration and a `claim=False` build — all of which post a
+  start carrying no identity and must keep working. The limit it accepts
+  is that such a start can still revive a cancelled task, which is how
+  every release before this behaved.
 
 - **`GET /builds/{build_id}/tasks/{task_id}/execution-status`**: read-only,
   two denormalised columns, no lock and no event. Answers a running
