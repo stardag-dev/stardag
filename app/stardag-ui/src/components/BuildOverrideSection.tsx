@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { cancelBuild, completeBuild, failBuild } from "../api/tasks";
 import { useAuth } from "../context/AuthContext";
 import type { Build, BuildStatus } from "../types/task";
@@ -106,6 +106,7 @@ export function BuildOverrideSection({
   const [pending, setPending] = useState<OverrideAction | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const headingId = useId();
 
   const confirm = useCallback(async () => {
     if (!pending) return;
@@ -135,8 +136,14 @@ export function BuildOverrideSection({
   const chosen = ACTIONS.find((a) => a.action === pending) ?? null;
 
   return (
-    <section className="space-y-2">
-      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+    // Named, so it is a landmark: this dialog has two halves that do
+    // different things to different subjects, and a screen-reader user
+    // navigating it should be able to tell which one they are in.
+    <section aria-labelledby={headingId} className="space-y-2">
+      <h3
+        id={headingId}
+        className="text-sm font-semibold text-gray-900 dark:text-gray-100"
+      >
         Override the recorded status
       </h3>
       <p className="text-xs text-gray-600 dark:text-gray-400">

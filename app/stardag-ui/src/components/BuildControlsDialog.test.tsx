@@ -584,11 +584,17 @@ describe("BuildControlsDialog", () => {
     const user = userEvent.setup();
     await openDialog(user);
 
+    // Scoped to the override half, and rejecting the *word*. Scanning
+    // the whole dialog would have tested the stop section's copy, which
+    // legitimately does discuss claims; and rejecting two particular
+    // phrasings would let "the claims remain held" through, which is
+    // just as much a promise this must not make.
+    const override = () =>
+      screen.getByRole("region", { name: /Override the recorded status/ });
+
     for (const label of ["Mark completed", "Mark failed", "Cancel build"]) {
       await user.click(await screen.findByRole("button", { name: label }));
-      const body = document.body.textContent ?? "";
-      expect(body).not.toMatch(/releases? (its |the )?(execution )?claims?/i);
-      expect(body).not.toMatch(/does not release any claim/i);
+      expect(override().textContent ?? "").not.toMatch(/claim/i);
       await user.click(screen.getByRole("button", { name: "Back" }));
     }
   });
