@@ -1012,56 +1012,46 @@ async def build_aio(
                     fail_fast_triggered = True
             return
 
-        # Handle normal task execution results
-        if isinstance(result, TaskExecutionError):
+        # Handle normal task execution results. Two shapes reach here and
+        # mean the same thing -- a ``TaskExecutionError`` wrapper, and the
+        # bare exception a custom executor may return for backward
+        # compatibility -- so they are normalised rather than handled
+        # twice. Keeping them apart is how the cancellation case below got
+        # fixed on one of them and not the other.
+        if isinstance(result, (TaskExecutionError, BaseException)):
+            failure: BaseException = (
+                result.exception if isinstance(result, TaskExecutionError) else result
+            )
             # Task failed - release lock (not completed) and notify registry.
             #
             # Except when the worker stopped *itself*. A worker that reached
             # a cooperative-cancellation checkpoint and found it was no
-            # longer wanted raises out of its container, and a detached
-            # executor reports any escaping exception as a failure -- but
-            # the task it would be reported against is either cancelled or
-            # running under somebody else, and a failure report writes
-            # through. So this build would end by marking a live execution
-            # failed, or a cancelled task failed, on the strength of a
-            # worker agreeing to stop. Counted locally, said to nobody.
-            cancelled_itself = isinstance(result.exception, ExecutionCancelled)
+            # longer wanted raises out of its container, and an executor
+            # reports any escaping exception as a failure -- but the task it
+            # would be reported against is either cancelled or running under
+            # somebody else, and a failure report writes through. So this
+            # build would end by marking a live execution failed, or a
+            # cancelled task failed, on the strength of a worker agreeing to
+            # stop. Counted locally, said to nobody.
             await release_lock_for_task(task, completed=False)
-            try:
-                if cancelled_itself:
-                    logger.info(
-                        f"Execution of task {task.id} stopped at a cooperative "
-                        "cancellation checkpoint; recording nothing against "
-                        "the task, which is cancelled or somebody else's."
-                    )
-                else:
+            if isinstance(failure, ExecutionCancelled):
+                logger.info(
+                    f"Execution of task {task.id} stopped at a cooperative "
+                    "cancellation checkpoint; recording nothing against the "
+                    "task, which is cancelled or somebody else's."
+                )
+            else:
+                try:
                     await registry.task_fail_aio(build_id, task, str(result))
-            except Exception as reg_err:
-                handle_registry_error(
-                    reg_err,
-                    f"Failed to notify registry of task {task.id} failure",
-                    on_registry_failure,
-                )
-            state.exception = result.exception
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to notify registry of task {task.id} failure",
+                        on_registry_failure,
+                    )
+            state.exception = failure
             task_count.failed += 1
-            error = result.exception
-            if fail_mode == FailMode.FAIL_FAST:
-                fail_fast_triggered = True
-
-        elif isinstance(result, BaseException):
-            # Backward compat: custom executor returned a bare exception
-            await release_lock_for_task(task, completed=False)
-            try:
-                await registry.task_fail_aio(build_id, task, str(result))
-            except Exception as reg_err:
-                handle_registry_error(
-                    reg_err,
-                    f"Failed to notify registry of task {task.id} failure",
-                    on_registry_failure,
-                )
-            state.exception = result
-            task_count.failed += 1
-            error = result
+            error = failure
             if fail_mode == FailMode.FAIL_FAST:
                 fail_fast_triggered = True
 
@@ -1640,71 +1630,72 @@ async def build_aio(
         a re-attach to somebody else's winner.
 
         A refusal here means the task stopped being ours between the
-        claim and the spawn — taken over, or cancelled outright. The
-        error itself needs no catching: both call sites route a failed
-        start through ``handle_registry_error``, which refuses to
-        tolerate a *refusal* even in ``warn`` mode, so the task fails
-        locally rather than proceeding as an owner it no longer is. That
-        is why this path does not need the tick's catch, where an
-        escaping error in a ``TaskGroup`` would cancel every sibling
-        spawn in the pass.
+        claim and this call — taken over, or cancelled outright — and it
+        is handled **once, around both shapes of the call**, detached and
+        not. Handling it only around the detached one is the shape this
+        first had, and it left the non-detached branch propagating into
+        exactly the failure the other branch was written to avoid.
 
-        **The container does need stopping, and this is the only place
-        that can.** It is already running and its reference was never
-        recorded, so nothing else can address it — the same reasoning as
-        the tick's, and the half that is easy to miss because the
-        exception handling looks complete without it.
+        Two things happen, and the second is the one that is easy to miss
+        because the exception handling looks complete without it.
 
-        Then this returns a **local** failure rather than propagating,
-        and that distinction is the whole point. Propagating sends the
-        refusal through the generic error path into ``process_result``,
-        which posts ``TASK_FAILED`` — against a task that another build
-        is now running, or that was just cancelled. The report writes
-        through, so losing a race would end with this build marking
-        somebody else's live execution failed, which is the very class of
-        damage the refusal exists to prevent. Returning a
-        ``LockAcquisitionResult`` takes the path the claim-loser timeout
-        already uses: counted as a local failure, ``fail_mode`` honoured,
-        and **nothing said to the registry about a task that is not
-        ours**.
+        **A local failure is returned rather than the error propagated.**
+        Propagating sends the refusal through the generic error path into
+        ``process_result``, which posts ``TASK_FAILED`` — against a task
+        another build is now running, or one that was just cancelled. The
+        report writes through, so losing a race would end with this build
+        marking somebody else's live execution failed, which is the very
+        damage the refusal exists to prevent. A ``LockAcquisitionResult``
+        takes the path the claim-loser timeout already uses: counted as a
+        local failure, ``fail_mode`` honoured, and **nothing said to the
+        registry about a task that is not ours**.
+
+        **And the container is stopped, when there is one.** It is
+        already running with a reference nothing recorded, so nothing
+        else can address it, and this is the only place still holding the
+        handle. Best-effort; its own cooperative checkpoint is the
+        backstop.
         """
         execution_id = task_states[task.id].execution_id
-        if handle is None:
-            await registry.task_start_aio(build_id, task, execution_id=execution_id)
-            return
         try:
-            await registry.task_start_aio(
-                build_id,
-                task,
-                executor=handle.executor,
-                executor_ref=handle.ref,
-                executor_metadata=handle.executor_metadata,
-                execution_id=execution_id,
-            )
+            if handle is None:
+                await registry.task_start_aio(build_id, task, execution_id=execution_id)
+            else:
+                await registry.task_start_aio(
+                    build_id,
+                    task,
+                    executor=handle.executor,
+                    executor_ref=handle.ref,
+                    executor_metadata=handle.executor_metadata,
+                    execution_id=execution_id,
+                )
         except APIError as start_err:
             if not execution_not_wanted(start_err):
                 raise
             reason = (start_err.payload or {}).get("error_code")
+            orphan = "" if handle is None else f" Stopping execution {handle.ref!r}."
             logger.warning(
                 f"Task {task.id} stopped being ours while its execution was "
-                f"being spawned ({reason}); the registry refused the ref. "
-                f"Stopping the orphaned execution {handle.ref!r}."
+                f"being started ({reason}); the registry refused the start.{orphan}"
             )
-            try:
-                await task_executor.cancel_detached(task, handle.executor, handle.ref)
-            except Exception as cancel_err:
-                logger.warning(
-                    f"Failed to stop orphaned execution {handle.ref!r} for "
-                    f"task {task.id}; it will run until its next cooperative "
-                    f"checkpoint: {cancel_err}"
-                )
+            if handle is not None:
+                try:
+                    await task_executor.cancel_detached(
+                        task, handle.executor, handle.ref
+                    )
+                except Exception as cancel_err:
+                    logger.warning(
+                        f"Failed to stop orphaned execution {handle.ref!r} for "
+                        f"task {task.id}; it will run until its next "
+                        f"cooperative checkpoint: {cancel_err}"
+                    )
             return LockAcquisitionResult(
                 status=LockAcquisitionStatus.HELD_BY_OTHER,
                 acquired=False,
                 error_message=(
                     f"The task stopped being this build's while its execution "
-                    f"was being spawned ({reason}); the orphaned execution was "
-                    f"stopped and nothing was recorded against the task."
+                    f"was being started ({reason}); nothing was recorded "
+                    f"against the task."
                 ),
             )
         return None
