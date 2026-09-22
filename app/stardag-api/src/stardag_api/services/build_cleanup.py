@@ -205,23 +205,18 @@ async def cascade_cancel_build_tasks(
 ) -> list[Task]:
     """Emit TASK_CANCELLED for the claims ``build_id`` holds. No commit.
 
-    **The invariant: when a build's claims are released, this is what
-    releases them, and it releases nothing else.** One implementation, for
-    every route that decides to release — a cancel that asked to
-    (``cascade``), a build failing, and the reaper sweeping an abandoned
-    build. The fail path used to get its release as a side effect of the
-    reactive tick stopping containers; when that machinery was deleted the
-    release became part of the transition itself, which is where it
-    belonged.
+    **The invariant: a build going terminal releases the claims it holds,
+    and releases nothing else.** One implementation, for every route out —
+    cancelled, failed, or swept as abandoned by the reaper.
 
-    **Not every terminal transition releases.** A plain
-    ``POST /builds/{id}/cancel`` without ``cascade`` deliberately does not,
-    and both its callers rely on that: ``stardag builds stop`` stops the
-    executions *first* and only then cancels with a release, and the UI's
-    cancel is a build-level event by design. Releasing a claim is what
-    lets the next build take the task over, so doing it while a container
-    is still running is a decision about somebody's running work, not
-    bookkeeping — which is why the caller makes it.
+    Neither of the first two used to reach here on its own. A cancel
+    released only when asked (``cascade=true``) and a failure never did;
+    what made the rule true in practice, for reactive builds, was the
+    scheduler's cancel drain writing TASK_CANCELLED per execution as a side
+    effect of stopping containers. Deleting that drain (STA-81) took the
+    release with it and exposed a behaviour nobody had chosen, so the
+    release moved into the transitions themselves, which is where it
+    belonged. ``cascade`` survives as an accepted no-op.
 
     Precisely:
 

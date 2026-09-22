@@ -39,20 +39,16 @@ async def _handle_terminal(
     work in flight, or is waiting on a concurrency-limit slot.
     """
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
-        # Nothing to do but report it. This tick reaches into no
-        # container, and it releases nothing either.
+        # Nothing to do but report it. The claims are already gone: a
+        # build going terminal releases them in the transaction that made
+        # it terminal, server-side, whichever route it took. This tick
+        # reaches into no container and releases nothing.
         #
-        # Whether the claims are already gone depends on how the build was
-        # cancelled, and that is the caller's decision rather than this
-        # one's: ``stardag builds stop`` stops the executions and then
-        # cancels with a release, while a plain cancel deliberately
-        # releases nothing and says so. What this tick must not do is
-        # decide it on their behalf, which is what the drain did -- it
-        # released claims for containers it had asked a backend to stop,
-        # with no way to know whether the stop took.
-        #
-        # The workers under any claims that were released find out at
-        # their own checkpoints (``stardag.cancellation``).
+        # The drain used to do both from here, and that is what it got
+        # wrong: it released claims for containers it had asked a backend
+        # to stop, with no way to know whether the stop took. The workers
+        # find out for themselves now, at their own checkpoints
+        # (``stardag.cancellation``).
         return frontier.build_status
 
     counts = frontier.status_counts

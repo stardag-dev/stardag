@@ -208,20 +208,42 @@ worker, which is what the incidents were.
 Deploy the registry before tagging the SDK. The usual test for relaxing
 that rule asks whether anything in the increment can _refuse_ an older
 server; here the problem is the opposite direction. A new SDK against an
-old registry no longer drains cancels, and the old registry's `/fail` does
-not release claims — so a `FAIL_FAST` build would leave its running tasks
-claimed, and their concurrency-limit slots occupied, until the claims
-expire. That is worse than either version alone.
+old registry no longer drains cancels, and an old registry releases claims
+on neither route — so a terminal build, failed or cancelled, would leave
+its running tasks claimed and their concurrency-limit slots occupied until
+the claims expire. That is worse than either version alone.
 
-#### A failed build now releases its claims
+#### A build going terminal releases its claims — cancel and fail alike
 
 `POST /builds/{id}/fail` releases the execution claims the build holds,
-where it previously wrote one event. On a `FAIL_FAST` build those claims
-used to be released as a side effect of the drain stopping each container;
-with the drain gone, the release moves into the transition itself, where
-cancel already had it. Nothing to do — but note that a fail-fast build's
-running tasks now become available to the next build immediately rather
-than at claim expiry.
+where it previously wrote one event, and `POST /builds/{id}/cancel`
+releases them unconditionally rather than only when passed `cascade=true`.
+The parameter is now a no-op, accepted so existing callers keep working;
+a later cleanup removes it.
+
+Neither route reached the rule on its own before. What made it true in
+practice, for reactive builds, was the cancel drain writing TASK_CANCELLED
+per execution as a side effect of stopping containers. With the drain gone
+the release moved into the transitions themselves, where it belonged.
+
+Nothing to do — but two consequences are worth knowing.
+
+A terminal build's tasks become available to the next build **immediately**
+rather than at claim expiry. That is the point, and it is what closes the
+stall where a cancelled build denied its tasks to everyone for the
+executor's timeout plus the claim grace.
+
+And the release opens a window: the next build can take a task over within
+seconds, while the old container is still writing. Three things make that
+safe rather than merely survivable. The output is content-addressed, so
+both writers produce the same bytes. The old worker exits at its next
+cooperative checkpoint, told `build_not_running`. And one whose `run()`
+has no checkpoint simply runs to completion, harmlessly.
+
+**This is still not how you stop a live build.** `stardag builds cancel`
+keeps its warning, and `stardag builds stop` remains the command for a
+build that is still running something: it lists the executions while the
+claims make that list exact, ends those calls, and cancels last.
 
 #### Migration: custom registries and executors
 

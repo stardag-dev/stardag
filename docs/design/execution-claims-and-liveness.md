@@ -118,29 +118,32 @@ point, and it is the reverse of what the scheduler was attempting. **The
 server never reaches an execution backend**; the command does, from the
 operator's own credentials.
 
-**Releasing a claim is now the only thing any of these paths does**, and it
-stops there. A build that fails releases the claims it held, and so does a
-cancel that asked to (`cascade`) and the reaper sweeping an abandoned
-build; one implementation serves all three.
+**A build going terminal releases the claims it holds**, by every route out
+— cancelled, failed, or swept as abandoned — and it stops there. One
+implementation serves all three.
 
-**A plain cancel deliberately releases nothing**, and that asymmetry is the
-design rather than an oversight. Releasing is what lets the next build take
-the task over, so doing it while a container is still running is a decision
-about somebody's running work. `stardag builds stop` makes that decision in
-the right order — stop the executions, then cancel with a release — and a
-cancel of a build you believe is already dead makes it by asking for the
-cascade. Until then the claim lapses on its own expiry.
+That rule was the decision, and it was not what the code did. A cancel
+released only when asked (`cascade=true`) and a failure never did; what
+made it true in practice, for reactive builds, was the drain writing
+TASK_CANCELLED per execution as a side effect of stopping containers.
+Removing the drain removed the release with it, which is how a behaviour
+nobody had chosen became visible — a cancelled build holding its claims and
+its concurrency-limit slots until they expired. So the release moved into
+the transitions themselves.
 
-Note this is a change in _behaviour_ and not in intent: before the drain
-was removed, a plain cancel of a _reactive_ build had its claims released a
-tick later, by the drain, as a side effect of stopping containers it could
-not confirm it had stopped. The CLI already documented the behaviour you
-now get.
+**The window this opens, stated plainly.** Releasing is what lets the next
+build take the task over, and it can do so within seconds while the old
+container is still writing. Three things make that acceptable rather than
+merely tolerable: the output is content-addressed, so both writers produce
+the same bytes; the old worker exits at its next cooperative checkpoint,
+told `build_not_running`; and one whose `run()` has no checkpoint simply
+finishes, harmlessly. What it is not is a way to stop a live build —
+`stardag builds stop` is, and it exists precisely because the order
+matters.
 
-Whatever is released, the containers run on until they notice; their output
-is content-addressed, so one that finishes writes something nobody reads.
-That is the cheap error, and it is the one this design takes deliberately.
-The expensive one was a claim held past the build that owned it.
+The containers running on is the cheap error, and it is the one this design
+takes deliberately. The expensive one was a claim held past the build that
+owned it.
 
 The loss worth naming: a task with side effects outside its target is not
 protected by any of this, and never was.

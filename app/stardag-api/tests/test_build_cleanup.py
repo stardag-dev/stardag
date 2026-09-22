@@ -92,27 +92,62 @@ async def _task_status(client: AsyncClient, task_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# cascade= on single-build cancel
+# a terminal transition releases the build's claims
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_cancel_without_cascade_leaves_the_claim_held(client: AsyncClient):
-    """The historical behaviour, kept as the default: a build-level event
-    only. The task stays RUNNING and keeps denying its claim."""
+@pytest.mark.parametrize(
+    ("route", "build_status"), [("cancel", "cancelled"), ("fail", "failed")]
+)
+async def test_a_terminal_transition_releases_the_builds_claims(
+    client: AsyncClient, route: str, build_status: str
+):
+    """Cancel and fail alike, through one implementation. Kept on purpose.
+
+    This is the rule STA-78 decided and STA-81 had to make true. It was
+    **not** true of a plain cancel: the route released nothing unless asked
+    (``cascade=true``), and a reactive build's claims were released a tick
+    later by the scheduler's cancel drain, as a side effect of it stopping
+    containers. Deleting the drain took the release with it and exposed a
+    behaviour nobody had chosen — a cancelled build holding its claims, and
+    their concurrency-limit slots, until they expired.
+
+    Both halves are asserted because either alone passes on the old code:
+    the task is CANCELLED **under this build**, and the limit slot is free.
+    A release that wrote the status without freeing the slot would leave
+    every later build queued on the key.
+    """
     build_id = await _new_build(client)
-    await _start(client, build_id, "keep-running", ["gpu"])
+    await _start(client, build_id, "was-running", ["gpu"])
 
-    response = await client.post(f"/api/v1/builds/{build_id}/cancel")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "cancelled"
-    assert body["cascaded_task_ids"] == []
-    assert body["cascaded_task_count"] == 0
+    response = await client.post(f"/api/v1/builds/{build_id}/{route}")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == build_status
 
-    assert await _task_status(client, "keep-running") == "running"
+    assert await _task_status(client, "was-running") == "cancelled", (
+        f"a {route}ed build left its task claimed"
+    )
     holders = (await client.get("/api/v1/concurrency-limits/gpu/holders")).json()
-    assert [h["task_id"] for h in holders["holders"]] == ["keep-running"]
+    assert holders["holders"] == [], (
+        f"a {route}ed build kept its concurrency-limit slot"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cascade_on_the_single_build_cancel_is_a_no_op(client: AsyncClient):
+    """The parameter is accepted and ignored, which is what keeps existing
+    callers working while the behaviour it selected became the only
+    behaviour. A later cleanup removes it."""
+    for value, task_id in (("true", "with-flag"), ("false", "without-flag")):
+        build_id = await _new_build(client)
+        await _start(client, build_id, task_id)
+        response = await client.post(
+            f"/api/v1/builds/{build_id}/cancel", params={"cascade": value}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["cascaded_task_ids"] == [task_id]
+        assert await _task_status(client, task_id) == "cancelled"
 
 
 @pytest.mark.asyncio

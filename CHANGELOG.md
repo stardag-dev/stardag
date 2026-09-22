@@ -220,28 +220,35 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - `latest_execution_id` is surfaced on the task read models
   (`GET /tasks`, `GET /tasks/{task_id}`).
 
-- **A failed build releases the claims it holds.**
-  `POST /builds/{id}/fail` now releases them, unconditionally — it
-  previously wrote a single BUILD_FAILED event, and the claims of a
-  fail-fast build's running tasks were released as a side effect of the
-  SDK's cancel drain stopping each container. With the drain gone that was
-  the one consumer nobody had listed, and without this a failed build would
-  hold its tasks' claims and concurrency-limit slots until they expired.
-  The scope, what is written and what is left alone are stated once, at
+- **A build going terminal releases the claims it holds — cancel and fail
+  alike.** `POST /builds/{id}/fail` now releases them, and
+  `POST /builds/{id}/cancel` releases them unconditionally rather than only
+  when asked. One implementation serves both, and the reaper; what is
+  released, what is written and what is never touched are stated once, at
   `services.build_cleanup.cascade_cancel_build_tasks`.
 
-  `POST /builds/{id}/cancel` is unchanged: its `cascade` parameter still
-  decides, because a cancel may legitimately be a bookkeeping correction to
-  a build somebody else is running, or the second half of
-  `stardag builds stop`, which has already dealt with the containers.
+  Neither route reached it on its own before. A failure wrote a single
+  BUILD_FAILED event; a cancel released only when passed `cascade=true`.
+  What made the rule true in practice, for reactive builds, was the SDK's
+  cancel drain writing TASK_CANCELLED per execution as a side effect of
+  stopping containers. Deleting the drain took the release with it — the
+  consumer nobody had listed — and exposed a behaviour nobody had chosen:
+  a terminal build holding its tasks' claims, and their concurrency-limit
+  slots, until they expired.
 
-  **One behaviour change falls out of that.** A plain cancel of a
-  _reactive_ build used to have its claims released a tick later, by the
-  drain, as a side effect of stopping containers it could not confirm it
-  had stopped. Nothing does that now, so those claims lapse on their own
-  expiry — which is the behaviour `stardag builds cancel` has documented
-  since it shipped, and the reason `builds stop` exists. Use `builds stop`
-  for a build that is still running something.
+  The cancel route's `cascade` parameter is therefore **redundant, and
+  accepted as a no-op** so existing callers keep working; a later cleanup
+  removes it. The bulk-cancel route's own parameter is untouched.
+
+  **The window this opens, stated honestly.** A release lets the next
+  build take the task over within seconds, while the old container is
+  still writing. Both write the same bytes, since output is
+  content-addressed; the old worker exits at its next cooperative
+  checkpoint on `build_not_running`; and one whose `run()` has no
+  checkpoint runs to completion harmlessly. This is still not the way to
+  stop a live build — `stardag builds cancel` keeps its warning, and
+  `stardag builds stop` remains the command for one that is still running
+  something.
 
 - **`GET /builds/{id}/executions` is removed**, with the event-log
   reconstruction behind it — two window functions, the keyset cursor, and

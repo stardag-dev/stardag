@@ -38,12 +38,11 @@ Three things follow, and every mode below rests on them:
 - **Cancellation is cooperative, and stopping is yours.** Nothing reaches
   into a container: a worker asks at its own checkpoints whether it is
   still wanted and exits cleanly when it is not, writing no output and
-  reporting no completion. To end the containers now, use
-  `stardag builds stop` — it lists the build's live executions, cancels
-  those calls from your side, and only then cancels the build. A build
-  that fails releases its own claims; a plain cancel from the UI or CLI
-  records the event and leaves them to lapse, which is why stopping comes
-  first.
+  reporting no completion. A build going terminal — cancelled or failed —
+  releases the claims it holds, so its tasks are immediately available to
+  the next build. To end the containers rather than leave them to notice,
+  use `stardag builds stop`: it lists the build's live executions, cancels
+  those calls from your side, and only then cancels the build.
 - **Liveness is the backend's answer.** A scheduler asks Modal whether a
   recorded call is running, finished or gone — no heartbeats.
 

@@ -1655,19 +1655,13 @@ async def fail_build(
 ):
     """Mark a build as failed, releasing the claims it holds.
 
-    A task left RUNNING under a build that is over keeps denying its
-    execution claim, and keeps occupying its concurrency-limit slots, until
-    the claim expires. The scope, what is written and what is deliberately
-    left alone are stated once, at
+    **A terminal transition releases the build's claims** — this route and
+    ``POST /builds/{id}/cancel`` alike, through one implementation. A task
+    left RUNNING under a build that is over keeps denying its execution
+    claim, and keeps occupying its concurrency-limit slots, until the claim
+    expires. What is released, what is written and what is never touched
+    are stated once, at
     :func:`stardag_api.services.build_cleanup.cascade_cancel_build_tasks`.
-
-    **Unconditional here, unlike the cancel route's opt-in ``cascade``**,
-    and the asymmetry is deliberate. A failing build is its own scheduler
-    reporting that it has stopped working, so there is no caller left who
-    wants the claims kept. A cancel arrives from outside and may be a
-    bookkeeping correction to a build somebody else is still running, or
-    the second half of ``stardag builds stop``, which has already dealt
-    with the containers — so the caller says.
 
     **The server still stops nothing.** Like every other status write this
     rewrites the registry's view; a worker whose task is released here runs
@@ -1742,55 +1736,52 @@ async def cancel_build(
         bool,
         Query(
             description=(
-                "Also cancel the claims this build holds: emit TASK_CANCELLED "
-                "for its RUNNING, SUSPENDED and INTERRUPTED tasks, freeing "
-                "their execution claims and concurrency-limit slots. Off by "
-                "default."
+                "Redundant, and accepted only for compatibility: a cancel "
+                "now always releases the claims this build holds. Passing "
+                "true or false makes no difference. A later cleanup removes "
+                "the parameter."
             ),
+            deprecated=True,
         ),
     ] = False,
 ):
-    """Cancel a build, optionally cascading to the claims its tasks hold.
+    """Cancel a build, releasing the claims it holds.
 
-    Without ``cascade`` this writes a single build-level BUILD_CANCELLED
-    event and nothing else — which is what it has always done, and why
-    cancelling a build has never actually cleaned anything up. Task rows are
-    per *environment* with a denormalised global ``latest_status``, so a task
-    the build left RUNNING keeps denying its execution claim to every future
-    build that needs it, and keeps occupying its concurrency-limit slots,
-    long after the build itself is gone.
+    **A terminal transition releases the build's claims** — this route and
+    ``POST /builds/{id}/fail`` alike, through one implementation. What is
+    released, what is written and what is never touched are stated once, at
+    :func:`stardag_api.services.build_cleanup.cascade_cancel_build_tasks`:
+    the build's own RUNNING, SUSPENDED and INTERRUPTED tasks, never a task
+    another build holds, never PENDING work.
 
-    ``cascade=true`` releases those: TASK_CANCELLED for every task of this
-    build that is RUNNING, SUSPENDED or INTERRUPTED **and whose current
-    status this build produced** — the build-owned statuses, shared with the
-    revoke check so the two cannot drift (``services.claims``). Both restrictions matter —
+    Until recently this released nothing unless asked (``cascade=true``),
+    and a reactive build's claims were released a tick later by the
+    scheduler's cancel drain, as a side effect of it stopping containers.
+    Deleting that drain removed the release with it, which is how a
+    behaviour nobody had chosen became visible: a cancelled build holding
+    its claims and concurrency-limit slots until they expired. ``cascade``
+    is kept as an accepted no-op so existing callers keep working.
 
-    - PENDING tasks are left alone. They hold no claim, and cancelling one
-      would reach into other builds: a task this build registered may be
-      referenced by a live build elsewhere. (``skip-blocked`` is the
-      operation for pending work whose upstreams failed.)
-    - Tasks another build put into RUNNING are left alone. Releasing those
-      is that build's cancel, not this one's.
-
-    Default off because it is a behaviour change for existing callers.
-    (``POST /builds/{id}/fail`` releases unconditionally: a build failing is
-    its own scheduler reporting that it has stopped, so nobody wants the
-    claims kept.)
-
-    **The server cannot stop anything**, and nothing else automatic will
+    **The server still stops nothing**, and nothing else automatic will
     either. Like every other status write this rewrites the registry's
-    view; the worker keeps running until it notices, and then exits cleanly
-    at its next cooperative checkpoint without writing output. To end the
-    containers now, ``stardag builds stop`` reads the build's executions
-    while the claims still make that list exact, cancels those calls, and
-    only then cancels the build. If a task completes first, COMPLETED is
-    sticky and wins — coherent with "targets are ground truth", but worth
-    knowing before cancelling a build you are not sure is dead.
+    view. The consequence to understand before cancelling a build you are
+    not sure is dead: releasing the claim is what lets the next build take
+    the task over, and it can do so within seconds while the old container
+    is still writing. Both write the same bytes, since output is
+    content-addressed; the old worker exits at its next cooperative
+    checkpoint on ``build_not_running``; and one whose ``run()`` has no
+    checkpoint simply finishes. If it finishes first, COMPLETED is sticky
+    and wins.
+
+    To end the containers rather than leave them to notice, use
+    ``stardag builds stop``: it reads the build's executions while the
+    claims still make that list exact, cancels those calls, and only then
+    cancels the build.
 
     Args:
         triggered_by_user_id: Optional user ID if this is a manual override from UI.
         commit_hash: Optional git commit hash of the code that ran this build.
-        cascade: See above.
+        cascade: Accepted and ignored; see above.
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -1805,29 +1796,28 @@ async def cancel_build(
     build = await _get_build_for_update(build_id, db, auth)
 
     metadata = _build_event_metadata(commit_hash, triggered_by_user_id)
-    cascaded_task_ids: list[str] = []
-    if cascade:
-        cascaded = await cascade_cancel_build_tasks(
-            db,
-            build_id,
-            event_metadata=(metadata or {}) | {"cancelled_by": "build_cancel_cascade"},
-        )
-        cascaded_task_ids = [t.task_id for t in cascaded]
-        if cascaded_task_ids:
-            _raise_if_limit_exceeded(
-                await check_entity_creation_limit(
-                    db,
-                    auth.workspace_id,
-                    "events",
-                    limits_settings,
-                    # +1 for the BUILD_CANCELLED event written below.
-                    # `check_entity_creation_limit` reserves nothing, so the
-                    # earlier single-event check has not held any capacity —
-                    # counting only the cascade lets `1 + len(cascade)` cross
-                    # the limit.
-                    amount=len(cascaded_task_ids) + 1,
-                )
+    # Unconditional: ``cascade`` is a no-op kept for compatibility.
+    cascaded = await cascade_cancel_build_tasks(
+        db,
+        build_id,
+        event_metadata=(metadata or {}) | {"cancelled_by": "build_cancel"},
+    )
+    cascaded_task_ids = [t.task_id for t in cascaded]
+    if cascaded_task_ids:
+        _raise_if_limit_exceeded(
+            await check_entity_creation_limit(
+                db,
+                auth.workspace_id,
+                "events",
+                limits_settings,
+                # +1 for the BUILD_CANCELLED event written below.
+                # `check_entity_creation_limit` reserves nothing, so the
+                # earlier single-event check has not held any capacity —
+                # counting only the released claims lets `1 + len(released)`
+                # cross the limit.
+                amount=len(cascaded_task_ids) + 1,
             )
+        )
 
     event = Event(
         build_id=build_id,
