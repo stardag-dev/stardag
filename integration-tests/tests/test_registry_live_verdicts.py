@@ -43,8 +43,15 @@ def _line(
     status: int = 201,
     duration: str = "320.9 ms",
     execution: str = "203.9 ms",
+    utc_offset_hours: int = 0,
 ) -> str:
-    stamp = at.strftime("%Y-%m-%d %H:%M:%S+00:00")
+    """One access-log line, as `modal app logs --timestamps` prints it.
+
+    ``utc_offset_hours`` exists because that command prints in the
+    *caller's* timezone — see the timezone test at the bottom.
+    """
+    zone = dt.timezone(dt.timedelta(hours=utc_offset_hours))
+    stamp = at.astimezone(zone).strftime(f"%Y-%m-%d %H:%M:%S{utc_offset_hours:+03d}:00")
     return (
         f"{stamp} ta-01M349DXEG    {method} {path} -> {status} Created  "
         f"(duration: {duration}, execution: {execution})"
@@ -386,3 +393,42 @@ def test_a_slow_row_still_counts_over_a_truncated_log(tmp_path: Path) -> None:
         verdict_for(_occurrence(request_method=None, request_path=None), log)[0]
         == "HYPOTHESIS B"
     )
+
+
+def test_the_log_and_the_record_may_be_in_different_timezones(tmp_path: Path) -> None:
+    """Observed live, and a silent two-hour error if it were not handled.
+
+    `modal app logs --timestamps` prints in the *caller's* timezone: the
+    same registry answered `+00:00` from a GitHub runner and `+02:00`
+    from a laptop. The record's `observed_at` is always UTC, so the two
+    sides of the join can disagree by whatever the developer's offset is.
+    A naive comparison would look in the wrong window and report
+    hypothesis C from an absence it had manufactured.
+    """
+    served = _AT - dt.timedelta(seconds=30)
+    _log(
+        tmp_path,
+        _line(
+            _AT - dt.timedelta(seconds=150),
+            "GET",
+            "/health",
+            status=200,
+            utc_offset_hours=2,
+        ),
+        _line(served, utc_offset_hours=2),
+        _line(
+            _AT + dt.timedelta(seconds=10),
+            "GET",
+            "/health",
+            status=200,
+            utc_offset_hours=2,
+        ),
+    )
+    # The premise: the wall-clock text in the log is not the record's.
+    assert served.strftime("%H:%M") not in (tmp_path / REGISTRY_LOG_NAME).read_text()
+
+    verdict, evidence = verdict_for(
+        _occurrence(), parse_access_log(tmp_path / REGISTRY_LOG_NAME)
+    )
+    assert verdict == "HYPOTHESIS C"
+    assert "The registry served this request" in " ".join(evidence)
