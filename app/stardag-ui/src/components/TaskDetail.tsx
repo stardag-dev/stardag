@@ -13,11 +13,7 @@ import type {
   EventType,
   ExecutorMetadata,
 } from "../types/task";
-import {
-  availableClaimActions,
-  CLAIM_ACTION_LABELS,
-  type ClaimAction,
-} from "../utils/claims";
+import { type ClaimAction } from "../utils/claims";
 import {
   isModalMetadata,
   modalAppUrl,
@@ -362,12 +358,6 @@ export function TaskDetail({
     task.latest_status_at ?? (globalStatus === "running" ? task.started_at : null);
   const heldFor = claimSince ? formatDuration(claimSince, null) : null;
 
-  // The plain Cancel button addresses the *viewed* build. When the claim
-  // is held by a different one, that is the wrong build to address, so the
-  // claim callout below owns the action instead of offering two.
-  const canCancel =
-    buildId && !crossBuild && (task.status === "pending" || task.status === "running");
-
   const loadEvents = useCallback(async () => {
     setEventsLoading(true);
     try {
@@ -429,19 +419,6 @@ export function TaskDetail({
     },
     [task.task_id, task.environment_id],
   );
-
-  const handleCancel = async () => {
-    if (!buildId || !canCancel) return;
-
-    const confirmed = window.confirm(
-      `Are you sure you want to cancel task "${task.task_name}"?`,
-    );
-    if (!confirmed) return;
-
-    if (await runTaskAction("release", buildId)) {
-      onTaskCancelled();
-    }
-  };
 
   const handleClaimAction = useCallback(async () => {
     if (!claimAction || !holderBuildId) return;
@@ -543,19 +520,8 @@ export function TaskDetail({
               currentBuildId={buildId}
               onStatusBuildClick={onStatusBuildClick}
             />
-            {canCancel && (
-              <button
-                onClick={handleCancel}
-                disabled={cancelling}
-                className="rounded-md bg-red-100 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50"
-              >
-                {cancelling ? "Cancelling..." : "Cancel"}
-              </button>
-            )}
           </div>
-          {cancelError && !claimAction && (
-            <p className="mt-1 text-xs text-red-600 dark:text-red-400">{cancelError}</p>
-          )}
+
           {claimNotice && (
             <p
               role="status"
@@ -565,18 +531,20 @@ export function TaskDetail({
             </p>
           )}
 
-          {/* Claim holder: who is sitting on this task, and for how long. */}
+          {/* One line of status and one plain button.
+
+              This was an amber callout carrying a paragraph and a red
+              action. In a side pane that reads as an error about the
+              task rather than as a fact about it plus something you may
+              do — and the task is usually fine. The explanation and the
+              confirmation both live in the dialog now, which is where
+              someone who has decided to act will read them. */}
           {showClaimHolder && holderBuildId && (
-            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2.5 dark:border-amber-900/60 dark:bg-amber-950/30">
-              <p className="text-xs font-semibold text-amber-900 dark:text-amber-200">
-                {crossBuild
-                  ? "Execution claim held by another build"
-                  : "Holding an execution claim"}
-              </p>
-              <p className="mt-1 text-xs text-amber-900/90 dark:text-amber-100/90">
-                This task has been <em>{globalStatus}</em>
+            <div className="mt-1.5 space-y-1.5">
+              <p className="text-xs text-gray-600 dark:text-gray-400">
+                {globalStatus === "running" ? "Running" : "Suspended"}
                 {heldFor && heldFor !== "—" ? (
-                  <span title={formatAbsoluteTime(claimSince)}> for {heldFor}</span>
+                  <span title={formatAbsoluteTime(claimSince)}> {heldFor}</span>
                 ) : null}{" "}
                 under build{" "}
                 {onStatusBuildClick ? (
@@ -584,42 +552,41 @@ export function TaskDetail({
                     type="button"
                     onClick={() => onStatusBuildClick(holderBuildId)}
                     title={`Go to build ${holderBuildId}`}
-                    className="rounded bg-amber-100 px-1 py-0.5 font-mono text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:bg-amber-900/40 dark:text-blue-300"
+                    className="rounded font-mono text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-300"
                   >
                     {holderBuildId.slice(0, 8)}
                   </button>
                 ) : (
-                  <code className="rounded bg-amber-100 px-1 py-0.5 font-mono dark:bg-amber-900/40">
-                    {holderBuildId.slice(0, 8)}
-                  </code>
+                  <code className="font-mono">{holderBuildId.slice(0, 8)}</code>
                 )}
-                {crossBuild ? ", not the build you are viewing." : "."} A task&rsquo;s
-                status is environment-wide, so until this claim is released every build
-                that needs this task waits on it.
+                {crossBuild ? " (not the build you are viewing)" : ""}, which holds its
+                claim.
               </p>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                {isAdmin ? (
-                  availableClaimActions(globalStatus).map((action) => (
-                    <button
-                      key={action}
-                      type="button"
-                      disabled={cancelling}
-                      onClick={() => {
-                        setCancelError(null);
-                        setClaimNotice(null);
-                        setClaimAction(action);
-                      }}
-                      className="rounded-md border border-red-300 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:opacity-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/30"
-                    >
-                      {CLAIM_ACTION_LABELS[action]}
-                    </button>
-                  ))
-                ) : (
-                  <span className="text-xs text-amber-900/80 dark:text-amber-200/80">
-                    Releasing a claim requires the workspace admin role.
-                  </span>
-                )}
-              </div>
+
+              {isAdmin || !crossBuild ? (
+                <button
+                  type="button"
+                  disabled={cancelling}
+                  onClick={() => {
+                    setCancelError(null);
+                    setClaimNotice(null);
+                    setClaimAction("release");
+                  }}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
+                >
+                  Release claim and retry…
+                </button>
+              ) : (
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Releasing a claim held by another build requires the workspace admin
+                  role.
+                </p>
+              )}
+
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                To stop what is running, use Build controls &rarr; Stop on build{" "}
+                {holderBuildId.slice(0, 8)}.
+              </p>
             </div>
           )}
         </div>

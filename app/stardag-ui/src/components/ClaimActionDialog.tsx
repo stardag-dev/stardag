@@ -65,10 +65,10 @@ export function ClaimActionDialog({
       title={
         action === "retry"
           ? "Reset this task to pending"
-          : "Release this task's execution claim"
+          : "Release this task's claim and let the build retry it"
       }
       destructive
-      confirmLabel={action === "retry" ? "Reset to pending" : "Release claim"}
+      confirmLabel={action === "retry" ? "Reset to pending" : "Release claim and retry"}
       busyLabel={action === "retry" ? "Resetting…" : "Releasing…"}
       cancelLabel="Close"
       busy={busy}
@@ -91,18 +91,12 @@ export function ClaimActionDialog({
       ) : (
         <>
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            Cancels {target} {addressed} — the build whose event put it into{" "}
-            <em>{status}</em>, and therefore the build that owns its claim.
+            Releases {target}&rsquo;s claim {addressed}, so that build retries it on its
+            next tick.
           </p>
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            A task&rsquo;s status is environment-wide, so this one task denies its
-            execution claim to <em>every</em> build that needs it until something
-            releases it. Releasing frees the claim and any concurrency-limit slot it
-            holds.
-          </p>
-          <p className="text-xs text-gray-500 dark:text-gray-400">
-            The server cannot stop anything: a worker whose task is cancelled here keeps
-            going until it notices, and if it completes anyway, completed wins.
+            Use this when the worker is gone but the claim was not released. If the
+            worker is still running, a second one starts beside it.
           </p>
         </>
       )}

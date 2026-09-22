@@ -18,7 +18,7 @@ vi.mock("../api/tasks", () => ({
   fetchTaskEvents: vi.fn().mockResolvedValue([]),
 }));
 
-import { cancelTask, retryTask } from "../api/tasks";
+import { cancelTask } from "../api/tasks";
 import { ModalExecutionCallRef, ModalExecutionDetails, TaskDetail } from "./TaskDetail";
 
 const fullMetadata = {
@@ -310,7 +310,7 @@ describe("TaskDetail claim holder", () => {
     vi.clearAllMocks();
   });
 
-  it("says in words that another build holds the claim, and for how long", async () => {
+  it("states the holder and how long in one line, not a callout", async () => {
     const onStatusBuildClick = vi.fn();
     const user = userEvent.setup();
     render(
@@ -323,14 +323,43 @@ describe("TaskDetail claim holder", () => {
       />,
     );
 
-    expect(
-      screen.getByText("Execution claim held by another build"),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/for 4h 00m/)).toBeInTheDocument();
+    // A fact about the task, in the same voice as the rest of the pane —
+    // the amber callout read as an error about a task that is usually
+    // fine.
+    expect(screen.getByText(/which holds its claim/)).toBeInTheDocument();
+    expect(screen.getByText(/4h 00m/)).toBeInTheDocument();
     expect(screen.getByText(/not the build you are viewing/)).toBeInTheDocument();
+    expect(screen.queryByText("Execution claim held by another build")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: HOLDER_BUILD.slice(0, 8) }));
     expect(onStatusBuildClick).toHaveBeenCalledWith(HOLDER_BUILD);
+  });
+
+  // Everything explanatory moved into the dialog, so the pane carries one
+  // plain button and the reasoning arrives when someone acts on it.
+  it("keeps the explanation in the dialog, not the pane", async () => {
+    const user = userEvent.setup();
+    render(
+      <TaskDetail
+        task={makeTask()}
+        buildId={VIEWED_BUILD}
+        onClose={() => {}}
+        onTaskCancelled={() => {}}
+      />,
+    );
+
+    expect(screen.queryByText(/a second one starts beside it/i)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Release claim and retry…" }));
+
+    expect(
+      await screen.findByText(/so that build retries it on its next tick/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /if the worker is still running, a second one starts beside it/i,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("addresses the release to the holding build, not the one on screen", async () => {
@@ -346,15 +375,14 @@ describe("TaskDetail claim holder", () => {
       />,
     );
 
-    // The plain Cancel button stands down: it would address the wrong build.
+    // The plain Cancel button is gone entirely: it addressed the viewed
+    // build, and on a running task it duplicated this action without
+    // saying what it did.
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Release claim" }));
-    expect(
-      await screen.findByText("Release this task's execution claim"),
-    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Release claim and retry…" }));
     await user.click(
-      screen.getAllByRole("button", { name: "Release claim" }).slice(-1)[0],
+      screen.getAllByRole("button", { name: "Release claim and retry" }).slice(-1)[0],
     );
 
     await waitFor(() =>
@@ -363,35 +391,7 @@ describe("TaskDetail claim holder", () => {
     expect(onTaskCancelled).toHaveBeenCalled();
   });
 
-  it("offers a reset as well for a suspended task, and retries under the holder", async () => {
-    vi.mocked(retryTask).mockResolvedValue(undefined);
-    const onTaskCancelled = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <TaskDetail
-        task={makeTask({ status: "suspended", latest_status: "suspended" })}
-        buildId={VIEWED_BUILD}
-        onClose={() => {}}
-        onTaskCancelled={onTaskCancelled}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Reset to pending" }));
-    await user.click(
-      screen.getAllByRole("button", { name: "Reset to pending" }).slice(-1)[0],
-    );
-    await waitFor(() =>
-      expect(retryTask).toHaveBeenCalledWith(HOLDER_BUILD, "tid-grind-beans", "env-1"),
-    );
-    // The reset path has to ask for a re-read too. This panel renders the
-    // status — and the claim notice with it — from its `task` prop, so a parent
-    // that is not told keeps showing "holding an execution claim" for a task
-    // that was just reset to pending.
-    expect(onTaskCancelled).toHaveBeenCalled();
-  });
-
-  it("hides the remedies from non-admin members but keeps the diagnosis", async () => {
-    mockWorkspaceRole = "member";
+  it("points at the build-level stop where a task-level one would be", async () => {
     render(
       <TaskDetail
         task={makeTask()}
@@ -402,14 +402,26 @@ describe("TaskDetail claim holder", () => {
     );
 
     expect(
-      await screen.findByText("Execution claim held by another build"),
+      screen.getByText(/To stop what is running, use Build controls/),
     ).toBeInTheDocument();
+  });
+
+  it("hides the action from non-admin members but keeps the status line", async () => {
+    mockWorkspaceRole = "member";
+    render(
+      <TaskDetail
+        task={makeTask()}
+        buildId={VIEWED_BUILD}
+        onClose={() => {}}
+        onTaskCancelled={() => {}}
+      />,
+    );
+
+    expect(screen.getByText(/which holds its claim/)).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Release claim" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByText("Releasing a claim requires the workspace admin role."),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "Release claim and retry…" }),
+    ).toBeNull();
+    expect(screen.getByText(/requires the workspace admin role/)).toBeInTheDocument();
   });
 
   it("says nothing about claims for a task that holds none", async () => {
@@ -430,7 +442,7 @@ describe("TaskDetail claim holder", () => {
     render(
       <TaskDetail task={makeTask()} onClose={() => {}} onTaskCancelled={() => {}} />,
     );
-    expect(await screen.findByText("Holding an execution claim")).toBeInTheDocument();
+    expect(await screen.findByText(/which holds its claim/)).toBeInTheDocument();
     expect(screen.queryByText(/not the build you are viewing/)).not.toBeInTheDocument();
   });
 });
