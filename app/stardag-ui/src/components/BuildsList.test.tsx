@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BreadcrumbProvider } from "../context/BreadcrumbContext";
 import type { Build, BulkCancelBuildsResponse } from "../types/task";
+import { shortBuildId } from "../utils/ids";
 import { BuildsList } from "./BuildsList";
 
 let mockEnvironmentId = "env-1";
@@ -159,6 +160,10 @@ describe("BuildsList", () => {
 
   // The table did not show the build id at all, and it is what every CLI
   // command against a build takes.
+  //
+  // The three fixtures deliberately share a leading `01a0c…` the way real
+  // UUIDv7 build ids created in the same second do — an abbreviation from
+  // the front would draw the same string on every row.
   it("shows each build's id, and copies the whole one", async () => {
     // userEvent.setup() installs a working clipboard stub in jsdom.
     const user = userEvent.setup();
@@ -167,7 +172,7 @@ describe("BuildsList", () => {
       name: `Copy build id ${staleBuild.id}`,
     });
     // Both halves matter: the short form is drawn, and the full id is not.
-    expect(chip).toHaveTextContent(staleBuild.id.slice(0, 8));
+    expect(chip).toHaveTextContent(shortBuildId(staleBuild.id));
     expect(chip).not.toHaveTextContent(staleBuild.id);
 
     await user.click(chip);

@@ -4,6 +4,7 @@ import { useBreadcrumb } from "../context/BreadcrumbContext";
 import { useEnvironment } from "../context/EnvironmentContext";
 import { useRowSelection } from "../hooks/useRowSelection";
 import type { Build, BuildStatus, BulkCancelBuildsResponse } from "../types/task";
+import { shortBuildId } from "../utils/ids";
 import {
   formatAbsoluteTime,
   formatDuration,
@@ -684,9 +685,9 @@ function BuildRow({
           </button>
           {/* The build id, which this table did not show at all. It is
               what every CLI command against a build takes, so the chip
-              copies the whole id rather than the eight characters it
-              draws. */}
-          <CopyChip label={build.id.slice(0, 8)} value={build.id} title="Build id" />
+              copies the whole id rather than the characters it draws.
+              Abbreviated from the *end* — see `shortBuildId`. */}
+          <CopyChip label={shortBuildId(build.id)} value={build.id} title="Build id" />
           {/* Both chips below say what they are. Unlabelled, a short hex
               string and a bare app name were two grey-and-purple tokens
               with no way to tell what either meant. */}
