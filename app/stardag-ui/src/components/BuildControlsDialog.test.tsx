@@ -572,6 +572,27 @@ describe("BuildControlsDialog", () => {
   // stopped, "Cancel" looked like the answer, and it releases the claims
   // while every container runs on.
 
+  // Twice now the server has changed what an override does to the
+  // claims — none released before STA-81, all released after — and both
+  // times this copy went stale, once asserting the exact opposite of the
+  // truth about a destructive action. The rule it settled on is that the
+  // copy says what does not move: an override edits the record and does
+  // not stop what is running. This test pins the silence, so the next
+  // server change cannot quietly make the dialog wrong again.
+  it("says nothing about claims in either direction", async () => {
+    answerWith([makeTask()]);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    for (const label of ["Mark completed", "Mark failed", "Cancel build"]) {
+      await user.click(await screen.findByRole("button", { name: label }));
+      const body = document.body.textContent ?? "";
+      expect(body).not.toMatch(/releases? (its |the )?(execution )?claims?/i);
+      expect(body).not.toMatch(/does not release any claim/i);
+      await user.click(screen.getByRole("button", { name: "Back" }));
+    }
+  });
+
   it("warns that cancelling does not stop what is running", async () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();
