@@ -189,6 +189,26 @@ def test_releasing_a_slot_wakes_the_build_queued_on_it(
         "Nothing about slot-release wake-ups was exercised.\n" + describe(build_b)
     )
 
+    # And it *was* dormant -- observed, not predicted. The measured
+    # precondition bounds the work left when this build was *triggered*,
+    # not when its tick actually started, so a slow bootstrap can still
+    # eat the margin: necessary, but not sufficient on its own. A tick
+    # that lingered out is the outcome itself.
+    #
+    # Through `require_complete_trail`, because this is a trail
+    # observation and a preempted terminal tick must not redden the
+    # scenario for it -- which is what STA-89 set out to stop. And `any`
+    # rather than `summaries[0]`: when the first tick is preempted,
+    # `summaries[0]` silently becomes the second one, while the question
+    # the scenario means -- some tick lingered out and a later one did
+    # the work -- does not depend on the order.
+    require_complete_trail(build_b, what="whether any tick of build B lingered out")
+    assert any(s.get("outcome") == "lingered_out" for s in summaries_b), (
+        "No tick of build B ever lingered out, so B may have been "
+        "resident when the slot freed and seen it on its own poll -- the "
+        "wake-up path would then not have been exercised.\n" + describe(build_b)
+    )
+
     # And B was dormant when the slot freed: A's task must outlast B's
     # linger, so B's tick cannot still have been resident to see it on its
     # own poll. From the constants, not from the trail -- see the helper.

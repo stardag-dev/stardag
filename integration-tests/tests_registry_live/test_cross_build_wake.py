@@ -39,6 +39,7 @@ from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     assert_remaining_work_outlasts_linger,
     assert_trail_complete,
+    require_complete_trail,
     describe,
     tick_summaries,
     trail_may_be_truncated,
@@ -166,4 +167,25 @@ def test_a_blockers_completion_wakes_a_dormant_build(deployment: Deployment) -> 
         f"Build B spawned {spawned_b} tasks; it should have spawned only its "
         "own root, having waited for the shared task rather than running a "
         "second copy of it.\n" + describe(build_b)
+    )
+
+    # And it *was* dormant -- observed, not predicted. The measured
+    # precondition bounds the work left when this build was *triggered*,
+    # not when its tick actually started, so a slow bootstrap can still
+    # eat the margin: necessary, but not sufficient on its own. A tick
+    # that lingered out is the outcome itself.
+    #
+    # Through `require_complete_trail`, because this is a trail
+    # observation and a preempted terminal tick must not redden the
+    # scenario for it -- which is what STA-89 set out to stop. And `any`
+    # rather than `summaries[0]`: when the first tick is preempted,
+    # `summaries[0]` silently becomes the second one, while the question
+    # the scenario means -- some tick lingered out and a later one did
+    # the work -- does not depend on the order.
+    require_complete_trail(build_b, what="whether any tick of build B lingered out")
+    assert any(s.get("outcome") == "lingered_out" for s in summaries_b), (
+        "No tick of build B ever lingered out, so B may have been "
+        "resident throughout and seen the shared task finish on its own "
+        "poll -- the wake-up path would then not have been exercised.\n"
+        + describe(build_b)
     )

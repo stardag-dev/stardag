@@ -175,6 +175,31 @@ def test_many_dormant_builds_are_each_woken_once(deployment: Deployment) -> None
         )
 
     for index, build_id in enumerate(neighbours):
+        # And it *was* dormant -- observed, not predicted. The measured
+        # precondition bounds the work left when the neighbours were
+        # *triggered*, not when their ticks started, so a slow bootstrap
+        # can still eat the margin: necessary, but not sufficient alone.
+        # A tick that lingered out is the outcome itself.
+        #
+        # Through `require_complete_trail`, because this is a trail
+        # observation and a preempted terminal tick must not redden the
+        # scenario for it -- which is what STA-89 set out to stop. And
+        # `any` rather than `summaries[0]`: when the first tick is
+        # preempted, `summaries[0]` silently becomes the second one,
+        # while the question the scenario means -- some tick lingered out
+        # and a later one did the work -- does not depend on the order.
+        require_complete_trail(
+            build_id, what=f"whether any tick of neighbour {index} lingered out"
+        )
+        assert any(
+            s.get("outcome") == "lingered_out" for s in tick_summaries(build_id)
+        ), (
+            f"Neighbour {index} never lingered out, so it may have been "
+            "resident throughout and seen the shared task finish on its own "
+            "poll -- the wake-up path would then not have been exercised.\n"
+            + describe(build_id)
+        )
+
         # Not asserted on the *count of ticks*, which a cold container
         # would inflate for reasons that have nothing to do with the
         # hand-out stamp.
