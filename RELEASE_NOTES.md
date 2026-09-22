@@ -156,6 +156,19 @@ answer `False`. Stopping needs positive evidence, because stopping a
 healthy worker destroys work while letting a superseded one finish writes a
 content-addressed output nobody reads.
 
+**One known limitation, named so you can recognise it (STA-99).** A build
+that takes over a _lapsed_ claim and re-attaches to the previous
+container may find that container stops itself: taking the claim records
+this build's execution identity, so the container it re-attached to is no
+longer the execution the task names. Four things must coincide — the task
+RUNNING elsewhere with a recorded reference at registration, that claim
+lapsed, this build's claim granted, and the old container still alive —
+and the container only stops at its _next_ checkpoint, so a `run()` with
+no dynamic dependencies and no `cancellation_requested()` call has none
+left and completes normally. When it does happen you get one retried
+attempt and one wasted container, under the ordinary attempt budget;
+output is content-addressed, so nothing is wrong, only slower.
+
 **Side-effecting tasks are the one real loss, and were never inside the
 promise.** A task that has already written to somebody else's database or
 sent an email has done so; cancellation ends the execution, not what the

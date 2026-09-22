@@ -76,6 +76,26 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   worker with no identity can still be told its build or its task has
   stopped.
 
+- **Known limitation (STA-99): a build that takes over a lapsed claim and
+  re-attaches to the still-live container may see that container stop
+  itself.** Taking over the claim records this build's execution identity
+  on the task, so the re-attached container is no longer the execution
+  the task names, and its own checkpoint stops it.
+
+  Four conditions must coincide: the task is RUNNING elsewhere with a
+  recorded executor reference when this build registers, that holder's
+  claim has lapsed, this build's claim is granted, and the old container
+  is still alive. And the container only stops at its **next** checkpoint
+  — a `run()` with no dynamic dependencies and no
+  `cancellation_requested()` call has none left, so it completes normally
+  and the re-attach still works.
+
+  Symptom when it does happen: **one retried attempt and one wasted
+  container**, under the ordinary attempt budget. Correctness is
+  unaffected — output is content-addressed. The fix is a decision about
+  whether re-attach or supersession wins on a granted claim, which is
+  being designed with STA-94 rather than patched.
+
 - **Only an execution this submission spawned is ever stopped.** A handle
   can be borrowed rather than created — the claim loser re-attaches to the
   winner's execution, and a resumed build adopts a reference an earlier run
