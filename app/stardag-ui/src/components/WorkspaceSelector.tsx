@@ -125,7 +125,6 @@ export function WorkspaceSelector() {
         onClick={() => setIsOpen(!isOpen)}
         disabled={isExchangingToken}
         aria-expanded={isOpen}
-        aria-haspopup="menu"
         className={CRUMB_TRIGGER}
         title={
           activeWorkspace
@@ -160,7 +159,7 @@ export function WorkspaceSelector() {
 
       {/* Dropdown menu */}
       {isOpen && (
-        <div role="menu" className={`${CRUMB_MENU} min-w-[19rem]`}>
+        <div className={`${CRUMB_MENU} min-w-[19rem]`}>
           {/* Current workspace header */}
           {activeWorkspace && (
             <div className="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-4 py-3">

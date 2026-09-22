@@ -58,7 +58,20 @@ export function CrumbChevron({ open }: { open: boolean }) {
   );
 }
 
-/** The panel a crumb's dropdown renders into. */
+/**
+ * The panel a crumb's dropdown renders into.
+ *
+ * Deliberately **not** `role="menu"`. That role promises menu keyboard
+ * semantics — arrow keys, Home/End, typeahead, roving focus — and none
+ * of these panels implement them; a screen-reader user told "menu" would
+ * be handed a set of keys that do nothing. What they actually are is a
+ * disclosure over a group of ordinary buttons, which Tab already
+ * reaches. The trigger's `aria-expanded` says so honestly, and that is
+ * the whole contract.
+ *
+ * Giving them real menu semantics is a worthwhile change, and a separate
+ * one — the same shape as the focus-trap gap noted in `Modal`.
+ */
 export const CRUMB_MENU =
   "absolute left-0 top-full z-50 mt-1.5 min-w-[16rem] overflow-hidden rounded-lg " +
   "border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800";

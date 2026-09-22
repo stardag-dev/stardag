@@ -44,7 +44,7 @@ describe("EnvironmentSelector", () => {
     render(<EnvironmentSelector />);
 
     await user.click(screen.getByRole("button", { expanded: false }));
-    await user.click(screen.getByRole("menuitem", { name: "dev" }));
+    await user.click(screen.getByRole("button", { name: "dev" }));
 
     expect(setActiveEnvironment).toHaveBeenCalledWith(DEV);
   });
@@ -54,10 +54,10 @@ describe("EnvironmentSelector", () => {
     render(<EnvironmentSelector />);
 
     await user.click(screen.getByRole("button", { expanded: false }));
-    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "dev" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("menuitem", { name: "dev" }));
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "dev" }));
+    expect(screen.queryByRole("button", { name: "dev" })).not.toBeInTheDocument();
   });
 
   it("closes the menu when the pointer goes down outside it", async () => {
@@ -70,10 +70,10 @@ describe("EnvironmentSelector", () => {
     );
 
     await user.click(screen.getByRole("button", { expanded: false }));
-    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "dev" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "elsewhere" }));
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "dev" })).not.toBeInTheDocument();
   });
 
   // A control with nothing to choose between is noise in the trail, and

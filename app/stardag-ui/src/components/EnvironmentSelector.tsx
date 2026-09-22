@@ -37,7 +37,6 @@ export function EnvironmentSelector() {
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          aria-haspopup="menu"
           className={CRUMB_TRIGGER}
           title={
             activeEnvironment
@@ -52,7 +51,7 @@ export function EnvironmentSelector() {
         </button>
 
         {open && (
-          <div role="menu" className={CRUMB_MENU}>
+          <div className={CRUMB_MENU}>
             <p className="border-b border-gray-200 px-3 py-2 text-xs font-semibold tracking-wide text-gray-500 uppercase dark:border-gray-700 dark:text-gray-400">
               Environments
             </p>
@@ -63,7 +62,6 @@ export function EnvironmentSelector() {
                   <button
                     key={environment.id}
                     type="button"
-                    role="menuitem"
                     onClick={() => {
                       setActiveEnvironment(environment);
                       setOpen(false);
