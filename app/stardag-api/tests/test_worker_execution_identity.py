@@ -889,21 +889,31 @@ async def test_execution_status_never_says_stop_on_a_missing_identity(
 
 
 async def test_the_task_read_models_surface_the_identity(client: AsyncClient):
-    """Both task reads, because a listing and a detail are built separately.
+    """**Every** task read, because each one is built separately.
 
-    The single-task read is the one nobody forgets; the listing is where a
-    field added to the response model has twice been left at its default
-    on this codebase.
+    Three of them, and they do not share a constructor. The two under
+    ``/tasks`` validate straight off the row, so a field added to
+    ``TaskResponse`` appears on both for free. The build-scoped one
+    hand-builds ``TaskWithStatusResponse`` — which *inherits* that field
+    — so a new column is silently null there alone. That is exactly what
+    happened to this one, and it survived seven review rounds and a
+    hand-written audit before an eighth caught it.
     """
     execution_id = _eid()
-    await _running(client, "surfaced", execution_id, ref="fc-1")
+    build_id = await _running(client, "surfaced", execution_id, ref="fc-1")
 
     detail = (await client.get("/api/v1/tasks/surfaced")).json()
     listing = (await client.get("/api/v1/tasks", params={"page_size": 100})).json()
     listed = next(t for t in listing["tasks"] if t["task_id"] == "surfaced")
+    in_build = (await client.get(f"{BUILDS}/{build_id}/tasks")).json()
+    scoped = next(t for t in in_build if t["task_id"] == "surfaced")
 
     assert detail["latest_execution_id"] == execution_id
     assert listed["latest_execution_id"] == execution_id
+    assert scoped["latest_execution_id"] == execution_id, (
+        "the build-scoped task read hand-builds its response, so an "
+        "inherited field is null there unless someone adds it"
+    )
 
 
 # --- Dialect --------------------------------------------------------------

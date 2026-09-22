@@ -5363,6 +5363,11 @@ async def list_tasks_in_build(
                 latest_executor=task.latest_executor,
                 latest_executor_ref=task.latest_executor_ref,
                 latest_executor_metadata=task.latest_executor_metadata,
+                # Inherited from TaskResponse, and hand-built here rather
+                # than validated off the row, so a field added there is
+                # null on this endpoint alone until someone adds it. That
+                # is what happened to this one.
+                latest_execution_id=task.latest_execution_id,
                 status=status,
                 started_at=started_at,
                 completed_at=completed_at,
