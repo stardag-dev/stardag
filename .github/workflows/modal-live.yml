@@ -186,6 +186,35 @@ jobs:
             fi
           done
 
+      # **The one thing a reader of a cancelled check cannot find out from
+      # the check itself.** GitHub keeps at most one running and one
+      # pending job per concurrency group, so when a third run wants the
+      # registry-live group, the *older pending* job is cancelled -- and a
+      # job cancelled before it starts executes no steps, so it can leave
+      # no logs and no summary of its own. The explanation has to be
+      # written by a job that did run, before the fact, which is this one.
+      - name: Note how a cancelled registry-live tier will read
+        if: steps.decide.outputs.registry_live == 'true'
+        run: |
+          {
+            echo "### Registry-live tier"
+            echo
+            echo "This run wants the registry-live tier, which is"
+            echo "serialised **workspace-wide**: one run at a time across"
+            echo "all PRs and the weekly schedule, because one run peaks"
+            echo "at 45-65 Modal containers against a 100-container"
+            echo "workspace limit."
+            echo
+            echo "So it may sit pending for ten minutes or so behind"
+            echo "another PR. That is expected and needs nothing from you."
+            echo
+            echo "**If it shows as \`cancelled\` with no logs**, a third"
+            echo "run claimed the queue slot: GitHub keeps only one"
+            echo "running and one pending job per group and drops the"
+            echo "older pending one. It is not a failure and not a flake."
+            echo "Re-run the job, or push again. (STA-91)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   modal-live:
     name: Live Modal tier
     runs-on: ubuntu-latest
@@ -287,6 +316,32 @@ jobs:
     runs-on: ubuntu-latest
     needs: decide
     if: needs.decide.outputs.registry_live == 'true'
+    # **One tier run at a time across the whole workspace**, which the
+    # workflow-level group above cannot do: that one is keyed per PR, so
+    # two PRs touching these paths ran two full stacks side by side.
+    #
+    # The numbers are why. One run peaks at a realistic 45-65 containers
+    # (upper bound ~115; no `max_containers` on any scenario worker or tick
+    # function), against a workspace limit of **100 concurrent containers**
+    # that also carries every developer's `dev-<checkout>` stack and the
+    # self-hosted deployment. Two runs do not fit. The limit was hit on
+    # 2026-09-22 (STA-91).
+    #
+    # A constant string on purpose -- no PR number, no ref, no environment
+    # -- because the resource being protected is the *workspace*, which is
+    # one thing for every run of this job including the weekly schedule.
+    # Anything interpolated here would silently restore the per-PR
+    # behaviour this exists to remove.
+    #
+    # The Live Modal tier is deliberately not in the group: it peaks around
+    # five or six containers and is not the load.
+    concurrency:
+      group: registry-live-andhus-workspace
+      # Queue, never cancel. A tier run that is already provisioning has a
+      # Modal environment, a database and deployed apps behind it; killing
+      # it mid-flight leaks all of them and buys nothing, since the point
+      # is to not run two at once rather than to run the newest.
+      cancel-in-progress: false
     # Provisioning is about a minute and the scenarios run concurrently in
     # roughly three; the rest is slack for Modal latency, not a budget.
     timeout-minutes: 30

@@ -534,6 +534,38 @@ iterating on one scenario by name (`tox -e registry-modal-live -- -n0
 tests_registry_live -k <name>`), harness work that needs a stack, and forcing
 a branch CI cannot reach. Tear one down as soon as it is done.
 
+**The tier is serialised workspace-wide, so a pending run is normal and a
+cancelled one is not a failure.** One run peaks at a realistic 45–65 Modal
+containers, with an upper bound near 115 and no `max_containers` on any
+scenario worker or tick function. The `andhus` workspace caps at **100
+concurrent containers** and also carries every developer's `dev-<checkout>`
+stack and the self-hosted deployment — so two tier runs do not fit, and on
+2026-09-22 the limit was reached. The `registry-live` job therefore sits in a
+job-level concurrency group whose name is a constant
+(`registry-live-andhus-workspace`): one tier run at a time across every PR and
+the weekly schedule, with `cancel-in-progress: false` so a run already holding
+a Modal environment is never killed mid-flight. Expect the check to sit pending
+for around ten minutes when another PR is ahead of you.
+
+**The trap, because it looks exactly like a failure.** GitHub keeps at most
+**one running and one pending** job per concurrency group. A third run does not
+queue behind the second — it takes the pending slot, and the _older pending_
+job is **cancelled**. On that PR it shows as a cancelled check with **no logs
+at all**, because a job cancelled before it starts runs no steps and so cannot
+explain itself. It is not a failure, not a flake, and nothing is wrong with the
+branch: re-run the job, or push again.
+
+Since the cancelled job cannot write that explanation, the `Decide what to run`
+job writes it to the run summary up front, whenever it decides the tier should
+run. That is the only place in the run that can say it.
+
+One consequence to confirm the first time it happens rather than assume:
+teardown is gated on `always() && !cancelled()`, so if a cancelled
+`registry-live` job makes the _run_ read as cancelled, the run's Modal
+environment will not be deleted by its own teardown. The nightly sweeper is the
+existing backstop for exactly that case — it keys on GitHub state rather than
+age — so nothing leaks permanently either way, but it is worth watching once.
+
 **Take a precondition from the constants only where the arithmetic closes.**
 `test_reactive_e2e` spawns its own work, so a tick that lingers for a fixed
 window once idle must go before work that outlasts it —
