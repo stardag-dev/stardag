@@ -435,11 +435,10 @@ class ExecutionStatus(StardagBaseModel):
     """Whether a running worker is still the one its task is waiting for.
 
     Cooperative cancellation's answer. **Every default here says "keep
-    running"**, which is the invariant rather than a convenience: a
-    registry that does not implement this, a server predating the
-    endpoint, and a response that did not parse must all leave the worker
-    alone. Stopping a healthy worker destroys work; a superseded one
-    running on writes a content-addressed output nobody reads.
+    running"** — which is not a convenience but the invariant in
+    :mod:`stardag.cancellation`, expressed as field defaults: a registry
+    that does not implement this, a server predating the endpoint, and a
+    response that did not parse must all leave the worker alone.
     """
 
     still_current: bool = True

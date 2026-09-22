@@ -27,6 +27,7 @@ import uuid
 
 import pytest
 
+from stardag_integration_tests.registry_live._events import task_events
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._wait import (
     describe,
@@ -65,25 +66,32 @@ COOPERATIVE_SLEEP_SECONDS = 600
 COOPERATIVE_EXIT_TIMEOUT_SECONDS = 180
 
 
-def _call_is_running(ref: str) -> bool:
-    """Ask Modal whether a function call is still in flight.
+_STILL_RUNNING = object()
 
-    The same poll the Modal executor's own ``detached_status`` makes: a
-    zero timeout raises the builtin ``TimeoutError`` while the call is
-    running, and anything else means it is over -- finished, cancelled, or
-    gone. The ambiguity that distinction usually carries does not arise
-    here: this task ends only by sleeping out, which the scenario is sized
-    to exclude, or by stopping itself.
+
+def _call_outcome(ref: str) -> object:
+    """How a function call ended, or ``_STILL_RUNNING`` while it has not.
+
+    A zero-timeout ``get`` raises the builtin ``TimeoutError`` while the
+    call is in flight, and otherwise gives the call's own result or
+    re-raises the exception that ended it.
+
+    The *exception* is what this scenario turns on, not merely the fact
+    that the call is over. There is still a cancel drain in the reactive
+    tick (STA-81 deletes it), so a lingering tick can stop a container of
+    its own accord — and a scenario that only checked "the call is gone"
+    would pass on that and prove nothing about the worker. A worker that
+    stopped itself raises ``ExecutionCancelled`` out of the container, and
+    nothing else in the system produces that.
     """
     import modal
 
     try:
-        modal.FunctionCall.from_id(ref).get(timeout=0)
+        return modal.FunctionCall.from_id(ref).get(timeout=0)
     except TimeoutError:
-        return True
-    except Exception:
-        return False
-    return False
+        return _STILL_RUNNING
+    except Exception as e:
+        return e
 
 
 def test_a_retried_claim_is_granted_to_the_attempt_that_won_it() -> None:
@@ -242,21 +250,38 @@ def test_a_superseded_workers_start_cannot_take_the_task_back() -> None:
     )
 
 
-def test_a_cancelled_builds_worker_stops_itself() -> None:
+def test_a_cancelled_tasks_worker_stops_itself(deployment) -> None:
     """Cooperative cancellation, with nothing reaching into the container.
 
-    The cancel is a plain one: it marks the build and releases its claims
-    and stops there. Nothing calls Modal. The only thing that can end this
-    container is the container, asking at a point its own author chose.
+    Nothing calls Modal here. The cancel releases the task's claim and
+    stops; the only thing that can end this container is the container,
+    asking at a point its own author chose -- ``Cooperative`` calls
+    ``stardag.cancellation_requested()`` between sleeps, which is the
+    surface no unit test can exercise against a real registry.
 
-    Two assertions, and they fail from opposite directions. The call being
-    **gone** is what a worker that ignored the answer would fail -- it
-    would still be sleeping out its own duration, far past the poll's
-    timeout. The target being **absent** is what a worker that noticed but
-    exited untidily would fail: returning normally from ``run()`` writes
-    the output and is reported as a completion, which is precisely the
-    thing "exits cleanly" rules out.
+    **The task is cancelled rather than the build, and that is not a
+    weaker case.** It is the *cascade's* shape, which is the one STA-78
+    names: the claim is released so the next build may have the task, and
+    until one does the row still names this very execution -- so the
+    identity comparison cannot see it and only the task's own status can.
+    It is also the only variant that isolates the worker from the
+    machinery STA-81 is about to delete: a lingering tick still drains
+    cancels for a cancelled *build*, and an earlier version of this
+    scenario passed with ``cancelled_refs=1`` in the tick summary, having
+    proved nothing about the worker at all. Once STA-81 removes the
+    drain, a build cancel becomes equally testable here.
+
+    Three assertions, failing from three directions. The call being
+    **gone** catches a worker that ignored the answer -- it would still be
+    sleeping, far past the poll's timeout. The exception being
+    ``ExecutionCancelled`` catches anything that reached into the
+    container instead, since nothing else in the system raises it. The
+    target being **absent** catches a worker that noticed and exited
+    untidily: returning normally from ``run()`` writes the output and is
+    reported as a completion, which is exactly what "exits cleanly" rules
+    out.
     """
+    from stardag.exceptions import ExecutionCancelled
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
@@ -282,22 +307,59 @@ def test_a_cancelled_builds_worker_stops_itself() -> None:
         build_id=build_id,
         timeout=STATUS_TIMEOUT_SECONDS,
     )
-    ref = find_task(str(worker_task.id), task_name="Cooperative").latest_executor_ref
-    assert ref is not None, (
-        "The task is RUNNING with no executor reference, so there is no "
-        f"container to observe.\n{describe(build_id)}"
-    )
 
-    registry.build_cancel(build_id)
+    # Then wait for the container to have **started running the task**, not
+    # merely to have been spawned, and the difference decides which
+    # checkpoint this scenario exercises.
+    #
+    # A start is recorded three times for one execution: the claim (no
+    # ref), the tick's post-spawn start (the ref), and the worker's own
+    # self-report from inside the container. Cancelling after the second
+    # means the cancel is already in place when the container starts, and
+    # the start-of-attempt checkpoint catches it before ``run()`` is ever
+    # entered -- true, useful, and already covered by unit tests. Waiting
+    # for the third puts the worker *inside* its loop, so what stops it is
+    # ``stardag.cancellation_requested()``, which is the surface this
+    # scenario exists for and the one no unit test can exercise against a
+    # real registry.
+    #
+    # Wait on the state you need, never on the one that usually
+    # accompanies it -- both halves of that cost a red run here.
+    def _starts() -> int:
+        return sum(
+            1
+            for event in task_events(deployment, worker_task.id, missing_ok=True)
+            if event["event_type"] == "task_started"
+        )
 
     wait_until(
-        lambda: not _call_is_running(ref),
+        lambda: _starts() >= 3,
+        build_id=build_id,
+        timeout=STATUS_TIMEOUT_SECONDS,
+        what="the worker to report its own start from inside the container",
+    )
+    ref = find_task(str(worker_task.id), task_name="Cooperative").latest_executor_ref
+    assert ref is not None
+
+    registry.task_cancel_by_id(build_id, str(worker_task.id))
+
+    wait_until(
+        lambda: _call_outcome(ref) is not _STILL_RUNNING,
         build_id=build_id,
         timeout=COOPERATIVE_EXIT_TIMEOUT_SECONDS,
         what=(
-            f"execution {ref} to stop itself after its build was cancelled "
+            f"execution {ref} to end after its build was cancelled "
             f"(it would otherwise sleep for {COOPERATIVE_SLEEP_SECONDS}s)"
         ),
+    )
+
+    outcome = _call_outcome(ref)
+    assert isinstance(outcome, ExecutionCancelled), (
+        "The execution ended, but not by stopping itself. Only the worker "
+        "raises ExecutionCancelled; anything else here means something "
+        "reached into the container, which is what cooperative "
+        f"cancellation exists to stop needing.\nGot: {outcome!r}\n"
+        f"{describe(build_id)}"
     )
 
     assert not worker_task.complete(), (

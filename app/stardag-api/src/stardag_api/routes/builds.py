@@ -685,6 +685,14 @@ def _claim_is_this_same_execution(
     )
 
 
+# Task statuses that say "nobody wants this run right now", as opposed to
+# the several that a worker's own reports produce. Kept narrow on purpose:
+# this is the one place a task-level state may stop a container, and every
+# other non-RUNNING status is something the worker itself may have just
+# written.
+_NOT_TO_BE_RUN = (TaskStatus.CANCELLED, TaskStatus.SKIPPED)
+
+
 def _report_identity(
     executor_ref: str | None, execution_id: UUID | None
 ) -> dict | None:
@@ -4558,48 +4566,66 @@ async def get_execution_status(
     ``latest_execution_id`` — so it is cheap enough to sit on a worker's
     inner loop behind a throttle.
 
-    Two ways to be told no, and nothing else counts:
+    Three ways to be told no, and nothing else counts:
 
     - **``build_not_running``** — the build that spawned this execution
       is cancelled, failed, completed or exited early, so nothing is
-      waiting for the output. This is the common case, and the only one
-      reachable without an identity: cancelling a build releases its
-      claims but replaces no execution, so the task may still name this
-      very worker.
+      waiting for the output.
+    - **``task_cancelled``** — the task itself has been cancelled or
+      skipped. Its claim was released, which is what a cascade does, and
+      until somebody else takes it over the row still names this very
+      execution — so the identity comparison below cannot see it. Not
+      gated on the identity for the same reason: the server refuses a
+      cancel from a build that does not hold the task, so a CANCELLED
+      task was cancelled by its own holder.
     - **``superseded``** — the task's claim moved on and it now names a
       *different* execution. The caller lost the task; the holder is
       somebody else's container.
 
+    The first two are the ones reachable **without an identity**, which
+    is what keeps a worker that was never given one covered for the cases
+    a human actually causes.
+
     What deliberately does **not** answer no: an execution id on neither
     side or on only one (nothing to compare — absence is no opinion, as
-    everywhere else in these rules), and a task whose status is not
-    RUNNING while the identity still matches, which is the ordinary
-    window around a worker's own reports rather than evidence about
-    anybody else.
+    everywhere else in these rules), and any *other* non-RUNNING status
+    while the identity still matches — FAILED, COMPLETED, SUSPENDED and
+    INTERRUPTED are all things this worker's own reports produce, and
+    reading its own report back as a reason to stop would be a worker
+    cancelling itself.
 
     A caller unable to reach this at all — a transport failure, a server
     predating it — must read that as "keep running". The endpoint is a
-    permission to stop, never an instruction to continue.
+    permission to stop, never an instruction to continue; the invariant
+    that rule comes from is stated once, in the SDK's
+    ``stardag.cancellation`` module docstring.
     """
     build, db_task = await _get_build_and_task(build_id, task_id, db, auth)
 
-    if build.latest_status != BuildStatus.RUNNING:
+    def _no(reason: str) -> ExecutionStatusResponse:
         return ExecutionStatusResponse(
             still_current=False,
-            reason="build_not_running",
+            reason=reason,
             build_status=build.latest_status,
             task_status=db_task.latest_status,
             latest_execution_id=db_task.latest_execution_id,
         )
+
+    if build.latest_status != BuildStatus.RUNNING:
+        return _no("build_not_running")
+
+    if db_task.latest_status in _NOT_TO_BE_RUN:
+        return _no("task_cancelled")
 
     superseded = (
         execution_id is not None
         and db_task.latest_execution_id is not None
         and db_task.latest_execution_id != execution_id
     )
+    if superseded:
+        return _no("superseded")
     return ExecutionStatusResponse(
-        still_current=not superseded,
-        reason="superseded" if superseded else None,
+        still_current=True,
         build_status=build.latest_status,
         task_status=db_task.latest_status,
         latest_execution_id=db_task.latest_execution_id,

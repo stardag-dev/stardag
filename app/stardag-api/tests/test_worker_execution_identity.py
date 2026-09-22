@@ -577,6 +577,72 @@ async def test_execution_status_reports_a_cancelled_build(client: AsyncClient):
     assert answer["reason"] == "build_not_running"
 
 
+async def test_execution_status_reports_a_cancelled_task(client: AsyncClient):
+    """The cascade's shape, which the identity comparison cannot see.
+
+    Releasing a task's claim is what lets the next build have it — and
+    until one does, the row still names this very execution, so
+    ``superseded`` is false and the build is still RUNNING. Without this
+    third reason a cascaded worker would run on to completion.
+    """
+    execution_id = _eid()
+    build_id = await _running(client, "cancelled-task", execution_id, ref="fc-1")
+
+    cancelled = await client.post(f"{BUILDS}/{build_id}/tasks/cancelled-task/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+
+    answer = (
+        await client.get(
+            f"{BUILDS}/{build_id}/tasks/cancelled-task/execution-status",
+            params={"execution_id": execution_id},
+        )
+    ).json()
+
+    assert answer["still_current"] is False
+    assert answer["reason"] == "task_cancelled"
+    assert answer["build_status"] == "running", (
+        "the build was not the thing that stopped, so this is not the "
+        "build_not_running case wearing a different name"
+    )
+
+
+@pytest.mark.parametrize("kind", ["interrupt", "suspend", "fail"])
+async def test_a_workers_own_report_is_not_a_reason_to_stop_itself(
+    client: AsyncClient, kind: str
+):
+    """Every other non-RUNNING status is something this worker just wrote.
+
+    Reading its own report back as "you are no longer wanted" would have a
+    worker cancel itself the moment it checkpointed an interruption — and
+    the interruption path exists precisely so the task can be resumed.
+    """
+    execution_id = _eid()
+    build_id = await _running(client, f"self-report-{kind}", execution_id, ref="fc-1")
+
+    await _report(
+        client,
+        build_id,
+        f"self-report-{kind}",
+        kind,
+        **(
+            {"executor_ref": "fc-1", "execution_id": execution_id}
+            if kind == "interrupt"
+            else {}
+        ),
+    )
+
+    answer = (
+        await client.get(
+            f"{BUILDS}/{build_id}/tasks/self-report-{kind}/execution-status",
+            params={"execution_id": execution_id},
+        )
+    ).json()
+
+    assert answer["still_current"] is True, (
+        f"a {kind} report made the worker that sent it stop itself: {answer}"
+    )
+
+
 async def test_execution_status_reports_a_takeover(
     client: AsyncClient, async_session: AsyncSession
 ):

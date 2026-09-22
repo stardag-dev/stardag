@@ -988,12 +988,10 @@ class ExecutionStatusResponse(BaseModel):
     answer at a point in its own code where stopping is safe.
     """
 
-    # Keep running. **False only on positive evidence**, which is the
-    # invariant to check a change here against: a caller that cannot
-    # reach this endpoint, or reaches a server predating it, must carry
-    # on. Stopping a healthy worker destroys work; a superseded one
-    # running to completion writes a content-addressed output nobody
-    # reads, which is the cheaper error by a wide margin.
+    # Keep running. **False only on positive evidence** -- the invariant
+    # is stated once, in the SDK's ``stardag.cancellation`` module
+    # docstring, and this is the server half of it. What it means here:
+    # never answer False for a state this endpoint could not evaluate.
     still_current: bool
     # Why not, when not: ``build_not_running`` or ``superseded``. None
     # while still current. Named rather than inferred from the fields

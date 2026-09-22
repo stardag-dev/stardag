@@ -12,6 +12,7 @@ StardagError
 │   ├── SDKVersionUnsupportedError
 │   └── TokenExpiredError
 ├── ResumableInterruption
+├── ExecutionCancelled
 └── ...
 ```
 
@@ -202,6 +203,45 @@ starts after the container does.
 Resumption is bounded by `TickConfig.max_interruptions` (default 20), a
 budget separate from `max_attempts` — see
 [Preemption and timeouts](../how-to/integrate-modal.md#preemption-and-timeouts).
+
+## ExecutionCancelled
+
+```python
+from stardag import ExecutionCancelled
+```
+
+The other exception you **raise** rather than catch. It says: _this
+execution is no longer wanted; stop without producing anything._
+
+Stardag raises it for you at the two automatic cooperative-cancellation
+checkpoints — the start of each attempt, and each dynamic-dependency
+yield. You raise it where only you know a stop is safe:
+
+```python
+import stardag as sd
+
+for chunk in chunks:
+    if sd.cancellation_requested():
+        raise sd.ExecutionCancelled()
+    process(chunk)
+```
+
+The worker treats it as a **clean exit, not a task failure**: no output is
+written, no completion is reported, and no end-of-attempt event is
+recorded. What it does _not_ do is return normally, and that is
+deliberate — a backend call that succeeds with no output is read by a
+scheduler as "the worker wrote it, eventual consistency", which would
+record a completion for a target that does not exist.
+
+Ask `sd.cancellation_requested()` first rather than raising
+speculatively: it is throttled, and it answers `True` only when the
+registry positively said this execution has been superseded, its task
+cancelled, or its build stopped running. See
+[Cancelling work](../concepts/build-execution.md#cancelling-work-the-worker-asks-nothing-reaches-in).
+
+Like `ResumableInterruption`, it is an ordinary `Exception` rather than a
+`BaseException`, so it does not slip past your own error handling. A task
+that catches it should re-raise.
 
 ## Common Error Scenarios
 
