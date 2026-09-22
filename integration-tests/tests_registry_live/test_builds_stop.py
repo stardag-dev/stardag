@@ -90,6 +90,24 @@ def _refs(entries: list[dict]) -> dict[str, str]:
     return {entry["task_id"]: entry["executor_ref"] for entry in entries}
 
 
+def _stoppable_ids(build_id: uuid.UUID) -> set[str]:
+    """Task ids this build holds whose row already names a live call.
+
+    Read through the command's own collector, which is the one thing here
+    that is not independent of the code under test. Acceptable, and worth
+    stating: the selection *rules* are pinned in
+    ``tests/test__cli/test_stop.py``, and a collector that returned the
+    wrong set would fail this scenario as a timeout rather than as a wrong
+    answer. What it buys is that the wait below is on the state the
+    command is actually defined against.
+    """
+    from stardag._cli import _stop
+    from stardag.registry import registry_provider
+
+    executions, _ = _stop.collect_executions(registry_provider.get(), build_id)
+    return {e.task_id for e in executions if e.stoppable}
+
+
 def test_stop_cancels_only_the_selected_workers_calls() -> None:
     from typer.testing import CliRunner
 
@@ -121,6 +139,22 @@ def test_stop_cancels_only_the_selected_workers_calls() -> None:
         what="all four upstreams to be running under this build",
     )
 
+    # RUNNING is not enough, and the difference is STA-88. A task is
+    # claimed -- which is what makes it RUNNING -- before its spawn reports
+    # a call id, so between the two the row names no call. The command
+    # lists such a row and marks it not stoppable, which is correct and is
+    # what that issue fixed; but a scenario that stopped there would hand
+    # ``selected_refs`` a null and sail through the Modal check below
+    # having cancelled nothing. The end-to-end path this scenario exists
+    # for only exists once the refs are on the rows, so that is the state
+    # to wait for.
+    wait_until(
+        lambda: _stoppable_ids(build_id) >= {str(task.id) for task in stopped + kept},
+        build_id=build_id,
+        timeout=RUNNING_TIMEOUT_SECONDS,
+        what="all four upstreams to have reported a call id",
+    )
+
     # The command itself, not a reimplementation of it. --json so the
     # assertion is on what it selected rather than on rendered text;
     # --yes because there is nobody to confirm.
@@ -142,6 +176,17 @@ def test_stop_cancels_only_the_selected_workers_calls() -> None:
     assert sorted(excluded_refs) == sorted(str(task.id) for task in kept), (
         "The untouched upstreams were not reported as excluded, so the "
         "operator was not told what keeps running.\n"
+        f"{result.output}\n{describe(build_id)}"
+    )
+
+    # The two assertions above already pin the listing's completeness --
+    # between them they name all four rows, which is how STA-88 surfaced
+    # here in the first place. What they do not pin is that the refs are
+    # real, and without that the Modal check below passes on nulls having
+    # cancelled nothing.
+    assert all(selected_refs.values()), (
+        "A selected execution carried no call id, so the Modal check "
+        "below would pass without cancelling anything.\n"
         f"{result.output}\n{describe(build_id)}"
     )
 

@@ -88,16 +88,54 @@ class TestSelection:
         # that execution yielded and returned, so there is nothing to stop.
         assert _stop.execution_from_task(_row(latest_status=status)) is None
 
-    def test_no_ref_means_no_execution_to_stop(self):
-        assert _stop.execution_from_task(_row(latest_executor_ref=None)) is None
+    def test_a_claim_with_no_ref_yet_is_listed_and_not_stoppable(self):
+        # STA-88, and the reason this is not "no ref, no row": the tick
+        # starts a task twice. First a claim, which sets RUNNING with no
+        # ref because nothing has been spawned yet; then a ref-bearing
+        # start once the spawn returns a call id. Dropping the row in
+        # between made the list silently short — two of four running
+        # upstreams on the live run that found this — at exactly the
+        # moment an operator reaches for the command, during a fan-out.
+        execution = _execution(latest_executor_ref=None)
+        assert execution.executor_ref is None
+        assert not execution.stoppable
+        assert execution.not_stoppable_reason == _stop.NO_REF_YET
 
     def test_a_ref_with_no_executor_named_is_treated_as_modal(self):
         # Pre-``latest_executor`` data. Modal is the only executor that has
         # ever recorded a ref, and dropping the row would hide a live
         # container from the one list that is supposed to be exact.
-        execution = _execution(latest_executor=None)
+        execution = _execution(latest_executor=None, latest_executor_metadata=None)
         assert execution.executor == "modal"
         assert execution.stoppable
+
+    def test_an_unspawned_claim_is_attributed_from_its_metadata(self):
+        # A claim names no executor of its own — there is no call yet — but
+        # its metadata declares the kind it is about to spawn on. Reading
+        # it keeps ``--executor`` honest about a row that would otherwise
+        # be assumed to be Modal.
+        execution = _execution(
+            latest_executor=None,
+            latest_executor_ref=None,
+            latest_executor_metadata={"kind": "prefect"},
+        )
+        assert execution.executor == "prefect"
+        assert not execution.stoppable
+
+    def test_a_mid_spawn_fan_out_is_listed_in_full(self):
+        # The shape of the live failure: a fan-out caught partway, some
+        # tasks spawned and some only claimed. Every one of them is this
+        # build's and every one of them is running; the list has to say so
+        # for all four, or the operator releases claims believing they
+        # stopped more than they did.
+        spawned = [_row(), _row()]
+        claimed = [_row(latest_executor_ref=None), _row(latest_executor_ref=None)]
+        registry = _mock_registry(spawned + claimed)
+
+        collected, _ = _stop.collect_executions(registry, UUID(BUILD_ID))
+
+        assert len(collected) == 4
+        assert sum(e.stoppable for e in collected) == 2
 
     def test_only_this_builds_rows_are_collected(self):
         mine = _row()
@@ -291,6 +329,54 @@ class TestStopCommand:
         # running with its claim released, which the output has to say.
         registry.build_cancel.assert_called_once()
         assert "excluded by a filter" in result.output
+
+    def test_an_unspawned_claim_is_selected_reported_and_not_cancelled(self):
+        # The end-to-end form of STA-88. The row is selected — it is this
+        # build's and it matches the filter, both of which the claim's own
+        # metadata already establishes — and it reaches neither the
+        # canceller nor silence: the operator is told it keeps running,
+        # because that is the one thing this command must never get wrong.
+        spawned = _row()
+        claimed = _row(latest_executor_ref=None)
+        registry = _mock_registry([spawned, claimed])
+
+        with (
+            _patch_resolve(registry),
+            mock.patch.object(
+                _stop,
+                "cancel_modal_calls",
+                side_effect=lambda es: [_stop.CancelOutcome(e) for e in es],
+            ) as cancel,
+        ):
+            result = runner.invoke(app, ["stop", BUILD_ID, "--yes"])
+
+        assert result.exit_code == 0, result.output
+        handed_to_modal = [e.task_id for e in cancel.call_args.args[0]]
+        assert handed_to_modal == [spawned.task_id]
+        assert "could not be stopped" in result.output
+        assert claimed.task_id in result.output
+        # Not the filter's wording: nobody asked for this one to be left.
+        assert "excluded by a filter" not in result.output
+        registry.build_cancel.assert_called_once()
+
+    def test_the_json_document_says_why_a_selection_was_not_stopped(self):
+        import json
+
+        registry = _mock_registry([_row(latest_executor_ref=None)])
+        with (
+            _patch_resolve(registry),
+            mock.patch.object(_stop, "cancel_modal_calls") as cancel,
+        ):
+            result = runner.invoke(app, ["stop", BUILD_ID, "--json", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        (entry,) = payload["selected"]
+        assert entry["executor_ref"] is None
+        assert entry["stoppable"] is False
+        assert entry["not_stoppable_reason"] == _stop.NO_REF_YET
+        assert payload["stopped_count"] == 0
+        cancel.assert_not_called()
 
     def test_a_non_modal_execution_is_listed_and_left_alone(self):
         registry = _mock_registry([_row(latest_executor="prefect")])

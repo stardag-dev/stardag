@@ -18,12 +18,26 @@ build's to stop when its row says so:
 
     latest_status_build_id == build
     latest_status in (running, interrupted)
-    latest_executor_ref is set
 
 No ranking, no event walk, no authority rules. If a neighbour had taken
 the task over the row would carry the neighbour's build id and the task
 would not be selected — the same single check that makes the list exact
 makes it safe.
+
+**The executor ref decides what can be stopped, not what is listed.** It
+used to be a third condition above, and that was a bug (STA-88): a task
+is claimed before its container exists. The tick starts a task twice —
+first a claim, which sets RUNNING with no ref because nothing has been
+spawned yet, then a ref-bearing start once the spawn returns a call id —
+so between the two the row is RUNNING, held by this build, and names no
+call. Dropping it there made the list silently short by however many
+tasks were mid-spawn, which on a cold container is a container start's
+worth of time, and it was worst during a fan-out: exactly when an
+operator reaches for this command. A row with no ref is therefore listed
+like any other and reported as not stoppable, alongside the executions
+on an executor this command cannot reach. Both are the same statement —
+here is something of yours that will keep running, and why — and it is
+the statement the whole ordering exists to make.
 
 The two statuses, and the two it leaves out:
 
@@ -58,6 +72,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # and left alone — with a reason, rather than silently dropped, because an
 # execution nobody told you about is the thing the ordering is protecting.
 MODAL_EXECUTOR = "modal"
+
+# Why a listed execution cannot be stopped, for the operator and for the
+# --json document. Neither reason drops the row.
+NO_REF_YET = "no call id recorded yet — it was claimed but not yet spawned"
 
 # Statuses whose row may still name a live execution (see the module
 # docstring for why these two and not the others).
@@ -94,7 +112,9 @@ class Execution:
     task_name: str
     status: str
     executor: str
-    executor_ref: str
+    # None while the task is claimed but its spawn has not reported a call
+    # id yet. Listed anyway, and not stoppable — see the module docstring.
+    executor_ref: str | None
     executor_metadata: dict[str, Any]
     # When the task entered its current status — "running since", and the
     # column the ``--older-than`` filter and the "running for" cell read.
@@ -131,7 +151,24 @@ class Execution:
     @property
     def stoppable(self) -> bool:
         """Whether this command can stop it, as opposed to only list it."""
-        return self.executor == MODAL_EXECUTOR
+        return self.not_stoppable_reason is None
+
+    @property
+    def not_stoppable_reason(self) -> str | None:
+        """Why this one can only be listed, or None if it can be stopped.
+
+        Two ways to be unstoppable and they are worth telling apart. An
+        execution on another executor is permanent — stardag reaches Modal
+        and nothing else. One with no call id yet is a moment: the spawn
+        will report its ref, and re-running the command a few seconds
+        later will stop it. An operator deciding whether to wait needs to
+        know which they are looking at.
+        """
+        if self.executor != MODAL_EXECUTOR:
+            return f"stardag cannot stop a {self.executor!r} execution"
+        if not self.executor_ref:
+            return NO_REF_YET
+        return None
 
     @property
     def restart_due(self) -> bool:
@@ -209,24 +246,30 @@ def execution_from_task(task: "TaskSummary") -> Execution | None:
     """Build an :class:`Execution` from a task row, or None if it holds none.
 
     The whole selection rule for one row, minus the build check the caller
-    makes: a status that may still have a container behind it, and a ref
-    naming that container.
+    makes: a status that may still have a container behind it. Whether the
+    row names that container decides ``stoppable``, not membership — a
+    claim is recorded before the spawn that fills the ref in, and a row in
+    that window is precisely the one an operator must not be left ignorant
+    of. See the module docstring.
     """
     if task.latest_status not in STOPPABLE_STATUSES:
         return None
-    if not task.latest_executor_ref:
-        return None
+    metadata = task.latest_executor_metadata or {}
+    # No executor named on the row is two different things. Pre-
+    # ``latest_executor`` data, where Modal is the only executor that ever
+    # recorded a ref; or a claim written before its spawn, which names no
+    # executor of its own but whose metadata declares its ``kind``. Ask
+    # the metadata, then fall back to Modal rather than leaving a live
+    # container unattributed in the one list that is meant to be exact.
+    executor = task.latest_executor or metadata.get("kind") or MODAL_EXECUTOR
     return Execution(
         task_id=task.task_id,
         task_namespace=task.task_namespace,
         task_name=task.task_name,
         status=task.latest_status or "",
-        # A ref with no executor named is pre-``latest_executor`` data.
-        # Treat it as Modal — the only executor that has ever recorded a
-        # ref — rather than dropping a live container from the list.
-        executor=task.latest_executor or MODAL_EXECUTOR,
+        executor=executor,
         executor_ref=task.latest_executor_ref,
-        executor_metadata=task.latest_executor_metadata or {},
+        executor_metadata=metadata,
         status_at=task.latest_status_at,
         preempted_at=task.latest_preempted_at,
     )
@@ -336,6 +379,13 @@ def cancel_modal_calls(executions: Sequence[Execution]) -> list[CancelOutcome]:
 
     outcomes: list[CancelOutcome] = []
     for execution in executions:
+        if execution.executor_ref is None:
+            # Unreachable through the command, which hands this only the
+            # stoppable ones. Reported rather than raised, for the same
+            # reason every other failure here is: one bad entry must not
+            # take the rest of the list down with it.
+            outcomes.append(CancelOutcome(execution, error=NO_REF_YET))
+            continue
         try:
             modal.FunctionCall.from_id(execution.executor_ref).cancel()
         except Exception as error:  # noqa: BLE001 - reported, never fatal

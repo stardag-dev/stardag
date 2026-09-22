@@ -600,8 +600,7 @@ query about the present gives the wrong answer: acting on it either misses the
 container you meant to stop or kills one you do not own.
 
 While the claims are still held, none of that is possible. The task row names
-this build, this build's executor and this build's call id, and that is all the
-command needs:
+this build and this build's executor, and that is all the command needs:
 
 ```sh
 # 1. What is this build actually running? Nothing is stopped or cancelled.
@@ -633,6 +632,11 @@ The confirmation prompt says how many are being left.
 
 Things worth knowing:
 
+- **What the list is exact about is ownership, not stoppability.** Every
+  execution it names is this build's and none has been taken over; but a task
+  claimed moments ago has no call id on its row until its spawn reports one, so
+  it is listed and marked not stoppable rather than dropped. Re-run the command
+  to catch those once their containers are up.
 - **Only Modal executions can be stopped from here.** Anything else is listed —
   so nothing is invisible — and marked "not stoppable here". Stardag reaches
   Modal and nothing else, and the registry reaches no backend at all.

@@ -96,10 +96,18 @@ with no SDK action.
   `--older-than`, repeatable `--task-id` — narrow what is stopped;
   `--dry-run` prints and exits, and `--json` emits the selection. An
   execution a filter excludes keeps running after the build is cancelled,
-  and the prompt says how many. Executions on a non-Modal executor are
-  listed as "not stoppable here" rather than dropped: stardag reaches
-  Modal and nothing else, and the registry reaches no backend at all. A
-  hard kill is the Modal dashboard's, which the registry UI deep-links to.
+  and the prompt says how many. A hard kill is the Modal dashboard's,
+  which the registry UI deep-links to.
+
+  Nothing the build holds is dropped from the list, and there are two ways
+  to be in it without being stoppable. An execution on a non-Modal
+  executor, permanently — stardag reaches Modal and nothing else, and the
+  registry reaches no backend at all. And a task that has been claimed but
+  whose spawn has not reported a call id yet, momentarily: RUNNING is the
+  claim, and the claim is recorded first, so re-running the command once
+  the container is up will catch it. Both are listed with the reason, in
+  the table and as `not_stoppable_reason` in `--json`; the list is exact
+  about which executions are the build's, not about which can be stopped.
 
 - **Breaking: `stardag builds cancel --cascade` is removed.** It released
   the build's claims and left its containers running, which is the ordering

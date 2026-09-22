@@ -723,6 +723,12 @@ def builds_stop(
     claims). Executions on another executor are listed and left alone —
     stardag reaches Modal and nothing else.
 
+    What "exact" covers: every execution the list names is this build's,
+    and nothing it names has been taken over. What it does not cover is
+    being stoppable. A task claimed a moment ago has no call id on its row
+    until its spawn reports one, so it is listed and marked not stoppable
+    rather than dropped — re-run to catch it once the spawn lands.
+
     `--dry-run` prints the list and stops there. Anything a filter
     excludes keeps running after the build is cancelled: it no longer
     holds a claim, so its output is the only thing that can land, and
@@ -875,6 +881,20 @@ def builds_stop(
         f"[green]Cancelled build[/green] {build_id} "
         f"— stopped {len(stoppable)} execution(s), released its claims."
     )
+    if unstoppable:
+        # Selected, not stopped. Louder than the excluded note below
+        # because nobody asked for this one: a filter leaving something
+        # running is the operator's own decision, whereas this is the
+        # command falling short of what they asked for.
+        report.print(
+            f"[yellow]{len(unstoppable)} selected execution(s) could not be "
+            "stopped[/yellow] and keep running:"
+        )
+        for execution in unstoppable:
+            report.print(
+                f"  [dim]{execution.task_id}  {execution.qualified_name}  "
+                f"— {execution.not_stoppable_reason}[/dim]"
+            )
     if excluded:
         report.print(
             f"[dim]{len(excluded)} execution(s) were excluded by a filter "
@@ -916,6 +936,10 @@ def _stop_json(execution: "_stop.Execution") -> dict[str, Any]:
         "status_at": execution.status_at,
         "restart_due": execution.restart_due,
         "stoppable": execution.stoppable,
+        # Null when it is stoppable. Present so a caller parsing this can
+        # tell "on another executor, never stoppable from here" from
+        # "claimed a moment ago, stoppable once its spawn reports".
+        "not_stoppable_reason": execution.not_stoppable_reason,
     }
 
 
@@ -957,13 +981,26 @@ def _render_executions(
             execution.qualified_name,
             status,
             execution.executor
-            if execution.stoppable
+            if execution.executor == _stop.MODAL_EXECUTOR
             else f"{execution.executor} [yellow](not stoppable here)[/yellow]",
-            execution.executor_ref,
+            execution.executor_ref or "[yellow](not recorded yet)[/yellow]",
             execution.worker or "-",
             _age(execution.status_at),
         )
     console.print(table)
+
+    # The rows that are about to be left running, said once and plainly.
+    # A reader who skims the table sees a Modal executor and a task id and
+    # assumes it is handled; the ref cell is the only thing that says
+    # otherwise, and it is the easiest column to miss.
+    unspawned = [e for e in selected if e.executor_ref is None]
+    if unspawned:
+        console.print(
+            f"[yellow]{len(unspawned)} of these were claimed but have not "
+            "reported a call id yet[/yellow], so there is nothing to "
+            "cancel and they keep running. Their spawn reports within a "
+            "container start — re-run this command to catch them."
+        )
 
     workspaces = _stop.modal_workspaces(e for e in selected if e.stoppable)
     if workspaces:
@@ -1007,7 +1044,7 @@ def _render_cancel_outcomes(
 ) -> None:
     """Per-call result, because a partial stop has to be visible."""
     for outcome in outcomes:
-        ref = outcome.execution.executor_ref
+        ref = outcome.execution.executor_ref or "(no call id)"
         name = outcome.execution.qualified_name
         if outcome.ok:
             report.print(f"  [green]stopped[/green] {ref}  {name}")
