@@ -73,6 +73,20 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   worker with no identity can still be told its build or its task has
   stopped.
 
+- **Losing a task is never reported as that task's failure.** Two paths
+  reach the same damage and both are closed. When the resident engine's
+  post-spawn start is refused, the refusal used to travel the generic
+  error path and post `TASK_FAILED` — against a task another build is now
+  running, or one that was just cancelled — and a failure report writes
+  through, so losing a race would have ended with this build marking
+  somebody else's live execution failed. And a worker that stopped itself
+  at a cooperative checkpoint raises out of its container, which a
+  detached executor reports as a task failure, reaching the same place.
+
+  Both are now counted as a **local** failure on the path the claim-loser
+  timeout already uses: `fail_mode` is honoured and the build still fails,
+  but nothing is said to the registry about a task that is not its own.
+
 - The reactive tick handles the post-spawn start's `execution_superseded`
   409 instead of letting it escape. That error arrives inside a
   `TaskGroup`, where it would cancel every sibling spawn in the pass and

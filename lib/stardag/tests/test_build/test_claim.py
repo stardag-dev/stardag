@@ -26,7 +26,7 @@ from stardag.build import (
     LockAcquisitionStatus,
     build_aio,
 )
-from stardag.exceptions import APIError
+from stardag.exceptions import APIError, ExecutionCancelled
 from stardag.registry import StartClaimResult
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
@@ -443,18 +443,25 @@ async def test_a_refused_ref_recording_start_stops_the_container_it_orphaned(
     same thing to this caller: this container is not what the task is
     waiting for.
 
-    The refusal still propagates, which is the pre-existing contract —
-    ``handle_registry_error`` never tolerates a refusal, in either mode,
-    because the build would otherwise carry on under a rule it did not
-    ask for. What changes is only that the container is stopped on the
-    way out.
+    **And the build must say nothing about the task.** Propagating the
+    refusal sent it through the generic error path into ``process_result``,
+    which posts ``TASK_FAILED`` — against a task another build is now
+    running, or one that was just cancelled. A failure report writes
+    through, so losing the race would have ended with this build marking
+    somebody else's live execution failed: the very damage the refusal
+    exists to prevent, arriving by the other door. Counted as a local
+    failure instead, on the path the claim-loser timeout already uses.
     """
     task = SyncOnlyTask(name=f"orphan-{error_code}")
     registry = ClaimRegistry()
     registry.refuse_ref_recording_start = error_code
     executor = FakeDetachedExecutor()
 
-    with pytest.raises(APIError):
+    # FAIL_FAST (the default) raises the local failure rather than
+    # returning a summary — the pre-existing contract for one, and not
+    # what this test is about. What matters is *which* failure, and what
+    # was said to the registry on the way.
+    with pytest.raises(Exception, match="stopped being this build's"):
         await build_aio(
             [task], task_executor=executor, registry=registry, claim_config=FAST_CLAIM
         )
@@ -466,6 +473,51 @@ async def test_a_refused_ref_recording_start_stops_the_container_it_orphaned(
     cancelled_task_id, _, cancelled_ref = executor.cancel_detached_calls[0]
     assert cancelled_task_id == task.id
     assert cancelled_ref == f"spawned-{task.id}"
+
+    methods = [m for (m, _tid, _extra) in registry.calls]
+    assert "task_fail_aio" not in methods, (
+        "the build reported a failure for a task that is not its own — "
+        f"against a live holder, this releases their claim. Calls: {methods}"
+    )
+    assert "build_fail_aio" in methods, (
+        "losing the task is still this build's failure, recorded against "
+        "the build rather than against a task it does not own"
+    )
+
+
+async def test_a_worker_that_stopped_itself_is_not_reported_as_a_failure(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    """The other door into the same damage.
+
+    A worker that reached a cooperative-cancellation checkpoint and found
+    it was no longer wanted raises out of its container, and a detached
+    executor reports *any* escaping exception as a task failure. But the
+    task that failure would be recorded against is either cancelled or
+    running under somebody else, and a failure report writes straight
+    through — so a worker politely agreeing to stop would end with this
+    build marking a live execution failed.
+
+    The build still fails locally; it just says nothing about a task that
+    is not its own.
+    """
+    task = SyncOnlyTask(name="worker-stopped-itself")
+    registry = ClaimRegistry()
+    executor = FakeDetachedExecutor(
+        spawn_error=None,
+        run_error=ExecutionCancelled("no longer wanted"),
+    )
+
+    with pytest.raises(ExecutionCancelled):
+        await build_aio(
+            [task], task_executor=executor, registry=registry, claim_config=FAST_CLAIM
+        )
+
+    methods = [m for (m, _tid, _extra) in registry.calls]
+    assert "task_fail_aio" not in methods, (
+        "a worker that stopped itself was reported as a task failure, which "
+        f"against a live holder releases their claim. Calls: {methods}"
+    )
 
 
 class TestClaimLoser:

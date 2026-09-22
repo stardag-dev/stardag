@@ -81,6 +81,7 @@ from stardag.build_config import (
 from stardag.exceptions import (
     APIError,
     BuildConfigMismatchError,
+    ExecutionCancelled,
     execution_not_wanted,
 )
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
@@ -1013,10 +1014,28 @@ async def build_aio(
 
         # Handle normal task execution results
         if isinstance(result, TaskExecutionError):
-            # Task failed - release lock (not completed) and notify registry
+            # Task failed - release lock (not completed) and notify registry.
+            #
+            # Except when the worker stopped *itself*. A worker that reached
+            # a cooperative-cancellation checkpoint and found it was no
+            # longer wanted raises out of its container, and a detached
+            # executor reports any escaping exception as a failure -- but
+            # the task it would be reported against is either cancelled or
+            # running under somebody else, and a failure report writes
+            # through. So this build would end by marking a live execution
+            # failed, or a cancelled task failed, on the strength of a
+            # worker agreeing to stop. Counted locally, said to nobody.
+            cancelled_itself = isinstance(result.exception, ExecutionCancelled)
             await release_lock_for_task(task, completed=False)
             try:
-                await registry.task_fail_aio(build_id, task, str(result))
+                if cancelled_itself:
+                    logger.info(
+                        f"Execution of task {task.id} stopped at a cooperative "
+                        "cancellation checkpoint; recording nothing against "
+                        "the task, which is cancelled or somebody else's."
+                    )
+                else:
+                    await registry.task_fail_aio(build_id, task, str(result))
             except Exception as reg_err:
                 handle_registry_error(
                     reg_err,
@@ -1611,7 +1630,7 @@ async def build_aio(
 
     async def registry_task_start(
         task: BaseTask, handle: DetachedHandle | None
-    ) -> None:
+    ) -> LockAcquisitionResult | None:
         """Emit TASK_STARTED, with the detached-execution ref when present.
 
         Carries the identity the claim was taken with, so this start
@@ -1634,8 +1653,20 @@ async def build_aio(
         that can.** It is already running and its reference was never
         recorded, so nothing else can address it — the same reasoning as
         the tick's, and the half that is easy to miss because the
-        exception handling looks complete without it. Best-effort, and
-        then the refusal propagates as before.
+        exception handling looks complete without it.
+
+        Then this returns a **local** failure rather than propagating,
+        and that distinction is the whole point. Propagating sends the
+        refusal through the generic error path into ``process_result``,
+        which posts ``TASK_FAILED`` — against a task that another build
+        is now running, or that was just cancelled. The report writes
+        through, so losing a race would end with this build marking
+        somebody else's live execution failed, which is the very class of
+        damage the refusal exists to prevent. Returning a
+        ``LockAcquisitionResult`` takes the path the claim-loser timeout
+        already uses: counted as a local failure, ``fail_mode`` honoured,
+        and **nothing said to the registry about a task that is not
+        ours**.
         """
         execution_id = task_states[task.id].execution_id
         if handle is None:
@@ -1653,10 +1684,11 @@ async def build_aio(
         except APIError as start_err:
             if not execution_not_wanted(start_err):
                 raise
+            reason = (start_err.payload or {}).get("error_code")
             logger.warning(
                 f"Task {task.id} stopped being ours while its execution was "
-                f"being spawned; the registry refused the ref. Stopping the "
-                f"orphaned execution {handle.ref!r}."
+                f"being spawned ({reason}); the registry refused the ref. "
+                f"Stopping the orphaned execution {handle.ref!r}."
             )
             try:
                 await task_executor.cancel_detached(task, handle.executor, handle.ref)
@@ -1666,7 +1698,16 @@ async def build_aio(
                     f"task {task.id}; it will run until its next cooperative "
                     f"checkpoint: {cancel_err}"
                 )
-            raise
+            return LockAcquisitionResult(
+                status=LockAcquisitionStatus.HELD_BY_OTHER,
+                acquired=False,
+                error_message=(
+                    f"The task stopped being this build's while its execution "
+                    f"was being spawned ({reason}); the orphaned execution was "
+                    f"stopped and nothing was recorded against the task."
+                ),
+            )
+        return None
 
     async def submit_with_lock(
         task: BaseTask,
@@ -1842,7 +1883,9 @@ async def build_aio(
                 # are tolerated by the registry.
                 if state.registered:
                     try:
-                        await registry_task_start(task, handle)
+                        lost = await registry_task_start(task, handle)
+                        if lost is not None:
+                            return lost
                         state.started = True
                     except Exception as reg_err:
                         handle_registry_error(
@@ -1855,7 +1898,9 @@ async def build_aio(
                 # happens before the spawn): record the executor ref with a
                 # plain, tolerated-duplicate start.
                 try:
-                    await registry_task_start(task, handle)
+                    lost = await registry_task_start(task, handle)
+                    if lost is not None:
+                        return lost
                 except Exception as reg_err:
                     handle_registry_error(
                         reg_err,

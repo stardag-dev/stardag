@@ -140,6 +140,15 @@ but _is_ reported as a completion, and the backend call succeeds — which a
 scheduler reads as "the worker wrote it, eventual consistency".
 `ExecutionCancelled` is recognised and records nothing at all.
 
+**Losing a task is never reported as that task's failure.** A worker that
+stops itself raises out of its container, and a detached executor reports
+any escaping exception as a failure — but the task it would be reported
+against is cancelled or running under somebody else, and a failure report
+writes through. So a worker politely agreeing to stop would have ended
+with the build marking a live execution failed. Counted as a local failure
+instead: the build still fails, and says nothing about a task that is not
+its own. The same applies when a build's post-spawn start is refused.
+
 **A worker never stops on silence.** An unreachable registry, a transport
 failure, a server predating the endpoint and a registry with no opinion all
 answer `False`. Stopping needs positive evidence, because stopping a

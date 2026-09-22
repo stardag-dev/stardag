@@ -48,10 +48,14 @@ class FakeDetachedExecutor(TaskExecutorABC):
         detached: bool = True,
         live_refs: set[str] | None = None,
         spawn_error: Exception | None = None,
+        run_error: BaseException | None = None,
     ) -> None:
         self.detached = detached
         self.live_refs = live_refs or set()
         self.spawn_error = spawn_error
+        # Raised from the "remote" execution rather than from the spawn:
+        # the shape of a worker that started and then stopped itself.
+        self.run_error = run_error
         self.submit_calls: list[UUID] = []
         self.spawn_calls: list[UUID] = []
         # The identity each spawn was handed, in spawn order.
@@ -63,6 +67,8 @@ class FakeDetachedExecutor(TaskExecutorABC):
         self.cancel_detached_calls: list[tuple[UUID, str, str]] = []
 
     async def _run_inline(self, task: BaseTask) -> None | TaskStruct:
+        if self.run_error is not None:
+            raise self.run_error
         result = task.run()
         assert result is None, "FakeDetachedExecutor only supports simple tasks"
         return None
