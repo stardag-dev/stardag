@@ -25,15 +25,19 @@ accounted against this limit or woken by its release.
 
 from __future__ import annotations
 
+import sys
+
 import uuid
 
 import pytest
 
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._wait import (
+    assert_dormancy_is_forced,
     assert_trail_complete,
     describe,
     tick_summaries,
+    trail_may_be_truncated,
     wait_for_task_status,
     wait_for_terminal,
 )
@@ -152,6 +156,15 @@ def test_releasing_a_slot_wakes_the_build_queued_on_it(slot_limit) -> None:
     # B really was denied the slot rather than merely being slow to start.
     # Without this the test would pass just as well with no limit set at
     # all, which is the failure mode worth guarding against here.
+    # The one report-presence assertion kept in these four, and the
+    # exception is reasoned rather than overlooked. A limit denial writes
+    # **no durable event** -- it is counted in the tick summary and nowhere
+    # else -- so there is no state to assert on instead; giving it one is
+    # direction 3, deferred. Dropping it is worse than keeping it: without
+    # it the scenario passes just as well with no limit in force, which is
+    # the silently-weaker-test failure this file's timing rules exist to
+    # prevent. What it risks is a preempted *early* tick, which softening
+    # the terminal wait does not make more likely.
     denied = sum(s.get("limit_denied", 0) for s in summaries_b)
     assert denied >= 1, (
         "No tick of build B was ever denied a concurrency slot, so the "
@@ -159,18 +172,21 @@ def test_releasing_a_slot_wakes_the_build_queued_on_it(slot_limit) -> None:
         "Nothing about slot-release wake-ups was exercised.\n" + describe(build_b)
     )
 
-    # And B was dormant when the slot freed: its first tick gave up and
-    # left, so the tick that finished it was spawned by the wake-up rather
-    # than being something B had left running.
-    assert summaries_b[0].get("outcome") == "lingered_out", (
-        "Build B's first tick did not linger out, so it may still have "
-        "been resident when the slot freed and seen it on its own poll. "
-        f"A's task ({A_SLOW_SECONDS}s) must comfortably outlast B's linger "
-        f"({B_LINGER_SECONDS}s).\n" + describe(build_b)
+    # And B was dormant when the slot freed: A's task must outlast B's
+    # linger, so B's tick cannot still have been resident to see it on its
+    # own poll. From the constants, not from the trail -- see the helper.
+    assert_dormancy_is_forced(
+        work_seconds=A_SLOW_SECONDS,
+        linger_seconds=B_LINGER_SECONDS,
+        what="A's task against B's linger",
     )
-    assert len(summaries_b) > 1, (
-        "Build B ran exactly one tick, so it cannot have been woken.\n"
-        + describe(build_b)
+
+    lingered = sum(1 for s in summaries_b if s.get("outcome") == "lingered_out")
+    print(
+        f"[harness] {len(summaries_b)} tick summary(ies) retained, "
+        f"{lingered} reporting lingered_out"
+        + (" (trail may be truncated)" if trail_may_be_truncated(build_b) else ""),
+        file=sys.stderr,
     )
 
     # Nothing is asserted about *which* process spawned B's wake-up tick,

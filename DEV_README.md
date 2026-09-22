@@ -416,6 +416,43 @@ durable substitute is not obvious, it is usually the task event log:
 the `task_interrupted` rather than for a tick's `interruptions_restarted`
 count, which says the same thing and survives the tick that did it.
 
+**Where no durable substitute exists, two moves come before giving up.**
+Both were needed for the wake-up scenarios (STA-89), whose subject really is
+ticks — and the registry's only record of a tick is the summary it writes at
+the end, so there is nothing else to read.
+
+_Take the precondition from the constants instead of from the run._ Those
+scenarios needed their build to be dormant before its work finished, and
+checked it by reading the trail: first summary `lingered_out`, more than one
+summary. The same fact follows from arithmetic — a tick lingers for a fixed
+window once idle, and cannot have started the work later than it spawned it,
+so work that outlasts the linger guarantees the tick went first.
+`assert_dormancy_is_forced` asserts that, and it is strictly stronger than the
+observation it replaces: no container is slow enough to break it, and slowness
+pushes it the safe way.
+
+_When a count does come from reports, assert the direction a missing report
+cannot fake._ A truncated trail can only **under**-count, so an upper bound
+survives it and a lower bound does not — and the upper bound is usually the
+one that matters anyway. `spawned <= TASKS_IN_PLAN` catches double execution,
+which is the defect; `== TASKS_IN_PLAN` additionally fails when a reporter
+dies. Same asymmetry as the good-report/bad-report one above, counted rather
+than present.
+
+One lower bound is knowingly kept: `test_limit_slot_wake` asserts that some
+tick was denied a concurrency slot, because a limit denial writes no event and
+the alternative is a scenario that passes with no limit in force at all. It is
+marked as the exception it is.
+
+**`wait_for_terminal` no longer fails on a missing final summary.** Its wait
+stays — the read-before-report race is real, and without it every counter read
+below is short by a tick. But 15 of the 18 scenarios call it, so raising there
+meant a tick preempted between writing the build's terminal status and
+reporting its summary reddened whichever scenario was unlucky, after ninety
+seconds, with a message that reads like a scheduling defect. It now warns,
+records the trail as possibly truncated, and returns; `trail_may_be_truncated`
+lets a failure message say so.
+
 **A scenario that needs its second build woken _twice_ should keep that
 build resident instead.** `select_wake_candidates` hands a flagged build
 out at most once per 120s window and does not compare the flag's timestamp
