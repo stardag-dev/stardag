@@ -84,7 +84,7 @@ def _owner(task_id: str):
     return find_task(task_id, task_name="Slow").latest_status_build_id
 
 
-def test_a_cancelled_build_stops_its_own_executions_and_no_others() -> None:
+def test_a_cancelled_build_cannot_touch_another_builds_execution() -> None:
     from stardag.integration.modal._spawn import spawn_tick
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.dag_app import APP_NAME, app
