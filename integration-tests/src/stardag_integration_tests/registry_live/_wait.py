@@ -231,10 +231,13 @@ def require_complete_trail(build_id: UUID, *, what: str) -> None:
         + what
         + " is read off build "
         + str(build_id)
-        + "'s tick trail, and the tick that ended that build never reported "
-        "its summary, so the trail is short by an entry and the count is "
-        "short by its contribution. Not a pass and not a failure; the "
-        "durable assertions above this one ran."
+        + "'s tick trail, and no terminal tick summary was ever observed "
+        "for it -- so the trail may be incomplete and the count short by "
+        "whatever it is missing. Usually that is a tick preempted between "
+        "writing the build's terminal status and reporting, but the build "
+        "may equally have been ended by something that is not a tick at "
+        "all; this cannot tell them apart and does not try. Not a pass and "
+        "not a failure; the durable assertions above this one ran."
     )
 
 

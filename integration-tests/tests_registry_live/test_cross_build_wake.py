@@ -12,8 +12,11 @@ worth being explicit about the alternatives it rules out:
 
 - **B's own tick did not notice.** B is triggered with a short linger and
   the shared task outlives it, so by the time A completes, B is dormant:
-  no container of its own anywhere. The assertion on B's first tick outcome
-  is what pins that down.
+  no container of its own anywhere. Two things pin that down:
+  ``assert_remaining_work_outlasts_linger`` before B is triggered, which
+  requires the work still to come to outlast B's linger, and -- behind the
+  inconclusive guard, since it is a trail reading -- that some tick of B
+  did linger out.
 - **A watchdog did not sweep it up.** The app deploys none, deliberately.
   A periodic sweep would make every build here eventually complete and
   would make this scenario prove nothing.
@@ -56,9 +59,10 @@ pytestmark = [
 
 # The shared task must outlive B's tick by a clear margin. These two
 # numbers are the scenario; if they ever cross, it silently degrades into
-# "a tick watched a task finish" and still passes. The assertion on B's
-# first tick outcome is what catches that, which is what allows these to be
-# sized tightly rather than padded.
+# "a tick watched a task finish" and still passes. The measured
+# precondition catches that before B is triggered, and the lingered-out
+# observation catches it afterwards, which is what allows these to be sized
+# tightly rather than padded.
 SHARED_SLEEP_SECONDS = 75
 B_LINGER_SECONDS = 15
 
