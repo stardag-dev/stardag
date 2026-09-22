@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchTasks } from "../api/tasks";
-import type { BuildStatus } from "../types/task";
+import type { Build, BuildStatus } from "../types/task";
 import { modalFunctionCallUrl } from "../utils/modalLinks";
 import {
   CLAIM_PAGE_SIZE,
@@ -19,6 +19,8 @@ import {
 import { formatAbsoluteTime, formatDuration } from "../utils/time";
 import { StatusBadge } from "./StatusBadge";
 import { Modal } from "./Modal";
+import { BuildOverrideSection } from "./BuildOverrideSection";
+import { canOverrideStatus } from "../utils/builds";
 import { Checkbox } from "./ui/Checkbox";
 import { ToolbarButton } from "./ui/ToolbarButton";
 
@@ -53,7 +55,7 @@ export const MAX_ROWS_DRAWN = 50;
  */
 const CLI_MAX_CLAIM_HOLDERS = 20_000;
 
-interface BuildStopPanelProps {
+interface BuildControlsDialogProps {
   buildId: string;
   environmentId: string;
   /**
@@ -64,10 +66,12 @@ interface BuildStopPanelProps {
    */
   buildStatus: BuildStatus;
   /**
-   * Bumped by the parent on every refresh, so this panel refetches in
+   * Bumped by the parent on every refresh, so this dialog refetches in
    * step with the build view rather than running a timer of its own.
    */
   refreshToken?: number;
+  /** Called with the updated build after a status override lands. */
+  onBuildChanged: (build: Build) => void;
 }
 
 /**
@@ -95,12 +99,13 @@ interface BuildStopPanelProps {
  * have to remember each new piece of state someone adds, and forgetting
  * one shows a previous build's executions under this build's header.
  */
-export function BuildStopPanel({
+export function BuildControlsDialog({
   buildId,
   environmentId,
   buildStatus,
   refreshToken = 0,
-}: BuildStopPanelProps) {
+  onBuildChanged,
+}: BuildControlsDialogProps) {
   const [held, setHeld] = useState<StoppableExecution[] | null>(null);
   const [total, setTotal] = useState(0);
   const [truncated, setTruncated] = useState(false);
@@ -246,8 +251,8 @@ export function BuildStopPanel({
   return (
     <>
       <ToolbarButton
-        label="Stop running tasks"
-        hint="What this build still has running, and the command that stops it"
+        label="Build controls"
+        hint="Override the build status and, optionally, stop running tasks"
         align="right"
         onClick={() => setOpen(true)}
       >
@@ -271,9 +276,28 @@ export function BuildStopPanel({
       <Modal
         isOpen={open}
         onClose={() => setOpen(false)}
-        title="Stop running tasks"
+        title="Build controls"
         maxWidthClass="max-w-4xl"
       >
+        {/* The record first, then the work — and a rule between them,
+            because the whole difficulty is that these are two different
+            things and the UI used to present them as unrelated. */}
+        {canOverrideStatus(buildStatus) && (
+          <>
+            <BuildOverrideSection
+              buildId={buildId}
+              environmentId={environmentId}
+              buildStatus={buildStatus}
+              hasLiveExecutions={executions.length > 0}
+              onChanged={onBuildChanged}
+            />
+            <hr className="my-4 border-gray-200 dark:border-gray-700" />
+          </>
+        )}
+
+        <h3 className="mb-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
+          Stop running tasks
+        </h3>
         <StopDialogBody
           error={error}
           held={held}
@@ -283,9 +307,9 @@ export function BuildStopPanel({
         >
           <p className="text-xs text-gray-600 dark:text-gray-400">
             These are read off the task rows while this build still holds their claims,
-            which is the only moment the list is exact — cancelling the build releases
-            the claims, and another build may then take a task over. Stopping the
-            containers is the operator&rsquo;s to do:{" "}
+            which is the only moment the list is exact — releasing the claims lets
+            another build take a task over. Stopping the containers is the
+            operator&rsquo;s to do:{" "}
             <strong>stardag never reaches the execution backend from here.</strong> Run
             the command below, or open a call in Modal and kill it there.
           </p>
@@ -414,8 +438,9 @@ export function BuildStopPanel({
               </div>
               <p className="text-xs text-gray-600 dark:text-gray-400">
                 It stops these calls first and cancels the build afterwards, in that
-                order. Add <code>--dry-run</code> to see its own list before anything
-                happens.
+                order — so <strong>this is the whole operation</strong>, and there is no
+                need to override the status above as well. Add <code>--dry-run</code> to
+                see its own list before anything happens.
                 {excluded > 0 && (
                   <>
                     {" "}

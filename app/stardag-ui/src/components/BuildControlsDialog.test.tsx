@@ -3,11 +3,20 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BuildStatus, Task, TaskStatus } from "../types/task";
 import { CLAIM_PAGE_SIZE, MAX_CLAIM_PAGES } from "../utils/stoppable";
-import { BuildStopPanel, MAX_ROWS_DRAWN } from "./BuildStopPanel";
+import { BuildControlsDialog, MAX_ROWS_DRAWN } from "./BuildControlsDialog";
 
-vi.mock("../api/tasks", () => ({ fetchTasks: vi.fn() }));
+vi.mock("../api/tasks", () => ({
+  fetchTasks: vi.fn(),
+  cancelBuild: vi.fn(),
+  completeBuild: vi.fn(),
+  failBuild: vi.fn(),
+}));
 
-import { fetchTasks } from "../api/tasks";
+vi.mock("../context/AuthContext", () => ({
+  useAuth: () => ({ user: { profile: { sub: "user-1" } } }),
+}));
+
+import { cancelBuild, completeBuild, fetchTasks } from "../api/tasks";
 
 const BUILD = "11111111-1111-1111-1111-111111111111";
 const OTHER_BUILD = "22222222-2222-2222-2222-222222222222";
@@ -65,13 +74,16 @@ function answerWith(tasks: Task[], total = tasks.length) {
   });
 }
 
+const onBuildChanged = vi.fn();
+
 function renderPanel(buildStatus: BuildStatus = "running") {
   return render(
-    <BuildStopPanel
+    <BuildControlsDialog
       buildId={BUILD}
       environmentId="env-1"
       buildStatus={buildStatus}
       refreshToken={0}
+      onBuildChanged={onBuildChanged}
     />,
   );
 }
@@ -84,15 +96,18 @@ function renderPanel(buildStatus: BuildStatus = "running") {
  */
 async function openDialog(user: ReturnType<typeof userEvent.setup>) {
   renderPanel();
-  await user.click(screen.getByRole("button", { name: /Stop running tasks/ }));
+  await user.click(screen.getByRole("button", { name: "Build controls" }));
   await waitFor(() => expect(fetchTasks).toHaveBeenCalled());
 }
 
 beforeEach(() => {
   vi.mocked(fetchTasks).mockReset();
+  vi.mocked(cancelBuild).mockReset();
+  vi.mocked(completeBuild).mockReset();
+  onBuildChanged.mockReset();
 });
 
-describe("BuildStopPanel", () => {
+describe("BuildControlsDialog", () => {
   it("says nothing is running rather than showing an empty dialog", async () => {
     // As a band above the DAG this rendered nothing at all, which was
     // right for something that appeared unbidden. In a dialog somebody
@@ -108,7 +123,11 @@ describe("BuildStopPanel", () => {
     // every 5s auto-refresh, drawing nothing (STA-83).
     answerWith([makeTask()]);
     renderPanel();
-    await waitFor(() => expect(screen.getByRole("button")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Build controls" }),
+      ).toBeInTheDocument(),
+    );
     expect(fetchTasks).not.toHaveBeenCalled();
   });
 
@@ -134,7 +153,7 @@ describe("BuildStopPanel", () => {
     const user = userEvent.setup();
     renderPanel();
 
-    await user.click(screen.getByRole("button", { name: /Stop running tasks/ }));
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
 
     expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
     expect(screen.getByText(`stardag builds stop ${BUILD}`)).toBeInTheDocument();
@@ -144,7 +163,7 @@ describe("BuildStopPanel", () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     const link = screen.getByRole("link", { name: "fc-abc123" });
     expect(link).toHaveAttribute("href", expect.stringContaining("modal.com"));
@@ -169,7 +188,7 @@ describe("BuildStopPanel", () => {
     ]);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     await user.selectOptions(screen.getByLabelText("Worker"), "gpu");
 
@@ -198,7 +217,7 @@ describe("BuildStopPanel", () => {
     ]);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     await user.selectOptions(screen.getByLabelText("Executor"), "modal");
 
@@ -214,7 +233,7 @@ describe("BuildStopPanel", () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     expect(screen.queryByLabelText("Executor")).not.toBeInTheDocument();
   });
@@ -240,7 +259,7 @@ describe("BuildStopPanel", () => {
     ]);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     await user.click(screen.getByRole("checkbox", { name: /Include Featurise/ }));
     expect(
@@ -261,7 +280,7 @@ describe("BuildStopPanel", () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     await user.click(screen.getByRole("button", { name: "Copy" }));
 
@@ -279,7 +298,7 @@ describe("BuildStopPanel", () => {
       answerWith([makeTask()]);
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       const { unmount } = renderPanel();
-      await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+      await user.click(await screen.findByRole("button", { name: "Build controls" }));
       await user.click(screen.getByRole("button", { name: "Copy" }));
       expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
 
@@ -313,7 +332,7 @@ describe("BuildStopPanel", () => {
 
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     expect(vi.mocked(fetchTasks).mock.calls.map((c) => c[0]?.page)).toEqual([1, 2]);
     expect(screen.getByText("OnPageTwo")).toBeInTheDocument();
@@ -339,7 +358,7 @@ describe("BuildStopPanel", () => {
     answerWith([makeTask()], MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     expect(screen.getByText(/may be incomplete/)).toBeInTheDocument();
   });
@@ -353,7 +372,7 @@ describe("BuildStopPanel", () => {
     ]);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     // Nothing ticked means the command targets everything listed.
     expect(screen.getByText(`stardag builds stop ${BUILD}`)).toBeInTheDocument();
@@ -373,7 +392,7 @@ describe("BuildStopPanel", () => {
     answerWith([makeTask({ latest_executor: "prefect" })]);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     expect(
       screen.getByText(/run on an executor stardag cannot stop/),
@@ -388,7 +407,7 @@ describe("BuildStopPanel", () => {
     answerWith([makeTask({ latest_executor: null, latest_executor_ref: null })]);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     expect(screen.getByText("not recorded yet")).toBeInTheDocument();
     expect(screen.getByText(/have no call id on their row/)).toBeInTheDocument();
@@ -409,7 +428,7 @@ describe("BuildStopPanel", () => {
     ]);
     const user = userEvent.setup();
     renderPanel();
-    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+    await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     // Ambiguous, so it is grouped with the pending rows and the wording
     // names both possibilities rather than promising a call id.
@@ -423,6 +442,74 @@ describe("BuildStopPanel", () => {
     const user = userEvent.setup();
     await openDialog(user);
     expect(await screen.findByRole("alert")).toHaveTextContent("gateway timeout");
+  });
+
+  // --- Overriding the recorded status ---
+  //
+  // These live in the same dialog as the stop list because the two were
+  // confusable while they were separate controls: on a build you wanted
+  // stopped, "Cancel" looked like the answer, and it releases the claims
+  // while every container runs on.
+
+  it("warns that cancelling does not stop what is running", async () => {
+    answerWith([makeTask()]);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+
+    expect(screen.getByText(/releases its execution claims/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/do not cancel here — use the command below instead/i),
+    ).toBeInTheDocument();
+    // Nothing happened yet: the first click only asks.
+    expect(cancelBuild).not.toHaveBeenCalled();
+  });
+
+  it("says the command needs no override alongside it", async () => {
+    answerWith([makeTask()]);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    expect(
+      await screen.findByText(/no need to override the status above as well/i),
+    ).toBeInTheDocument();
+  });
+
+  it("does not warn about running work when there is none", async () => {
+    answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    expect(screen.queryByText(/use the command below instead/i)).toBeNull();
+  });
+
+  it("overrides only after the second, confirming click", async () => {
+    answerWith([makeTask()]);
+    vi.mocked(completeBuild).mockResolvedValue({ id: BUILD } as never);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    await user.click(await screen.findByRole("button", { name: "Mark completed" }));
+    expect(completeBuild).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Mark completed" }));
+    await waitFor(() =>
+      expect(completeBuild).toHaveBeenCalledWith(BUILD, "env-1", "user-1"),
+    );
+    expect(onBuildChanged).toHaveBeenCalled();
+  });
+
+  it("offers no override on a build whose record is already final", async () => {
+    answerWith([makeTask()]);
+    const user = userEvent.setup();
+    renderPanel("failed");
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+
+    expect(screen.queryByRole("button", { name: "Cancel build" })).toBeNull();
+    // The stop half is still there: a failed build's containers run on.
+    expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
   });
 
   // STA-83: rendering was uncapped while fetching was paginated, so a wide

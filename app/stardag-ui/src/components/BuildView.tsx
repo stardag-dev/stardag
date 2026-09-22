@@ -5,15 +5,7 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
-import {
-  cancelBuild,
-  completeBuild,
-  failBuild,
-  fetchBuild,
-  fetchBuildGraph,
-  fetchTasksInBuild,
-} from "../api/tasks";
-import { useAuth } from "../context/AuthContext";
+import { fetchBuild, fetchBuildGraph, fetchTasksInBuild } from "../api/tasks";
 import { useBreadcrumb, type BreadcrumbItem } from "../context/BreadcrumbContext";
 import { useEnvironment } from "../context/EnvironmentContext";
 import type {
@@ -26,12 +18,12 @@ import type {
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
-import { useClickOutside } from "../hooks/useClickOutside";
 import { rootsSatisfiedFrom } from "../utils/claims";
 import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildStatusBadge } from "./BuildStatusBadge";
-import { BuildStopPanel } from "./BuildStopPanel";
+import { BuildControlsDialog } from "./BuildControlsDialog";
 import { BuildInfoDialog } from "./BuildInfoDialog";
+import { ToolbarButton } from "./ui/ToolbarButton";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
 import {
@@ -51,7 +43,6 @@ interface BuildViewProps {
 
 export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps) {
   const { activeEnvironment } = useEnvironment();
-  const { user } = useAuth();
   const { setItems: setBreadcrumb } = useBreadcrumb();
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
@@ -77,13 +68,6 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   const [dagDirection, setDagDirection] = useState<LayoutDirection>("LR");
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
   const dagPositionCacheRef = useRef<PositionCache>(createPositionCache());
-
-  // Override state dropdown
-  const [showOverrideMenu, setShowOverrideMenu] = useState(false);
-  const [overriding, setOverriding] = useState(false);
-  const [overrideError, setOverrideError] = useState<string | null>(null);
-  const [overrideNotice, setOverrideNotice] = useState<string | null>(null);
-  const overrideMenuRef = useRef<HTMLDivElement>(null);
 
   // Refresh state
   const [refreshing, setRefreshing] = useState(false);
@@ -189,52 +173,6 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     };
   }, [autoRefresh, build?.status, handleRefresh]);
 
-  // Override state handlers
-  const handleOverride = useCallback(
-    async (action: "cancel" | "complete" | "fail") => {
-      if (!activeEnvironment?.id || !buildId) return;
-
-      const actionLabels = {
-        cancel: "cancel",
-        complete: "mark as completed",
-        fail: "mark as failed",
-      };
-
-      const confirmed = window.confirm(
-        `Are you sure you want to ${actionLabels[action]} this build?`,
-      );
-      if (!confirmed) return;
-
-      setShowOverrideMenu(false);
-      setOverriding(true);
-      setOverrideError(null);
-      setOverrideNotice(null);
-
-      const userId = user?.profile?.sub;
-
-      try {
-        let updatedBuild: Build;
-        if (action === "cancel") {
-          updatedBuild = await cancelBuild(buildId, activeEnvironment.id, userId);
-        } else if (action === "complete") {
-          updatedBuild = await completeBuild(buildId, activeEnvironment.id, userId);
-        } else {
-          updatedBuild = await failBuild(buildId, activeEnvironment.id, userId);
-        }
-        setBuild(updatedBuild);
-      } catch (err) {
-        setOverrideError(
-          err instanceof Error
-            ? err.message
-            : `Failed to ${actionLabels[action]} build`,
-        );
-      } finally {
-        setOverriding(false);
-      }
-    },
-    [activeEnvironment?.id, buildId, user?.profile?.sub],
-  );
-
   // ESC to exit DAG fullscreen
   useEffect(() => {
     if (!dagFullscreen) return;
@@ -244,9 +182,6 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [dagFullscreen]);
-
-  const closeOverrideMenu = useCallback(() => setShowOverrideMenu(false), []);
-  useClickOutside(overrideMenuRef, showOverrideMenu, closeOverrideMenu);
 
   // Double-click refresh to toggle auto-refresh
   const handleRefreshClick = useCallback(() => {
@@ -267,12 +202,6 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       }
     }
   }, [autoRefresh, handleRefresh]);
-
-  // Can override if build is in an active or stuck state
-  const canOverride =
-    build?.status === "running" ||
-    build?.status === "pending" ||
-    build?.status === "exit_early";
 
   // Update breadcrumb navigation
   useEffect(() => {
@@ -445,35 +374,61 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
             <div className="flex h-full flex-col">
               {/* The build view tool and info bar.
 
-                  Three roles, always in the same order: narrow the task
-                  list, read what this build *is*, act on it. Everything
-                  that used to be a full-width band between the header
-                  and the DAG is reachable from here instead — the chips
-                  that were crowding the breadcrumb, and the build
-                  config that had its own strip. */}
+                  Two clusters. On the left, everything about *this list
+                  of tasks*: narrowing it, how many there are, and
+                  refreshing it. On the right, everything about *the
+                  build*: what it is, what the scheduler makes of it, and
+                  what you can do to it.
+
+                  Every one of the right-hand controls is an icon with a
+                  tooltip that appears at once — see `ui/ToolbarButton`.
+                  Between them they replaced four coloured pills and two
+                  full-width bands, so nothing now sits between this row
+                  and the DAG except a failed build's reason. */}
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-200 bg-white px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
-                {/* 1 — narrow */}
-                <div className="flex items-center gap-2">
+                {/* The task list */}
+                <div className="flex min-w-0 flex-1 items-center gap-2">
                   <TaskFilters
                     nameFilter={nameFilter}
                     onNameFilterChange={handleSetNameFilter}
                     statusFilter={statusFilter}
                     onStatusFilterChange={handleSetStatusFilter}
                   />
-                </div>
-
-                {/* 2 — what this build is.
-
-                    One icon, not four pills. The Modal app, the reactive
-                    flag, the structure scope and the build config are
-                    fixed facts about a build, not status, and as coloured
-                    badges they read as the latter — while being truncated
-                    so far that a scope key said nothing. They are in the
-                    dialog behind this icon, at full length. */}
-                <div className="flex min-w-0 flex-1 items-center gap-1.5">
                   <span className="text-xs whitespace-nowrap text-gray-500 dark:text-gray-400">
                     {realTasks.length} task{realTasks.length === 1 ? "" : "s"}
                   </span>
+                  <ToolbarButton
+                    label={autoRefresh ? "Stop auto-refreshing" : "Refresh"}
+                    hint={
+                      autoRefresh
+                        ? "Refreshing every 5 seconds"
+                        : "Double-click to refresh every 5 seconds"
+                    }
+                    onClick={handleRefreshClick}
+                    disabled={refreshing && !autoRefresh}
+                    active={autoRefresh}
+                  >
+                    <svg
+                      aria-hidden="true"
+                      className={`h-4 w-4 ${
+                        refreshing || autoRefresh ? "animate-spin" : ""
+                      }`}
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                      />
+                    </svg>
+                  </ToolbarButton>
+                </div>
+
+                {/* The build */}
+                <div className="flex items-center gap-1.5">
                   <BuildInfoDialog build={build} />
                   {activeEnvironment?.id && (
                     <BuildSchedulingPanel
@@ -485,117 +440,15 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                       onChanged={handleRefresh}
                     />
                   )}
-                </div>
-
-                {/* 3 — act */}
-                <div className="flex items-center gap-1.5">
-                  {/* What this build still has running, and the command
-                      that stops it. An icon rather than a band above the
-                      DAG; it never stops anything itself. */}
                   {activeEnvironment?.id && (
-                    <BuildStopPanel
+                    <BuildControlsDialog
                       key={buildId}
                       buildId={buildId}
                       environmentId={activeEnvironment.id}
                       buildStatus={build.status}
                       refreshToken={refreshToken}
+                      onBuildChanged={setBuild}
                     />
-                  )}
-                  <button
-                    onClick={handleRefreshClick}
-                    disabled={refreshing && !autoRefresh}
-                    className={`rounded-md p-1 transition-colors ${
-                      autoRefresh
-                        ? "bg-blue-100 text-blue-700 ring-2 ring-blue-400 dark:bg-blue-900/30 dark:text-blue-400"
-                        : "text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-                    } disabled:opacity-50`}
-                    title={
-                      autoRefresh
-                        ? "Auto-refreshing (click to stop)"
-                        : "Click to refresh, double-click for auto-refresh"
-                    }
-                  >
-                    <svg
-                      className={`h-4 w-4 ${
-                        refreshing || autoRefresh ? "animate-spin" : ""
-                      }`}
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                      />
-                    </svg>
-                  </button>
-                  {canOverride && (
-                    <div className="relative" ref={overrideMenuRef}>
-                      <button
-                        onClick={() => setShowOverrideMenu(!showOverrideMenu)}
-                        disabled={overriding}
-                        className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
-                      >
-                        {overriding ? "..." : "Override"}
-                        <svg
-                          className={`h-3 w-3 transition-transform ${
-                            showOverrideMenu ? "rotate-180" : ""
-                          }`}
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M19 9l-7 7-7-7"
-                          />
-                        </svg>
-                      </button>
-                      {showOverrideMenu && (
-                        <div className="absolute right-0 z-10 mt-1 w-56 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 dark:bg-gray-800 dark:ring-gray-700">
-                          <div className="py-1">
-                            <button
-                              onClick={() => handleOverride("complete")}
-                              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
-                            >
-                              <span className="h-2 w-2 rounded-full bg-green-500" />
-                              Mark Completed
-                            </button>
-                            <button
-                              onClick={() => handleOverride("fail")}
-                              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
-                            >
-                              <span className="h-2 w-2 rounded-full bg-red-500" />
-                              Mark Failed
-                            </button>
-                            <button
-                              onClick={() => handleOverride("cancel")}
-                              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
-                            >
-                              <span className="h-2 w-2 rounded-full bg-gray-500" />
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {overrideError && (
-                    <span className="text-xs text-red-600 dark:text-red-400">
-                      {overrideError}
-                    </span>
-                  )}
-                  {overrideNotice && (
-                    <span
-                      role="status"
-                      className="text-xs text-green-700 dark:text-green-400"
-                    >
-                      {overrideNotice}
-                    </span>
                   )}
                 </div>
               </div>
