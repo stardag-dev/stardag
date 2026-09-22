@@ -39,10 +39,19 @@ async def _handle_terminal(
     work in flight, or is waiting on a concurrency-limit slot.
     """
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
-        # Nothing to do but report it. The claims are already gone: a
-        # build going terminal releases them in the transaction that made
-        # it terminal, server-side, whichever route it took. This tick
-        # reaches into no container and releases nothing.
+        # Nothing to do but report it. This tick reaches into no
+        # container and releases nothing.
+        #
+        # Usually the claims are already gone: a cancel and a fail release
+        # them server-side, in the transaction that made the build
+        # terminal. Not always, and the exception is worth knowing before
+        # relying on it -- a build swept by the reaper with
+        # ``ReaperSettings.cascade`` off, or bulk-cancelled with its
+        # ``cascade`` off, is terminal with its claims still held until
+        # they expire. Either way there is nothing for this tick to do:
+        # releasing is the server's, and it is not this build's tick that
+        # would know which path brought it here. STA-103 removes those two
+        # switches.
         #
         # The drain used to do both from here, and that is what it got
         # wrong: it released claims for containers it had asked a backend
