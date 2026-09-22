@@ -4,9 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BreadcrumbProvider, useBreadcrumb } from "../context/BreadcrumbContext";
 import type { Build, Task } from "../types/task";
 
+let mockEnvironmentId = "env-1";
 vi.mock("../context/EnvironmentContext", () => ({
   useEnvironment: () => ({
-    activeEnvironment: { id: "env-1", slug: "default", name: "default" },
+    activeEnvironment: { id: mockEnvironmentId, slug: "default", name: "default" },
   }),
 }));
 
@@ -117,6 +118,7 @@ function renderView() {
 
 describe("BuildView header and tool-and-info bar", () => {
   beforeEach(() => {
+    mockEnvironmentId = "env-1";
     vi.mocked(fetchBuild).mockResolvedValue(makeBuild());
     vi.mocked(fetchTasksInBuild).mockResolvedValue([makeTask()]);
     vi.mocked(fetchBuildGraph).mockResolvedValue({ nodes: [], edges: [] });
@@ -267,6 +269,56 @@ describe("BuildView header and tool-and-info bar", () => {
     );
 
     await waitFor(() => expect(screen.queryByText("Parked")).toBeNull());
+  });
+
+  // Changing environment restarts the load with the same `buildId`, so
+  // an identity check on the build id alone cannot see it — and the
+  // component stays mounted across the switch.
+  it("shows the loader when the environment changes under the same build", async () => {
+    const view = renderView();
+    expect(await screen.findByText("Parked")).toBeInTheDocument();
+
+    vi.mocked(fetchBuild).mockReturnValue(new Promise(() => {}) as never);
+    mockEnvironmentId = "env-2";
+    view.rerender(
+      <BreadcrumbProvider>
+        <CrumbProbe />
+        <BuildView buildId={BUILD_ID} onBack={vi.fn()} />
+      </BreadcrumbProvider>,
+    );
+
+    await waitFor(() => expect(screen.queryByText("Parked")).toBeNull());
+  });
+
+  // A slow read for the build you navigated away from used to land,
+  // overwrite the build and clear `loading` — after which nothing
+  // downstream could tell that the wrong build was on screen.
+  it("ignores a superseded read that lands after navigation", async () => {
+    const OTHER = "02b1d6d4-0000-7000-8000-000000000000";
+    let landFirst: (b: Build) => void = () => {};
+    vi.mocked(fetchBuild).mockReturnValue(
+      new Promise<Build>((resolve) => {
+        landFirst = resolve;
+      }) as never,
+    );
+
+    const view = renderView();
+    // Navigate before the first read has answered.
+    vi.mocked(fetchBuild).mockReturnValue(new Promise(() => {}) as never);
+    view.rerender(
+      <BreadcrumbProvider>
+        <CrumbProbe />
+        <BuildView buildId={OTHER} onBack={vi.fn()} />
+      </BreadcrumbProvider>,
+    );
+
+    // The abandoned read answers now, with the first build.
+    landFirst(makeBuild());
+    await waitFor(() => expect(fetchBuild).toHaveBeenCalledTimes(2));
+
+    // It must neither render nor declare the view settled.
+    expect(screen.queryByText("golden-diamond-28")).toBeNull();
+    expect(screen.queryByText("Parked")).toBeNull();
   });
 
   it("says nothing about a config the build never set", async () => {

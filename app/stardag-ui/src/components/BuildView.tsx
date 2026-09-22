@@ -98,6 +98,19 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   const [page, setPage] = useState(1);
   const pageSize = 20;
 
+  // What is on screen, and what was asked for. The pair is the identity
+  // of a load: the same build id read under a different environment is a
+  // different thing to show, and comparing only the build id misses an
+  // environment switch entirely — `BuildView` stays mounted through one.
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const requestedKey = `${activeEnvironment?.id ?? ""}:${buildId}`;
+  // Stale-response guard, the same shape the panels in this view already
+  // use. Without it a slow read for the previous build can land after
+  // navigation, overwrite `build`, and drop `loading` — at which point
+  // no guard downstream can tell that what is rendered is the wrong
+  // build.
+  const loadEpochRef = useRef(0);
+
   // Load build data
   const loadBuild = useCallback(async () => {
     if (!activeEnvironment?.id || !buildId) {
@@ -105,6 +118,9 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       return;
     }
 
+    const epoch = ++loadEpochRef.current;
+    const fresh = () => loadEpochRef.current === epoch;
+    const key = `${activeEnvironment.id}:${buildId}`;
     setLoading(true);
     setError(null);
     try {
@@ -117,13 +133,19 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
           max_per_type_per_level: dagControls.maxPerType,
         }),
       ]);
+      if (!fresh()) return;
       setBuild(buildData);
       setAllTasks(tasksData);
       setGraph(graphData);
+      setLoadedKey(key);
     } catch (err) {
+      if (!fresh()) return;
       setError(err instanceof Error ? err.message : "Failed to load build");
     } finally {
-      setLoading(false);
+      // Only the newest request may declare the view settled. A
+      // superseded one clearing this would expose whatever is on screen
+      // as though it were the answer.
+      if (fresh()) setLoading(false);
     }
   }, [
     activeEnvironment?.id,
@@ -342,13 +364,13 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // the refresh icon's own spin is the right size of signal.
   //
   // But `!build` is the wrong test for that, because this component
-  // stays mounted across a change of `buildId` and holds the previous
-  // build's data while the new one loads — so the old DAG, rows and
-  // controls would render under the new build's header. Comparing the
-  // loaded id with the requested one distinguishes the two cases: a
-  // refresh matches and keeps the view, navigation does not and gets
-  // the loader.
-  if (loading && build?.id !== buildId) {
+  // stays mounted across a change of build *or environment* and holds
+  // the previous data while the new load runs — so the old DAG, rows
+  // and controls would render under the new header. Comparing what is
+  // loaded against what was asked for distinguishes the two cases: a
+  // refresh matches and keeps the view, a change of either does not and
+  // gets the loader.
+  if (loading && loadedKey !== requestedKey) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
