@@ -865,6 +865,12 @@ def builds_stop(
                 )
 
         try:
+            # ``cascade=True`` is belt and braces. Against a current
+            # registry the release is unconditional and the parameter is
+            # an accepted no-op; against an older one it is the only thing
+            # that releases the claims, and this command's whole promise
+            # is that the stop happened first and the claims go after. So
+            # it is passed explicitly rather than relying on either.
             registry.build_cancel(parsed, cascade=True)
         except StardagError as e:
             _fail(e)

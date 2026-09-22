@@ -977,8 +977,10 @@ class RegistryABC(metaclass=abc.ABCMeta):
         call idempotent. Reactive builds are excluded unless
         ``include_reactive`` (or ``reactive_app_name``) says otherwise:
         they are quiet between ticks *by design*, so quiet does not mean
-        abandoned. ``cascade`` defaults True here (unlike the single-build
-        cancel) because releasing leaked claims is the entire point.
+        abandoned. ``cascade`` is honoured here and defaults True, because
+        releasing leaked claims is the entire point — unlike the
+        single-build cancel, where it is an accepted no-op and the release
+        is unconditional. Removing this switch too is STA-103.
 
         ``dry_run=True`` reports the exact same selection — builds, the
         tasks a real run would cancel, and the per-build ``skipped``

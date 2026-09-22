@@ -244,10 +244,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   defaults to true. So the word now means two things: on the single-build
   route it is ignored and the claims always go, while on the bulk route
   `cascade: false` still means "record the events and release nothing".
-  Left that way deliberately — the bulk parameter is a user-facing toggle
-  in the UI's bulk-cancel dialog, and changing it is a separate decision
-  from this one — but do not carry "cascade is a no-op" from one route to
-  the other.
+  The reaper has the same switch, `ReaperSettings.cascade`
+  (`STARDAG_API_REAPER_CASCADE`, default true). Both are left that way
+  deliberately — they are operator-facing controls, and changing them is a
+  separate decision from this one — so do not carry "cascade is a no-op"
+  from the single-build route to either. **Removing both, so a terminal
+  build always releases, is tracked as STA-103.**
 
   **The window this opens, stated honestly.** A release lets the next
   build take the task over within seconds, while the old container is

@@ -2,16 +2,21 @@
 
 A build whose orchestrator died without emitting a terminal event stays
 RUNNING forever: interrupted local builds, crashed CI runs and failed
-triggers accumulate permanently. Worse, cancelling a build has never
-cascaded to its tasks, so a task left RUNNING keeps denying its execution
-claim — ``latest_status`` is environment-global — to every future build that
-needs it, and keeps occupying its concurrency-limit slots.
+triggers accumulate permanently. And a task left RUNNING keeps denying its
+execution claim — ``latest_status`` is environment-global — to every future
+build that needs it, and keeps occupying its concurrency-limit slots.
+
+Cancelling a build used not to release those either; since STA-81 it does,
+unconditionally, and so does failing one.
 
 This module is the shared machinery for fixing that: selecting builds that
 are genuinely abandoned, and cancelling a build together with the claims it
-holds. ``routes/builds.py`` exposes it (single-build cascade, bulk cancel,
-and the reaper — bulk cancel with an idleness filter); ``main.py`` can
-optionally drive the sweep on a timer.
+holds. ``routes/builds.py`` exposes it from four places: the single-build
+cancel and fail, which always release; bulk cancel, which honours its
+request's ``cascade``; and the reaper, which honours
+``ReaperSettings.cascade`` (bulk cancel with an idleness filter). ``main.py``
+can optionally drive the sweep on a timer. Removing the last two switches is
+STA-103.
 
 Everything here is idempotent. Cancelling a build that is already terminal
 is a no-op, so a retried call, two racing operators, or two API replicas
@@ -218,7 +223,8 @@ async def cascade_cancel_build_tasks(
     build event and leaves the claims to expire — deliberately, since both
     are operator-facing controls, but it means "a terminal build has
     released its claims" is true of the defaults rather than of the
-    system.
+    system. **Both switches are temporary** — removing them, so the rule
+    holds without exception, is STA-103.
 
     Neither of the first two used to reach here on its own. A cancel
     released only when asked (``cascade=true``) and a failure never did;
@@ -226,8 +232,10 @@ async def cascade_cancel_build_tasks(
     scheduler's cancel drain writing TASK_CANCELLED per execution as a side
     effect of stopping containers. Deleting that drain (STA-81) took the
     release with it and exposed a behaviour nobody had chosen, so the
-    release moved into the transitions themselves, which is where it
-    belonged. ``cascade`` survives as an accepted no-op.
+    release moved into those two transitions themselves, which is where it
+    belonged. The single-build cancel's own ``cascade`` survives there as an
+    accepted no-op; the bulk and reaper switches still decide, until
+    STA-103 removes them.
 
     Precisely:
 

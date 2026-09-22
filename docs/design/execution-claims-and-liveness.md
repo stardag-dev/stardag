@@ -128,7 +128,8 @@ request's `cascade`, and the reaper honours `ReaperSettings.cascade`, both
 defaulting to on. With either turned off the build event is recorded and
 the claims lapse on their own expiry. So the rule below describes the
 defaults rather than the system, and the exception is a control somebody
-asked for rather than an oversight.
+asked for rather than an oversight. **Both are temporary**: removing them,
+so the rule holds without exception, is tracked as STA-103.
 
 That rule was the decision, and it was not what the code did. A cancel
 released only when asked (`cascade=true`) and a failure never did; what
