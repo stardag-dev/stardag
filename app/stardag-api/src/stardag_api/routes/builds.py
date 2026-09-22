@@ -634,13 +634,22 @@ def _claim_is_this_same_execution(
     would start granting real double-claims, which is the thing the claim
     exists to prevent.
 
-    ``(executor, executor_ref)`` is what separates them: a retry repeats
-    the pair (same request, same payload), a genuine second attempt
-    carries the new execution's own. So all of build, executor and ref
-    must match, and **a request without a ref is always refused** -- with
-    nothing to compare, a retry and a second attempt are
-    indistinguishable, and the safe answer to "I cannot tell" is the one
-    that never double-claims.
+    ``execution_id`` is what separates them, when the caller mints one:
+    a retry repeats it (same request, same payload), a genuine second
+    attempt mints a new one. It is the identity that works *here*, which
+    the executor ref cannot be: the claim is taken before the spawn, so
+    at this point there is no ref to compare and never was. That is why
+    the ref-less claim -- the one both engines actually make -- used to
+    fall through to the refusal below and tell a worker that somebody
+    else held the task it had just won.
+
+    Falling back, ``(executor, executor_ref)`` separates them for a
+    caller that mints no id: a retry repeats the pair, a genuine second
+    attempt carries the new execution's own. So all of build, executor
+    and ref must match, and **a request with neither an id nor a ref is
+    always refused** -- with nothing to compare, a retry and a second
+    attempt are indistinguishable, and the safe answer to "I cannot
+    tell" is the one that never double-claims.
 
     **The pair, not the ref.** A ref is backend-specific -- a Modal
     function call id, a pod name, a local run counter -- so two backends
@@ -656,6 +665,16 @@ def _claim_is_this_same_execution(
     if db_task.latest_status_build_id != build_id:
         return False
     asking = extra_metadata or {}
+    asking_execution = asking.get("execution_id")
+    if asking_execution is not None:
+        # The id decides on its own when the caller sends one. Not
+        # combined with the ref: the whole point is that a claim has no
+        # ref yet, so requiring one alongside would refuse exactly the
+        # retry this exists to grant. A holder recorded without an id
+        # (an older SDK's claim) cannot be the same execution as one
+        # asking with a *different* identity, so it is refused, which is
+        # the safe direction.
+        return str(db_task.latest_execution_id) == str(asking_execution)
     asking_ref = asking.get("executor_ref")
     if asking_ref is None:
         return False
@@ -732,6 +751,14 @@ async def _create_task_event(
                     "error_code": "task_already_running",
                     "executor": db_task.latest_executor,
                     "executor_ref": db_task.latest_executor_ref,
+                    # Which claim won. A caller that sent its own id can
+                    # then tell "somebody else holds this" from "my retry
+                    # was not recognised"; only the second is a bug here.
+                    "execution_id": (
+                        str(db_task.latest_execution_id)
+                        if db_task.latest_execution_id
+                        else None
+                    ),
                     "latest_status_at": (
                         db_task.latest_status_at.isoformat()
                         if db_task.latest_status_at
@@ -834,6 +861,7 @@ async def _create_task_event(
                 status=status,
                 latest_status=db_task.latest_status,
                 attempt_count=attempt_count,
+                execution_id=db_task.latest_execution_id,
             )
 
     if event_type == EventType.TASK_CANCELLED and not may_revoke(db_task, build_id):
@@ -892,6 +920,7 @@ async def _create_task_event(
         status=status,
         latest_status=db_task.latest_status,
         attempt_count=attempt_count,
+        execution_id=db_task.latest_execution_id,
     )
 
 
@@ -4175,6 +4204,24 @@ async def start_task(
     limit_key: Annotated[list[str] | None, Query()] = None,
     enforce_limits: bool = False,
     claim: bool = False,
+    execution_id: Annotated[
+        UUID | None,
+        Query(
+            description=(
+                "Identity of the claim this start is taking, minted by "
+                "the caller before it claims. Re-send the same value if "
+                "the request is retried: with `claim=true` a start "
+                "repeating the id the task already holds is the same "
+                "attempt asking again and is granted, where a different "
+                "one from the same build is a second attempt and is "
+                "denied. It exists because the claim is taken before the "
+                "spawn, so there is no `executor_ref` yet to identify "
+                "the attempt by. Omitted: the `(executor, executor_ref)` "
+                "pair decides, which is the behaviour of an SDK "
+                "predating this."
+            ),
+        ),
+    ] = None,
     claim_ttl_seconds: Annotated[
         int | None,
         Query(
@@ -4217,16 +4264,24 @@ async def start_task(
         claim: Atomic per-task execution claim: reject the start with
             **409** when *another* execution already holds a live claim
             (error code ``task_already_running``, echoing the running
-            execution's
-            ``executor``/``executor_ref`` so the caller can re-attach, and
-            its ``latest_status_expires_at``) or is already COMPLETED
+            execution's ``executor``/``executor_ref`` so the caller can
+            re-attach, its ``execution_id``, and its
+            ``latest_status_expires_at``) or is already COMPLETED
             (``task_already_completed``). The check runs on the
             FOR-UPDATE-locked task row inside the start transaction, so
             concurrent claiming starts serialize — at most one wins. A
             denied claim records nothing (no event, no concurrency-limit
             slots). A claim whose expiry has passed denies nothing: this
             start takes it over, replacing the previous holder's build,
-            executor fields and expiry together.
+            executor fields, identity and expiry together.
+
+            **Not "another" by build alone.** A start repeating the
+            ``execution_id`` the task already holds is that attempt
+            asking again — a retried delivery — and is granted; a
+            different one from the same build is a second attempt and is
+            denied like anybody else's. With no id sent, the
+            ``(executor, executor_ref)`` pair decides, and a request
+            naming neither is denied.
 
             Neither does a claim this same execution already holds --
             same build, same ``executor`` *and* same ``executor_ref``. The
@@ -4268,8 +4323,22 @@ async def start_task(
         or parsed_executor_metadata is not None
         or limit_keys
         or claim_ttl_seconds is not None
+        or execution_id is not None
+        or claim
     ):
         extra_metadata = {}
+        if claim:
+            # Recorded on the event, not merely acted on, because the
+            # fold needs it: a granted claim is a new attempt and must
+            # not inherit the identity of the one it replaced.
+            extra_metadata["claim"] = True
+        if execution_id is not None:
+            # Carried on the event for the same reason the TTL is: the
+            # task row's identity is folded from the event that set it,
+            # so a replay of the stream reproduces the same answer the
+            # row gives. Stringified because event_metadata is JSON on
+            # both dialects and a UUID is not a JSON scalar.
+            extra_metadata["execution_id"] = str(execution_id)
         if executor is not None:
             extra_metadata["executor"] = executor
         if executor_ref is not None:

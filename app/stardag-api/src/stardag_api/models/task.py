@@ -228,6 +228,38 @@ class Task(Base, TimestampMixin):
     )
     latest_commit_hash: Mapped[str | None] = mapped_column(String(64))
 
+    # Identity of the claim the task is running under, minted by the
+    # caller before it claims and sent with the claiming start.
+    #
+    # It exists because the claim is taken BEFORE the spawn, so there is
+    # no executor ref yet, and without one a retried claiming start (the
+    # registry client re-sending a POST whose response was lost) could
+    # not be told from a genuine second attempt of the same build. Both
+    # were refused, so a worker stood down from a task it held the claim
+    # on and the task sat claimed and not running until the claim
+    # expired.
+    #
+    # **Set by a start that names one, and left alone by one that does
+    # not** -- deliberately NOT the set-or-clear of the executor columns
+    # below, and the difference is the point. The tick records a second,
+    # ref-bearing start once the spawn returns and that start names no
+    # identity; clearing on it would drop the id moments after the claim
+    # recorded it, so a retry arriving even slightly late would be read
+    # as a second attempt and refused -- the exact failure this closes.
+    # Silence is not a statement. TASK_RETRIED clears it, and is the
+    # only thing that does.
+    #
+    # NULL means "no claim identity known" -- the pre-identity
+    # behaviour, where the ``(executor, executor_ref)`` pair decides --
+    # so the column is additive by construction and an SDK predating it
+    # is unaffected.
+    #
+    # Read by exactly one thing: ``_claim_is_this_same_execution`` in
+    # ``routes/builds.py``, on the FOR-UPDATE-locked row. It is NOT a
+    # liveness signal and says nothing about whether a container is
+    # running; the claim and its expiry answer that.
+    latest_execution_id: Mapped[UUID | None] = mapped_column(Uuid)
+
     # Executor reference of the most recent TASK_STARTED event (e.g.
     # executor="modal", executor_ref=<Modal function call id>). Lets a
     # resumed build re-attach to a detached execution that is still running

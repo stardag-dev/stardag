@@ -29,7 +29,7 @@ from typing import (
     Union,
     cast,
 )
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from stardag import (
     BaseTask,
@@ -1399,6 +1399,25 @@ async def build_aio(
         suspected_dead_ref: str | None = None
         attempted = False  # always try the claim at least once, even with
         # wait_timeout_seconds=0 ("claim, but don't wait if held")
+        # This claim's identity, minted **outside** the loop below and
+        # sent on every iteration -- which is the whole point, and the
+        # thing to check if this is ever refactored.
+        #
+        # One call to this function is one logical claim attempt by this
+        # build, however many times it goes round: the loop polls while
+        # somebody else holds the task, and re-asks after recording a
+        # dead winner. So every iteration is the *same* attempt asking
+        # again, and must carry the same id. That is what makes a lost
+        # response survivable -- the next iteration re-sends it, the
+        # registry recognises its own grant, and the build proceeds
+        # instead of standing down from a task it already holds.
+        #
+        # Minting inside the loop would defeat it exactly: each
+        # iteration would look like a fresh attempt, the registry would
+        # refuse it as a second claim, and the build would wait out a
+        # claim it holds itself. A genuine second attempt gets a new id
+        # by calling this function again, which is what a retry does.
+        execution_id = uuid4()
         try:
             claim_metadata: dict | None = None
             try:
@@ -1430,7 +1449,10 @@ async def build_aio(
                 attempted = True
                 try:
                     result = await registry.task_start_claim_aio(
-                        build_id, task, executor_metadata=claim_metadata
+                        build_id,
+                        task,
+                        executor_metadata=claim_metadata,
+                        execution_id=execution_id,
                     )
                 except Exception as claim_err:
                     # Registry hiccup on the claim itself: in `warn` mode

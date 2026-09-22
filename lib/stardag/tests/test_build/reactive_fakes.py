@@ -92,6 +92,16 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.statuses: dict[str, str] = {}
         self.upstreams: dict[str, set[str]] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
+        # Per task, the identity of the claim it is held under -- the
+        # API's ``tasks.latest_execution_id``. Modelled rather than
+        # ignored because the rule that reads it is the one this double
+        # exists to let a test falsify: a retried claim is granted where
+        # a second attempt is not. A double that accepted the parameter
+        # and dropped it would pass either way.
+        self.execution_ids: dict[str, str | None] = {}
+        # Every execution id this registry was sent on a claim, per
+        # task, in order.
+        self.sent_execution_ids: dict[str, list[str | None]] = {}
         self.start_metadata: dict[str, dict | None] = {}
         self.needs_tick = False
         # Scheduler lease state (see build_acquire_scheduler_lease_aio).
@@ -398,6 +408,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         self._count_event(tid, kind="start")
         self.sent_claim_ttls.setdefault(tid, []).append(claim_ttl_seconds)
         self.statuses[tid] = "running"
+        self.status_build_id[tid] = build_id
         self.refs[tid] = (executor, executor_ref)
         # Per build, because that is what the event log records and what
         # the executions listing reads. ``refs`` alone is the *current*
@@ -434,6 +445,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        execution_id=None,
         *,
         claim=True,
     ):
@@ -446,13 +458,27 @@ class FakeReactiveRegistry(NoOpRegistry):
         tid = str(task.id)
         self.calls.append(("start_claim", tid))
         self.claim_limit_keys[tid] = list(limit_keys or [])
-        if claim and self.statuses.get(tid) == "running":
+        self.sent_execution_ids.setdefault(tid, []).append(
+            None if execution_id is None else str(execution_id)
+        )
+        held = self.execution_ids.get(tid)
+        # The same attempt asking again, which is what a lost response
+        # makes the client do. Same build and same id; a different id
+        # from the same build is a second attempt and is denied.
+        same_attempt = (
+            execution_id is not None
+            and held is not None
+            and str(execution_id) == held
+            and self.status_build_id.get(tid, build_id) == build_id
+        )
+        if claim and self.statuses.get(tid) == "running" and not same_attempt:
             executor_name, ref = self.refs.get(tid, (None, None))
             return StartClaimResult(
                 started=False,
                 denied_reason="already_running",
                 executor=executor_name,
                 executor_ref=ref,
+                execution_id=held,
             )
         if claim and self.statuses.get(tid) == "completed":
             return StartClaimResult(started=False, denied_reason="already_completed")
@@ -467,7 +493,19 @@ class FakeReactiveRegistry(NoOpRegistry):
         )
         if not started:
             return StartClaimResult(started=False, denied_reason="limit")
-        return StartClaimResult(started=True)
+        # A granted *claim* records its identity -- including recording
+        # none, since it is a new attempt and inherits nothing. Gated on
+        # ``claim`` like the server, which keys the clear on the claim
+        # flag: the limiter's unclaiming acquire comes through here too
+        # and must preserve, or it would erase a live identity.
+        if claim:
+            self.execution_ids[tid] = (
+                None if execution_id is None else str(execution_id)
+            )
+        return StartClaimResult(
+            started=True,
+            execution_id=None if execution_id is None else str(execution_id),
+        )
 
     async def _acquire_limits(
         self,
@@ -526,6 +564,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         if self.statuses.get(task_id) in _RETRYABLE_STATUSES:
             self.statuses[task_id] = "pending"
             self.refs.pop(task_id, None)
+            # The server's TASK_RETRIED fold clears the identity too: a
+            # retry re-runs from scratch, so the next attempt is a new
+            # claim and must not be granted as a repeat of this one.
+            self.execution_ids.pop(task_id, None)
 
     async def task_retry_aio(self, build_id, task):
         tid = str(task.id)
@@ -539,6 +581,8 @@ class FakeReactiveRegistry(NoOpRegistry):
         if self.statuses.get(tid) in _RETRYABLE_STATUSES:
             self.statuses[tid] = "pending"
             self.refs.pop(tid, None)
+            # See the twin above: the identity goes with the reset.
+            self.execution_ids.pop(tid, None)
 
     async def build_add_roots_aio(self, build_id, root_task_ids):
         self.calls.append(("add_roots", ",".join(root_task_ids)))

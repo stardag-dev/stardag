@@ -6,7 +6,7 @@ import typing
 from datetime import datetime, timezone
 from functools import partial
 from typing import Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from stardag import (
     BaseTask,
@@ -961,12 +961,29 @@ async def _act_on_frontier(
         # start, so omitting it there would hand the claim straight back to
         # the registry's generic default and undo the derivation.
         ttl_seconds = claim_ttl_seconds(task, task_executor)
+        # The claim's identity, minted here because here is the earliest
+        # point it can be: the claim goes in before the spawn, so the
+        # executor ref does not exist yet, and until something did the
+        # claim had nothing to name itself by.
+        #
+        # What it buys is one thing: the registry client retries a POST
+        # whose response was lost, and a repeat carrying this same id is
+        # this attempt asking again rather than a second attempt to
+        # refuse. Refused, the repeat would tell this worker that
+        # somebody else holds the task -- a correct reason to stand
+        # down, and it does, while itself holding the claim, leaving the
+        # task claimed and not running until the claim expires. Going
+        # round this loop again for a genuine retry runs this line again
+        # and gets a new id, which is the distinction the build id alone
+        # cannot make.
+        execution_id = uuid4()
         claim_result = await registry.task_start_claim_aio(
             build_id,
             task,
             executor_metadata=acquire_metadata,
             limit_keys=limit_keys or None,
             claim_ttl_seconds=ttl_seconds,
+            execution_id=execution_id,
         )
         if not claim_result.started:
             if claim_result.denied_reason == "limit":

@@ -959,6 +959,18 @@ class TaskEventResponse(BaseModel):
     # see ``FrontierTaskRef``. Always populated, on every endpoint
     # returning this model.
     attempt_count: int = 0
+    # The claim identity the task now holds, echoed on every endpoint
+    # returning this model.
+    #
+    # Confirmation, first: a caller that sent an ``execution_id`` and
+    # reads its own back knows the server honoured it, where a server
+    # predating the field answers ``None`` and the caller can log that
+    # it is running without the idempotent retry. Deliberately not an
+    # error — unlike a structure scope, an unrecognised id costs only
+    # that, which is the behaviour of every release before this one, so
+    # refusing would turn a version skew into an outage for no
+    # correctness gain.
+    execution_id: UUID | None = None
 
 
 class TaskListResponse(BaseModel):

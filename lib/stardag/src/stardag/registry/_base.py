@@ -421,6 +421,14 @@ class StartClaimResult(StardagBaseModel):
     # which is not evidence of death — the loser waits, as it always has.
     latest_status_expires_at: str | None = None
     denied_keys: list[str] = []
+    # The claim identity the task now holds, echoed by a registry that
+    # understands ``execution_id``. On a grant it is the caller's own id
+    # coming back, which is how a caller confirms the server honoured
+    # it; on an ``already_running`` denial it names the claim that won.
+    # ``None`` from a registry predating the field -- not an error,
+    # since the only cost is the idempotent retry, which is how every
+    # earlier release behaved.
+    execution_id: str | None = None
 
 
 class RegisteredTaskInfo(StardagBaseModel):
@@ -1681,6 +1689,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
         *,
         claim: bool = True,
     ) -> StartClaimResult:
@@ -1895,6 +1904,7 @@ class NoOpRegistry(RegistryABC):
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
         *,
         claim: bool = True,
     ) -> StartClaimResult:
@@ -1907,7 +1917,10 @@ class NoOpRegistry(RegistryABC):
         :class:`RegistryABC` (where it would silently defeat arbitration a
         real backend was expected to provide).
         """
-        return StartClaimResult(started=True)
+        return StartClaimResult(
+            started=True,
+            execution_id=None if execution_id is None else str(execution_id),
+        )
 
 
 def _declared_for(

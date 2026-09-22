@@ -1306,6 +1306,7 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
         executor_metadata=None,
         limit_keys=None,
         claim_ttl_seconds=None,
+        execution_id=None,
         *,
         claim=True,
     ):
@@ -1336,6 +1337,7 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
             executor_metadata=executor_metadata,
             limit_keys=limit_keys,
             claim_ttl_seconds=claim_ttl_seconds,
+            execution_id=execution_id,
             claim=claim,
         )
 

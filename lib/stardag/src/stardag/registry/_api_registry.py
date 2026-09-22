@@ -904,6 +904,7 @@ class APIRegistry(RegistryABC):
         executor_ref: str | None,
         executor_metadata: dict[str, Any] | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
     ) -> dict[str, str]:
         """Event params plus optional detached-execution reference.
 
@@ -925,6 +926,13 @@ class APIRegistry(RegistryABC):
             )
         if claim_ttl_seconds is not None:
             params["claim_ttl_seconds"] = str(claim_ttl_seconds)
+        if execution_id is not None:
+            # Same story as the two above: a server predating the
+            # parameter ignores it, and what is lost is the idempotent
+            # retry -- which is how every release before this behaved.
+            # So no version gating here either; the echo on the
+            # response is how a caller can tell.
+            params["execution_id"] = str(execution_id)
         return params
 
     def task_complete(self, build_id: UUID, task: "BaseTask") -> None:
@@ -2514,6 +2522,7 @@ class APIRegistry(RegistryABC):
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
         *,
         claim: bool = True,
     ) -> StartClaimResult:
@@ -2534,7 +2543,7 @@ class APIRegistry(RegistryABC):
         lapses.
         """
         params: dict[str, Any] = self._get_start_params(
-            executor, executor_ref, executor_metadata, claim_ttl_seconds
+            executor, executor_ref, executor_metadata, claim_ttl_seconds, execution_id
         )
         if claim:
             params["claim"] = "true"
@@ -2549,7 +2558,7 @@ class APIRegistry(RegistryABC):
             or "plain"
         )
         try:
-            await self._arequest(
+            response = await self._arequest(
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
                 params=params,
@@ -2565,6 +2574,7 @@ class APIRegistry(RegistryABC):
                     executor=payload.get("executor"),
                     executor_ref=payload.get("executor_ref"),
                     latest_status_expires_at=payload.get("latest_status_expires_at"),
+                    execution_id=payload.get("execution_id"),
                 )
             if e.status_code == 409 and error_code == "task_already_completed":
                 return StartClaimResult(
@@ -2577,7 +2587,9 @@ class APIRegistry(RegistryABC):
                     denied_keys=list(payload.get("denied_keys") or []),
                 )
             raise
-        return StartClaimResult(started=True)
+        return StartClaimResult(
+            started=True, execution_id=_echoed_execution_id(response)
+        )
 
     async def task_start_aio(
         self,
@@ -2875,6 +2887,30 @@ def _add_scope_params(
         params["build_config"] = _json.dumps(
             dict(build_config), separators=(",", ":"), sort_keys=True
         )
+
+
+def _echoed_execution_id(response: Any) -> str | None:
+    """The ``execution_id`` a start response echoed, if it echoed one.
+
+    Absent from a registry predating the field, and that is not an
+    error -- unlike a structure scope, an ignored id costs only the
+    idempotent retry, which is how every earlier release behaved.
+    Returning ``None`` lets a caller log the degradation without turning
+    a version skew into an outage.
+
+    Defensive about the body: this runs on the success path of the
+    hottest call in the system, and a claim that actually succeeded must
+    not be reported as failed because a response was not the JSON shape
+    expected.
+    """
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    echoed = body.get("execution_id")
+    return None if echoed is None else str(echoed)
 
 
 def _registry_too_old(operation: str) -> RegistryTooOldError:
