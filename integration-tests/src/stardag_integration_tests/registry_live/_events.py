@@ -156,25 +156,36 @@ REPORT_APPLIED_KEY = "report_applied"
 
 
 def granted_claim_starts(deployment: Deployment, build_id: Any) -> dict[str, int]:
-    """Claims this build was granted, per task id.
+    """Executions this build was granted a claim for, per task id.
 
     **The durable form of a tick's ``spawned`` counter.** A tick spawns a
     task only after the registry grants it the claim, and the grant is a
-    row: one claim-marked ``task_started`` under this build per spawn,
-    written inside the transaction that arbitrates the claim. An
-    interruption restart goes through the same path, so it adds one to
-    both counts and they stay equal.
+    row: a ``task_started`` event under this build carrying
+    ``claim: True``, written inside the transaction that arbitrates the
+    claim, before any container exists. An interruption restart takes the
+    same path, so it adds one to both counts and they stay equal.
 
-    Why this rather than summing the trail: a tick summary exists only if
-    the tick survived to write it, so a preempted reporter makes the sum
-    short. Asserting the exact count then fails for a reason that is not
-    the code's, and relaxing it to ``<=`` is worse -- the missing summary
-    is exactly where a duplicate spawn would have been recorded, so the
-    ceiling passes *because* the evidence is gone. The event log has no
-    such gap: the claim is granted before the container exists, so nothing
-    the container does later can unwrite it.
+    **Distinct execution ids, not rows, and that is not a detail.** The
+    registry client retries a POST whose response never arrived, and a
+    redelivered claiming start is *granted* by design -- the server
+    recognises the execution now asking as the one already holding the
+    claim (``_claim_is_this_same_execution``) and runs on to write a
+    second event. Counting rows would read that retry as a second
+    execution and fail a scenario for a lost response. The event carries
+    ``execution_id`` for exactly this reason, and the code that writes it
+    warns any new reader that counts rows; this is that reader.
+
+    A row with no ``execution_id`` cannot be deduplicated, so each counts
+    as its own execution. That errs towards a loud failure rather than a
+    silent pass, which is the right direction for a test -- though no
+    engine path here produces one: the reactive scheduler mints a
+    ``uuid4`` per spawn attempt and sends it with the claim.
+
+    Refused reports are excluded: a claim-start the registry kept as
+    audit but did not apply changed nothing and licensed no spawn.
     """
-    counts: dict[str, int] = {}
+    executions: dict[str, set[str]] = {}
+    unidentified: dict[str, int] = {}
     with httpx.Client(timeout=60.0) as client:
         response = client.get(
             f"{deployment.api_url.rstrip('/')}/api/v1/builds/{build_id}/events",
@@ -184,13 +195,21 @@ def granted_claim_starts(deployment: Deployment, build_id: Any) -> dict[str, int
     for event in response.json():
         metadata = event.get("event_metadata") or {}
         if (
-            event.get("event_type") == "task_started"
-            and metadata.get(CLAIM_KEY) is True
-            and metadata.get(REPORT_APPLIED_KEY) is not False
+            event.get("event_type") != "task_started"
+            or metadata.get(CLAIM_KEY) is not True
+            or metadata.get(REPORT_APPLIED_KEY) is False
         ):
-            task_id = str(event.get("task_id"))
-            counts[task_id] = counts.get(task_id, 0) + 1
-    return counts
+            continue
+        task_id = str(event.get("task_id"))
+        execution_id = metadata.get("execution_id")
+        if execution_id is None:
+            unidentified[task_id] = unidentified.get(task_id, 0) + 1
+        else:
+            executions.setdefault(task_id, set()).add(str(execution_id))
+    return {
+        task_id: len(executions.get(task_id, set())) + unidentified.get(task_id, 0)
+        for task_id in {*executions, *unidentified}
+    }
 
 
 def describe_claims(counts: dict[str, int]) -> str:

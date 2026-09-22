@@ -143,6 +143,12 @@ def test_many_dormant_builds_are_each_woken_once(deployment: Deployment) -> None
             f"--- neighbour {index} ---\n{describe(build_id)}"
         )
 
+    # Two passes over the neighbours, and the split is load-bearing. The
+    # durable assertions run for *every* neighbour first; only then do the
+    # trail-only ones, which can skip. `require_complete_trail` skips the
+    # whole test, so a single truncated neighbour in a combined loop would
+    # carry off the durable checks of every neighbour after it -- turning
+    # one preempted tick into three unexamined builds.
     for index, build_id in enumerate(neighbours):
         summaries = tick_summaries(build_id)
         assert_trail_complete(build_id, summaries)
@@ -155,6 +161,18 @@ def test_many_dormant_builds_are_each_woken_once(deployment: Deployment) -> None
             file=sys.stderr,
         )
 
+        # It waited for the owner's copy rather than running a second one:
+        # its own spawns are its root alone. Counted from the event log --
+        # a granted claim is a row written before the container exists, so
+        # a preempted reporter cannot make it short.
+        spawned = sum(granted_claim_starts(deployment, build_id).values())
+        assert spawned == 1, (
+            f"Neighbour {index} spawned {spawned} task(s); it should have "
+            "spawned only its own root, having waited for the shared task "
+            "rather than running a second copy.\n" + describe(build_id)
+        )
+
+    for index, build_id in enumerate(neighbours):
         # Not asserted on the *count of ticks*, which a cold container
         # would inflate for reasons that have nothing to do with the
         # hand-out stamp.
@@ -164,8 +182,13 @@ def test_many_dormant_builds_are_each_woken_once(deployment: Deployment) -> None
         # allowed, because the owning tick's exit hand-off can genuinely
         # race a drain. Several is the storm the hand-out stamp exists to
         # prevent -- every notifier spawning for every flagged build.
+        #
+        # Trail-only, with no durable counterpart, so it may decline to
+        # answer -- which is why every durable check above ran first.
         require_complete_trail(build_id, what=f"neighbour {index}'s lease-held count")
-        contended = sum(1 for s in summaries if s.get("outcome") == "lease_held")
+        contended = sum(
+            1 for s in tick_summaries(build_id) if s.get("outcome") == "lease_held"
+        )
         assert contended <= 1, (
             f"Neighbour {index} had {contended} tick(s) find the scheduler "
             "lease already held, so that many redundant containers were "
@@ -175,17 +198,4 @@ def test_many_dormant_builds_are_each_woken_once(deployment: Deployment) -> None
             "hand-out is not stamping builds as it hands them out -- "
             f"within one {WAKE_HANDOUT_WINDOW_SECONDS}s window a build "
             "must be handed to exactly one caller.\n" + describe(build_id)
-        )
-
-        # It waited for the owner's copy rather than running a second one:
-        # its own spawns are its root alone.
-        # Counted from the event log, not the tick trail: a granted claim
-        # is a row written before the container exists, so a preempted
-        # reporter cannot make it short.
-        claims = granted_claim_starts(deployment, build_id)
-        spawned = sum(claims.values())
-        assert spawned == 1, (
-            f"Neighbour {index} spawned {spawned} task(s); it should have "
-            "spawned only its own root, having waited for the shared task "
-            "rather than running a second copy.\n" + describe(build_id)
         )

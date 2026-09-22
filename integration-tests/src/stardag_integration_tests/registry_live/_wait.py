@@ -212,7 +212,9 @@ def require_complete_trail(build_id: UUID, *, what: str) -> None:
     """
     if not trail_may_be_truncated(build_id):
         return
-    directory = os.environ.get("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", "").strip()
+    from ._diagnostics import DIAGNOSTICS_DIR_ENV
+
+    directory = os.environ.get(DIAGNOSTICS_DIR_ENV, "").strip()
     if directory:
         try:
             target = Path(directory)
@@ -308,13 +310,13 @@ def wait_for_terminal(
     code under test, so it now warns and returns, and the trail is
     recorded as possibly truncated.
 
-    **What that costs, and who pays it.** The trail may now be short by
-    its last entry, so any assertion that sums it can under-count. Sums
-    asserted as *upper* bounds are unaffected -- an under-count cannot
-    breach a ceiling -- and that is the direction those assertions
-    actually care about (double execution, redundant containers). Sums
-    asserted as *lower* bounds are not sound here and are called out
-    individually where they survive.
+    **What that costs.** The trail may now be short by its last entry, so
+    nothing may be *counted* off it without saying what a missing entry
+    would do. Counts that have a durable substitute take it -- spawns are
+    read from the event log (``_events.granted_claim_starts``). The few
+    that do not go through ``require_complete_trail``, which declines to
+    answer rather than guessing.
+
     """
     status = wait_until(
         lambda: _terminal_status(build_id),

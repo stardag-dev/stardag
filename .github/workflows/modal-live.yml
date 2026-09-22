@@ -412,13 +412,32 @@ jobs:
           mkdir -p "$diag"
           timeouts="$diag/transport-timeouts"
           others="$diag/non-timeout-failures"
+          # Scenarios that could not be evaluated: the tick that ended a
+          # build never reported, so a counter read off its trail has no
+          # answer. The harness skips those rather than guessing, and the
+          # count belongs here for the same reason the retry count does --
+          # a tier skipping its way to green must be visible, and an
+          # uncounted skip is exactly how it would not be.
+          inconclusive="$diag/inconclusive-trails"
           # Printed by the harness when it could not classify a failure or
           # could not record one. Kept in step with
           # `_diagnostics.CLASSIFICATION_FAILED`.
           unclassified="STARDAG_REGISTRY_LIVE_CLASSIFICATION_FAILED"
 
+          report_inconclusive() {
+            [ -f "$inconclusive" ] || return 0
+            echo "::warning title=Registry-live inconclusive::$(tr '\n' ';' \
+              < "$inconclusive") -- the tick that ended each of these builds "\
+              "never reported, so a trail-only counter had no answer and the "\
+              "scenario was skipped rather than guessed at (STA-89)."
+            echo "diagnose=true" >> "$GITHUB_OUTPUT"
+          }
+
           if tox -e registry-modal-live $POSARGS 2>&1 \
                | tee "$diag/pytest-attempt-1.log"; then
+            # A green run can still have skipped a scenario, and that is
+            # worth the artifact and the count even though nothing failed.
+            report_inconclusive
             exit 0
           fi
 
@@ -486,6 +505,9 @@ jobs:
 
           tox -e registry-modal-live $POSARGS 2>&1 \
             | tee "$diag/pytest-attempt-2.log"
+          rc=$?
+          report_inconclusive
+          exit $rc
 
       # Pulled before anything can delete them. The teardown job runs
       # `modal environment delete` once both tiers finish, and that takes

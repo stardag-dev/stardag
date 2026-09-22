@@ -44,6 +44,7 @@ import uuid
 import pytest
 
 from stardag_integration_tests.registry_live._events import (
+    granted_claim_starts,
     describe_events,
     resets_by,
     task_events,
@@ -192,7 +193,11 @@ def test_a_failed_blocker_is_left_alone_by_a_second_build(
 
     # B never ran the shared task, nor anything downstream of it -- its
     # root was unreachable from the moment the blocker failed.
-    spawned_b = sum(s.get("spawned", 0) for s in summaries_b)
+    # From the event log rather than the trail: a granted claim is a row,
+    # so this answer does not depend on B's ticks having survived to
+    # report. `assert_trail_complete` above guards a different thing --
+    # the server's retention cap, not a preempted reporter.
+    spawned_b = sum(granted_claim_starts(deployment, build_b).values())
     assert spawned_b == 0, (
         f"Build B spawned {spawned_b} task(s). With its only upstream "
         "failed and left alone, there was nothing for it to run.\n" + describe(build_b)
