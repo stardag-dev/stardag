@@ -37,6 +37,7 @@ rather than of this implementation.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 import typing
@@ -70,6 +71,15 @@ def _configured_interval() -> float:
     try:
         value = float(raw)
     except ValueError:
+        logger.warning(f"Invalid {CHECK_INTERVAL_ENV}: {raw!r}; using the default.")
+        return DEFAULT_CHECK_INTERVAL_SECONDS
+    # ``float()`` accepts "nan" and "inf", and both break the throttle
+    # silently rather than loudly, in opposite directions: every
+    # comparison against NaN is false, so it asks on every call, and
+    # every comparison against inf is true, so it never asks again --
+    # which disables cooperative cancellation without saying so. Neither
+    # is a thing to interpret charitably.
+    if not math.isfinite(value):
         logger.warning(f"Invalid {CHECK_INTERVAL_ENV}: {raw!r}; using the default.")
         return DEFAULT_CHECK_INTERVAL_SECONDS
     # Zero means "ask every time", which is a legitimate thing to want in

@@ -105,7 +105,22 @@ class TestTheThrottle:
         monkeypatch.setenv(CHECK_INTERVAL_ENV, "7.5")
         assert CancellationChecker(lambda: False)._min_interval == 7.5
 
-    @pytest.mark.parametrize("raw", ["not-a-number", "", "  "])
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "not-a-number",
+            "",
+            "  ",
+            # Both parse as floats and break the throttle silently, in
+            # opposite directions: NaN fails every comparison so it asks
+            # on every call, inf passes every one so it never asks again
+            # — which switches cooperative cancellation off without
+            # saying so.
+            "nan",
+            "inf",
+            "-inf",
+        ],
+    )
     def test_an_unreadable_interval_falls_back(self, monkeypatch, raw):
         monkeypatch.setenv(CHECK_INTERVAL_ENV, raw)
         checker = CancellationChecker(lambda: False)
