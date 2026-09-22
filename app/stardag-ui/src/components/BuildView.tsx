@@ -196,6 +196,10 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       clickTimerRef.current = null;
     }
     refreshOwnerRef.current = null;
+    // Cleared with the marker it belongs to: with the owner check above,
+    // the abandoned refresh will decline to clear this itself, and
+    // nothing else would.
+    setRefreshing(false);
   }, [buildId, activeEnvironment?.id]);
 
   // Refresh handler
@@ -226,8 +230,15 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     try {
       await loadBuild();
     } finally {
-      if (refreshOwnerRef.current === owner) refreshOwnerRef.current = null;
-      setRefreshing(false);
+      // Both, under the same check. `refreshing` is what the marker
+      // exists to drive, so clearing it unconditionally reintroduced the
+      // bug one line below the fix: an abandoned refresh settling would
+      // stop the icon spinning while the current identity's refresh was
+      // still in flight.
+      if (refreshOwnerRef.current === owner) {
+        refreshOwnerRef.current = null;
+        setRefreshing(false);
+      }
     }
   }, [loadBuild, requestedKey]);
 

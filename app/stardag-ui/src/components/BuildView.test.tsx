@@ -478,6 +478,58 @@ describe("BuildView header and tool-and-info bar", () => {
     expect(crumbs()[1]).not.toHaveTextContent("running");
   });
 
+  // `refreshing` is what the in-flight marker exists to drive, so it
+  // has to be cleared under the same ownership check — otherwise an
+  // abandoned refresh settling stops the icon while the current
+  // identity's refresh is still running.
+  it("keeps the refresh icon spinning when an abandoned refresh settles", async () => {
+    const OTHER = "02b1d6d4-0000-7000-8000-000000000000";
+    const spinning = () =>
+      Boolean(
+        screen
+          .getByRole("button", { name: "Refresh" })
+          .querySelector("svg")
+          ?.getAttribute("class")
+          ?.includes("animate-spin"),
+      );
+
+    const user = userEvent.setup();
+    const view = renderView();
+    await screen.findByText("golden-diamond-28");
+
+    // Build A's refresh is left in flight.
+    let landA: (b: Build) => void = () => {};
+    vi.mocked(fetchBuild).mockReturnValue(
+      new Promise<Build>((resolve) => {
+        landA = resolve;
+      }) as never,
+    );
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(fetchBuild).toHaveBeenCalledTimes(2));
+
+    // Navigate to B, which loads fine.
+    vi.mocked(fetchBuild).mockResolvedValue(makeBuild({ id: OTHER }));
+    view.rerender(
+      <BreadcrumbProvider>
+        <CrumbProbe />
+        <BuildView buildId={OTHER} onBack={vi.fn()} />
+      </BreadcrumbProvider>,
+    );
+    await waitFor(() => expect(spinning()).toBe(false));
+
+    // Now B has a refresh of its own in flight.
+    vi.mocked(fetchBuild).mockReturnValue(new Promise(() => {}) as never);
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(spinning()).toBe(true));
+
+    // A's abandoned read finally answers. It must not stop B's spinner.
+    await act(async () => {
+      landA(makeBuild());
+      await Promise.resolve();
+    });
+    expect(spinning()).toBe(true);
+  });
+
   it("says nothing about a config the build never set", async () => {
     const user = userEvent.setup();
     renderView();
