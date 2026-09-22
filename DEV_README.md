@@ -416,6 +416,75 @@ durable substitute is not obvious, it is usually the task event log:
 the `task_interrupted` rather than for a tick's `interruptions_restarted`
 count, which says the same thing and survives the tick that did it.
 
+**A truncated trail cannot answer a counting question in either direction,
+so counts come from the event log.** This is the correction to a rule that
+briefly said the opposite. Losing a tick's summary lowers any sum read from
+the trail, so an exact count fails for a reason that is not the code's — and
+relaxing it to `<=` is _worse_, not safer: the missing summary is exactly
+where a duplicate spawn would have been recorded, so the ceiling passes
+**because** the evidence is gone. A one-directional argument (an under-count
+cannot breach a ceiling) rules out false failures and says nothing about false
+passes; both have to be ruled out before a weakened assertion is honest.
+
+The way out is that the thing being counted usually _is_ durable, and the
+harness was asking the wrong witness. A tick records a `task_started` once
+`submit_detached` has returned, carrying the backend's reference for the call
+it just created — so the registry holds one ref-bearing row per execution
+actually submitted, written before the container reports anything and
+therefore immune to the tick dying on the way home.
+`_events.spawned_executions` counts **distinct `executor_ref`s** per task, and
+every spawn assertion is `== N` strict against it.
+
+Both halves of "distinct ref-bearing" carry weight, and each was got wrong
+once before it was got right. _Distinct_, because the SDK retries a POST whose
+response was lost and the API deliberately appends a second row for it — two
+rows naming one call are one execution. _Ref-bearing_, because **a granted
+claim is not a spawn**: the claim is taken first and the submission can still
+fail, in which case the tick records a task failure and never increments
+`spawned`, while the claim row sits there looking like an execution that never
+happened. The ref only exists once there is a call to name, so counting refs
+excludes that case by construction rather than by a special case.
+
+**What genuinely has no durable record is skipped, and the skip is counted.**
+A tick self-healing a completion, a concurrency-limit denial and a tick
+finding the lease held are reported nowhere but the trail. For those,
+`_wait.require_complete_trail` returns no answer when the terminal tick never
+reported: `pytest.skip` with a reason, plus a marker CI counts the way it
+counts transport-timeout retries. A skip that nobody counts is how a tier
+quietly skips its way to green; a counted one is a measurement.
+
+**Run the full tier in CI, not locally.** A local run deploys into the same
+Modal workspace CI uses, so it contends with whatever checks are in flight —
+and contention is the leading unexplained variable behind this tier's red
+rate. Verifying locally to protect CI makes CI less reliable, for you and for
+everyone else with a PR open. Push and read the `Registry-live tier` check;
+when it goes red the diagnostics artifact is downloadable, so a CI red is as
+diagnosable as a local one. Keep local stacks for what they are good at:
+iterating on one scenario by name (`tox -e registry-modal-live -- -n0
+tests_registry_live -k <name>`), harness work that needs a stack, and forcing
+a branch CI cannot reach. Tear one down as soon as it is done.
+
+**Take a precondition from the constants only where the arithmetic closes.**
+`test_reactive_e2e` spawns its own work, so a tick that lingers for a fixed
+window once idle must go before work that outlasts it —
+`assert_dormancy_is_forced` asserts exactly that, and no container is slow
+enough to break it. The other three wake-up scenarios wait on a task **another
+build already started**, where the constant is the task's total runtime and
+the quantity that matters is what remains when the waiting build's tick
+begins. Comparing the constant there lets a slow bootstrap leave the build
+resident through the completion while `75 > 15` still looks reassuring, so
+`assert_remaining_work_outlasts_linger` measures the remainder from the
+registry's record of the start, at the moment the waiting build is triggered.
+
+**`wait_for_terminal` no longer fails on a missing final summary.** Its wait
+stays — the read-before-report race is real, and without it every counter read
+below is short by a tick. But 15 of the 18 scenarios call it, so raising there
+meant a tick preempted between writing the build's terminal status and
+reporting its summary reddened whichever scenario was unlucky, after ninety
+seconds, with a message that reads like a scheduling defect. It now warns,
+records the trail as possibly truncated, and returns; `trail_may_be_truncated`
+lets a failure message say so.
+
 **A scenario that needs its second build woken _twice_ should keep that
 build resident instead.** `select_wake_candidates` hands a flagged build
 out at most once per 120s window and does not compare the flag's timestamp

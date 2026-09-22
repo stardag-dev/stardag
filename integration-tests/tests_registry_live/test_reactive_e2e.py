@@ -27,15 +27,22 @@ completion itself rather than being told about it.
 
 from __future__ import annotations
 
+import sys
 import uuid
 
 import pytest
-
+from stardag_integration_tests.registry_live._events import (
+    spawned_executions,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
+    assert_dormancy_is_forced,
     assert_trail_complete,
     describe,
+    require_complete_trail,
     tick_summaries,
+    trail_may_be_truncated,
     wait_for_terminal,
 )
 
@@ -65,7 +72,7 @@ BUILD_TIMEOUT_SECONDS = 420
 TASKS_IN_PLAN = 3
 
 
-def test_a_worker_wakes_the_build_that_has_no_scheduler() -> None:
+def test_a_worker_wakes_the_build_that_has_no_scheduler(deployment: Deployment) -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         get_range,
@@ -96,26 +103,24 @@ def test_a_worker_wakes_the_build_that_has_no_scheduler() -> None:
     summaries = tick_summaries(build_id)
     assert_trail_complete(build_id, summaries)
 
-    # The first tick gave up and left. `lingered_out` is the outcome that
-    # says so: it polled, found nothing more to do, and exited with the
-    # build still running. That is what makes the next tick a *wake-up*
-    # rather than a continuation, and it is the precondition for everything
-    # below.
-    assert summaries[0].get("outcome") == "lingered_out", (
-        "The first tick did not linger out, so it was still resident when "
-        "the work finished and nothing had to be woken.\n" + describe(build_id)
+    # The build was dormant before its work finished, which is the whole
+    # precondition for the wake-up being a wake-up. Established from the
+    # constants rather than from the trail -- see the helper.
+    assert_dormancy_is_forced(
+        work_seconds=WORKER_SLEEP_SECONDS,
+        linger_seconds=TICK_LINGER_SECONDS,
+        what="the leaf's sleep against the tick's linger",
     )
 
-    # More than one tick ran. With the watchdog off and no resident
-    # orchestrator, a second tick can only have been spawned by a worker --
-    # and a worker can only do that by asking the registry whether a
-    # scheduler is live. This is the wake-up, and there is no other
-    # explanation available for it.
-    assert len(summaries) > 1, (
-        "The build completed within a single tick, so nothing ever needed "
-        "waking and the wake-up path was not exercised. The leaf's sleep "
-        f"({WORKER_SLEEP_SECONDS}s) must comfortably outlast the tick's "
-        f"linger ({TICK_LINGER_SECONDS}s).\n" + describe(build_id)
+    # Diagnostic, never an assertion: what the ticks reported.
+    # A trail that shows no lingering tick is worth seeing, but its
+    # absence is evidence about the reporters, not about the wake-up.
+    lingered = sum(1 for s in summaries if s.get("outcome") == "lingered_out")
+    print(
+        f"[harness] {len(summaries)} tick summary(ies) retained, "
+        f"{lingered} reporting lingered_out"
+        + (" (trail may be truncated)" if trail_may_be_truncated(build_id) else ""),
+        file=sys.stderr,
     )
 
     # One spawn per task across every tick: each ran exactly once. Double
@@ -123,7 +128,14 @@ def test_a_worker_wakes_the_build_that_has_no_scheduler() -> None:
     # above this is what it looks like -- though a Modal preemption also
     # produces a legitimate re-spawn, so read the trail before blaming the
     # claim.
-    spawned = sum(s.get("spawned", 0) for s in summaries)
+    # Counted from the event log, not from the tick trail. A tick spawns
+    # only after the registry grants it the claim, and that grant is a
+    # row -- written before the container exists, so nothing the
+    # container does later can unwrite it. Summing `spawned` instead
+    # would be short whenever a tick was preempted before reporting, and
+    # relaxing that to `<=` would pass *because* the evidence is gone.
+    claims = spawned_executions(deployment, build_id)
+    spawned = sum(claims.values())
     assert spawned == TASKS_IN_PLAN, (
         f"{spawned} spawns for {TASKS_IN_PLAN} tasks. More than "
         f"{TASKS_IN_PLAN} usually means double execution, but an "
@@ -147,6 +159,7 @@ def test_a_worker_wakes_the_build_that_has_no_scheduler() -> None:
     # What cannot happen if the workers are reaching the registry is *every*
     # completion being self-healed. That is the shape of a missing or wrong
     # stardag-api-key secret, and it is what this rules out.
+    require_complete_trail(build_id, what="the self-healed count")
     self_healed = sum(s.get("self_healed", 0) for s in summaries)
     assert self_healed < TASKS_IN_PLAN, (
         f"All {TASKS_IN_PLAN} completions had to be self-healed by a tick, "

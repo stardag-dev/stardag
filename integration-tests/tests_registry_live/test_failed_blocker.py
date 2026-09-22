@@ -42,16 +42,16 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
 from stardag_integration_tests.registry_live._events import (
     describe_events,
     resets_by,
+    spawned_executions,
     task_events,
     wait_until_registered,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
-from stardag_integration_tests.registry_live._scenario_app import MAX_LINGER_SECONDS
 from stardag_integration_tests.registry_live._harness import Deployment
+from stardag_integration_tests.registry_live._scenario_app import MAX_LINGER_SECONDS
 from stardag_integration_tests.registry_live._wait import (
     assert_trail_complete,
     describe,
@@ -192,7 +192,12 @@ def test_a_failed_blocker_is_left_alone_by_a_second_build(
 
     # B never ran the shared task, nor anything downstream of it -- its
     # root was unreachable from the moment the blocker failed.
-    spawned_b = sum(s.get("spawned", 0) for s in summaries_b)
+    # From the event log rather than the trail: a submitted execution
+    # leaves a ref-bearing row, so this answer does not depend on B's
+    # ticks having survived to report. `assert_trail_complete` above
+    # guards a different thing -- the server's retention cap, not a
+    # preempted reporter.
+    spawned_b = sum(spawned_executions(deployment, build_b).values())
     assert spawned_b == 0, (
         f"Build B spawned {spawned_b} task(s). With its only upstream "
         "failed and left alone, there was nothing for it to run.\n" + describe(build_b)

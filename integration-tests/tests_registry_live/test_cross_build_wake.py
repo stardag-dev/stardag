@@ -12,8 +12,11 @@ worth being explicit about the alternatives it rules out:
 
 - **B's own tick did not notice.** B is triggered with a short linger and
   the shared task outlives it, so by the time A completes, B is dormant:
-  no container of its own anywhere. The assertion on B's first tick outcome
-  is what pins that down.
+  no container of its own anywhere. Two things pin that down:
+  ``assert_remaining_work_outlasts_linger`` before B is triggered, which
+  requires the work still to come to outlast B's linger, and -- behind the
+  inconclusive guard, since it is a trail reading -- that some tick of B
+  did linger out.
 - **A watchdog did not sweep it up.** The app deploys none, deliberately.
   A periodic sweep would make every build here eventually complete and
   would make this scenario prove nothing.
@@ -27,15 +30,22 @@ drained that flag. There is no other route.
 
 from __future__ import annotations
 
+import sys
 import uuid
 
 import pytest
-
+from stardag_integration_tests.registry_live._events import (
+    spawned_executions,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
+    assert_remaining_work_outlasts_linger,
     assert_trail_complete,
+    require_complete_trail,
     describe,
     tick_summaries,
+    trail_may_be_truncated,
     wait_for_task_status,
     wait_for_terminal,
 )
@@ -49,9 +59,10 @@ pytestmark = [
 
 # The shared task must outlive B's tick by a clear margin. These two
 # numbers are the scenario; if they ever cross, it silently degrades into
-# "a tick watched a task finish" and still passes. The assertion on B's
-# first tick outcome is what catches that, which is what allows these to be
-# sized tightly rather than padded.
+# "a tick watched a task finish" and still passes. The measured
+# precondition catches that before B is triggered, and the lingered-out
+# observation catches it afterwards, which is what allows these to be sized
+# tightly rather than padded.
 SHARED_SLEEP_SECONDS = 75
 B_LINGER_SECONDS = 15
 
@@ -59,7 +70,7 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
-def test_a_blockers_completion_wakes_a_dormant_build() -> None:
+def test_a_blockers_completion_wakes_a_dormant_build(deployment: Deployment) -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         get_range,
@@ -94,6 +105,20 @@ def test_a_blockers_completion_wakes_a_dormant_build() -> None:
         timeout=STATUS_TIMEOUT_SECONDS,
     )
 
+    # The dormancy precondition, measured rather than assumed. The
+    # shared task is already RUNNING, so its *total* duration says
+    # nothing about whether this build will go dormant -- what
+    # decides that is the work still to come when its tick starts.
+    # Comparing the constant would let a slow bootstrap leave the
+    # build resident through the completion while SHARED_SLEEP_SECONDS >
+    # B_LINGER_SECONDS still looked reassuring.
+    assert_remaining_work_outlasts_linger(
+        deployment,
+        shared.id,
+        total_seconds=SHARED_SLEEP_SECONDS,
+        linger_seconds=B_LINGER_SECONDS,
+        what="the shared task's remaining work against B's linger",
+    )
     build_b = app.build_trigger(
         square(values=shared, offset=11),
         reactive=True,
@@ -122,23 +147,49 @@ def test_a_blockers_completion_wakes_a_dormant_build() -> None:
     # someone else, waited out its linger and exited with the build still
     # running -- so the tick that finished B afterwards was spawned by the
     # wake-up and not by anything B left behind.
-    assert summaries_b[0].get("outcome") == "lingered_out", (
-        "Build B's first tick did not linger out, so it may have been "
-        "resident when the blocker completed and noticed on its own poll. "
-        f"The shared task's sleep ({SHARED_SLEEP_SECONDS}s) must "
-        f"comfortably outlast B's linger ({B_LINGER_SECONDS}s) plus B's "
-        "bootstrap.\n" + describe(build_b)
-    )
-    assert len(summaries_b) > 1, (
-        "Build B ran exactly one tick, so it cannot have been woken.\n"
-        + describe(build_b)
+
+    # Diagnostic, never an assertion: what the ticks reported.
+    # A trail that shows no lingering tick is worth seeing, but its
+    # absence is evidence about the reporters, not about the wake-up.
+    lingered = sum(1 for s in summaries_b if s.get("outcome") == "lingered_out")
+    print(
+        f"[harness] {len(summaries_b)} tick summary(ies) retained, "
+        f"{lingered} reporting lingered_out"
+        + (" (trail may be truncated)" if trail_may_be_truncated(build_b) else ""),
+        file=sys.stderr,
     )
 
-    # B never ran the shared task: it waited for A's copy and then used it.
-    # Its own spawns are its root alone.
-    spawned_b = sum(s.get("spawned", 0) for s in summaries_b)
+    # Counted from the event log, not from the tick trail. A tick spawns
+    # only after the registry grants it the claim, and that grant is a
+    # row -- written before the container exists, so nothing the
+    # container does later can unwrite it. Summing `spawned` instead
+    # would be short whenever a tick was preempted before reporting, and
+    # relaxing that to `<=` would pass *because* the evidence is gone.
+    claims_b = spawned_executions(deployment, build_b)
+    spawned_b = sum(claims_b.values())
     assert spawned_b == 1, (
         f"Build B spawned {spawned_b} tasks; it should have spawned only its "
         "own root, having waited for the shared task rather than running a "
         "second copy of it.\n" + describe(build_b)
+    )
+
+    # And it *was* dormant -- observed, not predicted. The measured
+    # precondition bounds the work left when this build was *triggered*,
+    # not when its tick actually started, so a slow bootstrap can still
+    # eat the margin: necessary, but not sufficient on its own. A tick
+    # that lingered out is the outcome itself.
+    #
+    # Through `require_complete_trail`, because this is a trail
+    # observation and a preempted terminal tick must not redden the
+    # scenario for it -- which is what STA-89 set out to stop. And `any`
+    # rather than `summaries[0]`: when the first tick is preempted,
+    # `summaries[0]` silently becomes the second one, while the question
+    # the scenario means -- some tick lingered out and a later one did
+    # the work -- does not depend on the order.
+    require_complete_trail(build_b, what="whether any tick of build B lingered out")
+    assert any(s.get("outcome") == "lingered_out" for s in summaries_b), (
+        "No tick of build B ever lingered out, so B may have been "
+        "resident throughout and seen the shared task finish on its own "
+        "poll -- the wake-up path would then not have been exercised.\n"
+        + describe(build_b)
     )

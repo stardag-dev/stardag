@@ -412,13 +412,39 @@ jobs:
           mkdir -p "$diag"
           timeouts="$diag/transport-timeouts"
           others="$diag/non-timeout-failures"
+          # Scenarios that could not be evaluated: the tick that ended a
+          # build never reported, so a counter read off its trail has no
+          # answer. The harness skips those rather than guessing, and the
+          # count belongs here for the same reason the retry count does --
+          # a tier skipping its way to green must be visible, and an
+          # uncounted skip is exactly how it would not be.
+          inconclusive="$diag/inconclusive-trails"
           # Printed by the harness when it could not classify a failure or
           # could not record one. Kept in step with
           # `_diagnostics.CLASSIFICATION_FAILED`.
           unclassified="STARDAG_REGISTRY_LIVE_CLASSIFICATION_FAILED"
 
+          # Takes the marker's path, because the retry moves attempt 1's
+          # aside before running again -- so reading only the top-level
+          # file would preserve an attempt-1 skip in the artifact and
+          # never warn about it or count it, which is the failure this
+          # whole marker exists to prevent.
+          report_inconclusive() {
+            [ -f "$1" ] || return 0
+            echo "::warning title=Registry-live inconclusive::$(tr '\n' ';' \
+              < "$1") -- no terminal tick summary was observed for these "\
+              "builds, so a trail-only counter had no answer and the "\
+              "scenario was skipped rather than guessed at. Usually a "\
+              "preempted tick; possibly a build ended by something that is "\
+              "not a tick (STA-89)."
+            echo "diagnose=true" >> "$GITHUB_OUTPUT"
+          }
+
           if tox -e registry-modal-live $POSARGS 2>&1 \
                | tee "$diag/pytest-attempt-1.log"; then
+            # A green run can still have skipped a scenario, and that is
+            # worth the artifact and the count even though nothing failed.
+            report_inconclusive "$inconclusive"
             exit 0
           fi
 
@@ -466,6 +492,8 @@ jobs:
           # Keep the first attempt's evidence. The retry writes fresh
           # markers and records at the top level, so without this a green
           # retry would leave nothing behind to explain the warning above.
+          report_inconclusive "$inconclusive"
+
           mkdir -p "$diag/attempt-1"
           find "$diag" -maxdepth 1 -type f -exec mv {} "$diag/attempt-1/" \;
 
@@ -486,6 +514,9 @@ jobs:
 
           tox -e registry-modal-live $POSARGS 2>&1 \
             | tee "$diag/pytest-attempt-2.log"
+          rc=$?
+          report_inconclusive "$inconclusive"
+          exit $rc
 
       # Pulled before anything can delete them. The teardown job runs
       # `modal environment delete` once both tiers finish, and that takes

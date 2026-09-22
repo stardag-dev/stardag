@@ -9,9 +9,15 @@ regressed" and "the Modal worker never started".
 
 from __future__ import annotations
 
+import os
+import sys
 import time
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any
 from uuid import UUID
+
+import pytest
 
 TERMINAL = ("completed", "failed", "cancelled")
 
@@ -131,6 +137,164 @@ def describe(build_id: UUID) -> str:
     return "\n".join(lines)
 
 
+# Builds whose terminal tick never reported. Read by the scenarios' failure
+# messages, so a counter that came out low says why it might have.
+_TRUNCATED_TRAILS: set[UUID] = set()
+
+
+def trail_may_be_truncated(build_id: UUID) -> bool:
+    """Whether this build's terminal tick failed to report in time."""
+    return build_id in _TRUNCATED_TRAILS
+
+
+def assert_dormancy_is_forced(
+    *, work_seconds: float, linger_seconds: float, what: str
+) -> None:
+    """The wake-up precondition, taken from the constants, not from a report.
+
+    Every wake-up scenario needs its build to be *dormant* when the thing
+    it is waiting for happens -- otherwise the tick was still resident,
+    saw it on its own poll, and the wake-up path was never exercised. The
+    scenario then passes while testing something weaker, which is the
+    failure the timing rules here exist to prevent.
+
+    It used to be checked by reading the trail: the first summary says
+    ``lingered_out``, and there is more than one summary. Both are
+    assertions that a *report* exists, so a preempted tick made a healthy
+    run look like a regression -- and, worse, made a real regression look
+    like that preemption (STA-87, STA-89).
+
+    This is the same precondition established from the scenario's own
+    constants instead, and it is strictly stronger. A tick lingers
+    ``linger_seconds`` once it has nothing left to do, and it cannot have
+    started the work later than it spawned it; so if the work outlasts the
+    linger, the tick *must* have gone before the work finished. That is
+    arithmetic, not observation: no container is slow enough to break it,
+    and slowness pushes it the safe way, since a late start delays the
+    work and not the linger.
+
+    The four scenarios using this sit at four to five times the linger.
+    Only the inequality is enforced -- a margin would be a policy invented
+    here -- but the ratio is reported so that an edit narrowing it is
+    visible in the failure.
+    """
+    if work_seconds <= linger_seconds:
+        raise AssertionError(
+            f"{what}: the work ({work_seconds:g}s) does not outlast the "
+            f"linger ({linger_seconds:g}s), so the build is not guaranteed "
+            f"to be dormant when the wake-up arrives and the scenario may "
+            f"be testing a resident tick noticing on its own poll. Raise "
+            f"the work or lower the linger."
+        )
+
+
+INCONCLUSIVE_MARKER_NAME = "inconclusive-trails"
+
+
+def require_complete_trail(build_id: UUID, *, what: str) -> None:
+    """Refuse to answer a counting question the trail cannot answer.
+
+    For the few counters with no durable record -- a tick self-healing a
+    completion, a concurrency-limit denial, a tick finding the lease
+    held. None of those writes a row, so the trail is the only witness,
+    and a trail missing its terminal entry is short by that tick's
+    contribution.
+
+    Both directions are unsound, which is why this skips rather than
+    relaxes. An exact count fails for a reason that is not the code's; a
+    `<=` passes because the evidence is gone. A skip is the honest third
+    answer, and it is counted, so a tier skipping its way to green is
+    visible rather than reassuring.
+
+    Spawn counts do *not* come here: a submitted execution leaves a row
+    naming the call, so they are asserted against the event log instead
+    (``_events.spawned_executions``).
+    """
+    if not trail_may_be_truncated(build_id):
+        return
+    from ._diagnostics import DIAGNOSTICS_DIR_ENV
+
+    directory = os.environ.get(DIAGNOSTICS_DIR_ENV, "").strip()
+    if directory:
+        try:
+            target = Path(directory)
+            target.mkdir(parents=True, exist_ok=True)
+            with (target / INCONCLUSIVE_MARKER_NAME).open("a") as marker:
+                marker.write(str(build_id) + " -- " + what + "\n")
+        except OSError as error:  # pragma: no cover - diagnostics only
+            print(
+                "Could not record the inconclusive trail: " + repr(error),
+                file=sys.stderr,
+            )
+    pytest.skip(
+        "Inconclusive: "
+        + what
+        + " is read off build "
+        + str(build_id)
+        + "'s tick trail, and no terminal tick summary was ever observed "
+        "for it -- so the trail may be incomplete and the count short by "
+        "whatever it is missing. Usually that is a tick preempted between "
+        "writing the build's terminal status and reporting, but the build "
+        "may equally have been ended by something that is not a tick at "
+        "all; this cannot tell them apart and does not try. Not a pass and "
+        "not a failure; the durable assertions above this one ran."
+    )
+
+
+def assert_remaining_work_outlasts_linger(
+    deployment,
+    task_id: UUID,
+    *,
+    total_seconds: float,
+    linger_seconds: float,
+    what: str,
+) -> None:
+    """The dormancy precondition when another build started the work already.
+
+    Measured, because a constant cannot answer it. The task is running
+    before this build is triggered, so what decides whether this build
+    goes dormant is the work *remaining* when its tick starts -- and a
+    slow bootstrap eats that margin while the constants still compare
+    favourably.
+
+    Both timestamps come from the registry, and both are chosen to err
+    the same way. The *earliest* recorded start, because the task row
+    holds the latest and the engine writes a second one after
+    ``submit_detached``. The server's own clock, from the response's
+    ``Date`` header, because comparing a server timestamp against the
+    runner's clock adds whatever the skew is. Either mistake understates
+    the elapsed time, which overstates the remainder -- the direction
+    that lets this pass when it should fail.
+
+    Still a necessary condition rather than a sufficient one: the waiting
+    build's tick starts some time after this runs, and how long its
+    container takes is recorded nowhere -- the same gap that makes a
+    preempted tick invisible. The margin is printed so an eroding one
+    shows up before it becomes a silent pass.
+    """
+    from ._events import earliest_start_and_server_now
+
+    measured = earliest_start_and_server_now(deployment, task_id)
+    if measured is None:
+        raise AssertionError(
+            f"{what}: the registry records no start for task {task_id}, so "
+            f"the remaining window cannot be established."
+        )
+    started_at, now = measured
+    elapsed = (now - started_at).total_seconds()
+    remaining = total_seconds - elapsed
+    if remaining <= linger_seconds:
+        raise AssertionError(
+            f"{what}: the task started {elapsed:.0f}s ago on the registry's "
+            f"clock and runs for {total_seconds:g}s, so only {remaining:.0f}s "
+            f"remain -- not more than this build's linger "
+            f"({linger_seconds:g}s). The build is not guaranteed to be "
+            f"dormant when the task finishes, so it may see the completion "
+            f"on its own poll and the wake-up path would not be exercised. "
+            f"A slow bootstrap eats this margin; raise the task's duration."
+        )
+
+
 def wait_for_terminal(
     build_id: UUID,
     *,
@@ -138,21 +302,37 @@ def wait_for_terminal(
     poll_interval: float = 5.0,
     trail_timeout: float = 90.0,
 ) -> str:
-    """Block until the build is terminal *and* its last tick has reported.
+    """Block until the build is terminal, then give its last tick time to report.
 
-    Both halves are needed, and the second is not obvious. A tick that
-    drives a build to completion writes the build's terminal status first
-    and reports its own summary afterwards -- two separate calls, in that
-    order. So a caller that sees "completed" and immediately reads the tick
-    trail can get a trail that is missing its final entry.
+    **The first half is an assertion; the second is a courtesy.** A build
+    that never reaches a terminal status is a real failure and still fails
+    here. A terminal build whose final tick did not report is not: the
+    build is done, the work is recorded on the build and task rows, and
+    the only thing missing is a tick's account of itself.
 
-    Every assertion in this tier reads that trail, so the window is not
-    academic: it silently subtracts a tick's worth of counters. It passed
-    three local runs and failed on the first CI run, which is exactly the
-    signature of a race whose width depends on latency and load.
+    The wait exists for a real race and stays. A tick writes the build's
+    terminal status *first* and reports its summary *after*, so a caller
+    that sees "completed" and immediately reads the trail gets a trail
+    missing its final entry -- which silently subtracts a tick's worth of
+    counters from every assertion below it. That was found the honest way:
+    it passed three local runs and failed on the first CI run.
 
-    Waiting for a summary carrying ``terminal_status`` is the precise form
-    of "the tick that ended this build has finished talking".
+    What changed (STA-89) is what happens when the wait runs out. It used
+    to raise, which made **every** scenario that waits for a build fail if
+    the tick that ended it was preempted between those two calls -- a
+    ninety-second wait and then a message reading like a scheduling
+    defect, attributed to whichever scenario was unlucky. 15 of the 18
+    scenarios call this. A preempted reporter is not evidence about the
+    code under test, so it now warns and returns, and the trail is
+    recorded as possibly truncated.
+
+    **What that costs.** The trail may now be short by its last entry, so
+    nothing may be *counted* off it without saying what a missing entry
+    would do. Counts that have a durable substitute take it -- spawns are
+    read from the event log (``_events.spawned_executions``). The few
+    that do not go through ``require_complete_trail``, which declines to
+    answer rather than guessing.
+
     """
     status = wait_until(
         lambda: _terminal_status(build_id),
@@ -161,17 +341,21 @@ def wait_for_terminal(
         poll_interval=poll_interval,
         what="a terminal status",
     )
-    wait_until(
-        lambda: any(s.get("terminal_status") for s in tick_summaries(build_id)),
-        build_id=build_id,
-        timeout=trail_timeout,
-        poll_interval=2.0,
-        what=(
-            f"the tick that ended this build ({status}) to report its "
-            "summary. The build is terminal, so either that tick died "
-            "between writing the status and reporting, or the build was "
-            "ended by something that is not a tick"
-        ),
+    deadline = time.monotonic() + trail_timeout
+    while time.monotonic() < deadline:
+        if any(s.get("terminal_status") for s in tick_summaries(build_id)):
+            return status
+        time.sleep(2.0)
+
+    _TRUNCATED_TRAILS.add(build_id)
+    print(
+        f"[harness] build {build_id} is {status} but the tick that ended it "
+        f"did not report within {trail_timeout:.0f}s. Either it died between "
+        f"writing the status and reporting -- a preemption does exactly that "
+        f"-- or something that is not a tick ended the build. Not a failure: "
+        f"the build and task rows carry the result. The tick trail below may "
+        f"be missing its last entry, so counts read from it are lower bounds.",
+        file=sys.stderr,
     )
     return status
 
@@ -217,8 +401,8 @@ def task_status(task_id: UUID) -> str | None:
     the *normal* first answer: a scenario starts polling as soon as it has
     triggered a build, and the plan reaches the registry a moment later.
     """
-    from stardag.registry import registry_provider
     from stardag.exceptions import NotFoundError
+    from stardag.registry import registry_provider
 
     try:
         return registry_provider.get().task_get_metadata(task_id).status

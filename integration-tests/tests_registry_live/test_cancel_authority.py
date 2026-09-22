@@ -44,6 +44,7 @@ from stardag_integration_tests.registry_live._wait import (
     describe,
     find_task,
     task_status,
+    require_complete_trail,
     tick_summaries,
     wait_for_task_status,
     wait_for_terminal,
@@ -186,6 +187,12 @@ def test_a_cancelled_build_stops_its_own_executions_and_no_others() -> None:
     # containers sleep the same duration, so if A's survives, both complete
     # and the row records whichever reported last: an answer that depends on
     # a race is not evidence either way.
+    # A lower bound read off the trail, and `cancelled_refs` has no
+    # durable counterpart -- a tick cancelling an execution reports the
+    # count and writes no row of its own. So it takes the same route as
+    # the other trail-only counters: no answer rather than a guess when
+    # the tick that ended the build never reported.
+    require_complete_trail(build_a, what="the cancelled-executions count")
     stopped = sum(s.get("cancelled_refs", 0) for s in tick_summaries(build_a))
     assert stopped >= 1, (
         "The cancelled build stopped no executions at all, so the cascade "

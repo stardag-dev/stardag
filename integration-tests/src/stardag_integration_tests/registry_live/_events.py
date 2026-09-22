@@ -15,7 +15,10 @@ workers use, and the same shape as the harness's other direct calls.
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from datetime import datetime
+from email.utils import parsedate_to_datetime
+from typing import Any
 
 import httpx
 
@@ -139,3 +142,112 @@ def first_event_at(events: Iterable[dict[str, Any]], build_id: Any) -> str | Non
     """
     mine = events_by(events, build_id)
     return str(mine[0]["created_at"]) if mine else None
+
+
+# A report the registry kept as audit but refused to apply. Excluded,
+# because a refused claim-start changed nothing and did not license a
+# spawn (`services.status.REPORT_APPLIED_KEY`).
+REPORT_APPLIED_KEY = "report_applied"
+
+
+def spawned_executions(deployment: Deployment, build_id: Any) -> dict[str, int]:
+    """Executions this build actually submitted, per task id.
+
+    **The durable form of a tick's ``spawned`` counter.** A tick records a
+    second ``task_started`` once ``submit_detached`` has returned, carrying
+    the backend's reference for the call it just created. That row is the
+    registry's evidence that a container was submitted, it is written
+    before the container reports anything, and it survives the tick dying
+    on the way home.
+
+    **Counted by distinct ``executor_ref``, and both halves of that matter.**
+
+    *Distinct*, because the registry client retries a POST whose response
+    was lost and the API deliberately appends a second row for it -- the
+    code that writes it warns any new reader that counts rows. Two rows
+    naming one call are one execution.
+
+    *Ref-bearing*, because the granted **claim** is not a spawn. The claim
+    is taken first and the submission can still fail: ``submit_detached``
+    raises, the tick records a task failure, and ``summary.spawned`` is
+    never incremented -- but the claim row exists. Counting claims would
+    read that as an execution that never happened and fail a scenario for
+    a submission error. The ref only exists once there is a call to name.
+
+    Refused reports are excluded: a start the registry kept as audit but
+    did not apply changed nothing.
+    """
+    refs: dict[str, set[str]] = {}
+    for event in _build_events(deployment, build_id):
+        metadata = event.get("event_metadata") or {}
+        ref = metadata.get("executor_ref")
+        if (
+            event.get("event_type") != "task_started"
+            or ref is None
+            or metadata.get(REPORT_APPLIED_KEY) is False
+        ):
+            continue
+        refs.setdefault(str(event.get("task_id")), set()).add(str(ref))
+    return {task_id: len(seen) for task_id, seen in refs.items()}
+
+
+def _get(deployment: Deployment, path: str) -> httpx.Response:
+    """One authenticated GET against the registry, for the readers below."""
+    with httpx.Client(timeout=60.0) as client:
+        response = client.get(
+            f"{deployment.api_url.rstrip('/')}/api/v1/{path.lstrip('/')}",
+            headers={"X-API-Key": deployment.api_key},
+        )
+        response.raise_for_status()
+    return response
+
+
+def earliest_start_and_server_now(
+    deployment: Deployment, task_id: Any
+) -> tuple[datetime, datetime] | None:
+    """When this task first started, and what the registry's clock says now.
+
+    Both ends from the server, and both chosen to err the same way.
+
+    The *earliest* ``task_started`` rather than the task row's
+    ``started_at``: the row holds the latest start, and the reactive
+    engine writes a second one after ``submit_detached``, so reading it
+    understates how long the task has been running -- which overstates
+    the work remaining, in the direction that lets a precondition pass
+    when it should not.
+
+    ``now`` from the response's ``Date`` header rather than the runner's
+    clock, so the subtraction is between two readings of one clock. A
+    local ``now`` against a server timestamp is off by whatever the skew
+    is, in an unknown direction.
+
+    ``None`` only when the task has no start recorded yet. A response
+    without a ``Date`` header raises instead, because that is a different
+    problem with a different fix and the caller cannot tell them apart
+    from a bare ``None``.
+    """
+    response = _get(deployment, f"tasks/{task_id}/events")
+    starts = [
+        event["created_at"]
+        for event in response.json()
+        if event.get("event_type") == "task_started" and event.get("created_at")
+    ]
+    if not starts:
+        return None
+    served_at = response.headers.get("date")
+    if not served_at:
+        raise AssertionError(
+            f"The registry's response for task {task_id} carried no Date "
+            f"header, so there is no server-side 'now' to measure the "
+            f"remaining work against. Measuring it against this machine's "
+            f"clock instead would add an unknown skew in an unknown "
+            f"direction, which is what reading the header avoids."
+        )
+    return (
+        min(datetime.fromisoformat(value) for value in starts),
+        parsedate_to_datetime(served_at),
+    )
+
+
+def _build_events(deployment: Deployment, build_id: Any) -> list[dict[str, Any]]:
+    return list(_get(deployment, f"builds/{build_id}/events").json())
