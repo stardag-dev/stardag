@@ -341,9 +341,16 @@ this job checks out the PR's own head on purpose. A branch not rebased since
 the instrument landed therefore runs the markers, retry and log dump against a
 tree that has none of the code behind them — which once reported "no scenario
 reported a transport timeout" for a run holding two of them, and failed the
-dump with `invalid choice: 'logs'`. A step checks for the instrument up front
-now and says "not measured" rather than "measured and found nothing"; the fix
-is to rebase.
+dump with `invalid choice: 'logs'`. A step checks the checkout up front now and
+says "not measured" rather than "measured and found nothing"; the fix is to
+rebase.
+
+It checks the **three capabilities separately** — the classifier, the log dump
+and the verdict pass — because they landed in different PRs and a single
+boolean over them fails the wrong way: a branch carrying the classifier but not
+the verdict join would be treated as having neither and would lose its Modal
+log dump, which is the most useful thing in the artifact and a capability that
+branch has. Each consumer is gated on what it actually calls.
 
 Locally none of that is configured and the record is printed to stderr
 instead. `provision logs --output-dir <dir>` is the log dump on its own, and

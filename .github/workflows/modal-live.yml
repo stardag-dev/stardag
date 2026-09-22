@@ -350,25 +350,49 @@ jobs:
       # as "not measured", never as "measured and found nothing".
       - name: Check the checkout carries the diagnostics instrument
         id: instrument
+        # **Three capabilities, checked separately, because they landed in
+        # two different PRs and the next one will make it three.** A single
+        # boolean over all of them fails the wrong way: a branch carrying
+        # the classifier but not the verdict join would have been treated
+        # as having neither, and would have lost its *Modal log dump* --
+        # the most useful thing in the artifact, and a capability that
+        # branch has. Gate each consumer on what it actually calls.
         run: |
           set -uo pipefail
           live=integration-tests/src/stardag_integration_tests/registry_live
-          present=yes
-          for required in "$live/_diagnostics.py" "$live/diagnose.py"; do
-            [ -f "$required" ] || present=no
-          done
-          # The log dump is a `provision` subcommand rather than a file,
-          # so it is checked where it is declared. Both halves shipped
-          # together, but they need not stay that way, and the step that
-          # calls this one is the one that failed unreadably.
-          grep -q '"logs"' "$live/provision.py" || present=no
-          echo "present=$present" >> "$GITHUB_OUTPUT"
-          if [ "$present" = no ]; then
-            echo "::warning title=Registry-live instrument absent::This" \
-              "checkout predates the registry-live diagnostics, so nothing" \
-              "in this run will be classified, probed or retried. The" \
-              "workflow comes from the merge ref and the code from the PR" \
-              "head; rebase onto main to get them. (STA-92)"
+
+          # Writes the markers the retry reads, and the records and probe.
+          classifier=yes
+          [ -f "$live/_diagnostics.py" ] || classifier=no
+
+          # `provision logs`, checked where it is declared rather than by
+          # file. This is the one whose absence used to fail unreadably,
+          # with `invalid choice: 'logs'` in a step nobody reads.
+          log_dump=yes
+          grep -q '"logs"' "$live/provision.py" || log_dump=no
+
+          # The access-log join. Newest of the three, so it is the one a
+          # branch is most likely to be missing.
+          verdict=yes
+          [ -f "$live/diagnose.py" ] || verdict=no
+
+          {
+            echo "classifier=$classifier"
+            echo "log_dump=$log_dump"
+            echo "verdict=$verdict"
+          } >> "$GITHUB_OUTPUT"
+
+          missing=""
+          [ "$classifier" = yes ] || missing="$missing the classifier,"
+          [ "$log_dump" = yes ] || missing="$missing the log dump,"
+          [ "$verdict" = yes ] || missing="$missing the verdict pass,"
+          if [ -n "$missing" ]; then
+            echo "::warning title=Registry-live instrument incomplete::This" \
+              "checkout is missing${missing%,}, so that much of the" \
+              "diagnosis will not happen. The workflow comes from the merge" \
+              "ref and the code from the PR head, so a branch not rebased" \
+              "past a harness change runs the new workflow against the old" \
+              "code; rebase onto main. (STA-92)"
           fi
 
       # A separate step from the run below, so a provisioning failure reads
@@ -448,7 +472,10 @@ jobs:
           POSARGS: ${{ inputs.serial && '-- -n0 tests_registry_live' || '' }}
           # Whether the tree this runs has the classifier the branches
           # below read markers from. See the step that computes it.
-          INSTRUMENT_PRESENT: ${{ steps.instrument.outputs.present }}
+          # Only the classifier matters to this step: it is what writes
+          # the markers the branches below read. A checkout with the
+          # classifier and nothing else still classifies correctly.
+          INSTRUMENT_PRESENT: ${{ steps.instrument.outputs.classifier }}
         run: |
           set -uo pipefail
           diag="$STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR"
@@ -587,7 +614,7 @@ jobs:
       - name: Dump the Modal logs for the run
         if: |
           (failure() || steps.scenarios.outputs.diagnose == 'true')
-          && steps.instrument.outputs.present == 'yes'
+          && steps.instrument.outputs.log_dump == 'yes'
         continue-on-error: true
         # Belt and braces with the dump's own budget. Both exist because
         # the job's deadline is the one thing that would take the artifact
@@ -612,7 +639,7 @@ jobs:
       - name: Reconcile the timeouts with the registry's access log
         if: |
           (failure() || steps.scenarios.outputs.diagnose == 'true')
-          && steps.instrument.outputs.present == 'yes'
+          && steps.instrument.outputs.verdict == 'yes'
         continue-on-error: true
         timeout-minutes: 2
         run: |
