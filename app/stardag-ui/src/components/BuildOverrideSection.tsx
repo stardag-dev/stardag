@@ -19,25 +19,19 @@ const ACTIONS: {
     action: "complete",
     label: "Mark completed",
     dot: "bg-green-500",
-    effect:
-      "Records this build as completed. Use it to reconcile a record that is " +
-      "wrong — most often a build whose roots were finished by another build.",
+    effect: "Records completion.",
   },
   {
     action: "fail",
     label: "Mark failed",
     dot: "bg-red-500",
-    effect:
-      "Records this build as failed. It does not reach the execution " +
-      "backend, so anything already running carries on.",
+    effect: "Releases the claims and skips the tasks blocked behind the failure.",
   },
   {
     action: "cancel",
     label: "Cancel build",
     dot: "bg-gray-500",
-    effect:
-      "Records this build as cancelled. It does not reach the execution " +
-      "backend, so anything already running carries on.",
+    effect: "Releases the build's claims; other builds may take its tasks over.",
   },
 ];
 
@@ -135,6 +129,15 @@ export function BuildOverrideSection({
 
   const chosen = ACTIONS.find((a) => a.action === pending) ?? null;
 
+  // "Mark completed" is the one terminal override that releases nothing
+  // (STA-103), so offering it while the build still holds executions
+  // invites stranding every one of their claims until expiry. It is
+  // withheld unless the scan has positively said nothing is running —
+  // "not known yet" is not "none", and here the unsafe reading is the
+  // optimistic one.
+  const completedIsSafe = liveExecutions === "none";
+  const offered = ACTIONS.filter((a) => a.action !== "complete" || completedIsSafe);
+
   return (
     // Named, so it is a landmark: this dialog has two halves that do
     // different things to different subjects, and a screen-reader user
@@ -144,17 +147,16 @@ export function BuildOverrideSection({
         id={headingId}
         className="text-sm font-semibold text-gray-900 dark:text-gray-100"
       >
-        Override the recorded status
+        Record an outcome instead
       </h3>
       <p className="text-xs text-gray-600 dark:text-gray-400">
-        This changes what the registry says about the build.{" "}
-        <strong>It does not reach the execution backend</strong>, so nothing that is
-        running stops.
+        For a build that will not finish on its own. Changes the record only; nothing
+        running is stopped.
       </p>
 
       {chosen === null ? (
         <div className="flex flex-wrap gap-2">
-          {ACTIONS.map(({ action, label, dot }) => (
+          {offered.map(({ action, label, dot }) => (
             <button
               key={action}
               type="button"
@@ -168,6 +170,12 @@ export function BuildOverrideSection({
               {label}
             </button>
           ))}
+          {!completedIsSafe && (
+            <p className="w-full text-xs text-gray-500 dark:text-gray-400">
+              Mark completed is not offered while this build may still have tasks
+              running: it is the one outcome that releases no claims.
+            </p>
+          )}
         </div>
       ) : (
         <div className="space-y-2 rounded-md border border-gray-300 bg-gray-50 px-3 py-2 dark:border-gray-600 dark:bg-gray-900/40">

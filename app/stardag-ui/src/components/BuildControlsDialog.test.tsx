@@ -16,7 +16,7 @@ vi.mock("../context/AuthContext", () => ({
   useAuth: () => ({ user: { profile: { sub: "user-1" } } }),
 }));
 
-import { cancelBuild, completeBuild, fetchTasks } from "../api/tasks";
+import { cancelBuild, completeBuild, failBuild, fetchTasks } from "../api/tasks";
 
 const BUILD = "11111111-1111-1111-1111-111111111111";
 const OTHER_BUILD = "22222222-2222-2222-2222-222222222222";
@@ -104,6 +104,7 @@ beforeEach(() => {
   vi.mocked(fetchTasks).mockReset();
   vi.mocked(cancelBuild).mockReset();
   vi.mocked(completeBuild).mockReset();
+  vi.mocked(failBuild).mockReset();
   onBuildChanged.mockReset();
 });
 
@@ -410,7 +411,9 @@ describe("BuildControlsDialog", () => {
     await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     expect(screen.getByText("not recorded yet")).toBeInTheDocument();
-    expect(screen.getByText(/have no call id on their row/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Rows without a call id exit at their next checkpoint/),
+    ).toBeInTheDocument();
     // The pending wording, not the other-executor one.
     expect(screen.queryByText(/executor stardag cannot stop/)).toBe(null);
   });
@@ -432,8 +435,10 @@ describe("BuildControlsDialog", () => {
 
     // Ambiguous, so it is grouped with the pending rows and the wording
     // names both possibilities rather than promising a call id.
-    expect(screen.getByText(/have no call id on their row/)).toBeInTheDocument();
-    expect(screen.getByText(/own process/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Rows without a call id exit at their next checkpoint/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("not recorded yet")).toBeInTheDocument();
     expect(screen.queryByText(/executor stardag cannot stop/)).toBe(null);
   });
 
@@ -491,20 +496,20 @@ describe("BuildControlsDialog", () => {
 
   it("confirms an override where the override section cannot", async () => {
     answerWith([makeTask()]);
-    vi.mocked(completeBuild).mockResolvedValue({
+    vi.mocked(failBuild).mockResolvedValue({
       id: BUILD,
-      status: "completed",
+      status: "failed",
     } as never);
     const user = userEvent.setup();
     await openDialog(user);
 
-    await user.click(await screen.findByRole("button", { name: "Mark completed" }));
-    await user.click(screen.getByRole("button", { name: "Mark completed" }));
+    await user.click(await screen.findByRole("button", { name: "Mark failed" }));
+    await user.click(screen.getByRole("button", { name: "Mark failed" }));
 
     // The section itself unmounts once the status is no longer
     // overridable, so the confirmation has to live outside it.
-    expect(await screen.findByText(/now recorded as completed/i)).toBeInTheDocument();
-    expect(screen.getByText(/Nothing was stopped/i)).toBeInTheDocument();
+    expect(await screen.findByText(/now recorded as failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/Nothing running was stopped/i)).toBeInTheDocument();
   });
 
   // Auto-refresh re-runs the effect every 5s and a scan is up to 20
@@ -572,31 +577,50 @@ describe("BuildControlsDialog", () => {
   // stopped, "Cancel" looked like the answer, and it releases the claims
   // while every container runs on.
 
-  // Twice now the server has changed what an override does to the
-  // claims — none released before STA-81, all released after — and both
-  // times this copy went stale, once asserting the exact opposite of the
-  // truth about a destructive action. The rule it settled on is that the
-  // copy says what does not move: an override edits the record and does
-  // not stop what is running. This test pins the silence, so the next
-  // server change cannot quietly make the dialog wrong again.
-  it("says nothing about claims in either direction", async () => {
+  // #375 pinned this copy to say *nothing* about claims, because the
+  // behaviour was mid-flight: STA-81 was about to make a terminal
+  // transition release them, and no sentence was true on both sides. It
+  // has landed, so the honest constraint is no longer silence but
+  // accuracy — each action names the claims exactly when it changes
+  // them. Same discipline, a settled fact to attach it to.
+  it("names the claims exactly where the action changes them", async () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();
     await openDialog(user);
 
-    // Scoped to the override half, and rejecting the *word*. Scanning
-    // the whole dialog would have tested the stop section's copy, which
-    // legitimately does discuss claims; and rejecting two particular
-    // phrasings would let "the claims remain held" through, which is
-    // just as much a promise this must not make.
     const override = () =>
-      screen.getByRole("region", { name: /Override the recorded status/ });
+      screen.getByRole("region", { name: /Record an outcome instead/ });
 
-    for (const label of ["Mark completed", "Mark failed", "Cancel build"]) {
-      await user.click(await screen.findByRole("button", { name: label }));
-      expect(override().textContent ?? "").not.toMatch(/claim/i);
-      await user.click(screen.getByRole("button", { name: "Back" }));
-    }
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    expect(override().textContent ?? "").toMatch(/releases the build's claims/i);
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    await user.click(screen.getByRole("button", { name: "Mark failed" }));
+    expect(override().textContent ?? "").toMatch(/releases the claims/i);
+    await user.click(screen.getByRole("button", { name: "Back" }));
+  });
+
+  // The one terminal override that releases nothing (STA-103), so it is
+  // withheld unless the scan has positively said nothing is running.
+  it("withholds Mark completed while the build may still hold claims", async () => {
+    answerWith([makeTask()]);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
+    expect(
+      screen.getByText(/is the one outcome that releases no claims/i),
+    ).toBeInTheDocument();
+  });
+
+  it("offers Mark completed once nothing is running", async () => {
+    answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    expect(
+      await screen.findByRole("button", { name: "Mark completed" }),
+    ).toBeInTheDocument();
   });
 
   it("warns that cancelling does not stop what is running", async () => {
@@ -604,32 +628,34 @@ describe("BuildControlsDialog", () => {
     const user = userEvent.setup();
     await openDialog(user);
 
-    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    // The section's own line carries the non-effect for every action;
+    // the per-action warning carries the one that only bites while
+    // something is actually running.
+    expect(screen.getByText(/nothing running is stopped/i)).toBeInTheDocument();
 
-    // The claim the copy must not make is that cancelling stops
-    // anything: `POST /cancel` without `cascade` writes one event.
-    expect(
-      screen.getByText(
-        /does not reach the execution backend, so anything already running carries on/i,
-      ),
-    ).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
     expect(screen.getByText(/cancelling here will not stop them/i)).toBeInTheDocument();
     expect(
       screen.getByText(
         /ends the selected containers first and cancels the build afterwards/i,
       ),
     ).toBeInTheDocument();
-    // Nothing happened yet: the first click only asks.
     expect(cancelBuild).not.toHaveBeenCalled();
   });
 
-  it("says the command needs no override alongside it", async () => {
+  // The old copy said in words that no override was needed alongside the
+  // command. The structure says it now — stop first, record second — so
+  // what has to hold is that the stop line states the build is cancelled
+  // and its claims released, which is what makes an override redundant.
+  it("says the command cancels the build and releases its claims", async () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();
     await openDialog(user);
 
     expect(
-      await screen.findByText(/no need to override the status above as well/i),
+      await screen.findByText(
+        /then cancels the build and releases every claim it holds/i,
+      ),
     ).toBeInTheDocument();
   });
 
@@ -644,16 +670,16 @@ describe("BuildControlsDialog", () => {
 
   it("overrides only after the second, confirming click", async () => {
     answerWith([makeTask()]);
-    vi.mocked(completeBuild).mockResolvedValue({ id: BUILD } as never);
+    vi.mocked(failBuild).mockResolvedValue({ id: BUILD } as never);
     const user = userEvent.setup();
     await openDialog(user);
 
-    await user.click(await screen.findByRole("button", { name: "Mark completed" }));
-    expect(completeBuild).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "Mark failed" }));
+    expect(failBuild).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Mark completed" }));
+    await user.click(screen.getByRole("button", { name: "Mark failed" }));
     await waitFor(() =>
-      expect(completeBuild).toHaveBeenCalledWith(BUILD, "env-1", "user-1"),
+      expect(failBuild).toHaveBeenCalledWith(BUILD, "env-1", "user-1"),
     );
     expect(onBuildChanged).toHaveBeenCalled();
   });

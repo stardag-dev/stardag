@@ -272,9 +272,6 @@ export function BuildControlsDialog({
     (execution) =>
       !execution.stoppable && !pendingReasons.includes(execution.notStoppableReason),
   ).length;
-  const unspawned = chosen.filter((execution) =>
-    pendingReasons.includes(execution.notStoppableReason),
-  ).length;
 
   return (
     <>
@@ -307,41 +304,8 @@ export function BuildControlsDialog({
         title="Build controls"
         maxWidthClass="max-w-4xl"
       >
-        {/* The record first, then the work — and a rule between them,
-            because the whole difficulty is that these are two different
-            things and the UI used to present them as unrelated. */}
-        {canOverrideStatus(buildStatus) && (
-          <>
-            <BuildOverrideSection
-              buildId={buildId}
-              environmentId={environmentId}
-              buildStatus={buildStatus}
-              liveExecutions={
-                // `held` is null until the scan answers, and stays null if
-                // it fails. Both are "not known", and neither is "none".
-                held === null ? "unknown" : held.length > 0 ? "some" : "none"
-              }
-              onChanged={(updated) => {
-                setStatusNotice(`This build is now recorded as ${updated.status}.`);
-                onBuildChanged(updated);
-              }}
-            />
-            <hr className="my-4 border-gray-200 dark:border-gray-700" />
-          </>
-        )}
-
-        {statusNotice && (
-          <ResultBanner
-            tone="success"
-            className="mb-3"
-            onDismiss={() => setStatusNotice(null)}
-          >
-            {statusNotice} Nothing was stopped — see below for what is still running.
-          </ResultBanner>
-        )}
-
         <h3 className="mb-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
-          Stop running tasks
+          Stop what is running
         </h3>
         <StopDialogBody
           error={error}
@@ -351,12 +315,9 @@ export function BuildControlsDialog({
           buildId={buildId}
         >
           <p className="text-xs text-gray-600 dark:text-gray-400">
-            These are read off the task rows while this build still holds their claims,
-            which is the only moment the list is exact — releasing the claims lets
-            another build take a task over. Stopping the containers is the
-            operator&rsquo;s to do:{" "}
-            <strong>stardag never reaches the execution backend from here.</strong> Run
-            the command below, or open a call in Modal and kill it there.
+            Ends the listed Modal calls from your credentials, then cancels the build
+            and releases every claim it holds. Rows without a call id exit at their next
+            checkpoint.
           </p>
 
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -444,20 +405,14 @@ export function BuildControlsDialog({
               : `The command below names the ${chosen.length} you ticked.`}
           </p>
 
+          {/* The spawn-reporting explanation is gone: the section's own
+              first line already says rows without a call id exit at their
+              next checkpoint. What survives is the case that is permanent
+              rather than a moment — another backend entirely. */}
           {unreachable > 0 && (
             <p className="text-xs text-gray-600 dark:text-gray-400">
-              {unreachable} of these run on an executor stardag cannot stop. They are
-              listed so nothing is invisible; ending them is that backend&rsquo;s own
-              business.
-            </p>
-          )}
-
-          {unspawned > 0 && (
-            <p className="text-xs text-gray-600 dark:text-gray-400">
-              {unspawned} of these have no call id on their row, so the command has
-              nothing to cancel for them and they keep running. A spawn reports its id
-              within a container start — refresh, and anything still listed without one
-              is running in this build&rsquo;s own process.
+              {unreachable} run on an executor stardag cannot stop; ending those is that
+              backend&rsquo;s own business.
             </p>
           )}
 
@@ -487,10 +442,7 @@ export function BuildControlsDialog({
                 </button>
               </div>
               <p className="text-xs text-gray-600 dark:text-gray-400">
-                It stops these calls first and cancels the build afterwards, in that
-                order — so <strong>this is the whole operation</strong>, and there is no
-                need to override the status above as well. Add <code>--dry-run</code> to
-                see its own list before anything happens.
+                Add <code>--dry-run</code> to see its own list before anything happens.
                 {excluded > 0 && (
                   <>
                     {" "}
@@ -512,6 +464,44 @@ export function BuildControlsDialog({
             </p>
           )}
         </StopDialogBody>
+
+        {/* The work first, then the record. Stopping is what an
+            operator opening this dialog almost always came for, and
+            the rule between the two halves is doing the work the old
+            separate controls did not: these act on different things.
+            The notice sits outside the override block because a
+            successful override can take the build out of the
+            overridable statuses, which unmounts that block. */}
+        {(canOverrideStatus(buildStatus) || statusNotice) && (
+          <hr className="my-4 border-gray-200 dark:border-gray-700" />
+        )}
+
+        {canOverrideStatus(buildStatus) && (
+          <BuildOverrideSection
+            buildId={buildId}
+            environmentId={environmentId}
+            buildStatus={buildStatus}
+            liveExecutions={
+              // `held` is null until the scan answers, and stays null if
+              // it fails. Both are "not known", and neither is "none".
+              held === null ? "unknown" : held.length > 0 ? "some" : "none"
+            }
+            onChanged={(updated) => {
+              setStatusNotice(`This build is now recorded as ${updated.status}.`);
+              onBuildChanged(updated);
+            }}
+          />
+        )}
+
+        {statusNotice && (
+          <ResultBanner
+            tone="success"
+            className="mt-3"
+            onDismiss={() => setStatusNotice(null)}
+          >
+            {statusNotice} Nothing running was stopped.
+          </ResultBanner>
+        )}
       </Modal>
     </>
   );
