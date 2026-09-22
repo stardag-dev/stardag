@@ -12,6 +12,8 @@ import { OnboardingModal } from "./components/OnboardingModal";
 import { ServerVersionFooter } from "./components/ServerVersionFooter";
 import { SessionExpiredOverlay } from "./components/SessionExpiredOverlay";
 import { WorkspaceSelector } from "./components/WorkspaceSelector";
+import { EnvironmentSelector } from "./components/EnvironmentSelector";
+import { CRUMB_CURRENT, CRUMB_TRIGGER, CrumbSeparator } from "./components/ui/Crumb";
 import { WorkspaceSettings } from "./components/WorkspaceSettings";
 import { PendingInvites } from "./components/PendingInvites";
 import type { NavItem } from "./components/Sidebar";
@@ -43,17 +45,14 @@ function BreadcrumbNav() {
   return (
     <>
       {items.map((item, i) => (
-        <div key={i} className="flex items-center gap-2">
-          <span className="text-gray-300 dark:text-gray-600">/</span>
+        <div key={i} className="flex min-w-0 items-center gap-1.5">
+          <CrumbSeparator />
           {item.onClick ? (
-            <button
-              onClick={item.onClick}
-              className="text-base text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
-            >
-              {item.label}
+            <button type="button" onClick={item.onClick} className={CRUMB_TRIGGER}>
+              <span className="truncate">{item.label}</span>
             </button>
           ) : (
-            <span className="text-base font-medium text-gray-900 dark:text-gray-100">
+            <span className={CRUMB_CURRENT} title={item.title}>
               {item.label}
             </span>
           )}
@@ -87,10 +86,13 @@ function MainLayout({
         {/* Header */}
         {showHeader && (
           <header className="flex h-14 items-center justify-between border-b border-gray-200 bg-white px-4 dark:border-gray-700 dark:bg-gray-800">
-            <div className="flex min-w-0 items-center gap-2">
+            {/* One trail, one baseline: workspace / environment / page /
+                record. See components/ui/Crumb. */}
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5">
               <WorkspaceSelector />
+              <EnvironmentSelector />
               <BreadcrumbNav />
-            </div>
+            </nav>
             <div className="flex items-center gap-3">
               <ThemeToggle />
               <UserMenu />

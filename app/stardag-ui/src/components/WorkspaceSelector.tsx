@@ -1,14 +1,21 @@
-import { useState, useRef, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useEnvironment } from "../context/EnvironmentContext";
 import { useAuth } from "../context/AuthContext";
+import { useClickOutside } from "../hooks/useClickOutside";
 import { fetchPendingInvites, type PendingInvite } from "../api/workspaces";
+import { CRUMB_MENU, CRUMB_TRIGGER, CrumbChevron } from "./ui/Crumb";
 
 /**
- * Slack-like workspace selector component.
+ * The workspace crumb: the first step in the header trail.
  *
- * Displays the current workspace prominently in the top-left,
- * with a dropdown to switch workspaces or create new ones.
- * Token exchange happens automatically when switching workspaces.
+ * It switches workspaces and nothing else. Environments moved out to
+ * `EnvironmentSelector`, which is a sibling crumb rather than a section
+ * inside this dropdown — see that file for why.
+ *
+ * Token exchange happens automatically when switching workspaces, and
+ * the trigger shows it: the avatar carries a pulsing dot while the new
+ * workspace's token is being fetched, because until it lands the rest of
+ * the page is still showing the old workspace's data.
  */
 export function WorkspaceSelector() {
   const { isAuthenticated } = useAuth();
@@ -16,9 +23,6 @@ export function WorkspaceSelector() {
     workspaces,
     activeWorkspace,
     setActiveWorkspace,
-    environments,
-    activeEnvironment,
-    setActiveEnvironment,
     isLoading,
     isExchangingToken,
   } = useEnvironment();
@@ -36,16 +40,8 @@ export function WorkspaceSelector() {
     }
   }, [isAuthenticated, isLoading]);
 
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setIsOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  const closeDropdown = useCallback(() => setIsOpen(false), []);
+  useClickOutside(dropdownRef, isOpen, closeDropdown);
 
   // Don't show if not authenticated
   if (!isAuthenticated) {
@@ -124,62 +120,46 @@ export function WorkspaceSelector() {
 
   return (
     <div className="relative" ref={dropdownRef}>
-      {/* Main button - Slack-like workspace selector */}
       <button
+        type="button"
         onClick={() => setIsOpen(!isOpen)}
         disabled={isExchangingToken}
-        className="flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
+        aria-expanded={isOpen}
+        className={CRUMB_TRIGGER}
+        title={
+          activeWorkspace
+            ? `Workspace ${activeWorkspace.name} — switch workspace`
+            : "Select a workspace"
+        }
       >
-        {/* Workspace avatar */}
-        <div className="relative">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 text-white font-bold text-lg">
+        {/* A 24px mark, not a 36px tile: at the trail's type size a
+            larger avatar sets its own baseline and drags the row out of
+            alignment, which is the misalignment this row had. */}
+        <span className="relative flex-shrink-0">
+          <span className="flex h-6 w-6 items-center justify-center rounded bg-gradient-to-br from-blue-500 to-purple-600 text-xs font-bold text-white">
             {workspaceInitial}
-          </div>
-          {/* Token exchange indicator */}
+          </span>
           {isExchangingToken && (
-            <div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white dark:border-gray-800 bg-yellow-400 animate-pulse" />
+            <span
+              title="Switching workspace…"
+              className="absolute -right-0.5 -bottom-0.5 h-2 w-2 animate-pulse rounded-full border border-white bg-yellow-400 dark:border-gray-800"
+            />
           )}
-          {/* Pending invites notification badge */}
           {!isExchangingToken && pendingInvites.length > 0 && (
-            <div className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full border-2 border-white dark:border-gray-800 bg-orange-500 text-[10px] font-bold text-white">
+            <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full border border-white bg-orange-500 text-[9px] font-bold text-white dark:border-gray-800">
               {pendingInvites.length > 9 ? "9+" : pendingInvites.length}
-            </div>
-          )}
-        </div>
-
-        {/* Workspace and environment name */}
-        <div className="flex flex-col items-start min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="font-semibold text-gray-900 dark:text-gray-100 truncate max-w-[150px]">
-              {activeWorkspace?.name ?? "Select workspace"}
-            </span>
-            <svg
-              className={`h-4 w-4 text-gray-500 transition-transform ${
-                isOpen ? "rotate-180" : ""
-              }`}
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M19 9l-7 7-7-7"
-              />
-            </svg>
-          </div>
-          {activeEnvironment && (
-            <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[150px]">
-              {activeEnvironment.name}
             </span>
           )}
-        </div>
+        </span>
+        <span className="max-w-[12rem] truncate font-medium text-gray-900 dark:text-gray-100">
+          {activeWorkspace?.name ?? "Select workspace"}
+        </span>
+        <CrumbChevron open={isOpen} />
       </button>
 
       {/* Dropdown menu */}
       {isOpen && (
-        <div className="absolute left-0 top-full z-50 mt-2 min-w-[300px] rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-xl overflow-hidden">
+        <div className={`${CRUMB_MENU} min-w-[19rem]`}>
           {/* Current workspace header */}
           {activeWorkspace && (
             <div className="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-4 py-3">
@@ -196,57 +176,6 @@ export function WorkspaceSelector() {
                   </div>
                 </div>
               </div>
-            </div>
-          )}
-
-          {/* Environments section */}
-          {activeWorkspace && environments.length > 0 && (
-            <div className="border-b border-gray-200 dark:border-gray-700 py-2">
-              <div className="px-4 py-1.5 text-xs font-semibold uppercase text-gray-500 dark:text-gray-400">
-                Environments
-              </div>
-              {environments.map((env) => (
-                <button
-                  key={env.id}
-                  onClick={() => {
-                    setActiveEnvironment(env);
-                    setIsOpen(false);
-                  }}
-                  className={`flex w-full items-center gap-3 px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 ${
-                    activeEnvironment?.id === env.id
-                      ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
-                      : "text-gray-900 dark:text-gray-100"
-                  }`}
-                >
-                  <svg
-                    className="h-4 w-4 text-gray-400"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
-                    />
-                  </svg>
-                  {env.name}
-                  {activeEnvironment?.id === env.id && (
-                    <svg
-                      className="ml-auto h-4 w-4"
-                      fill="currentColor"
-                      viewBox="0 0 20 20"
-                    >
-                      <path
-                        fillRule="evenodd"
-                        d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                        clipRule="evenodd"
-                      />
-                    </svg>
-                  )}
-                </button>
-              ))}
             </div>
           )}
 
