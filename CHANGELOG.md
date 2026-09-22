@@ -223,9 +223,14 @@ with no SDK action.
 
   The panel's selection rules mirror the command's exactly and moved with
   them: a row with no call id is listed, its Call cell reads "not recorded
-  yet", and the panel says which of the two permanent reasons or the one
-  momentary reason applies. The UI ships in the server image rather than
-  the SDK tag, so this half arrives with the next server release.
+  yet", and the panel gives the same reason the command would. Executions
+  on another executor are called out separately from those with no call id
+  on their row — and that second group carries the same hedge the CLI
+  does, because an unattributed row may be a non-detached execution or a
+  claim whose spawn has not reported yet, so the guidance is to refresh and
+  see rather than to wait or to give up. The UI ships in the server image
+  rather than the SDK tag, so this half arrives with the next server
+  release.
 
 - The build page's **"Cancel & Release Claims"** action is gone, for the
   reason the `--cascade` flag is: it released the claims first and stopped
