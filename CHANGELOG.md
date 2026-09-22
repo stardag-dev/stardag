@@ -238,7 +238,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
   The cancel route's `cascade` parameter is therefore **redundant, and
   accepted as a no-op** so existing callers keep working; a later cleanup
-  removes it. The bulk-cancel route's own parameter is untouched.
+  removes it.
+
+  **`POST /builds/bulk-cancel` still honours its own `cascade`**, which
+  defaults to true. So the word now means two things: on the single-build
+  route it is ignored and the claims always go, while on the bulk route
+  `cascade: false` still means "record the events and release nothing".
+  Left that way deliberately — the bulk parameter is a user-facing toggle
+  in the UI's bulk-cancel dialog, and changing it is a separate decision
+  from this one — but do not carry "cascade is a no-op" from one route to
+  the other.
 
   **The window this opens, stated honestly.** A release lets the next
   build take the task over within seconds, while the old container is
