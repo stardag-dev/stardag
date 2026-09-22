@@ -99,12 +99,13 @@ function renderPanel(
 
 /** Re-render the panel under a different environment, same build. */
 let lastRender: ReturnType<typeof render> | null = null;
-function rerenderIn(environmentId: string) {
+function rerenderIn(environmentId: string, refreshToken = 0) {
   lastRender?.rerender(
     <BuildSchedulingPanel
       buildId={VIEWED_BUILD}
       environmentId={environmentId}
       buildStatus="running"
+      refreshToken={refreshToken}
     />,
   );
 }
@@ -276,6 +277,28 @@ describe("BuildSchedulingPanel", () => {
     rerenderIn("env-2");
 
     await waitFor(() => expect(screen.queryByText("Not progressing")).toBeNull());
+  });
+
+  // The previous frontier is kept on screen through a failed re-read,
+  // so the dialog must say the read failed — otherwise it shows a
+  // confident, ordinary-looking answer that is merely old, while the
+  // icon's dot and tooltip say the opposite.
+  it("says so when a re-read fails with a frontier already on screen", async () => {
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(
+      makeFrontier({ blocked_by_external: [makeBlocker()] }),
+    );
+    await openScheduling();
+    expect(await screen.findByText("Not progressing")).toBeInTheDocument();
+
+    vi.mocked(fetchBuildFrontier).mockRejectedValue(new Error("gateway timeout"));
+    rerenderIn("env-1", 1);
+
+    expect(
+      await screen.findByText(/from the last successful read and may be out of date/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("gateway timeout", { exact: false })).toBeInTheDocument();
+    // The answer itself stays; it is old, not gone.
+    expect(screen.getByText("Not progressing")).toBeInTheDocument();
   });
 
   it("marks the icon when the build is not progressing", async () => {

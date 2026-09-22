@@ -837,7 +837,23 @@ export function BuildSchedulingPanel({
         title="Scheduling"
         maxWidthClass="max-w-3xl"
       >
-        <div className="max-h-[70vh] overflow-y-auto">{body}</div>
+        <div className="max-h-[70vh] overflow-y-auto">
+          {/* A failed read with a frontier already on screen. The
+              previous frontier is deliberately kept rather than
+              blanked, which makes saying so essential: otherwise the
+              dialog shows a confident, ordinary-looking answer that is
+              simply old, while the icon's own dot and tooltip say the
+              read failed. Before this panel became a dialog the error
+              check came first and so always showed; restructuring it
+              put this branch behind `!frontier`. */}
+          {frontierError && (
+            <ResultBanner tone="warning" className="mb-3">
+              Could not re-read this build&rsquo;s scheduler state, so what is below is
+              from the last successful read and may be out of date: {frontierError}
+            </ResultBanner>
+          )}
+          {body}
+        </div>
       </Modal>
       {/* Rendered outside the dialog, and after it, so the confirmation
           stacks on top of the dialog it was triggered from rather than
