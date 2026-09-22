@@ -109,6 +109,23 @@ class TestSelection:
         assert execution.executor == "modal"
         assert execution.stoppable
 
+    def test_a_non_detached_execution_is_not_attributed_to_modal(self):
+        # The row a local, thread-pool or subprocess execution writes:
+        # ``TaskExecutorABC.get_executor_metadata`` defaults to None and
+        # the non-detached start passes no executor, no ref and no
+        # metadata (``build/_concurrent.py``'s ``registry_task_start``
+        # with ``handle is None``, and ``_sequential.py``'s plain
+        # ``task_start``). Guessing Modal here would put it under
+        # ``--executor modal`` and promise a call id that never arrives.
+        execution = _execution(
+            latest_executor=None,
+            latest_executor_ref=None,
+            latest_executor_metadata=None,
+        )
+        assert execution.executor == ""
+        assert not execution.stoppable
+        assert execution.not_stoppable_reason == _stop.NO_EXECUTOR
+
     def test_an_unspawned_claim_is_attributed_from_its_metadata(self):
         # A claim names no executor of its own — there is no call yet — but
         # its metadata declares the kind it is about to spawn on. Reading
@@ -376,6 +393,30 @@ class TestStopCommand:
         assert entry["stoppable"] is False
         assert entry["not_stoppable_reason"] == _stop.NO_REF_YET
         assert payload["stopped_count"] == 0
+        cancel.assert_not_called()
+
+    def test_a_non_detached_execution_is_not_offered_a_re_run(self):
+        # Same rule as the non-Modal row below, for the case that is
+        # actually reachable from a plain local build: listed so the
+        # operator knows it keeps running, never promised a call id.
+        registry = _mock_registry(
+            [
+                _row(
+                    latest_executor=None,
+                    latest_executor_ref=None,
+                    latest_executor_metadata=None,
+                )
+            ]
+        )
+        with (
+            _patch_resolve(registry),
+            mock.patch.object(_stop, "cancel_modal_calls") as cancel,
+        ):
+            result = runner.invoke(app, ["stop", BUILD_ID, "--dry-run"])
+
+        assert result.exit_code == 0, result.output
+        assert "re-run this command" not in result.output
+        assert "not stoppable here" in result.output
         cancel.assert_not_called()
 
     def test_a_ref_less_non_modal_row_is_not_offered_a_re_run(self):

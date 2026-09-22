@@ -982,7 +982,7 @@ def _render_executions(
             status,
             execution.executor
             if execution.executor == _stop.MODAL_EXECUTOR
-            else f"{execution.executor} [yellow](not stoppable here)[/yellow]",
+            else f"{execution.executor or '-'} [yellow](not stoppable here)[/yellow]",
             execution.executor_ref or "[yellow](not recorded yet)[/yellow]",
             execution.worker or "-",
             _age(execution.status_at),

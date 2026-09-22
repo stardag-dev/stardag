@@ -3,6 +3,8 @@ import type { Task, TaskStatus } from "../types/task";
 import {
   CLAIM_PAGE_SIZE,
   MAX_CLAIM_PAGES,
+  NO_EXECUTOR,
+  NO_REF_YET,
   collectExecutions,
   executionFromTask,
   executionsForBuild,
@@ -75,17 +77,52 @@ describe("executionFromTask", () => {
     expect(executionFromTask(task, BUILD)).toBe(null);
   });
 
-  it("does not select a row with no executor ref", () => {
-    expect(executionFromTask(makeTask({ latest_executor_ref: null }), BUILD)).toBe(
-      null,
+  it("lists a claim whose spawn has not reported a call id yet", () => {
+    // STA-88. The tick starts a task twice: a claim, which sets RUNNING
+    // with no ref because nothing has been spawned yet, then a
+    // ref-bearing start once the spawn returns a call id. Dropping the
+    // row in between made the panel silently short, worst during a
+    // fan-out — which is exactly when somebody opens it.
+    const execution = executionFromTask(
+      makeTask({ latest_executor: null, latest_executor_ref: null }),
+      BUILD,
     );
+    expect(execution).not.toBe(null);
+    expect(execution?.executorRef).toBe(null);
+    expect(execution?.stoppable).toBe(false);
+    expect(execution?.notStoppableReason).toBe(NO_REF_YET);
+    // Attributed from the claim's own metadata, not guessed.
+    expect(execution?.executor).toBe("modal");
+  });
+
+  it("does not attribute a non-detached execution to Modal", () => {
+    // The row a local, thread-pool or subprocess execution writes: no
+    // executor, no ref and no metadata, because
+    // `TaskExecutorABC.get_executor_metadata` defaults to None and the
+    // non-detached start passes none of the three. Guessing Modal would
+    // promise a call id that never arrives.
+    const execution = executionFromTask(
+      makeTask({
+        latest_executor: null,
+        latest_executor_ref: null,
+        latest_executor_metadata: null,
+      }),
+      BUILD,
+    );
+    expect(execution?.executor).toBe("");
+    expect(execution?.stoppable).toBe(false);
+    expect(execution?.notStoppableReason).toBe(NO_EXECUTOR);
   });
 
   it("treats a ref with no executor named as Modal", () => {
     // Data from before `latest_executor` existed. Modal is the only
-    // executor that has ever recorded a ref, and dropping the row would
-    // hide a live container from a list that is meant to be exact.
-    const execution = executionFromTask(makeTask({ latest_executor: null }), BUILD);
+    // executor that has ever recorded a ref, so the guess is safe here
+    // and dropping the row would hide a live container from a list that
+    // is meant to be exact.
+    const execution = executionFromTask(
+      makeTask({ latest_executor: null, latest_executor_metadata: null }),
+      BUILD,
+    );
     expect(execution?.executor).toBe("modal");
     expect(execution?.stoppable).toBe(true);
   });
@@ -256,6 +293,13 @@ describe("executorsIn", () => {
       makeTask(),
       makeTask({ latest_executor: "prefect" }),
       makeTask({ latest_executor: null }),
+      // Unattributed: no `--executor` value names it, so it must not
+      // become a blank option that builds a command matching nothing.
+      makeTask({
+        latest_executor: null,
+        latest_executor_ref: null,
+        latest_executor_metadata: null,
+      }),
     ];
     expect(executorsIn(executionsForBuild(rows, BUILD))).toEqual(["modal", "prefect"]);
   });

@@ -99,15 +99,20 @@ with no SDK action.
   and the prompt says how many. A hard kill is the Modal dashboard's,
   which the registry UI deep-links to.
 
-  Nothing the build holds is dropped from the list, and there are two ways
-  to be in it without being stoppable. An execution on a non-Modal
-  executor, permanently — stardag reaches Modal and nothing else, and the
-  registry reaches no backend at all. And a task that has been claimed but
-  whose spawn has not reported a call id yet, momentarily: RUNNING is the
-  claim, and the claim is recorded first, so re-running the command once
-  the container is up will catch it. Both are listed with the reason, in
-  the table and as `not_stoppable_reason` in `--json`; the list is exact
-  about which executions are the build's, not about which can be stopped.
+  Nothing the build holds is dropped from the list, and there are three
+  ways to be in it without being stoppable. An execution on a non-Modal
+  executor — stardag reaches Modal and nothing else, and the registry
+  reaches no backend at all. A **non-detached** execution, which the build
+  ran in its own process, thread or subprocess and whose row therefore
+  names no executor at all. Both permanent. And a task that has been
+  claimed but whose spawn has not reported a call id yet, which is the one
+  momentary case: RUNNING _is_ the claim and the claim is recorded first,
+  so re-running the command once the container is up will catch it.
+
+  All three are listed with the reason, in the table and as
+  `not_stoppable_reason` in `--json`, and only the last is offered a
+  re-run. The list is exact about which executions are the build's, not
+  about which of them can be stopped.
 
 - **Breaking: `stardag builds cancel --cascade` is removed.** It released
   the build's claims and left its containers running, which is the ordering
@@ -214,6 +219,12 @@ with no SDK action.
   dashboard page for a hard kill. The panel is absent unless the build
   holds live executions — except where the claim-holder scan gave up
   early, which it reports rather than passing off as "nothing running".
+
+  The panel's selection rules mirror the command's exactly and moved with
+  them: a row with no call id is listed, its Call cell reads "not recorded
+  yet", and the panel says which of the two permanent reasons or the one
+  momentary reason applies. The UI ships in the server image rather than
+  the SDK tag, so this half arrives with the next server release.
 
 - The build page's **"Cancel & Release Claims"** action is gone, for the
   reason the `--cascade` flag is: it released the claims first and stopped

@@ -9,6 +9,7 @@ import {
   stopCommand,
   workersIn,
   MAX_CLAIM_PAGES,
+  NO_REF_YET,
   STOPPABLE_STATUSES,
   type StopFilters,
   type StoppableExecution,
@@ -221,7 +222,15 @@ export function BuildStopPanel({
   }
 
   const excluded = executions.length - chosen.length;
-  const unstoppable = chosen.filter((execution) => !execution.stoppable).length;
+  // Split by reason, not counted together: one is permanent and one is
+  // over in seconds, and an operator deciding whether to wait or to go to
+  // the Modal dashboard needs to know which they are looking at.
+  const unreachable = chosen.filter(
+    (execution) => !execution.stoppable && execution.notStoppableReason !== NO_REF_YET,
+  ).length;
+  const unspawned = chosen.filter(
+    (execution) => execution.notStoppableReason === NO_REF_YET,
+  ).length;
 
   return (
     <div className="rounded-md border border-amber-200 bg-amber-50/60 dark:border-amber-900/60 dark:bg-amber-900/10">
@@ -352,11 +361,20 @@ export function BuildStopPanel({
               : `The command below names the ${chosen.length} you ticked.`}
           </p>
 
-          {unstoppable > 0 && (
+          {unreachable > 0 && (
             <p className="text-xs text-gray-600 dark:text-gray-400">
-              {unstoppable} of these run on an executor stardag cannot stop. They are
-              listed so nothing is invisible; ending them is that backend&rsquo;s own
-              business.
+              {unreachable} of these cannot be stopped from here — they run on another
+              executor, or in the build&rsquo;s own process. They are listed so nothing
+              is invisible; ending them is not something stardag can reach out and do.
+            </p>
+          )}
+
+          {unspawned > 0 && (
+            <p className="text-xs text-gray-600 dark:text-gray-400">
+              {unspawned} of these were claimed but have not reported a call id yet, so
+              the command has nothing to cancel for them and they keep running. Their
+              spawn reports within a container start — refresh, then re-run the command
+              to catch them.
             </p>
           )}
 
@@ -489,7 +507,18 @@ function ExecutionTable({ executions, ticked, onToggle }: ExecutionTableProps) {
                 {execution.worker ?? "—"}
               </td>
               <td className="py-1 pr-2">
-                {callUrl ? (
+                {/* The ref decides first, not the URL: modalFunctionCallUrl
+                    still resolves an app-level link without a call id, and
+                    linking that would render an empty anchor where the
+                    reason belongs. */}
+                {!execution.executorRef ? (
+                  <span
+                    className="text-[11px] text-amber-800 dark:text-amber-300"
+                    title={execution.notStoppableReason ?? undefined}
+                  >
+                    not recorded yet
+                  </span>
+                ) : callUrl ? (
                   <a
                     href={callUrl}
                     target="_blank"

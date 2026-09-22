@@ -341,9 +341,42 @@ describe("BuildStopPanel", () => {
     renderPanel();
     await user.click(await screen.findByRole("button", { name: /Stop running/ }));
 
-    expect(
-      screen.getByText(/run on an executor stardag cannot stop/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/cannot be stopped from here/)).toBeInTheDocument();
+  });
+
+  it("lists a claim whose spawn has not reported a call id yet", async () => {
+    // STA-88, the panel half. The row is RUNNING and held by this build
+    // from the moment it is claimed, which is before its container
+    // exists; dropping it until the ref arrived made the panel silently
+    // short during exactly the fan-out somebody opens it to look at.
+    answerWith([makeTask({ latest_executor: null, latest_executor_ref: null })]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+
+    expect(screen.getByText("not recorded yet")).toBeInTheDocument();
+    expect(screen.getByText(/have not reported a call id yet/)).toBeInTheDocument();
+    // The temporary reason, not the permanent one.
+    expect(screen.queryByText(/cannot be stopped from here/)).toBe(null);
+  });
+
+  it("does not promise a re-run for a non-detached execution", async () => {
+    // No executor, no ref, no metadata — what a local, thread-pool or
+    // subprocess execution records. Permanent, so the re-run wording
+    // would be false.
+    answerWith([
+      makeTask({
+        latest_executor: null,
+        latest_executor_ref: null,
+        latest_executor_metadata: null,
+      }),
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+
+    expect(screen.getByText(/cannot be stopped from here/)).toBeInTheDocument();
+    expect(screen.queryByText(/have not reported a call id yet/)).toBe(null);
   });
 
   it("reports a read failure rather than looking empty", async () => {
