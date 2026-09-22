@@ -1129,7 +1129,6 @@ async def _run_tick_body_aio(
                         frontier,
                         build_id=build_id,
                         registry=registry,
-                        task_executor=task_executor,
                         config=config,
                         summary=summary,
                         denied_this_round=denied_this_round,

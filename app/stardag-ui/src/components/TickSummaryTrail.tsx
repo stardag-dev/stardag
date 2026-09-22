@@ -58,10 +58,6 @@ const COUNTERS: Record<string, { label: string; help: string }> = {
     label: "failures recorded",
     help: "Tasks whose detached execution was found failed.",
   },
-  cancelled_refs: {
-    label: "executions cancelled",
-    help: "Detached executions cancelled by this tick.",
-  },
   iterations: {
     label: "iterations",
     help: "Scheduling passes within this tick.",

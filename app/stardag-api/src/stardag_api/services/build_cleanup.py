@@ -33,7 +33,6 @@ from stardag_api.models import Build, BuildStatus, Event, EventType, Task
 from stardag_api.models.base import as_utc, utc_now
 from stardag_api.services.claims import BUILD_OWNED_STATUSES
 from stardag_api.services.status import apply_event_to_build, transition_task
-from stardag_api.services.wakeups import flag_build
 
 logger = logging.getLogger(__name__)
 
@@ -206,14 +205,43 @@ async def cascade_cancel_build_tasks(
 ) -> list[Task]:
     """Emit TASK_CANCELLED for the claims ``build_id`` holds. No commit.
 
-    "Claims this build holds" means tasks that are RUNNING, SUSPENDED or INTERRUPTED
-    **and whose current status was produced by this build**
-    (``latest_status_build_id``). The ownership scope is what makes cascading
-    safe: a task this build merely referenced, while another build is
-    actually running it, belongs to that build's cancel, not this one — the
-    server cannot stop a live execution, it can only rewrite the registry's
-    view of it, so cancelling somebody else's running task would leave a live
-    worker writing into a task the registry has declared dead.
+    **The invariant: a build going terminal releases the claims it holds,
+    and releases nothing else.** One rule, one implementation, for every
+    way a build can end — cancelled by a user, failed by its own scheduler,
+    or swept as abandoned by the reaper. It was previously true of cancel
+    alone, and the fail path got its claim release as a side effect of the
+    reactive tick stopping containers; when that machinery was deleted the
+    release had to become part of the transition itself, which is where it
+    belonged.
+
+    Precisely:
+
+    - **Released:** a task that is RUNNING, SUSPENDED or INTERRUPTED **and
+      whose current status this build produced** (``latest_status_build_id``).
+      Those are the three statuses a task can be *owned* in, shared with
+      the per-task cancel guard so the two cannot drift
+      (:data:`stardag_api.services.claims.BUILD_OWNED_STATUSES`).
+    - **Written:** one TASK_CANCELLED event per such task, attributed to
+      this build, through :func:`transition_task` — so the denormalised
+      columns, the limit slots and the neighbour wake-ups all move with it.
+    - **Never touched:** a task another build now holds. The server cannot
+      stop a live execution, only rewrite the registry's view of one, so
+      cancelling somebody else's running task would leave a live worker
+      writing into a task the registry has declared dead. PENDING tasks are
+      left alone too: they hold no claim, and a task this build merely
+      registered may be referenced by a live build elsewhere.
+
+    **Why the polarity runs this way.** Releasing a claim whose container
+    is still running is the cheap error: the output is content-addressed,
+    so a worker that runs on writes something nobody is waiting for, and it
+    stops itself at its next cooperative checkpoint once its build is no
+    longer RUNNING (``stardag.cancellation``). Not releasing is the
+    expensive one — the claim and its concurrency-limit slots are held
+    until expiry, and every later build that needs the task is denied it
+    for that whole window. This is the opposite polarity from the
+    report-validity rules, which default to refusing, and the difference is
+    deliberate: there a wrong accept corrupts state, here a wrong release
+    costs at most duplicated work.
 
     Returns the affected task rows (already mutated in the session). The
     caller commits.
@@ -315,9 +343,6 @@ async def cancel_builds(
         # its status just changed, and it can no longer be re-selected
         # (its latest_status is no longer RUNNING).
         locked.last_active_at = now
-        # A cancelled reactive build still has executions only a tick can
-        # stop; flag it so the next scheduler pass in the environment does.
-        await flag_build(db, locked, now=now)
         results.append(
             CancelledBuild(
                 build=build,

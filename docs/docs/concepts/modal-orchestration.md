@@ -35,8 +35,13 @@ Three things follow, and every mode below rests on them:
 - **Re-attach instead of re-execute.** A resumed build, or another build
   wanting the same task, finds it `RUNNING` with a live reference and
   attaches. Restarting an orchestrator does not restart your long tasks.
-- **Real cancellation.** Fail-fast and a cancel from the UI cancel the
-  tracked calls; workers of a dead build do not run to completion.
+- **Cancellation is cooperative, and stopping is yours.** A cancel — from
+  the UI, the CLI, or a fail-fast build's own scheduler — releases the
+  build's claims and stops there. Nothing reaches into a container: the
+  worker asks at its own checkpoints whether it is still wanted and exits
+  cleanly when it is not, writing no output and reporting no completion.
+  To end the containers now, `stardag builds stop` lists them and cancels
+  the calls from your side.
 - **Liveness is the backend's answer.** A scheduler asks Modal whether a
   recorded call is running, finished or gone — no heartbeats.
 

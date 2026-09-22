@@ -80,27 +80,54 @@ from a build that does not hold it (`services.claims.may_revoke`, 409
 `not_claim_holder`), and the cascade's status tuple and the guard's are one
 constant rather than two.
 
-**A build also has to be able to find what it started**, and that is a
-question about the past, not about the present. The frontier cannot answer
-it: `running` is plan-scoped, not ownership-scoped, and a cascading cancel
-moves the build's own tasks to CANCELLED, out of both `running` and
-`actionable`, while their containers keep going — so the cascade released
-the claims, nothing stopped the executions, and the next claimant ran a
-second copy of a task still executing.
+### Nothing revokes an execution automatically (STA-81)
 
-Nor can the task row, and the reason is worth stating because the first fix
-here got it wrong. Releasing the claim is _meant_ to let the next build take
-the task over, and it does so in seconds — measured at three, in a live run,
-against a cancelled build whose tick had not started. From that moment the
-row names the new execution, and the old one is unreachable by status:
-stopping it that way either misses it or kills the wrong container.
+The paragraphs above are about **claims**, and they stand. What was
+removed is everything that tried to stop the _containers_ those claims
+covered.
 
-So `GET /builds/{id}/executions` answers from the event log — the ref this
-build recorded when it started the task, unless a worker has since reported
-that execution over. **An execution ref is not a claim.** The claim says who
-may run the task next; the ref names one execution, and the build that
-started it owns it however the claim has moved since. That is what makes
-cancelling it safe: it cannot reach anybody else's container.
+The scheduler used to do it. A tick of a terminal build asked the registry
+which executions the build had started — a question about the past, which
+neither the frontier nor the task row can answer, since releasing the claim
+is _meant_ to let the next build take the task over and it does so in
+seconds — and then cancelled each one at its backend. That listing, the
+conditional cancel it fed, and the drain that ran them are gone.
+
+They are gone because the shape was the problem rather than any one bug.
+Three production incidents came from this area and no other, and each fix
+opened a hole beside it: a short-lived scheduler with no handles in memory,
+reconstructing "which container is mine" from the event log in eight places
+that had to agree and twice did not. Reasoning about another process's
+containers is what generated the complexity, so the answer was to stop
+doing it, not to reconstruct more carefully.
+
+**What replaces it, in two halves.**
+
+_Cooperative, for the automatic case._ A worker carries its own execution
+identity and asks, at checkpoints it reaches anyway, whether it is still
+the execution this task is waiting for. Told no, it stops without writing
+output or reporting a completion. It is a pull: nobody reconstructs
+anything, because the only process that has to know which container this is
+_is_ that container. See `stardag.cancellation`.
+
+_Human-driven, for the hard stop._ `stardag builds stop` lists the build's
+running executions **while its claims are still held**, which is what makes
+the reading exact — only this build can be on those rows — then stops the
+selected calls and only then cancels the build. The order is the whole
+point, and it is the reverse of what the scheduler was attempting. **The
+server never reaches an execution backend**; the command does, from the
+operator's own credentials.
+
+**A build going terminal releases the claims it holds**, by every route out
+— cancelled, failed, or swept as abandoned — and stops there. The
+containers run on until they notice; their output is content-addressed, so
+one that finishes writes something nobody reads. That is the cheap error,
+and it is the one this design now takes deliberately. The expensive one was
+a claim held past the build that owned it, and that is what the release
+prevents.
+
+The loss worth naming: a task with side effects outside its target is not
+protected by any of this, and never was.
 
 ### Revocation is not a result
 

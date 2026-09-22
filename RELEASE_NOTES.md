@@ -179,6 +179,53 @@ Needs a registry at `server-v0.5.0` or newer. Against an older one the
 worker simply has no checkpoints, which is the behaviour of every release
 before this.
 
+
+### Nothing automatic stops a container any more
+
+The reactive scheduler used to end a terminal build's executions: it asked
+the registry which executions the build had started and cancelled each one
+at its backend. That is removed. Three production incidents came from this
+area and no other, and the shape was the cause rather than any single bug —
+a short-lived scheduler with no handles in memory, reconstructing "which
+container is mine" from the event log in eight places that had to agree.
+
+What replaces it is already in this release, in two halves. A worker
+carries its own execution identity and asks, at checkpoints it reaches
+anyway, whether it is still wanted; told no, it stops without writing
+output or reporting a completion. And `stardag builds stop` is the hard
+stop: it lists the build's running executions **while its claims are still
+held**, which is what makes that listing exact, ends the selected calls
+from your own credentials, and cancels the build last.
+
+**What you lose:** a task whose side effects land outside its target is not
+protected by either half, and never was by the drain either — a cancelled
+container kept running until its backend noticed.
+
+**What you gain:** cancelling a build can no longer kill a neighbour's
+worker, which is what the incidents were.
+
+#### A failed build now releases its claims
+
+`POST /builds/{id}/fail` releases the execution claims the build holds,
+where it previously wrote one event. On a `FAIL_FAST` build those claims
+used to be released as a side effect of the drain stopping each container;
+with the drain gone, the release moves into the transition itself, where
+cancel already had it. Nothing to do — but note that a fail-fast build's
+running tasks now become available to the next build immediately rather
+than at claim expiry.
+
+#### Migration: custom registries and executors
+
+| Removed                                                                | What to do                                                                                                                 |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `RegistryABC.build_get_executions` / `build_get_executions_aio`        | Delete the override. Nothing calls it.                                                                                     |
+| `BuildExecution`, `BuildExecutions` (exported from `stardag.registry`) | Delete the import.                                                                                                         |
+| `task_cancel_aio(if_executor=…, if_executor_ref=…)`                    | Drop the parameters. The engines no longer pass them; an override still declaring them is not broken, only never narrowed. |
+| `TickSummary.cancelled_refs`                                           | Drop any reader. It could only ever be zero once the drain went.                                                           |
+
+Custom **executors** are unaffected: `cancel_detached` stays on
+`TaskExecutorABC` and is what `stardag builds stop` reaches through.
+
 ---
 
 ## v0.25.0 — A task is rebuilt from the registry, never from a pickle

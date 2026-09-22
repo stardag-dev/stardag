@@ -78,12 +78,12 @@ def _live_reactive_build_filters(environment_id: UUID) -> list:
     return _reactive_build_filters(environment_id, (BuildStatus.RUNNING,))
 
 
-# Statuses a flagged build may be handed out in. RUNNING is the ordinary
-# case. CANCELLED is the build-level cancel (UI, CLI, reaper): the build is
-# terminal in the registry but its detached executions are still running,
-# and only a tick can stop them — so a cancelled build needs exactly one
-# more tick, which is what its flag asks for.
-_CANDIDATE_STATUSES = (BuildStatus.RUNNING, BuildStatus.CANCELLED)
+# Statuses a flagged build may be handed out in. RUNNING only: a tick can
+# act on a wake-up in no other status. CANCELLED used to be here, because a
+# cancelled build's detached executions were still running and only a tick
+# stopped them; nothing stops containers from a scheduler now (STA-81), so
+# a terminal build's tick would read a terminal frontier and return.
+_CANDIDATE_STATUSES = (BuildStatus.RUNNING,)
 
 
 async def _flag_builds(
@@ -119,20 +119,6 @@ async def _flag_builds(
         .values(needs_tick_at=now)
         .execution_options(synchronize_session=False)
     )
-
-
-async def flag_build(
-    db: AsyncSession, build: Build, *, now: datetime | None = None
-) -> None:
-    """Flag one build for a tick if it is reactively scheduled.
-
-    For state changes that concern the build *itself* rather than one of
-    its tasks — a cancel from the UI, say, whose running executions only a
-    tick can stop. The flag makes the next scheduler pass anywhere in the
-    environment pick it up instead of leaving it to the watchdog.
-    """
-    if build.reactive_app_name:
-        build.needs_tick_at = now or utc_now()
 
 
 async def flag_after_task_transition(

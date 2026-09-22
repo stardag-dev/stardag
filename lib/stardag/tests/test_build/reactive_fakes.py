@@ -33,8 +33,6 @@ from stardag.build._reactive import (
 from stardag.exceptions import APIError, NotFoundError
 from stardag.registry import (
     SchedulerLeaseResult,
-    BuildExecution,
-    BuildExecutions,
     BuildFrontier,
     BuildNotifyResult,
     FrontierTaskRef,
@@ -211,19 +209,8 @@ class FakeReactiveRegistry(NoOpRegistry):
         # ...and every object-based retry, which is what the tick uses to
         # reset a cancelled or skipped task it may run.
         self.retry_error: Exception | None = None
-        # Set False to emulate a server predating the executions route: the
-        # tick falls back to filtering the frontier itself.
-        self.serves_executions = True
-        # ...and False to emulate one predating the owner on frontier refs,
-        # where the fallback cannot filter by ownership either.
+        # Set False to emulate a server predating the owner on frontier refs.
         self.serves_status_build_id = True
-        self.executions_calls: list[UUID] = []
-        # A transient failure of the executions listing — distinct from
-        # ``serves_executions``, which models a server that lacks the route.
-        self.executions_error: Exception | None = None
-        # Page size of the executions listing, so a test can force the
-        # drain loop the real server's cap makes reachable.
-        self.executions_page_size = 100
 
     # --- test setup helpers ---
 
@@ -626,27 +613,8 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.calls.append(("add_roots", ",".join(root_task_ids)))
         self.root_task_ids += [t for t in root_task_ids if t not in self.root_task_ids]
 
-    async def task_cancel_aio(
-        self, build_id, task, *, if_executor=None, if_executor_ref=None
-    ):
+    async def task_cancel_aio(self, build_id, task):
         tid = str(task.id)
-        # Ownership as well as identity, which is what the API's locked
-        # ``held`` check tests. Without the owner comparison the fake would
-        # happily record a cancel against a task a *successor* build now
-        # holds — so a regression that stamps the successor's claim dead
-        # would pass every test here.
-        if if_executor_ref is not None and (
-            self.statuses.get(tid) not in ("running", "interrupted")
-            or self.status_build_id.get(tid, build_id) != build_id
-            or self.refs.get(tid, (None, None)) != (if_executor, if_executor_ref)
-        ):
-            # The server's rule, on the locked row: nothing to revoke under
-            # that execution, so nothing is recorded. Modelled because the
-            # tick's cleanup pass relies on it -- to not stamp a task another
-            # build has since reset, and to not revoke an execution this
-            # build started after the listing was read.
-            self.calls.append(("cancel-skipped", tid))
-            return
         self.calls.append(("cancel", tid))
         self._count_event(tid, kind="other")
         self.statuses[tid] = "cancelled"
@@ -683,6 +651,12 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.calls.append(("build_fail", None))
         self.build_status = "failed"
         self.build_error_message = error_message
+        # Mirrors the API: a build going terminal releases the claims it
+        # holds, in the same transaction. Modelled rather than ignored
+        # because the terminal path depends on it — the tick fails the
+        # build *before* asking for the blocked closure, precisely so the
+        # tasks this releases become seeds of it.
+        self._release_claims()
 
     async def task_get_metadata_aio(self, task_id):
         from stardag.registry._base import TaskMetadata
@@ -706,6 +680,12 @@ class FakeReactiveRegistry(NoOpRegistry):
             completed_at=None,
             error_message=None,
         )
+
+    def _release_claims(self) -> None:
+        """TASK_CANCELLED for every task this build holds live."""
+        for tid, status in list(self.statuses.items()):
+            if status in ("running", "suspended", "interrupted"):
+                self.statuses[tid] = "cancelled"
 
     async def build_skip_blocked_aio(self, build_id):
         # Mirrors the API: pending/suspended tasks transitively downstream
@@ -842,80 +822,6 @@ class FakeReactiveRegistry(NoOpRegistry):
             # can never be set.
             self.lease_on_release()
         return SchedulerLeaseResult(build_id=build_id, held=held)
-
-    async def build_get_executions_aio(
-        self, build_id, *, cursor=None
-    ) -> BuildExecutions:
-        """Mirrors the API: the executions **this build started**, with a ref.
-
-        Read from a per-build record of starts rather than from who holds
-        the task now, because that difference is the entire reason the
-        endpoint exists. A cascading cancel releases the claims this build
-        held so the next build can take those tasks over — and the next
-        build can claim one within seconds, before this build's tick runs.
-        From then on the task row names somebody else, while the container
-        this build started is still going.
-
-        An earlier version of this fake filtered on current ownership
-        (``status_build_id``), which meant it returned *nothing* in exactly
-        that state — so the unit tests could not reach the case the
-        endpoint was built for, and only the live tier caught it. Do not
-        reintroduce that filter.
-
-        CANCELLED joins the live statuses only when the build itself is
-        cancelled — for a running build a cancelled task is an attempt it
-        already abandoned, not a container to chase.
-        """
-        self.executions_calls.append(build_id)
-        if self.executions_error is not None:
-            raise self.executions_error
-        if not self.serves_executions:
-            # FastAPI's own unknown-path 404, which is how the SDK tells
-            # "this server is too old" from "no such build".
-            raise NotFoundError("Not Found", detail="Not Found")
-        # CANCELLED is listed whatever the *build's* status, because the
-        # API does: TASK_CANCELLED is not an execution-end report, so a
-        # task this build cancelled still has a container to stop. Gating
-        # it on the build being cancelled made the fake miss exactly the
-        # state ``test_a_task_this_build_cancelled_is_still_its_to_stop``
-        # is about.
-        statuses = {"running", "interrupted", "cancelled"}
-        executions = []
-        started = {**self.staged_starts, **self.started_by.get(build_id, {})}
-        for tid, (executor, executor_ref) in started.items():
-            status = self.statuses.get(tid)
-            if status not in statuses:
-                continue
-            executions.append(
-                BuildExecution(
-                    task_id=tid,
-                    latest_status=status,
-                    executor=executor,
-                    executor_ref=executor_ref,
-                    latest_status_at=self.status_at.get(tid),
-                )
-            )
-        # Keyset paging, modelled because the tick has to drain it: the
-        # server's answer does not shrink as executions are stopped, so a
-        # caller that re-asks without the cursor gets the same page forever.
-        # Keyed on the task, like the server: the only part of a row that
-        # does not move while a caller pages through it.
-        executions.sort(key=lambda e: e.task_id)
-        start = 0
-        if cursor is not None:
-            start = next(
-                (i + 1 for i, e in enumerate(executions) if e.task_id == cursor),
-                len(executions),
-            )
-        page = executions[start : start + self.executions_page_size]
-        truncated = start + len(page) < len(executions)
-        return BuildExecutions(
-            build_id=build_id,
-            build_status=self.build_status,
-            executions=page,
-            truncated=truncated,
-            next_cursor=page[-1].task_id if truncated and page else None,
-        )
 
     async def build_get_frontier_aio(self, build_id) -> BuildFrontier:
         if self.frontier_error is not None:

@@ -4,11 +4,11 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Annotated, Mapping, Sequence, cast
+from typing import Annotated, Mapping, Sequence
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, false, func, select, tuple_, update
+from sqlalchemy import delete, false, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,8 +56,6 @@ from stardag_api.schemas import (
     AddDependenciesResponse,
     BuildCancelResponse,
     BuildCreate,
-    BuildExecutionRef,
-    BuildExecutionsResponse,
     BuildFrontierResponse,
     BuildListResponse,
     BuildNotifyResponse,
@@ -108,7 +106,6 @@ from stardag_api.services.wakeups import (
     MAX_LEASE_TTL_SECONDS,
     MIN_LEASE_TTL_SECONDS,
     acquire_scheduler_lease,
-    flag_build,
     lease_is_live,
     mark_tick_requested,
     release_scheduler_lease,
@@ -560,62 +557,6 @@ async def _replace_limit_keys(
     await db.execute(insert_stmt.values(rows).on_conflict_do_nothing())
 
 
-async def _latest_started_execution(
-    db: AsyncSession, build_id: UUID, task_pk: UUID
-) -> tuple[str | None, str] | None:
-    """The last execution ``build_id`` recorded a start for on this task.
-
-    ``(executor, executor_ref)``, or None if this build never recorded one
-    carrying a ref. The same question ``GET /builds/{id}/executions`` asks
-    of every task at once, asked here for one — and asked of the event log
-    for the same reason: the task row's executor columns describe whoever
-    holds the task now, and are set *or cleared* by every start, so a worker
-    self-reporting without executor fields wipes the ref of the very
-    execution it is reporting.
-    """
-    ref_column = Event.event_metadata["executor_ref"].as_string()
-    executor_column = Event.event_metadata["executor"].as_string()
-    starts = (
-        select(executor_column.label("executor"), ref_column.label("ref"))
-        .where(
-            Event.build_id == build_id,
-            Event.task_id == task_pk,
-            Event.event_type == EventType.TASK_STARTED,
-        )
-        # id (UUID7) breaks created_at ties, as everywhere else here.
-        .order_by(Event.created_at.desc(), Event.id.desc())
-    )
-    # The latest start decides which **backend** is running the task; the
-    # newest ref recorded *by that backend* identifies the execution.
-    #
-    # Neither half alone is right, and the two failures pull opposite ways.
-    # Taking the newest ref outright ignores a later start that moved the
-    # task to another backend, and a conditional cancel matching that stale
-    # ref stamps the current run CANCELLED. Taking the latest start outright
-    # loses the ref whenever a worker self-reports without one — Modal's
-    # reporter names its executor but leaves the ref None when
-    # ``current_function_call_id()`` is unavailable — and that refused every
-    # cancel whose worker had checked in, which is the live regression this
-    # endpoint was built to fix.
-    #
-    # Keying on the backend separates them: a ref-less start from the same
-    # backend is that backend still running the task, while a start naming a
-    # different backend (or none) is a different execution and the old ref
-    # stops being an answer.
-    rows = (await db.execute(starts)).all()
-    if not rows:
-        return None
-    executor = rows[0][0]
-    if executor is None:
-        return None
-    for row_executor, ref in rows:
-        if row_executor != executor:
-            break
-        if ref is not None:
-            return executor, cast(str, ref)
-    return None
-
-
 def _claim_is_this_same_execution(
     db_task: Task, *, build_id: UUID, extra_metadata: dict | None
 ) -> bool:
@@ -660,8 +601,7 @@ def _claim_is_this_same_execution(
     second claim, which is the one thing this endpoint exists to prevent.
     The pair is also how the rest of the system reads these columns:
     ``DetachedHandle`` records both so "a ref is only handed back to the
-    backend that created it", and ``_latest_started_execution`` above
-    keys on the backend for the same reason.
+    backend that created it".
     """
     if db_task.latest_status_build_id != build_id:
         return False
@@ -820,8 +760,6 @@ async def _create_task_event(
     extra_metadata: dict | None = None,
     limit_keys: list[str] | None = None,
     claim: bool = False,
-    if_executor: str | None = None,
-    if_executor_ref: str | None = None,
 ) -> TaskEventResponse:
     """Create a task event and return slim response.
 
@@ -834,10 +772,6 @@ async def _create_task_event(
     the FOR-UPDATE-locked task row, and the raised HTTPException rolls back
     the whole transaction (no event, no limit-key rows, and any
     limit-row locks taken by the enforce_limits pre-check are released).
-
-    ``if_executor`` / ``if_executor_ref`` (TASK_CANCELLED only): record
-    nothing unless this build still holds the task, in a status with an
-    execution to revoke, under *that* execution. See :func:`cancel_task`.
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -1006,89 +940,6 @@ async def _create_task_event(
                 ),
             },
         )
-
-    if event_type == EventType.TASK_CANCELLED and (
-        # *Either* half enters the conditional path. Gating on the ref
-        # alone let a caller pass `if_executor` by itself, skip the identity
-        # check entirely, and fall through to the unconditional authority
-        # path — so an incomplete pair was rejected in one direction and
-        # silently ignored in the other.
-        if_executor_ref is not None or if_executor is not None
-    ):
-        # Evaluated on the FOR-UPDATE-locked row, which is the whole point:
-        # a cleanup pass decides what to cancel from a listing it read a
-        # moment ago, and the row can have moved since in two ways that both
-        # end badly.
-        #
-        # Another build can have reset the task to PENDING and be about to
-        # run it. Writing CANCELLED then takes no claim — PENDING holds none
-        # — but it stamps a neighbour's freshly scheduled task dead and
-        # sends it round the reset loop, which is the class of damage the
-        # caller is cleaning up after.
-        #
-        # Or *this* build can have started the task again under a new ref:
-        # a retry it spawned, or a worker of the old attempt self-reporting
-        # late. Then status and owner still say "held by me", and recording
-        # the cancel would revoke the claim of an execution nobody stopped —
-        # so the identity of the execution has to be part of the condition,
-        # not just who holds the task.
-        #
-        # A no-op rather than a 409: the caller is doing best-effort
-        # cleanup over a list, and "it moved on" is a normal outcome, not an
-        # error to log per task.
-        # Compared against the **event log**, not against the task row's
-        # executor columns, and that is not a stylistic choice — the row is
-        # the wrong source for the same reason this whole cleanup path reads
-        # the log. Every TASK_STARTED sets *or clears* those columns from
-        # its own metadata, so a worker self-reporting its start with no
-        # executor fields nulls the ref of the execution it is reporting.
-        # Comparing there rejected the cancel for every Modal task whose
-        # worker had checked in, left the task RUNNING under a build that is
-        # gone, and was caught by a live scenario rather than by any of
-        # this file's tests.
-        #
-        # The pair, not the ref alone: a ref is backend-specific by contract
-        # — ``cancel_detached`` takes ``(executor, ref)`` — so two backends
-        # can mint the same string, and half an identity is not one.
-        #
-        # Both halves are required, and this used to accept the ref alone —
-        # which contradicted the paragraph above it. ``if_executor is None``
-        # matched any backend that had minted the same string, so a caller
-        # naming a ref without its backend could stop one execution and
-        # stamp a different one cancelled.
-        if if_executor is None or if_executor_ref is None:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error_code": "incomplete_execution_identity",
-                    "message": (
-                        "if_executor and if_executor_ref identify an "
-                        "execution only together: a ref is backend-specific, "
-                        "so two backends can mint the same string, and a "
-                        "backend alone names no execution at all. Pass both "
-                        "or neither."
-                    ),
-                },
-            )
-        started = await _latest_started_execution(db, build_id, db_task.id)
-        held = (
-            db_task.latest_status in (TaskStatus.RUNNING, TaskStatus.INTERRUPTED)
-            and db_task.latest_status_build_id == build_id
-            and started is not None
-            and started[1] == if_executor_ref
-            and started[0] == if_executor
-        )
-        if not held:
-            status, _, _, _, attempt_count = await get_task_status_in_build(
-                db, build_id, db_task.id
-            )
-            return TaskEventResponse(
-                task_id=db_task.task_id,
-                status=status,
-                latest_status=db_task.latest_status,
-                attempt_count=attempt_count,
-                execution_id=db_task.latest_execution_id,
-            )
 
     if event_type == EventType.TASK_CANCELLED and not may_revoke(db_task, build_id):
         # Authority to revoke is build-scoped. Evaluated on the same
@@ -1802,7 +1653,25 @@ async def fail_build(
     triggered_by_user_id: str | None = None,
     commit_hash: str | None = None,
 ):
-    """Mark a build as failed.
+    """Mark a build as failed, releasing the claims it holds.
+
+    A build going terminal releases its claims — the same rule a cancel
+    follows, and for the same reason: a task left RUNNING under a build
+    that is over keeps denying its execution claim, and keeps occupying its
+    concurrency-limit slots, until the claim expires. The scope, what is
+    written and what is deliberately left alone are stated once, at
+    :func:`stardag_api.services.build_cleanup.cascade_cancel_build_tasks`.
+
+    Unconditional here, unlike the cancel route's opt-in ``cascade``. A
+    failing build is its own scheduler reporting that it has stopped
+    working, so there is no caller who wants the claims kept — where a
+    cancel may legitimately be a bookkeeping correction to a build somebody
+    else is still running.
+
+    **The server still stops nothing.** Like every other status write this
+    rewrites the registry's view; a worker whose task is released here runs
+    until it notices, and after that exits cleanly at its next cooperative
+    checkpoint rather than writing a result nobody waits for.
 
     Args:
         error_message: Optional error message.
@@ -1817,20 +1686,46 @@ async def fail_build(
         )
     )
 
+    # Locked before the release below takes its task locks — build then
+    # tasks, the order every path uses.
     build = await _get_build_for_update(build_id, db, auth)
+
+    metadata = _build_event_metadata(commit_hash, triggered_by_user_id)
+    released = await cascade_cancel_build_tasks(
+        db,
+        build_id,
+        event_metadata=(metadata or {}) | {"cancelled_by": "build_fail"},
+    )
+    if released:
+        _raise_if_limit_exceeded(
+            await check_entity_creation_limit(
+                db,
+                auth.workspace_id,
+                "events",
+                limits_settings,
+                # +1 for the BUILD_FAILED event written below; the earlier
+                # single-event check reserves nothing, so counting only the
+                # released claims lets `1 + len(released)` cross the limit.
+                amount=len(released) + 1,
+            )
+        )
 
     event = Event(
         build_id=build_id,
         task_id=None,
         event_type=EventType.BUILD_FAILED,
         error_message=error_message,
-        event_metadata=_build_event_metadata(commit_hash, triggered_by_user_id),
+        event_metadata=metadata,
     )
     await _record_build_event(db, build, event)
     await _touch_build_last_active(db, build_id)
+    # One transaction: the build and the claims it held go terminal
+    # together, so a failure here cannot leave a failed build still
+    # holding claims.
     await db.commit()
 
-    record_entity_created(auth.workspace_id, "events")
+    for _ in range(len(released) + 1):
+        record_entity_created(auth.workspace_id, "events")
 
     return await _build_to_response(db, build)
 
@@ -1876,13 +1771,18 @@ async def cancel_build(
     - Tasks another build put into RUNNING are left alone. Releasing those
       is that build's cancel, not this one's.
 
-    Default off because it is a behaviour change for existing callers — the
-    SDK's own fail-fast path cancels its running tasks itself.
+    Default off because it is a behaviour change for existing callers.
+    (``POST /builds/{id}/fail`` releases unconditionally: a build failing is
+    its own scheduler reporting that it has stopped, so nobody wants the
+    claims kept.)
 
-    **The server cannot stop anything.** Like every other status write, this
-    rewrites the registry's view; a worker whose task is cancelled here keeps
-    running until it notices (a reactive tick cancels the detached execution;
-    a resident engine polls). If the task then completes, COMPLETED is
+    **The server cannot stop anything**, and nothing else automatic will
+    either. Like every other status write this rewrites the registry's
+    view; the worker keeps running until it notices, and then exits cleanly
+    at its next cooperative checkpoint without writing output. To end the
+    containers now, ``stardag builds stop`` reads the build's executions
+    while the claims still make that list exact, cancels those calls, and
+    only then cancels the build. If a task completes first, COMPLETED is
     sticky and wins — coherent with "targets are ground truth", but worth
     knowing before cancelling a build you are not sure is dead.
 
@@ -1936,10 +1836,12 @@ async def cancel_build(
     )
     await _record_build_event(db, build, event)
     await _touch_build_last_active(db, build_id)
-    # A cancelled reactive build still has executions only a tick can stop.
-    # Flag it, so the next scheduler pass anywhere in the environment picks
-    # it up instead of leaving it to the watchdog.
-    await flag_build(db, build)
+    # No wake-up is spawned for the cancelled build itself. It used to be
+    # flagged so that some tick would come back and stop its containers;
+    # nothing stops containers any more, and a terminal build's tick has
+    # nothing left to do. The builds that *do* need waking are the
+    # neighbours whose gating upstreams this just released, and each
+    # released task flags them on its own transition.
     # One transaction: the build and the claims it held go terminal together,
     # so a failure here cannot leave a cancelled build still holding claims.
     await db.commit()
@@ -2270,29 +2172,28 @@ async def notify_build(
     # Only a RUNNING build can act on a wake-up, so only a RUNNING build is
     # flagged here. This is the same restriction ``_flag_builds`` applies to
     # the transition hook, and its absence here was a live loop: a cancelled
-    # build's workers keep running until a tick stops them, every one of
-    # them notifies on its way out, and each notify re-flagged the build for
-    # the next drain to hand out again — forever, for as long as neighbours
+    # build's workers keep running until they notice, every one of them
+    # notifies on its way out, and each notify re-flagged the build for the
+    # next drain to hand out again — forever, for as long as neighbours
     # kept touching its tasks.
     #
-    # A cancelled build still gets its one tick: its own cancel sets the
-    # flag (``flag_build``), which survives here and is reported below, so
-    # the first caller to see it still spawns. Once that tick clears the
-    # flag, later notifies report False and nobody spawns again.
+    # A cancelled build gets no tick at all: the one it used to get existed
+    # to run the cancel drain, which is gone (STA-81).
     if build.latest_status == BuildStatus.RUNNING:
         build.needs_tick_at = now
     # A flag set while the build was RUNNING outlives the transition to a
-    # terminal status, because completing or failing does not clear it. So
+    # terminal status, because going terminal does not clear it. So
     # reporting "is there a flag" would answer True to a straggler notify
     # long after the build ended, and the worker would spawn a tick on a
     # build with nothing to do.
     #
-    # CANCELLED is the deliberate exception and the reason this is not
-    # simply "RUNNING only": its own cancel sets the flag precisely so one
-    # more tick runs and stops the containers it left behind.
-    needs_tick = build.needs_tick_at is not None and build.latest_status in (
-        BuildStatus.RUNNING,
-        BuildStatus.CANCELLED,
+    # RUNNING only, with no exception. CANCELLED used to be one, because a
+    # cancelled build wanted a last tick to stop the containers it left
+    # behind; that drain is gone (STA-81), and the builds a cancel does
+    # wake are the neighbours its released claims unblock, each flagged by
+    # its own task transition.
+    needs_tick = (
+        build.needs_tick_at is not None and build.latest_status == BuildStatus.RUNNING
     )
     # Stamp the hand-out mark in the SAME transaction as the flag, on the
     # assumption that the caller will spawn: a concurrent
@@ -3009,270 +2910,6 @@ _EXECUTION_ENDED_EVENTS = (
     EventType.TASK_FAILED,
     EventType.TASK_SUSPENDED,
 )
-
-
-@router.get("/{build_id}/executions", response_model=BuildExecutionsResponse)
-async def get_build_executions(
-    build_id: UUID,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
-    cursor: Annotated[
-        str | None,
-        Query(
-            description=(
-                "Continue a previous page: pass the ``next_cursor`` it "
-                "returned. Keyset rather than offset, because stopping an "
-                "execution records nothing — the answer does not shrink as "
-                "a caller works through it, and an offset would be stable "
-                "only until a worker reported one over."
-            ),
-        ),
-    ] = None,
-):
-    """The detached executions this build started and never saw end.
-
-    **The server cannot stop anything** — it can only say what is left to
-    stop. Only the engine that spawned an execution can cancel it, and it
-    needs three things: which executions are this build's to revoke, which
-    backend ran them, and the ref to cancel.
-
-    The frontier cannot answer that, and neither can the task rows. Both
-    describe the task's *current* state, and the question here is about the
-    past: what did this build start? Those differ in exactly the case that
-    matters. A cascading build cancel releases the claims this build held —
-    which is the point, it is what lets the next build take those tasks
-    over — and the next build can claim one within seconds, long before the
-    cancelled build's tick gets to run. From that moment the task row names
-    the *new* execution, and the old one, still running, is unreachable:
-    stopping it by task status would either miss it or kill the new one.
-    Both happened.
-
-    So this reads the event log instead, which is where the past is kept.
-    For each task, this build's most recent TASK_STARTED carrying an
-    executor ref — unless this build has since recorded one of
-    :data:`_EXECUTION_ENDED_EVENTS` for it, which means a worker reported
-    the execution over and there is nothing left to kill.
-
-    **An execution ref is not a claim.** The claim says who may run the
-    task next; the ref names one execution, and the build that started it
-    owns it however the claim has moved since. Cancelling that ref cannot
-    touch anybody else's container, which is what makes answering from the
-    past safe rather than reckless.
-
-    **What this cannot see, because nothing recorded it.** A detached
-    execution is findable here only if its reference reached the registry,
-    and one path never sends it: a resident build resuming a task from its
-    dynamic dependencies, with a backend whose workers do not self-report
-    lifecycle, submits a fresh detached handle and records only
-    TASK_RESUMED — which carries no ref (``build/_concurrent.py`` says so in
-    its own comment, since the same gap makes that execution unre-attachable
-    after a crash). So for that mode the answer is the last execution the
-    registry was told about, not the one running now. Reactive builds are
-    unaffected: their workers self-report, and every start carries its ref.
-
-    Paged with a keyset ``cursor`` over the **task**, not over the start
-    time. Paging at all, because stopping an execution records nothing — a
-    cancel is a request, not an end, which is the whole point above — so
-    this answer does not shrink as a caller works through it, and a bare cap
-    would hand back the same page forever.
-
-    Keyed on the task because that is the only part of a row that does not
-    move. Ordering by the start's timestamp looks natural and is a trap: a
-    task that gets a *newer* start between two page requests is re-ranked
-    onto the far side of the cursor and is then skipped entirely — on a
-    terminal build, whose drain has no second chance, that is a container
-    left running. A task's identity does not change, so a cursor over it
-    cannot skip one.
-
-    Cancelling is idempotent at every backend stardag supports, so a ref
-    stopped twice — or one whose execution already ended without this build
-    hearing about it — costs nothing.
-    """
-    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    build = await _get_build_checked(build_id, db, auth)
-
-    # Every execution-identity field comes off the *start event*, never off
-    # the task's current row. The row describes whoever holds the task now,
-    # and after a takeover that is somebody else's execution — pairing this
-    # build's historical ref with the successor's backend or metadata would
-    # hand back something that identifies no execution at all.
-    ref_column = Event.event_metadata["executor_ref"].as_string()
-    executor_column = Event.event_metadata["executor"].as_string()
-    metadata_column = Event.event_metadata["executor_metadata"]
-    ranked = (
-        select(
-            Event.task_id.label("task_pk"),
-            Event.created_at.label("started_at"),
-            ref_column.label("executor_ref"),
-            executor_column.label("executor"),
-            metadata_column.label("executor_metadata"),
-            Event.id.label("event_id"),
-            # id (UUID7) breaks created_at ties, the same way the status
-            # replay does — without it two same-timestamp starts order by
-            # whatever the index returned, and "the latest ref" becomes a
-            # coin toss between two executions.
-            func.row_number()
-            .over(
-                partition_by=Event.task_id,
-                order_by=(Event.created_at.desc(), Event.id.desc()),
-            )
-            .label("rank"),
-        )
-        .where(
-            Event.build_id == build_id,
-            Event.event_type == EventType.TASK_STARTED,
-            Event.task_id.is_not(None),
-            # The cursor, pushed in before the window rather than applied
-            # to its output. Both window functions partition by task, so
-            # restricting the input is equivalence-preserving — and without
-            # it each of up to _MAX_EXECUTION_PAGES requests re-ranks every
-            # start the build ever recorded, which is the one way this
-            # once-per-build-death query gets expensive on a wide build.
-            *(
-                [Event.task_id > after]
-                if (after := _parse_executions_cursor(cursor))
-                else []
-            ),
-        )
-        .subquery()
-    )
-    # Two questions, and they are not the same one. The latest start says
-    # which **backend** is running the task; the newest ref recorded by
-    # that backend says which execution. ``_latest_started_execution`` keys
-    # on the backend for the same reason and must agree with this, since
-    # the drain stops what this lists and the conditional cancel re-asks
-    # there before recording anything.
-    #
-    # Ranking only ref-bearing starts would ignore a later start that moved
-    # the task to another backend and hand back a ref that no longer names
-    # the running execution. Ranking every start and demanding a ref on the
-    # winner would drop the execution whenever a worker self-reports
-    # without one — Modal's reporter names its executor but leaves the ref
-    # None when ``current_function_call_id()`` is unavailable — which is
-    # the live regression this endpoint exists to fix.
-    latest_backend = (
-        select(ranked.c.task_pk, ranked.c.executor).where(ranked.c.rank == 1).subquery()
-    )
-    with_ref = (
-        select(
-            ranked,
-            func.row_number()
-            .over(
-                # By task **and** backend, which is the rule this query is
-                # supposed to express: the newest ref recorded *by the
-                # latest backend*. Partitioning by task alone ranked across
-                # backends, so a task whose starts interleave as
-                # (modal, ref), (other, ref), (modal, no-ref) put the other
-                # backend's row at rank 1 — and the join below, which
-                # requires the latest backend, then matched nothing and
-                # dropped the task entirely. The Modal container it names
-                # would have been left running.
-                partition_by=(ranked.c.task_pk, ranked.c.executor),
-                order_by=(ranked.c.started_at.desc(), ranked.c.event_id.desc()),
-            )
-            .label("ref_rank"),
-        )
-        .where(
-            ranked.c.executor_ref.is_not(None),
-            # No backend name is an execution nobody can address, so it is
-            # not reported rather than reported half-identified.
-            ranked.c.executor.is_not(None),
-        )
-        .subquery()
-    )
-    latest = (
-        select(with_ref)
-        .join(
-            latest_backend,
-            (latest_backend.c.task_pk == with_ref.c.task_pk)
-            & (latest_backend.c.executor == with_ref.c.executor),
-        )
-        .where(with_ref.c.ref_rank == 1)
-        .subquery()
-    )
-    ended = (
-        select(Event.id)
-        .where(
-            Event.build_id == build_id,
-            Event.task_id == latest.c.task_pk,
-            Event.event_type.in_(_EXECUTION_ENDED_EVENTS),
-            # Same tie-break, for the same reason: an end recorded in the
-            # same microsecond as the start it ends would otherwise be
-            # missed, and the execution reported as still to stop.
-            tuple_(Event.created_at, Event.id)
-            > tuple_(latest.c.started_at, latest.c.event_id),
-        )
-        .exists()
-    )
-    query = (
-        select(
-            Task,
-            latest.c.executor,
-            latest.c.executor_ref,
-            latest.c.executor_metadata,
-            latest.c.started_at,
-            latest.c.event_id,
-        )
-        .join(latest, latest.c.task_pk == Task.id)
-        .where(~ended)
-        # Ordered by the task, which is what makes the cursor stable — see
-        # the docstring. UUID7, so this is still roughly registration order.
-        .order_by(Task.id.asc())
-        .limit(_MAX_BUILD_EXECUTIONS + 1)
-    )
-    # Also applied on the outer join: the push-down above narrows the
-    # events, this narrows the tasks, and a task with no start at all must
-    # not slip back in behind the cursor.
-    if after is not None:
-        query = query.where(Task.id > after)
-    rows = (await db.execute(query)).all()
-
-    truncated = len(rows) > _MAX_BUILD_EXECUTIONS
-    page = rows[:_MAX_BUILD_EXECUTIONS]
-    return BuildExecutionsResponse(
-        build_id=build_id,
-        build_status=build.latest_status,
-        executions=[
-            BuildExecutionRef(
-                task_id=task.task_id,
-                latest_status=task.latest_status,
-                # Narrowed to str by the query's IS NOT NULL filters.
-                executor=cast(str, executor),
-                executor_ref=cast(str, executor_ref),
-                executor_metadata=executor_metadata,
-                # The task's own status timestamp, not the start event's.
-                # The field is named for the current status and the
-                # fallback path fills it from the frontier's task ref, so
-                # returning the historical start here paired a current
-                # status with an old time — and a client applying any
-                # staleness rule to it would be reading a number that means
-                # something else. ``started_at`` stays what it was added
-                # for: ordering starts, and the ended-event comparison.
-                latest_status_at=task.latest_status_at,
-            )
-            for task, executor, executor_ref, executor_metadata, started_at, _ in page
-        ],
-        truncated=truncated,
-        next_cursor=(str(page[-1][0].id) if truncated and page else None),
-    )
-
-
-def _parse_executions_cursor(cursor: str | None) -> UUID | None:
-    """Decode a ``next_cursor`` back into the task it names.
-
-    A 400 rather than a silent restart from the top: a caller handed page
-    one again would loop over it, which is the failure this paging exists to
-    remove.
-    """
-    if not cursor:
-        return None
-    try:
-        return UUID(cursor)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Malformed executions cursor: {cursor!r}",
-        ) from None
 
 
 # --- Tasks within Builds ---
@@ -5004,34 +4641,6 @@ async def cancel_task(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     commit_hash: str | None = None,
-    if_executor: Annotated[
-        str | None,
-        Query(
-            description=(
-                "The backend of the execution named by ``if_executor_ref``. "
-                "A reference is backend-specific by contract, so the pair is "
-                "the execution's identity; passing only the reference "
-                "compares half of it."
-            ),
-        ),
-    ] = None,
-    if_executor_ref: Annotated[
-        str | None,
-        Query(
-            description=(
-                "Record nothing unless this build still holds the task in "
-                "RUNNING or INTERRUPTED *under this executor reference*. "
-                "For an engine cleaning up after itself from a list it read "
-                "a moment ago: by then another build may have reset the "
-                "task and be about to run it, or this build may have "
-                "started it again under a new reference — and revoking the "
-                "claim of an execution nobody stopped is the same damage in "
-                "a different direction. Answers 200 with the unchanged "
-                "status rather than an error, since losing that race is a "
-                "normal outcome and not a fault."
-            ),
-        ),
-    ] = None,
 ):
     """Cancel a task, releasing its execution claim and limit slots.
 
@@ -5056,8 +4665,6 @@ async def cancel_task(
         db,
         auth,
         commit_hash=commit_hash,
-        if_executor=if_executor,
-        if_executor_ref=if_executor_ref,
     )
 
 

@@ -1,36 +1,41 @@
-"""Cancelling a build stops its own work, and only its own work.
+"""Cancelling a build touches its neighbours' executions not at all.
 
-Two defects met here in production and neither is visible from one build.
+The first half of a production incident, kept; the second half deleted
+with its cause (STA-81).
 
-A build was cancelled with ``--cascade``. That releases the claims it held
--- which is what lets the next build take those tasks over -- but nothing
-stopped the containers, because the only caller of ``cancel_detached``
-reads the frontier, and a cascaded task is CANCELLED and therefore in
-neither ``running`` nor ``actionable``. So the old execution kept going
-while a second build started its own copy of the same task: two executions
-of one task id, the one thing the claim exists to prevent.
+**What is still tested here.** A cancelled build was ticked again --
+neighbours kept flagging it -- and it cancelled every RUNNING task in its
+*plan*. After plan closure that includes tasks a second build had claimed
+and was executing, so it killed their containers and released their
+claims. The second build recorded failures, retried, and was killed again
+on the next tick; the loop never converged. The route now refuses a cancel
+from a build that does not hold the task, and this scenario is what proves
+it under real concurrency:
 
-Then the cancelled build ticked again -- neighbours kept flagging it -- and
-cancelled every RUNNING task in its *plan*. After plan closure that
-includes tasks the second build had claimed, so it killed their containers
-and released their claims. The second build recorded failures, retried,
-and was killed again on the next tick; the loop never converged.
-
-The scenario is both halves at once, because in production they were the
-same incident:
-
-1. A runs a slow shared task. Cancel A with ``--cascade``.
+1. A runs a slow shared task. Cancel A, releasing its claims.
 2. B is triggered, resets the cancelled task and runs it.
 3. A is ticked again, deliberately, while B's copy is running.
 
-What must then hold is that B's execution is untouched *and* that A's own
-container is gone. The second is what the completion owner proves: both
-containers sleep the same duration and A's started first, so if A's were
-still alive it would complete the task before B's and COMPLETED is sticky.
-An owner of A on that row means A's container outlived its cancel.
+B's execution must be untouched and B must finish. Against the code this
+fixed, step 3 kills B's container and B never completes.
 
-Against the code this fixes, step 3 kills B's container and step 1 leaves
-A's alive -- so both assertions fail, from opposite directions.
+**What was removed, and why it is not a gap.** This scenario used to
+assert a second thing: that A's *own* container was gone, stopped by A's
+tick. That was the other defect -- a cascade released the claims while the
+containers ran on -- and the fix was a cancel drain in the tick, which
+STA-78 has now withdrawn along with every other attempt to stop a
+container from a scheduler. Nothing automatic stops A's container any
+more; the two replacements are a worker that stops *itself* at a
+cooperative checkpoint (covered by
+``test_execution_identity.test_a_cancelled_tasks_worker_stops_itself``,
+which cancels the build and watches the worker exit) and ``stardag builds
+stop`` for a hard stop (``test_builds_stop.py``). The task used here
+sleeps with no checkpoint of its own, so it is the wrong instrument for
+either -- asserting anything about its container now would be asserting
+that the drain still exists.
+
+The first half is the half that was a *claim* bug, and claims are what
+this file is about.
 """
 
 from __future__ import annotations
@@ -44,7 +49,6 @@ from stardag_integration_tests.registry_live._wait import (
     describe,
     find_task,
     task_status,
-    require_complete_trail,
     tick_summaries,
     wait_for_task_status,
     wait_for_terminal,
@@ -176,27 +180,4 @@ def test_a_cancelled_build_stops_its_own_executions_and_no_others() -> None:
         "from under it by a build that no longer holds them.\n"
         f"--- build A (cancelled) ---\n{describe(build_a)}\n"
         f"--- build B ---\n{describe(build_b)}"
-    )
-
-    # The other half: A stopped a container of its own. Before the executions
-    # route existed there was nothing for it to stop -- its cascaded task was
-    # CANCELLED, so in neither `running` nor `actionable` -- and the claim
-    # was released while the container ran on.
-    #
-    # Asserted on A's own trail rather than on who completed the task. Both
-    # containers sleep the same duration, so if A's survives, both complete
-    # and the row records whichever reported last: an answer that depends on
-    # a race is not evidence either way.
-    # A lower bound read off the trail, and `cancelled_refs` has no
-    # durable counterpart -- a tick cancelling an execution reports the
-    # count and writes no row of its own. So it takes the same route as
-    # the other trail-only counters: no answer rather than a guess when
-    # the tick that ended the build never reported.
-    require_complete_trail(build_a, what="the cancelled-executions count")
-    stopped = sum(s.get("cancelled_refs", 0) for s in tick_summaries(build_a))
-    assert stopped >= 1, (
-        "The cancelled build stopped no executions at all, so the cascade "
-        "released its claims and left its containers running -- which is "
-        "how two builds came to execute one task.\n"
-        f"--- build A (cancelled) ---\n{describe(build_a)}"
     )

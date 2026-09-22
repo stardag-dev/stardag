@@ -124,6 +124,31 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   container it belongs to is stopped there, while the handle is still
   held: its reference was never recorded, so nothing else could find it.
 
+- **The scheduler no longer stops containers.** The reactive tick's cancel
+  drain is gone: a terminal build's tick no longer lists the executions the
+  build started and cancels them at their backend. Cancellation is
+  cooperative — a worker asks at its own checkpoints whether it is still
+  wanted and exits cleanly when it is not — and a hard stop is
+  `stardag builds stop`, which lists the build's executions while its claims
+  are still held, ends those calls, and cancels the build last.
+
+  This is the removal half of STA-78: all three production incidents in this
+  area came from a short-lived scheduler reasoning about containers other
+  processes had started, and each fix opened a hole beside it.
+
+  **Breaking for custom registries.** `RegistryABC.build_get_executions` and
+  `build_get_executions_aio` are removed, with the `BuildExecution` and
+  `BuildExecutions` models exported from `stardag.registry`; an
+  implementation that overrode them can delete the override. `task_cancel_aio`
+  no longer accepts `if_executor` / `if_executor_ref` — an override still
+  declaring them keeps working, since the engines no longer pass them, but
+  the narrowing they applied is gone. See
+  [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+- `TickSummary.cancelled_refs` is removed. Nothing could increment it once
+  the drain went, and a counter permanently reporting zero reads as "nothing
+  was cancelled" rather than "nothing cancels".
+
 ### Registry API
 
 - **A non-claiming start naming a superseded execution is refused** (409,
@@ -191,6 +216,44 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 - `latest_execution_id` is surfaced on the task read models
   (`GET /tasks`, `GET /tasks/{task_id}`).
+
+- **A build going terminal releases the claims it holds, by every route
+  out.** `POST /builds/{id}/fail` now releases them, unconditionally — it
+  previously wrote a single BUILD_FAILED event, and the claims of a
+  fail-fast build's running tasks were released as a side effect of the
+  SDK's cancel drain stopping each container. With the drain gone that was
+  the one consumer nobody had listed, and without this a failed build would
+  hold its tasks' claims and concurrency-limit slots until they expired.
+  The scope, what is written and what is left alone are stated once, at
+  `services.build_cleanup.cascade_cancel_build_tasks`.
+
+  `POST /builds/{id}/cancel` is unchanged: its `cascade` parameter still
+  decides, because a cancel may legitimately be a bookkeeping correction to
+  a build somebody else is running, where a build failing is its own
+  scheduler saying it has stopped.
+
+- **`GET /builds/{id}/executions` is removed**, with the event-log
+  reconstruction behind it — two window functions, the keyset cursor, and
+  the "which execution did this build start" lookup. Nothing needs to
+  reconstruct that: a worker knows its own identity, and `builds stop` reads
+  the task row while the claims make it exact.
+
+- **The per-task cancel no longer takes `if_executor` / `if_executor_ref`.**
+  Their only caller was the drain. An old client still sending them gets a
+  plain cancel, which is the safe direction — the caller wanted the claim
+  released, and the `not_claim_holder` authority rule still decides whether
+  it may.
+
+- **A cancelled build is no longer flagged for a scheduler tick.** That
+  flag existed to run the drain again; a terminal build's tick would now
+  read a terminal frontier and return. The builds a cancel genuinely wakes
+  are the neighbours whose gating upstreams it released, and each released
+  task flags them on its own transition.
+
+### UI
+
+- The tick-summary trail drops the "executions cancelled" counter, which
+  the SDK no longer reports.
 
 ## [0.25.0] — 2026-09-22
 

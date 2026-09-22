@@ -7,30 +7,35 @@ afterwards. The selection *rules* are pinned in
 ``tests/test__cli/test_stop.py``, including the one that matters most --
 that only the selected executions are handed to the canceller.
 
-**What this scenario deliberately does not assert, and why.** The obvious
-companion claim -- that the executions a filter excluded are left running
--- is not observable here yet. A tick of a *terminal* build still runs the
-automated cancel drain, which cancels every execution the build started,
-excluded ones included. An earlier version of this scenario asserted the
-excluded calls were still live immediately after the command returned; it
-passed twice locally and failed in CI, where a lingering tick polling
-every three seconds noticed the cancelled build first and drained all four
-(``cancelled_refs=4`` in its summary). That is a race against a component
-this issue does not change, and a flaky scenario is worth less than a
-narrow one.
+**The exclusivity half is asserted here again** (STA-81). It could not be,
+while a tick of a *terminal* build still ran the automated cancel drain:
+that drain cancelled every execution the build had started, excluded ones
+included, so an earlier version of this scenario passed twice locally and
+failed in CI where a lingering tick got there first
+(``cancelled_refs=4`` in its summary). The drain is gone, nothing else
+reaches into a container, and the claim is testable directly.
 
-The drain is STA-81's to delete, immediately after this merges. **When it
-goes, this scenario should grow the assertion back**, and in its strongest
-form: wait for the excluded upstreams to reach COMPLETED, which proves
-both that they were never touched and that a result landing after the
-build was cancelled still counts. Until then that guarantee rests on the
-unit test that pins exactly which executions reach ``cancel_modal_calls``.
+It is asserted twice, in increasing strength. Immediately after the
+command returns, the excluded calls are still running -- which is the
+command's actual promise. Then the excluded upstreams are waited to
+COMPLETED, which proves the stronger thing: they were never touched at
+all, and **a result landing after the build was cancelled still counts**.
+That second one is worth its minutes because nothing else in the tier
+covers it, and because it is the concrete form of "a revocation is not a
+result": the stop cascades TASK_CANCELLED to these rows on its way out,
+and the completion that arrives afterwards wins anyway.
 
-Note the same drain also weakens the "the selected calls stopped" check
-below into a liveness test rather than an exclusivity one: it would have
-stopped them too. It is kept because it is the only place the path from
-CLI to a real Modal cancellation is exercised end to end, and because it
-fails loudly if that path breaks.
+**It depends on the upstreams having no cooperative checkpoint**, which
+``SlowOnWorker`` does not -- one plain ``time.sleep`` inside ``run()``,
+past the start-of-attempt check and with no dynamic-dependency yield.
+Give that task a ``stardag.cancellation_requested()`` call and the
+excluded workers would exit on the cascade instead of completing, and this
+assertion would invert. That is the right behaviour and the wrong test;
+change the assertion, not the framework.
+
+The "the selected calls stopped" check below is now an exclusivity check
+rather than a mere liveness one, for the same reason: nothing but this
+command could have stopped them.
 """
 
 from __future__ import annotations
@@ -52,7 +57,10 @@ registry_live_guard()
 
 pytestmark = [
     pytest.mark.registry_live,
-    pytest.mark.timeout(900),
+    # Longer than the tier's usual 900: this scenario now waits out the
+    # excluded upstreams' own sleep, which is the price of asserting that
+    # they were never touched rather than merely that they were listed.
+    pytest.mark.timeout(1200),
 ]
 
 # Long enough for the tick to put four containers on two workers and stay
@@ -63,6 +71,11 @@ RUNNING_TIMEOUT_SECONDS = 420
 # A cancel reaches Modal's scheduler promptly, but "promptly" is not
 # "synchronously" -- poll rather than assert once.
 STOPPED_TIMEOUT_SECONDS = 120
+
+# On top of the upstreams' own sleep, for the completion wait: container
+# start skew, the time this scenario spends getting all four running, and
+# the report's trip back to the registry.
+COMPLETION_SLACK_SECONDS = 180
 
 
 def _call_is_running(ref: str) -> bool:
@@ -189,14 +202,29 @@ def test_stop_cancels_only_the_selected_workers_calls() -> None:
         "below would pass without cancelling anything.\n"
         f"{result.output}\n{describe(build_id)}"
     )
+    assert all(excluded_refs.values()), (
+        "An excluded execution carried no call id, so the exclusivity "
+        "check below would have nothing to probe.\n"
+        f"{result.output}\n{describe(build_id)}"
+    )
+
+    # The excluded calls are still running, right now. Asserted before the
+    # poll below rather than after it, because this is the claim with a
+    # deadline: these containers end on their own eventually, and a check
+    # made minutes later could not tell "never touched" from "finished".
+    # Nothing else in the system can stop them -- the drain that used to is
+    # gone (see the module docstring) -- so a dead one here means the
+    # command reached past its own selection.
+    assert all(_call_is_running(ref) for ref in excluded_refs.values()), (
+        "An execution the filter excluded is no longer running, so the "
+        "command stopped something it was told to leave alone.\n"
+        f"{result.output}\n{describe(build_id)}"
+    )
 
     # The selected calls are gone from Modal. Polled rather than asserted
     # once: the cancel reaches Modal's scheduler promptly, not atomically.
-    #
-    # A liveness check rather than an exclusivity one -- the terminal
-    # build's cancel drain would stop these too (see the module docstring)
-    # -- but it is the only place the path from this CLI to a real Modal
-    # cancellation is exercised, and it fails loudly if that path breaks.
+    # An exclusivity check as well as a liveness one, now that nothing but
+    # this command could have ended them.
     wait_until(
         lambda: not any(_call_is_running(ref) for ref in selected_refs.values()),
         build_id=build_id,
@@ -205,7 +233,24 @@ def test_stop_cancels_only_the_selected_workers_calls() -> None:
         what="the selected Modal calls to stop running",
     )
 
-    # And the build is cancelled, which is what released the claims. Last,
-    # because it is the only step that is also visible from the registry --
-    # a failure here should not mask the two above.
+    # And the build is cancelled, which is what released the claims. Before
+    # the completion wait, because it is what makes that wait meaningful:
+    # the cascade has stamped the excluded upstreams CANCELLED by now.
     assert build_status(build_id) == "cancelled", describe(build_id)
+
+    # The strong form. The excluded upstreams run out their sleep and
+    # report a completion into a build that is already cancelled, and it
+    # is folded: COMPLETED is sticky, and a revocation is not a verdict on
+    # the task. Nothing could reach this state if the command had touched
+    # them -- a cancelled Modal call raises rather than returning.
+    #
+    # Sized off the task's own sleep plus the skew this scenario has
+    # already spent waiting, so a hang fails on the timeout rather than on
+    # the tier's.
+    wait_until(
+        lambda: all(task_status(task.id) == "completed" for task in kept),
+        build_id=build_id,
+        timeout=root.seconds + COMPLETION_SLACK_SECONDS,
+        poll_interval=5.0,
+        what="the excluded upstreams to run to completion untouched",
+    )

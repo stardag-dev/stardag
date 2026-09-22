@@ -197,22 +197,30 @@ async def test_cascade_cancel_flags_the_other(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_cancelling_a_reactive_build_flags_it(client: AsyncClient):
-    """Its running executions can only be stopped by a tick — so make sure
-    one comes, rather than leaving it to the watchdog."""
+async def test_cancelling_a_reactive_build_does_not_flag_itself(client: AsyncClient):
+    """A cancelled build wants no tick of its own (STA-81).
+
+    It used to be flagged because its running executions could only be
+    stopped by a tick, which ran the cancel drain. Nothing stops containers
+    from a scheduler now — the workers stop themselves at their next
+    checkpoint — so that tick would read a terminal frontier and return.
+    The builds that genuinely need waking are the *neighbours* gated on the
+    claims this cancel released, and each released task flags them on its
+    own transition (``test_cascade_cancel_flags_the_other`` above).
+    """
     a = await _build(client)
     await _clear(client, a)
     await client.post(f"/api/v1/builds/{a}/cancel")
-    assert await _needs_tick(client, a) is True
+    assert await _needs_tick(client, a) is False
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_reactive_build_is_handed_out(client: AsyncClient):
-    """The flag a cancel sets is only useful if a drainer can be handed the
-    build: its executions are still running and only a tick stops them."""
+async def test_a_cancelled_build_is_not_handed_out_for_a_tick(client: AsyncClient):
+    """The other side of the same removal: no drainer is handed a build
+    whose only remaining work was the drain."""
     a = await _build(client)
     await client.post(f"/api/v1/builds/{a}/cancel")
-    assert [c["build_id"] for c in await _candidates(client)] == [a]
+    assert await _candidates(client) == []
 
 
 @pytest.mark.asyncio
@@ -265,19 +273,6 @@ async def test_notify_does_not_reflag_a_build_that_is_no_longer_running(
     assert notify["needs_tick"] is False
     assert await _needs_tick(client, a) is False
     assert await _candidates(client) == []
-
-
-@pytest.mark.asyncio
-async def test_notify_still_reports_a_cancelled_builds_undrained_flag(
-    client: AsyncClient,
-):
-    """The one tick is not lost. A cancel flags the build itself, and a
-    worker notifying before that flag is drained is told a tick is wanted —
-    so the notifier spawns it rather than leaving it to the next drain."""
-    a = await _build(client)
-    await client.post(f"/api/v1/builds/{a}/cancel")
-    notify = (await client.post(f"/api/v1/builds/{a}/notify")).json()
-    assert notify["needs_tick"] is True
 
 
 @pytest.mark.asyncio
@@ -907,16 +902,20 @@ async def test_a_completed_builds_leftover_flag_does_not_spawn_a_tick(
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_build_keeps_its_one_cleanup_tick(client: AsyncClient):
-    """The exception that stops the rule above being "RUNNING only"."""
-    # Reactive: only a reactive build is ever flagged for a tick.
+async def test_a_cancelled_build_gets_no_cleanup_tick(client: AsyncClient):
+    """The rule above has no exception any more (STA-81).
+
+    A cancelled build's "cleanup tick" was the cancel drain, and it is
+    gone. A straggler worker notifying on its way out must not resurrect
+    the build for a pass that would do nothing.
+    """
+    # Reactive: only a reactive build was ever flagged for a tick.
     build = await _build(client)
     await _register(client, build, "cascaded")
     await _start(client, build, "cascaded")
     await client.post(f"/api/v1/builds/{build}/cancel", params={"cascade": "true"})
 
     response = await client.post(f"/api/v1/builds/{build}/notify")
-    assert response.json()["needs_tick"] is True, (
-        "the cancel's own flag must survive: nothing else will stop the "
-        "containers this build left running"
+    assert response.json()["needs_tick"] is False, (
+        "a cancelled build asked for a tick that has nothing left to do"
     )
