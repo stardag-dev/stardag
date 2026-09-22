@@ -9,6 +9,7 @@ import {
   stopCommand,
   workersIn,
   MAX_CLAIM_PAGES,
+  NO_EXECUTOR,
   NO_REF_YET,
   STOPPABLE_STATUSES,
   type StopFilters,
@@ -225,11 +226,13 @@ export function BuildStopPanel({
   // Split by reason, not counted together: one is permanent and one is
   // over in seconds, and an operator deciding whether to wait or to go to
   // the Modal dashboard needs to know which they are looking at.
+  const pendingReasons: (string | null)[] = [NO_REF_YET, NO_EXECUTOR];
   const unreachable = chosen.filter(
-    (execution) => !execution.stoppable && execution.notStoppableReason !== NO_REF_YET,
+    (execution) =>
+      !execution.stoppable && !pendingReasons.includes(execution.notStoppableReason),
   ).length;
-  const unspawned = chosen.filter(
-    (execution) => execution.notStoppableReason === NO_REF_YET,
+  const unspawned = chosen.filter((execution) =>
+    pendingReasons.includes(execution.notStoppableReason),
   ).length;
 
   return (
@@ -363,18 +366,18 @@ export function BuildStopPanel({
 
           {unreachable > 0 && (
             <p className="text-xs text-gray-600 dark:text-gray-400">
-              {unreachable} of these cannot be stopped from here — they run on another
-              executor, or in the build&rsquo;s own process. They are listed so nothing
-              is invisible; ending them is not something stardag can reach out and do.
+              {unreachable} of these run on an executor stardag cannot stop. They are
+              listed so nothing is invisible; ending them is that backend&rsquo;s own
+              business.
             </p>
           )}
 
           {unspawned > 0 && (
             <p className="text-xs text-gray-600 dark:text-gray-400">
-              {unspawned} of these were claimed but have not reported a call id yet, so
-              the command has nothing to cancel for them and they keep running. Their
-              spawn reports within a container start — refresh, then re-run the command
-              to catch them.
+              {unspawned} of these have no call id on their row, so the command has
+              nothing to cancel for them and they keep running. A spawn reports its id
+              within a container start — refresh, and anything still listed without one
+              is running in this build&rsquo;s own process.
             </p>
           )}
 

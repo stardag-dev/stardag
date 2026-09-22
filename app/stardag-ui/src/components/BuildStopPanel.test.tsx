@@ -341,7 +341,9 @@ describe("BuildStopPanel", () => {
     renderPanel();
     await user.click(await screen.findByRole("button", { name: /Stop running/ }));
 
-    expect(screen.getByText(/cannot be stopped from here/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/run on an executor stardag cannot stop/),
+    ).toBeInTheDocument();
   });
 
   it("lists a claim whose spawn has not reported a call id yet", async () => {
@@ -355,15 +357,15 @@ describe("BuildStopPanel", () => {
     await user.click(await screen.findByRole("button", { name: /Stop running/ }));
 
     expect(screen.getByText("not recorded yet")).toBeInTheDocument();
-    expect(screen.getByText(/have not reported a call id yet/)).toBeInTheDocument();
-    // The temporary reason, not the permanent one.
-    expect(screen.queryByText(/cannot be stopped from here/)).toBe(null);
+    expect(screen.getByText(/have no call id on their row/)).toBeInTheDocument();
+    // The pending wording, not the other-executor one.
+    expect(screen.queryByText(/executor stardag cannot stop/)).toBe(null);
   });
 
-  it("does not promise a re-run for a non-detached execution", async () => {
-    // No executor, no ref, no metadata — what a local, thread-pool or
-    // subprocess execution records. Permanent, so the re-run wording
-    // would be false.
+  it("does not call an unattributed row permanently unstoppable", async () => {
+    // No executor, no ref, no metadata. Written by a non-detached
+    // execution *and* by a Modal claim whose best-effort metadata lookup
+    // returned None, so neither verdict is safe.
     answerWith([
       makeTask({
         latest_executor: null,
@@ -375,8 +377,11 @@ describe("BuildStopPanel", () => {
     renderPanel();
     await user.click(await screen.findByRole("button", { name: /Stop running/ }));
 
-    expect(screen.getByText(/cannot be stopped from here/)).toBeInTheDocument();
-    expect(screen.queryByText(/have not reported a call id yet/)).toBe(null);
+    // Ambiguous, so it is grouped with the pending rows and the wording
+    // names both possibilities rather than promising a call id.
+    expect(screen.getByText(/have no call id on their row/)).toBeInTheDocument();
+    expect(screen.getByText(/own process/)).toBeInTheDocument();
+    expect(screen.queryByText(/executor stardag cannot stop/)).toBe(null);
   });
 
   it("reports a read failure rather than looking empty", async () => {

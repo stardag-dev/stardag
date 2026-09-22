@@ -76,7 +76,14 @@ MODAL_EXECUTOR = "modal"
 # Why a listed execution cannot be stopped, for the operator and for the
 # --json document. None of these drop the row.
 NO_REF_YET = "no call id recorded yet — it was claimed but not yet spawned"
-NO_EXECUTOR = "no executor recorded — there is nothing here to reach"
+# Deliberately not a verdict. The row cannot tell a non-detached execution
+# from a Modal claim whose metadata lookup came back empty, so this names
+# the state and the one action that settles it rather than guessing. See
+# ``not_stoppable_reason``.
+NO_EXECUTOR = (
+    "no executor recorded — it runs in the build's own process, or its "
+    "spawn has not reported yet; re-run to see whether a call id appears"
+)
 
 # Statuses whose row may still name a live execution (see the module
 # docstring for why these two and not the others).
@@ -158,22 +165,31 @@ class Execution:
     def not_stoppable_reason(self) -> str | None:
         """Why this one can only be listed, or None if it can be stopped.
 
-        Three ways to be unstoppable, and only one of them is temporary,
-        which is the distinction an operator is actually making: do I wait
-        for this, or is it never going to be mine to stop?
+        Three reasons, and what separates them is what the operator is
+        deciding: do I wait for this, or is it never going to be mine?
 
-        - **No executor at all.** A non-detached execution — the build ran
-          it in its own process, thread or subprocess — records a start
-          with no executor, no ref and no metadata. Permanent: there is no
-          remote thing to cancel.
-        - **Another executor.** Permanent too; stardag reaches Modal and
+        - **Another executor.** Permanent; stardag reaches Modal and
           nothing else.
-        - **No call id yet.** The one moment: the spawn will report its
-          ref, and re-running a few seconds later will stop it.
+        - **No call id yet**, on a row that does name its executor. The
+          one clear moment: the spawn will report its ref, and re-running
+          a few seconds later will stop it.
+        - **No executor at all** — no executor, no ref, no metadata.
+          Genuinely ambiguous, and it is not this command's place to
+          resolve it. A non-detached execution writes exactly that row
+          (nothing to cancel, ever), and so does a Modal claim whose
+          ``get_executor_metadata`` came back empty — it is best-effort
+          and returns None when worker selection raises — which is a
+          spawn about to report. So the reason names both and points at
+          the one action that distinguishes them. Inferring permanence
+          from absence here would re-open the mid-spawn blindness this
+          whole change exists to close, on the rows least able to afford
+          it. The real fix is an explicit signal on the start for a
+          known non-detached execution; that is a protocol change and
+          not this PR's.
 
         Order matters. The unattributed row must be caught before the
-        Modal comparison, or it inherits Modal's branch and gets told a
-        re-run will find a call that does not exist.
+        Modal comparison, or it inherits Modal's branch and is promised a
+        call id that may never exist.
         """
         if not self.executor:
             return NO_EXECUTOR
@@ -276,12 +292,14 @@ def execution_from_task(task: "TaskSummary") -> Execution | None:
     # and dropping the row would hide a live container.
     #
     # Without one: either a claim written before its spawn, which names no
-    # executor but whose metadata declares its ``kind``; or a
-    # **non-detached execution**, which records no executor, no ref and no
-    # metadata at all, because ``TaskExecutorABC.get_executor_metadata``
-    # defaults to None and the local path passes none of the three. That
-    # last row must not inherit the Modal guess: it would be selected by
-    # ``--executor modal`` and promised a call id that will never exist.
+    # executor but whose metadata declares its ``kind``; or a row that
+    # declares nothing at all. That last one is written by a non-detached
+    # execution — the local path passes no executor, no ref and no
+    # metadata — and also by a Modal claim whose best-effort
+    # ``get_executor_metadata`` returned None. It must not inherit the
+    # Modal guess (it would be selected by ``--executor modal`` and
+    # promised a call id that may never exist), and it must not be called
+    # local either; ``not_stoppable_reason`` says so rather than picking.
     executor = task.latest_executor or metadata.get("kind") or ""
     if not executor and task.latest_executor_ref:
         executor = MODAL_EXECUTOR

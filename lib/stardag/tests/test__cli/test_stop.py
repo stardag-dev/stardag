@@ -395,10 +395,12 @@ class TestStopCommand:
         assert payload["stopped_count"] == 0
         cancel.assert_not_called()
 
-    def test_a_non_detached_execution_is_not_offered_a_re_run(self):
-        # Same rule as the non-Modal row below, for the case that is
-        # actually reachable from a plain local build: listed so the
-        # operator knows it keeps running, never promised a call id.
+    def test_an_unattributed_row_is_not_called_permanently_unstoppable(self):
+        # No executor, no ref, no metadata. Written by a non-detached
+        # execution *and* by a Modal claim whose best-effort
+        # ``get_executor_metadata`` returned None, so neither verdict is
+        # safe. The output names both and points at the one action that
+        # tells them apart, rather than picking.
         registry = _mock_registry(
             [
                 _row(
@@ -415,8 +417,11 @@ class TestStopCommand:
             result = runner.invoke(app, ["stop", BUILD_ID, "--dry-run"])
 
         assert result.exit_code == 0, result.output
-        assert "re-run this command" not in result.output
-        assert "not stoppable here" in result.output
+        # Whitespace-normalised: rich wraps the notice to the terminal
+        # width, so a phrase can straddle a line break.
+        rendered = " ".join(result.output.split())
+        assert "no call id on their row" in rendered
+        assert "own process" in rendered
         cancel.assert_not_called()
 
     def test_a_ref_less_non_modal_row_is_not_offered_a_re_run(self):

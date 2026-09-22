@@ -100,19 +100,20 @@ with no SDK action.
   which the registry UI deep-links to.
 
   Nothing the build holds is dropped from the list, and there are three
-  ways to be in it without being stoppable. An execution on a non-Modal
-  executor — stardag reaches Modal and nothing else, and the registry
-  reaches no backend at all. A **non-detached** execution, which the build
-  ran in its own process, thread or subprocess and whose row therefore
-  names no executor at all. Both permanent. And a task that has been
-  claimed but whose spawn has not reported a call id yet, which is the one
-  momentary case: RUNNING _is_ the claim and the claim is recorded first,
-  so re-running the command once the container is up will catch it.
+  reasons a listed execution may not be stoppable. An execution on a
+  non-Modal executor — permanent; stardag reaches Modal and nothing else,
+  and the registry reaches no backend at all. A task claimed but whose
+  spawn has not reported a call id yet — momentary, since RUNNING _is_ the
+  claim and the claim is recorded first, so re-running once the container
+  is up will catch it. And a row naming no executor at all, which is
+  genuinely ambiguous and says so: a non-detached execution writes it, and
+  so does a Modal claim whose best-effort executor metadata came back
+  empty, so the reason names both and points at the one action that tells
+  them apart rather than guessing.
 
-  All three are listed with the reason, in the table and as
-  `not_stoppable_reason` in `--json`, and only the last is offered a
-  re-run. The list is exact about which executions are the build's, not
-  about which of them can be stopped.
+  All three carry their reason into the table, the closing summary and
+  `not_stoppable_reason` in `--json`. The list is exact about which
+  executions are the build's, not about which of them can be stopped.
 
 - **Breaking: `stardag builds cancel --cascade` is removed.** It released
   the build's claims and left its containers running, which is the ordering

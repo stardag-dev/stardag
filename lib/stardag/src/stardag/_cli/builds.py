@@ -995,15 +995,20 @@ def _render_executions(
     # otherwise, and it is the easiest column to miss.
     #
     # Keyed on the reason, not on the ref being absent: a non-Modal
-    # execution can lack a ref too, and for that one "re-run to catch it"
-    # is false — nothing this command does will ever stop it.
-    unspawned = [e for e in selected if e.not_stoppable_reason == _stop.NO_REF_YET]
+    # execution can lack a ref too, and for that one a re-run is false
+    # hope — nothing this command does will ever stop it.
+    unspawned = [
+        e
+        for e in selected
+        if e.not_stoppable_reason in (_stop.NO_REF_YET, _stop.NO_EXECUTOR)
+    ]
     if unspawned:
         console.print(
-            f"[yellow]{len(unspawned)} of these were claimed but have not "
-            "reported a call id yet[/yellow], so there is nothing to "
-            "cancel and they keep running. Their spawn reports within a "
-            "container start — re-run this command to catch them."
+            f"[yellow]{len(unspawned)} of these have no call id on their "
+            "row[/yellow], so there is nothing to cancel and they keep "
+            "running. A spawn reports its id within a container start — "
+            "re-run this command, and anything still listed without one "
+            "is running in this build's own process."
         )
 
     workspaces = _stop.modal_workspaces(e for e in selected if e.stoppable)

@@ -57,12 +57,22 @@ export const NO_REF_YET =
   "no call id recorded yet — it was claimed but not yet spawned";
 
 /**
- * A non-detached execution: the build ran it in its own process, thread
- * or subprocess, so the row carries no executor, no ref and no metadata.
- * Permanent — there is no remote thing to cancel — and it must be caught
- * before the Modal comparison or it inherits Modal's branch.
+ * The row declares no executor, no ref and no metadata — and that is
+ * genuinely ambiguous, so this names the state rather than a verdict.
+ *
+ * A non-detached execution writes it (the build ran the task in its own
+ * process; nothing to cancel, ever), and so does a Modal claim whose
+ * `get_executor_metadata` came back empty — it is best-effort and
+ * returns None when worker selection raises — which is a spawn about to
+ * report its call id. Calling that permanent would re-open the mid-spawn
+ * blindness this change closes, on the rows least able to afford it.
+ *
+ * Must be caught before the Modal comparison, or it inherits Modal's
+ * branch and is promised a call id that may never exist.
  */
-export const NO_EXECUTOR = "no executor recorded — there is nothing here to reach";
+export const NO_EXECUTOR =
+  "no executor recorded — it runs in the build's own process, or its " +
+  "spawn has not reported yet; refresh to see whether a call id appears";
 
 /** Statuses whose row may still have a container behind it. */
 export const STOPPABLE_STATUSES: TaskStatus[] = ["running", "interrupted"];
@@ -88,11 +98,10 @@ export interface StoppableExecution {
   /**
    * Why it can only be listed, or null when it can be stopped.
    *
-   * Three ways to be unstoppable, and only one is temporary — which is
-   * the distinction the operator is making. No executor at all
-   * (`NO_EXECUTOR`, a non-detached execution) and another executor are
-   * both permanent. `NO_REF_YET` is the one moment: the spawn will
-   * report a ref, and the panel shows it stoppable on its next refresh.
+   * Three reasons. Another executor is permanent. `NO_REF_YET` is the
+   * one clear moment: the spawn will report a ref, and the panel shows
+   * it stoppable on its next refresh. `NO_EXECUTOR` is ambiguous on
+   * purpose and says so — see its own note.
    */
   notStoppableReason: string | null;
 }
