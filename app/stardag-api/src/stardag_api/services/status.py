@@ -415,17 +415,36 @@ def _replay_report_applies(
 ) -> bool:
     """The replay's twin of :func:`_reports_on_the_current_execution`.
 
-    Same rule, from what a replay can see. Build ownership is implicit —
-    each replay walks one build's events — so what is left is "still
-    running" and "still the same execution", with both identities tracked
-    off the starts as the walk goes.
+    Same rule, from what a replay can see: "still running" and "still the
+    same execution", with both identities tracked off the starts as the
+    walk goes.
 
     It has to be the same rule, which is why the comparison itself is
     :func:`_names_the_execution` rather than a second copy of it. The
     replays answer the per-build view that the UI and the frontier read,
-    and the row answers the environment-global one; a report the row
-    refuses but a replay applies shows the same task as INTERRUPTED in one
-    place and RUNNING in the other.
+    and the row answers the environment-global one; *within one build*, a
+    report the row refuses on identity and a replay applies shows the same
+    task as INTERRUPTED in one place and RUNNING in the other.
+
+    **Ownership is the one test a replay cannot make, and the agreement
+    stops there.** The row's other test is "still RUNNING under the
+    reporting build"; a build-scoped walk never sees another build's
+    events, so a takeover is invisible to it — not implicit in it. After
+    one, the row refuses this build's late report and the replay applies
+    it.
+
+    That divergence is deliberate, and reading it as a hole gets the
+    direction backwards. The two views already disagree *before* the
+    report lands: this build's walk says RUNNING about an execution that
+    is dead, while the row says RUNNING about the successor's. Applying
+    the report is what ends that, leaving the build a true statement about
+    its own execution. Refusing it here instead would freeze this build's
+    view at RUNNING for an execution nothing will ever finish — the
+    silent-stall class STA-44 exists to remove.
+
+    So the refusal marker is deliberately not consulted here. It is read
+    where it does decide something: the attempt tally in both replays,
+    where a refused report must not stand as a predecessor.
     """
     if status != TaskStatus.RUNNING:
         return False
@@ -1286,8 +1305,9 @@ async def get_task_status_in_build(
             # build-scoped half of the rule _apply_event_to_task applies
             # globally, and for the same reason: an interruption reported
             # after a cancel is a report about an execution the cancel
-            # already ended. The other half (ownership) is implicit here,
-            # since this replay only ever sees one build's events.
+            # already ended. The other half, ownership, is one this replay
+            # cannot test at all; _replay_report_applies says why that is
+            # the right answer rather than a gap.
             #
             # Not an ending, so completed_at is deliberately untouched —
             # mirrors _apply_event_to_task, including the unconditional

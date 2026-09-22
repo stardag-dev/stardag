@@ -26,6 +26,9 @@ environment-global question and the two per-build replays answer the one
 the UI and the frontier read. A report the row refuses but a replay
 applies shows one task as INTERRUPTED in the UI and RUNNING in the
 frontier, and nothing in the code makes them agree — only a test can.
+Ownership is the one axis where they are *meant* to part, because a
+build-scoped walk cannot see a takeover; that is pinned too, so the gap
+is not closed by mistake.
 """
 
 from __future__ import annotations
@@ -590,6 +593,68 @@ async def test_the_replays_survive_a_claim_redelivery(
     assert statuses[row.id][0].value == "running", (
         "the whole-build replay applied a report the row refused"
     )
+
+
+async def test_a_replay_keeps_its_own_view_after_a_takeover(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """Where the agreement stops, pinned so nobody closes it by mistake.
+
+    The row has a test a replay cannot make: "still RUNNING under the
+    *reporting* build". A build-scoped walk never sees another build's
+    events, so after a takeover the row refuses this build's late report
+    and the replay applies it, and the two disagree. That is the one axis
+    where they are allowed to, and it looks enough like a hole that it has
+    already been reported as one.
+
+    It is the right answer, and the direction is what makes it so. The
+    views disagree *before* the report lands — A's walk says RUNNING about
+    an execution that is dead, the row says RUNNING about B's — so
+    applying the report is what ends the disagreement that matters,
+    leaving A a true statement about A's own execution. Skipping refused
+    reports here, which is the obvious "fix", would freeze A's view at
+    RUNNING for an execution nothing will ever finish: the silent-stall
+    class STA-44 exists to remove, reintroduced in the per-build view.
+
+    The refusal marker is still honoured where it decides something — the
+    attempt tally — which ``test_a_refused_start_records_nothing_and_
+    spends_no_attempt`` and the STA-44 suite cover.
+    """
+    from stardag_api.services.status import get_task_status_in_build
+
+    a_execution, b_execution = _eid(), _eid()
+    build_a = await _running(client, "takeover", a_execution, ref="fc-a")
+    await _expire(async_session, "takeover")
+    build_b = await _running(client, "takeover", b_execution, ref="fc-b")
+
+    # A's worker, restarted late, reports the end of the execution it was
+    # running. The row refuses it: B holds the task now.
+    reported = await _report(
+        client,
+        build_a,
+        "takeover",
+        "interrupt",
+        reason="timeout",
+        executor_ref="fc-a",
+        execution_id=a_execution,
+    )
+    assert reported.status_code == 200, reported.text
+
+    row = await _task_row(async_session, "takeover")
+    assert row.latest_status == "running", "A's report evicted the live holder"
+    assert str(row.latest_status_build_id) == build_b
+    assert str(row.latest_execution_id) == b_execution
+    assert row.latest_executor_ref == "fc-b"
+
+    # A's own view moves, in both replays, and that is the intent.
+    assert reported.json()["status"] == "interrupted"
+    assert await _replayed_for_all(async_session, build_a, "takeover") == "interrupted"
+
+    # B's is untouched by a report about somebody else's execution.
+    b_status, _, _, _, _ = await get_task_status_in_build(
+        async_session, uuid.UUID(build_b), row.id
+    )
+    assert b_status.value == "running"
 
 
 # --- Cooperative cancellation's question ---------------------------------
