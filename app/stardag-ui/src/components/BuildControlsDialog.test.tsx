@@ -459,8 +459,11 @@ describe("BuildControlsDialog", () => {
     await user.click(await screen.findByRole("button", { name: "Cancel build" }));
 
     expect(screen.getByText(/releases its execution claims/i)).toBeInTheDocument();
+    // The distinction is ordering, not a flag: cancelling releases the
+    // claims first and leaves the containers; the command ends them first.
+    expect(screen.getByText(/the order is the whole difference/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/do not cancel here — use the command below instead/i),
+      screen.getByText(/ends the selected containers, then cancels the build/i),
     ).toBeInTheDocument();
     // Nothing happened yet: the first click only asks.
     expect(cancelBuild).not.toHaveBeenCalled();
@@ -482,7 +485,7 @@ describe("BuildControlsDialog", () => {
     await openDialog(user);
 
     await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    expect(screen.queryByText(/use the command below instead/i)).toBeNull();
+    expect(screen.queryByText(/the order is the whole difference/i)).toBeNull();
   });
 
   it("overrides only after the second, confirming click", async () => {
