@@ -15,6 +15,7 @@ import { BuildStatusBadge } from "./BuildStatusBadge";
 import { BulkCancelDialog } from "./BulkCancelDialog";
 import { BulkActionBar } from "./ui/BulkActionBar";
 import { Checkbox } from "./ui/Checkbox";
+import { CopyChip } from "./ui/CopyChip";
 import { ResultBanner } from "./ui/ResultBanner";
 
 interface BuildsListProps {
@@ -681,12 +682,20 @@ function BuildRow({
           >
             {build.name}
           </button>
+          {/* The build id, which this table did not show at all. It is
+              what every CLI command against a build takes, so the chip
+              copies the whole id rather than the eight characters it
+              draws. */}
+          <CopyChip label={build.id.slice(0, 8)} value={build.id} title="Build id" />
+          {/* Both chips below say what they are. Unlabelled, a short hex
+              string and a bare app name were two grey-and-purple tokens
+              with no way to tell what either meant. */}
           {build.commit_hash && (
             <span
-              title={build.commit_hash}
-              className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-600 dark:bg-gray-700 dark:text-gray-400"
+              title={`Commit ${build.commit_hash}`}
+              className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600 dark:bg-gray-700 dark:text-gray-400"
             >
-              {build.commit_hash.slice(0, 7)}
+              commit <span className="font-mono">{build.commit_hash.slice(0, 7)}</span>
             </span>
           )}
           {build.reactive_app_name && (
@@ -696,10 +705,10 @@ function BuildRow({
                 e.stopPropagation();
                 onFilterReactiveApp(build.reactive_app_name as string);
               }}
-              title={`Reactive build — filter by app “${build.reactive_app_name}”`}
-              className="rounded bg-purple-100 px-1.5 py-0.5 text-xs text-purple-700 hover:bg-purple-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500 dark:bg-purple-900/40 dark:text-purple-300 dark:hover:bg-purple-900/70"
+              title={`Reactive build, scheduled by ticks of the app “${build.reactive_app_name}” — click to show only this app's builds`}
+              className="rounded bg-purple-100 px-1.5 py-0.5 text-[11px] text-purple-700 hover:bg-purple-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500 dark:bg-purple-900/40 dark:text-purple-300 dark:hover:bg-purple-900/70"
             >
-              {build.reactive_app_name}
+              reactive app: {build.reactive_app_name}
             </button>
           )}
         </div>

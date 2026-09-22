@@ -139,10 +139,32 @@ describe("BuildsList", () => {
     );
   });
 
-  it("renders the short commit chip and the reactive app chip", async () => {
+  // Both chips used to be bare tokens — a hex string and an app name,
+  // grey and purple, with nothing saying which was which.
+  it("says what each chip is", async () => {
     renderList();
     expect(await screen.findByText("abcdef1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "demo-scheduler" })).toBeInTheDocument();
+    expect(screen.getByText(/^commit/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "reactive app: demo-scheduler" }),
+    ).toBeInTheDocument();
+  });
+
+  // The table did not show the build id at all, and it is what every CLI
+  // command against a build takes.
+  it("shows each build's id, and copies the whole one", async () => {
+    // userEvent.setup() installs a working clipboard stub in jsdom.
+    const user = userEvent.setup();
+    renderList();
+    const chip = await screen.findByRole("button", {
+      name: `Copy build id ${staleBuild.id}`,
+    });
+    expect(chip).toHaveTextContent(staleBuild.id.slice(0, 8));
+
+    await user.click(chip);
+    expect(await window.navigator.clipboard.readText()).toBe(staleBuild.id);
+    // Copying an identifier must not also open the build it identifies.
+    expect(onSelectBuild).not.toHaveBeenCalled();
   });
 
   it("sends the status filter to the server", async () => {
@@ -167,7 +189,9 @@ describe("BuildsList", () => {
     renderList();
     await screen.findByText("nightly-refresh");
 
-    await user.click(screen.getByRole("button", { name: "demo-scheduler" }));
+    await user.click(
+      screen.getByRole("button", { name: "reactive app: demo-scheduler" }),
+    );
 
     // Debounced, so the request lands shortly after the click.
     await waitFor(() =>
