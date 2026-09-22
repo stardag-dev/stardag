@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BreadcrumbProvider, useBreadcrumb } from "../context/BreadcrumbContext";
@@ -23,11 +23,19 @@ vi.mock("./DagGraph", () => ({ DagGraph: () => <div data-testid="dag" /> }));
 // the dialog clears its scan, filters and ticks by remounting rather
 // than by a reset effect.
 const controlsMounted = vi.hoisted(() => vi.fn());
+// Also captures `onBuildChanged`, so a test can play the part of a
+// confirmed override without reaching through the real dialog.
+const captureOverride = vi.hoisted(() => vi.fn());
 vi.mock("./BuildControlsDialog", () => ({
-  BuildControlsDialog: () => {
+  BuildControlsDialog: ({
+    onBuildChanged,
+  }: {
+    onBuildChanged: (build: Build) => void;
+  }) => {
     useEffect(() => {
       controlsMounted();
-    }, []);
+      captureOverride(onBuildChanged);
+    }, [onBuildChanged]);
     return null;
   },
 }));
@@ -44,6 +52,10 @@ vi.mock("../api/tasks", () => ({
 }));
 
 import { fetchBuild, fetchBuildGraph, fetchTasksInBuild } from "../api/tasks";
+
+/** The most recent `onBuildChanged` the controls dialog was handed. */
+const overrideHandler = () =>
+  captureOverride.mock.calls.at(-1)?.[0] as ((build: Build) => void) | undefined;
 import { BuildView } from "./BuildView";
 
 const BUILD_ID = "01a0c5c3-f18e-7d22-bcaf-add71bd0287c";
@@ -132,6 +144,7 @@ describe("BuildView header and tool-and-info bar", () => {
   beforeEach(() => {
     mockEnvironmentId = "env-1";
     controlsMounted.mockClear();
+    captureOverride.mockClear();
     vi.mocked(fetchBuild).mockResolvedValue(makeBuild());
     vi.mocked(fetchTasksInBuild).mockResolvedValue([makeTask()]);
     vi.mocked(fetchBuildGraph).mockResolvedValue({ nodes: [], edges: [] });
@@ -426,6 +439,43 @@ describe("BuildView header and tool-and-info bar", () => {
     await user.click(refresh);
     await new Promise((resolve) => setTimeout(resolve, 450));
     expect(fetchBuild).toHaveBeenCalledTimes(2);
+  });
+
+  // A read issued before the override carries the pre-override record,
+  // and because it is for the same identity the epoch still calls it
+  // fresh — so it lands afterwards and reverts what the user just set.
+  it("does not let a read that predates an override undo it", async () => {
+    let landStaleRead: (b: Build) => void = () => {};
+    const user = userEvent.setup();
+    renderView();
+    await screen.findByText("golden-diamond-28");
+
+    // A refresh is in flight, holding the pre-override record.
+    vi.mocked(fetchBuild).mockReturnValue(
+      new Promise<Build>((resolve) => {
+        landStaleRead = resolve;
+      }) as never,
+    );
+    await user.click(await screen.findByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(fetchBuild).toHaveBeenCalledTimes(2));
+
+    // The override lands first. Invoked through the callback the
+    // controls dialog is handed, which is the seam that matters here.
+    await act(async () => {
+      overrideHandler()?.(makeBuild({ status: "failed" }));
+    });
+    // The build's own status lives in the breadcrumb; the task table
+    // has statuses of its own, so assert on the crumb, not the page.
+    await waitFor(() => expect(crumbs()[1]).toHaveTextContent("failed"));
+
+    // Now the older read answers, with the build still running.
+    await act(async () => {
+      landStaleRead(makeBuild({ status: "running" }));
+      await Promise.resolve();
+    });
+
+    expect(crumbs()[1]).toHaveTextContent("failed");
+    expect(crumbs()[1]).not.toHaveTextContent("running");
   });
 
   it("says nothing about a config the build never set", async () => {

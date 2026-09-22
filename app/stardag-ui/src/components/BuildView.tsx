@@ -77,14 +77,12 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // so the 5s auto-refresh drives one request stream, not two.
   const [refreshToken, setRefreshToken] = useState(0);
   const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Pending single click, held for the double-click window.
-  //
-  // Cleared on a change of build or environment, not only on unmount:
-  // this component stays mounted through both, and a timer left running
-  // fires with the *previous* identity's closure. That is not merely a
-  // wasted request — it bumps the shared load epoch, which discards the
-  // load that is legitimately in flight, and then applies its own older
-  // answer as the current one.
+  // Pending single click, held for the double-click window. A timer
+  // left running past a change of identity fires with the *previous*
+  // identity's closure, which is not merely a wasted request: it bumps
+  // the shared load epoch, discarding the load legitimately in flight,
+  // then applies its own older answer. Cleared on identity change by
+  // the effect below, and here on unmount.
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
     () => () => {
@@ -93,7 +91,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
         clickTimerRef.current = null;
       }
     },
-    [buildId, activeEnvironment?.id],
+    [],
   );
 
   // Handle DAG toggle with panel resize
@@ -176,16 +174,29 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     loadBuild();
   }, [loadBuild]);
 
-  // Reset build-scoped UI state when the user navigates between builds.
-  // Otherwise, filters/pagination from Build A can silently apply to
-  // Build B, and a previously selected task can leave the detail panel
-  // and breadcrumb pointing at stale data from the prior build.
+  // Everything a change of identity invalidates, in one place.
+  //
+  // "Identity" is the environment and the build together, not the build
+  // alone: this component stays mounted through a change of either, and
+  // an environment switch leaves `buildId` untouched. Keyed on the build
+  // alone, this kept the previous environment's filters and pagination,
+  // and kept a selected task whose own `environment_id` belonged to the
+  // environment you just left — so acting on it acted in the wrong one.
+  //
+  // The pending refresh click and the in-flight refresh marker are here
+  // for the same reason and not by coincidence: each is work aimed at
+  // the identity that was current when it started.
   useEffect(() => {
     setNameFilter("");
     setStatusFilter("");
     setPage(1);
     setSelectedTask(null);
-  }, [buildId]);
+    if (clickTimerRef.current !== null) {
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
+    refreshOwnerRef.current = null;
+  }, [buildId, activeEnvironment?.id]);
 
   // Refresh handler
   // Single-flight, on a ref rather than on `refreshing`.
@@ -200,19 +211,25 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // It guards *refreshes* rather than `loadBuild` itself, because a load
   // triggered by a change of build, environment or DAG controls is a
   // different request and must supersede rather than be skipped.
-  const refreshInFlightRef = useRef(false);
+  // It holds *which* identity's refresh is in flight rather than merely
+  // that one is. A bare boolean stayed true across navigation until the
+  // abandoned request settled, silently dropping every refresh for the
+  // build you had moved to; and the abandoned request's own completion
+  // would then clear a marker the new identity had set.
+  const refreshOwnerRef = useRef<string | null>(null);
   const handleRefresh = useCallback(async () => {
-    if (refreshInFlightRef.current) return;
-    refreshInFlightRef.current = true;
+    if (refreshOwnerRef.current !== null) return;
+    const owner = requestedKey;
+    refreshOwnerRef.current = owner;
     setRefreshing(true);
     setRefreshToken((token) => token + 1);
     try {
       await loadBuild();
     } finally {
-      refreshInFlightRef.current = false;
+      if (refreshOwnerRef.current === owner) refreshOwnerRef.current = null;
       setRefreshing(false);
     }
-  }, [loadBuild]);
+  }, [loadBuild, requestedKey]);
 
   // Auto-refreshing a build that has stopped is pointless, and the
   // interval below has always declined to do it — but the toolbar used
@@ -282,9 +299,21 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   const handleBuildOverridden = useCallback(
     (updated: Build) => {
       if (updated.id !== buildId) return;
+      // Supersede any read already in flight. It was issued *before*
+      // this write and carries the pre-override record, and because it
+      // is for this same identity the epoch still considers it fresh —
+      // so without this it lands afterwards and visibly reverts the
+      // status the user just set.
+      //
+      // Clearing `loading` by hand is part of the same move: the
+      // superseded read's own `finally` is epoch-guarded and will now
+      // decline to, which would otherwise leave the view spinning.
+      loadEpochRef.current += 1;
       setBuild(updated);
+      setLoadedKey(requestedKey);
+      setLoading(false);
     },
-    [buildId],
+    [buildId, requestedKey],
   );
 
   // Update breadcrumb navigation
