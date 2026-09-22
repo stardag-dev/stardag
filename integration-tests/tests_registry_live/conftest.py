@@ -36,6 +36,7 @@ from stardag_integration_tests.registry_live._diagnostics import (
 )
 from stardag_integration_tests.registry_live._guard import ENV_API_URL, is_enabled
 from stardag_integration_tests.registry_live._harness import (
+    BootCheckUnanswered,
     Deployment,
     RegistryContainerRecycled,
 )
@@ -135,6 +136,11 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
     phase is the point -- an earlier version exempted all of teardown,
     which also exempted a fixture's own teardown failing for real.
 
+    The same applies to skipping the boot probe: only
+    ``BootCheckUnanswered`` arrives with its probe already done, and it
+    says so by being that type. A ``slot_limit`` cleanup timing out is an
+    ordinary teardown timeout and gets probed like any other.
+
     Nothing raised in here may reach pytest: a diagnostic that breaks
     reporting would cost the run the very evidence it exists to collect.
     Under xdist this runs in the worker process; the files it writes are
@@ -165,6 +171,7 @@ def _classify(
             phase=report.when,
             error=error,
             timeout=timeout,
+            already_probed=isinstance(error, BootCheckUnanswered),
         )
     elif not isinstance(error, RegistryContainerRecycled):
         record_non_timeout_failure(nodeid=item.nodeid, phase=report.when, error=error)

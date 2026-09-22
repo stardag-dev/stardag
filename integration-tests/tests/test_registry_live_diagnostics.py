@@ -29,6 +29,7 @@ from stardag_integration_tests.registry_live._diagnostics import (
     transport_timeout,
 )
 from stardag_integration_tests.registry_live._harness import (
+    BootCheckUnanswered,
     Deployment,
     RegistryContainerRecycled,
 )
@@ -124,6 +125,70 @@ def test_the_recycle_assertion_is_exempt_by_type_not_by_phase() -> None:
     # Still not a transport timeout, so the retry it enables is the
     # recycle one and not this issue's.
     assert transport_timeout(error) is None
+
+
+def test_the_boot_check_failure_is_still_a_transport_timeout() -> None:
+    """It wraps the timeout rather than replacing it, so the chain still finds it.
+
+    ``BootCheckUnanswered`` exists to say "my probe is already done", and
+    it must buy that without costing the classification: it is a
+    ``RuntimeError``, not an ``AssertionError``, so the discriminator
+    walks through to the timeout underneath.
+    """
+    timeout = httpx.ReadTimeout("timed out", request=_REQUEST)
+    try:
+        try:
+            raise timeout
+        except httpx.ReadTimeout as cause:
+            raise BootCheckUnanswered("no answer in six attempts") from cause
+    except BootCheckUnanswered as error:
+        assert transport_timeout(error) is timeout
+
+
+def test_only_the_boot_check_skips_the_probe(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fixture timing out in teardown is probed like anything else.
+
+    The phase cannot decide this: ``slot_limit`` deletes a concurrency
+    limit in its teardown, so a teardown timeout is not necessarily the
+    boot check. Inferring it from the phase swallowed the probe for
+    exactly that case.
+    """
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    probes: list[str] = []
+    monkeypatch.setattr(
+        _diagnostics,
+        "probe_boot",
+        lambda url, **k: (
+            probes.append(url)
+            or BootProbe(answered=True, elapsed=0.3, boot_id="boot-one", error=None)
+        ),
+    )
+    timeout = httpx.ReadTimeout("timed out", request=_REQUEST)
+
+    probe = record_transport_timeout(
+        _deployment(),
+        nodeid="tests_registry_live/test_x.py::test_a",
+        phase="teardown",
+        error=timeout,
+        timeout=timeout,
+        already_probed=False,
+    )
+    assert len(probes) == 1
+    assert probe.probed is True
+    assert probe.label("boot-one") == "HYPOTHESIS B"
+
+    skipped = record_transport_timeout(
+        _deployment(),
+        nodeid="tests_registry_live/test_y.py::test_b",
+        phase="teardown",
+        error=timeout,
+        timeout=timeout,
+        already_probed=True,
+    )
+    assert len(probes) == 1
+    assert skipped.probed is False
 
 
 def test_a_connection_error_is_not_a_timeout() -> None:

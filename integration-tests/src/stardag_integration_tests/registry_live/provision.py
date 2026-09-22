@@ -457,6 +457,15 @@ LOG_BUDGET_SECONDS = 240.0
 LOG_PER_APP_TIMEOUT_SECONDS = 120.0
 
 
+def _decode(stream: str | bytes | None) -> str:
+    """Whatever the subprocess produced, as text, never raising."""
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return stream
+
+
 def _loggable_apps() -> list[str]:
     """Every app whose logs are worth having, which is not the deployed set.
 
@@ -533,9 +542,16 @@ def logs(modal_environment: str, output_dir: Path) -> None:
                 )
                 body = (result.stdout or "") + (result.stderr or "")
                 status = f"exit {result.returncode}"
-            except subprocess.TimeoutExpired:
-                body = ""
-                status = "the fetch itself timed out"
+            except subprocess.TimeoutExpired as expired:
+                # Keep whatever arrived before the deadline. A slow fetch
+                # is the bounded failure this path exists to tolerate, and
+                # the lines it did produce are the ones nearest the moment
+                # of interest. Decoded explicitly because `TimeoutExpired`
+                # hands back **bytes** even under `text=True` -- verified,
+                # not assumed -- so concatenating it raw would raise here
+                # and lose the file as well as the output.
+                body = _decode(expired.stdout) + _decode(expired.stderr)
+                status = "the fetch itself timed out; partial output kept"
             except OSError as error:
                 body = ""
                 status = f"could not run the Modal CLI: {error}"

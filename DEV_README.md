@@ -241,14 +241,26 @@ carries the reasoning.
 
 **A transport timeout is the second retryable failure, and the list ends
 there.** A request that receives _no HTTP response at all_ says nothing about
-the code under test, because no assertion in that scenario was ever evaluated.
-It has happened five times, in five scenarios against five endpoints, and the
-cause is still unidentified. CI runs the tier once more — without
-re-provisioning, since the stack is intact — and emits a workflow warning, so
-occurrences are counted rather than silenced. Strictly a timeout: an assertion
-failure and an HTTP error status are real results and fail immediately.
-`_diagnostics.transport_timeout` states both exclusions, and
+the code under test. It has happened five times, in five scenarios against
+five endpoints, and the cause is still unidentified. CI runs the tier once
+more — without re-provisioning, since the stack is intact — and emits a
+workflow warning, so occurrences are counted rather than silenced. Strictly a
+timeout: an assertion failure and an HTTP error status are real results and
+fail immediately. `_diagnostics.transport_timeout` states both exclusions, and
 `tests/test_registry_live_diagnostics.py` holds them.
+
+**Read the phase before concluding what was lost**, because it is recorded and
+it is not always the same thing. Fixtures here talk to the registry at both
+ends of a scenario — `slot_limit` sets a concurrency limit before and deletes
+it after — so a timeout in `setup` means the scenario never started, one in
+`call` means no assertion was reached, and one in `teardown` can follow a body
+that passed and proved exactly what it set out to. Every marker line, record
+filename and record body carries it.
+
+**A failure that is not a timeout forbids the retry, whatever phase it came
+from.** One exemption exists and it is by type, not by phase:
+`RegistryContainerRecycled`, which is the recycle case and has a recovery of
+its own. A fixture failing to clean up is a real failure and ends the run.
 
 **On a timeout the harness probes `/_harness/boot` before the scenario gives
 up**, and that probe is the point of the exercise. It returns a closure

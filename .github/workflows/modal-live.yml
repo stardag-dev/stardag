@@ -359,8 +359,9 @@ jobs:
       #    workspace, target root and API key were in the one that went.
       #
       # 2. **A transport timeout**: a request that received *no HTTP
-      #    response at all*, so no assertion in that scenario was ever
-      #    evaluated. Five occurrences, five scenarios, five endpoints, and
+      #    response at all*, from a scenario's body or from a fixture at
+      #    either end of it. Five occurrences, five scenarios, five
+      #    endpoints, and
       #    the cause is still unidentified. Strictly a timeout: an
       #    assertion failure and an HTTP error status are both real results
       #    and fail immediately. Those two exclusions are what keep this
@@ -373,9 +374,12 @@ jobs:
       #    says nothing about what the other eleven met; retrying on the
       #    strength of the timeout alone would let a flaky real failure
       #    pass on the second attempt and turn the check green over it.
-      #    The harness names every call-phase failure that was *not* a
-      #    timeout in a second marker, and the presence of that marker ends
-      #    the run. The recycle branch above is deliberately not gated the
+      #    The harness names every non-timeout failure in a second marker
+      #    -- setup, call and teardown alike, since fixtures here do
+      #    registry I/O at both ends of a scenario -- and the presence of
+      #    that marker ends the run. Exactly one failure is exempt, by
+      #    type rather than by phase: the recycle assertion, which is
+      #    case 1 above and has its own recovery. The recycle branch above is deliberately not gated the
       #    same way: a lost database explains *every* failure in the run,
       #    which is why its retry re-provisions, whereas one scenario's
       #    timeout explains only that scenario.
@@ -419,10 +423,10 @@ jobs:
             reprovision=yes
           elif [ -f "$timeouts" ] && [ ! -f "$others" ]; then
             echo "::warning title=Registry transport timeout::$(tr '\n' ';' \
-              < "$timeouts") -- no HTTP response arrived, so no assertion" \
-              "was evaluated. Running the tier once more; the boot probe in" \
-              "the diagnostics artifact says whether the container was" \
-              "answering at the time (STA-86)."
+              < "$timeouts") -- no HTTP response arrived. Running the tier" \
+              "once more; each line names the phase it happened in, and the" \
+              "boot probe in the diagnostics artifact says whether the" \
+              "container was answering at the time (STA-86)."
             reprovision=no
           elif [ -f "$timeouts" ]; then
             echo "A scenario hit a transport timeout, but this run also" \

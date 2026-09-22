@@ -114,6 +114,23 @@ def record_recycle(previous: str, current: str) -> None:
         )
 
 
+class BootCheckUnanswered(RuntimeError):
+    """The post-scenario boot check got no answer at all.
+
+    Raised *from* the transport error that ended it, so the
+    transport-timeout discriminator still finds the timeout by walking
+    the cause chain and classifies this as the failure class it is.
+
+    Its own type for one reason: it is the only failure that arrives with
+    its probe already done. ``assert_same_container`` has just read
+    ``/_harness/boot`` six times over a hundred seconds without an
+    answer, so probing again would add delay and no information. Nothing
+    else may claim that -- fixtures do registry I/O in teardown too, and
+    an earlier version inferred it from the *phase*, which quietly
+    swallowed the probe for a ``slot_limit`` cleanup that timed out.
+    """
+
+
 class RegistryContainerRecycled(AssertionError):
     """The process holding the database was replaced mid-run.
 
@@ -190,9 +207,19 @@ class Deployment:
         # replacement has actually identified itself. A registry that never
         # answers stays unclassified on purpose -- nothing was identified,
         # so nothing is retried.
-        current = self.current_boot_id(
-            attempts=BOOT_READ_ATTEMPTS, retry_pause=3.0, timeout=15.0
-        )
+        try:
+            current = self.current_boot_id(
+                attempts=BOOT_READ_ATTEMPTS, retry_pause=3.0, timeout=15.0
+            )
+        except Exception as error:
+            # Named, rather than left as the bare transport error, so the
+            # one caller that needs to know this probe has already run can
+            # tell. See BootCheckUnanswered.
+            raise BootCheckUnanswered(
+                f"The registry at {self.api_url} did not answer "
+                f"/_harness/boot in {BOOT_READ_ATTEMPTS} attempts, so "
+                f"whether the container survived this scenario is unknown."
+            ) from error
         if current != self.boot_id:
             record_recycle(self.boot_id, current)
             raise RegistryContainerRecycled(

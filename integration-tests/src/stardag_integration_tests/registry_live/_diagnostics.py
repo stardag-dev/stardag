@@ -62,9 +62,12 @@ TIMEOUT_MARKER_NAME = "transport-timeouts"
 # transport timeout says nothing about what the other eleven met: without
 # this, a run where one scenario timed out and another failed an assertion
 # would be retried whole, and a flaky assertion passing the second time
-# would turn the check green over a real failure. Every call-phase failure
-# that is *not* a transport timeout is named here, and CI refuses to retry
-# a run that has any.
+# would turn the check green over a real failure. Every failure that is not
+# a transport timeout is named here -- setup, call and teardown alike,
+# since fixtures do registry I/O at both ends of a scenario -- and CI
+# refuses to retry a run that has any. One exemption, by type rather than
+# by phase: ``RegistryContainerRecycled``, which has its own marker and a
+# recovery of its own.
 NON_TIMEOUT_MARKER_NAME = "non-timeout-failures"
 
 # Short on purpose. The question the probe asks is not "does the registry
@@ -293,6 +296,7 @@ def record_transport_timeout(
     phase: str,
     error: BaseException,
     timeout: BaseException,
+    already_probed: bool = False,
 ) -> BootProbe:
     """Probe the registry, print the finding, and leave it for CI to read.
 
@@ -300,20 +304,19 @@ def record_transport_timeout(
     probe answers a useful question: a minute later the contention that
     caused the timeout has passed and the registry answers everything.
 
-    ``phase`` is the pytest phase the timeout came out of, and it does
-    three jobs. It keeps the two records a single test can produce from
-    overwriting each other -- fixture teardown still runs after a failed
-    call, so one scenario can time out twice. It goes into the record, so
-    a reader knows whether the scenario's own request or the
-    post-scenario check was the one that got no answer. And it decides
-    whether to probe at all: a timeout from ``teardown`` came out of
-    ``assert_same_container``, which has just read the boot endpoint six
-    times over a hundred seconds without an answer. That *is* the probe,
-    and a seventh read would add only delay.
+    ``phase`` names the pytest phase for the record and the filename --
+    fixture teardown runs after a failed call, so one scenario can time
+    out twice, and without the phase the second record would overwrite
+    the first.
+
+    ``already_probed`` is *not* derived from it, and that separation is
+    the point. Only ``BootCheckUnanswered`` arrives with its probe done,
+    and only its own raiser knows that; inferring it from the teardown
+    phase swallowed the probe for any fixture whose cleanup timed out.
     """
     probe = (
         probe_boot(deployment.api_url)
-        if phase != "teardown"
+        if not already_probed
         else BootProbe(
             answered=False,
             elapsed=0.0,
@@ -430,6 +433,19 @@ def _record_name(nodeid: str, phase: str) -> str:
     return f"timeout-{phase}-{slug[:120]}-{os.getpid()}.txt"
 
 
+# What a timeout at each phase cost, which is no longer the same sentence
+# for all three. A call-phase timeout means no assertion was reached; a
+# teardown one can follow a body that passed and proved what it set out to.
+_WHAT_WAS_LOST = {
+    "setup": "The scenario never started, so it proved nothing.",
+    "call": "No assertion in this scenario was ever evaluated.",
+    "teardown": (
+        "The scenario's own result stands; its cleanup, or the check that "
+        "the registry survived it, did not complete."
+    ),
+}
+
+
 def _render(
     deployment: Deployment,
     *,
@@ -443,8 +459,8 @@ def _render(
         [
             "",
             "=" * 72,
-            "TRANSPORT TIMEOUT against the registry -- no response was received,",
-            "so no assertion in this scenario was ever evaluated.",
+            "TRANSPORT TIMEOUT against the registry -- no response was received.",
+            _WHAT_WAS_LOST.get(phase, "The scenario did not complete."),
             "=" * 72,
             f"  scenario:  {nodeid}",
             f"  phase:     {phase}",
