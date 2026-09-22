@@ -206,8 +206,9 @@ def require_complete_trail(build_id: UUID, *, what: str) -> None:
     answer, and it is counted, so a tier skipping its way to green is
     visible rather than reassuring.
 
-    Spawn counts do *not* come here: a granted claim is a row, so they
-    are asserted against the event log instead (`_events`).
+    Spawn counts do *not* come here: a submitted execution leaves a row
+    naming the call, so they are asserted against the event log instead
+    (``_events.spawned_executions``).
     """
     if not trail_may_be_truncated(build_id):
         return
@@ -325,7 +326,7 @@ def wait_for_terminal(
     **What that costs.** The trail may now be short by its last entry, so
     nothing may be *counted* off it without saying what a missing entry
     would do. Counts that have a durable substitute take it -- spawns are
-    read from the event log (``_events.granted_claim_starts``). The few
+    read from the event log (``_events.spawned_executions``). The few
     that do not go through ``require_complete_trail``, which declines to
     answer rather than guessing.
 

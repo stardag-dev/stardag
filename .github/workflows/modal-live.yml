@@ -424,11 +424,16 @@ jobs:
           # `_diagnostics.CLASSIFICATION_FAILED`.
           unclassified="STARDAG_REGISTRY_LIVE_CLASSIFICATION_FAILED"
 
+          # Takes the marker's path, because the retry moves attempt 1's
+          # aside before running again -- so reading only the top-level
+          # file would preserve an attempt-1 skip in the artifact and
+          # never warn about it or count it, which is the failure this
+          # whole marker exists to prevent.
           report_inconclusive() {
-            [ -f "$inconclusive" ] || return 0
+            [ -f "$1" ] || return 0
             echo "::warning title=Registry-live inconclusive::$(tr '\n' ';' \
-              < "$inconclusive") -- the tick that ended each of these builds "\
-              "never reported, so a trail-only counter had no answer and the "\
+              < "$1") -- the tick that ended each of these builds never "\
+              "reported, so a trail-only counter had no answer and the "\
               "scenario was skipped rather than guessed at (STA-89)."
             echo "diagnose=true" >> "$GITHUB_OUTPUT"
           }
@@ -437,7 +442,7 @@ jobs:
                | tee "$diag/pytest-attempt-1.log"; then
             # A green run can still have skipped a scenario, and that is
             # worth the artifact and the count even though nothing failed.
-            report_inconclusive
+            report_inconclusive "$inconclusive"
             exit 0
           fi
 
@@ -485,6 +490,8 @@ jobs:
           # Keep the first attempt's evidence. The retry writes fresh
           # markers and records at the top level, so without this a green
           # retry would leave nothing behind to explain the warning above.
+          report_inconclusive "$inconclusive"
+
           mkdir -p "$diag/attempt-1"
           find "$diag" -maxdepth 1 -type f -exec mv {} "$diag/attempt-1/" \;
 
@@ -506,7 +513,7 @@ jobs:
           tox -e registry-modal-live $POSARGS 2>&1 \
             | tee "$diag/pytest-attempt-2.log"
           rc=$?
-          report_inconclusive
+          report_inconclusive "$inconclusive"
           exit $rc
 
       # Pulled before anything can delete them. The teardown job runs

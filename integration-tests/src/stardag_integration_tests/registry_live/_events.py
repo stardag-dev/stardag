@@ -191,6 +191,17 @@ def spawned_executions(deployment: Deployment, build_id: Any) -> dict[str, int]:
     return {task_id: len(seen) for task_id, seen in refs.items()}
 
 
+def _get(deployment: Deployment, path: str) -> httpx.Response:
+    """One authenticated GET against the registry, for the readers below."""
+    with httpx.Client(timeout=60.0) as client:
+        response = client.get(
+            f"{deployment.api_url.rstrip('/')}/api/v1/{path.lstrip('/')}",
+            headers={"X-API-Key": deployment.api_key},
+        )
+        response.raise_for_status()
+    return response
+
+
 def earliest_start_and_server_now(
     deployment: Deployment, task_id: Any
 ) -> tuple[datetime, datetime] | None:
@@ -207,17 +218,15 @@ def earliest_start_and_server_now(
 
     ``now`` from the response's ``Date`` header rather than the runner's
     clock, so the subtraction is between two readings of one clock. A
-    local ``now`` compared against a server timestamp is off by whatever
-    the skew is, in an unknown direction.
+    local ``now`` against a server timestamp is off by whatever the skew
+    is, in an unknown direction.
 
-    ``None`` when the task has no start recorded yet.
+    ``None`` only when the task has no start recorded yet. A response
+    without a ``Date`` header raises instead, because that is a different
+    problem with a different fix and the caller cannot tell them apart
+    from a bare ``None``.
     """
-    with httpx.Client(timeout=60.0) as client:
-        response = client.get(
-            f"{deployment.api_url.rstrip('/')}/api/v1/tasks/{task_id}/events",
-            headers={"X-API-Key": deployment.api_key},
-        )
-        response.raise_for_status()
+    response = _get(deployment, f"tasks/{task_id}/events")
     starts = [
         event["created_at"]
         for event in response.json()
@@ -227,7 +236,13 @@ def earliest_start_and_server_now(
         return None
     served_at = response.headers.get("date")
     if not served_at:
-        return None
+        raise AssertionError(
+            f"The registry's response for task {task_id} carried no Date "
+            f"header, so there is no server-side 'now' to measure the "
+            f"remaining work against. Measuring it against this machine's "
+            f"clock instead would add an unknown skew in an unknown "
+            f"direction, which is what reading the header avoids."
+        )
     return (
         min(datetime.fromisoformat(value) for value in starts),
         parsedate_to_datetime(served_at),
@@ -235,20 +250,4 @@ def earliest_start_and_server_now(
 
 
 def _build_events(deployment: Deployment, build_id: Any) -> list[dict[str, Any]]:
-    with httpx.Client(timeout=60.0) as client:
-        response = client.get(
-            f"{deployment.api_url.rstrip('/')}/api/v1/builds/{build_id}/events",
-            headers={"X-API-Key": deployment.api_key},
-        )
-        response.raise_for_status()
-    return list(response.json())
-
-
-def describe_claims(counts: dict[str, int]) -> str:
-    """The per-task breakdown, for an assertion message."""
-    if not counts:
-        return "  no granted claims recorded under this build"
-    return "\n".join(
-        f"  task {task_id}: {count} granted claim(s)"
-        for task_id, count in sorted(counts.items())
-    )
+    return list(_get(deployment, f"builds/{build_id}/events").json())

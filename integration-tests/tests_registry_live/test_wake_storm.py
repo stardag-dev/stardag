@@ -164,8 +164,9 @@ def test_many_dormant_builds_are_each_woken_once(deployment: Deployment) -> None
 
         # It waited for the owner's copy rather than running a second one:
         # its own spawns are its root alone. Counted from the event log --
-        # a granted claim is a row written before the container exists, so
-        # a preempted reporter cannot make it short.
+        # a submitted execution leaves a row naming the call, written
+        # before the container reports anything, so a preempted reporter
+        # cannot make it short.
         spawned = sum(spawned_executions(deployment, build_id).values())
         assert spawned == 1, (
             f"Neighbour {index} spawned {spawned} task(s); it should have "

@@ -192,10 +192,11 @@ def test_a_failed_blocker_is_left_alone_by_a_second_build(
 
     # B never ran the shared task, nor anything downstream of it -- its
     # root was unreachable from the moment the blocker failed.
-    # From the event log rather than the trail: a granted claim is a row,
-    # so this answer does not depend on B's ticks having survived to
-    # report. `assert_trail_complete` above guards a different thing --
-    # the server's retention cap, not a preempted reporter.
+    # From the event log rather than the trail: a submitted execution
+    # leaves a ref-bearing row, so this answer does not depend on B's
+    # ticks having survived to report. `assert_trail_complete` above
+    # guards a different thing -- the server's retention cap, not a
+    # preempted reporter.
     spawned_b = sum(spawned_executions(deployment, build_b).values())
     assert spawned_b == 0, (
         f"Build B spawned {spawned_b} task(s). With its only upstream "

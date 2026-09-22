@@ -427,15 +427,23 @@ cannot breach a ceiling) rules out false failures and says nothing about false
 passes; both have to be ruled out before a weakened assertion is honest.
 
 The way out is that the thing being counted usually _is_ durable, and the
-harness was simply asking the wrong witness. A tick spawns a task only after
-the registry grants it the claim, and that grant is a row: a `task_started`
-event under the build carrying `event_metadata["claim"] = True`, written
-inside the transaction that arbitrates the claim, before any container exists.
-A denied claim raises before the event is constructed, so the count is of
-grants. An interruption restart takes the same path, so it adds one to the
-spawn count and one to the claim count and they stay equal.
-`_events.granted_claim_starts` reads it, and every spawn assertion is `== N`
-strict against it.
+harness was asking the wrong witness. A tick records a `task_started` once
+`submit_detached` has returned, carrying the backend's reference for the call
+it just created — so the registry holds one ref-bearing row per execution
+actually submitted, written before the container reports anything and
+therefore immune to the tick dying on the way home.
+`_events.spawned_executions` counts **distinct `executor_ref`s** per task, and
+every spawn assertion is `== N` strict against it.
+
+Both halves of "distinct ref-bearing" carry weight, and each was got wrong
+once before it was got right. _Distinct_, because the SDK retries a POST whose
+response was lost and the API deliberately appends a second row for it — two
+rows naming one call are one execution. _Ref-bearing_, because **a granted
+claim is not a spawn**: the claim is taken first and the submission can still
+fail, in which case the tick records a task failure and never increments
+`spawned`, while the claim row sits there looking like an execution that never
+happened. The ref only exists once there is a call to name, so counting refs
+excludes that case by construction rather than by a special case.
 
 **What genuinely has no durable record is skipped, and the skip is counted.**
 A tick self-healing a completion, a concurrency-limit denial and a tick

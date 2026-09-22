@@ -185,9 +185,10 @@ def test_one_sweep_spawns_one_tick_per_build_and_returns(
         # Each task ran once: a sweep that spawns a tick for a build whose
         # work is already in flight must not start a second copy of it.
         # leaf, slow, root.
-        # Counted from the event log, not the tick trail: a granted claim
-        # is a row written before the container exists, so a preempted
-        # reporter cannot make it short.
+        # Counted from the event log, not the tick trail: a submitted
+        # execution leaves a row naming the call, written before the
+        # container reports anything, so a preempted reporter cannot make
+        # it short.
         claims = spawned_executions(deployment, build_id)
         spawned = sum(claims.values())
         assert spawned == 3, (
