@@ -444,6 +444,127 @@ describe("BuildControlsDialog", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("gateway timeout");
   });
 
+  // The warning is the reason these two controls share a dialog, so the
+  // states where it is withheld matter as much as the state where it
+  // shows. "Not known yet" is not "none".
+  it("warns while the scan is still running", async () => {
+    vi.mocked(fetchTasks).mockReturnValue(new Promise(() => {}) as never);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
+  });
+
+  it("warns when the scan failed, rather than implying nothing is running", async () => {
+    vi.mocked(fetchTasks).mockRejectedValue(new Error("gateway timeout"));
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
+  });
+
+  // As a panel, vanishing on `completed` was invisible. As a dialog
+  // somebody is reading, it is not — and one way to reach `completed`
+  // is to mark it so from this very dialog.
+  it("stays open when the build reaches a finished status", async () => {
+    answerWith([makeTask()]);
+    const user = userEvent.setup();
+    const view = renderPanel();
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+    expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
+
+    view.rerender(
+      <BuildControlsDialog
+        buildId={BUILD}
+        environmentId="env-1"
+        buildStatus="completed"
+        refreshToken={0}
+        onBuildChanged={onBuildChanged}
+      />,
+    );
+
+    expect(screen.getByText("GrindBeans")).toBeInTheDocument();
+  });
+
+  it("confirms an override where the override section cannot", async () => {
+    answerWith([makeTask()]);
+    vi.mocked(completeBuild).mockResolvedValue({
+      id: BUILD,
+      status: "completed",
+    } as never);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    await user.click(await screen.findByRole("button", { name: "Mark completed" }));
+    await user.click(screen.getByRole("button", { name: "Mark completed" }));
+
+    // The section itself unmounts once the status is no longer
+    // overridable, so the confirmation has to live outside it.
+    expect(await screen.findByText(/now recorded as completed/i)).toBeInTheDocument();
+    expect(screen.getByText(/Nothing was stopped/i)).toBeInTheDocument();
+  });
+
+  // Auto-refresh re-runs the effect every 5s and a scan is up to 20
+  // sequential requests with no cancellation.
+  it("does not start a second scan while one is in flight", async () => {
+    vi.mocked(fetchTasks).mockReturnValue(new Promise(() => {}) as never);
+    const user = userEvent.setup();
+    const view = renderPanel();
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+    await waitFor(() => expect(fetchTasks).toHaveBeenCalledTimes(1));
+
+    for (const token of [1, 2, 3]) {
+      view.rerender(
+        <BuildControlsDialog
+          buildId={BUILD}
+          environmentId="env-1"
+          buildStatus="running"
+          refreshToken={token}
+          onBuildChanged={onBuildChanged}
+        />,
+      );
+    }
+
+    expect(fetchTasks).toHaveBeenCalledTimes(1);
+  });
+
+  // With no filter set, rows falling out of the selection means they
+  // stopped running — telling the user to widen filters they never set
+  // sends them looking for a control that is already at "all".
+  it("says the ticked rows finished, not that the filters are too narrow", async () => {
+    answerWith([
+      makeTask({ task_id: "gone", task_name: "Featurise" }),
+      makeTask({ task_id: "stays", task_name: "Aggregate" }),
+    ]);
+    const user = userEvent.setup();
+    const view = renderPanel();
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+    await user.click(
+      await screen.findByRole("checkbox", { name: /Include Featurise/ }),
+    );
+
+    // The rescan no longer lists the ticked one: it completed. Another
+    // execution is still running, so the list itself is not empty.
+    answerWith([makeTask({ task_id: "stays", task_name: "Aggregate" })]);
+    view.rerender(
+      <BuildControlsDialog
+        buildId={BUILD}
+        environmentId="env-1"
+        buildStatus="running"
+        refreshToken={1}
+        onBuildChanged={onBuildChanged}
+      />,
+    );
+
+    expect(
+      await screen.findByText(/no longer running, so there is nothing to stop/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/widen the filters/i)).toBeNull();
+  });
+
   // --- Overriding the recorded status ---
   //
   // These live in the same dialog as the stop list because the two were

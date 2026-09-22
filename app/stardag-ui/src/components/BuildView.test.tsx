@@ -353,6 +353,35 @@ describe("BuildView header and tool-and-info bar", () => {
     await waitFor(() => expect(controlsMounted).toHaveBeenCalledTimes(2));
   });
 
+  // The gesture used to be one-way: the first click of the pair turned
+  // auto-refresh off and the second turned it straight back on, so it
+  // could be switched on but never off.
+  it("turns auto-refresh off again on a second double-click", async () => {
+    const user = userEvent.setup();
+    renderView();
+    const refresh = await screen.findByRole("button", { name: "Refresh" });
+
+    await user.dblClick(refresh);
+    const stop = await screen.findByRole("button", { name: "Stop auto-refreshing" });
+
+    await user.dblClick(stop);
+    expect(await screen.findByRole("button", { name: "Refresh" })).toBeInTheDocument();
+  });
+
+  // The interval has always declined to run on a build that is not
+  // running; the toolbar used to light up and claim otherwise.
+  it("does not offer auto-refresh on a build that has stopped", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchBuild).mockResolvedValue(makeBuild({ status: "failed" }));
+    renderView();
+    const refresh = await screen.findByRole("button", { name: "Refresh" });
+
+    await user.dblClick(refresh);
+
+    expect(screen.queryByRole("button", { name: "Stop auto-refreshing" })).toBeNull();
+    expect(refresh).not.toHaveAccessibleDescription(/every 5 seconds/i);
+  });
+
   it("says nothing about a config the build never set", async () => {
     const user = userEvent.setup();
     renderView();

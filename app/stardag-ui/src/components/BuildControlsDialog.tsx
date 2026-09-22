@@ -22,6 +22,7 @@ import { Modal } from "./Modal";
 import { BuildOverrideSection } from "./BuildOverrideSection";
 import { canOverrideStatus } from "../utils/builds";
 import { Checkbox } from "./ui/Checkbox";
+import { ResultBanner } from "./ui/ResultBanner";
 import { ToolbarButton } from "./ui/ToolbarButton";
 
 // The staleness options the filter offers, in seconds. Round numbers an
@@ -112,6 +113,10 @@ export function BuildControlsDialog({
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Kept here rather than in the override section, because a successful
+  // override can take the build out of the overridable statuses — which
+  // unmounts that section, and would take its own confirmation with it.
+  const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
   const [worker, setWorker] = useState("");
   const [executor, setExecutor] = useState("");
@@ -124,6 +129,8 @@ export function BuildControlsDialog({
   // A slow response from a previous build or environment must not
   // overwrite the current one's list.
   const epochRef = useRef(0);
+  // Whether a scan is in flight; see the effect below.
+  const scanningRef = useRef(false);
   // The "Copied" flash's timer, so it can be cancelled. Two reasons it
   // needs to be: unmounting mid-flash would set state on a dead
   // component, and a second copy before the first flash expires would
@@ -143,6 +150,14 @@ export function BuildControlsDialog({
   // nothing (STA-83). Opening it is the signal that the answer is wanted.
   useEffect(() => {
     if (!open || !buildId || !environmentId) return;
+    // One scan at a time. The effect re-runs on every `refreshToken`
+    // bump, which auto-refresh produces every 5 seconds, and a scan is
+    // up to 20 sequential requests with no cancellation — so past a few
+    // hundred claim holders a second scan starts before the first ends
+    // and they pile up for as long as the dialog stays open. The epoch
+    // keeps the *data* right; this keeps the *requests* bounded.
+    if (scanningRef.current) return;
+    scanningRef.current = true;
     const epoch = ++epochRef.current;
     collectExecutions(
       (page) =>
@@ -164,6 +179,9 @@ export function BuildControlsDialog({
       .catch((err: unknown) => {
         if (epochRef.current !== epoch) return;
         setError(err instanceof Error ? err.message : "Failed to read running tasks");
+      })
+      .finally(() => {
+        scanningRef.current = false;
       });
   }, [open, buildId, environmentId, refreshToken]);
 
@@ -202,6 +220,9 @@ export function BuildControlsDialog({
     : chosen.length
       ? { taskIds: chosen.map((execution) => execution.taskId) }
       : null;
+  // Whether anything is narrowing the list, which decides how to
+  // explain an empty selection.
+  const anyFilterSet = Boolean(worker || executor || namespace || olderThanSeconds);
   const workers = useMemo(() => workersIn(executions), [executions]);
   const executors = useMemo(() => executorsIn(executions), [executions]);
   const command = filters === null ? null : stopCommand(buildId, filters);
@@ -233,7 +254,14 @@ export function BuildControlsDialog({
   // Offered for every build that is not finished. A cancelled or failed
   // build is exactly when this is wanted, because cancelling a build does
   // not stop its containers.
-  if (buildStatus === "completed") return null;
+  //
+  // `&& !open` matters: the status can reach `completed` while the
+  // dialog is being read — the operator marks it completed from this
+  // very dialog, or a 5-second auto-refresh brings the news — and
+  // returning null then unmounts the dialog out from under them,
+  // mid-action and with no confirmation. As a panel that was invisible;
+  // as a dialog it is not. Once it is open it stays open until closed.
+  if (buildStatus === "completed" && !open) return null;
 
   const excluded = executions.length - chosen.length;
   // Split by reason, not counted together: one is permanent and one is
@@ -288,11 +316,28 @@ export function BuildControlsDialog({
               buildId={buildId}
               environmentId={environmentId}
               buildStatus={buildStatus}
-              hasLiveExecutions={executions.length > 0}
-              onChanged={onBuildChanged}
+              liveExecutions={
+                // `held` is null until the scan answers, and stays null if
+                // it fails. Both are "not known", and neither is "none".
+                held === null ? "unknown" : held.length > 0 ? "some" : "none"
+              }
+              onChanged={(updated) => {
+                setStatusNotice(`This build is now recorded as ${updated.status}.`);
+                onBuildChanged(updated);
+              }}
             />
             <hr className="my-4 border-gray-200 dark:border-gray-700" />
           </>
+        )}
+
+        {statusNotice && (
+          <ResultBanner
+            tone="success"
+            className="mb-3"
+            onDismiss={() => setStatusNotice(null)}
+          >
+            {statusNotice} Nothing was stopped — see below for what is still running.
+          </ResultBanner>
         )}
 
         <h3 className="mb-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
@@ -418,9 +463,14 @@ export function BuildControlsDialog({
 
           {command === null ? (
             <p role="status" className="text-xs text-amber-800 dark:text-amber-300">
-              None of the rows you ticked match these filters, so there is nothing to
-              stop. Clear the ticks or widen the filters — no command is offered,
-              because one with no targets would stop everything.
+              {anyFilterSet
+                ? "None of the rows you ticked match these filters, so there is nothing to stop. Clear the ticks or widen the filters."
+                : // No filter is set, so the ticked rows did not fall out of a
+                  // narrowing — they fell out of the list. They finished, or
+                  // something else took them over, between ticking and the
+                  // last rescan.
+                  "The executions you ticked are no longer running, so there is nothing to stop. Clear the ticks to target whatever is still listed."}{" "}
+              No command is offered, because one with no targets would stop everything.
             </p>
           ) : (
             <div className="space-y-1">

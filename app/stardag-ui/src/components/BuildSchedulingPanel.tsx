@@ -387,6 +387,13 @@ export function BuildSchedulingPanel({
     setOpen(false);
     setNotice(null);
     setActionError(null);
+    // `pending` renders ClaimActionDialog, and confirming it writes —
+    // with the *old* blocker's ids and the *new* environment. Today the
+    // parent's loader unmounts this subtree on either change so it is
+    // unreachable, but this effect exists precisely for the case where
+    // it is not, and leaving the one write out of it is the wrong thing
+    // to forget.
+    setPending(null);
   }, [buildId, environmentId]);
 
   const form = frontier ? schedulingPanelForm(frontier, buildStatus) : "hidden";

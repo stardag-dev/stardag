@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cancelBuild, completeBuild, failBuild } from "../api/tasks";
 import { useAuth } from "../context/AuthContext";
 import type { Build, BuildStatus } from "../types/task";
@@ -45,8 +45,16 @@ interface BuildOverrideSectionProps {
   buildId: string;
   environmentId: string;
   buildStatus: BuildStatus;
-  /** Whether anything is still running, which changes the advice given. */
-  hasLiveExecutions: boolean;
+  /**
+   * Whether the build still has executions running.
+   *
+   * Three values, not two. `"unknown"` is the scan still running or
+   * failed, and it has to be distinguishable: treating it as `"none"`
+   * silently withholds the warning that is the whole reason these two
+   * controls share a dialog, and it withholds it in the state where the
+   * operator has *least* information.
+   */
+  liveExecutions: "unknown" | "none" | "some";
   onChanged: (build: Build) => void;
 }
 
@@ -75,10 +83,21 @@ export function BuildOverrideSection({
   buildId,
   environmentId,
   buildStatus,
-  hasLiveExecutions,
+  liveExecutions,
   onChanged,
 }: BuildOverrideSectionProps) {
   const { user } = useAuth();
+  // The one async mutation in this view. Every fetch around it takes an
+  // epoch; this takes the simpler equivalent, because the component is
+  // remounted on any change of identity — so "still mounted" is exactly
+  // "still the same build and environment".
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   const [pending, setPending] = useState<OverrideAction | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,12 +114,14 @@ export function BuildOverrideSection({
           : pending === "complete"
             ? await completeBuild(buildId, environmentId, userId)
             : await failBuild(buildId, environmentId, userId);
+      if (!alive.current) return;
       setPending(null);
       onChanged(updated);
     } catch (err) {
+      if (!alive.current) return;
       setError(err instanceof Error ? err.message : "The override failed");
     } finally {
-      setBusy(false);
+      if (alive.current) setBusy(false);
     }
   }, [pending, buildId, environmentId, user?.profile?.sub, onChanged]);
 
@@ -141,8 +162,18 @@ export function BuildOverrideSection({
           <p className="text-xs text-gray-700 dark:text-gray-300">{chosen.effect}</p>
 
           {/* The whole point of the dialog: when there is work running,
-              the override is almost certainly not what was wanted. */}
-          {chosen.action === "cancel" && hasLiveExecutions && (
+              the override is almost certainly not what was wanted —
+              and when we cannot yet tell, saying nothing would be the
+              same as saying there is none. */}
+          {chosen.action === "cancel" && liveExecutions === "unknown" && (
+            <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
+              Whether this build still has executions running is not known yet — the
+              list below has not finished loading, or could not be read. Cancelling here
+              would not stop them either way. If anything may still be running, stop it
+              with the command below rather than cancelling here.
+            </p>
+          )}
+          {chosen.action === "cancel" && liveExecutions === "some" && (
             <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
               This build still has executions running, and cancelling here will not stop
               them. The command below is the one that does: it ends the selected

@@ -58,7 +58,11 @@ export function ToolbarButton({
         onClick={onClick}
         disabled={disabled}
         aria-label={label}
-        aria-describedby={tooltipId}
+        // Only the hint describes. Pointing this at the whole tooltip
+        // made every button announce as "Refresh, button, Refresh
+        // Double-click to…" — the name read twice, once as itself and
+        // once as its own description.
+        aria-describedby={hint ? tooltipId : undefined}
         className={`relative rounded-md p-1 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50 ${
           active
             ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
@@ -69,14 +73,17 @@ export function ToolbarButton({
         {badge}
       </button>
       <span
-        id={tooltipId}
         role="tooltip"
         className={`pointer-events-none absolute top-full z-30 mt-1.5 w-max max-w-64 rounded-md bg-gray-900 px-2 py-1 text-xs text-gray-100 opacity-0 shadow-lg transition-opacity delay-100 duration-75 group-focus-within:opacity-100 group-hover:opacity-100 dark:bg-gray-700 ${
           align === "right" ? "right-0" : "left-1/2 -translate-x-1/2"
         }`}
       >
         {label}
-        {hint && <span className="block text-gray-400">{hint}</span>}
+        {hint && (
+          <span id={tooltipId} className="block text-gray-400">
+            {hint}
+          </span>
+        )}
       </span>
     </span>
   );

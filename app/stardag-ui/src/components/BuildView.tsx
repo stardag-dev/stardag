@@ -77,7 +77,14 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // so the 5s auto-refresh drives one request stream, not two.
   const [refreshToken, setRefreshToken] = useState(0);
   const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastClickRef = useRef<number>(0);
+  // Pending single click, held for the double-click window.
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (clickTimerRef.current !== null) clearTimeout(clickTimerRef.current);
+    },
+    [],
+  );
 
   // Handle DAG toggle with panel resize
   const handleToggleDag = useCallback(() => {
@@ -178,6 +185,17 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     setRefreshing(false);
   }, [loadBuild]);
 
+  // Auto-refreshing a build that has stopped is pointless, and the
+  // interval below has always declined to do it — but the toolbar used
+  // to light up and claim otherwise, because nothing connected the two.
+  const canAutoRefresh = build?.status === "running";
+
+  // Turn it off when the build stops running, so the control cannot go
+  // on asserting something the interval is not doing.
+  useEffect(() => {
+    if (!canAutoRefresh && autoRefresh) setAutoRefresh(false);
+  }, [canAutoRefresh, autoRefresh]);
+
   // Auto-refresh effect
   useEffect(() => {
     if (autoRefresh && build?.status === "running") {
@@ -207,26 +225,38 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
 
   // Single click refreshes; double-click toggles auto-refresh.
   //
-  // The button stays enabled throughout, because disabling it during the
-  // in-flight first refresh is what made the double-click unreachable.
-  // A second single click arriving while one is already in flight is
-  // simply dropped — the answer it would fetch is the one already on its
-  // way.
+  // The single click is *deferred* by the double-click window rather
+  // than acted on at once. Acting immediately meant the two gestures
+  // overlapped: with auto-refresh on, the first click of a double-click
+  // turned it off and the second turned it straight back on, so the
+  // gesture could switch it on but never off.
+  //
+  // The button also stays enabled throughout, because disabling it
+  // during the in-flight first refresh is the other thing that made the
+  // double-click unreachable.
   const handleRefreshClick = useCallback(() => {
-    const now = Date.now();
-    const timeSinceLastClick = now - lastClickRef.current;
-    lastClickRef.current = now;
+    if (clickTimerRef.current !== null) {
+      // Second click inside the window: this is the double.
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+      if (canAutoRefresh) setAutoRefresh((previous) => !previous);
+      else handleRefresh();
+      return;
+    }
+    clickTimerRef.current = setTimeout(() => {
+      clickTimerRef.current = null;
+      if (autoRefresh) setAutoRefresh(false);
+      else if (!refreshing) handleRefresh();
+    }, 300);
+  }, [autoRefresh, canAutoRefresh, refreshing, handleRefresh]);
 
-    if (timeSinceLastClick < 300) {
-      setAutoRefresh((prev) => !prev);
-      return;
-    }
-    if (autoRefresh) {
-      setAutoRefresh(false);
-      return;
-    }
-    if (!refreshing) handleRefresh();
-  }, [autoRefresh, refreshing, handleRefresh]);
+  const handleBuildOverridden = useCallback(
+    (updated: Build) => {
+      if (updated.id !== buildId) return;
+      setBuild(updated);
+    },
+    [buildId],
+  );
 
   // Update breadcrumb navigation
   useEffect(() => {
@@ -444,7 +474,9 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                     hint={
                       autoRefresh
                         ? "Refreshing every 5 seconds"
-                        : "Double-click to refresh every 5 seconds"
+                        : canAutoRefresh
+                          ? "Double-click to refresh every 5 seconds"
+                          : undefined
                     }
                     onClick={handleRefreshClick}
                     // Deliberately NOT disabled while refreshing. It used
@@ -502,7 +534,12 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                       environmentId={activeEnvironment.id}
                       buildStatus={build.status}
                       refreshToken={refreshToken}
-                      onBuildChanged={setBuild}
+                      // Guarded rather than `setBuild` directly: an
+                      // override is async, this view stays mounted
+                      // across a change of build, and a slow one
+                      // resolving afterwards would write the previous
+                      // build's record into the current build's view.
+                      onBuildChanged={handleBuildOverridden}
                     />
                   )}
                 </div>
