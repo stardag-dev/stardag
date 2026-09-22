@@ -518,6 +518,46 @@ async def test_a_borrowed_handle_is_never_cancelled_on_a_refusal(
     )
 
 
+async def test_a_refusal_releases_the_global_lock_it_was_holding(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    """A new exit must not become a new leak.
+
+    The global lock is taken **before** the claim and the start, so the
+    local-loss result added for a refused start returns while holding it.
+    ``process_result``'s ``LockAcquisitionResult`` branch was written for
+    the one case where nothing was ever acquired, and released nothing —
+    so the lease sat held until its TTL and blocked every other build
+    wanting that key.
+
+    The same was already true of a claim denied as already-completed,
+    which is why the release went into the branch rather than into this
+    one exit.
+    """
+    from tests.test_build.test_concurrent import MockGlobalLockManager
+
+    task = SyncOnlyTask(name="lock-released-on-refusal")
+    registry = ClaimRegistry()
+    registry.refuse_ref_recording_start = "execution_superseded"
+    executor = FakeDetachedExecutor()
+    locks = MockGlobalLockManager()
+
+    with pytest.raises(Exception, match="stopped being this build's"):
+        await build_aio(
+            [task],
+            task_executor=executor,
+            registry=registry,
+            claim_config=FAST_CLAIM,
+            global_lock_manager=typing.cast(typing.Any, locks),
+            global_lock_config=GlobalLockConfig(enabled=True),
+        )
+
+    assert [tid for tid, _ in locks.releases] == [str(task.id)], (
+        "the refusal returned while holding the global lock, which then "
+        f"blocked every other build until its TTL. Releases: {locks.releases}"
+    )
+
+
 async def test_a_worker_that_stopped_itself_is_not_reported_as_a_failure(
     default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
 ):

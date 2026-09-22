@@ -993,6 +993,22 @@ async def build_aio(
 
         # Handle lock acquisition results (lock was not acquired)
         if isinstance(result, LockAcquisitionResult):
+            # Release the global lock first, because "lock not acquired" is
+            # no longer the only way to get here. Two paths reach this
+            # branch *after* ``submit_with_lock`` has taken the lock and
+            # added the task to ``held_locks``: a claim denied as
+            # already-completed, and — new — a start the registry refused
+            # because the task stopped being ours. Neither released it, so
+            # the lease sat held until its TTL and blocked every other
+            # build wanting that key.
+            #
+            # A no-op when nothing is held, which is what the original
+            # lock-not-acquired case is, so one call covers all of them
+            # rather than each new exit remembering for itself.
+            await release_lock_for_task(
+                task,
+                completed=result.status == LockAcquisitionStatus.ALREADY_COMPLETED,
+            )
             if result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
                 # Task completed externally - wait for visibility then mark complete
                 await wait_for_completion_with_retry(task)
