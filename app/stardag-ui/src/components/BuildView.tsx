@@ -183,25 +183,28 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [dagFullscreen]);
 
-  // Double-click refresh to toggle auto-refresh
+  // Single click refreshes; double-click toggles auto-refresh.
+  //
+  // The button stays enabled throughout, because disabling it during the
+  // in-flight first refresh is what made the double-click unreachable.
+  // A second single click arriving while one is already in flight is
+  // simply dropped — the answer it would fetch is the one already on its
+  // way.
   const handleRefreshClick = useCallback(() => {
     const now = Date.now();
     const timeSinceLastClick = now - lastClickRef.current;
     lastClickRef.current = now;
 
     if (timeSinceLastClick < 300) {
-      // Double-click: toggle auto-refresh
       setAutoRefresh((prev) => !prev);
-    } else {
-      // Single click: manual refresh (only if not in auto-refresh mode)
-      if (!autoRefresh) {
-        handleRefresh();
-      } else {
-        // Click while auto-refreshing: stop auto-refresh
-        setAutoRefresh(false);
-      }
+      return;
     }
-  }, [autoRefresh, handleRefresh]);
+    if (autoRefresh) {
+      setAutoRefresh(false);
+      return;
+    }
+    if (!refreshing) handleRefresh();
+  }, [autoRefresh, refreshing, handleRefresh]);
 
   // Update breadcrumb navigation
   useEffect(() => {
@@ -328,7 +331,14 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     setPage(1);
   }, []);
 
-  if (loading) {
+  // Only the *first* load takes over the screen. `loadBuild` raises
+  // `loading` on every refresh too, so this used to replace the whole
+  // view — toolbar included — each time anyone hit refresh or a 5-second
+  // auto-refresh tick fired. Besides the flashing, it is the other half
+  // of why the advertised double-click could not work: the button it
+  // wanted a second click on had unmounted. The refresh icon spins to
+  // show a refresh in flight, which is the right size of signal.
+  if (loading && !build) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
@@ -405,7 +415,12 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                         : "Double-click to refresh every 5 seconds"
                     }
                     onClick={handleRefreshClick}
-                    disabled={refreshing && !autoRefresh}
+                    // Deliberately NOT disabled while refreshing. It used
+                    // to be, which quietly made the advertised
+                    // double-click impossible: the first click starts a
+                    // fetch, `refreshing` goes true, the button disables,
+                    // and the second click never lands. Re-entry is
+                    // guarded in the handler instead.
                     active={autoRefresh}
                   >
                     <svg

@@ -662,9 +662,13 @@ function ExecutionTable({ executions, ticked, onToggle }: ExecutionTableProps) {
       </table>
       {undrawn > 0 && (
         <p className="px-1 py-1.5 text-xs text-gray-600 dark:text-gray-400">
-          {undrawn} more execution{undrawn === 1 ? "" : "s"} not listed. The command
-          below still targets every one of them — narrow with the filters above to see a
-          particular set.
+          {undrawn} more execution{undrawn === 1 ? "" : "s"} not listed.{" "}
+          {ticked.size > 0
+            ? // Ticking switches the command to exact task ids, so the undrawn
+              // rows really are excluded. Claiming otherwise would err towards
+              // "everything is covered", which is the dangerous direction.
+              "Ticked rows are named individually, so these are not included — clear the ticks to target the whole list."
+            : "The command below still targets every one of them — narrow with the filters above to see a particular set."}
         </p>
       )}
     </div>

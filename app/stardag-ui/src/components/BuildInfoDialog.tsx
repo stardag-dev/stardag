@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import type { Build } from "../types/task";
-import { modalAppUrl } from "../utils/modalLinks";
+import { isModalMetadata, modalAppUrl } from "../utils/modalLinks";
 import { isSyntheticScope } from "../utils/scope";
 import { formatAbsoluteTime } from "../utils/time";
 import { BuildStatusBadge } from "./BuildStatusBadge";
@@ -133,19 +133,44 @@ function ExecutorField({ build }: { build: Build }) {
     typeof metadata?.app_name === "string" && metadata.app_name.length > 0
       ? metadata.app_name
       : null;
+  // `kind` decides what the app name is *called*. Without this check a
+  // build on any other backend that happens to record an `app_name` is
+  // announced as Modal — the same guard `BuildExecutorChips` has always
+  // had, and the reason this dialog needs it too.
+  const isModal = metadata ? isModalMetadata(metadata) : false;
+  const kind = typeof metadata?.kind === "string" ? metadata.kind : null;
   const url = modalAppUrl(metadata);
-  const reactive = metadata?.reactive === true;
+
+  // `reactive_app_name` is the canonical marker: the reactive-meta
+  // endpoint sets it independently of whatever trigger metadata the
+  // build was created with, so a build can be tick-driven with nothing
+  // in `executor_metadata` to show for it. The metadata flag stays as a
+  // fallback for servers that predate the column.
+  const reactiveApp = build.reactive_app_name ?? null;
+  const reactive = reactiveApp !== null || metadata?.reactive === true;
 
   if (!appName && !reactive) {
     return (
       <Field
         label="Execution"
-        hint="No executor was recorded, so this build ran in its own process."
+        hint={
+          metadata
+            ? "No app was recorded for this build's trigger."
+            : "No executor was recorded. Either the build ran in its own process, or it predates the server recording one."
+        }
       >
-        <span className="text-gray-500 dark:text-gray-400">Local</span>
+        <span className="text-gray-500 dark:text-gray-400">
+          {kind ?? "Not recorded"}
+        </span>
       </Field>
     );
   }
+
+  const appLabel = appName
+    ? isModal
+      ? `Modal app ${appName}`
+      : `${kind ?? "Executor"} app ${appName}`
+    : null;
 
   return (
     <Field
@@ -156,7 +181,7 @@ function ExecutorField({ build }: { build: Build }) {
           : "Driven by a resident orchestrator rather than by scheduler ticks."
       }
     >
-      {appName &&
+      {appLabel &&
         (url ? (
           <a
             href={url}
@@ -164,12 +189,19 @@ function ExecutorField({ build }: { build: Build }) {
             rel="noopener noreferrer"
             className="font-medium text-blue-700 hover:underline dark:text-blue-400"
           >
-            Modal app {appName}
+            {appLabel}
           </a>
         ) : (
-          <span className="font-medium">Modal app {appName}</span>
+          <span className="font-medium">{appLabel}</span>
         ))}
-      {!appName && reactive && <span>Reactive</span>}
+      {/* Named separately when the reactive app is not the trigger's
+          app — they are different facts and can disagree. */}
+      {reactiveApp && reactiveApp !== appName && (
+        <span className="text-gray-600 dark:text-gray-400">
+          ticked by {reactiveApp}
+        </span>
+      )}
+      {!appLabel && reactive && <span>Reactive</span>}
     </Field>
   );
 }

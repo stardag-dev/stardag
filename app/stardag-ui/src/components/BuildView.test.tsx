@@ -17,7 +17,7 @@ vi.mock("../context/AuthContext", () => ({
 // The graph and the two self-fetching panels are not what this file is
 // about, and each drags in a renderer or a request stream of its own.
 vi.mock("./DagGraph", () => ({ DagGraph: () => <div data-testid="dag" /> }));
-vi.mock("./BuildStopPanel", () => ({ BuildStopPanel: () => null }));
+vi.mock("./BuildControlsDialog", () => ({ BuildControlsDialog: () => null }));
 vi.mock("./BuildSchedulingPanel", () => ({ BuildSchedulingPanel: () => null }));
 vi.mock("./TaskDetail", () => ({ TaskDetail: () => <div data-testid="detail" /> }));
 
@@ -59,6 +59,7 @@ function makeBuild(overrides: Partial<Build> = {}): Build {
       reactive: true,
     },
     scope_key: "5c6ed85f155d9a01:2b7c",
+    reactive_app_name: "sd-stop-demo",
     ...overrides,
   };
 }
@@ -186,6 +187,60 @@ describe("BuildView header and tool-and-info bar", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/Reactive:/)).toBeInTheDocument();
     expect(screen.getByText(/"limit": 3/)).toBeInTheDocument();
+  });
+
+  // The button used to disable itself the moment the first click started
+  // a fetch, so the second click of the advertised double-click could
+  // never land and auto-refresh was unreachable.
+  it("reaches auto-refresh on a double-click, mid-fetch", async () => {
+    const user = userEvent.setup();
+    renderView();
+    const refresh = await screen.findByRole("button", { name: "Refresh" });
+
+    // From here every read hangs, which is the state that used to both
+    // disable the button and unmount the toolbar behind it.
+    vi.mocked(fetchBuild).mockReturnValue(new Promise(() => {}) as never);
+    expect(refresh).toBeEnabled();
+
+    await user.dblClick(refresh);
+
+    expect(
+      await screen.findByRole("button", { name: "Stop auto-refreshing" }),
+    ).toBeInTheDocument();
+  });
+
+  // `kind` decides what the app name is called. Without the guard, any
+  // backend that records an app_name was announced as Modal.
+  it("does not call a non-Modal executor Modal", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchBuild).mockResolvedValue(
+      makeBuild({
+        reactive_app_name: null,
+        executor_metadata: { kind: "kubernetes", app_name: "batch-runner" },
+      }),
+    );
+    renderView();
+    await user.click(await screen.findByRole("button", { name: "Build info" }));
+
+    expect(await screen.findByText(/batch-runner/)).toBeInTheDocument();
+    expect(screen.queryByText(/Modal app/)).not.toBeInTheDocument();
+  });
+
+  // `reactive_app_name` is set by the reactive-meta endpoint, independently
+  // of whatever trigger metadata the build was created with.
+  it("reads reactive from the build column, not only from metadata", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchBuild).mockResolvedValue(
+      makeBuild({
+        reactive_app_name: "sd-ticker",
+        executor_metadata: null,
+      }),
+    );
+    renderView();
+    await user.click(await screen.findByRole("button", { name: "Build info" }));
+
+    expect(await screen.findByText(/Reactive:/)).toBeInTheDocument();
+    expect(screen.getByText(/sd-ticker/)).toBeInTheDocument();
   });
 
   it("says nothing about a config the build never set", async () => {

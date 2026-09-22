@@ -36,10 +36,8 @@ const ACTIONS: {
     label: "Cancel build",
     dot: "bg-gray-500",
     effect:
-      "Records this build as cancelled and releases its execution claims " +
-      "straight away. Anything already running carries on until it reaches " +
-      "its next cooperative checkpoint, and once the claims are gone another " +
-      "build may take those tasks over.",
+      "Records this build as cancelled, and does nothing else. It does not " +
+      "reach the execution backend, so anything already running carries on.",
   },
 ];
 
@@ -59,10 +57,19 @@ interface BuildOverrideSectionProps {
  * **an override edits the record, the stop command ends the work.** They
  * were previously two unrelated controls, a dropdown in the toolbar and
  * a panel below it, so the obvious-looking move on a build you wanted
- * stopped was to pick "Cancel" — which releases the claims, leaves every
- * container running, and invites a neighbouring build to pick the tasks
- * up. Putting them in one dialog, with the record on top and the work
- * below, is what makes the choice visible.
+ * stopped was to pick "Cancel" — which writes one BUILD_CANCELLED event
+ * and nothing else, leaving every container running. Putting them in one
+ * dialog, with the record on top and the work below, is what makes the
+ * choice visible.
+ *
+ * The copy deliberately says nothing about what cancelling does to the
+ * *claims*. `POST /builds/{id}/cancel` takes a `cascade` flag that this
+ * call does not set, so today it releases none of them; STA-81 is
+ * changing that, and the bulk-cancel path already passes `cascade: true`.
+ * Whichever way that settles, "it does not stop what is running" stays
+ * true and is the fact the decision turns on — so that is what is
+ * stated, and the claim semantics are left to the one place that owns
+ * them.
  */
 export function BuildOverrideSection({
   buildId,
@@ -137,12 +144,10 @@ export function BuildOverrideSection({
               the override is almost certainly not what was wanted. */}
           {chosen.action === "cancel" && hasLiveExecutions && (
             <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
-              This build still has executions running, and the order is the whole
-              difference. Cancelling here releases the claims first and leaves those
-              containers to run on until their next cooperative checkpoint. The command
-              below does it the other way round — it ends the selected containers, then
-              cancels the build — which is why it is the one to reach for when you want
-              the work stopped. You do not need both.
+              This build still has executions running, and cancelling here will not stop
+              them. The command below is the one that does: it ends the selected
+              containers first and cancels the build afterwards. Reach for it instead —
+              you do not need both.
             </p>
           )}
 

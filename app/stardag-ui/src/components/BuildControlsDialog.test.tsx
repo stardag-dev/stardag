@@ -458,12 +458,18 @@ describe("BuildControlsDialog", () => {
 
     await user.click(await screen.findByRole("button", { name: "Cancel build" }));
 
-    expect(screen.getByText(/releases its execution claims/i)).toBeInTheDocument();
-    // The distinction is ordering, not a flag: cancelling releases the
-    // claims first and leaves the containers; the command ends them first.
-    expect(screen.getByText(/the order is the whole difference/i)).toBeInTheDocument();
+    // The claim the copy must not make is that cancelling stops
+    // anything: `POST /cancel` without `cascade` writes one event.
     expect(
-      screen.getByText(/ends the selected containers, then cancels the build/i),
+      screen.getByText(
+        /does not reach the execution backend, so anything already running carries on/i,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/cancelling here will not stop them/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /ends the selected containers first and cancels the build afterwards/i,
+      ),
     ).toBeInTheDocument();
     // Nothing happened yet: the first click only asks.
     expect(cancelBuild).not.toHaveBeenCalled();
@@ -485,7 +491,7 @@ describe("BuildControlsDialog", () => {
     await openDialog(user);
 
     await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    expect(screen.queryByText(/the order is the whole difference/i)).toBeNull();
+    expect(screen.queryByText(/cancelling here will not stop them/i)).toBeNull();
   });
 
   it("overrides only after the second, confirming click", async () => {
@@ -529,6 +535,28 @@ describe("BuildControlsDialog", () => {
     expect(screen.getByText(`Task${MAX_ROWS_DRAWN - 1}`)).toBeInTheDocument();
     expect(screen.queryByText(`Task${MAX_ROWS_DRAWN}`)).toBe(null);
     expect(screen.getByText(/12 more executions not listed/)).toBeInTheDocument();
+  });
+
+  // Ticking switches the command to exact task ids, so the undrawn rows
+  // stop being included — and saying otherwise errs towards "everything
+  // is covered", which is the dangerous direction.
+  it("stops claiming the undrawn rows are covered once rows are ticked", async () => {
+    answerWith(
+      Array.from({ length: MAX_ROWS_DRAWN + 12 }, (_, i) =>
+        makeTask({ id: `row-${i}`, task_id: `tid-${i}`, task_name: `Task${i}` }),
+      ),
+    );
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    expect(
+      await screen.findByText(/still targets every one of them/),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: "Include Task0" }));
+
+    expect(screen.queryByText(/still targets every one of them/)).toBeNull();
+    expect(screen.getByText(/these are not included/)).toBeInTheDocument();
   });
 
   // The command is unaffected by how much of the list is drawn.

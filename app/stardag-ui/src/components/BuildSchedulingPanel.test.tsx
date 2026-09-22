@@ -212,6 +212,43 @@ describe("BuildSchedulingPanel", () => {
     );
   });
 
+  // The previous frontier stays on screen while the next read is in
+  // flight, so `frontier === null` was true on the first load only and
+  // every refresh after it showed a static clock.
+  it("spins while a refresh is in flight, not only on first load", async () => {
+    let release: (value: BuildFrontier) => void = () => {};
+    vi.mocked(fetchBuildFrontier).mockReturnValue(
+      new Promise<BuildFrontier>((resolve) => {
+        release = resolve;
+      }),
+    );
+    const { rerender } = renderPanel();
+
+    const trigger = await screen.findByRole("button", { name: "Scheduling" });
+    expect(trigger.querySelector(".animate-spin")).not.toBeNull();
+
+    release(makeFrontier({ actionable: [{ task_id: "t", latest_status: "pending" }] }));
+    await waitFor(() => expect(trigger.querySelector(".animate-spin")).toBeNull());
+
+    // A second read, with the first frontier still on screen.
+    vi.mocked(fetchBuildFrontier).mockReturnValue(new Promise<BuildFrontier>(() => {}));
+    rerender(
+      <BuildSchedulingPanel
+        buildId={VIEWED_BUILD}
+        environmentId="env-1"
+        buildStatus="running"
+        refreshToken={1}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("button", { name: "Scheduling" })
+          .querySelector(".animate-spin"),
+      ).not.toBeNull(),
+    );
+  });
+
   it("marks the icon when the build is not progressing", async () => {
     vi.mocked(fetchBuildFrontier).mockResolvedValue(makeFrontier());
     renderPanel();

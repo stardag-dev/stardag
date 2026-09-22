@@ -315,6 +315,11 @@ export function BuildSchedulingPanel({
 
   const [frontier, setFrontier] = useState<BuildFrontier | null>(null);
   const [frontierError, setFrontierError] = useState<string | null>(null);
+  // Tracked separately from `frontier === null`, because the previous
+  // frontier is deliberately kept on screen while the next read is in
+  // flight. Without this the spinner appeared on the first load only,
+  // and every refresh after it showed a static clock.
+  const [frontierLoading, setFrontierLoading] = useState(true);
 
   const [summaries, setSummaries] = useState<BuildTickSummary[]>([]);
   const [ticksLoading, setTicksLoading] = useState(false);
@@ -348,6 +353,7 @@ export function BuildSchedulingPanel({
     if (!buildId || !environmentId) return;
     const epoch = ++frontierEpochRef.current;
     const fresh = () => frontierEpochRef.current === epoch;
+    setFrontierLoading(true);
     fetchBuildFrontier(buildId, environmentId)
       .then((data) => {
         if (!fresh()) return;
@@ -359,6 +365,9 @@ export function BuildSchedulingPanel({
         setFrontierError(
           err instanceof Error ? err.message : "Failed to read scheduler state",
         );
+      })
+      .finally(() => {
+        if (fresh()) setFrontierLoading(false);
       });
   }, [buildId, environmentId, refreshToken, localNonce]);
 
@@ -367,6 +376,7 @@ export function BuildSchedulingPanel({
   useEffect(() => {
     setFrontier(null);
     setFrontierError(null);
+    setFrontierLoading(true);
     setSummaries([]);
     setTicksUnavailable(false);
     setTicksError(null);
@@ -464,7 +474,7 @@ export function BuildSchedulingPanel({
   // a dot when something is wrong. An icon that came and went would be
   // worse than one that says what it knows — a control that disappears
   // reads as a bug, and a toolbar whose buttons move is hard to aim at.
-  const loading = !frontier && !frontierError;
+  const loading = frontierLoading;
   const unhealthy = frontierError !== null || form === "stalled";
   const trigger = (
     <ToolbarButton
