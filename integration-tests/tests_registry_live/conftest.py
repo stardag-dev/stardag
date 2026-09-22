@@ -25,11 +25,22 @@ none of, and ``testpaths`` in ``pyproject.toml`` still points only at
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
+from stardag_integration_tests.registry_live._diagnostics import (
+    CLASSIFICATION_FAILED,
+    record_non_timeout_failure,
+    record_transport_timeout,
+    transport_timeout,
+)
 from stardag_integration_tests.registry_live._guard import ENV_API_URL, is_enabled
-from stardag_integration_tests.registry_live._harness import Deployment
+from stardag_integration_tests.registry_live._harness import (
+    BootCheckUnanswered,
+    Deployment,
+    RegistryContainerRecycled,
+)
 from stardag_integration_tests.registry_live.provision import (
     default_environment_name,
     load_coordinates,
@@ -86,6 +97,98 @@ def pytest_configure(config: pytest.Config) -> None:
     # reads its expectation from the thing it is checking proves nothing.
     os.environ[ENV_API_URL] = deployment.api_url
     _deployment = deployment
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
+    """Classify every failure, at the instant it happens.
+
+    Two records come out of this, and CI needs both: a transport timeout
+    is what buys a run its one retry, and anything else is what forbids
+    one. The tier runs twelve scenarios at once, so "somebody timed out"
+    and "somebody failed for real" are routinely both true of the same
+    run, and only the second may decide it.
+
+    **Here rather than in a fixture, because the timing is the value.**
+    The probe asks whether the registry is answering *while the
+    scenario's own request is timing out*. A finaliser would run after
+    the scenario's other teardown -- including the autouse check below,
+    which spends up to a hundred seconds retrying the boot read when the
+    registry is unreachable -- by which time the contention has passed
+    and the registry answers everything in milliseconds. Every occurrence
+    would read as the same reassuring nothing.
+
+    **A wrapper rather than a plain hook**, so the decision is made on
+    pytest's own report. ``call.excinfo`` alone is set for a skip and for
+    an xfail as well as for a failure, and recording either as a real
+    failure would silently forbid a retry the run was entitled to.
+
+    **Every phase is classified, and exactly one failure is exempt.**
+    Setup and teardown are not formalities here: fixtures talk to the
+    registry at both ends -- ``test_limit_slot_wake``'s ``slot_limit``
+    sets a concurrency limit before the scenario and deletes it in a
+    ``finally`` afterwards -- so a failure at either end is as real as one
+    in the body, and must forbid the retry just the same.
+
+    **Every failed report is classified, exception or not**, because a
+    strict ``xfail`` that passes carries none and would otherwise leave
+    the run retryable. And anything that goes wrong in here fails
+    *closed*: it prints ``CLASSIFICATION_FAILED``, which the workflow
+    refuses to retry over, because an absent marker is read as proof that
+    nothing real broke.
+
+    The exemption is ``RegistryContainerRecycled`` and nothing else. That
+    one has its own marker and its own retry, which re-provisions because
+    the replacement's database is empty; recording it here would disarm
+    the recovery that exists for it. Exempting it by *type* rather than by
+    phase is the point -- an earlier version exempted all of teardown,
+    which also exempted a fixture's own teardown failing for real.
+
+    The same applies to skipping the boot probe: only
+    ``BootCheckUnanswered`` arrives with its probe already done, and it
+    says so by being that type. A ``slot_limit`` cleanup timing out is an
+    ordinary teardown timeout and gets probed like any other.
+
+    Nothing raised in here may reach pytest: a diagnostic that breaks
+    reporting would cost the run the very evidence it exists to collect.
+    Under xdist this runs in the worker process; the files it writes are
+    on the runner's disk, which is what CI reads back.
+    """
+    report = yield
+    try:
+        _classify(item, call, report)
+    except Exception as error:  # pragma: no cover - diagnostics only
+        # Fail closed, loudly. A classifier that died has decided nothing,
+        # and CI reads an absent marker as "nothing real broke" -- so the
+        # run must become non-retryable on the strength of this line.
+        print(f"{CLASSIFICATION_FAILED}: {error!r}", file=sys.stderr)
+    return report
+
+
+def _classify(
+    item: pytest.Item, call: pytest.CallInfo[None], report: pytest.TestReport
+) -> None:
+    if not report.failed or _deployment is None:
+        return
+    if report.when not in ("setup", "call", "teardown"):
+        return
+
+    # Not gated on ``call.excinfo``. A strict ``xfail`` that passes is a
+    # failed report carrying no exception at all, and dropping it would
+    # leave the run retryable over an XPASS.
+    error = call.excinfo.value if call.excinfo is not None else None
+    timeout = transport_timeout(error) if error is not None else None
+    if timeout is not None:
+        record_transport_timeout(
+            _deployment,
+            nodeid=item.nodeid,
+            phase=report.when,
+            error=error,
+            timeout=timeout,
+            already_probed=isinstance(error, BootCheckUnanswered),
+        )
+    elif not isinstance(error, RegistryContainerRecycled):
+        record_non_timeout_failure(nodeid=item.nodeid, phase=report.when, error=error)
 
 
 @pytest.fixture(autouse=True)

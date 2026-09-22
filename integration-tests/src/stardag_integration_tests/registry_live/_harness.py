@@ -52,6 +52,18 @@ DEFAULT_ENVIRONMENT_SLUG = "main"
 # message is the whole story.
 RECYCLE_MARKER_ENV = "STARDAG_REGISTRY_LIVE_RECYCLE_MARKER"
 
+# What the harness says when it could not record what it found. Defined
+# here rather than in ``_diagnostics`` only because that module imports
+# this one and not the reverse; ``_diagnostics`` re-exports it, and it is
+# one spelling either way.
+#
+# An unwritten marker is indistinguishable from a run with nothing wrong
+# in it, and CI reads it that way -- so every failure to write one has to
+# be said aloud on a channel that does not depend on the filesystem the
+# markers live on. The runner tees the tier's output; the workflow
+# refuses to retry a run whose log holds this.
+CLASSIFICATION_FAILED = "STARDAG_REGISTRY_LIVE_CLASSIFICATION_FAILED"
+
 # Reading the boot id at provisioning time waits out a cold start, so it
 # gets a long timeout and one try. The post-scenario check cannot: it runs
 # after every scenario, so its worst case has to stay small enough to sit
@@ -63,8 +75,15 @@ BOOT_READ_TIMEOUT_SECONDS = 60.0
 BOOT_READ_ATTEMPTS = 6
 
 
-def _record_recycle(previous: str, current: str) -> None:
+def record_recycle(previous: str, current: str) -> None:
     """Leave the evidence of a recycle where a shell can read it.
+
+    Two callers, and neither is optional. The post-scenario check below
+    is the usual one. The other is the boot probe a transport timeout
+    runs (``_diagnostics``): if it answers from a *different* container,
+    it has identified a recycle off this same nonce, and saying so there
+    rather than waiting for a second read means the retry re-provisions
+    even when that second read gets no answer either.
 
     **Why a retry, and not a database that survives the container.** The
     obvious fix for "a recycle loses the whole database" is to put PGDATA on
@@ -101,10 +120,51 @@ def _record_recycle(previous: str, current: str) -> None:
     try:
         Path(path).write_text(f"{previous} -> {current}\n")
     except OSError as error:  # pragma: no cover - diagnostics only
+        # Fail closed. Both callers are exempt from the non-timeout
+        # marker -- the recycle assertion by type, the probe's finding by
+        # design -- so a recycle nobody could record is a recycle nobody
+        # records at all, and CI would take the plain-timeout branch and
+        # re-run against an empty database.
         print(
-            f"Could not write the recycle marker to {path!r}: {error}",
+            f"{CLASSIFICATION_FAILED}: could not write the recycle marker "
+            f"to {path!r}: {error}",
             file=sys.stderr,
         )
+
+
+class BootCheckUnanswered(RuntimeError):
+    """The post-scenario boot check got no answer at all.
+
+    Raised *from* the transport error that ended it, so the
+    transport-timeout discriminator still finds the timeout by walking
+    the cause chain and classifies this as the failure class it is.
+
+    Its own type for one reason: it is the only failure that arrives with
+    its probe already done. ``assert_same_container`` has just read
+    ``/_harness/boot`` six times over a hundred seconds without an
+    answer, so probing again would add delay and no information. Nothing
+    else may claim that -- fixtures do registry I/O in teardown too, and
+    an earlier version inferred it from the *phase*, which quietly
+    swallowed the probe for a ``slot_limit`` cleanup that timed out.
+    """
+
+
+class RegistryContainerRecycled(AssertionError):
+    """The process holding the database was replaced mid-run.
+
+    Its own type because one consumer has to tell it apart from every
+    other teardown failure and cannot do so by phase. A non-timeout
+    failure in teardown normally *forbids* CI's retry -- fixtures here
+    tear down through the registry, and ``test_limit_slot_wake``'s
+    ``slot_limit`` deletes a concurrency limit in a ``finally`` -- but
+    this one must not, because it has its own marker and its own retry,
+    and that retry re-provisions. An earlier version exempted the whole
+    teardown phase instead, which was one exemption doing the work of
+    two.
+
+    An ``AssertionError`` subclass, so pytest reports it as before and
+    the transport-timeout discriminator keeps excluding it for free.
+    """
 
 
 @dataclass(frozen=True)
@@ -165,19 +225,29 @@ class Deployment:
         # replacement has actually identified itself. A registry that never
         # answers stays unclassified on purpose -- nothing was identified,
         # so nothing is retried.
-        current = self.current_boot_id(
-            attempts=BOOT_READ_ATTEMPTS, retry_pause=3.0, timeout=15.0
-        )
+        try:
+            current = self.current_boot_id(
+                attempts=BOOT_READ_ATTEMPTS, retry_pause=3.0, timeout=15.0
+            )
+        except Exception as error:
+            # Named, rather than left as the bare transport error, so the
+            # one caller that needs to know this probe has already run can
+            # tell. See BootCheckUnanswered.
+            raise BootCheckUnanswered(
+                f"The registry at {self.api_url} did not answer "
+                f"/_harness/boot in {BOOT_READ_ATTEMPTS} attempts, so "
+                f"whether the container survived this scenario is unknown."
+            ) from error
         if current != self.boot_id:
-            _record_recycle(self.boot_id, current)
-            raise AssertionError(
+            record_recycle(self.boot_id, current)
+            raise RegistryContainerRecycled(
                 f"The registry container was replaced mid-run (boot id "
                 f"{self.boot_id} -> {current}). Its Postgres is inside that "
                 f"container, so the database this scenario was writing to no "
                 f"longer exists. This is a harness failure and not a "
                 f"scheduling one: provision the stack again and re-run. CI "
                 f"does that by itself, once, off the marker this just "
-                f"wrote -- see _record_recycle for why that rather than a "
+                f"wrote -- see record_recycle for why that rather than a "
                 f"database outliving the container."
             )
 

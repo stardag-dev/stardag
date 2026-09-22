@@ -2,6 +2,7 @@
 
     python -m stardag_integration_tests.registry_live.provision up
     python -m stardag_integration_tests.registry_live.provision status
+    python -m stardag_integration_tests.registry_live.provision logs
     python -m stardag_integration_tests.registry_live.provision stop
     python -m stardag_integration_tests.registry_live.provision down
 
@@ -33,6 +34,7 @@ import re
 import secrets
 import subprocess
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -433,19 +435,159 @@ def _scenario_apps() -> list[tuple[str, str]]:
     ]
 
 
+# Bounded by a time window first and an entry count second, and the order
+# matters. `--tail` counts *entries across every function in the app*, so a
+# chatty worker would crowd out the registry lines that explain the stall;
+# the window does not have that failure mode. Three hours covers a PR's whole
+# run with room for a retry, and the count is only there to keep the file
+# from being unbounded -- a full twenty-scenario run plus a retry measured
+# about 3,300 entries against the registry.
+LOG_WINDOW = "3h"
+LOG_MAX_ENTRIES = 20000
+
+# A deadline for the *whole* dump, not a timeout per app, and that is the
+# point of it. The registry-live job has thirty minutes, of which a first
+# run and a retry can already take twenty; four apps each free to hang for
+# minutes would end the job before the upload step, losing exactly the
+# evidence this exists to keep. Whatever is collected when the budget runs
+# out is what gets uploaded, and the apps that did not fit say so in their
+# own files. Measured: four apps take a few seconds each against a live
+# stack, so the budget is slack rather than a target.
+LOG_BUDGET_SECONDS = 240.0
+LOG_PER_APP_TIMEOUT_SECONDS = 120.0
+
+
+def _decode(stream: str | bytes | None) -> str:
+    """Whatever the subprocess produced, as text, never raising."""
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return stream
+
+
+def _loggable_apps() -> list[str]:
+    """Every app whose logs are worth having, which is not the deployed set.
+
+    `_scenario_apps` drives deploy *and* stop, so an app may only be in it
+    if provisioning owns its lifecycle. `registry-live-rollover` does not
+    qualify -- ``test_rollover`` deploys it itself, twice, under two code
+    ids -- but it runs real workers, and a red rollover scenario with no
+    worker logs is the case this dump exists for. Hence a separate list,
+    with the difference stated rather than left to be noticed.
+    """
+    from .rollover_app import APP_NAME as ROLLOVER_APP
+
+    return [
+        DEFAULT_REGISTRY_APP,
+        *(name for _, name in _scenario_apps()),
+        ROLLOVER_APP,
+    ]
+
+
+def logs(modal_environment: str, output_dir: Path) -> None:
+    """Write every app's Modal logs into ``output_dir``.
+
+    The evidence for a red run is deleted minutes after it goes red:
+    teardown runs ``modal environment delete`` once both tiers finish, and
+    that takes the registry container, the scenario apps and all their logs
+    together. Three separate occurrences on this tier were diagnosable only
+    because somebody pulled the logs by hand while the other tier was still
+    running, and one cause is still only a hypothesis because nobody did.
+
+    So CI calls this before teardown can run and uploads the directory as a
+    workflow artifact. Timestamps and container ids are asked for
+    explicitly: the question these logs get read for is "what was this
+    container doing at the moment the client gave up", and neither the time
+    nor which container served is in the default line format.
+
+    Deliberately forgiving, and bounded. A failure here must never decide
+    whether the tier passed -- it is the diagnosis of a verdict already
+    reached -- so an app that cannot be read leaves its error in its own
+    file and the next app is still tried, and the whole dump gives up at
+    ``LOG_BUDGET_SECONDS`` rather than risking the job's own deadline.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + LOG_BUDGET_SECONDS
+    for app_name in _loggable_apps():
+        destination = output_dir / f"{app_name}.log"
+        remaining = deadline - time.monotonic()
+        command = [
+            modal_cli(),
+            "app",
+            "logs",
+            app_name,
+            "-e",
+            modal_environment,
+            "--since",
+            LOG_WINDOW,
+            "-n",
+            str(LOG_MAX_ENTRIES),
+            "--timestamps",
+            "--show-container-id",
+        ]
+        if remaining <= 0:
+            body = ""
+            status = (
+                f"skipped: the {LOG_BUDGET_SECONDS:.0f}s budget for the whole "
+                f"dump was spent on the apps above"
+            )
+        else:
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=min(remaining, LOG_PER_APP_TIMEOUT_SECONDS),
+                )
+                body = (result.stdout or "") + (result.stderr or "")
+                status = f"exit {result.returncode}"
+            except subprocess.TimeoutExpired as expired:
+                # Keep whatever arrived before the deadline. A slow fetch
+                # is the bounded failure this path exists to tolerate, and
+                # the lines it did produce are the ones nearest the moment
+                # of interest. Decoded explicitly because `TimeoutExpired`
+                # hands back **bytes** even under `text=True` -- verified,
+                # not assumed -- so concatenating it raw would raise here
+                # and lose the file as well as the output.
+                body = _decode(expired.stdout) + _decode(expired.stderr)
+                status = "the fetch itself timed out; partial output kept"
+            except OSError as error:
+                body = ""
+                status = f"could not run the Modal CLI: {error}"
+
+        destination.write_text(
+            f"# {app_name} in Modal environment {modal_environment}\n"
+            f"# {' '.join(command)}\n"
+            f"# {status}\n\n{body}"
+        )
+        print(f"[provision] wrote {destination} ({status}, {len(body)} bytes)")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="provision",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("action", choices=("up", "down", "stop", "status"))
+    parser.add_argument("action", choices=("up", "down", "stop", "status", "logs"))
     parser.add_argument(
         "--modal-env",
         default=os.environ.get("MODAL_ENVIRONMENT") or default_environment_name(),
         help="Modal environment for this stack (default: derived from the checkout)",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Where `logs` writes one file per deployed app",
+    )
     args = parser.parse_args(argv)
+
+    if args.action == "logs":
+        if args.output_dir is None:
+            parser.error("logs needs --output-dir")
+        logs(args.modal_env, args.output_dir)
+        return 0
 
     if args.action == "up":
         deployment = up(args.modal_env)
