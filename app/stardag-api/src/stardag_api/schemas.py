@@ -219,8 +219,14 @@ class BuildCancelResponse(BuildResponse):
     """Response of ``POST /builds/{id}/cancel``.
 
     A superset of :class:`BuildResponse` — clients written against the plain
-    build shape are unaffected. ``cascaded_task_ids`` is empty unless the
-    call passed ``cascade=true``.
+    build shape are unaffected.
+
+    ``cascaded_task_ids`` lists the tasks whose claims this cancel
+    released, and **is populated whether or not the call passed
+    ``cascade``**: a cancel now always releases, and the parameter is an
+    accepted no-op. It used to be empty without the flag, so a client that
+    reads "empty" as "nothing was released" is reading a contract that no
+    longer holds.
     """
 
     # Tasks this call moved to CANCELLED, releasing their execution claims

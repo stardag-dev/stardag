@@ -496,11 +496,18 @@ class BuildListPage(StardagBaseModel):
 class BuildCancelResult(BuildSummary):
     """Response of ``POST /builds/{id}/cancel``.
 
-    A superset of :class:`BuildSummary`, mirroring the server. The
-    cascade fields are empty/zero unless the call passed ``cascade=True``
-    — and on a server predating the cascade they are absent from the
-    response and default here, which reads correctly as "nothing was
-    cascaded".
+    A superset of :class:`BuildSummary`, mirroring the server.
+
+    The cascade fields list the tasks whose claims the cancel released,
+    and are populated **whether or not ``cascade`` was passed**: a cancel
+    now always releases, and the parameter is an accepted no-op. They were
+    empty without it before, so do not read "empty" as "nothing was
+    released".
+
+    Two cases do still produce empty: the build held no claims, and a
+    server predating the cascade, which omits the fields entirely so they
+    default here. Neither is distinguishable from the other in the
+    response, and neither means the claims survived on a current server.
     """
 
     # Tasks moved to CANCELLED alongside the build, releasing their

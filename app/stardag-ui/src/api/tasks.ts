@@ -332,13 +332,17 @@ export async function fetchTaskEvents(
 // Build actions
 
 /**
- * Cancel a single build: a build-level event, and nothing else.
+ * Cancel a single build: the event, and the release of its claims.
  *
- * Deliberately no cascade. Releasing the build's claims lets the next
- * build take its tasks over, so from that moment the task row names a
- * successor's execution while the old one is still running — which is why
- * stopping comes first and is the operator's to do, from the CLI. See
- * `BuildStopPanel` and `stardag builds stop`.
+ * This client passes no `cascade`, and that no longer means "release
+ * nothing" — the parameter is an accepted no-op and a cancel always
+ * releases the claims the build holds. So its tasks become available to
+ * the next build immediately.
+ *
+ * What is still separate is **stopping**. Releasing lets the next build
+ * take a task over while the old container is still writing, so the stop
+ * has to come first and is the operator's to do, from their own
+ * credentials. See `BuildStopPanel` and `stardag builds stop`.
  */
 export async function cancelBuild(
   buildId: string,
