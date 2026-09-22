@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import typing
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 
 from stardag import (
@@ -131,7 +131,9 @@ class SpawnFailingExecutor(FakeTickExecutor):
         super().__init__(**kwargs)
         self.spawn_attempts = 0
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         self.spawn_attempts += 1
         raise RuntimeError("backend refused the spawn")
 

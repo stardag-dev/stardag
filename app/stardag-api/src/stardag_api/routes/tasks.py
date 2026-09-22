@@ -136,29 +136,7 @@ async def list_tasks(
     tasks = result.scalars().all()
 
     return TaskListResponse(
-        tasks=[
-            TaskResponse(
-                id=t.id,
-                task_id=t.task_id,
-                environment_id=t.environment_id,
-                task_namespace=t.task_namespace,
-                task_name=t.task_name,
-                task_data=t.task_data,
-                version=t.version,
-                output_uri=t.output_uri,
-                created_at=t.created_at,
-                is_phantom=t.is_phantom,
-                latest_executor=t.latest_executor,
-                latest_executor_ref=t.latest_executor_ref,
-                latest_executor_metadata=t.latest_executor_metadata,
-                latest_status=t.latest_status,
-                latest_status_at=t.latest_status_at,
-                latest_status_build_id=t.latest_status_build_id,
-                latest_status_expires_at=t.latest_status_expires_at,
-                latest_preempted_at=t.latest_preempted_at,
-            )
-            for t in tasks
-        ],
+        tasks=[TaskResponse.model_validate(t) for t in tasks],
         total=total,
         page=page,
         page_size=page_size,
@@ -236,26 +214,7 @@ async def get_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    return TaskResponse(
-        id=task.id,
-        task_id=task.task_id,
-        environment_id=task.environment_id,
-        task_namespace=task.task_namespace,
-        task_name=task.task_name,
-        task_data=task.task_data,
-        version=task.version,
-        output_uri=task.output_uri,
-        created_at=task.created_at,
-        is_phantom=task.is_phantom,
-        latest_executor=task.latest_executor,
-        latest_executor_ref=task.latest_executor_ref,
-        latest_executor_metadata=task.latest_executor_metadata,
-        latest_status=task.latest_status,
-        latest_status_at=task.latest_status_at,
-        latest_status_build_id=task.latest_status_build_id,
-        latest_status_expires_at=task.latest_status_expires_at,
-        latest_preempted_at=task.latest_preempted_at,
-    )
+    return TaskResponse.model_validate(task)
 
 
 @router.get("/{task_id}/artifacts", response_model=TaskArtifactListResponse)

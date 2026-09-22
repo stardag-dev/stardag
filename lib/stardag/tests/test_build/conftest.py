@@ -163,6 +163,7 @@ class RecordingRegistry(NoOpRegistry):
         executor_ref: str | None = None,
         executor_metadata: dict | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         self._record(
             "task_start_aio",
@@ -170,6 +171,7 @@ class RecordingRegistry(NoOpRegistry):
             executor=executor,
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
+            execution_id=execution_id,
         )
         await super().task_start_aio(
             build_id,
@@ -177,6 +179,7 @@ class RecordingRegistry(NoOpRegistry):
             executor=executor,
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
+            execution_id=execution_id,
         )
 
     async def task_complete_aio(self, build_id: UUID, task: BaseTask) -> None:
@@ -215,9 +218,14 @@ class RecordingRegistry(NoOpRegistry):
         task: BaseTask,
         reason: str | None = None,
         executor_ref: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
-        self._record("task_interrupt_aio", task.id, reason=reason)
-        await super().task_interrupt_aio(build_id, task, reason, executor_ref)
+        self._record(
+            "task_interrupt_aio", task.id, reason=reason, execution_id=execution_id
+        )
+        await super().task_interrupt_aio(
+            build_id, task, reason, executor_ref, execution_id=execution_id
+        )
 
     async def task_suspend_aio(self, build_id: UUID, task: BaseTask) -> None:
         self._record("task_suspend_aio", task.id)

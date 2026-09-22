@@ -30,7 +30,7 @@ from stardag.build import (
 from stardag.build._reactive import (
     _RETRYABLE_STATUSES,
 )
-from stardag.exceptions import NotFoundError
+from stardag.exceptions import APIError, NotFoundError
 from stardag.registry import (
     SchedulerLeaseResult,
     BuildExecution,
@@ -402,11 +402,49 @@ class FakeReactiveRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ):
         tid = str(task.id)
         self.calls.append(("start", tid))
+        self.sent_execution_ids.setdefault(tid, []).append(
+            None if execution_id is None else str(execution_id)
+        )
+        # The supersession refusal, modelled rather than assumed: a
+        # *non-claiming* start naming an execution the task no longer
+        # holds is refused, and nothing is recorded. Both sides must name
+        # one — absence on either is no opinion, exactly as on the server
+        # — and the task must still be running, since a task nobody holds
+        # is up for grabs.
+        #
+        # Modelled here because the double deciding this by a different
+        # rule from the server is how the cancel-path defects survived
+        # every unit test: a double written from the same misconception
+        # as the code cannot contradict it. This one is written from the
+        # server's rule, and the registry-live tier checks that reading.
+        held = self.execution_ids.get(tid)
+        if (
+            execution_id is not None
+            and held is not None
+            and str(execution_id) != held
+            and self.statuses.get(tid) == "running"
+        ):
+            raise APIError(
+                "This task is running under a different execution",
+                status_code=409,
+                payload={
+                    "error_code": "execution_superseded",
+                    "execution_id": held,
+                },
+            )
         self._count_event(tid, kind="start")
         self.sent_claim_ttls.setdefault(tid, []).append(claim_ttl_seconds)
+        # Preserve-on-silence, as the server's fold does it: a start that
+        # names no identity leaves the recorded one alone. The tick's own
+        # post-spawn start *does* name one, and clearing on a start that
+        # does not is what would drop the id moments after the claim
+        # recorded it.
+        if execution_id is not None:
+            self.execution_ids[tid] = str(execution_id)
         self.statuses[tid] = "running"
         self.status_build_id[tid] = build_id
         self.refs[tid] = (executor, executor_ref)
@@ -620,7 +658,9 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.fail_reasons.setdefault(tid, []).append(error_message)
         self.statuses[tid] = "failed"
 
-    async def task_interrupt_aio(self, build_id, task, reason=None, executor_ref=None):
+    async def task_interrupt_aio(
+        self, build_id, task, reason=None, executor_ref=None, execution_id=None
+    ):
         """What a worker reports when the platform took its container.
 
         Mirrors the server: the claim goes (so no expiry survives) but the
@@ -975,6 +1015,8 @@ class FakeTickExecutor(TaskExecutorABC):
         # ref -> probe status
         self.probe_statuses = statuses or {}
         self.spawned: list[UUID] = []
+        # The identity each spawn was given, in spawn order.
+        self.spawned_execution_ids: list[UUID | None] = []
         self.cancelled_refs: list[str] = []
         self._spawn_count = 0
         # The backend's own wall-clock limit, from which the tick derives
@@ -990,8 +1032,15 @@ class FakeTickExecutor(TaskExecutorABC):
     def supports_detached(self, task: BaseTask) -> bool:
         return True
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         self.spawned.append(task.id)
+        # Recorded so a test can assert the identity reached the spawn —
+        # the point of the whole protocol is that the container can name
+        # its own execution, and a double that accepts the argument and
+        # drops it cannot show that it did.
+        self.spawned_execution_ids.append(execution_id)
         self._spawn_count += 1
 
         async def wait():

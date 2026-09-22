@@ -4,6 +4,194 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **Cooperative cancellation: a worker asks whether it is still wanted.**
+  Nothing reaches into a running container. A cancel marks the build (or
+  the task) and releases its claims; the container finds out by asking,
+  at checkpoints where stopping is safe, and exits cleanly — no output
+  written, no completion reported.
+
+  Two checkpoints are automatic: the **start of each attempt**, before
+  `run()`, which catches a cancel that landed while the container was
+  still queued; and **each dynamic-dependency yield**, so a stopped build
+  does not pay for another layer of the DAG. For a long `run()` body,
+  `stardag.cancellation_requested()` is the opt-in for a point only the
+  task's author can place, and `stardag.ExecutionCancelled` is what to
+  raise there. Both are new public API.
+
+  A background poll raising into arbitrary user code was considered and
+  rejected: it can interrupt a write halfway, which is the one thing
+  content-addressed targets exist to prevent.
+
+  **A worker exits only on positive evidence that it is no longer
+  wanted.** A transport failure, an unreachable registry, a server
+  predating the endpoint and a registry with no opinion all keep it
+  running. The polarity is derived rather than defaulted: stopping a
+  healthy worker destroys work, while letting a superseded one finish
+  writes a content-addressed output nobody reads.
+
+  Throttled, 30s by default, `STARDAG_CANCELLATION_CHECK_INTERVAL_SECONDS`.
+  The cost is **one registry read per task attempt** plus one per
+  dynamic-dependency yield, against a task attempt that already makes a
+  start report, an artifact upload, a completion and a wake. The start
+  report answers half the question for free — a start naming a superseded
+  execution is refused — but a successful one says nothing about whether
+  the build is still running, so the checkpoint asks.
+
+  **Side-effecting tasks are the one real loss, and were never inside the
+  promise.** A task that has already written to somebody else's database
+  has done so; cancellation ends the execution, not what it did outside
+  its target.
+
+- **The worker carries its execution identity.** The id minted at the
+  claim now reaches the container (`STARDAG_EXECUTION_ID`) and is echoed
+  on the worker's own start and on its interruption and preemption
+  reports, so the registry can tell them from a superseded execution's.
+
+  **Breaking for custom executors and registries.**
+  `TaskExecutorABC.submit_detached` gains a keyword-only `execution_id`,
+  and `RegistryABC`'s `task_start(_aio)`, `task_interrupt(_aio)` and
+  `task_preempt(_aio)` gain an optional one (as `task_start_claim(_aio)`
+  did earlier in this batch). The defaults make these safe for _callers_,
+  not for _overrides_: Python dispatches to the override and the engines
+  pass the keyword unconditionally, so an implementation still declaring
+  the old signature raises `TypeError`. Add the parameter.
+
+  Not softened with a signature check that drops the keyword for an
+  override that cannot take it — that would hand such an implementation a
+  worker unable to name its own execution, with the protections and
+  cooperative cancellation silently absent. A `TypeError` at the seam is
+  the better answer.
+
+  **The non-detached `submit` path is explicitly opted out**, not
+  overlooked. Adding the parameter to `submit` — the one method nearly
+  every custom executor overrides — would break all of them, for a path
+  that already matches its reports on the executor reference and so
+  degrades to nothing worse than the behaviour that predates identities.
+  The refusal below needs an identity on _both_ sides, so that path is
+  never wrongly refused either. It is not excluded from cancellation: a
+  worker with no identity can still be told its build or its task has
+  stopped.
+
+- **Known limitation (STA-99): a build that takes over a lapsed claim and
+  re-attaches to the still-live container may see that container stop
+  itself.** Taking over the claim records this build's execution identity
+  on the task, so the re-attached container is no longer the execution
+  the task names, and its own checkpoint stops it.
+
+  Four conditions must coincide: the task is RUNNING elsewhere with a
+  recorded executor reference when this build registers, that holder's
+  claim has lapsed, this build's claim is granted, and the old container
+  is still alive. And the container only stops at its **next** checkpoint
+  — a `run()` with no dynamic dependencies and no
+  `cancellation_requested()` call has none left, so it completes normally
+  and the re-attach still works.
+
+  Symptom when it does happen: **one retried attempt and one wasted
+  container**, under the ordinary attempt budget. Correctness is
+  unaffected — output is content-addressed. The fix is a decision about
+  whether re-attach or supersession wins on a granted claim, which is
+  being designed with STA-94 rather than patched.
+
+- **Only an execution this submission spawned is ever stopped.** A handle
+  can be borrowed rather than created — the claim loser re-attaches to the
+  winner's execution, and a resumed build adopts a reference an earlier run
+  recorded. Cancelling one of those when the registry refuses a start would
+  kill a live execution belonging to somebody else, which is the damage the
+  refusal exists to prevent, done in its name.
+
+- **Losing a task is never reported as that task's failure.** Two paths
+  reach the same damage and both are closed. When the resident engine's
+  post-spawn start is refused, the refusal used to travel the generic
+  error path and post `TASK_FAILED` — against a task another build is now
+  running, or one that was just cancelled — and a failure report writes
+  through, so losing a race would have ended with this build marking
+  somebody else's live execution failed. And a worker that stopped itself
+  at a cooperative checkpoint raises out of its container, which a
+  detached executor reports as a task failure, reaching the same place.
+
+  Both are now counted as a **local** failure on the path the claim-loser
+  timeout already uses: `fail_mode` is honoured and the build still fails,
+  but nothing is said to the registry about a task that is not its own.
+
+- The reactive tick handles the post-spawn start's `execution_superseded`
+  409 instead of letting it escape. That error arrives inside a
+  `TaskGroup`, where it would cancel every sibling spawn in the pass and
+  kill the tick, leaving those siblings claimed and never spawned. The
+  container it belongs to is stopped there, while the handle is still
+  held: its reference was never recorded, so nothing else could find it.
+
+### Registry API
+
+- **A non-claiming start naming a superseded execution is refused** (409,
+  `execution_superseded`). A worker's own start used to be folded in
+  unconditionally — new status, new owner, new executor fields, a fresh
+  claim — with no check on who held the claim, so a restart arriving
+  after its claim had lapsed and been taken over could evict the live
+  holder. Two executions of one task, which is the one outcome claims
+  exist to prevent.
+
+  Three conditions, all needed: a **live claim** (a task past its expiry
+  is up for grabs and taking it over is the ordinary self-heal path),
+  an identity on **both sides** (absence is no opinion, so a rolling
+  deploy is unaffected), and the two **differing** — a Modal preemption
+  restarts under the same call id and re-sends the same identity, so a
+  legitimate restart is accepted. The transaction rolls back, so nothing
+  is recorded and no attempt is spent.
+
+  Build ownership is deliberately **not** part of the test. On an id
+  match the recorded owner cannot separate an impostor from the genuine
+  holder, so it would refuse both — and only the genuine case is
+  reachable through the SDK.
+
+- **A non-claiming start that would revive a cancelled task is refused**
+  (409, `task_cancelled`). Cancelling a task releases its claim — which
+  is the point, it is what lets the next build have it — but it also
+  leaves no live claim for the supersession rule to protect, and the row
+  still names the cancelled execution. So a container that was queued
+  when the cancel landed would start, be accepted, and the fold would
+  turn CANCELLED back into RUNNING under the very execution that was
+  cancelled; its own checkpoint would then read a task running under
+  itself and let it carry on.
+
+  Reviving such a task is a _claim's_ job, after a reset, never a
+  report's. **Scoped to starts that carry an execution identity**, and
+  only those, which is the line every other rule here draws: absence of
+  an identity is no opinion. That leaves the concurrency limiter's
+  slot-occupying start untouched, and with it the sequential engine, the
+  Prefect integration and a `claim=False` build — all of which post a
+  start carrying no identity and must keep working. The limit it accepts
+  is that such a start can still revive a cancelled task, which is how
+  every release before this behaved.
+
+- **`GET /builds/{build_id}/tasks/{task_id}/execution-status`**: read-only,
+  two denormalised columns, no lock and no event. Answers a running
+  worker's one question — still current, or `build_not_running`,
+  `task_cancelled` or `superseded`. `execution_id` is optional; without
+  one the build and task halves are still evaluated, which is what keeps
+  a worker that was never given an identity covered for the cases a human
+  causes.
+
+- The two per-build status replays mirror the row fold's
+  **claim-redelivery** guard: a re-delivered claim carries the id the task
+  already holds and no executor of its own, and must not erase the
+  reference the spawn recorded. A replay that cleared it where the row
+  preserves it would apply a later report naming a stale reference that
+  the row refuses — one task INTERRUPTED in the UI and RUNNING in the
+  frontier.
+
+- The interruption and preemption reports accept an `execution_id`,
+  preferred over `executor_ref` where both are sent because the identity
+  covers the whole life of an execution where the reference only covers
+  the part after the spawn. The two per-build status replays compare it
+  alongside the row's fold, so all three readers give one answer.
+
+- `latest_execution_id` is surfaced on the task read models
+  (`GET /tasks`, `GET /tasks/{task_id}`).
+
 ## [0.25.0] — 2026-09-22
 
 **SDK-only release.** The `### Registry API` and `### UI` entries below are
@@ -205,8 +393,8 @@ with no SDK action.
   are safe and no `minimum_version` bump is needed. `execution_id` is
   echoed on every task-event response and named on an
   `already_running` denial. See `docs/design/executions-as-records.md`,
-  which also records the `executions` table this replaces, why it is
-  not being built, and which half of the identity is still to come.
+  which also records the `executions` table this replaces and why it is
+  not being built.
 
 ### UI
 

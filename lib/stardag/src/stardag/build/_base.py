@@ -193,6 +193,13 @@ class TaskExecutionState:
     exception: BaseException | None = None
     # True when task is waiting for a global lock held by another build
     waiting_for_lock: bool = False
+    # Identity of the execution this build is about to run, or is running,
+    # for the task. Minted when the claim is taken -- before the spawn, so
+    # before any executor ref exists -- and reused by the start that
+    # records the ref and by the worker inside the container, so all three
+    # name one execution. None when nothing has been claimed or started
+    # yet for this attempt, and cleared again when the claim was lost.
+    execution_id: UUID | None = None
 
     @property
     def all_deps(self) -> list[BaseTask]:
@@ -302,6 +309,27 @@ class TaskExecutorABC(ABC):
                 The returned TaskStruct contains the discovered dependencies.
             - TaskExecutionError: Task failed. Contains the exception and a
                 pre-formatted traceback string captured at the point of failure.
+
+        **No execution identity is passed here, deliberately.** A worker
+        started this way cannot name its own execution, so its
+        self-reports are matched on the executor reference alone — which
+        is what its own start records, and what every release before
+        identities existed used. Nothing degrades; the two rules the
+        identity buys (an idempotent retried claim, and a superseded
+        start refused) simply do not apply to it, and the refusal needs
+        an identity on *both* sides, so this path is never wrongly
+        refused either.
+
+        The trade is a breaking change against no gain. ``submit`` is the
+        one method nearly every custom executor overrides, and the engine
+        passing a new keyword would raise ``TypeError`` in all of them,
+        for a mode — a claimed *non-detached* execution — that has to be
+        asked for explicitly. :meth:`submit_detached` takes the identity
+        instead; see its docstring.
+
+        Cooperative cancellation is *not* fully excluded from this path:
+        a worker with no identity can still be told its build is no
+        longer running, which is the case that motivates it.
         """
         ...
 
@@ -398,13 +426,45 @@ class TaskExecutorABC(ABC):
         """
         return False
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         """Start a detached execution of ``task`` and return its handle.
 
         Only called when :meth:`supports_detached` returned True for the
         task. Implementations should return as soon as the execution is
         durably started (spawned) — the build engine records the handle's
         ``(executor, ref)`` in the registry *before* awaiting ``wait()``.
+
+        ``execution_id`` is the identity the caller minted before it
+        claimed the task. An implementation whose workers report their own
+        lifecycle **must forward it into the execution**, because the
+        registry honours a worker's start and its interruption reports
+        only while the task still holds the execution they name — a worker
+        that cannot name its own execution loses those protections and
+        falls back to the pre-identity rules. It is also what lets the
+        worker ask whether it is still wanted. Forwarded explicitly rather
+        than read from ambient context: it is per-execution, and a value
+        this specific going missing is invisible until a report is quietly
+        mis-attributed.
+
+        **Breaking for an existing override.** The default here is for
+        *callers*, not for subclasses: Python dispatches to the override,
+        and both engines pass the keyword unconditionally, so an
+        implementation still declaring ``submit_detached(self, task)``
+        raises ``TypeError`` before it spawns. Add the parameter.
+
+        Deliberately not softened with a signature check that omits the
+        keyword for an override that cannot take it. That would hand such
+        an executor a worker unable to name its own execution, with both
+        protections and cooperative cancellation silently absent — a
+        value this specific going missing is invisible until a report is
+        quietly mis-attributed, which is the failure this whole protocol
+        exists to remove. A ``TypeError`` at the seam is the better
+        answer.
+
+        See :meth:`submit` for why the non-detached path has no identity
+        at all.
 
         Raises:
             Exception: if the execution could not be started; the build
@@ -568,13 +628,15 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
             return False
         return executor.supports_detached(task)
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         """Route detached submission to the owning executor."""
         key = self.router(task)
         executor = self.executors.get(key)
         if executor is None:
             raise KeyError(f"No executor found for routing key: {key}")
-        return await executor.submit_detached(task)
+        return await executor.submit_detached(task, execution_id=execution_id)
 
     async def reattach(
         self, task: BaseTask, executor: str, ref: str

@@ -78,7 +78,12 @@ from stardag.build_config import (
     rebind_to_build_config,
     set_build_config,
 )
-from stardag.exceptions import BuildConfigMismatchError
+from stardag.exceptions import (
+    APIError,
+    BuildConfigMismatchError,
+    ExecutionCancelled,
+    execution_not_wanted,
+)
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
 
@@ -988,6 +993,22 @@ async def build_aio(
 
         # Handle lock acquisition results (lock was not acquired)
         if isinstance(result, LockAcquisitionResult):
+            # Release the global lock first, because "lock not acquired" is
+            # no longer the only way to get here. Two paths reach this
+            # branch *after* ``submit_with_lock`` has taken the lock and
+            # added the task to ``held_locks``: a claim denied as
+            # already-completed, and — new — a start the registry refused
+            # because the task stopped being ours. Neither released it, so
+            # the lease sat held until its TTL and blocked every other
+            # build wanting that key.
+            #
+            # A no-op when nothing is held, which is what the original
+            # lock-not-acquired case is, so one call covers all of them
+            # rather than each new exit remembering for itself.
+            await release_lock_for_task(
+                task,
+                completed=result.status == LockAcquisitionStatus.ALREADY_COMPLETED,
+            )
             if result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
                 # Task completed externally - wait for visibility then mark complete
                 await wait_for_completion_with_retry(task)
@@ -1007,38 +1028,46 @@ async def build_aio(
                     fail_fast_triggered = True
             return
 
-        # Handle normal task execution results
-        if isinstance(result, TaskExecutionError):
-            # Task failed - release lock (not completed) and notify registry
+        # Handle normal task execution results. Two shapes reach here and
+        # mean the same thing -- a ``TaskExecutionError`` wrapper, and the
+        # bare exception a custom executor may return for backward
+        # compatibility -- so they are normalised rather than handled
+        # twice. Keeping them apart is how the cancellation case below got
+        # fixed on one of them and not the other.
+        if isinstance(result, (TaskExecutionError, BaseException)):
+            failure: BaseException = (
+                result.exception if isinstance(result, TaskExecutionError) else result
+            )
+            # Task failed - release lock (not completed) and notify registry.
+            #
+            # Except when the worker stopped *itself*. A worker that reached
+            # a cooperative-cancellation checkpoint and found it was no
+            # longer wanted raises out of its container, and an executor
+            # reports any escaping exception as a failure -- but the task it
+            # would be reported against is either cancelled or running under
+            # somebody else, and a failure report writes through. So this
+            # build would end by marking a live execution failed, or a
+            # cancelled task failed, on the strength of a worker agreeing to
+            # stop. Counted locally, said to nobody.
             await release_lock_for_task(task, completed=False)
-            try:
-                await registry.task_fail_aio(build_id, task, str(result))
-            except Exception as reg_err:
-                handle_registry_error(
-                    reg_err,
-                    f"Failed to notify registry of task {task.id} failure",
-                    on_registry_failure,
+            if isinstance(failure, ExecutionCancelled):
+                logger.info(
+                    f"Execution of task {task.id} stopped at a cooperative "
+                    "cancellation checkpoint; recording nothing against the "
+                    "task, which is cancelled or somebody else's."
                 )
-            state.exception = result.exception
+            else:
+                try:
+                    await registry.task_fail_aio(build_id, task, str(result))
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to notify registry of task {task.id} failure",
+                        on_registry_failure,
+                    )
+            state.exception = failure
             task_count.failed += 1
-            error = result.exception
-            if fail_mode == FailMode.FAIL_FAST:
-                fail_fast_triggered = True
-
-        elif isinstance(result, BaseException):
-            # Backward compat: custom executor returned a bare exception
-            await release_lock_for_task(task, completed=False)
-            try:
-                await registry.task_fail_aio(build_id, task, str(result))
-            except Exception as reg_err:
-                handle_registry_error(
-                    reg_err,
-                    f"Failed to notify registry of task {task.id} failure",
-                    on_registry_failure,
-                )
-            state.exception = result
-            task_count.failed += 1
-            error = result
+            error = failure
             if fail_mode == FailMode.FAIL_FAST:
                 fail_fast_triggered = True
 
@@ -1417,7 +1446,14 @@ async def build_aio(
         # refuse it as a second claim, and the build would wait out a
         # claim it holds itself. A genuine second attempt gets a new id
         # by calling this function again, which is what a retry does.
+        #
+        # Held on the task's state as well as locally, because three
+        # later calls have to repeat it: the spawn that forwards it into
+        # the container, the post-spawn start that records the ref, and
+        # the worker's own reports. Cleared again on the two paths below
+        # where this build ends up with no execution of its own.
         execution_id = uuid4()
+        state.execution_id = execution_id
         try:
             claim_metadata: dict | None = None
             try:
@@ -1463,6 +1499,17 @@ async def build_aio(
                         f"Claim start failed for task {task.id}",
                         on_registry_failure,
                     )
+                    # Nothing is assumed recorded on this path, so
+                    # nothing should be asserted either: the fallback
+                    # start goes out with no identity, as it did before
+                    # identities existed. Keeping the minted id would
+                    # have the start claim an execution whose claim may
+                    # never have committed -- and against another
+                    # build's live claim that is a 409, which
+                    # ``handle_registry_error`` turns into a task failure
+                    # in the default mode, on the one path whose whole
+                    # purpose is to carry on when the claim call failed.
+                    state.execution_id = None
                     return ("unclaimed", None)
                 if result.started:
                     return ("granted", None)
@@ -1487,6 +1534,21 @@ async def build_aio(
                             f"Claim for task {task.id} lost — re-attached to "
                             f"the winning execution {attach_handle.ref!r}."
                         )
+                        # We lost, so the execution now running is not one
+                        # we minted an identity for, and the id above
+                        # belongs to a claim that was refused. Dropping it
+                        # is what keeps the start this path still records
+                        # honest: it names the winner's ref with no
+                        # identity of its own, which is exactly how this
+                        # path behaved before identities existed.
+                        #
+                        # The alternative -- adopting the winner's id from
+                        # the denial -- looks tidier and is wrong twice
+                        # over: it would assert somebody else's execution
+                        # as ours, and the server refuses precisely that,
+                        # so the re-attach would fail instead of
+                        # proceeding.
+                        state.execution_id = None
                         return ("attach", attach_handle)
                     probe = await _probe_claimed_execution(
                         task, result.executor, result.executor_ref
@@ -1573,19 +1635,97 @@ async def build_aio(
             state.waiting_for_lock = False
 
     async def registry_task_start(
-        task: BaseTask, handle: DetachedHandle | None
-    ) -> None:
-        """Emit TASK_STARTED, with the detached-execution ref when present."""
-        if handle is None:
-            await registry.task_start_aio(build_id, task)
-            return
-        await registry.task_start_aio(
-            build_id,
-            task,
-            executor=handle.executor,
-            executor_ref=handle.ref,
-            executor_metadata=handle.executor_metadata,
-        )
+        task: BaseTask,
+        handle: DetachedHandle | None,
+        *,
+        spawned_here: bool = False,
+    ) -> LockAcquisitionResult | None:
+        """Emit TASK_STARTED, with the detached-execution ref when present.
+
+        Carries the identity the claim was taken with, so this start
+        re-records the same execution rather than looking to the registry
+        like a different one that should be refused. None on the paths
+        that hold no claim of their own — an unclaimed fallback start, or
+        a re-attach to somebody else's winner.
+
+        A refusal here means the task stopped being ours between the
+        claim and this call — taken over, or cancelled outright — and it
+        is handled **once, around both shapes of the call**, detached and
+        not. Handling it only around the detached one is the shape this
+        first had, and it left the non-detached branch propagating into
+        exactly the failure the other branch was written to avoid.
+
+        Two things happen, and the second is the one that is easy to miss
+        because the exception handling looks complete without it.
+
+        **A local failure is returned rather than the error propagated.**
+        Propagating sends the refusal through the generic error path into
+        ``process_result``, which posts ``TASK_FAILED`` — against a task
+        another build is now running, or one that was just cancelled. The
+        report writes through, so losing a race would end with this build
+        marking somebody else's live execution failed, which is the very
+        damage the refusal exists to prevent. A ``LockAcquisitionResult``
+        takes the path the claim-loser timeout already uses: counted as a
+        local failure, ``fail_mode`` honoured, and **nothing said to the
+        registry about a task that is not ours**.
+
+        **And the container is stopped — but only one this submission
+        spawned.** ``spawned_here`` is the whole of that distinction and
+        it is load-bearing. A handle can also be *borrowed*: the claim
+        loser re-attaches to the winner's execution, and a resumed build
+        re-attaches to a ref recorded by an earlier run. Cancelling one of
+        those on a refusal would kill a live execution belonging to
+        somebody else — the exact damage this rule exists to prevent,
+        done in its name. A spawned one, by contrast, is running with a
+        reference nothing recorded, so nothing else can ever address it
+        and this is the only place still holding it. Best-effort; its own
+        cooperative checkpoint is the backstop either way.
+        """
+        execution_id = task_states[task.id].execution_id
+        try:
+            if handle is None:
+                await registry.task_start_aio(build_id, task, execution_id=execution_id)
+            else:
+                await registry.task_start_aio(
+                    build_id,
+                    task,
+                    executor=handle.executor,
+                    executor_ref=handle.ref,
+                    executor_metadata=handle.executor_metadata,
+                    execution_id=execution_id,
+                )
+        except APIError as start_err:
+            if not execution_not_wanted(start_err):
+                raise
+            reason = (start_err.payload or {}).get("error_code")
+            orphan = handle if spawned_here else None
+            stopping = "" if orphan is None else f" Stopping execution {orphan.ref!r}."
+            logger.warning(
+                f"Task {task.id} stopped being ours while its execution was "
+                f"being started ({reason}); the registry refused the start."
+                f"{stopping}"
+            )
+            if orphan is not None:
+                try:
+                    await task_executor.cancel_detached(
+                        task, orphan.executor, orphan.ref
+                    )
+                except Exception as cancel_err:
+                    logger.warning(
+                        f"Failed to stop orphaned execution {orphan.ref!r} for "
+                        f"task {task.id}; it will run until its next "
+                        f"cooperative checkpoint: {cancel_err}"
+                    )
+            return LockAcquisitionResult(
+                status=LockAcquisitionStatus.HELD_BY_OTHER,
+                acquired=False,
+                error_message=(
+                    f"The task stopped being this build's while its execution "
+                    f"was being started ({reason}); nothing was recorded "
+                    f"against the task."
+                ),
+            )
+        return None
 
     async def submit_with_lock(
         task: BaseTask,
@@ -1703,6 +1843,13 @@ async def build_aio(
             # survive this process, so their (executor, ref) is recorded with
             # the TASK_STARTED event below — before we block on the result.
             handle: DetachedHandle | None = claim_handle
+            # Whether *this* submission created the execution behind
+            # ``handle``, as opposed to borrowing one: ``claim_handle`` is
+            # the winner's execution after a lost claim, and the re-attach
+            # below adopts one an earlier run started. Only a handle we
+            # spawned may be cancelled when the registry refuses our start
+            # — see ``registry_task_start``.
+            spawned_here = False
             detached_ref = detached_refs.pop(task.id, None)
             if handle is None and detached_ref is not None:
                 ref_executor, ref = detached_ref
@@ -1721,7 +1868,10 @@ async def build_aio(
                     )
             if handle is None and task_executor.supports_detached(task):
                 try:
-                    handle = await task_executor.submit_detached(task)
+                    handle = await task_executor.submit_detached(
+                        task, execution_id=task_states[task.id].execution_id
+                    )
+                    spawned_here = True
                 except Exception as e:
                     return TaskExecutionError(
                         exception=e,
@@ -1759,7 +1909,11 @@ async def build_aio(
                 # are tolerated by the registry.
                 if state.registered:
                     try:
-                        await registry_task_start(task, handle)
+                        lost = await registry_task_start(
+                            task, handle, spawned_here=spawned_here
+                        )
+                        if lost is not None:
+                            return lost
                         state.started = True
                     except Exception as reg_err:
                         handle_registry_error(
@@ -1772,7 +1926,11 @@ async def build_aio(
                 # happens before the spawn): record the executor ref with a
                 # plain, tolerated-duplicate start.
                 try:
-                    await registry_task_start(task, handle)
+                    lost = await registry_task_start(
+                        task, handle, spawned_here=spawned_here
+                    )
+                    if lost is not None:
+                        return lost
                 except Exception as reg_err:
                     handle_registry_error(
                         reg_err,

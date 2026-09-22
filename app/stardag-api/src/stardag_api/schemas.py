@@ -321,6 +321,11 @@ class TaskResponse(BaseModel):
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict | None = None
+    # The execution the task is currently running under. Alongside the
+    # reference rather than instead of it: the reference addresses a
+    # container at a backend, this names the execution across the whole of
+    # its life, including the window before the spawn returned one.
+    latest_execution_id: UUID | None = None
     # Denormalised *global* status of the task — the environment-wide state,
     # not "the state within some build". A task row is unique per
     # (environment_id, task_id), so a task left RUNNING by any build denies
@@ -971,6 +976,32 @@ class TaskEventResponse(BaseModel):
     # refusing would turn a version skew into an outage for no
     # correctness gain.
     execution_id: UUID | None = None
+
+
+class ExecutionStatusResponse(BaseModel):
+    """Whether a running worker is still the one its task is waiting for.
+
+    The answer to cooperative cancellation's one question, read off two
+    denormalised columns: the build's status and the task's current
+    execution identity. Nothing here reaches an execution backend, and
+    nothing here stops anything — the worker decides what to do with the
+    answer at a point in its own code where stopping is safe.
+    """
+
+    # Keep running. **False only on positive evidence** -- the invariant
+    # is stated once, in the SDK's ``stardag.cancellation`` module
+    # docstring, and this is the server half of it. What it means here:
+    # never answer False for a state this endpoint could not evaluate.
+    still_current: bool
+    # Why not, when not: ``build_not_running`` or ``superseded``. None
+    # while still current. Named rather than inferred from the fields
+    # below so a worker's log says what happened without re-deriving it.
+    reason: str | None = None
+    build_status: BuildStatus
+    task_status: TaskStatus | None = None
+    # The execution the task holds now. On ``superseded`` this names the
+    # one that replaced the caller's; it is never the caller's own.
+    latest_execution_id: UUID | None = None
 
 
 class TaskListResponse(BaseModel):

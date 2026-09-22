@@ -20,7 +20,12 @@ from stardag.build._task_modules import (
     import_failure_note,
 )
 from stardag._core.rehydrate import TaskRehydrationError
-from stardag.exceptions import NotFoundError, is_missing_route_error
+from stardag.exceptions import (
+    APIError,
+    NotFoundError,
+    execution_not_wanted,
+    is_missing_route_error,
+)
 from stardag.registry import (
     BuildFrontier,
     FrontierTaskRef,
@@ -1005,7 +1010,9 @@ async def _act_on_frontier(
             denied_this_round += 1
             return
         try:
-            handle = await task_executor.submit_detached(task)
+            handle = await task_executor.submit_detached(
+                task, execution_id=execution_id
+            )
         except Exception as e:
             logger.error(f"Failed to spawn task {task.id}: {e}")
             # The one failure no execution backend can retry for us: there
@@ -1025,14 +1032,60 @@ async def _act_on_frontier(
             )
             acted = True
             return
-        await registry.task_start_aio(
-            build_id,
-            task,
-            executor=handle.executor,
-            executor_ref=handle.ref,
-            executor_metadata=handle.executor_metadata,
-            claim_ttl_seconds=ttl_seconds,
-        )
+        try:
+            await registry.task_start_aio(
+                build_id,
+                task,
+                executor=handle.executor,
+                executor_ref=handle.ref,
+                executor_metadata=handle.executor_metadata,
+                claim_ttl_seconds=ttl_seconds,
+                execution_id=execution_id,
+            )
+        except APIError as start_err:
+            if not execution_not_wanted(start_err):
+                raise
+            # The task stopped being ours while the spawn was in flight:
+            # the claim lapsed and somebody else took it, or a cancel
+            # released it outright. The registry is right to refuse --
+            # recording this ref now would stamp our execution over a live
+            # holder, or undo the cancel.
+            #
+            # Caught rather than propagated because this coroutine runs
+            # in a TaskGroup: an escaping error cancels every sibling
+            # spawn in the pass and kills the tick, which would leave
+            # those siblings claimed and never spawned until their claims
+            # expire. The claim's own "you lost" answer is handled
+            # gracefully a few lines above; this is the same answer
+            # arriving later, and deserves the same treatment.
+            #
+            # The container is already running and its ref was never
+            # recorded, so nothing else can find it -- stop it here,
+            # best-effort, while we still hold the handle. Its own
+            # cooperative checkpoints would get it eventually; this is
+            # faster and costs one call we can make right now.
+            logger.warning(
+                f"Task {task.id} was taken over while its execution was "
+                f"being spawned; the registry refused the ref. Stopping "
+                f"the orphaned execution {handle.ref!r}."
+            )
+            try:
+                await task_executor.cancel_detached(task, handle.executor, handle.ref)
+                # Counted on the same line as the terminal drain's stops.
+                # A reader of the trail is asking "did this tick end any
+                # executions", and the answer must not depend on which
+                # mechanism got there first -- the drain cannot stop this
+                # one at all, because its reference was never recorded.
+                summary.cancelled_refs += 1
+            except Exception as cancel_err:
+                logger.warning(
+                    f"Failed to stop orphaned execution {handle.ref!r} for "
+                    f"task {task.id}; it will run until its next cooperative "
+                    f"checkpoint: {cancel_err}"
+                )
+            summary.claim_denied += 1
+            denied_this_round += 1
+            return
         summary.spawned += 1
         if task.id in resumption_requests:
             # Counted here rather than where the request was read, so a

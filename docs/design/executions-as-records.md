@@ -21,19 +21,18 @@ any of them found.
 > because the identity is a strict prefix of the table: if the table is
 > ever needed, this column is its key. See STA-78 for the decision.
 
-> **And the identity itself ships in two halves.** What lands with this
-> note is the **claim** half: the caller mints an id before it claims,
-> sends it with the claiming start, and the registry uses it to tell a
-> retried delivery from a second attempt. Nothing yet carries that id
-> into a container. The **worker** half — forwarding it into the spawn,
-> the worker echoing it on its own reports, and the server refusing a
-> start that names an execution the task no longer runs under — moves
-> to STA-79, where cooperative cancellation needs the identical
-> plumbing (a worker that knows its own execution and can ask the
-> registry about it) and gives it a second consumer. Sections below that
-> describe the worker half describe STA-79, not what is in the tree.
-> Building that protocol twice, half in each issue, is how it ends up
-> with two owners.
+> **The identity shipped in two halves, and both are now in the tree.**
+> The **claim** half landed with this note: the caller mints an id
+> before it claims, sends it with the claiming start, and the registry
+> uses it to tell a retried delivery from a second attempt. The
+> **worker** half — forwarding it into the spawn, the worker echoing it
+> on its own reports, and the server refusing a start that names an
+> execution the task no longer runs under — followed in STA-79, where
+> cooperative cancellation needed the identical plumbing (a worker that
+> knows its own execution and can ask the registry about it) and gave it
+> a second consumer. They were split because building that protocol
+> twice, half in each issue, is how it ends up with two owners; they
+> ship in the same batch.
 
 It is a companion to
 [execution-claims-and-liveness.md](execution-claims-and-liveness.md),
@@ -133,9 +132,9 @@ correct state — is the record that is not being built.
 Minted by the caller before it claims — by **both** engines, the
 resident one re-sending it on every iteration of its wait-and-retry
 loop, since all of those iterations are one logical attempt.
-**Today it is sent with one call, the claiming start**; repeating it on the start that records the
-reference, on the worker's own self-report and on its interruption and
-preemption reports is the worker half, and arrives with STA-79.
+It rides on every call about one execution: the claiming start, the
+start that records the reference, the worker's own self-report, and its
+interruption and preemption reports.
 
 **Client-minted, necessarily.** A server-minted id would be one the retry
 does not have, since a lost response is the entire failure being
@@ -145,13 +144,11 @@ On a **claiming** start, the id is the retry test: the same id from the
 same build is the same execution asking again and is granted, a different
 id while the claim is live is arbitrated exactly as before.
 
-On a **non-claiming** start, the id would be the supersession test: a
-start naming an execution the task demonstrably no longer runs under is
+On a **non-claiming** start, the id is the supersession test: a start
+naming an execution the task demonstrably no longer runs under is
 refused, on three conditions each load-bearing — a live claim (a task
 nobody holds is up for grabs, and an ordinary retry must not be
-refused), both identities present, and the ids differing. That rule is
-STA-79's, and is not in the tree: without the worker half no start
-carries an id to judge, so there is nothing for it to decide.
+refused), both identities present, and the ids differing.
 
 **Absence is never a mismatch**, in both directions of a rolling
 deploy. A caller that mints no id falls back to the
@@ -160,9 +157,8 @@ has no opinion to contradict. Refusing on a missing value would turn a
 version skew into tasks that look unstarted, which is worse than the bug
 being fixed.
 
-A Modal preemption restarts the input under the **same call id**, so
-once the worker half exists a legitimate restart re-sends the same
-execution id and matches. That is not a special case bolted on; it is
+A Modal preemption restarts the input under the **same call id**, so a
+legitimate restart re-sends the same execution id and matches. That is not a special case bolted on; it is
 what "the same execution" means.
 
 **The fold preserves rather than clears**, and that is load-bearing

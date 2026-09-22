@@ -132,6 +132,70 @@ granted.
 
 Design record: [`docs/design/execution-claims-and-liveness.md`](https://github.com/stardag-dev/stardag/blob/main/docs/design/execution-claims-and-liveness.md).
 
+### Cancelling work: the worker asks, nothing reaches in
+
+Cancelling a build marks it and releases the claims its tasks hold, and
+stops there. **Nothing reaches into a running container to kill it.** The
+containers find out by asking.
+
+A worker knows its own execution's identity — minted when its task was
+claimed, before the container existed — and at its checkpoints it asks the
+registry one question: _is this execution still the one the task is
+waiting for?_ Told no, it stops **cleanly**: no output written, no
+completion reported.
+
+Two checkpoints are automatic and cost you nothing:
+
+- **The start of each attempt**, before `run()`. This catches a cancel
+  that landed while the container was still queued, which on a wide
+  fan-out is most of them.
+- **Each dynamic-dependency yield**, where the task is about to register
+  children and suspend. A build that has stopped does not pay for another
+  layer of the DAG.
+
+For a long `run()` body, ask where _you_ know stopping is safe:
+
+```python
+import stardag as sd
+
+
+class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
+    def run(self):
+        directory = self.target()
+        for epoch in range(self.epochs):
+            if sd.cancellation_requested():
+                raise sd.ExecutionCancelled()
+            train_one_epoch(directory)
+        directory.mark_done()
+```
+
+`cancellation_requested()` is throttled (30s by default,
+`STARDAG_CANCELLATION_CHECK_INTERVAL_SECONDS`), so it is cheap to call in a
+loop. It answers `False` outside a worker.
+
+Three things are worth knowing about the shape of this.
+
+**It never stops a healthy worker.** A `False` is also what you get from an
+unreachable registry, a transport failure, or a registry that does not
+implement the question. Stopping needs _positive evidence_ that the
+execution is no longer wanted, because stopping wrongly destroys work
+while running on wrongly writes a content-addressed output nobody reads.
+
+**Raise rather than return.** An early `return` writes no output, which
+looks like a clean stop and is not one: the worker cannot tell it from a
+task that finished, so it reports a completion — for a target that does not
+exist. `ExecutionCancelled` is the only thing recognised, and the only
+thing that records nothing.
+
+**Side-effecting tasks are not covered, and never were.** A task that
+writes to somebody else's database or sends an email has already done so
+by the time it reaches a checkpoint. Cancellation ends the _execution_; it
+cannot undo what the execution did outside its target.
+
+When you need a container gone _now_ rather than at its next checkpoint,
+that is a human decision with a command of its own —
+[`stardag builds stop`](../configuration/cli.md).
+
 ### Structure scope
 
 _In practice: [Evolve a DAG Safely](../how-to/evolve-dags.md)._

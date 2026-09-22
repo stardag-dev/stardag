@@ -6,6 +6,181 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## Unreleased
+
+### A late restart can no longer evict the build that took its task over
+
+A worker reports its own start, and that report is **non-claiming** — so
+it used to be applied unconditionally: new status, new owner, new
+executor fields, a fresh claim, with no check on who held the claim.
+
+That was unreachable while a claim outlived the execution it guarded, and
+v0.23.0 made it reachable on purpose. A preemption brings a claim's expiry
+forward to a short restart grace, which is what turns "stalled for a day"
+into "a lapsed claim in minutes". If the restart is merely _late_, the
+claim lapses, a neighbour claims the task and spawns its own execution,
+and then the original restart lands and its worker's start stamps over the
+live holder. Two executions of one task, which is the one outcome claims
+exist to prevent.
+
+The identity minted at the claim now travels into the container
+(`STARDAG_EXECUTION_ID`) and comes back on the worker's start and on its
+interruption and preemption reports, so the registry can tell a live
+execution's report from a superseded one's. A start naming an execution
+the task no longer runs under is refused with **409
+`execution_superseded`**, and nothing is recorded.
+
+A Modal preemption restarts an input under the _same_ call id and the
+restarted worker re-sends the _same_ identity, so a legitimate restart is
+accepted. So is a report from an SDK or against a server that does not
+send one: absence is never treated as a mismatch, in either direction of a
+rolling deploy.
+
+**Nothing is required of you unless you have written your own executor or
+registry** — see the breaking note below. `submit` deliberately does
+**not** take an identity: it is the method nearly every custom executor
+overrides, and a worker started that way already matches its reports on
+the executor reference, which is what every release before this did.
+
+### Breaking: a custom executor or registry must take `execution_id`
+
+Only if you subclass `TaskExecutorABC` or `RegistryABC` yourself. If you
+use stardag's own executors and the API registry, there is nothing to do.
+
+These methods gained an `execution_id` parameter in this release:
+
+| Class             | Methods                                                                |
+| ----------------- | ---------------------------------------------------------------------- |
+| `TaskExecutorABC` | `submit_detached` (keyword-only)                                       |
+| `RegistryABC`     | `task_start`, `task_interrupt`, `task_preempt`, and their `_aio` twins |
+
+`RegistryABC.task_start_claim(_aio)` gained the same parameter in **v0.25.0**,
+where this consequence was not called out. If you have a custom registry and
+have not upgraded past v0.24.0 yet, that one is waiting for you too.
+
+They all have defaults, and **that does not make an existing override
+compatible.** The default is for callers; Python dispatches to your
+override, and the engines pass the keyword unconditionally — so an
+implementation still declaring the old signature raises `TypeError`,
+before it spawns or reports. Add the parameter; forwarding it is enough,
+and ignoring it is fine if your backend has nothing to do with it.
+
+```python
+class MyExecutor(sd.TaskExecutorABC):
+    async def submit_detached(self, task, *, execution_id=None):
+        ...
+```
+
+We considered inspecting the signature and dropping the keyword for an
+override that cannot take it, and rejected it. That would leave your
+worker unable to name its own execution, with the superseded-start
+refusal and cooperative cancellation silently absent — and a missing
+identity is invisible until a report is quietly mis-attributed, which is
+the failure this whole change exists to remove. A `TypeError` at the seam
+says what happened.
+
+### Cooperative cancellation: the container asks, nothing reaches in
+
+Cancelling a build marks it and releases the claims its tasks hold, and
+stops there. **Nothing reaches into a running container to kill it.** The
+containers find out by asking.
+
+A worker knows its own execution's identity, and at its checkpoints it
+asks the registry one question — _is this execution still the one the task
+is waiting for?_ Told no, it stops **cleanly**: no output written, no
+completion reported.
+
+One more thing a cancel needed, found in review. Cancelling a _task_
+releases its claim, so there is no live claim left for the rule above to
+protect and the row still names the cancelled execution — a container
+queued when the cancel landed would start, be accepted, and the fold
+would turn CANCELLED back into RUNNING under the very execution that was
+cancelled. That start is now refused too (409 `task_cancelled`), on the
+principle that reviving a cancelled task is a claim's job after a reset,
+never a report's.
+
+Two checkpoints are automatic and cost you nothing:
+
+- **The start of each attempt**, before `run()`. This catches a cancel
+  that landed while the container was still queued, which on a wide
+  fan-out is most of them. It costs one registry read: the worker's own
+  start report answers half of it for free — a start naming a superseded
+  execution is refused — but a successful start says nothing about
+  whether the build is still running.
+- **Each dynamic-dependency yield**, where the task is about to register
+  children and suspend. A stopped build does not pay for another layer of
+  the DAG.
+
+For a long `run()` body, ask where _you_ know a stop is safe:
+
+```python
+import stardag as sd
+
+
+class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
+    def run(self):
+        directory = self.target()
+        for epoch in range(self.epochs):
+            if sd.cancellation_requested():
+                raise sd.ExecutionCancelled()
+            train_one_epoch(directory)
+        directory.mark_done()
+```
+
+`cancellation_requested()` is throttled — 30s by default,
+`STARDAG_CANCELLATION_CHECK_INTERVAL_SECONDS` — so it is cheap to call in a
+loop, and it answers `False` outside a worker.
+
+A background poll raising into arbitrary user code was considered and
+rejected. It can interrupt a write halfway, which is the one thing
+content-addressed targets exist to prevent, and it cannot honestly be
+called "exiting cleanly".
+
+**Raise rather than return.** Returning early from `run()` writes no output
+but _is_ reported as a completion, and the backend call succeeds — which a
+scheduler reads as "the worker wrote it, eventual consistency".
+`ExecutionCancelled` is recognised and records nothing at all.
+
+**Losing a task is never reported as that task's failure.** A worker that
+stops itself raises out of its container, and a detached executor reports
+any escaping exception as a failure — but the task it would be reported
+against is cancelled or running under somebody else, and a failure report
+writes through. So a worker politely agreeing to stop would have ended
+with the build marking a live execution failed. Counted as a local failure
+instead: the build still fails, and says nothing about a task that is not
+its own. The same applies when a build's post-spawn start is refused.
+
+**A worker never stops on silence.** An unreachable registry, a transport
+failure, a server predating the endpoint and a registry with no opinion all
+answer `False`. Stopping needs positive evidence, because stopping a
+healthy worker destroys work while letting a superseded one finish writes a
+content-addressed output nobody reads.
+
+**One known limitation, named so you can recognise it (STA-99).** A build
+that takes over a _lapsed_ claim and re-attaches to the previous
+container may find that container stops itself: taking the claim records
+this build's execution identity, so the container it re-attached to is no
+longer the execution the task names. Four things must coincide — the task
+RUNNING elsewhere with a recorded reference at registration, that claim
+lapsed, this build's claim granted, and the old container still alive —
+and the container only stops at its _next_ checkpoint, so a `run()` with
+no dynamic dependencies and no `cancellation_requested()` call has none
+left and completes normally. When it does happen you get one retried
+attempt and one wasted container, under the ordinary attempt budget;
+output is content-addressed, so nothing is wrong, only slower.
+
+**Side-effecting tasks are the one real loss, and were never inside the
+promise.** A task that has already written to somebody else's database or
+sent an email has done so; cancellation ends the execution, not what the
+execution did outside its target. When you need a container gone _now_
+rather than at its next checkpoint, that is `stardag builds stop`.
+
+Needs a registry at `server-v0.5.0` or newer. Against an older one the
+worker simply has no checkpoints, which is the behaviour of every release
+before this.
+
+---
+
 ## v0.25.0 — A task is rebuilt from the registry, never from a pickle
 
 ### Registry data is the only task representation
@@ -188,7 +363,7 @@ upgraded, with no SDK change and no redeploy.
 
 Only the claim carries an identity in this release. Forwarding it into
 the worker, so a container can name its own execution when it reports,
-arrives with cooperative cancellation.
+follows in the next one.
 
 ### Breaking: `TickConfig` and `TickSummary` are keyword-only
 

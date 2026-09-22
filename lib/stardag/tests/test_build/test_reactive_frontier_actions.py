@@ -7,7 +7,7 @@ import asyncio
 import logging
 import typing
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 
 import pytest
@@ -1193,8 +1193,10 @@ class TestExecutorMetadataRecording:
     class MetadataTickExecutor(FakeTickExecutor):
         METADATA = {"kind": "modal", "app_name": "tick-app"}
 
-        async def submit_detached(self, task: BaseTask) -> DetachedHandle:
-            handle = await super().submit_detached(task)
+        async def submit_detached(
+            self, task: BaseTask, *, execution_id: UUID | None = None
+        ) -> DetachedHandle:
+            handle = await super().submit_detached(task, execution_id=execution_id)
             return DetachedHandle(
                 executor=handle.executor,
                 ref=handle.ref,
@@ -1424,7 +1426,9 @@ class InstrumentedTickExecutor(FakeTickExecutor):
         self.in_flight = 0
         self.max_in_flight = 0
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
@@ -1434,7 +1438,7 @@ class InstrumentedTickExecutor(FakeTickExecutor):
             await asyncio.sleep(0)
             await asyncio.sleep(0)
             self.call_log.append(("spawn", str(task.id)))
-            return await super().submit_detached(task)
+            return await super().submit_detached(task, execution_id=execution_id)
         finally:
             self.in_flight -= 1
 

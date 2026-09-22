@@ -26,6 +26,7 @@ from stardag.build import (
     LockAcquisitionStatus,
     build_aio,
 )
+from stardag.exceptions import APIError, ExecutionCancelled
 from stardag.registry import StartClaimResult
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
@@ -66,6 +67,10 @@ class ClaimRegistry(RecordingRegistry):
         # arrived. The resident engine then re-asks by construction,
         # because its claim sits in a wait-and-retry loop.
         self.lose_first_response = False
+        # Simulates losing the task between the claim and the spawn: the
+        # post-spawn start that records the reference is refused, which is
+        # what the API answers when the row has moved on.
+        self.refuse_ref_recording_start: str | None = None
 
     def seed_running(
         self,
@@ -160,13 +165,21 @@ class ClaimRegistry(RecordingRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ):
+        if self.refuse_ref_recording_start is not None and executor_ref is not None:
+            raise APIError(
+                "the task has moved on",
+                status_code=409,
+                payload={"error_code": self.refuse_ref_recording_start},
+            )
         await super().task_start_aio(
             build_id,
             task,
             executor=executor,
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
+            execution_id=execution_id,
         )
         self.statuses[str(task.id)] = "running"
         if executor_ref is not None:
@@ -346,6 +359,238 @@ class TestClaimIdentity:
         assert won.started
         assert not again.started
         assert again.denied_reason == "already_running"
+
+
+class TestTheIdentityTheClaimCarries:
+    """Where the resident engine's minted identity goes after the claim.
+
+    Three destinations and two deliberate *absences*, and the absences are
+    the part that reads like a bug: a build with no claim of its own has
+    no identity to assert, and a start that asserted one anyway would be
+    claiming an execution it does not have.
+    """
+
+    def _starts(self, registry: ClaimRegistry) -> list[dict]:
+        return [
+            extra for (method, _, extra) in registry.calls if method == "task_start_aio"
+        ]
+
+    async def test_the_spawn_and_the_start_name_the_claims_execution(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """All three — claim, spawn, post-spawn start — name one
+        execution, which is what lets the worker inside the container
+        name it too."""
+        task = SyncOnlyTask(name="claim-identity-carried")
+        registry = ClaimRegistry()
+        executor = FakeDetachedExecutor()
+
+        await build_aio([task], task_executor=executor, registry=registry)
+
+        claimed = registry.claim_execution_ids[0]
+        assert claimed is not None
+        assert (
+            executor.spawn_execution_ids
+            and str(executor.spawn_execution_ids[0]) == claimed
+        ), "the spawn was not told which execution it is"
+        started = self._starts(registry)
+        assert started and str(started[-1]["execution_id"]) == claimed, (
+            "the post-spawn start named a different execution from the claim"
+        )
+
+    async def test_a_build_that_lost_the_claim_asserts_no_identity(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Looks like a bug and is the fix.
+
+        Re-attaching means watching *somebody else's* execution. The id
+        this build minted belongs to a claim that was refused, so the
+        start it still records goes out with none — exactly as this path
+        behaved before identities existed. Adopting the winner's id
+        instead would assert another build's execution as ours, and the
+        server refuses precisely that.
+        """
+        task = SyncOnlyTask(name="claim-lost-no-identity")
+        registry = ClaimRegistry()
+        executor = FakeDetachedExecutor(live_refs={"fc-winner"})
+        registry.seed_running(task, "fake", "fc-winner")
+
+        await build_aio([task], task_executor=executor, registry=registry)
+
+        started = self._starts(registry)
+        assert started, "the re-attach recorded no start at all"
+        assert all(extra["execution_id"] is None for extra in started), (
+            "a build that lost the claim asserted an execution as its own"
+        )
+
+
+@pytest.mark.parametrize("error_code", ["execution_superseded", "task_cancelled"])
+async def test_a_refused_ref_recording_start_stops_the_container_it_orphaned(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    error_code: str,
+):
+    """The half of the refusal that the exception handling hides.
+
+    The claim was granted, the spawn went out, and between them the task
+    stopped being ours — taken over, or cancelled. The registry refuses
+    the reference, and the existing error handling already fails the task
+    correctly. What it does not do is stop the container, which is
+    running right now with a reference **nothing recorded** — so nothing
+    else can ever address it. The handle is in hand exactly here and
+    nowhere later.
+
+    Both refusal codes, because they arrive at the same call and mean the
+    same thing to this caller: this container is not what the task is
+    waiting for.
+
+    **And the build must say nothing about the task.** Propagating the
+    refusal sent it through the generic error path into ``process_result``,
+    which posts ``TASK_FAILED`` — against a task another build is now
+    running, or one that was just cancelled. A failure report writes
+    through, so losing the race would have ended with this build marking
+    somebody else's live execution failed: the very damage the refusal
+    exists to prevent, arriving by the other door. Counted as a local
+    failure instead, on the path the claim-loser timeout already uses.
+    """
+    task = SyncOnlyTask(name=f"orphan-{error_code}")
+    registry = ClaimRegistry()
+    registry.refuse_ref_recording_start = error_code
+    executor = FakeDetachedExecutor()
+
+    # FAIL_FAST (the default) raises the local failure rather than
+    # returning a summary — the pre-existing contract for one, and not
+    # what this test is about. What matters is *which* failure, and what
+    # was said to the registry on the way.
+    with pytest.raises(Exception, match="stopped being this build's"):
+        await build_aio(
+            [task], task_executor=executor, registry=registry, claim_config=FAST_CLAIM
+        )
+
+    assert executor.cancel_detached_calls, (
+        "the container we spawned and then lost was left running with a "
+        "reference nothing recorded"
+    )
+    cancelled_task_id, _, cancelled_ref = executor.cancel_detached_calls[0]
+    assert cancelled_task_id == task.id
+    assert cancelled_ref == f"spawned-{task.id}"
+
+    methods = [m for (m, _tid, _extra) in registry.calls]
+    assert "task_fail_aio" not in methods, (
+        "the build reported a failure for a task that is not its own — "
+        f"against a live holder, this releases their claim. Calls: {methods}"
+    )
+    assert "build_fail_aio" in methods, (
+        "losing the task is still this build's failure, recorded against "
+        "the build rather than against a task it does not own"
+    )
+
+
+async def test_a_borrowed_handle_is_never_cancelled_on_a_refusal(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    """Stopping the orphan must not become stopping somebody else's worker.
+
+    A handle is not always one this submission created. The claim loser
+    re-attaches to the **winner's** execution, and a resumed build adopts
+    a reference an earlier run recorded. Cancelling one of those when the
+    registry refuses our start would kill a live execution belonging to
+    another build — the exact damage the refusal exists to prevent, done
+    in its name.
+
+    Here the claim is lost to a live winner, so the handle is borrowed,
+    and the start that follows is refused. The orphan-stopping path must
+    not fire.
+    """
+    task = SyncOnlyTask(name="borrowed-handle")
+    registry = ClaimRegistry()
+    registry.seed_running(task, "fake", "fc-winner")
+    registry.refuse_ref_recording_start = "task_cancelled"
+    executor = FakeDetachedExecutor(live_refs={"fc-winner"})
+
+    with pytest.raises(Exception, match="stopped being this build's"):
+        await build_aio(
+            [task], task_executor=executor, registry=registry, claim_config=FAST_CLAIM
+        )
+
+    assert executor.cancel_detached_calls == [], (
+        "a refusal cancelled an execution this build did not start — "
+        f"{executor.cancel_detached_calls}"
+    )
+
+
+async def test_a_refusal_releases_the_global_lock_it_was_holding(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    """A new exit must not become a new leak.
+
+    The global lock is taken **before** the claim and the start, so the
+    local-loss result added for a refused start returns while holding it.
+    ``process_result``'s ``LockAcquisitionResult`` branch was written for
+    the one case where nothing was ever acquired, and released nothing —
+    so the lease sat held until its TTL and blocked every other build
+    wanting that key.
+
+    The same was already true of a claim denied as already-completed,
+    which is why the release went into the branch rather than into this
+    one exit.
+    """
+    from tests.test_build.test_concurrent import MockGlobalLockManager
+
+    task = SyncOnlyTask(name="lock-released-on-refusal")
+    registry = ClaimRegistry()
+    registry.refuse_ref_recording_start = "execution_superseded"
+    executor = FakeDetachedExecutor()
+    locks = MockGlobalLockManager()
+
+    with pytest.raises(Exception, match="stopped being this build's"):
+        await build_aio(
+            [task],
+            task_executor=executor,
+            registry=registry,
+            claim_config=FAST_CLAIM,
+            global_lock_manager=typing.cast(typing.Any, locks),
+            global_lock_config=GlobalLockConfig(enabled=True),
+        )
+
+    assert [tid for tid, _ in locks.releases] == [str(task.id)], (
+        "the refusal returned while holding the global lock, which then "
+        f"blocked every other build until its TTL. Releases: {locks.releases}"
+    )
+
+
+async def test_a_worker_that_stopped_itself_is_not_reported_as_a_failure(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    """The other door into the same damage.
+
+    A worker that reached a cooperative-cancellation checkpoint and found
+    it was no longer wanted raises out of its container, and a detached
+    executor reports *any* escaping exception as a task failure. But the
+    task that failure would be recorded against is either cancelled or
+    running under somebody else, and a failure report writes straight
+    through — so a worker politely agreeing to stop would end with this
+    build marking a live execution failed.
+
+    The build still fails locally; it just says nothing about a task that
+    is not its own.
+    """
+    task = SyncOnlyTask(name="worker-stopped-itself")
+    registry = ClaimRegistry()
+    executor = FakeDetachedExecutor(
+        spawn_error=None,
+        run_error=ExecutionCancelled("no longer wanted"),
+    )
+
+    with pytest.raises(ExecutionCancelled):
+        await build_aio(
+            [task], task_executor=executor, registry=registry, claim_config=FAST_CLAIM
+        )
+
+    methods = [m for (m, _tid, _extra) in registry.calls]
+    assert "task_fail_aio" not in methods, (
+        "a worker that stopped itself was reported as a task failure, which "
+        f"against a live holder releases their claim. Calls: {methods}"
+    )
 
 
 class TestClaimLoser:

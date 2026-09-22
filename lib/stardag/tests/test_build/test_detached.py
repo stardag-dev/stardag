@@ -48,16 +48,27 @@ class FakeDetachedExecutor(TaskExecutorABC):
         detached: bool = True,
         live_refs: set[str] | None = None,
         spawn_error: Exception | None = None,
+        run_error: BaseException | None = None,
     ) -> None:
         self.detached = detached
         self.live_refs = live_refs or set()
         self.spawn_error = spawn_error
+        # Raised from the "remote" execution rather than from the spawn:
+        # the shape of a worker that started and then stopped itself.
+        self.run_error = run_error
         self.submit_calls: list[UUID] = []
         self.spawn_calls: list[UUID] = []
+        # The identity each spawn was handed, in spawn order.
+        self.spawn_execution_ids: list[UUID | None] = []
         self.reattach_calls: list[tuple[UUID, str, str]] = []
         self.cancel_calls: list[UUID] = []
+        # Detached stops, which are a different question from ``cancel``:
+        # they address a container by reference rather than a task object.
+        self.cancel_detached_calls: list[tuple[UUID, str, str]] = []
 
     async def _run_inline(self, task: BaseTask) -> None | TaskStruct:
+        if self.run_error is not None:
+            raise self.run_error
         result = task.run()
         assert result is None, "FakeDetachedExecutor only supports simple tasks"
         return None
@@ -69,7 +80,10 @@ class FakeDetachedExecutor(TaskExecutorABC):
     def supports_detached(self, task: BaseTask) -> bool:
         return self.detached
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
+        self.spawn_execution_ids.append(execution_id)
         if self.spawn_error is not None:
             raise self.spawn_error
         self.spawn_calls.append(task.id)
@@ -95,6 +109,9 @@ class FakeDetachedExecutor(TaskExecutorABC):
 
     async def cancel(self, task: BaseTask) -> None:
         self.cancel_calls.append(task.id)
+
+    async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
+        self.cancel_detached_calls.append((task.id, executor, ref))
 
     async def setup(self) -> None:
         pass
@@ -328,8 +345,10 @@ class MetadataDetachedExecutor(FakeDetachedExecutor):
 
     METADATA = {"kind": "fake", "app_name": "meta-app", "workspace": "acme"}
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
-        handle = await super().submit_detached(task)
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
+        handle = await super().submit_detached(task, execution_id=execution_id)
         return DetachedHandle(
             executor=handle.executor,
             ref=handle.ref,

@@ -60,11 +60,13 @@ from stardag.build_config import (
     set_build_config,
 )
 from stardag.build import build, build_aio, build_sequential, build_sequential_aio
+from stardag.cancellation import cancellation_requested
 from stardag.config import config_provider
 from stardag.exceptions import (
     APIError,
     AuthenticationError,
     AuthorizationError,
+    ExecutionCancelled,
     RegistryTooOldError,
     SDKVersionUnsupportedError,
     StardagError,
@@ -108,6 +110,7 @@ __all__ = [
     "build_aio",
     "build_sequential",
     "build_sequential_aio",
+    "cancellation_requested",
     "config_provider",
     "Depends",
     "DirectoryTarget",
@@ -125,6 +128,7 @@ __all__ = [
     "namespace",
     "Polymorphic",
     "registry_provider",
+    "ExecutionCancelled",
     "ResumableInterruption",
     "RegistryTooOldError",
     "SDKVersionUnsupportedError",
