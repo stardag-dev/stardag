@@ -20,7 +20,12 @@ from stardag.build._task_modules import (
     import_failure_note,
 )
 from stardag._core.rehydrate import TaskRehydrationError
-from stardag.exceptions import APIError, NotFoundError, is_missing_route_error
+from stardag.exceptions import (
+    APIError,
+    NotFoundError,
+    execution_not_wanted,
+    is_missing_route_error,
+)
 from stardag.registry import (
     BuildFrontier,
     FrontierTaskRef,
@@ -1038,13 +1043,13 @@ async def _act_on_frontier(
                 execution_id=execution_id,
             )
         except APIError as start_err:
-            if not _execution_superseded(start_err):
+            if not execution_not_wanted(start_err):
                 raise
-            # We lost the task while the spawn was in flight -- the claim
-            # lapsed, or a cascading cancel released it, and somebody
-            # else claimed it. The registry is right to refuse: recording
-            # this ref now would stamp our execution over the live
-            # holder's.
+            # The task stopped being ours while the spawn was in flight:
+            # the claim lapsed and somebody else took it, or a cancel
+            # released it outright. The registry is right to refuse --
+            # recording this ref now would stamp our execution over a live
+            # holder, or undo the cancel.
             #
             # Caught rather than propagated because this coroutine runs
             # in a TaskGroup: an escaping error cancels every sibling
@@ -1085,19 +1090,6 @@ async def _act_on_frontier(
 
     await _run_bounded([partial(spawn, task) for task in spawn_candidates], semaphore)
     return acted, denied_this_round, awaiting_backend
-
-
-def _execution_superseded(error: APIError) -> bool:
-    """Whether the registry refused a start because we lost the task.
-
-    The 409 a non-claiming start gets when the execution it names is no
-    longer the one the task runs under. Matched on the error code rather
-    than the status, since 409 also carries the claim denials, and those
-    arrive as a ``StartClaimResult`` rather than an exception.
-    """
-    if error.status_code != 409:
-        return False
-    return (error.payload or {}).get("error_code") == "execution_superseded"
 
 
 def _claim_has_lapsed(expires_at: datetime | None, now: datetime) -> bool:

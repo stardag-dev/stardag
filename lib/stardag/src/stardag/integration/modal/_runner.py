@@ -58,7 +58,12 @@ from stardag.cancellation import (
     cancellation_scope,
     current_checker as _current_cancellation_checker,
 )
-from stardag.exceptions import APIError, ExecutionCancelled, ResumableInterruption
+from stardag.exceptions import (
+    APIError,
+    ExecutionCancelled,
+    ResumableInterruption,
+    execution_not_wanted,
+)
 from stardag.registry._base import NoOpRegistry, registry_provider
 from stardag.utils.env import temp_env_vars
 
@@ -443,18 +448,6 @@ def _worker_scope_preflight(env_overrides: dict[str, str] | None) -> str | None:
     return worker_scope_key(_get(STARDAG_SCOPE_KEY_ENV), build_id)
 
 
-def _execution_superseded(error: APIError) -> bool:
-    """Whether the registry refused a call because this execution lost the task.
-
-    Matched on the error code rather than the status: 409 also carries
-    the claim denials and the already-completed answer, which mean
-    different things.
-    """
-    if error.status_code != 409:
-        return False
-    return (error.payload or {}).get("error_code") == "execution_superseded"
-
-
 def _checkpoint_at_yield() -> None:
     """The dynamic-dependency checkpoint, read off the ambient scope.
 
@@ -724,11 +717,11 @@ class _WorkerLifecycleReporter:
                     execution_id=self.execution_id,
                 )
             except APIError as e:
-                if not _execution_superseded(e):
+                if not execution_not_wanted(e):
                     raise
                 self.cancellation.note_cancelled(
-                    "the registry refused its start: the task is running "
-                    "under a different execution"
+                    "the registry refused its start: "
+                    f"{(e.payload or {}).get('error_code')}"
                 )
 
         self._guard(_do, "start")

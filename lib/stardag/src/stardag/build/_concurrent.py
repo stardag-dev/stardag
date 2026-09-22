@@ -78,7 +78,11 @@ from stardag.build_config import (
     rebind_to_build_config,
     set_build_config,
 )
-from stardag.exceptions import BuildConfigMismatchError
+from stardag.exceptions import (
+    APIError,
+    BuildConfigMismatchError,
+    execution_not_wanted,
+)
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
 
@@ -1616,28 +1620,53 @@ async def build_aio(
         that hold no claim of their own — an unclaimed fallback start, or
         a re-attach to somebody else's winner.
 
-        A refusal here (409 ``execution_superseded``) means the claim
-        lapsed and was taken over between the grant and the spawn, and it
-        needs no handling of its own: both call sites already route a
-        failed start through ``handle_registry_error``, which refuses to
+        A refusal here means the task stopped being ours between the
+        claim and the spawn — taken over, or cancelled outright. The
+        error itself needs no catching: both call sites route a failed
+        start through ``handle_registry_error``, which refuses to
         tolerate a *refusal* even in ``warn`` mode, so the task fails
         locally rather than proceeding as an owner it no longer is. That
-        is also why this path does not need the tick's catch — one task
-        fails, where an escaping error in the tick's ``TaskGroup`` would
-        cancel every sibling spawn in the pass.
+        is why this path does not need the tick's catch, where an
+        escaping error in a ``TaskGroup`` would cancel every sibling
+        spawn in the pass.
+
+        **The container does need stopping, and this is the only place
+        that can.** It is already running and its reference was never
+        recorded, so nothing else can address it — the same reasoning as
+        the tick's, and the half that is easy to miss because the
+        exception handling looks complete without it. Best-effort, and
+        then the refusal propagates as before.
         """
         execution_id = task_states[task.id].execution_id
         if handle is None:
             await registry.task_start_aio(build_id, task, execution_id=execution_id)
             return
-        await registry.task_start_aio(
-            build_id,
-            task,
-            executor=handle.executor,
-            executor_ref=handle.ref,
-            executor_metadata=handle.executor_metadata,
-            execution_id=execution_id,
-        )
+        try:
+            await registry.task_start_aio(
+                build_id,
+                task,
+                executor=handle.executor,
+                executor_ref=handle.ref,
+                executor_metadata=handle.executor_metadata,
+                execution_id=execution_id,
+            )
+        except APIError as start_err:
+            if not execution_not_wanted(start_err):
+                raise
+            logger.warning(
+                f"Task {task.id} stopped being ours while its execution was "
+                f"being spawned; the registry refused the ref. Stopping the "
+                f"orphaned execution {handle.ref!r}."
+            )
+            try:
+                await task_executor.cancel_detached(task, handle.executor, handle.ref)
+            except Exception as cancel_err:
+                logger.warning(
+                    f"Failed to stop orphaned execution {handle.ref!r} for "
+                    f"task {task.id}; it will run until its next cooperative "
+                    f"checkpoint: {cancel_err}"
+                )
+            raise
 
     async def submit_with_lock(
         task: BaseTask,

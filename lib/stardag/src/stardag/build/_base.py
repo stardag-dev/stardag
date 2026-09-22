@@ -448,9 +448,23 @@ class TaskExecutorABC(ABC):
         this specific going missing is invisible until a report is quietly
         mis-attributed.
 
-        Keyword-only and defaulted, so an existing override that does not
-        take it still works — it just runs without an identity. See
-        :meth:`submit` for why the non-detached path has none at all.
+        **Breaking for an existing override.** The default here is for
+        *callers*, not for subclasses: Python dispatches to the override,
+        and both engines pass the keyword unconditionally, so an
+        implementation still declaring ``submit_detached(self, task)``
+        raises ``TypeError`` before it spawns. Add the parameter.
+
+        Deliberately not softened with a signature check that omits the
+        keyword for an override that cannot take it. That would hand such
+        an executor a worker unable to name its own execution, with both
+        protections and cooperative cancellation silently absent — a
+        value this specific going missing is invisible until a report is
+        quietly mis-attributed, which is the failure this whole protocol
+        exists to remove. A ``TypeError`` at the seam is the better
+        answer.
+
+        See :meth:`submit` for why the non-detached path has no identity
+        at all.
 
         Raises:
             Exception: if the execution could not be started; the build

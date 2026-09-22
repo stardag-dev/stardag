@@ -26,6 +26,7 @@ from stardag.build import (
     LockAcquisitionStatus,
     build_aio,
 )
+from stardag.exceptions import APIError
 from stardag.registry import StartClaimResult
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
@@ -66,6 +67,10 @@ class ClaimRegistry(RecordingRegistry):
         # arrived. The resident engine then re-asks by construction,
         # because its claim sits in a wait-and-retry loop.
         self.lose_first_response = False
+        # Simulates losing the task between the claim and the spawn: the
+        # post-spawn start that records the reference is refused, which is
+        # what the API answers when the row has moved on.
+        self.refuse_ref_recording_start: str | None = None
 
     def seed_running(
         self,
@@ -162,6 +167,12 @@ class ClaimRegistry(RecordingRegistry):
         claim_ttl_seconds=None,
         execution_id=None,
     ):
+        if self.refuse_ref_recording_start is not None and executor_ref is not None:
+            raise APIError(
+                "the task has moved on",
+                status_code=409,
+                payload={"error_code": self.refuse_ref_recording_start},
+            )
         await super().task_start_aio(
             build_id,
             task,
@@ -411,6 +422,50 @@ class TestTheIdentityTheClaimCarries:
         assert all(extra["execution_id"] is None for extra in started), (
             "a build that lost the claim asserted an execution as its own"
         )
+
+
+@pytest.mark.parametrize("error_code", ["execution_superseded", "task_cancelled"])
+async def test_a_refused_ref_recording_start_stops_the_container_it_orphaned(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    error_code: str,
+):
+    """The half of the refusal that the exception handling hides.
+
+    The claim was granted, the spawn went out, and between them the task
+    stopped being ours — taken over, or cancelled. The registry refuses
+    the reference, and the existing error handling already fails the task
+    correctly. What it does not do is stop the container, which is
+    running right now with a reference **nothing recorded** — so nothing
+    else can ever address it. The handle is in hand exactly here and
+    nowhere later.
+
+    Both refusal codes, because they arrive at the same call and mean the
+    same thing to this caller: this container is not what the task is
+    waiting for.
+
+    The refusal still propagates, which is the pre-existing contract —
+    ``handle_registry_error`` never tolerates a refusal, in either mode,
+    because the build would otherwise carry on under a rule it did not
+    ask for. What changes is only that the container is stopped on the
+    way out.
+    """
+    task = SyncOnlyTask(name=f"orphan-{error_code}")
+    registry = ClaimRegistry()
+    registry.refuse_ref_recording_start = error_code
+    executor = FakeDetachedExecutor()
+
+    with pytest.raises(APIError):
+        await build_aio(
+            [task], task_executor=executor, registry=registry, claim_config=FAST_CLAIM
+        )
+
+    assert executor.cancel_detached_calls, (
+        "the container we spawned and then lost was left running with a "
+        "reference nothing recorded"
+    )
+    cancelled_task_id, _, cancelled_ref = executor.cancel_detached_calls[0]
+    assert cancelled_task_id == task.id
+    assert cancelled_ref == f"spawned-{task.id}"
 
 
 class TestClaimLoser:

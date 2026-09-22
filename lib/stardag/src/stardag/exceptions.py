@@ -71,6 +71,33 @@ class ResumableInterruption(StardagError):
     """
 
 
+def execution_not_wanted(error: "APIError") -> bool:
+    """Whether the registry refused a call because this execution is over.
+
+    Two error codes, one meaning: *stop, this container is not what the
+    task is waiting for.* ``execution_superseded`` is the task having
+    moved on to another execution; ``task_cancelled`` is the build having
+    declared it not to be run at all and released the claim that would
+    otherwise have protected it.
+
+    Matched on the code rather than the status, because 409 also carries
+    the claim denials and the already-completed answer, which mean
+    different things and have different callers.
+
+    One predicate rather than two because both consumers — the reactive
+    tick's post-spawn start and the worker's own start report — act
+    identically on either: stop the execution. Splitting them would mean
+    two call sites that have to be kept in agreement, and a third code
+    added later would have to find both.
+    """
+    if error.status_code != 409:
+        return False
+    return (error.payload or {}).get("error_code") in _EXECUTION_OVER_CODES
+
+
+_EXECUTION_OVER_CODES = frozenset({"execution_superseded", "task_cancelled"})
+
+
 class ExecutionCancelled(StardagError):
     """Raise this to stop an execution the build no longer wants.
 

@@ -217,13 +217,44 @@ accepted. So is a report from an SDK or against a server that does not
 send one: absence is never treated as a mismatch, in either direction of a
 rolling deploy.
 
-**Nothing is required of you.** For a custom `TaskExecutorABC`,
-`submit_detached` gains a keyword-only `execution_id` with a default — an
-existing override keeps working and simply runs without an identity.
-`submit` deliberately does **not** take one: it is the method nearly every
-custom executor overrides, and a worker started that way already matches
-its reports on the executor reference, which is what every release before
-this did.
+**Nothing is required of you unless you have written your own executor or
+registry** — see the breaking note below. `submit` deliberately does
+**not** take an identity: it is the method nearly every custom executor
+overrides, and a worker started that way already matches its reports on
+the executor reference, which is what every release before this did.
+
+### Breaking: a custom executor or registry must take `execution_id`
+
+Only if you subclass `TaskExecutorABC` or `RegistryABC` yourself. If you
+use stardag's own executors and the API registry, there is nothing to do.
+
+These methods gained an `execution_id` parameter in this release:
+
+| Class             | Methods                                                                                    |
+| ----------------- | ------------------------------------------------------------------------------------------ |
+| `TaskExecutorABC` | `submit_detached` (keyword-only)                                                           |
+| `RegistryABC`     | `task_start`, `task_start_claim`, `task_interrupt`, `task_preempt`, and their `_aio` twins |
+
+They all have defaults, and **that does not make an existing override
+compatible.** The default is for callers; Python dispatches to your
+override, and the engines pass the keyword unconditionally — so an
+implementation still declaring the old signature raises `TypeError`,
+before it spawns or reports. Add the parameter; forwarding it is enough,
+and ignoring it is fine if your backend has nothing to do with it.
+
+```python
+class MyExecutor(sd.TaskExecutorABC):
+    async def submit_detached(self, task, *, execution_id=None):
+        ...
+```
+
+We considered inspecting the signature and dropping the keyword for an
+override that cannot take it, and rejected it. That would leave your
+worker unable to name its own execution, with the superseded-start
+refusal and cooperative cancellation silently absent — and a missing
+identity is invisible until a report is quietly mis-attributed, which is
+the failure this whole change exists to remove. A `TypeError` at the seam
+says what happened.
 
 ### Cooperative cancellation: the container asks, nothing reaches in
 
@@ -235,6 +266,15 @@ A worker knows its own execution's identity, and at its checkpoints it
 asks the registry one question — _is this execution still the one the task
 is waiting for?_ Told no, it stops **cleanly**: no output written, no
 completion reported.
+
+One more thing a cancel needed, found in review. Cancelling a _task_
+releases its claim, so there is no live claim left for the rule above to
+protect and the row still names the cancelled execution — a container
+queued when the cancel landed would start, be accepted, and the fold
+would turn CANCELLED back into RUNNING under the very execution that was
+cancelled. That start is now refused too (409 `task_cancelled`), on the
+principle that reviving a cancelled task is a claim's job after a reset,
+never a report's.
 
 Two checkpoints are automatic and cost you nothing:
 

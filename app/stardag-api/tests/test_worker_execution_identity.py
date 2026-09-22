@@ -643,6 +643,98 @@ async def test_a_workers_own_report_is_not_a_reason_to_stop_itself(
     )
 
 
+async def test_a_cancel_while_the_container_is_queued_is_not_undone(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """The hole a task-level cancel leaves in the queued window.
+
+    Cancelling a task releases its claim, so there is no *live* claim for
+    the supersession rule to protect and the identity still matches — the
+    late worker's start is accepted, the fold turns CANCELLED back into
+    RUNNING, and the pre-run checkpoint then reads a task that is running
+    under exactly this execution. The worker runs a cancelled task to
+    completion, which is the case cooperative cancellation is most often
+    for.
+
+    Reviving a task a build has declared not-to-be-run is a *claim's* job,
+    after a reset. It is never a report's.
+    """
+    execution_id = _eid()
+    build_id = await _running(client, "queued-cancel", execution_id, ref="fc-1")
+    assert (
+        await client.post(f"{BUILDS}/{build_id}/tasks/queued-cancel/cancel")
+    ).status_code == 200
+
+    # The container was queued through all of that, and now starts.
+    late = await _start(
+        client,
+        build_id,
+        "queued-cancel",
+        executor="modal",
+        executor_ref="fc-1",
+        execution_id=execution_id,
+    )
+
+    assert late.status_code == 409, (
+        "a cancelled task was revived by its own late worker's start"
+    )
+    assert late.json()["detail"]["error_code"] == "task_cancelled"
+
+    row = await _task_row(async_session, "queued-cancel")
+    assert row.latest_status == "cancelled"
+
+    # And the checkpoint the worker takes next still says stop.
+    answer = (
+        await client.get(
+            f"{BUILDS}/{build_id}/tasks/queued-cancel/execution-status",
+            params={"execution_id": execution_id},
+        )
+    ).json()
+    assert answer["still_current"] is False
+    assert answer["reason"] == "task_cancelled"
+
+
+async def test_the_limiters_enforced_start_is_not_caught_by_that(
+    client: AsyncClient,
+):
+    """A start that names no execution is bookkeeping, not a report.
+
+    The concurrency limiter records a start to occupy slots: no executor,
+    no reference, no identity. The refusal above is scoped to starts that
+    describe an actual execution precisely so this one is untouched — the
+    same distinction the fold already makes.
+    """
+    build_id = await _registered(client, "limiter-start")
+    assert (
+        await client.post(f"{BUILDS}/{build_id}/tasks/limiter-start/cancel")
+    ).status_code == 200
+
+    bookkeeping = await _start(client, build_id, "limiter-start")
+
+    assert bookkeeping.status_code == 200, bookkeeping.text
+
+
+async def test_a_claiming_start_still_revives_a_cancelled_task(
+    client: AsyncClient,
+):
+    """The healing path must stay open.
+
+    A build that finds a task another build cancelled resets it and runs
+    it. That is a claiming start, and claiming starts are arbitrated by
+    the claim rather than by this refusal.
+    """
+    build_id = await _running(client, "revive", _eid(), ref="fc-1")
+    assert (
+        await client.post(f"{BUILDS}/{build_id}/tasks/revive/cancel")
+    ).status_code == 200
+
+    reclaimed = await _start(
+        client, build_id, "revive", claim="true", execution_id=_eid()
+    )
+
+    assert reclaimed.status_code == 200, reclaimed.text
+
+
 async def test_execution_status_reports_a_takeover(
     client: AsyncClient, async_session: AsyncSession
 ):

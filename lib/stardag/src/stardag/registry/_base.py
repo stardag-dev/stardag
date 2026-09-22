@@ -675,6 +675,20 @@ class RegistryABC(metaclass=abc.ABCMeta):
     explicitly to all methods that need it. This allows a single registry instance
     to be reused across multiple builds.
 
+    **A note for custom implementations, because the defaults here can
+    mislead.** A parameter added to a method with a default is safe for
+    *callers*, not for *overrides*: Python dispatches to the override, and
+    the engines pass the new keyword unconditionally, so a subclass still
+    declaring the old signature raises ``TypeError``. ``execution_id`` was
+    added this way to ``task_start``, ``task_start_claim``,
+    ``task_interrupt`` and ``task_preempt`` (and their ``_aio`` twins) —
+    if you override any of them, add it.
+
+    That was chosen over a signature check that quietly drops the keyword,
+    because dropping it would leave the execution unable to name itself
+    and the protections it buys silently absent. A ``TypeError`` at the
+    seam says so.
+
     Method naming convention:
     - Build methods: build_<action> (e.g., build_start, build_complete)
     - Task methods: task_<action> (e.g., task_register, task_start)

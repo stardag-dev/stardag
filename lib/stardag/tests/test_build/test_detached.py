@@ -58,6 +58,9 @@ class FakeDetachedExecutor(TaskExecutorABC):
         self.spawn_execution_ids: list[UUID | None] = []
         self.reattach_calls: list[tuple[UUID, str, str]] = []
         self.cancel_calls: list[UUID] = []
+        # Detached stops, which are a different question from ``cancel``:
+        # they address a container by reference rather than a task object.
+        self.cancel_detached_calls: list[tuple[UUID, str, str]] = []
 
     async def _run_inline(self, task: BaseTask) -> None | TaskStruct:
         result = task.run()
@@ -100,6 +103,9 @@ class FakeDetachedExecutor(TaskExecutorABC):
 
     async def cancel(self, task: BaseTask) -> None:
         self.cancel_calls.append(task.id)
+
+    async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
+        self.cancel_detached_calls.append((task.id, executor, ref))
 
     async def setup(self) -> None:
         pass

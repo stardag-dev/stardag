@@ -712,6 +712,45 @@ def _report_identity(
     return metadata or None
 
 
+def _describes_an_execution(extra_metadata: dict | None) -> bool:
+    """Whether a start is a report about a container, or bookkeeping.
+
+    The concurrency limiter records a start to occupy slots and names no
+    executor, no reference and no identity; the fold already treats that
+    as "describes no execution at all". Scoping the cancelled-task
+    refusal the same way is what keeps the limiter's start out of it.
+    """
+    asking = extra_metadata or {}
+    return any(
+        asking.get(key) is not None
+        for key in ("execution_id", "executor", "executor_ref")
+    )
+
+
+def _revives_a_cancelled_task(db_task: Task, extra_metadata: dict | None) -> bool:
+    """Whether a non-claiming start would undo a cancel.
+
+    Cancelling a task **releases its claim**, which is the whole point —
+    it is what lets the next build have the task. But it also means there
+    is no live claim left for :func:`_supersedes_the_live_execution` to
+    protect, and the identity on the row is still the cancelled
+    execution's own. So a container queued when the cancel landed starts,
+    reports, is accepted, and the fold turns CANCELLED back into RUNNING
+    under the very execution that was cancelled. Its next checkpoint then
+    reads a task running under itself and lets it carry on.
+
+    **Reviving such a task is a claim's job, never a report's.** A build
+    that wants a cancelled task resets it (``TASK_RETRIED``) and claims
+    it, and claiming starts do not come through here.
+
+    Scoped to starts that describe an execution, so the limiter's
+    slot-occupying start is untouched — see :func:`_describes_an_execution`.
+    """
+    return db_task.latest_status in _NOT_TO_BE_RUN and _describes_an_execution(
+        extra_metadata
+    )
+
+
 def _supersedes_the_live_execution(db_task: Task, extra_metadata: dict | None) -> bool:
     """Whether a non-claiming start names an execution that has been replaced.
 
@@ -850,6 +889,38 @@ async def _create_task_event(
                 status_code=409,
                 detail={"error_code": "task_already_completed"},
             )
+
+    if (
+        event_type == EventType.TASK_STARTED
+        and not claim
+        and _revives_a_cancelled_task(db_task, extra_metadata)
+    ):
+        # A start that would undo a cancel. Refused for the same reason as
+        # the supersession below and with the same shape of answer, but on
+        # a different fact: there the task moved on to another execution,
+        # here the build declared it not to be run at all and released the
+        # claim that would otherwise have protected it.
+        #
+        # Both consumers already act on a 409 here — the tick stops the
+        # container it can still address, and the worker stops at its next
+        # checkpoint — so this needs no new handling, only its own name.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "task_cancelled",
+                "message": (
+                    "This task has been cancelled. Recording a start for it "
+                    "would undo the cancel; a build that wants it resets it "
+                    "and claims it."
+                ),
+                "task_status": str(db_task.latest_status),
+                "latest_status_build_id": (
+                    str(db_task.latest_status_build_id)
+                    if db_task.latest_status_build_id
+                    else None
+                ),
+            },
+        )
 
     if (
         event_type == EventType.TASK_STARTED

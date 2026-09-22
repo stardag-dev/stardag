@@ -221,10 +221,21 @@ with no SDK action.
   claim now reaches the container (`STARDAG_EXECUTION_ID`) and is echoed
   on the worker's own start and on its interruption and preemption
   reports, so the registry can tell them from a superseded execution's.
-  `TaskExecutorABC.submit_detached` gains a keyword-only `execution_id`
-  (defaulted, so existing overrides keep working) and `RegistryABC`'s
-  `task_start(_aio)`, `task_interrupt(_aio)` and `task_preempt(_aio)`
-  gain an optional `execution_id`.
+
+  **Breaking for custom executors and registries.**
+  `TaskExecutorABC.submit_detached` gains a keyword-only `execution_id`,
+  and `RegistryABC`'s `task_start(_aio)`, `task_interrupt(_aio)` and
+  `task_preempt(_aio)` gain an optional one (as `task_start_claim(_aio)`
+  did earlier in this batch). The defaults make these safe for _callers_,
+  not for _overrides_: Python dispatches to the override and the engines
+  pass the keyword unconditionally, so an implementation still declaring
+  the old signature raises `TypeError`. Add the parameter.
+
+  Not softened with a signature check that drops the keyword for an
+  override that cannot take it — that would hand such an implementation a
+  worker unable to name its own execution, with the protections and
+  cooperative cancellation silently absent. A `TypeError` at the seam is
+  the better answer.
 
   **The non-detached `submit` path is explicitly opted out**, not
   overlooked. Adding the parameter to `submit` — the one method nearly
@@ -289,6 +300,21 @@ with no SDK action.
   match the recorded owner cannot separate an impostor from the genuine
   holder, so it would refuse both — and only the genuine case is
   reachable through the SDK.
+
+- **A non-claiming start that would revive a cancelled task is refused**
+  (409, `task_cancelled`). Cancelling a task releases its claim — which
+  is the point, it is what lets the next build have it — but it also
+  leaves no live claim for the supersession rule to protect, and the row
+  still names the cancelled execution. So a container that was queued
+  when the cancel landed would start, be accepted, and the fold would
+  turn CANCELLED back into RUNNING under the very execution that was
+  cancelled; its own checkpoint would then read a task running under
+  itself and let it carry on.
+
+  Reviving such a task is a _claim's_ job, after a reset, never a
+  report's. Scoped to starts that name an executor, a reference or an
+  identity, so the concurrency limiter's slot-occupying start — which
+  describes no execution at all — is untouched.
 
 - **`GET /builds/{build_id}/tasks/{task_id}/execution-status`**: read-only,
   two denormalised columns, no lock and no event. Answers a running
