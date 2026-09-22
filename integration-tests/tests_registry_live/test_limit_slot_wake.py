@@ -30,6 +30,7 @@ import uuid
 
 import pytest
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     assert_remaining_work_outlasts_linger,
     assert_trail_complete,
@@ -84,7 +85,9 @@ def slot_limit():
         registry.concurrency_limit_delete(SLOW_LIMIT_KEY)
 
 
-def test_releasing_a_slot_wakes_the_build_queued_on_it(slot_limit) -> None:
+def test_releasing_a_slot_wakes_the_build_queued_on_it(
+    slot_limit, deployment: Deployment
+) -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         get_range,
@@ -134,6 +137,7 @@ def test_releasing_a_slot_wakes_the_build_queued_on_it(slot_limit) -> None:
     # build resident through the completion while A_SLOW_SECONDS >
     # B_LINGER_SECONDS still looked reassuring.
     assert_remaining_work_outlasts_linger(
+        deployment,
         a_slow.id,
         total_seconds=A_SLOW_SECONDS,
         linger_seconds=B_LINGER_SECONDS,

@@ -30,7 +30,7 @@ import uuid
 
 import pytest
 from stardag_integration_tests.registry_live._events import (
-    granted_claim_starts,
+    spawned_executions,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
@@ -111,6 +111,7 @@ def test_many_dormant_builds_are_each_woken_once(deployment: Deployment) -> None
     # completion while SHARED_SLEEP_SECONDS > NEIGHBOUR_LINGER_SECONDS
     # still looked reassuring.
     assert_remaining_work_outlasts_linger(
+        deployment,
         shared.id,
         total_seconds=SHARED_SLEEP_SECONDS,
         linger_seconds=NEIGHBOUR_LINGER_SECONDS,
@@ -165,7 +166,7 @@ def test_many_dormant_builds_are_each_woken_once(deployment: Deployment) -> None
         # its own spawns are its root alone. Counted from the event log --
         # a granted claim is a row written before the container exists, so
         # a preempted reporter cannot make it short.
-        spawned = sum(granted_claim_starts(deployment, build_id).values())
+        spawned = sum(spawned_executions(deployment, build_id).values())
         assert spawned == 1, (
             f"Neighbour {index} spawned {spawned} task(s); it should have "
             "spawned only its own root, having waited for the shared task "

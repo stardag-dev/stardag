@@ -13,7 +13,6 @@ import os
 import sys
 import time
 from collections.abc import Callable, Sequence
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -239,7 +238,12 @@ def require_complete_trail(build_id: UUID, *, what: str) -> None:
 
 
 def assert_remaining_work_outlasts_linger(
-    task_id: UUID, *, total_seconds: float, linger_seconds: float, what: str
+    deployment,
+    task_id: UUID,
+    *,
+    total_seconds: float,
+    linger_seconds: float,
+    what: str,
 ) -> None:
     """The dormancy precondition when another build started the work already.
 
@@ -247,35 +251,43 @@ def assert_remaining_work_outlasts_linger(
     before this build is triggered, so what decides whether this build
     goes dormant is the work *remaining* when its tick starts -- and a
     slow bootstrap eats that margin while the constants still compare
-    favourably. Read the task's start from the registry, subtract, and
-    require the remainder to outlast the linger.
+    favourably.
 
-    Not a clock race: the start time is a recorded fact and the
-    comparison is made once, at the moment the waiting build is
-    triggered. The margin it reports is the real one.
+    Both timestamps come from the registry, and both are chosen to err
+    the same way. The *earliest* recorded start, because the task row
+    holds the latest and the engine writes a second one after
+    ``submit_detached``. The server's own clock, from the response's
+    ``Date`` header, because comparing a server timestamp against the
+    runner's clock adds whatever the skew is. Either mistake understates
+    the elapsed time, which overstates the remainder -- the direction
+    that lets this pass when it should fail.
+
+    Still a necessary condition rather than a sufficient one: the waiting
+    build's tick starts some time after this runs, and how long its
+    container takes is recorded nowhere -- the same gap that makes a
+    preempted tick invisible. The margin is printed so an eroding one
+    shows up before it becomes a silent pass.
     """
-    from stardag.registry import registry_provider
+    from ._events import earliest_start_and_server_now
 
-    started_at = registry_provider.get().task_get_metadata(task_id).started_at
-    if started_at is None:
+    measured = earliest_start_and_server_now(deployment, task_id)
+    if measured is None:
         raise AssertionError(
-            what
-            + ": the registry has no start time for task "
-            + str(task_id)
-            + ", so the remaining window cannot be established."
+            f"{what}: the registry records no start for task {task_id}, so "
+            f"the remaining window cannot be established."
         )
-    elapsed = (
-        datetime.now(timezone.utc) - started_at.astimezone(timezone.utc)
-    ).total_seconds()
+    started_at, now = measured
+    elapsed = (now - started_at).total_seconds()
     remaining = total_seconds - elapsed
     if remaining <= linger_seconds:
         raise AssertionError(
-            f"{what}: the task started {elapsed:.0f}s ago and runs for {total_seconds:g}s, so only "
-            f"{remaining:.0f}s remain -- not more than this build's linger ({linger_seconds:g}s). "
-            "The build is not guaranteed to be dormant when the task "
-            "finishes, so it may see the completion on its own poll and the "
-            "wake-up path would not be exercised. A slow bootstrap eats this "
-            "margin; raise the task's duration."
+            f"{what}: the task started {elapsed:.0f}s ago on the registry's "
+            f"clock and runs for {total_seconds:g}s, so only {remaining:.0f}s "
+            f"remain -- not more than this build's linger "
+            f"({linger_seconds:g}s). The build is not guaranteed to be "
+            f"dormant when the task finishes, so it may see the completion "
+            f"on its own poll and the wake-up path would not be exercised. "
+            f"A slow bootstrap eats this margin; raise the task's duration."
         )
 
 

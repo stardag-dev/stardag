@@ -16,6 +16,8 @@ workers use, and the same shape as the harness's other direct calls.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -142,74 +144,104 @@ def first_event_at(events: Iterable[dict[str, Any]], build_id: Any) -> str | Non
     return str(mine[0]["created_at"]) if mine else None
 
 
-# What the registry writes when a claim is *granted*: `event_metadata`
-# carries `claim: True` on that TASK_STARTED and on no other
-# (`routes/builds.py`, and `services/status.py` reads it back). A denied
-# claim raises 409 before the event is constructed, so what this counts is
-# grants, not attempts.
-CLAIM_KEY = "claim"
-
 # A report the registry kept as audit but refused to apply. Excluded,
 # because a refused claim-start changed nothing and did not license a
 # spawn (`services.status.REPORT_APPLIED_KEY`).
 REPORT_APPLIED_KEY = "report_applied"
 
 
-def granted_claim_starts(deployment: Deployment, build_id: Any) -> dict[str, int]:
-    """Executions this build was granted a claim for, per task id.
+def spawned_executions(deployment: Deployment, build_id: Any) -> dict[str, int]:
+    """Executions this build actually submitted, per task id.
 
-    **The durable form of a tick's ``spawned`` counter.** A tick spawns a
-    task only after the registry grants it the claim, and the grant is a
-    row: a ``task_started`` event under this build carrying
-    ``claim: True``, written inside the transaction that arbitrates the
-    claim, before any container exists. An interruption restart takes the
-    same path, so it adds one to both counts and they stay equal.
+    **The durable form of a tick's ``spawned`` counter.** A tick records a
+    second ``task_started`` once ``submit_detached`` has returned, carrying
+    the backend's reference for the call it just created. That row is the
+    registry's evidence that a container was submitted, it is written
+    before the container reports anything, and it survives the tick dying
+    on the way home.
 
-    **Distinct execution ids, not rows, and that is not a detail.** The
-    registry client retries a POST whose response never arrived, and a
-    redelivered claiming start is *granted* by design -- the server
-    recognises the execution now asking as the one already holding the
-    claim (``_claim_is_this_same_execution``) and runs on to write a
-    second event. Counting rows would read that retry as a second
-    execution and fail a scenario for a lost response. The event carries
-    ``execution_id`` for exactly this reason, and the code that writes it
-    warns any new reader that counts rows; this is that reader.
+    **Counted by distinct ``executor_ref``, and both halves of that matter.**
 
-    A row with no ``execution_id`` cannot be deduplicated, so each counts
-    as its own execution. That errs towards a loud failure rather than a
-    silent pass, which is the right direction for a test -- though no
-    engine path here produces one: the reactive scheduler mints a
-    ``uuid4`` per spawn attempt and sends it with the claim.
+    *Distinct*, because the registry client retries a POST whose response
+    was lost and the API deliberately appends a second row for it -- the
+    code that writes it warns any new reader that counts rows. Two rows
+    naming one call are one execution.
 
-    Refused reports are excluded: a claim-start the registry kept as
-    audit but did not apply changed nothing and licensed no spawn.
+    *Ref-bearing*, because the granted **claim** is not a spawn. The claim
+    is taken first and the submission can still fail: ``submit_detached``
+    raises, the tick records a task failure, and ``summary.spawned`` is
+    never incremented -- but the claim row exists. Counting claims would
+    read that as an execution that never happened and fail a scenario for
+    a submission error. The ref only exists once there is a call to name.
+
+    Refused reports are excluded: a start the registry kept as audit but
+    did not apply changed nothing.
     """
-    executions: dict[str, set[str]] = {}
-    unidentified: dict[str, int] = {}
+    refs: dict[str, set[str]] = {}
+    for event in _build_events(deployment, build_id):
+        metadata = event.get("event_metadata") or {}
+        ref = metadata.get("executor_ref")
+        if (
+            event.get("event_type") != "task_started"
+            or ref is None
+            or metadata.get(REPORT_APPLIED_KEY) is False
+        ):
+            continue
+        refs.setdefault(str(event.get("task_id")), set()).add(str(ref))
+    return {task_id: len(seen) for task_id, seen in refs.items()}
+
+
+def earliest_start_and_server_now(
+    deployment: Deployment, task_id: Any
+) -> tuple[datetime, datetime] | None:
+    """When this task first started, and what the registry's clock says now.
+
+    Both ends from the server, and both chosen to err the same way.
+
+    The *earliest* ``task_started`` rather than the task row's
+    ``started_at``: the row holds the latest start, and the reactive
+    engine writes a second one after ``submit_detached``, so reading it
+    understates how long the task has been running -- which overstates
+    the work remaining, in the direction that lets a precondition pass
+    when it should not.
+
+    ``now`` from the response's ``Date`` header rather than the runner's
+    clock, so the subtraction is between two readings of one clock. A
+    local ``now`` compared against a server timestamp is off by whatever
+    the skew is, in an unknown direction.
+
+    ``None`` when the task has no start recorded yet.
+    """
+    with httpx.Client(timeout=60.0) as client:
+        response = client.get(
+            f"{deployment.api_url.rstrip('/')}/api/v1/tasks/{task_id}/events",
+            headers={"X-API-Key": deployment.api_key},
+        )
+        response.raise_for_status()
+    starts = [
+        event["created_at"]
+        for event in response.json()
+        if event.get("event_type") == "task_started" and event.get("created_at")
+    ]
+    if not starts:
+        return None
+    served_at = response.headers.get("date")
+    if not served_at:
+        return None
+    return (
+        min(datetime.fromisoformat(value) for value in starts),
+        parsedate_to_datetime(served_at),
+    )
+
+
+def _build_events(deployment: Deployment, build_id: Any) -> list[dict[str, Any]]:
     with httpx.Client(timeout=60.0) as client:
         response = client.get(
             f"{deployment.api_url.rstrip('/')}/api/v1/builds/{build_id}/events",
             headers={"X-API-Key": deployment.api_key},
         )
         response.raise_for_status()
-    for event in response.json():
-        metadata = event.get("event_metadata") or {}
-        if (
-            event.get("event_type") != "task_started"
-            or metadata.get(CLAIM_KEY) is not True
-            or metadata.get(REPORT_APPLIED_KEY) is False
-        ):
-            continue
-        task_id = str(event.get("task_id"))
-        execution_id = metadata.get("execution_id")
-        if execution_id is None:
-            unidentified[task_id] = unidentified.get(task_id, 0) + 1
-        else:
-            executions.setdefault(task_id, set()).add(str(execution_id))
-    return {
-        task_id: len(executions.get(task_id, set())) + unidentified.get(task_id, 0)
-        for task_id in {*executions, *unidentified}
-    }
+    return list(response.json())
 
 
 def describe_claims(counts: dict[str, int]) -> str:

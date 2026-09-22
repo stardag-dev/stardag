@@ -36,7 +36,7 @@ import uuid
 
 import pytest
 from stardag_integration_tests.registry_live._events import (
-    granted_claim_starts,
+    spawned_executions,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
@@ -122,7 +122,7 @@ def test_a_layer_wider_than_one_pass_completes_once_per_task(
     # container does later can unwrite it. Summing `spawned` instead
     # would be short whenever a tick was preempted before reporting, and
     # relaxing that to `<=` would pass *because* the evidence is gone.
-    claims = granted_claim_starts(deployment, build_id)
+    claims = spawned_executions(deployment, build_id)
     spawned = sum(claims.values())
     assert spawned == TASKS_IN_PLAN, (
         f"{spawned} spawns for {TASKS_IN_PLAN} tasks. Above it, a "

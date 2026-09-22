@@ -32,7 +32,7 @@ import uuid
 
 import pytest
 from stardag_integration_tests.registry_live._events import (
-    granted_claim_starts,
+    spawned_executions,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
@@ -108,6 +108,7 @@ def test_a_blockers_completion_wakes_a_dormant_build(deployment: Deployment) -> 
     # build resident through the completion while SHARED_SLEEP_SECONDS >
     # B_LINGER_SECONDS still looked reassuring.
     assert_remaining_work_outlasts_linger(
+        deployment,
         shared.id,
         total_seconds=SHARED_SLEEP_SECONDS,
         linger_seconds=B_LINGER_SECONDS,
@@ -159,7 +160,7 @@ def test_a_blockers_completion_wakes_a_dormant_build(deployment: Deployment) -> 
     # container does later can unwrite it. Summing `spawned` instead
     # would be short whenever a tick was preempted before reporting, and
     # relaxing that to `<=` would pass *because* the evidence is gone.
-    claims_b = granted_claim_starts(deployment, build_b)
+    claims_b = spawned_executions(deployment, build_b)
     spawned_b = sum(claims_b.values())
     assert spawned_b == 1, (
         f"Build B spawned {spawned_b} tasks; it should have spawned only its "

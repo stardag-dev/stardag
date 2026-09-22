@@ -49,7 +49,7 @@ import uuid
 import pytest
 from stardag_integration_tests.registry_live._deployed import run_watchdog_sweep
 from stardag_integration_tests.registry_live._events import (
-    granted_claim_starts,
+    spawned_executions,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
@@ -188,7 +188,7 @@ def test_one_sweep_spawns_one_tick_per_build_and_returns(
         # Counted from the event log, not the tick trail: a granted claim
         # is a row written before the container exists, so a preempted
         # reporter cannot make it short.
-        claims = granted_claim_starts(deployment, build_id)
+        claims = spawned_executions(deployment, build_id)
         spawned = sum(claims.values())
         assert spawned == 3, (
             f"Build {index} spawned {spawned} tasks for a three-task plan. "

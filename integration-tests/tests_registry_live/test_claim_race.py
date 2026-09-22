@@ -24,7 +24,7 @@ import uuid
 
 import pytest
 from stardag_integration_tests.registry_live._events import (
-    granted_claim_starts,
+    spawned_executions,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
@@ -103,8 +103,8 @@ def test_a_shared_task_runs_once_across_two_builds(deployment: Deployment) -> No
     # container does later can unwrite it. Summing `spawned` instead
     # would be short whenever a tick was preempted before reporting, and
     # relaxing that to `<=` would pass *because* the evidence is gone.
-    claims_a = granted_claim_starts(deployment, build_a)
-    claims_b = granted_claim_starts(deployment, build_b)
+    claims_a = spawned_executions(deployment, build_a)
+    claims_b = spawned_executions(deployment, build_b)
     spawned = sum(claims_a.values()) + sum(claims_b.values())
     assert spawned == DISTINCT_TASKS, (
         f"{spawned} spawns for {DISTINCT_TASKS} distinct tasks. More than "
