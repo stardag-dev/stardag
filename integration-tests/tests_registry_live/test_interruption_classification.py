@@ -118,6 +118,20 @@ def _executor_ref(task_id: str) -> str | None:
     return row.latest_executor_ref
 
 
+def _resumption_reports(summaries: list[dict]) -> str:
+    """What the ticks counted, for a failure message. Never an assertion.
+
+    A summary exists only if the tick that would have written it lived
+    long enough, so its absence says something about the reporter rather
+    than about the resumption.
+    """
+    counted = sum(summary.get("interruptions_restarted", 0) for summary in summaries)
+    return (
+        f"  [diagnostic] ticks report {counted} interruption restart(s) "
+        f"across {len(summaries)} retained summaries."
+    )
+
+
 def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
     deployment: Deployment,
 ) -> None:
@@ -207,10 +221,25 @@ def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
     row = find_task(str(root.id), task_name="Resumable")
     assert row.latest_status == "completed", describe(build_id)
 
-    resumptions = sum(s.get("interruptions_restarted", 0) for s in summaries)
-    assert resumptions >= 1, (
-        "No tick reported resuming the interrupted task, so the build "
-        "completed by some other route than the one under test.\n" + describe(build_id)
+    # The resumption, from the task's own event log rather than from a
+    # tick's count of them. Same reasoning as the rollover scenario
+    # (STA-87): a tick that resumes a task and is preempted before
+    # reporting leaves no count, and "no tick said so" would then be
+    # indistinguishable from "it never happened" -- which is the one
+    # reading that must stay falsifiable here. A start recorded *after*
+    # the interruption is the registry's own evidence that the task ran
+    # again, and no tick has to survive for it to be true.
+    after = task_events(deployment, root.id)
+    types = [event["event_type"] for event in after]
+    assert "task_interrupted" in types, (
+        f"The interruption is no longer in the event log: {types}\n"
+        + describe(build_id)
+    )
+    interrupted_at = types.index("task_interrupted")
+    assert "task_started" in types[interrupted_at + 1 :], (
+        "The interrupted task was never started again, so the build "
+        "completed by some other route than the one under test. Events: "
+        f"{types}\n" + _resumption_reports(summaries) + "\n" + describe(build_id)
     )
 
     # The other route, named, because it is the one this used to take
@@ -220,11 +249,10 @@ def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
     # the build still completes, so only the accounting says which
     # happened. Nothing in this scenario should fail: the execution ended
     # because the platform was asked to end it, and the worker said so.
-    failures = sum(s.get("failed_recorded", 0) for s in summaries)
-    assert failures == 0, (
-        "A tick recorded a failure for an execution the worker reported as "
-        "an interruption — the probe classified the cancelled input before "
-        "the report landed (STA-65).\n" + describe(build_id)
+    assert "task_failed" not in types, (
+        "A failure was recorded for an execution the worker reported as an "
+        "interruption — the probe classified the cancelled input before the "
+        f"report landed (STA-65). Events: {types}\n" + describe(build_id)
     )
 
     deployment.assert_same_container()
