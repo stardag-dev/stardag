@@ -346,6 +346,44 @@ describe("BuildStopPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("lists a claim whose spawn has not reported a call id yet", async () => {
+    // STA-88, the panel half. The row is RUNNING and held by this build
+    // from the moment it is claimed, which is before its container
+    // exists; dropping it until the ref arrived made the panel silently
+    // short during exactly the fan-out somebody opens it to look at.
+    answerWith([makeTask({ latest_executor: null, latest_executor_ref: null })]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+
+    expect(screen.getByText("not recorded yet")).toBeInTheDocument();
+    expect(screen.getByText(/have no call id on their row/)).toBeInTheDocument();
+    // The pending wording, not the other-executor one.
+    expect(screen.queryByText(/executor stardag cannot stop/)).toBe(null);
+  });
+
+  it("does not call an unattributed row permanently unstoppable", async () => {
+    // No executor, no ref, no metadata. Written by a non-detached
+    // execution *and* by a Modal claim whose best-effort metadata lookup
+    // returned None, so neither verdict is safe.
+    answerWith([
+      makeTask({
+        latest_executor: null,
+        latest_executor_ref: null,
+        latest_executor_metadata: null,
+      }),
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Stop running/ }));
+
+    // Ambiguous, so it is grouped with the pending rows and the wording
+    // names both possibilities rather than promising a call id.
+    expect(screen.getByText(/have no call id on their row/)).toBeInTheDocument();
+    expect(screen.getByText(/own process/)).toBeInTheDocument();
+    expect(screen.queryByText(/executor stardag cannot stop/)).toBe(null);
+  });
+
   it("reports a read failure rather than looking empty", async () => {
     vi.mocked(fetchTasks).mockRejectedValue(new Error("gateway timeout"));
     renderPanel();

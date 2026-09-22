@@ -16,13 +16,22 @@
  *
  *     latest_status_build_id === buildId
  *     latest_status is running | interrupted
- *     latest_executor_ref is set
  *
  * No ranking and no event-log reconstruction — the reason the list is read
  * *before* the build is cancelled. A cancel releases the build's claims,
  * and from that moment a neighbour may take a task over, so the row would
  * name somebody else's call. While the claims are held, the build id on
  * the row settles it.
+ *
+ * The executor ref decides what can be *stopped*, not what is listed. It
+ * used to be a third condition above, and that was a bug (STA-88): a task
+ * is claimed before its container exists. The tick starts it twice — a
+ * claim, which sets RUNNING with no ref because nothing has been spawned
+ * yet, then a ref-bearing start once the spawn returns a call id — so
+ * between the two the row is RUNNING, held by this build, and names no
+ * call. Dropping it there made the panel silently short by however many
+ * tasks were mid-spawn, worst during a fan-out, which is exactly when
+ * somebody opens this panel.
  *
  * Why those two statuses: RUNNING is the claim, and it covers preemption
  * too (a preemption keeps the status and the ref, and only pulls the
@@ -37,6 +46,34 @@ import type { ExecutorMetadata, Task, TaskStatus } from "../types/task";
 /** The only executor the CLI can stop. Others are listed, never acted on. */
 export const MODAL_EXECUTOR = "modal";
 
+/**
+ * Why a listed execution cannot be stopped. None of the reasons drop the
+ * row.
+ *
+ * Kept identical to `_stop.py`'s `NO_REF_YET`, because the panel's job is
+ * to explain the command's own output.
+ */
+export const NO_REF_YET =
+  "no call id recorded yet — it was claimed but not yet spawned";
+
+/**
+ * The row declares no executor, no ref and no metadata — and that is
+ * genuinely ambiguous, so this names the state rather than a verdict.
+ *
+ * A non-detached execution writes it (the build ran the task in its own
+ * process; nothing to cancel, ever), and so does a Modal claim whose
+ * `get_executor_metadata` came back empty — it is best-effort and
+ * returns None when worker selection raises — which is a spawn about to
+ * report its call id. Calling that permanent would re-open the mid-spawn
+ * blindness this change closes, on the rows least able to afford it.
+ *
+ * Must be caught before the Modal comparison, or it inherits Modal's
+ * branch and is promised a call id that may never exist.
+ */
+export const NO_EXECUTOR =
+  "no executor recorded — it runs in the build's own process, or its " +
+  "spawn has not reported yet; refresh to see whether a call id appears";
+
 /** Statuses whose row may still have a container behind it. */
 export const STOPPABLE_STATUSES: TaskStatus[] = ["running", "interrupted"];
 
@@ -47,7 +84,8 @@ export interface StoppableExecution {
   namespace: string;
   status: TaskStatus;
   executor: string;
-  executorRef: string;
+  /** Null while the task is claimed but its spawn has not reported yet. */
+  executorRef: string | null;
   metadata: ExecutorMetadata | null;
   /** The worker name the app declares (Modal's `worker_` prefix stripped). */
   worker: string | null;
@@ -57,6 +95,15 @@ export interface StoppableExecution {
   restartDue: boolean;
   /** Whether `stardag builds stop` can cancel it, or only list it. */
   stoppable: boolean;
+  /**
+   * Why it can only be listed, or null when it can be stopped.
+   *
+   * Three reasons. Another executor is permanent. `NO_REF_YET` is the
+   * one clear moment: the spawn will report a ref, and the panel shows
+   * it stoppable on its next refresh. `NO_EXECUTOR` is ambiguous on
+   * purpose and says so — see its own note.
+   */
+  notStoppableReason: string | null;
 }
 
 /** What the panel's controls narrow the list to. All optional. */
@@ -147,24 +194,38 @@ export function executionFromTask(
 ): StoppableExecution | null {
   const status = task.latest_status;
   if (!status || !STOPPABLE_STATUSES.includes(status)) return null;
-  if (!task.latest_executor_ref) return null;
   if (task.latest_status_build_id !== buildId) return null;
+  const metadata = task.latest_executor_metadata ?? null;
+  const executorRef = task.latest_executor_ref ?? null;
+  // No executor named on the row is three different things, and only a
+  // ref tells them apart. With a ref: data from before `latest_executor`
+  // existed, and Modal is the only executor that has ever recorded one,
+  // so the legacy guess is safe. Without one: either a claim written
+  // before its spawn, whose metadata declares its `kind`; or a
+  // non-detached execution, which records none of the three. That last
+  // row must not inherit the Modal guess — see `NO_EXECUTOR`.
+  const declared = task.latest_executor || metadata?.kind || "";
+  const executor = declared || (executorRef ? MODAL_EXECUTOR : "");
+  const notStoppableReason = !executor
+    ? NO_EXECUTOR
+    : executor !== MODAL_EXECUTOR
+      ? `stardag cannot stop a '${executor}' execution`
+      : !executorRef
+        ? NO_REF_YET
+        : null;
   return {
     taskId: task.task_id,
     qualifiedName: qualify(task.task_namespace, task.task_name),
     namespace: task.task_namespace,
     status,
-    // A ref with no executor named is data from before `latest_executor`
-    // existed. Modal is the only executor that has ever recorded a ref,
-    // and dropping the row would hide a live container from the one list
-    // that is meant to be exact.
-    executor: task.latest_executor || MODAL_EXECUTOR,
-    executorRef: task.latest_executor_ref,
-    metadata: task.latest_executor_metadata ?? null,
+    executor,
+    executorRef,
+    metadata,
     worker: workerOf(task.latest_executor_metadata),
     statusAt: task.latest_status_at ?? null,
     restartDue: restartDue(task),
-    stoppable: (task.latest_executor || MODAL_EXECUTOR) === MODAL_EXECUTOR,
+    stoppable: notStoppableReason === null,
+    notStoppableReason,
   };
 }
 
@@ -250,9 +311,19 @@ export function workersIn(executions: StoppableExecution[]): string[] {
   return [...names].sort();
 }
 
-/** The executors present in a list, for the filter dropdown. */
+/**
+ * The executors present in a list, for the filter dropdown.
+ *
+ * Unattributed rows are skipped: their executor is the empty string, and
+ * there is no `--executor` value that names them, so offering a blank
+ * option would produce a command that matches nothing.
+ */
 export function executorsIn(executions: StoppableExecution[]): string[] {
-  return [...new Set(executions.map((execution) => execution.executor))].sort();
+  const names = new Set<string>();
+  for (const execution of executions) {
+    if (execution.executor) names.add(execution.executor);
+  }
+  return [...names].sort();
 }
 
 /** Render a duration in seconds the way the CLI's `--older-than` takes it. */

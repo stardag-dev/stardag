@@ -96,10 +96,24 @@ with no SDK action.
   `--older-than`, repeatable `--task-id` — narrow what is stopped;
   `--dry-run` prints and exits, and `--json` emits the selection. An
   execution a filter excludes keeps running after the build is cancelled,
-  and the prompt says how many. Executions on a non-Modal executor are
-  listed as "not stoppable here" rather than dropped: stardag reaches
-  Modal and nothing else, and the registry reaches no backend at all. A
-  hard kill is the Modal dashboard's, which the registry UI deep-links to.
+  and the prompt says how many. A hard kill is the Modal dashboard's,
+  which the registry UI deep-links to.
+
+  Nothing the build holds is dropped from the list, and there are three
+  reasons a listed execution may not be stoppable. An execution on a
+  non-Modal executor — permanent; stardag reaches Modal and nothing else,
+  and the registry reaches no backend at all. A task claimed but whose
+  spawn has not reported a call id yet — momentary, since RUNNING _is_ the
+  claim and the claim is recorded first, so re-running once the container
+  is up will catch it. And a row naming no executor at all, which is
+  genuinely ambiguous and says so: a non-detached execution writes it, and
+  so does a Modal claim whose best-effort executor metadata came back
+  empty, so the reason names both and points at the one action that tells
+  them apart rather than guessing.
+
+  All three carry their reason into the table, the closing summary and
+  `not_stoppable_reason` in `--json`. The list is exact about which
+  executions are the build's, not about which of them can be stopped.
 
 - **Breaking: `stardag builds cancel --cascade` is removed.** It released
   the build's claims and left its containers running, which is the ordering
@@ -206,6 +220,17 @@ with no SDK action.
   dashboard page for a hard kill. The panel is absent unless the build
   holds live executions — except where the claim-holder scan gave up
   early, which it reports rather than passing off as "nothing running".
+
+  The panel's selection rules mirror the command's exactly and moved with
+  them: a row with no call id is listed, its Call cell reads "not recorded
+  yet", and the panel gives the same reason the command would. Executions
+  on another executor are called out separately from those with no call id
+  on their row — and that second group carries the same hedge the CLI
+  does, because an unattributed row may be a non-detached execution or a
+  claim whose spawn has not reported yet, so the guidance is to refresh and
+  see rather than to wait or to give up. The UI ships in the server image
+  rather than the SDK tag, so this half arrives with the next server
+  release.
 
 - The build page's **"Cancel & Release Claims"** action is gone, for the
   reason the `--cascade` flag is: it released the claims first and stopped
