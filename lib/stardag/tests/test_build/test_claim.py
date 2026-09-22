@@ -168,6 +168,7 @@ class ClaimRegistry(RecordingRegistry):
             executor=executor,
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
+            execution_id=execution_id,
         )
         self.statuses[str(task.id)] = "running"
         if executor_ref is not None:
@@ -347,6 +348,69 @@ class TestClaimIdentity:
         assert won.started
         assert not again.started
         assert again.denied_reason == "already_running"
+
+
+class TestTheIdentityTheClaimCarries:
+    """Where the resident engine's minted identity goes after the claim.
+
+    Three destinations and two deliberate *absences*, and the absences are
+    the part that reads like a bug: a build with no claim of its own has
+    no identity to assert, and a start that asserted one anyway would be
+    claiming an execution it does not have.
+    """
+
+    def _starts(self, registry: ClaimRegistry) -> list[dict]:
+        return [
+            extra for (method, _, extra) in registry.calls if method == "task_start_aio"
+        ]
+
+    async def test_the_spawn_and_the_start_name_the_claims_execution(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """All three — claim, spawn, post-spawn start — name one
+        execution, which is what lets the worker inside the container
+        name it too."""
+        task = SyncOnlyTask(name="claim-identity-carried")
+        registry = ClaimRegistry()
+        executor = FakeDetachedExecutor()
+
+        await build_aio([task], task_executor=executor, registry=registry)
+
+        claimed = registry.claim_execution_ids[0]
+        assert claimed is not None
+        assert (
+            executor.spawn_execution_ids
+            and str(executor.spawn_execution_ids[0]) == claimed
+        ), "the spawn was not told which execution it is"
+        started = self._starts(registry)
+        assert started and str(started[-1]["execution_id"]) == claimed, (
+            "the post-spawn start named a different execution from the claim"
+        )
+
+    async def test_a_build_that_lost_the_claim_asserts_no_identity(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Looks like a bug and is the fix.
+
+        Re-attaching means watching *somebody else's* execution. The id
+        this build minted belongs to a claim that was refused, so the
+        start it still records goes out with none — exactly as this path
+        behaved before identities existed. Adopting the winner's id
+        instead would assert another build's execution as ours, and the
+        server refuses precisely that.
+        """
+        task = SyncOnlyTask(name="claim-lost-no-identity")
+        registry = ClaimRegistry()
+        executor = FakeDetachedExecutor(live_refs={"fc-winner"})
+        registry.seed_running(task, "fake", "fc-winner")
+
+        await build_aio([task], task_executor=executor, registry=registry)
+
+        started = self._starts(registry)
+        assert started, "the re-attach recorded no start at all"
+        assert all(extra["execution_id"] is None for extra in started), (
+            "a build that lost the claim asserted an execution as its own"
+        )
 
 
 class TestClaimLoser:

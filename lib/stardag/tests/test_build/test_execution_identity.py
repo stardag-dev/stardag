@@ -22,6 +22,8 @@ from uuid import uuid4
 from stardag.build import TickConfig, run_tick_aio
 from stardag.target import InMemoryFileTarget
 
+from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
 from tests.test_build.reactive_fakes import (
     FAST_TICK,
     _chain,
@@ -140,3 +142,118 @@ class TestTheRuleTheFakeModels:
         assert won.started
         assert not denied.started
         assert denied.denied_reason == "already_running"
+
+
+class TestTheIdentityReachesTheSpawn:
+    async def test_the_spawn_is_told_which_execution_it_is(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The claim's identity has to reach the container, or the worker
+        cannot name its own execution — and then neither of the two rules
+        it exists for applies to the worker's own reports."""
+        (root,) = _chain("spawn-identity-root")
+        registry, executor = _setup([root], auto_complete=False)
+
+        await run_tick_aio(
+            uuid4(), registry=registry, task_executor=executor, config=FAST_TICK
+        )
+
+        assert executor.spawned_execution_ids, "nothing was spawned"
+        spawned = executor.spawned_execution_ids[0]
+        assert spawned is not None, "the spawn was given no identity"
+        assert str(spawned) == registry.sent_execution_ids[str(root.id)][0], (
+            "the spawn and the claim named different executions"
+        )
+
+    async def test_the_post_spawn_start_repeats_the_claims_identity(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Otherwise the registry would read the tick's own ref-recording
+        start as a *different* execution and refuse it."""
+        (root,) = _chain("post-spawn-root")
+        registry, executor = _setup([root], auto_complete=False)
+
+        await run_tick_aio(
+            uuid4(), registry=registry, task_executor=executor, config=FAST_TICK
+        )
+
+        # First and last, not first and second: the fake's limit-slot
+        # acquire goes through the same start path with no identity of its
+        # own, exactly as the server's enforced start does.
+        sent = registry.sent_execution_ids[str(root.id)]
+        assert len(sent) >= 2, "the post-spawn start recorded no identity"
+        assert sent[-1] == sent[0] and sent[0] is not None, (
+            f"the post-spawn start named a different execution: {sent}"
+        )
+
+
+class TestALostRaceDuringTheSpawn:
+    """The post-spawn start's 409, which must not take the tick with it.
+
+    The window is real and short: the claim is granted, the spawn is in
+    flight, and meanwhile the claim lapses or a cascading cancel releases
+    it and somebody else takes the task. The registry is right to refuse
+    the ref — recording it would stamp this execution over the live
+    holder's — but the refusal arrives inside a ``TaskGroup``, where an
+    escaping error cancels every sibling spawn and kills the pass. Those
+    siblings would be left claimed and never spawned until their claims
+    expire, which is a far worse outcome than the one task that was
+    genuinely lost.
+    """
+
+    def _taken_over_during_spawn(self, registry, executor, victim_id: str):
+        """Make ``victim_id``'s task change hands while its spawn runs."""
+        original = executor.submit_detached
+
+        async def submit_detached(task, *, execution_id=None):
+            handle = await original(task, execution_id=execution_id)
+            if str(task.id) == victim_id:
+                # Somebody else claimed it while we were spawning.
+                registry.execution_ids[victim_id] = str(uuid4())
+            return handle
+
+        executor.submit_detached = submit_detached
+
+    async def test_the_siblings_still_spawn_and_the_tick_survives(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        first = SyncOnlyTask(name="lost-one", deps=())
+        second = SyncOnlyTask(name="kept-one", deps=())
+        root = SyncOnlyTask(name="lost-race-root", deps=(first, second))
+        registry, executor = _setup([first, second, root], auto_complete=False)
+        self._taken_over_during_spawn(registry, executor, str(first.id))
+
+        # No exception: the 409 is handled, not propagated.
+        await run_tick_aio(
+            uuid4(), registry=registry, task_executor=executor, config=FAST_TICK
+        )
+
+        spawned = {str(t) for t in executor.spawned}
+        assert str(second.id) in spawned, (
+            "a sibling spawn was cancelled by the lost task's 409"
+        )
+
+    async def test_the_orphaned_container_is_stopped_while_we_hold_it(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The half of the fix that is easy to lose in a re-implementation.
+
+        Catching the 409 is obvious. Remembering that the container is
+        *already running with a ref nobody recorded* — so nothing else can
+        ever address it — is not. The handle is in hand exactly here and
+        nowhere later, so this is the only place it can be stopped. Its own
+        cooperative checkpoint would get it eventually; this is faster and
+        costs one call we can already make.
+        """
+        (root,) = _chain("orphan-root")
+        registry, executor = _setup([root], auto_complete=False)
+        self._taken_over_during_spawn(registry, executor, str(root.id))
+
+        await run_tick_aio(
+            uuid4(), registry=registry, task_executor=executor, config=FAST_TICK
+        )
+
+        assert executor.cancelled_refs, (
+            "the container we spawned and then lost was left running with "
+            "a reference nothing recorded"
+        )
