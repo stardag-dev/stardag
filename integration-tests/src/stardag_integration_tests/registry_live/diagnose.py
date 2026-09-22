@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -51,6 +52,14 @@ REGISTRY_LOG_NAME = "registry.log"
 
 # Where this writes its answer, inside the same directory.
 VERDICTS_NAME = "verdicts.txt"
+
+# The verdict is the one output that answers the question people actually
+# ask about a red tier, and until this it was the one output nobody saw
+# without downloading an artifact. On a runner it also goes out as a
+# workflow annotation, next to the retry warnings it explains, so the
+# answer is on the run summary rather than a click away. The full
+# reasoning stays in the artifact -- an annotation is a headline.
+ANNOTATION_TITLE = "Registry-live verdict"
 
 # How far *back* from the moment the client gave up to look for the
 # server's line. The client sends at T, waits its timeout, and the record
@@ -202,7 +211,18 @@ def parse_access_log(path: Path) -> AccessLog:
                 at=dt.datetime.fromisoformat(match["at"]),
                 container=match["container"],
                 method=match["method"],
-                path=match["path"],
+                # Query-stripped, to match the record's side. The sidecar
+                # stores `httpx.URL.path`, which never carries a query, so
+                # if this line ever did the two could not match and every
+                # call with parameters would read as absent -- hypothesis C
+                # manufactured out of a formatting difference. Neither log
+                # sampled so far prints one (including
+                # `POST /builds/{id}/tasks/{id}/start`, which carries
+                # `execution_id` as a query parameter), so this is
+                # belt-and-braces rather than a fix; it costs one call and
+                # removes a silent failure that would look exactly like a
+                # finding.
+                path=match["path"].partition("?")[0],
                 status=int(match["status"]),
                 duration=_seconds(match["duration"], match["duration_unit"]),
                 execution=_seconds(match["execution"], match["execution_unit"]),
@@ -253,18 +273,27 @@ def verdict_for(occurrence: dict, log: AccessLog) -> tuple[str, list[str]]:
     method = occurrence.get("request_method")
     path = occurrence.get("request_path")
     matches = log.around(at, method=method, path=path)
-
-    if method is None or path is None:
-        return _verdict_without_a_request(log, at, matches)
-
-    if not matches and not log.covers_window_before(at):
-        return "NO VERDICT", [
-            _incomplete_window(log, at),
-            "So the absence of a matching request is a gap in the evidence "
-            "rather than evidence.",
-        ]
+    identified = method is not None and path is not None
 
     if not matches:
+        # Absence is the one conclusion that needs the window whole, so it
+        # is gated before it is drawn -- and only here, where there is no
+        # positive finding it could suppress.
+        if not log.covers_window_before(at):
+            return "NO VERDICT", [
+                _incomplete_window(log, at),
+                "So the absence of a matching request is a gap in the "
+                "evidence rather than evidence.",
+            ]
+        if not identified:
+            return "HYPOTHESIS C", [
+                "The failing request could not be identified from the "
+                "exception, so this reads the whole window instead.",
+                f"The registry logged nothing at all in the "
+                f"{LOOKBACK_SECONDS:.0f}s before the client gave up, and "
+                f"the log does cover that window. Nothing on the registry "
+                f"took the time the client spent waiting.",
+            ]
         return "HYPOTHESIS C", [
             f"The registry logged no {method} {path} in the "
             f"{LOOKBACK_SECONDS:.0f}s before the client gave up, and the "
@@ -275,22 +304,56 @@ def verdict_for(occurrence: dict, log: AccessLog) -> tuple[str, list[str]]:
             "spent waiting.",
         ]
 
+    return _decide(matches, log, at, method=method, path=path)
+
+
+def _decide(
+    matches: list[Served],
+    log: AccessLog,
+    at: dt.datetime,
+    *,
+    method: str | None,
+    path: str | None,
+) -> tuple[str, list[str]]:
+    """Choose between B, A and C given the rows that could be the failure.
+
+    **One function for both callers**, which is the point of it existing.
+    It was two, and the copy that ran when the exception carried no
+    request had grown only a B branch -- so a queued row there produced
+    "HYPOTHESIS C ... nothing on the registry took the time" while the
+    same row on the other path produced A. Two verdicts for one set of
+    facts, and one of them wrong in the direction this whole pass exists
+    to prevent. The wording still differs; the decision does not.
+
+    Order is load-bearing: B, then A, then the coverage gate, then C.
+    Both positives rest on a line that is *present*, so a truncated dump
+    cannot make them wrong and must not be allowed to discard them. C
+    rests on nothing in the window being slow, which a truncated dump can
+    only fail to establish.
+    """
+    identified = method is not None and path is not None
+
     # How confidently a matching line can be called *the* line. One
     # candidate is an identification; several are a set the failing call
     # is somewhere in, and the two support different strengths of claim.
     # Only the positive verdicts need this caveat -- a window in which
     # nothing at all was slow rules out B and A for every member of it at
     # once, so C does not weaken with the count.
-    ambiguity = (
-        ""
-        if len(matches) == 1
-        else (
+    if not identified:
+        ambiguity = (
+            " The failing request could not be identified from the "
+            "exception, so this is the worst of everything in the window "
+            "rather than a line attributed to the failure."
+        )
+    elif len(matches) == 1:
+        ambiguity = ""
+    else:
+        ambiguity = (
             f" This is the worst of {len(matches)} calls to {method} {path} "
             f"in the window, which is a candidate rather than an "
             f"identification: this path carries no id, so the failing call "
             f"cannot be picked out from its neighbours."
         )
-    )
 
     slow_handler = [row for row in matches if row.execution >= SLOW_EXECUTION_SECONDS]
     if slow_handler:
@@ -315,27 +378,27 @@ def verdict_for(occurrence: dict, log: AccessLog) -> tuple[str, list[str]]:
             "its resources and the tier's worker count.",
         ]
 
-    # Every positive verdict above rests on a line that is *present*, so a
-    # truncated dump cannot make one of them wrong. C is the opposite
-    # shape -- it rests on nothing in the window being slow -- so it needs
-    # the window whole. A dump that starts inside the lookback leaves rows
-    # to look at and a prefix that cannot be looked at, and "none of the
-    # ones I can see was slow" is not the claim C makes.
     if not log.covers_window_before(at):
         return "NO VERDICT", [
             _incomplete_window(log, at),
-            "Matching requests were found and none of them was slow, but "
-            "that is only a claim about the part of the window that "
-            "survived the dump.",
+            "Rows were found and none of them was slow, but that is only a "
+            "claim about the part of the window that survived the dump.",
         ]
 
     worst = max(matches, key=lambda row: row.duration)
-    subject = (
-        "The registry served this request"
-        if len(matches) == 1
-        else f"The slowest of {len(matches)} calls to {method} {path} in the "
-        f"window was served"
-    )
+    if not identified:
+        subject = (
+            f"The failing request could not be identified from the "
+            f"exception, so this reads the whole window: the slowest of "
+            f"{len(matches)} requests in it was served"
+        )
+    elif len(matches) == 1:
+        subject = "The registry served this request"
+    else:
+        subject = (
+            f"The slowest of {len(matches)} calls to {method} {path} in the "
+            f"window was served"
+        )
     return "HYPOTHESIS C", [
         f"{subject} in {worst.duration:.3f}s "
         f"({worst.execution:.3f}s in the handler): {worst.describe()}.",
@@ -343,46 +406,6 @@ def verdict_for(occurrence: dict, log: AccessLog) -> tuple[str, list[str]]:
         "not the server that took the time. The response was produced and "
         "never received: the loss is between the container and the runner, "
         "rather than anywhere this tier's code can reach.",
-    ]
-
-
-def _verdict_without_a_request(
-    log: AccessLog, at: dt.datetime, window: list[Served]
-) -> tuple[str, list[str]]:
-    """When the exception carried no request, fall back to the window.
-
-    Weaker on purpose, and labelled as such. Without knowing which call
-    timed out, the most that can be said is whether *anything* the server
-    handled around that moment was slow -- which still refutes B when
-    nothing was.
-    """
-    slow = [row for row in window if row.execution >= SLOW_EXECUTION_SECONDS]
-    if slow:
-        worst = max(slow, key=lambda row: row.execution)
-        return "HYPOTHESIS B", [
-            "The failing request could not be identified from the "
-            "exception, so this reads the whole window instead.",
-            f"Something was slow in the handler there: {worst.describe()}.",
-        ]
-    # Checked *after* the positive branch, for the reason above: a slow row
-    # that is present is evidence whether or not anything was dropped. This
-    # verdict is already the weaker one -- it reasons from the window
-    # rather than the request -- and over a window with a hole in it there
-    # is nothing left of it at all.
-    if not log.covers_window_before(at):
-        return "NO VERDICT", [
-            "The failing request could not be identified from the "
-            "exception, so this had only the window to read -- and the "
-            "access log does not cover the whole of it.",
-            _incomplete_window(log, at),
-        ]
-    return "HYPOTHESIS C", [
-        "The failing request could not be identified from the exception, "
-        "so this reads the whole window instead.",
-        f"{len(window)} request(s) in the "
-        f"{LOOKBACK_SECONDS:.0f}s before the client gave up, none of them "
-        f"slow in the handler. Nothing on the registry took the time the "
-        f"client spent waiting.",
     ]
 
 
@@ -500,6 +523,23 @@ def report(directory: Path) -> str:
     return "\n".join(lines)
 
 
+def annotation(verdicts: list[tuple[str, dict]]) -> str | None:
+    """The one-line-per-occurrence headline, or ``None`` if there is none.
+
+    Deliberately not the evidence. A workflow annotation is read at a
+    glance and truncated when long, so it carries the verdict and what it
+    is about; anyone who wants the reasoning has `verdicts.txt` in the
+    artifact, which the retry warning already points at.
+    """
+    if not verdicts:
+        return None
+    parts = [
+        f"{verdict}: {occurrence.get('nodeid', '?')} [{occurrence.get('phase', '?')}]"
+        for verdict, occurrence in verdicts
+    ]
+    return f"::warning title={ANNOTATION_TITLE}::" + "; ".join(parts)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="diagnose",
@@ -529,6 +569,19 @@ def main(argv: list[str] | None = None) -> int:
         (args.directory / VERDICTS_NAME).write_text(text + "\n")
     except OSError as error:  # pragma: no cover - diagnostics only
         print(f"Could not write {VERDICTS_NAME}: {error}", file=sys.stderr)
+
+    # Only on a runner: the `::warning` form is noise in a terminal, and
+    # the printed report above is already the whole answer there.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        log = parse_access_log(args.directory / REGISTRY_LOG_NAME)
+        headline = annotation(
+            [
+                (verdict_for(occurrence, log)[0], occurrence)
+                for _, occurrence in load_occurrences(args.directory)
+            ]
+        )
+        if headline:
+            print(headline)
     return 0
 
 

@@ -432,3 +432,117 @@ def test_the_log_and_the_record_may_be_in_different_timezones(tmp_path: Path) ->
     )
     assert verdict == "HYPOTHESIS C"
     assert "The registry served this request" in " ".join(evidence)
+
+
+def test_a_queued_row_is_hypothesis_a_even_without_a_known_request(
+    tmp_path: Path,
+) -> None:
+    """Coordinator finding on #369: the two decision paths had diverged.
+
+    The copy that ran when the exception carried no request had only a B
+    branch, so a row with a long duration and a short handler time fell
+    through to "HYPOTHESIS C ... nothing on the registry took the time"
+    -- while the identical row on the with-request path produced A. Two
+    verdicts for one set of facts, and the wrong one was a C, which is
+    the exact defect class this PR removes.
+
+    Both paths now run one decision function. This test fails on the
+    code before that change.
+    """
+    _log(
+        tmp_path,
+        *_bracket(),
+        _line(
+            _AT - dt.timedelta(seconds=30),
+            duration="26.0 s",
+            execution="180.0 ms",
+        ),
+    )
+    log = parse_access_log(tmp_path / REGISTRY_LOG_NAME)
+
+    identified, _ = verdict_for(_occurrence(), log)
+    anonymous, evidence = verdict_for(
+        _occurrence(request_method=None, request_path=None), log
+    )
+    assert identified == "HYPOTHESIS A"
+    assert anonymous == "HYPOTHESIS A", "the two paths must not disagree"
+    assert "could not be identified from the exception" in " ".join(evidence)
+
+
+def test_a_query_string_in_the_log_does_not_hide_the_request(
+    tmp_path: Path,
+) -> None:
+    """The record's path never carries a query; the log's might.
+
+    The sidecar stores `httpx.URL.path`, which excludes the query. No
+    Modal access log sampled so far prints one -- not even for
+    `POST /builds/{id}/tasks/{id}/start`, which sends `execution_id` as a
+    query parameter -- but if one ever did, every call with parameters
+    would fail to match and the pass would report hypothesis C from an
+    absence it had invented. Cheaper to strip both sides than to depend
+    on a format nobody controls.
+    """
+    _log(
+        tmp_path,
+        *_bracket(),
+        _line(
+            _AT - dt.timedelta(seconds=30),
+            "GET",
+            "/api/v1/builds?limit=50&status=running",
+            status=200,
+        ),
+    )
+    log = parse_access_log(tmp_path / REGISTRY_LOG_NAME)
+    assert [row.path for row in log.served if row.method == "GET"][1:2] == [
+        "/api/v1/builds"
+    ]
+
+    verdict, evidence = verdict_for(
+        _occurrence(request_method="GET", request_path="/api/v1/builds"), log
+    )
+    assert verdict == "HYPOTHESIS C"
+    assert "logged no GET" not in " ".join(evidence), (
+        "the query-bearing line must be found, not read as an absence"
+    )
+
+
+def test_the_verdict_goes_out_as_an_annotation_on_a_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Coordinator finding on #369: the verdict was the one output nobody saw.
+
+    It went to the job log, which is long, and to the artifact, which has
+    to be downloaded — while the retry warning it explains was already a
+    workflow annotation. So the run summary showed "a transport timeout
+    happened" and never "and here is what it was".
+    """
+    _log(tmp_path, *_bracket(), _line(_AT - dt.timedelta(seconds=30)))
+    (tmp_path / "timeout-call-test-a-1.json").write_text(json.dumps(_occurrence()))
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert diagnose.main(["--dir", str(tmp_path)]) == 0
+    emitted = capsys.readouterr().out
+    assert "::warning title=Registry-live verdict::HYPOTHESIS C:" in emitted
+    assert "[call]" in emitted
+
+
+def test_no_annotation_off_a_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """`::warning` is noise in a terminal, where the report is already there."""
+    _log(tmp_path, *_bracket(), _line(_AT - dt.timedelta(seconds=30)))
+    (tmp_path / "timeout-call-test-a-1.json").write_text(json.dumps(_occurrence()))
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert diagnose.main(["--dir", str(tmp_path)]) == 0
+    assert "::warning" not in capsys.readouterr().out
+
+
+def test_no_annotation_when_there_was_no_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A run that failed for other reasons must not grow a verdict annotation."""
+    _log(tmp_path, *_bracket())
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert diagnose.main(["--dir", str(tmp_path)]) == 0
+    assert "::warning" not in capsys.readouterr().out

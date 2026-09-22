@@ -280,7 +280,10 @@ by evidence in its own artifact (STA-92). The label for that case is
 **What separates the remaining hypotheses is the access log**, and the join is
 a separate pass because the log is not readable from inside the run. After the
 dump, `diagnose.py` reconciles each timeout's JSON sidecar with the registry's
-own account of that request and writes `verdicts.txt`:
+own account of that request, writes `verdicts.txt`, and — on a runner —
+emits the verdict as a `Registry-live verdict` annotation next to the retry
+warning it explains, so the run summary says what the timeout was and not
+only that there was one:
 
 | What the log shows for the timed-out request    | Verdict                                       |
 | ----------------------------------------------- | --------------------------------------------- |
@@ -307,8 +310,15 @@ a candidate rather than an identification.
 being slow.** So truncation cannot touch the first two and withdraws the third:
 if the dump's oldest line falls inside the lookback, the answer is `no verdict`
 even though rows were found, because "none of the ones I can see was slow" is
-not the claim C makes. The coverage check therefore runs _after_ the positive
-branches, never before them.
+not the claim C makes. So the coverage check never pre-empts a positive
+finding: with rows in hand it runs after B and A, and it runs first only when
+there are no rows at all — where there is nothing for it to suppress.
+
+**Both callers share one decision function**, which is the point of it
+existing. They were separate, and the copy used when the exception carried no
+request had grown only a B branch — so a queued row produced C there and A on
+the other path: two verdicts for one set of facts, the wrong one being a C.
+The wording still differs by how much is known; the decision does not.
 
 **Everything a red run should be diagnosed from is uploaded as one artifact**,
 `registry-live-diagnostics-<attempt>`. That is not a convenience: `modal
