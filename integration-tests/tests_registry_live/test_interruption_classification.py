@@ -48,7 +48,7 @@ import uuid
 
 import pytest
 
-from stardag_integration_tests.registry_live._events import task_events
+from stardag_integration_tests.registry_live._events import events_by, task_events
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
@@ -229,7 +229,12 @@ def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
     # reading that must stay falsifiable here. A start recorded *after*
     # the interruption is the registry's own evidence that the task ran
     # again, and no tick has to survive for it to be true.
-    after = task_events(deployment, root.id)
+    # Strict, and scoped to this build. ``task_events`` answers across
+    # every build that has touched the task, while the counter this
+    # replaces was build-scoped -- and ``missing_ok`` would turn a task
+    # the registry has never heard of into an empty list, which is the
+    # answer an absence assertion reads as proof of correct behaviour.
+    after = events_by(task_events(deployment, root.id), build_id)
     types = [event["event_type"] for event in after]
     assert "task_interrupted" in types, (
         f"The interruption is no longer in the event log: {types}\n"
@@ -258,7 +263,7 @@ def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
     for task in (root.requires(), root):
         task_types = [
             event["event_type"]
-            for event in task_events(deployment, task.id, missing_ok=True)
+            for event in events_by(task_events(deployment, task.id), build_id)
         ]
         assert "task_failed" not in task_types, (
             f"A failure was recorded for task {task.id}, whose execution the "
