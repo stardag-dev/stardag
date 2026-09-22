@@ -249,10 +249,22 @@ def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
     # the build still completes, so only the accounting says which
     # happened. Nothing in this scenario should fail: the execution ended
     # because the platform was asked to end it, and the worker said so.
-    assert "task_failed" not in types, (
-        "A failure was recorded for an execution the worker reported as an "
-        "interruption — the probe classified the cancelled input before the "
-        f"report landed (STA-65). Events: {types}\n" + describe(build_id)
-    )
+    # Across *both* the build's tasks, not just the interrupted one: the
+    # counter this replaces (`failed_recorded`) was build-wide, and a
+    # failure recorded on the upstream and then retried would have been
+    # caught by it. A `task_failed` event is the durable form of the same
+    # thing -- it is written when the failure is recorded, and a later
+    # retry appends rather than erases.
+    for task in (root.requires(), root):
+        task_types = [
+            event["event_type"]
+            for event in task_events(deployment, task.id, missing_ok=True)
+        ]
+        assert "task_failed" not in task_types, (
+            f"A failure was recorded for task {task.id}, whose execution the "
+            "worker reported as an interruption — the probe classified the "
+            "cancelled input before the report landed (STA-65). Events: "
+            f"{task_types}\n" + describe(build_id)
+        )
 
     deployment.assert_same_container()
