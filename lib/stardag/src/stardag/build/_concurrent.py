@@ -1615,6 +1615,16 @@ async def build_aio(
         like a different one that should be refused. None on the paths
         that hold no claim of their own — an unclaimed fallback start, or
         a re-attach to somebody else's winner.
+
+        A refusal here (409 ``execution_superseded``) means the claim
+        lapsed and was taken over between the grant and the spawn, and it
+        needs no handling of its own: both call sites already route a
+        failed start through ``handle_registry_error``, which refuses to
+        tolerate a *refusal* even in ``warn`` mode, so the task fails
+        locally rather than proceeding as an owner it no longer is. That
+        is also why this path does not need the tick's catch — one task
+        fails, where an escaping error in the tick's ``TaskGroup`` would
+        cancel every sibling spawn in the pass.
         """
         execution_id = task_states[task.id].execution_id
         if handle is None:
