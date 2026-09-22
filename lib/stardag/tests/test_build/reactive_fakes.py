@@ -611,6 +611,15 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.build_status = "completed"
 
     async def build_fail_aio(self, build_id, error_message=None):
+        """Mirrors the API: release the claims, then close over the blocked.
+
+        Both halves happen **here**, as the server does them, and that is
+        the point rather than an implementation detail. A fake that
+        released here but left the closure to ``build_skip_blocked_aio``
+        would report a skip count the real server does not, and the tick's
+        bug — counting only what ``skip-blocked`` answers, which on a real
+        server is nothing — would pass every test.
+        """
         self.calls.append(("build_fail", None))
         self.build_status = "failed"
         self.build_error_message = error_message
@@ -620,6 +629,37 @@ class FakeReactiveRegistry(NoOpRegistry):
         # build *before* asking for the blocked closure, precisely so the
         # tasks this releases become seeds of it.
         self._release_claims(build_id)
+        from stardag.registry import BuildFailResult
+
+        return BuildFailResult(
+            id=build_id,
+            name="fake-build",
+            skipped_task_ids=self._close_over_blocked(),
+        )
+
+    def _close_over_blocked(self) -> list[str]:
+        """The blocked closure, as the server computes it inside /fail."""
+        blocked = {
+            tid
+            for tid, status in self.statuses.items()
+            if status in ("failed", "cancelled", "skipped")
+        }
+        propagating = ("failed", "cancelled", "skipped", "pending", "suspended")
+        skipped: list[str] = []
+        changed = True
+        while changed:
+            changed = False
+            for tid, ups in self.upstreams.items():
+                if self.statuses.get(tid) not in ("pending", "suspended"):
+                    continue
+                if any(
+                    u in blocked and self.statuses.get(u) in propagating for u in ups
+                ):
+                    self.statuses[tid] = "skipped"
+                    blocked.add(tid)
+                    skipped.append(tid)
+                    changed = True
+        return skipped
 
     async def task_get_metadata_aio(self, task_id):
         from stardag.registry._base import TaskMetadata

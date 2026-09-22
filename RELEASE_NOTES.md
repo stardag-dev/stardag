@@ -213,6 +213,13 @@ on neither route — so a terminal build, failed or cancelled, would leave
 its running tasks claimed and their concurrency-limit slots occupied until
 the claims expire. That is worse than either version alone.
 
+**Self-hosters: `DEFAULT_SERVER_VERSION` moves with this.** `stardag
+self-host up` pins the server image this SDK is tested against, and that
+pin is bumped in the release PR once `server-v0.5.0` exists. Until then a
+`self-host up` from `main` deploys the older server, which is the pairing
+described above — so use `--server-version` if you are running from
+`main` rather than from the tag.
+
 #### A build going terminal releases its claims — cancel and fail alike
 
 `POST /builds/{id}/fail` releases the execution claims the build holds,

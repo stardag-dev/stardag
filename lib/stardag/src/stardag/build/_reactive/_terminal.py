@@ -7,6 +7,7 @@ from uuid import UUID
 from stardag.build._base import FailMode
 from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.registry import (
+    BuildFailResult,
     BuildFrontier,
     RegistryABC,
 )
@@ -82,9 +83,10 @@ async def _handle_terminal(
         # Nothing is stopped from here. The workers under those released
         # claims find out at their next cooperative checkpoint; see
         # ``stardag.cancellation``.
-        await registry.build_fail_aio(
+        failure = await registry.build_fail_aio(
             build_id, f"{failed} task(s) failed (fail_mode=FAIL_FAST)"
         )
+        _count_server_skips(failure, summary)
         await _skip_blocked(registry, build_id, summary)
         return "failed"
 
@@ -167,11 +169,38 @@ async def _handle_terminal(
         logger.error(f"Failing build {build_id}: {reason}")
         # Fail before skipping, as above: the failure releases this build's
         # claims, and a released claim is a seed of the blocked closure.
-        await registry.build_fail_aio(build_id, reason)
+        failure = await registry.build_fail_aio(build_id, reason)
+        _count_server_skips(failure, summary)
         await _skip_blocked(registry, build_id, summary)
         return "failed"
 
     return None
+
+
+def _count_server_skips(
+    failure: "BuildFailResult | None", summary: TickSummary
+) -> None:
+    """Count what the *fail* skipped, since nothing else will.
+
+    The server completes the blocked closure inside ``/fail`` — in the
+    transaction that releases the claims, so the tasks it just released
+    are seeds of it. That leaves ``skip-blocked`` with nothing to do, and
+    a tick that counted only its answer would report zero skips on the
+    very tick that skipped everything. The count is what the trail and the
+    UI show, so losing it is not cosmetic.
+
+    Cannot double-count. A server that does the closure in ``/fail``
+    returns the ids here and answers ``skip-blocked`` with an empty list;
+    one that does not returns no ids here and does the work there. Each
+    task is reported by exactly one of the two.
+
+    ``None`` is a registry that does not report it at all — the ABC
+    default, and any custom backend — which reads as "nothing skipped
+    here", leaving ``skip-blocked`` to be the whole answer as before.
+    """
+    if failure is None:
+        return
+    summary.skipped += len(failure.skipped_task_ids)
 
 
 async def _skip_blocked(

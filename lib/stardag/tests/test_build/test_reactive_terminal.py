@@ -175,6 +175,45 @@ class TestSkipBlockedOnFailure:
         assert registry.statuses[str(mid.id)] == "skipped"
         assert registry.statuses[str(root.id)] == "skipped"
 
+    async def test_the_skip_count_survives_a_server_that_skips_in_fail(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Where the count comes from, pinned against the obvious mistake.
+
+        The server completes the blocked closure inside ``/fail``, so the
+        ``skip-blocked`` call that follows answers empty. A tick that
+        counted only that answer would report zero on the tick that
+        skipped everything — and every other test here would still pass,
+        because they assert the task *statuses* rather than the number.
+
+        This asserts the number, and that it came from the failure rather
+        than from the follow-up: the registry records exactly one
+        ``skip_blocked`` call and it contributed nothing.
+        """
+        bad = SyncOnlyTask(name="fc-bad")
+        mid = SyncOnlyTask(name="fc-mid", deps=(bad,))
+        root = SyncOnlyTask(name="fc-root", deps=(mid,))
+        registry, executor = _setup([bad, mid, root], auto_complete=False)
+        registry.add_task(str(bad.id), status="failed")
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            config=FAST_TICK,  # FAIL_FAST default
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.skipped == 2, (
+            "the tick lost the skips the failure performed server-side"
+        )
+        # The follow-up ran and found nothing, which is the state a real
+        # server leaves. If this fake ever skips there instead, the
+        # assertion above would pass for the wrong reason.
+        assert ("skip_blocked", None) in registry.calls
+        assert registry.statuses[str(mid.id)] == "skipped"
+        assert registry.statuses[str(root.id)] == "skipped"
+
     async def test_cancelled_branch_descendants_also_skipped(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):

@@ -516,6 +516,19 @@ class BuildCancelResult(BuildSummary):
     cascaded_task_count: int = 0
 
 
+class BuildFailResult(BuildSummary):
+    """Response of ``POST /builds/{id}/fail``.
+
+    A superset of :class:`BuildSummary`, mirroring the server.
+    ``skipped_task_ids`` is what the fail itself skipped while completing
+    the blocked closure — a server predating that omits the field, and it
+    defaults here to empty, which reads correctly as "this server did not
+    skip anything; ask ``skip-blocked`` yourself".
+    """
+
+    skipped_task_ids: list[str] = []
+
+
 class BulkCancelBuildRef(StardagBaseModel):
     """One build cancelled — or, in a dry run, *selected* — by bulk cancel."""
 
@@ -766,13 +779,27 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
-    def build_fail(self, build_id: UUID, error_message: str | None = None) -> None:
-        """Mark a build as failed.
+    def build_fail(
+        self, build_id: UUID, error_message: str | None = None
+    ) -> "BuildFailResult | None":
+        """Mark a build as failed, releasing the claims it holds.
+
+        The claims go in the same transaction that marks the build failed,
+        and the server completes the blocked closure there too — so the
+        descendants of what it just released are SKIPPED rather than left
+        PENDING.
+
+        Returns what that skipped, or None for backends that don't report
+        it (the default). **A caller that counts skips must read this**,
+        because asking ``skip-blocked`` afterwards now finds the work
+        already done and answers empty. Same optional-return convention as
+        :meth:`build_cancel`; an override that returns None is unaffected.
 
         Args:
             build_id: The build UUID returned by build_start.
             error_message: Optional error message describing the failure.
         """
+        return None
         pass
 
     def build_cancel(
@@ -1672,9 +1699,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
 
     async def build_fail_aio(
         self, build_id: UUID, error_message: str | None = None
-    ) -> None:
+    ) -> "BuildFailResult | None":
         """Async version of build_fail."""
-        self.build_fail(build_id, error_message)
+        return self.build_fail(build_id, error_message)
 
     async def build_cancel_aio(
         self, build_id: UUID, *, cascade: bool = False

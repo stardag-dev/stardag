@@ -776,6 +776,23 @@ class BulkCancelBuildsResponse(BaseModel):
     truncated: bool = False
 
 
+class BuildFailResponse(BuildResponse):
+    """Response of ``POST /builds/{id}/fail``.
+
+    A superset of :class:`BuildResponse`, so clients written against the
+    plain build shape are unaffected.
+
+    ``skipped_task_ids`` is what the fail *itself* skipped, completing the
+    blocked closure in the same transaction that released the claims. It
+    matters because the caller can no longer discover it: a scheduler that
+    asks ``POST /builds/{id}/skip-blocked`` afterwards gets an empty list,
+    the work having already been done, and would otherwise report having
+    skipped nothing on the tick that skipped everything.
+    """
+
+    skipped_task_ids: list[str] = []
+
+
 class SkipBlockedResponse(BaseModel):
     """Tasks skipped by POST /builds/{id}/skip-blocked."""
 

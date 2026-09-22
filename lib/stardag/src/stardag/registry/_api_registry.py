@@ -44,6 +44,7 @@ from stardag.registry._base import (
     SchedulerLeaseResult,
     StartClaimResult,
     BuildCancelResult,
+    BuildFailResult,
     BuildFrontier,
     BuildInfo,
     BuildListPage,
@@ -726,18 +727,21 @@ class APIRegistry(RegistryABC):
         )
         logger.info(f"Completed build: {build_id}")
 
-    def build_fail(self, build_id: UUID, error_message: str | None = None) -> None:
-        """Mark a build as failed."""
+    def build_fail(
+        self, build_id: UUID, error_message: str | None = None
+    ) -> BuildFailResult | None:
+        """Mark a build as failed, releasing the claims it holds."""
         params = self._get_event_params()
         if error_message:
             params["error_message"] = error_message
-        self._request(
+        response = self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/fail",
             params=params,
             operation="Fail build",
         )
         logger.info(f"Marked build as failed: {build_id}")
+        return BuildFailResult.model_validate(response.json())
 
     def build_cancel(
         self, build_id: UUID, *, cascade: bool = False
@@ -1495,18 +1499,19 @@ class APIRegistry(RegistryABC):
 
     async def build_fail_aio(
         self, build_id: UUID, error_message: str | None = None
-    ) -> None:
+    ) -> BuildFailResult | None:
         """Async version - mark a build as failed."""
         params = self._get_event_params()
         if error_message:
             params["error_message"] = error_message
-        await self._arequest(
+        response = await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/fail",
             params=params,
             operation="Fail build",
         )
         logger.info(f"Marked build as failed: {build_id}")
+        return BuildFailResult.model_validate(response.json())
 
     async def build_cancel_aio(
         self, build_id: UUID, *, cascade: bool = False

@@ -175,6 +175,32 @@ async def test_a_failed_build_completes_the_blocked_closure(client: AsyncClient)
 
 
 @pytest.mark.asyncio
+async def test_the_fail_response_reports_what_it_skipped(client: AsyncClient):
+    """The count has nowhere else to come from.
+
+    The closure runs inside ``/fail``, so a caller that asks
+    ``skip-blocked`` afterwards is told nothing was skipped — correctly,
+    the work being done. A scheduler that counted only that answer would
+    report zero skips on the very tick that skipped everything, which is
+    what the tick trail and the UI show. So the fail reports its own.
+    """
+    build_id = await _new_build(client)
+    await _start(client, build_id, "upstream")
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json=_register("downstream", deps=["upstream"]),
+    )
+
+    failed = await client.post(f"/api/v1/builds/{build_id}/fail")
+    assert failed.status_code == 200, failed.text
+    assert failed.json()["skipped_task_ids"] == ["downstream"]
+
+    # And the follow-up call finds nothing, which is why the above matters.
+    again = await client.post(f"/api/v1/builds/{build_id}/skip-blocked")
+    assert again.json()["skipped_task_ids"] == []
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_build_does_not_skip_the_descendants(client: AsyncClient):
     """The other side of that line, pinned so it is not "fixed" by symmetry.
 

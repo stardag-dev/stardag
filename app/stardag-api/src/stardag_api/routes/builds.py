@@ -55,6 +55,7 @@ from stardag_api.schemas import (
     AddDependenciesRequest,
     AddDependenciesResponse,
     BuildCancelResponse,
+    BuildFailResponse,
     BuildCreate,
     BuildFrontierResponse,
     BuildListResponse,
@@ -1644,7 +1645,7 @@ async def complete_build(
     return await _build_to_response(db, build)
 
 
-@router.post("/{build_id}/fail", response_model=BuildResponse)
+@router.post("/{build_id}/fail", response_model=BuildFailResponse)
 async def fail_build(
     build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -1745,7 +1746,11 @@ async def fail_build(
     for _ in range(len(released) + len(blocked) + 1):
         record_entity_created(auth.workspace_id, "events")
 
-    return await _build_to_response(db, build)
+    base = await _build_to_response(db, build)
+    return BuildFailResponse(
+        **base.model_dump(),
+        skipped_task_ids=[t.task_id for t in blocked],
+    )
 
 
 @router.post("/{build_id}/cancel", response_model=BuildCancelResponse)

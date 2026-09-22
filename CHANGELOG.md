@@ -304,6 +304,15 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   released are SKIPPED rather than dangling PENDING. The scheduler still
   asks, and that call is now a no-op.
 
+  **`POST /builds/{id}/fail` therefore reports what it skipped**, in a new
+  `skipped_task_ids` field on its response, and `RegistryABC.build_fail`
+  returns it (`BuildFailResult | None`, the same optional-return
+  convention `build_cancel` uses — an override returning `None` is
+  unaffected). Without it the count had nowhere to come from: the
+  follow-up `skip-blocked` call correctly answers empty, so a scheduler
+  counting only that answer reported zero skips on the tick that skipped
+  everything, which is the number its trail and the UI show.
+
   It has to be here rather than left to the caller, because _when_ the
   caller asks differs by version: every SDK up to v0.25.0 skips before it
   fails, since its cancel drain used to cancel the running branch first
