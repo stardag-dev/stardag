@@ -382,6 +382,52 @@ describe("BuildView header and tool-and-info bar", () => {
     expect(refresh).not.toHaveAccessibleDescription(/every 5 seconds/i);
   });
 
+  // A pending single click holds the closure of the identity it was
+  // aimed at. Firing after navigation does not merely waste a request:
+  // it bumps the shared load epoch, discarding the load that is
+  // legitimately in flight, then applies its own older answer.
+  it("drops a pending click when the build changes under it", async () => {
+    const OTHER = "02b1d6d4-0000-7000-8000-000000000000";
+    const user = userEvent.setup();
+    const view = renderView();
+    const refresh = await screen.findByRole("button", { name: "Refresh" });
+
+    // One click: the action is deferred for the double-click window.
+    await user.click(refresh);
+    const callsBefore = vi.mocked(fetchBuild).mock.calls.length;
+
+    view.rerender(
+      <BreadcrumbProvider>
+        <CrumbProbe />
+        <BuildView buildId={OTHER} onBack={vi.fn()} />
+      </BreadcrumbProvider>,
+    );
+
+    // Past the 300ms window, the abandoned click must not have fired a
+    // refresh of its own on top of the new build's load.
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(vi.mocked(fetchBuild).mock.calls.length).toBe(callsBefore + 1);
+    expect(vi.mocked(fetchBuild).mock.calls.at(-1)?.[0]).toBe(OTHER);
+  });
+
+  // `refreshing` was a state snapshot each caller cleared on its own
+  // completion, so an older one finishing could unlock the door for a
+  // newer request while one was still in flight.
+  it("runs one refresh at a time", async () => {
+    const user = userEvent.setup();
+    renderView();
+    const refresh = await screen.findByRole("button", { name: "Refresh" });
+
+    // Reads from here never answer, so the first refresh stays in flight.
+    vi.mocked(fetchBuild).mockReturnValue(new Promise(() => {}) as never);
+    await user.click(refresh);
+    await waitFor(() => expect(fetchBuild).toHaveBeenCalledTimes(2));
+
+    await user.click(refresh);
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(fetchBuild).toHaveBeenCalledTimes(2);
+  });
+
   it("says nothing about a config the build never set", async () => {
     const user = userEvent.setup();
     renderView();

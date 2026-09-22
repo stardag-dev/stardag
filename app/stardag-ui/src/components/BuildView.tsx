@@ -78,12 +78,22 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   const [refreshToken, setRefreshToken] = useState(0);
   const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Pending single click, held for the double-click window.
+  //
+  // Cleared on a change of build or environment, not only on unmount:
+  // this component stays mounted through both, and a timer left running
+  // fires with the *previous* identity's closure. That is not merely a
+  // wasted request — it bumps the shared load epoch, which discards the
+  // load that is legitimately in flight, and then applies its own older
+  // answer as the current one.
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
     () => () => {
-      if (clickTimerRef.current !== null) clearTimeout(clickTimerRef.current);
+      if (clickTimerRef.current !== null) {
+        clearTimeout(clickTimerRef.current);
+        clickTimerRef.current = null;
+      }
     },
-    [],
+    [buildId, activeEnvironment?.id],
   );
 
   // Handle DAG toggle with panel resize
@@ -178,11 +188,30 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   }, [buildId]);
 
   // Refresh handler
+  // Single-flight, on a ref rather than on `refreshing`.
+  //
+  // `refreshing` is a state snapshot, and every caller cleared it on its
+  // own completion — so with the 5-second interval firing regardless of
+  // what was already in flight, an older completion could clear the flag
+  // while a newer request was still running, and the next caller would
+  // start another on top. The ref is the fact; `refreshing` is only the
+  // spin on the icon.
+  //
+  // It guards *refreshes* rather than `loadBuild` itself, because a load
+  // triggered by a change of build, environment or DAG controls is a
+  // different request and must supersede rather than be skipped.
+  const refreshInFlightRef = useRef(false);
   const handleRefresh = useCallback(async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     setRefreshing(true);
     setRefreshToken((token) => token + 1);
-    await loadBuild();
-    setRefreshing(false);
+    try {
+      await loadBuild();
+    } finally {
+      refreshInFlightRef.current = false;
+      setRefreshing(false);
+    }
   }, [loadBuild]);
 
   // Auto-refreshing a build that has stopped is pointless, and the
@@ -246,9 +275,9 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null;
       if (autoRefresh) setAutoRefresh(false);
-      else if (!refreshing) handleRefresh();
+      else handleRefresh();
     }, 300);
-  }, [autoRefresh, canAutoRefresh, refreshing, handleRefresh]);
+  }, [autoRefresh, canAutoRefresh, handleRefresh]);
 
   const handleBuildOverridden = useCallback(
     (updated: Build) => {
