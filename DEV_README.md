@@ -326,6 +326,30 @@ competitor refused?" one round trip into a five-second lease, and on a loaded
 runner the round trip outlived the lease, so a correct answer was reported as
 a failure on somebody's unrelated PR.
 
+**Assert on durable state, never on a report from a process that can be
+preempted.** The sibling rule, and the one with teeth: a tick summary, a
+worker's self-report and an in-memory counter are diagnostics; the registry
+is the evidence. A scheduler tick can be killed at any moment, so
+`assert any(s.get("rolled_over") for s in summaries)` tests the absence of a
+_report_ and concludes the absence of the _behaviour_ — and those come apart
+exactly when it matters. A tick rolled a build over on 2026-09-21 and was
+preempted 53 seconds later; the rollover was correct and the scenario failed
+in the same words a genuine rollover regression would have produced. That is
+the cost: not the flake, but that a real regression then reads as the known
+flake. `test_rollover` now asserts that _this build_ is scoped to the new
+code, that edges exist under it, and that the deployments record names it
+current — none of which needs a reporter to survive — and prints what the
+ticks said underneath, as a diagnostic.
+
+The direction matters, and it is the whole of how to apply this. Requiring a
+_good_ report to be present fails when the reporter dies. Requiring a _bad_
+one to be absent can only fail on evidence that really exists, so
+`assert not any(s.get("outcome") == "rollover_failed" ...)` stays. When the
+durable substitute is not obvious, it is usually the task event log:
+`test_interruption_classification` asks for a `task_started` recorded after
+the `task_interrupted` rather than for a tick's `interruptions_restarted`
+count, which says the same thing and survives the tick that did it.
+
 **A scenario that needs its second build woken _twice_ should keep that
 build resident instead.** `select_wake_candidates` hands a flagged build
 out at most once per 120s window and does not compare the flag's timestamp
