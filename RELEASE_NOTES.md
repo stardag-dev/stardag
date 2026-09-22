@@ -204,6 +204,16 @@ container kept running until its backend noticed.
 **What you gain:** cancelling a build can no longer kill a neighbour's
 worker, which is what the incidents were.
 
+#### Server first, and this one has no exception
+
+Deploy the registry before tagging the SDK. The usual test for relaxing
+that rule asks whether anything in the increment can _refuse_ an older
+server; here the problem is the opposite direction. A new SDK against an
+old registry no longer drains cancels, and the old registry's `/fail` does
+not release claims — so a `FAIL_FAST` build would leave its running tasks
+claimed, and their concurrency-limit slots occupied, until the claims
+expire. That is worse than either version alone.
+
 #### A failed build now releases its claims
 
 `POST /builds/{id}/fail` releases the execution claims the build holds,

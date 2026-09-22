@@ -329,8 +329,8 @@ async def select_wake_candidates(
 ) -> list[Build]:
     """Hand out the flagged builds nobody is serving. No commit.
 
-    A build qualifies when it is RUNNING (or CANCELLED with the flag its
-    cancel set — see ``_CANDIDATE_STATUSES``), reactively scheduled, has a
+    A build qualifies when it is RUNNING (see ``_CANDIDATE_STATUSES``;
+    CANCELLED used to qualify too), reactively scheduled, has a
     pending wake-up (``needs_tick_at``), holds no live scheduler lease, and
     was not handed out within :data:`WAKE_HANDOUT_WINDOW`. Every build
     returned is stamped ``tick_requested_at = now`` in the same transaction,

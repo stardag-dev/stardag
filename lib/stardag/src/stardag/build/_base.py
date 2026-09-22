@@ -506,9 +506,14 @@ class TaskExecutorABC(ABC):
         """Best-effort cancel of a detached execution by its recorded ref.
 
         Unlike :meth:`cancel` (which works on in-flight handles tracked by
-        this executor instance), this cancels an execution started by *any*
-        process — used by scheduler ticks on build failure/cancellation.
-        Default: no-op.
+        this executor instance), this cancels an execution named only by a
+        recorded reference.
+
+        **No scheduler calls this to revoke another process's work any
+        more** (STA-81). What remains is a tick stopping a container it
+        spawned *itself*, in the pass that spawned it, when the registry
+        then refused the start — the execution is orphaned, nothing else
+        can find it, and the handle is still in hand. Default: no-op.
         """
         pass
 

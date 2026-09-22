@@ -1655,18 +1655,19 @@ async def fail_build(
 ):
     """Mark a build as failed, releasing the claims it holds.
 
-    A build going terminal releases its claims — the same rule a cancel
-    follows, and for the same reason: a task left RUNNING under a build
-    that is over keeps denying its execution claim, and keeps occupying its
-    concurrency-limit slots, until the claim expires. The scope, what is
-    written and what is deliberately left alone are stated once, at
+    A task left RUNNING under a build that is over keeps denying its
+    execution claim, and keeps occupying its concurrency-limit slots, until
+    the claim expires. The scope, what is written and what is deliberately
+    left alone are stated once, at
     :func:`stardag_api.services.build_cleanup.cascade_cancel_build_tasks`.
 
-    Unconditional here, unlike the cancel route's opt-in ``cascade``. A
-    failing build is its own scheduler reporting that it has stopped
-    working, so there is no caller who wants the claims kept — where a
-    cancel may legitimately be a bookkeeping correction to a build somebody
-    else is still running.
+    **Unconditional here, unlike the cancel route's opt-in ``cascade``**,
+    and the asymmetry is deliberate. A failing build is its own scheduler
+    reporting that it has stopped working, so there is no caller left who
+    wants the claims kept. A cancel arrives from outside and may be a
+    bookkeeping correction to a build somebody else is still running, or
+    the second half of ``stardag builds stop``, which has already dealt
+    with the containers — so the caller says.
 
     **The server still stops nothing.** Like every other status write this
     rewrites the registry's view; a worker whose task is released here runs

@@ -60,7 +60,11 @@ pytestmark = [
     # Longer than the tier's usual 900: this scenario now waits out the
     # excluded upstreams' own sleep, which is the price of asserting that
     # they were never touched rather than merely that they were listed.
-    pytest.mark.timeout(1200),
+    #
+    # Sized above the sum of the per-step budgets below (420 + 420 + 120 +
+    # 180 + 180), so a slow run fails on the step that is actually late
+    # and says which, rather than on this one, which says nothing.
+    pytest.mark.timeout(1500),
 ]
 
 # Long enough for the tick to put four containers on two workers and stay
@@ -212,6 +216,12 @@ def test_stop_cancels_only_the_selected_workers_calls() -> None:
     # poll below rather than after it, because this is the claim with a
     # deadline: these containers end on their own eventually, and a check
     # made minutes later could not tell "never touched" from "finished".
+    #
+    # It therefore requires the upstreams' sleep to outlast everything
+    # above — the two RUNNING waits and the command's own run. That is
+    # already what ``WorkerFanIn``'s docstring says the duration is for,
+    # and it fails safe: an upstream that outran its sleep is COMPLETED,
+    # so the "all four running" wait times out first and says so.
     # Nothing else in the system can stop them -- the drain that used to is
     # gone (see the module docstring) -- so a dead one here means the
     # command reached past its own selection.

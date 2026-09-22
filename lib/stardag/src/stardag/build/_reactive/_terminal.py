@@ -39,11 +39,20 @@ async def _handle_terminal(
     work in flight, or is waiting on a concurrency-limit slot.
     """
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
-        # Nothing to do but report it. A terminal build's claims are
-        # released by the registry as part of the transition that made it
-        # terminal, and its containers stop themselves at their next
-        # cooperative checkpoint (``stardag.cancellation``). This tick
-        # reaches into nothing.
+        # Nothing to do but report it. This tick reaches into no
+        # container, and it releases nothing either.
+        #
+        # Whether the claims are already gone depends on how the build was
+        # cancelled, and that is the caller's decision rather than this
+        # one's: ``stardag builds stop`` stops the executions and then
+        # cancels with a release, while a plain cancel deliberately
+        # releases nothing and says so. What this tick must not do is
+        # decide it on their behalf, which is what the drain did -- it
+        # released claims for containers it had asked a backend to stop,
+        # with no way to know whether the stop took.
+        #
+        # The workers under any claims that were released find out at
+        # their own checkpoints (``stardag.cancellation``).
         return frontier.build_status
 
     counts = frontier.status_counts
@@ -58,6 +67,12 @@ async def _handle_terminal(
         # and therefore seeds of the blocked closure. Skipping first would
         # leave their descendants dangling PENDING, because a RUNNING
         # intermediate may still complete and so blocks nothing.
+        #
+        # The cost of that order: if the skip call is lost, the build is
+        # already terminal and no later tick will retry it, so the
+        # descendants dangle. ``_skip_blocked`` logs at ERROR for exactly
+        # that reason — it is cosmetic state, but it is now unrecoverable
+        # cosmetic state.
         #
         # Nothing is stopped from here. The workers under those released
         # claims find out at their next cooperative checkpoint; see
@@ -176,4 +191,7 @@ async def _skip_blocked(
             "by the failure will remain pending."
         )
     except Exception as e:
-        logger.warning(f"Failed to skip blocked tasks for build {build_id}: {e}")
+        # ERROR, not WARNING: the build is already terminal by the time
+        # this runs (see ``_handle_terminal``), so nothing will retry it —
+        # a lost skip leaves blocked descendants PENDING for good.
+        logger.error(f"Failed to skip blocked tasks for build {build_id}: {e}")

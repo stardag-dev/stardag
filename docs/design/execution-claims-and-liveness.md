@@ -118,13 +118,29 @@ point, and it is the reverse of what the scheduler was attempting. **The
 server never reaches an execution backend**; the command does, from the
 operator's own credentials.
 
-**A build going terminal releases the claims it holds**, by every route out
-— cancelled, failed, or swept as abandoned — and stops there. The
-containers run on until they notice; their output is content-addressed, so
-one that finishes writes something nobody reads. That is the cheap error,
-and it is the one this design now takes deliberately. The expensive one was
-a claim held past the build that owned it, and that is what the release
-prevents.
+**Releasing a claim is now the only thing any of these paths does**, and it
+stops there. A build that fails releases the claims it held, and so does a
+cancel that asked to (`cascade`) and the reaper sweeping an abandoned
+build; one implementation serves all three.
+
+**A plain cancel deliberately releases nothing**, and that asymmetry is the
+design rather than an oversight. Releasing is what lets the next build take
+the task over, so doing it while a container is still running is a decision
+about somebody's running work. `stardag builds stop` makes that decision in
+the right order — stop the executions, then cancel with a release — and a
+cancel of a build you believe is already dead makes it by asking for the
+cascade. Until then the claim lapses on its own expiry.
+
+Note this is a change in _behaviour_ and not in intent: before the drain
+was removed, a plain cancel of a _reactive_ build had its claims released a
+tick later, by the drain, as a side effect of stopping containers it could
+not confirm it had stopped. The CLI already documented the behaviour you
+now get.
+
+Whatever is released, the containers run on until they notice; their output
+is content-addressed, so one that finishes writes something nobody reads.
+That is the cheap error, and it is the one this design takes deliberately.
+The expensive one was a claim held past the build that owned it.
 
 The loss worth naming: a task with side effects outside its target is not
 protected by any of this, and never was.

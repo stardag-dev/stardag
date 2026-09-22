@@ -174,6 +174,26 @@ def test_a_cancelled_build_stops_its_own_executions_and_no_others() -> None:
         "build rewrote it.\n" + describe(build_a)
     )
 
+    # The rule itself, asked directly. The tick above no longer issues a
+    # per-task cancel at all -- it returns on the terminal frontier -- so
+    # without this the scenario would only show that nothing reached B's
+    # task, not that the route would refuse if something tried. Issuing it
+    # as A, which does not hold the task, is exactly the call the deleted
+    # drain used to make, and the one production incident began with.
+    from stardag.exceptions import APIError
+
+    with pytest.raises(APIError) as refused:
+        registry.task_cancel_by_id(build_a, shared_id)
+    assert refused.value.status_code == 409, (
+        "The registry accepted a cancel of a task held by another build. "
+        f"That is the incident this scenario exists for.\n{describe(build_a)}"
+    )
+    assert (refused.value.payload or {}).get("error_code") == "not_claim_holder", (
+        f"Refused, but not as a claim-holder violation: {refused.value.payload}"
+    )
+    # And it really was refused, rather than recorded and then overwritten.
+    assert _owner(shared_id) == build_b, describe(build_b)
+
     status_b = wait_for_terminal(build_b, timeout=BUILD_TIMEOUT_SECONDS)
     assert status_b == "completed", (
         "Build B did not finish. Its executions were being cancelled out "

@@ -183,11 +183,9 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.status_build_id: dict[str, UUID | None] = {}
         # build_id -> task_id -> (executor, ref): the starts each build
         # recorded, which outlive that build losing the task.
-        self.started_by: dict[UUID, dict[str, tuple[str, str]]] = {}
         # Starts staged by ``add_task`` rather than simulated call-by-call.
         # Attributed to whichever build asks, since a test staging a ref is
         # setting up that build's own past.
-        self.staged_starts: dict[str, tuple[str, str]] = {}
         # task_id -> (namespace, name), echoed on blocker entries.
         self.task_names: dict[str, tuple[str, str]] = {}
         # Derived status of OTHER builds in the environment, served by
@@ -225,26 +223,11 @@ class FakeReactiveRegistry(NoOpRegistry):
         expires_at: "datetime | None" = None,
         attempt_count: int | None = None,
         interrupt_count: int = 0,
-        started_by_build: "UUID | None" = None,
     ) -> None:
         self.statuses[task_id] = status
         self.upstreams.setdefault(task_id, set()).update(upstreams or set())
         if executor or executor_ref:
             self.refs[task_id] = (executor, executor_ref)
-        if executor is not None and executor_ref is not None:
-            # Which build *started* this execution, which is a different
-            # question from who holds the task now — and the one the
-            # executions listing answers. ``started_by_build`` names it
-            # explicitly for a neighbour's execution; without it the start
-            # is attributed to whichever build asks, since a test staging a
-            # ref is usually setting up that build's own past.
-            if started_by_build is not None:
-                self.started_by.setdefault(started_by_build, {})[task_id] = (
-                    executor,
-                    executor_ref,
-                )
-            else:
-                self.staged_starts[task_id] = (executor, executor_ref)
         if status_at is not None:
             self.status_at[task_id] = status_at
         if expires_at is not None:
@@ -435,26 +418,6 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.statuses[tid] = "running"
         self.status_build_id[tid] = build_id
         self.refs[tid] = (executor, executor_ref)
-        # Per build, because that is what the event log records and what
-        # the executions listing reads. ``refs`` alone is the *current*
-        # execution, which stops being this build's the moment another one
-        # takes the task over.
-        # The retirement rule, modelled: the latest start decides the
-        # backend, and only a ref belonging to *that* backend is still this
-        # build's to stop. Recording only when both fields are present left
-        # an old detached ref in place after a start on another backend, so
-        # the fake offered an execution the real event-log query retires —
-        # and a cleanup test would have cancelled a stale container and
-        # called it a success.
-        mine = self.started_by.setdefault(build_id, {})
-        if executor is None:
-            mine.pop(tid, None)
-        elif executor_ref is not None:
-            mine[tid] = (executor, executor_ref)
-        elif mine.get(tid, (None, None))[0] != executor:
-            # Ref-less start on a different backend: the old ref is retired
-            # and this backend has not named an execution yet.
-            mine.pop(tid, None)
         self.start_metadata[tid] = executor_metadata
         if self.auto_complete:
             # Instant worker: completes and wakes the scheduler.
@@ -656,7 +619,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         # because the terminal path depends on it — the tick fails the
         # build *before* asking for the blocked closure, precisely so the
         # tasks this releases become seeds of it.
-        self._release_claims()
+        self._release_claims(build_id)
 
     async def task_get_metadata_aio(self, task_id):
         from stardag.registry._base import TaskMetadata
@@ -681,11 +644,20 @@ class FakeReactiveRegistry(NoOpRegistry):
             error_message=None,
         )
 
-    def _release_claims(self) -> None:
-        """TASK_CANCELLED for every task this build holds live."""
+    def _release_claims(self, build_id) -> None:
+        """TASK_CANCELLED for the live claims *this build* holds.
+
+        Scoped by ``status_build_id``, exactly as the server scopes it. A
+        wider release would be a fake that cannot fail on the one thing
+        this rule exists to guarantee — that a build going terminal never
+        declares a neighbour's live worker dead.
+        """
         for tid, status in list(self.statuses.items()):
-            if status in ("running", "suspended", "interrupted"):
-                self.statuses[tid] = "cancelled"
+            if status not in ("running", "suspended", "interrupted"):
+                continue
+            if self.status_build_id.get(tid, build_id) != build_id:
+                continue
+            self.statuses[tid] = "cancelled"
 
     async def build_skip_blocked_aio(self, build_id):
         # Mirrors the API: pending/suspended tasks transitively downstream

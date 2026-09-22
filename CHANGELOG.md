@@ -220,8 +220,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - `latest_execution_id` is surfaced on the task read models
   (`GET /tasks`, `GET /tasks/{task_id}`).
 
-- **A build going terminal releases the claims it holds, by every route
-  out.** `POST /builds/{id}/fail` now releases them, unconditionally — it
+- **A failed build releases the claims it holds.**
+  `POST /builds/{id}/fail` now releases them, unconditionally — it
   previously wrote a single BUILD_FAILED event, and the claims of a
   fail-fast build's running tasks were released as a side effect of the
   SDK's cancel drain stopping each container. With the drain gone that was
@@ -232,8 +232,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
   `POST /builds/{id}/cancel` is unchanged: its `cascade` parameter still
   decides, because a cancel may legitimately be a bookkeeping correction to
-  a build somebody else is running, where a build failing is its own
-  scheduler saying it has stopped.
+  a build somebody else is running, or the second half of
+  `stardag builds stop`, which has already dealt with the containers.
+
+  **One behaviour change falls out of that.** A plain cancel of a
+  _reactive_ build used to have its claims released a tick later, by the
+  drain, as a side effect of stopping containers it could not confirm it
+  had stopped. Nothing does that now, so those claims lapse on their own
+  expiry — which is the behaviour `stardag builds cancel` has documented
+  since it shipped, and the reason `builds stop` exists. Use `builds stop`
+  for a build that is still running something.
 
 - **`GET /builds/{id}/executions` is removed**, with the event-log
   reconstruction behind it — two window functions, the keyset cursor, and
@@ -243,9 +251,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 - **The per-task cancel no longer takes `if_executor` / `if_executor_ref`.**
   Their only caller was the drain. An old client still sending them gets a
-  plain cancel, which is the safe direction — the caller wanted the claim
-  released, and the `not_claim_holder` authority rule still decides whether
-  it may.
+  plain cancel — unknown query parameters are ignored — so the narrowing
+  they asked for is not applied. The `not_claim_holder` authority rule
+  still decides whether the caller may cancel at all, which is the
+  protection that mattered; what is lost is the finer "and only if it is
+  still _this_ execution" test. Reachable only by an SDK old enough to
+  still run a drain, against a server new enough to have none.
 
 - **A cancelled build is no longer flagged for a scheduler tick.** That
   flag existed to run the drain again; a terminal build's tick would now
