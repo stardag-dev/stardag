@@ -258,18 +258,10 @@ def verdict_for(occurrence: dict, log: AccessLog) -> tuple[str, list[str]]:
         return _verdict_without_a_request(log, at, matches)
 
     if not matches and not log.covers_window_before(at):
-        span = log.span
-        where = (
-            f"{span[0].isoformat(timespec='seconds')} .. "
-            f"{span[1].isoformat(timespec='seconds')}"
-            if span
-            else "empty"
-        )
         return "NO VERDICT", [
-            f"No matching request, and the access log does not cover the "
-            f"{LOOKBACK_SECONDS:.0f}s before "
-            f"{at.isoformat(timespec='seconds')} (it spans {where}). So the "
-            f"absence is a gap in the evidence rather than evidence."
+            _incomplete_window(log, at),
+            "So the absence of a matching request is a gap in the evidence "
+            "rather than evidence.",
         ]
 
     if not matches:
@@ -323,6 +315,20 @@ def verdict_for(occurrence: dict, log: AccessLog) -> tuple[str, list[str]]:
             "its resources and the tier's worker count.",
         ]
 
+    # Every positive verdict above rests on a line that is *present*, so a
+    # truncated dump cannot make one of them wrong. C is the opposite
+    # shape -- it rests on nothing in the window being slow -- so it needs
+    # the window whole. A dump that starts inside the lookback leaves rows
+    # to look at and a prefix that cannot be looked at, and "none of the
+    # ones I can see was slow" is not the claim C makes.
+    if not log.covers_window_before(at):
+        return "NO VERDICT", [
+            _incomplete_window(log, at),
+            "Matching requests were found and none of them was slow, but "
+            "that is only a claim about the part of the window that "
+            "survived the dump.",
+        ]
+
     worst = max(matches, key=lambda row: row.duration)
     subject = (
         "The registry served this request"
@@ -350,12 +356,6 @@ def _verdict_without_a_request(
     handled around that moment was slow -- which still refutes B when
     nothing was.
     """
-    if not window and not log.covers_window_before(at):
-        return "NO VERDICT", [
-            "The failing request could not be identified from the "
-            "exception, and the access log does not cover the window "
-            "around it either. There is nothing here to reason from."
-        ]
     slow = [row for row in window if row.execution >= SLOW_EXECUTION_SECONDS]
     if slow:
         worst = max(slow, key=lambda row: row.execution)
@@ -363,6 +363,18 @@ def _verdict_without_a_request(
             "The failing request could not be identified from the "
             "exception, so this reads the whole window instead.",
             f"Something was slow in the handler there: {worst.describe()}.",
+        ]
+    # Checked *after* the positive branch, for the reason above: a slow row
+    # that is present is evidence whether or not anything was dropped. This
+    # verdict is already the weaker one -- it reasons from the window
+    # rather than the request -- and over a window with a hole in it there
+    # is nothing left of it at all.
+    if not log.covers_window_before(at):
+        return "NO VERDICT", [
+            "The failing request could not be identified from the "
+            "exception, so this had only the window to read -- and the "
+            "access log does not cover the whole of it.",
+            _incomplete_window(log, at),
         ]
     return "HYPOTHESIS C", [
         "The failing request could not be identified from the exception, "
@@ -372,6 +384,22 @@ def _verdict_without_a_request(
         f"slow in the handler. Nothing on the registry took the time the "
         f"client spent waiting.",
     ]
+
+
+def _incomplete_window(log: AccessLog, at: dt.datetime) -> str:
+    """Say which part of the window is missing, in the log's own terms."""
+    span = log.span
+    where = (
+        f"{span[0].isoformat(timespec='seconds')} .. "
+        f"{span[1].isoformat(timespec='seconds')}"
+        if span
+        else "empty"
+    )
+    return (
+        f"The access log does not cover the {LOOKBACK_SECONDS:.0f}s before "
+        f"{at.isoformat(timespec='seconds')} (it spans {where}), so part of "
+        f"the window was dropped from the dump rather than being quiet."
+    )
 
 
 def _parsed_time(value: object) -> dt.datetime | None:

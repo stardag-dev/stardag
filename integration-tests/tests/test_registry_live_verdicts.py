@@ -51,6 +51,21 @@ def _line(
     )
 
 
+def _bracket() -> tuple[str, str]:
+    """Two lines that make the log cover the whole lookback window.
+
+    Every real dump has these -- the registry serves continuously for the
+    length of a run, so its log starts well before any one failure and
+    ends after it. Without them a fixture describes a *truncated* dump,
+    over which no verdict from absence is available, and several of these
+    tests said "the server saw nothing slow" from a log holding one line.
+    """
+    return (
+        _line(_AT - dt.timedelta(seconds=150), "GET", "/health", status=200),
+        _line(_AT + dt.timedelta(seconds=10), "GET", "/health", status=200),
+    )
+
+
 def _log(directory: Path, *lines: str) -> None:
     (directory / REGISTRY_LOG_NAME).write_text(
         "# registry in Modal environment ci-pr-1\n" + "\n".join(lines) + "\n"
@@ -131,7 +146,7 @@ def test_a_server_that_saw_nothing_slow_is_the_third_answer(tmp_path: Path) -> N
     thirty seconds. Neither of the two original hypotheses fits, and the
     instrument used to answer B here with no evidence at all.
     """
-    _log(tmp_path, _line(_AT - dt.timedelta(seconds=30)))
+    _log(tmp_path, *_bracket(), _line(_AT - dt.timedelta(seconds=30)))
     verdict, evidence = verdict_for(
         _occurrence(), parse_access_log(tmp_path / REGISTRY_LOG_NAME)
     )
@@ -173,6 +188,7 @@ def test_several_candidates_weaken_a_positive_verdict_but_not_the_third(
     base = _AT - dt.timedelta(seconds=30)
     _log(
         tmp_path,
+        *_bracket(),
         _line(base, execution="21.4 s"),
         _line(base + dt.timedelta(seconds=1)),
     )
@@ -181,7 +197,7 @@ def test_several_candidates_weaken_a_positive_verdict_but_not_the_third(
     )
     assert "candidate rather than an identification" in " ".join(evidence)
 
-    _log(tmp_path, _line(base), _line(base + dt.timedelta(seconds=1)))
+    _log(tmp_path, *_bracket(), _line(base), _line(base + dt.timedelta(seconds=1)))
     verdict, evidence = verdict_for(
         _occurrence(), parse_access_log(tmp_path / REGISTRY_LOG_NAME)
     )
@@ -249,7 +265,7 @@ def test_a_recycle_keeps_its_own_answer(tmp_path: Path) -> None:
 def test_an_unidentifiable_request_falls_back_to_the_window_and_says_so(
     tmp_path: Path,
 ) -> None:
-    _log(tmp_path, _line(_AT - dt.timedelta(seconds=30)))
+    _log(tmp_path, *_bracket(), _line(_AT - dt.timedelta(seconds=30)))
     verdict, evidence = verdict_for(
         _occurrence(request_method=None, request_path=None),
         parse_access_log(tmp_path / REGISTRY_LOG_NAME),
@@ -268,7 +284,7 @@ def test_the_report_reads_a_retried_attempts_records_too(tmp_path: Path) -> None
     the very run that prompted it -- and on a retry that went green, the
     top level holds no records at all.
     """
-    _log(tmp_path, _line(_AT - dt.timedelta(seconds=30)))
+    _log(tmp_path, *_bracket(), _line(_AT - dt.timedelta(seconds=30)))
     attempt = tmp_path / "attempt-1"
     attempt.mkdir()
     (attempt / "timeout-call-test-a-1.json").write_text(json.dumps(_occurrence()))
@@ -279,10 +295,16 @@ def test_the_report_reads_a_retried_attempts_records_too(tmp_path: Path) -> None
 
 
 def test_the_report_says_when_there_is_nothing_to_reconcile(tmp_path: Path) -> None:
+    """A red run with no timeouts still gets the run-level summary.
+
+    That summary is the cheap half of the answer and stands on its own:
+    if nothing in several thousand requests came near the client's
+    timeout, that is worth reading whatever failed.
+    """
     _log(tmp_path, _line(_AT))
-    assert "Nothing to\n  reconcile" in report(tmp_path) or "reconcile" in report(
-        tmp_path
-    )
+    text = report(tmp_path)
+    assert "Nothing to" in text and "reconcile" in text
+    assert "access log: 1 requests" in text
 
 
 def test_the_report_flags_a_log_it_could_not_parse_at_all(tmp_path: Path) -> None:
@@ -299,7 +321,7 @@ def test_the_report_flags_a_log_it_could_not_parse_at_all(tmp_path: Path) -> Non
 
 
 def test_main_writes_the_verdicts_into_the_artifact(tmp_path: Path) -> None:
-    _log(tmp_path, _line(_AT - dt.timedelta(seconds=30)))
+    _log(tmp_path, *_bracket(), _line(_AT - dt.timedelta(seconds=30)))
     (tmp_path / "timeout-call-test-a-1.json").write_text(json.dumps(_occurrence()))
 
     assert diagnose.main(["--dir", str(tmp_path)]) == 0
@@ -310,3 +332,57 @@ def test_main_writes_the_verdicts_into_the_artifact(tmp_path: Path) -> None:
 def test_main_is_never_what_turns_a_run_red(tmp_path: Path) -> None:
     """A green run writes no diagnostics directory at all."""
     assert diagnose.main(["--dir", str(tmp_path / "absent")]) == 0
+
+
+def test_a_truncated_prefix_withdraws_the_third_verdict(tmp_path: Path) -> None:
+    """Copilot round 1 on #369, accepted and widened to both paths.
+
+    A dump whose oldest line falls *inside* the lookback leaves rows to
+    read and a prefix that cannot be read. Every positive verdict rests
+    on a line that is present, so truncation cannot make one of them
+    wrong — but C rests on *nothing* in the window being slow, and over a
+    window with a hole in it that claim is not available. The finding was
+    raised against the no-request fallback; the same argument applies
+    where the request is known, so both are gated.
+    """
+    # Starts 30s into a 90s lookback: rows exist, the prefix does not.
+    _log(
+        tmp_path,
+        _line(_AT - dt.timedelta(seconds=60)),
+        _line(_AT - dt.timedelta(seconds=30)),
+        _line(_AT + dt.timedelta(seconds=5), "GET", "/health", status=200),
+    )
+    log = parse_access_log(tmp_path / REGISTRY_LOG_NAME)
+    assert log.around(_AT, method="POST", path="/api/v1/builds"), (
+        "the premise of this test is a *non-empty* window over an "
+        "incomplete log; an empty one is the case above"
+    )
+
+    verdict, evidence = verdict_for(_occurrence(), log)
+    assert verdict == "NO VERDICT"
+    assert "dropped from the dump rather than being quiet" in " ".join(evidence)
+
+    verdict, _ = verdict_for(_occurrence(request_method=None, request_path=None), log)
+    assert verdict == "NO VERDICT"
+
+
+def test_a_slow_row_still_counts_over_a_truncated_log(tmp_path: Path) -> None:
+    """The gate is on absence, not on the log being perfect.
+
+    Ordering matters here: checking coverage first would throw away a
+    finding that is sitting in the file. What was dropped cannot make a
+    line that survived untrue.
+    """
+    _log(
+        tmp_path,
+        _line(_AT - dt.timedelta(seconds=30), execution="21.4 s"),
+        _line(_AT + dt.timedelta(seconds=5), "GET", "/health", status=200),
+    )
+    log = parse_access_log(tmp_path / REGISTRY_LOG_NAME)
+    assert not log.covers_window_before(_AT)
+
+    assert verdict_for(_occurrence(), log)[0] == "HYPOTHESIS B"
+    assert (
+        verdict_for(_occurrence(request_method=None, request_path=None), log)[0]
+        == "HYPOTHESIS B"
+    )

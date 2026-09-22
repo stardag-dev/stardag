@@ -282,23 +282,33 @@ a separate pass because the log is not readable from inside the run. After the
 dump, `diagnose.py` reconciles each timeout's JSON sidecar with the registry's
 own account of that request and writes `verdicts.txt`:
 
-| What the log shows for the timed-out request   | Verdict                                       |
-| ---------------------------------------------- | --------------------------------------------- |
-| Seconds inside the handler                     | **B** — the database path; a product signal   |
-| Fast handler, long total: it sat queued        | **A** — a starved container                   |
-| Served in milliseconds, or never logged at all | **C** — the server was not what took the time |
-| Nothing, and the log does not cover the window | **no verdict** — a gap, not evidence          |
+| What the log shows for the timed-out request    | Verdict                                       |
+| ----------------------------------------------- | --------------------------------------------- |
+| Seconds inside the handler                      | **B** — the database path; a product signal   |
+| Fast handler, long total: it sat queued         | **A** — a starved container                   |
+| Served in milliseconds, or never logged at all  | **C** — the server was not what took the time |
+| Anything, but the log misses part of the window | **no verdict** — a gap, not evidence          |
 
 C is a positive finding rather than a fallback, and it is what the live data
 shows: the traceback ends in `httpcore._receive_response_body`, so the
 response head arrived and the body did not.
 
-**Two rules the pass follows, both learned by getting them wrong.** A probe
-that found nothing serving is never overturned by a later reading of a log — a
-direct observation outranks an inference, and the log would be quiet in exactly
-that case. And a positive verdict says how many requests matched: paths that
-create a resource carry no id, twelve workers issue them at once, so a slow
-line in the window is a candidate rather than an identification.
+**Three rules the pass follows, each learned by getting it wrong.**
+
+A probe that found nothing serving is never overturned by a later reading of a
+log — a direct observation outranks an inference, and the log would be quiet in
+exactly that case.
+
+A positive verdict says how many requests matched: paths that create a resource
+carry no id, twelve workers issue them at once, so a slow line in the window is
+a candidate rather than an identification.
+
+**A and B rest on a line that is present; C rests on nothing in the window
+being slow.** So truncation cannot touch the first two and withdraws the third:
+if the dump's oldest line falls inside the lookback, the answer is `no verdict`
+even though rows were found, because "none of the ones I can see was slow" is
+not the claim C makes. The coverage check therefore runs _after_ the positive
+branches, never before them.
 
 **Everything a red run should be diagnosed from is uploaded as one artifact**,
 `registry-live-diagnostics-<attempt>`. That is not a convenience: `modal
