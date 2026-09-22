@@ -416,33 +416,46 @@ durable substitute is not obvious, it is usually the task event log:
 the `task_interrupted` rather than for a tick's `interruptions_restarted`
 count, which says the same thing and survives the tick that did it.
 
-**Where no durable substitute exists, two moves come before giving up.**
-Both were needed for the wake-up scenarios (STA-89), whose subject really is
-ticks — and the registry's only record of a tick is the summary it writes at
-the end, so there is nothing else to read.
+**A truncated trail cannot answer a counting question in either direction,
+so counts come from the event log.** This is the correction to a rule that
+briefly said the opposite. Losing a tick's summary lowers any sum read from
+the trail, so an exact count fails for a reason that is not the code's — and
+relaxing it to `<=` is _worse_, not safer: the missing summary is exactly
+where a duplicate spawn would have been recorded, so the ceiling passes
+**because** the evidence is gone. A one-directional argument (an under-count
+cannot breach a ceiling) rules out false failures and says nothing about false
+passes; both have to be ruled out before a weakened assertion is honest.
 
-_Take the precondition from the constants instead of from the run._ Those
-scenarios needed their build to be dormant before its work finished, and
-checked it by reading the trail: first summary `lingered_out`, more than one
-summary. The same fact follows from arithmetic — a tick lingers for a fixed
-window once idle, and cannot have started the work later than it spawned it,
-so work that outlasts the linger guarantees the tick went first.
-`assert_dormancy_is_forced` asserts that, and it is strictly stronger than the
-observation it replaces: no container is slow enough to break it, and slowness
-pushes it the safe way.
+The way out is that the thing being counted usually _is_ durable, and the
+harness was simply asking the wrong witness. A tick spawns a task only after
+the registry grants it the claim, and that grant is a row: a `task_started`
+event under the build carrying `event_metadata["claim"] = True`, written
+inside the transaction that arbitrates the claim, before any container exists.
+A denied claim raises before the event is constructed, so the count is of
+grants. An interruption restart takes the same path, so it adds one to the
+spawn count and one to the claim count and they stay equal.
+`_events.granted_claim_starts` reads it, and every spawn assertion is `== N`
+strict against it.
 
-_When a count does come from reports, assert the direction a missing report
-cannot fake._ A truncated trail can only **under**-count, so an upper bound
-survives it and a lower bound does not — and the upper bound is usually the
-one that matters anyway. `spawned <= TASKS_IN_PLAN` catches double execution,
-which is the defect; `== TASKS_IN_PLAN` additionally fails when a reporter
-dies. Same asymmetry as the good-report/bad-report one above, counted rather
-than present.
+**What genuinely has no durable record is skipped, and the skip is counted.**
+A tick self-healing a completion, a concurrency-limit denial and a tick
+finding the lease held are reported nowhere but the trail. For those,
+`_wait.require_complete_trail` returns no answer when the terminal tick never
+reported: `pytest.skip` with a reason, plus a marker CI counts the way it
+counts transport-timeout retries. A skip that nobody counts is how a tier
+quietly skips its way to green; a counted one is a measurement.
 
-One lower bound is knowingly kept: `test_limit_slot_wake` asserts that some
-tick was denied a concurrency slot, because a limit denial writes no event and
-the alternative is a scenario that passes with no limit in force at all. It is
-marked as the exception it is.
+**Take a precondition from the constants only where the arithmetic closes.**
+`test_reactive_e2e` spawns its own work, so a tick that lingers for a fixed
+window once idle must go before work that outlasts it —
+`assert_dormancy_is_forced` asserts exactly that, and no container is slow
+enough to break it. The other three wake-up scenarios wait on a task **another
+build already started**, where the constant is the task's total runtime and
+the quantity that matters is what remains when the waiting build's tick
+begins. Comparing the constant there lets a slow bootstrap leave the build
+resident through the completion while `75 > 15` still looks reassuring, so
+`assert_remaining_work_outlasts_linger` measures the remainder from the
+registry's record of the start, at the moment the waiting build is triggered.
 
 **`wait_for_terminal` no longer fails on a missing final summary.** Its wait
 stays — the read-before-report race is real, and without it every counter read

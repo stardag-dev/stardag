@@ -9,10 +9,16 @@ regressed" and "the Modal worker never started".
 
 from __future__ import annotations
 
+import os
 import sys
 import time
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 from uuid import UUID
+
+import pytest
 
 TERMINAL = ("completed", "failed", "cancelled")
 
@@ -183,6 +189,94 @@ def assert_dormancy_is_forced(
         )
 
 
+INCONCLUSIVE_MARKER_NAME = "inconclusive-trails"
+
+
+def require_complete_trail(build_id: UUID, *, what: str) -> None:
+    """Refuse to answer a counting question the trail cannot answer.
+
+    For the few counters with no durable record -- a tick self-healing a
+    completion, a concurrency-limit denial, a tick finding the lease
+    held. None of those writes a row, so the trail is the only witness,
+    and a trail missing its terminal entry is short by that tick's
+    contribution.
+
+    Both directions are unsound, which is why this skips rather than
+    relaxes. An exact count fails for a reason that is not the code's; a
+    `<=` passes because the evidence is gone. A skip is the honest third
+    answer, and it is counted, so a tier skipping its way to green is
+    visible rather than reassuring.
+
+    Spawn counts do *not* come here: a granted claim is a row, so they
+    are asserted against the event log instead (`_events`).
+    """
+    if not trail_may_be_truncated(build_id):
+        return
+    directory = os.environ.get("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", "").strip()
+    if directory:
+        try:
+            target = Path(directory)
+            target.mkdir(parents=True, exist_ok=True)
+            with (target / INCONCLUSIVE_MARKER_NAME).open("a") as marker:
+                marker.write(str(build_id) + " -- " + what + "\n")
+        except OSError as error:  # pragma: no cover - diagnostics only
+            print(
+                "Could not record the inconclusive trail: " + repr(error),
+                file=sys.stderr,
+            )
+    pytest.skip(
+        "Inconclusive: "
+        + what
+        + " is read off build "
+        + str(build_id)
+        + "'s tick trail, and the tick that ended that build never reported "
+        "its summary, so the trail is short by an entry and the count is "
+        "short by its contribution. Not a pass and not a failure; the "
+        "durable assertions above this one ran."
+    )
+
+
+def assert_remaining_work_outlasts_linger(
+    task_id: UUID, *, total_seconds: float, linger_seconds: float, what: str
+) -> None:
+    """The dormancy precondition when another build started the work already.
+
+    Measured, because a constant cannot answer it. The task is running
+    before this build is triggered, so what decides whether this build
+    goes dormant is the work *remaining* when its tick starts -- and a
+    slow bootstrap eats that margin while the constants still compare
+    favourably. Read the task's start from the registry, subtract, and
+    require the remainder to outlast the linger.
+
+    Not a clock race: the start time is a recorded fact and the
+    comparison is made once, at the moment the waiting build is
+    triggered. The margin it reports is the real one.
+    """
+    from stardag.registry import registry_provider
+
+    started_at = registry_provider.get().task_get_metadata(task_id).started_at
+    if started_at is None:
+        raise AssertionError(
+            what
+            + ": the registry has no start time for task "
+            + str(task_id)
+            + ", so the remaining window cannot be established."
+        )
+    elapsed = (
+        datetime.now(timezone.utc) - started_at.astimezone(timezone.utc)
+    ).total_seconds()
+    remaining = total_seconds - elapsed
+    if remaining <= linger_seconds:
+        raise AssertionError(
+            f"{what}: the task started {elapsed:.0f}s ago and runs for {total_seconds:g}s, so only "
+            f"{remaining:.0f}s remain -- not more than this build's linger ({linger_seconds:g}s). "
+            "The build is not guaranteed to be dormant when the task "
+            "finishes, so it may see the completion on its own poll and the "
+            "wake-up path would not be exercised. A slow bootstrap eats this "
+            "margin; raise the task's duration."
+        )
+
+
 def wait_for_terminal(
     build_id: UUID,
     *,
@@ -289,8 +383,8 @@ def task_status(task_id: UUID) -> str | None:
     the *normal* first answer: a scenario starts polling as soon as it has
     triggered a build, and the plan reaches the registry a moment later.
     """
-    from stardag.registry import registry_provider
     from stardag.exceptions import NotFoundError
+    from stardag.registry import registry_provider
 
     try:
         return registry_provider.get().task_get_metadata(task_id).status

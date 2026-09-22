@@ -47,8 +47,10 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
 from stardag_integration_tests.registry_live._deployed import run_watchdog_sweep
+from stardag_integration_tests.registry_live._events import (
+    granted_claim_starts,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
@@ -183,7 +185,11 @@ def test_one_sweep_spawns_one_tick_per_build_and_returns(
         # Each task ran once: a sweep that spawns a tick for a build whose
         # work is already in flight must not start a second copy of it.
         # leaf, slow, root.
-        spawned = sum(s.get("spawned", 0) for s in summaries)
+        # Counted from the event log, not the tick trail: a granted claim
+        # is a row written before the container exists, so a preempted
+        # reporter cannot make it short.
+        claims = granted_claim_starts(deployment, build_id)
+        spawned = sum(claims.values())
         assert spawned == 3, (
             f"Build {index} spawned {spawned} tasks for a three-task plan. "
             "A swept tick arriving while the build's own work is running "

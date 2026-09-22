@@ -15,7 +15,8 @@ workers use, and the same shape as the harness's other direct calls.
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 import httpx
 
@@ -139,3 +140,64 @@ def first_event_at(events: Iterable[dict[str, Any]], build_id: Any) -> str | Non
     """
     mine = events_by(events, build_id)
     return str(mine[0]["created_at"]) if mine else None
+
+
+# What the registry writes when a claim is *granted*: `event_metadata`
+# carries `claim: True` on that TASK_STARTED and on no other
+# (`routes/builds.py`, and `services/status.py` reads it back). A denied
+# claim raises 409 before the event is constructed, so what this counts is
+# grants, not attempts.
+CLAIM_KEY = "claim"
+
+# A report the registry kept as audit but refused to apply. Excluded,
+# because a refused claim-start changed nothing and did not license a
+# spawn (`services.status.REPORT_APPLIED_KEY`).
+REPORT_APPLIED_KEY = "report_applied"
+
+
+def granted_claim_starts(deployment: Deployment, build_id: Any) -> dict[str, int]:
+    """Claims this build was granted, per task id.
+
+    **The durable form of a tick's ``spawned`` counter.** A tick spawns a
+    task only after the registry grants it the claim, and the grant is a
+    row: one claim-marked ``task_started`` under this build per spawn,
+    written inside the transaction that arbitrates the claim. An
+    interruption restart goes through the same path, so it adds one to
+    both counts and they stay equal.
+
+    Why this rather than summing the trail: a tick summary exists only if
+    the tick survived to write it, so a preempted reporter makes the sum
+    short. Asserting the exact count then fails for a reason that is not
+    the code's, and relaxing it to ``<=`` is worse -- the missing summary
+    is exactly where a duplicate spawn would have been recorded, so the
+    ceiling passes *because* the evidence is gone. The event log has no
+    such gap: the claim is granted before the container exists, so nothing
+    the container does later can unwrite it.
+    """
+    counts: dict[str, int] = {}
+    with httpx.Client(timeout=60.0) as client:
+        response = client.get(
+            f"{deployment.api_url.rstrip('/')}/api/v1/builds/{build_id}/events",
+            headers={"X-API-Key": deployment.api_key},
+        )
+        response.raise_for_status()
+    for event in response.json():
+        metadata = event.get("event_metadata") or {}
+        if (
+            event.get("event_type") == "task_started"
+            and metadata.get(CLAIM_KEY) is True
+            and metadata.get(REPORT_APPLIED_KEY) is not False
+        ):
+            task_id = str(event.get("task_id"))
+            counts[task_id] = counts.get(task_id, 0) + 1
+    return counts
+
+
+def describe_claims(counts: dict[str, int]) -> str:
+    """The per-task breakdown, for an assertion message."""
+    if not counts:
+        return "  no granted claims recorded under this build"
+    return "\n".join(
+        f"  task {task_id}: {count} granted claim(s)"
+        for task_id, count in sorted(counts.items())
+    )

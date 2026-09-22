@@ -35,8 +35,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
+from stardag_integration_tests.registry_live._events import (
+    granted_claim_starts,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     assert_trail_complete,
     describe,
@@ -79,7 +82,9 @@ TASKS_IN_PLAN = WIDTH + 1
 BUILD_TIMEOUT_SECONDS = 600
 
 
-def test_a_layer_wider_than_one_pass_completes_once_per_task() -> None:
+def test_a_layer_wider_than_one_pass_completes_once_per_task(
+    deployment: Deployment,
+) -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import FanIn
 
@@ -111,7 +116,14 @@ def test_a_layer_wider_than_one_pass_completes_once_per_task() -> None:
     # start have to be started later exactly once, and the ones it did
     # start must not be started again when the next pass re-reads a
     # frontier that still lists them as it left them.
-    spawned = sum(s.get("spawned", 0) for s in summaries)
+    # Counted from the event log, not from the tick trail. A tick spawns
+    # only after the registry grants it the claim, and that grant is a
+    # row -- written before the container exists, so nothing the
+    # container does later can unwrite it. Summing `spawned` instead
+    # would be short whenever a tick was preempted before reporting, and
+    # relaxing that to `<=` would pass *because* the evidence is gone.
+    claims = granted_claim_starts(deployment, build_id)
+    spawned = sum(claims.values())
     assert spawned == TASKS_IN_PLAN, (
         f"{spawned} spawns for {TASKS_IN_PLAN} tasks. Above it, a "
         "truncated pass re-spawned work the previous pass had already "

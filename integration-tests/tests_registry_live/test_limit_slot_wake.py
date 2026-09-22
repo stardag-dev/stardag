@@ -26,16 +26,15 @@ accounted against this limit or woken by its release.
 from __future__ import annotations
 
 import sys
-
 import uuid
 
 import pytest
-
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._wait import (
-    assert_dormancy_is_forced,
+    assert_remaining_work_outlasts_linger,
     assert_trail_complete,
     describe,
+    require_complete_trail,
     tick_summaries,
     trail_may_be_truncated,
     wait_for_task_status,
@@ -127,6 +126,19 @@ def test_releasing_a_slot_wakes_the_build_queued_on_it(slot_limit) -> None:
         timeout=STATUS_TIMEOUT_SECONDS,
     )
 
+    # The dormancy precondition, measured rather than assumed. The
+    # shared task is already RUNNING, so its *total* duration says
+    # nothing about whether this build will go dormant -- what
+    # decides that is the work still to come when its tick starts.
+    # Comparing the constant would let a slow bootstrap leave the
+    # build resident through the completion while A_SLOW_SECONDS >
+    # B_LINGER_SECONDS still looked reassuring.
+    assert_remaining_work_outlasts_linger(
+        a_slow.id,
+        total_seconds=A_SLOW_SECONDS,
+        linger_seconds=B_LINGER_SECONDS,
+        what="A's remaining work against B's linger",
+    )
     build_b = app.build_trigger(
         get_sum(integers=b_slow),
         reactive=True,
@@ -165,6 +177,7 @@ def test_releasing_a_slot_wakes_the_build_queued_on_it(slot_limit) -> None:
     # the silently-weaker-test failure this file's timing rules exist to
     # prevent. What it risks is a preempted *early* tick, which softening
     # the terminal wait does not make more likely.
+    require_complete_trail(build_b, what="the limit-denied count")
     denied = sum(s.get("limit_denied", 0) for s in summaries_b)
     assert denied >= 1, (
         "No tick of build B was ever denied a concurrency slot, so the "
@@ -175,11 +188,6 @@ def test_releasing_a_slot_wakes_the_build_queued_on_it(slot_limit) -> None:
     # And B was dormant when the slot freed: A's task must outlast B's
     # linger, so B's tick cannot still have been resident to see it on its
     # own poll. From the constants, not from the trail -- see the helper.
-    assert_dormancy_is_forced(
-        work_seconds=A_SLOW_SECONDS,
-        linger_seconds=B_LINGER_SECONDS,
-        what="A's task against B's linger",
-    )
 
     lingered = sum(1 for s in summaries_b if s.get("outcome") == "lingered_out")
     print(

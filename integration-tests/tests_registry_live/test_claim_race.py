@@ -23,8 +23,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
+from stardag_integration_tests.registry_live._events import (
+    granted_claim_starts,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     assert_trail_complete,
     describe,
@@ -56,7 +59,7 @@ BUILD_TIMEOUT_SECONDS = 480
 DISTINCT_TASKS = 4
 
 
-def test_a_shared_task_runs_once_across_two_builds() -> None:
+def test_a_shared_task_runs_once_across_two_builds(deployment: Deployment) -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         get_range,
@@ -94,7 +97,15 @@ def test_a_shared_task_runs_once_across_two_builds() -> None:
     # The whole point. Four distinct tasks exist across the two plans, and
     # four spawns happened in total: the shared pair ran once, not once per
     # build. Five would mean the claim did not hold.
-    spawned = sum(s.get("spawned", 0) for s in (*summaries_a, *summaries_b))
+    # Counted from the event log, not from the tick trail. A tick spawns
+    # only after the registry grants it the claim, and that grant is a
+    # row -- written before the container exists, so nothing the
+    # container does later can unwrite it. Summing `spawned` instead
+    # would be short whenever a tick was preempted before reporting, and
+    # relaxing that to `<=` would pass *because* the evidence is gone.
+    claims_a = granted_claim_starts(deployment, build_a)
+    claims_b = granted_claim_starts(deployment, build_b)
+    spawned = sum(claims_a.values()) + sum(claims_b.values())
     assert spawned == DISTINCT_TASKS, (
         f"{spawned} spawns for {DISTINCT_TASKS} distinct tasks. More than "
         f"{DISTINCT_TASKS} means the shared task ran in both builds and the "

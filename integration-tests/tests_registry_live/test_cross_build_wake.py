@@ -28,14 +28,16 @@ drained that flag. There is no other route.
 from __future__ import annotations
 
 import sys
-
 import uuid
 
 import pytest
-
+from stardag_integration_tests.registry_live._events import (
+    granted_claim_starts,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
-    assert_dormancy_is_forced,
+    assert_remaining_work_outlasts_linger,
     assert_trail_complete,
     describe,
     tick_summaries,
@@ -63,7 +65,7 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
-def test_a_blockers_completion_wakes_a_dormant_build() -> None:
+def test_a_blockers_completion_wakes_a_dormant_build(deployment: Deployment) -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         get_range,
@@ -98,6 +100,19 @@ def test_a_blockers_completion_wakes_a_dormant_build() -> None:
         timeout=STATUS_TIMEOUT_SECONDS,
     )
 
+    # The dormancy precondition, measured rather than assumed. The
+    # shared task is already RUNNING, so its *total* duration says
+    # nothing about whether this build will go dormant -- what
+    # decides that is the work still to come when its tick starts.
+    # Comparing the constant would let a slow bootstrap leave the
+    # build resident through the completion while SHARED_SLEEP_SECONDS >
+    # B_LINGER_SECONDS still looked reassuring.
+    assert_remaining_work_outlasts_linger(
+        shared.id,
+        total_seconds=SHARED_SLEEP_SECONDS,
+        linger_seconds=B_LINGER_SECONDS,
+        what="the shared task's remaining work against B's linger",
+    )
     build_b = app.build_trigger(
         square(values=shared, offset=11),
         reactive=True,
@@ -126,11 +141,6 @@ def test_a_blockers_completion_wakes_a_dormant_build() -> None:
     # someone else, waited out its linger and exited with the build still
     # running -- so the tick that finished B afterwards was spawned by the
     # wake-up and not by anything B left behind.
-    assert_dormancy_is_forced(
-        work_seconds=SHARED_SLEEP_SECONDS,
-        linger_seconds=B_LINGER_SECONDS,
-        what="the shared task's sleep against B's linger",
-    )
 
     # Diagnostic, never an assertion: what the ticks reported.
     # A trail that shows no lingering tick is worth seeing, but its
@@ -143,10 +153,15 @@ def test_a_blockers_completion_wakes_a_dormant_build() -> None:
         file=sys.stderr,
     )
 
-    # Upper bound: the defect is B spawning *more* than its own root, and
-    # a truncated trail can only under-count.
-    spawned_b = sum(s.get("spawned", 0) for s in summaries_b)
-    assert spawned_b <= 1, (
+    # Counted from the event log, not from the tick trail. A tick spawns
+    # only after the registry grants it the claim, and that grant is a
+    # row -- written before the container exists, so nothing the
+    # container does later can unwrite it. Summing `spawned` instead
+    # would be short whenever a tick was preempted before reporting, and
+    # relaxing that to `<=` would pass *because* the evidence is gone.
+    claims_b = granted_claim_starts(deployment, build_b)
+    spawned_b = sum(claims_b.values())
+    assert spawned_b == 1, (
         f"Build B spawned {spawned_b} tasks; it should have spawned only its "
         "own root, having waited for the shared task rather than running a "
         "second copy of it.\n" + describe(build_b)

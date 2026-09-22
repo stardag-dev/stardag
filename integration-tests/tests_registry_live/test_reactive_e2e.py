@@ -28,16 +28,19 @@ completion itself rather than being told about it.
 from __future__ import annotations
 
 import sys
-
 import uuid
 
 import pytest
-
+from stardag_integration_tests.registry_live._events import (
+    granted_claim_starts,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     assert_dormancy_is_forced,
     assert_trail_complete,
     describe,
+    require_complete_trail,
     tick_summaries,
     trail_may_be_truncated,
     wait_for_terminal,
@@ -69,7 +72,7 @@ BUILD_TIMEOUT_SECONDS = 420
 TASKS_IN_PLAN = 3
 
 
-def test_a_worker_wakes_the_build_that_has_no_scheduler() -> None:
+def test_a_worker_wakes_the_build_that_has_no_scheduler(deployment: Deployment) -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         get_range,
@@ -125,12 +128,15 @@ def test_a_worker_wakes_the_build_that_has_no_scheduler() -> None:
     # above this is what it looks like -- though a Modal preemption also
     # produces a legitimate re-spawn, so read the trail before blaming the
     # claim.
-    # An upper bound, not an equality, and the direction is the point: the
-    # defect is a spawn *above* the plan, and a trail missing its last entry
-    # can only under-count. Equality would turn a preempted reporter into a
-    # failure of the claim.
-    spawned = sum(s.get("spawned", 0) for s in summaries)
-    assert spawned <= TASKS_IN_PLAN, (
+    # Counted from the event log, not from the tick trail. A tick spawns
+    # only after the registry grants it the claim, and that grant is a
+    # row -- written before the container exists, so nothing the
+    # container does later can unwrite it. Summing `spawned` instead
+    # would be short whenever a tick was preempted before reporting, and
+    # relaxing that to `<=` would pass *because* the evidence is gone.
+    claims = granted_claim_starts(deployment, build_id)
+    spawned = sum(claims.values())
+    assert spawned == TASKS_IN_PLAN, (
         f"{spawned} spawns for {TASKS_IN_PLAN} tasks. More than "
         f"{TASKS_IN_PLAN} usually means double execution, but an "
         "interrupted worker legitimately respawns -- check the trail for "
@@ -153,6 +159,7 @@ def test_a_worker_wakes_the_build_that_has_no_scheduler() -> None:
     # What cannot happen if the workers are reaching the registry is *every*
     # completion being self-healed. That is the shape of a missing or wrong
     # stardag-api-key secret, and it is what this rules out.
+    require_complete_trail(build_id, what="the self-healed count")
     self_healed = sum(s.get("self_healed", 0) for s in summaries)
     assert self_healed < TASKS_IN_PLAN, (
         f"All {TASKS_IN_PLAN} completions had to be self-healed by a tick, "

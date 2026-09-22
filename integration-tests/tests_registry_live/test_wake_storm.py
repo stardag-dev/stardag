@@ -26,16 +26,19 @@ same. It needs a neighbourhood.
 from __future__ import annotations
 
 import sys
-
 import uuid
 
 import pytest
-
+from stardag_integration_tests.registry_live._events import (
+    granted_claim_starts,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
-    assert_dormancy_is_forced,
+    assert_remaining_work_outlasts_linger,
     assert_trail_complete,
     describe,
+    require_complete_trail,
     tick_summaries,
     trail_may_be_truncated,
     wait_for_task_status,
@@ -69,7 +72,7 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
-def test_many_dormant_builds_are_each_woken_once() -> None:
+def test_many_dormant_builds_are_each_woken_once(deployment: Deployment) -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         get_range,
@@ -98,6 +101,20 @@ def test_many_dormant_builds_are_each_woken_once() -> None:
         expected="running",
         build_id=owner,
         timeout=STATUS_TIMEOUT_SECONDS,
+    )
+
+    # The dormancy precondition, measured rather than assumed. The shared
+    # task is already RUNNING, so its *total* duration says nothing about
+    # whether the neighbours will go dormant -- what decides that is the
+    # work still to come when their ticks start. Comparing the constant
+    # would let a slow bootstrap leave a neighbour resident through the
+    # completion while SHARED_SLEEP_SECONDS > NEIGHBOUR_LINGER_SECONDS
+    # still looked reassuring.
+    assert_remaining_work_outlasts_linger(
+        shared.id,
+        total_seconds=SHARED_SLEEP_SECONDS,
+        linger_seconds=NEIGHBOUR_LINGER_SECONDS,
+        what="the shared task's remaining work against each neighbour's linger",
     )
 
     # Each neighbour has a root of its own, so these are genuinely N builds
@@ -130,13 +147,6 @@ def test_many_dormant_builds_are_each_woken_once() -> None:
         summaries = tick_summaries(build_id)
         assert_trail_complete(build_id, summaries)
 
-        # Dormant when the news arrived: its own tick gave up and left.
-        assert_dormancy_is_forced(
-            work_seconds=SHARED_SLEEP_SECONDS,
-            linger_seconds=NEIGHBOUR_LINGER_SECONDS,
-            what="the shared task's sleep against each neighbour's linger",
-        )
-
         lingered = sum(1 for s in summaries if s.get("outcome") == "lingered_out")
         print(
             f"[harness] neighbour {index}: {len(summaries)} tick summary(ies) "
@@ -145,15 +155,16 @@ def test_many_dormant_builds_are_each_woken_once() -> None:
             file=sys.stderr,
         )
 
-        # A tick that arrived while another held the lease for this build.
-        # trip and the message would blame the hand-out stamp for
-        # something that is just a cold container.
+        # Not asserted on the *count of ticks*, which a cold container
+        # would inflate for reasons that have nothing to do with the
+        # hand-out stamp.
         #
         # ``lease_held`` cannot be reached that way: it means a tick
         # arrived while another held the lease for the same build. One is
         # allowed, because the owning tick's exit hand-off can genuinely
         # race a drain. Several is the storm the hand-out stamp exists to
         # prevent -- every notifier spawning for every flagged build.
+        require_complete_trail(build_id, what=f"neighbour {index}'s lease-held count")
         contended = sum(1 for s in summaries if s.get("outcome") == "lease_held")
         assert contended <= 1, (
             f"Neighbour {index} had {contended} tick(s) find the scheduler "
@@ -168,10 +179,12 @@ def test_many_dormant_builds_are_each_woken_once() -> None:
 
         # It waited for the owner's copy rather than running a second one:
         # its own spawns are its root alone.
-        # Upper bound: the defect is running a second copy, and a
-        # truncated trail can only under-count.
-        spawned = sum(s.get("spawned", 0) for s in summaries)
-        assert spawned <= 1, (
+        # Counted from the event log, not the tick trail: a granted claim
+        # is a row written before the container exists, so a preempted
+        # reporter cannot make it short.
+        claims = granted_claim_starts(deployment, build_id)
+        spawned = sum(claims.values())
+        assert spawned == 1, (
             f"Neighbour {index} spawned {spawned} task(s); it should have "
             "spawned only its own root, having waited for the shared task "
             "rather than running a second copy.\n" + describe(build_id)
