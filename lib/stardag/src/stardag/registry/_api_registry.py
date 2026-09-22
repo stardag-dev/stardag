@@ -2198,62 +2198,21 @@ class APIRegistry(RegistryABC):
         """Ask the registry whether this execution is still wanted.
 
         Cooperative cancellation's only network call, and the only one
-        whose *failure* has to mean "carry on". Three ways this server
-        can decline to answer, and all three degrade to
-        ``still_current=True``:
-
-        - It predates the route, and answers 404 with FastAPI's generic
-          detail. Silence, logged once per worker at debug — a worker
-          running against an old registry simply has no cooperative
-          cancellation, exactly as before it existed.
-        - The request fails in transport. A network blip must not kill a
-          task that is running fine.
-        - The body is not the shape expected.
-
-        A genuine 404 for a missing build or task is re-raised, as
-        everywhere else in this client: that is a real error and reads
-        nothing like a version skew.
+        whose *failure* has to mean "carry on" — see
+        :class:`ExecutionStatus` for why that polarity is the invariant
+        rather than leniency. The three ways this can decline to answer,
+        and what each degrades to, are in :meth:`_execution_status_of`.
         """
-        params = self._get_params()
-        if execution_id is not None:
-            params["execution_id"] = str(execution_id)
         try:
             response = self._request(
                 "GET",
-                (
-                    f"{self.api_url}/api/v1/builds/{build_id}"
-                    f"/tasks/{task.id}/execution-status"
-                ),
-                params=params,
+                self._execution_status_url(build_id, task),
+                params=self._execution_status_params(execution_id),
                 operation=f"Execution status for task {task.id}",
             )
-        except NotFoundError as e:
-            if not is_missing_route_error(e):
-                raise
-            logger.debug(
-                "Registry API does not support GET /execution-status; "
-                "cooperative cancellation is unavailable for task %s.",
-                task.id,
-            )
-            return ExecutionStatus()
         except Exception as e:
-            logger.warning(
-                "Could not read execution status for task %s (%s); "
-                "assuming the execution is still wanted.",
-                task.id,
-                e,
-            )
-            return ExecutionStatus()
-        try:
-            return ExecutionStatus.model_validate(response.json())
-        except Exception as e:
-            logger.warning(
-                "Unreadable execution-status response for task %s (%s); "
-                "assuming the execution is still wanted.",
-                task.id,
-                e,
-            )
-            return ExecutionStatus()
+            return self._execution_status_unavailable(e, task)
+        return self._execution_status_of(response, task)
 
     async def execution_status_aio(
         self,
@@ -2262,36 +2221,63 @@ class APIRegistry(RegistryABC):
         execution_id: UUID | None = None,
     ) -> ExecutionStatus:
         """Async version - see :meth:`execution_status`."""
-        params = self._get_params()
-        if execution_id is not None:
-            params["execution_id"] = str(execution_id)
         try:
             response = await self._arequest(
                 "GET",
-                (
-                    f"{self.api_url}/api/v1/builds/{build_id}"
-                    f"/tasks/{task.id}/execution-status"
-                ),
-                params=params,
+                self._execution_status_url(build_id, task),
+                params=self._execution_status_params(execution_id),
                 operation=f"Execution status for task {task.id}",
             )
-        except NotFoundError as e:
-            if not is_missing_route_error(e):
-                raise
+        except Exception as e:
+            return self._execution_status_unavailable(e, task)
+        return self._execution_status_of(response, task)
+
+    def _execution_status_url(self, build_id: UUID, task: "BaseTask") -> str:
+        return (
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/execution-status"
+        )
+
+    def _execution_status_params(self, execution_id: UUID | None) -> dict[str, str]:
+        params = self._get_params()
+        if execution_id is not None:
+            params["execution_id"] = str(execution_id)
+        return params
+
+    def _execution_status_unavailable(
+        self, error: Exception, task: "BaseTask"
+    ) -> ExecutionStatus:
+        """What a request that did not arrive means: keep running.
+
+        Two shapes, and only one of them is routine. A server predating
+        the route answers 404 with FastAPI's generic detail, and a worker
+        against it simply has no cooperative cancellation — exactly as
+        before the feature existed, so it is logged at debug. Anything
+        else that failed in transport is worth a warning but must not
+        stop a task that is running fine.
+
+        A *genuine* 404 for a missing build or task is re-raised, as
+        everywhere else in this client: that is a real error and reads
+        nothing like a version skew.
+        """
+        if isinstance(error, NotFoundError):
+            if not is_missing_route_error(error):
+                raise error
             logger.debug(
                 "Registry API does not support GET /execution-status; "
                 "cooperative cancellation is unavailable for task %s.",
                 task.id,
             )
             return ExecutionStatus()
-        except Exception as e:
-            logger.warning(
-                "Could not read execution status for task %s (%s); "
-                "assuming the execution is still wanted.",
-                task.id,
-                e,
-            )
-            return ExecutionStatus()
+        logger.warning(
+            "Could not read execution status for task %s (%s); assuming "
+            "the execution is still wanted.",
+            task.id,
+            error,
+        )
+        return ExecutionStatus()
+
+    def _execution_status_of(self, response: Any, task: "BaseTask") -> ExecutionStatus:
+        """The answer, or "keep running" if the body was not the shape expected."""
         try:
             return ExecutionStatus.model_validate(response.json())
         except Exception as e:
