@@ -34,9 +34,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   writes a content-addressed output nobody reads.
 
   Throttled, 30s by default, `STARDAG_CANCELLATION_CHECK_INTERVAL_SECONDS`.
-  The start-of-attempt checkpoint usually costs no request at all: the
-  worker's own start report already asks the question, and the server's
-  refusal is the answer.
+  The cost is **one registry read per task attempt** plus one per
+  dynamic-dependency yield, against a task attempt that already makes a
+  start report, an artifact upload, a completion and a wake. The start
+  report answers half the question for free — a start naming a superseded
+  execution is refused — but a successful one says nothing about whether
+  the build is still running, so the checkpoint asks.
 
   **Side-effecting tasks are the one real loss, and were never inside the
   promise.** A task that has already written to somebody else's database

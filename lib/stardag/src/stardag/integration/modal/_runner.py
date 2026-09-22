@@ -1102,12 +1102,23 @@ class Runner(RunFunction):
                 if reporter is not None:
                     reporter.started()
                     # Checkpoint one: is this execution still the one the
-                    # task is waiting for? Placed after the start report
-                    # because that report often answers it for free — a
-                    # start naming a superseded execution is refused, and
-                    # the reporter records the refusal, so this usually
-                    # costs nothing. ``force`` because there is nothing
-                    # to throttle yet and the answer wants to be fresh.
+                    # task is waiting for?
+                    #
+                    # **It costs one registry read per attempt.** The
+                    # start report answers half the question for free —
+                    # a start naming a superseded execution is refused
+                    # and the reporter records that — but a *successful*
+                    # start says nothing about whether the build is still
+                    # running, which is the commoner way to stop being
+                    # wanted. So on the ordinary path this asks. Dropping
+                    # ``force`` would not save it either: the checker is
+                    # built per attempt, so it has never asked and the
+                    # throttle has nothing to reuse.
+                    #
+                    # Making it genuinely free would mean carrying the
+                    # build status on the start response, which threads a
+                    # value through every registry double and delegating
+                    # wrapper; that trade was considered and declined.
                     #
                     # Raised from here, outside the try below, so the
                     # end-of-attempt classifier never sees it: a

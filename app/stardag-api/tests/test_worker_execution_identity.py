@@ -752,24 +752,44 @@ async def test_a_cancel_while_the_container_is_queued_is_not_undone(
     assert answer["reason"] == "task_cancelled"
 
 
-async def test_the_limiters_enforced_start_is_not_caught_by_that(
-    client: AsyncClient,
+@pytest.mark.parametrize(
+    "params,what",
+    [
+        pytest.param({}, "the limiter's slot-occupying start", id="limiter"),
+        pytest.param(
+            {"executor": "modal", "executor_ref": "fc-1"},
+            "a detached spawn from a claim=False build",
+            id="claimless-detached",
+        ),
+    ],
+)
+async def test_a_start_with_no_identity_is_not_caught_by_that(
+    client: AsyncClient, params: dict, what: str
 ):
-    """A start that names no execution is bookkeeping, not a report.
+    """The refusal is scoped to an identity, and only to an identity.
 
-    The concurrency limiter records a start to occupy slots: no executor,
-    no reference, no identity. The refusal above is scoped to starts that
-    describe an actual execution precisely so this one is untouched — the
-    same distinction the fold already makes.
+    Both of these describe real callers that must keep working. The
+    limiter records a start to occupy slots and names nothing at all. A
+    ``claim=False`` build still spawns detached, so its post-spawn start
+    names an executor and a reference — and **that is the case an earlier
+    version of this refusal broke**: picking up a task an earlier build
+    left CANCELLED would have been refused, and under the default
+    FAIL_FAST the whole build aborted, where before it simply ran the
+    task.
+
+    Absence of an identity is no opinion, which is the line every other
+    rule here draws. Keying on the executor or the reference instead is
+    what produced the regression.
     """
-    build_id = await _registered(client, "limiter-start")
+    task_id = f"no-identity-{len(params)}"
+    build_id = await _registered(client, task_id)
     assert (
-        await client.post(f"{BUILDS}/{build_id}/tasks/limiter-start/cancel")
+        await client.post(f"{BUILDS}/{build_id}/tasks/{task_id}/cancel")
     ).status_code == 200
 
-    bookkeeping = await _start(client, build_id, "limiter-start")
+    accepted = await _start(client, build_id, task_id, **params)
 
-    assert bookkeeping.status_code == 200, bookkeeping.text
+    assert accepted.status_code == 200, f"{what} was refused: {accepted.text}"
 
 
 async def test_a_claiming_start_still_revives_a_cancelled_task(

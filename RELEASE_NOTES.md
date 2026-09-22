@@ -103,9 +103,10 @@ Two checkpoints are automatic and cost you nothing:
 
 - **The start of each attempt**, before `run()`. This catches a cancel
   that landed while the container was still queued, which on a wide
-  fan-out is most of them. It usually costs no extra request either: the
-  worker's own start report already asks the question, and the refusal
-  above is the answer.
+  fan-out is most of them. It costs one registry read: the worker's own
+  start report answers half of it for free — a start naming a superseded
+  execution is refused — but a successful start says nothing about
+  whether the build is still running.
 - **Each dynamic-dependency yield**, where the task is about to register
   children and suspend. A stopped build does not pay for another layer of
   the DAG.

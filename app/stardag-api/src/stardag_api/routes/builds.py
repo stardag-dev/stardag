@@ -712,37 +712,35 @@ def _report_identity(
     return metadata or None
 
 
-def _describes_an_execution(extra_metadata: dict | None) -> bool:
-    """Whether a start is a report about a container, or bookkeeping.
+def _names_an_identity(extra_metadata: dict | None) -> bool:
+    """Whether a start carries an execution identity of its own.
 
-    The concurrency limiter records a start to occupy slots and names no
-    executor, no reference and no identity; the fold already treats that
-    as "describes no execution at all". Scoping the cancelled-task
-    refusal the same way is what keeps the limiter's start out of it.
+    The cancelled-task refusal below is scoped to these and **only**
+    these, which is the line every other rule here draws: absence of an
+    identity is no opinion, never evidence. A caller that mints one is
+    saying "this container is execution E"; a caller that does not is
+    saying nothing the server can act on.
 
-    **The limit this leaves, stated rather than implied.** The limiter is
-    not the only caller that names nothing: so do the sequential engine,
-    the Prefect integration, and the concurrent engine with
-    ``claim=False``. A start from any of those can still revive a
-    cancelled task. Closing that would mean an explicit "this is
-    bookkeeping" marker threaded from the SDK, because the alternative —
-    refusing every identity-less non-claiming start — breaks the
-    sequential engine, which does not reset a task before starting it.
+    **It was briefly wider, and that was a regression.** Keying on the
+    executor or the reference instead also caught starts that describe a
+    container but carry no identity — and the concurrent engine with
+    ``claim=False`` posts exactly that for every detached spawn. A build
+    in that mode picking up a task an earlier build left CANCELLED or
+    SKIPPED would have had its start refused and, under the default
+    ``FAIL_FAST``, the whole build aborted, where before it simply ran
+    the task. Found by review on #368; the docstring that justified the
+    wider version asserted the opposite and was wrong.
 
-    Nothing regresses by leaving it: before this refusal existed *every*
-    non-claiming start revived a cancelled task, so this narrows the hole
-    rather than opening one. And a start naming no identity has no
-    identity-based checkpoint to lose either; what its worker keeps is
-    the build-status half of the cancellation check, which is the case a
-    human actually causes. Raised by review on #368 and declined there
-    with this reasoning; if it starts to matter, the marker is the fix
-    and it wants its own issue.
+    The limit this leaves is real and deliberate: a start with no
+    identity can still revive a cancelled task. That is how every release
+    before this behaved, so it narrows the hole rather than opening one,
+    and the callers it spares — the sequential engine, the Prefect
+    integration, the limiter's slot-occupying start, and a ``claim=False``
+    build — are precisely the ones that must keep working. Closing it
+    needs an explicit "this is bookkeeping" marker threaded from the SDK,
+    which is a protocol change of its own.
     """
-    asking = extra_metadata or {}
-    return any(
-        asking.get(key) is not None
-        for key in ("execution_id", "executor", "executor_ref")
-    )
+    return (extra_metadata or {}).get("execution_id") is not None
 
 
 def _revives_a_cancelled_task(db_task: Task, extra_metadata: dict | None) -> bool:
@@ -761,10 +759,10 @@ def _revives_a_cancelled_task(db_task: Task, extra_metadata: dict | None) -> boo
     that wants a cancelled task resets it (``TASK_RETRIED``) and claims
     it, and claiming starts do not come through here.
 
-    Scoped to starts that describe an execution, so the limiter's
-    slot-occupying start is untouched — see :func:`_describes_an_execution`.
+    Scoped to starts that carry an execution identity — see
+    :func:`_names_an_identity` for why that line and not a wider one.
     """
-    return db_task.latest_status in _NOT_TO_BE_RUN and _describes_an_execution(
+    return db_task.latest_status in _NOT_TO_BE_RUN and _names_an_identity(
         extra_metadata
     )
 
@@ -4663,10 +4661,18 @@ async def get_execution_status(
     - **``task_cancelled``** — the task itself has been cancelled or
       skipped. Its claim was released, which is what a cascade does, and
       until somebody else takes it over the row still names this very
-      execution — so the identity comparison below cannot see it. Not
-      gated on the identity for the same reason: the server refuses a
-      cancel from a build that does not hold the task, so a CANCELLED
-      task was cancelled by its own holder.
+      execution — so the identity comparison below cannot see it.
+
+      **Deliberately not gated on which build cancelled it.** A cascade
+      from a *neighbour* is exactly the case this has to catch, so
+      requiring the asking build to be the canceller would miss the one
+      that matters. Note that ``may_revoke`` only scopes cancels of
+      RUNNING, SUSPENDED and INTERRUPTED tasks to their holder — a
+      PENDING one is cancellable by anybody — so "it was cancelled by its
+      own holder" is not a guarantee this can lean on, and does not need
+      to be. The consequence to accept: with claims disabled, two builds
+      can run one task, and either one cancelling it stops the other's
+      worker. That is the mode's own trade, not this rule's.
     - **``superseded``** — the task's claim moved on and it now names a
       *different* execution. The caller lost the task; the holder is
       somebody else's container.
