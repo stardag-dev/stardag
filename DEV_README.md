@@ -445,6 +445,17 @@ reported: `pytest.skip` with a reason, plus a marker CI counts the way it
 counts transport-timeout retries. A skip that nobody counts is how a tier
 quietly skips its way to green; a counted one is a measurement.
 
+**Run the full tier in CI, not locally.** A local run deploys into the same
+Modal workspace CI uses, so it contends with whatever checks are in flight —
+and contention is the leading unexplained variable behind this tier's red
+rate. Verifying locally to protect CI makes CI less reliable, for you and for
+everyone else with a PR open. Push and read the `Registry-live tier` check;
+when it goes red the diagnostics artifact is downloadable, so a CI red is as
+diagnosable as a local one. Keep local stacks for what they are good at:
+iterating on one scenario by name (`tox -e registry-modal-live -- -n0
+tests_registry_live -k <name>`), harness work that needs a stack, and forcing
+a branch CI cannot reach. Tear one down as soon as it is done.
+
 **Take a precondition from the constants only where the arithmetic closes.**
 `test_reactive_e2e` spawns its own work, so a tick that lingers for a fixed
 window once idle must go before work that outlasts it —
