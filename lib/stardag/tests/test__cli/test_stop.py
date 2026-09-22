@@ -378,6 +378,24 @@ class TestStopCommand:
         assert payload["stopped_count"] == 0
         cancel.assert_not_called()
 
+    def test_a_ref_less_non_modal_row_is_not_offered_a_re_run(self):
+        # Both ways of being unstoppable at once. "Re-run to catch it" is
+        # true of a claim waiting on its spawn and false of an execution
+        # stardag can never reach, so the notice keys on the reason rather
+        # than on the ref being absent.
+        registry = _mock_registry(
+            [_row(latest_executor="prefect", latest_executor_ref=None)]
+        )
+        with (
+            _patch_resolve(registry),
+            mock.patch.object(_stop, "cancel_modal_calls") as cancel,
+        ):
+            result = runner.invoke(app, ["stop", BUILD_ID, "--dry-run"])
+
+        assert "re-run this command" not in result.output
+        assert "not stoppable here" in result.output
+        cancel.assert_not_called()
+
     def test_a_non_modal_execution_is_listed_and_left_alone(self):
         registry = _mock_registry([_row(latest_executor="prefect")])
         with (

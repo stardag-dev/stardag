@@ -993,7 +993,11 @@ def _render_executions(
     # A reader who skims the table sees a Modal executor and a task id and
     # assumes it is handled; the ref cell is the only thing that says
     # otherwise, and it is the easiest column to miss.
-    unspawned = [e for e in selected if e.executor_ref is None]
+    #
+    # Keyed on the reason, not on the ref being absent: a non-Modal
+    # execution can lack a ref too, and for that one "re-run to catch it"
+    # is false — nothing this command does will ever stop it.
+    unspawned = [e for e in selected if e.not_stoppable_reason == _stop.NO_REF_YET]
     if unspawned:
         console.print(
             f"[yellow]{len(unspawned)} of these were claimed but have not "
