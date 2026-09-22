@@ -210,6 +210,34 @@ def _reports_on_the_current_execution(task: Task, event: Event) -> bool:
     )
 
 
+def _is_claim_redelivery(
+    start_metadata: dict, current_execution_id: UUID | None
+) -> bool:
+    """Whether a start is the claim this task already holds, re-delivered.
+
+    The replays' copy of the guard in :func:`_apply_event_to_task`, and it
+    has to stay their copy rather than their own rule: the row and the two
+    replays answer the same question for different readers, and the one
+    place they are allowed to differ is what they can see.
+
+    The sequence is ordinary — claim, post-spawn start recording the ref,
+    then the claim's lost answer re-delivered and now granted. That last
+    event carries the id the task already holds and **no executor of its
+    own**, so treating it as an ordinary start would blank the ref the
+    spawn recorded. On the row that would leave nothing able to re-attach;
+    here it would make a later report naming a stale ref applicable in the
+    replay while the row refuses it.
+    """
+    if start_metadata.get("executor") is not None:
+        return False
+    recorded = _as_uuid(start_metadata.get("execution_id"))
+    return (
+        recorded is not None
+        and current_execution_id is not None
+        and recorded == current_execution_id
+    )
+
+
 def _names_the_execution(
     event: Event,
     *,
@@ -1209,12 +1237,19 @@ async def get_task_status_in_build(
             status = TaskStatus.RUNNING
             started_at = event.created_at
             start_metadata = event.event_metadata or {}
-            current_ref = start_metadata.get("executor_ref")
-            # Mirrors the fold: written when the start names an id, and
+            # Mirrors the fold, *including* its claim-redelivery guard: a
+            # re-delivered claim carries the id the task already holds and
+            # no executor of its own, and must not erase the ref the spawn
+            # recorded since. Clearing here where the row preserves is a
+            # divergence with real consequences — a later report naming a
+            # stale ref would be refused by the row and applied by this
+            # replay, which is one task INTERRUPTED in the UI and RUNNING
+            # in the frontier.
+            if not _is_claim_redelivery(start_metadata, current_execution_id):
+                current_ref = start_metadata.get("executor_ref")
+            # The identity itself: written when the start names one, and
             # otherwise left alone — except a granted claim, which always
-            # writes, including a clear. A replay that cleared where the
-            # row preserves would disagree with it, and the two answer the
-            # same question for different readers.
+            # writes, including a clear.
             replayed_execution = _as_uuid(start_metadata.get("execution_id"))
             if replayed_execution is not None or start_metadata.get("claim"):
                 current_execution_id = replayed_execution
@@ -1324,7 +1359,12 @@ async def get_all_task_statuses_in_build(
             status = TaskStatus.RUNNING
             started_at = event.created_at
             start_metadata = event.event_metadata or {}
-            current_refs[task_id] = start_metadata.get("executor_ref")
+            # The claim-redelivery guard again — see the twin in
+            # get_task_status_in_build, and the fold it mirrors.
+            if not _is_claim_redelivery(
+                start_metadata, current_execution_ids.get(task_id)
+            ):
+                current_refs[task_id] = start_metadata.get("executor_ref")
             replayed_execution = _as_uuid(start_metadata.get("execution_id"))
             if replayed_execution is not None or start_metadata.get("claim"):
                 current_execution_ids[task_id] = replayed_execution

@@ -534,6 +534,64 @@ async def test_the_replays_agree_with_the_row(
     )
 
 
+async def test_the_replays_survive_a_claim_redelivery(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """The sequence my first agreement test did not cover, and should have.
+
+    Claim, post-spawn start recording the ref, then the claim's lost answer
+    re-delivered and now granted. That last event carries the id the task
+    already holds and no executor of its own, and the row's fold
+    deliberately **preserves** the ref through it — otherwise nothing could
+    re-attach to the live worker.
+
+    A replay that clears there instead diverges in a way that only shows up
+    on the *next* report: one naming a stale ref is refused by the row
+    (ref mismatch) and applied by the replay (no current ref to contradict
+    it), which is one task INTERRUPTED in the UI and RUNNING in the
+    frontier. The parametrised test above misses it because every case
+    there reaches the report in one start.
+    """
+    from stardag_api.services.status import get_all_task_statuses_in_build
+
+    execution_id = _eid()
+    build_id = await _running(client, "redelivered", execution_id, ref="fc-1")
+
+    # The claim's answer was lost; the client re-sends it, and it is now
+    # granted rather than refused — which is what STA-50 bought.
+    redelivered = await _start(
+        client, build_id, "redelivered", claim="true", execution_id=execution_id
+    )
+    assert redelivered.status_code == 200, redelivered.text
+
+    row = await _task_row(async_session, "redelivered")
+    assert row.latest_executor_ref == "fc-1", (
+        "the re-delivered claim erased the ref the spawn recorded"
+    )
+
+    # Now a report from an execution that is gone, naming the same identity
+    # but the reference it used to have.
+    reported = await _report(
+        client,
+        build_id,
+        "redelivered",
+        "interrupt",
+        reason="timeout",
+        executor_ref="fc-stale",
+        execution_id=execution_id,
+    )
+
+    row = await _task_row(async_session, "redelivered")
+    assert row.latest_status == "running", "the row applied a stale report"
+    assert reported.json()["status"] == "running", (
+        "the per-task replay applied a report the row refused"
+    )
+    statuses = await get_all_task_statuses_in_build(async_session, uuid.UUID(build_id))
+    assert statuses[row.id][0].value == "running", (
+        "the whole-build replay applied a report the row refused"
+    )
+
+
 # --- Cooperative cancellation's question ---------------------------------
 
 

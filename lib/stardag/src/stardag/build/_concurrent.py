@@ -1619,7 +1619,10 @@ async def build_aio(
             state.waiting_for_lock = False
 
     async def registry_task_start(
-        task: BaseTask, handle: DetachedHandle | None
+        task: BaseTask,
+        handle: DetachedHandle | None,
+        *,
+        spawned_here: bool = False,
     ) -> LockAcquisitionResult | None:
         """Emit TASK_STARTED, with the detached-execution ref when present.
 
@@ -1650,11 +1653,17 @@ async def build_aio(
         local failure, ``fail_mode`` honoured, and **nothing said to the
         registry about a task that is not ours**.
 
-        **And the container is stopped, when there is one.** It is
-        already running with a reference nothing recorded, so nothing
-        else can address it, and this is the only place still holding the
-        handle. Best-effort; its own cooperative checkpoint is the
-        backstop.
+        **And the container is stopped — but only one this submission
+        spawned.** ``spawned_here`` is the whole of that distinction and
+        it is load-bearing. A handle can also be *borrowed*: the claim
+        loser re-attaches to the winner's execution, and a resumed build
+        re-attaches to a ref recorded by an earlier run. Cancelling one of
+        those on a refusal would kill a live execution belonging to
+        somebody else — the exact damage this rule exists to prevent,
+        done in its name. A spawned one, by contrast, is running with a
+        reference nothing recorded, so nothing else can ever address it
+        and this is the only place still holding it. Best-effort; its own
+        cooperative checkpoint is the backstop either way.
         """
         execution_id = task_states[task.id].execution_id
         try:
@@ -1673,19 +1682,21 @@ async def build_aio(
             if not execution_not_wanted(start_err):
                 raise
             reason = (start_err.payload or {}).get("error_code")
-            orphan = "" if handle is None else f" Stopping execution {handle.ref!r}."
+            orphan = handle if spawned_here else None
+            stopping = "" if orphan is None else f" Stopping execution {orphan.ref!r}."
             logger.warning(
                 f"Task {task.id} stopped being ours while its execution was "
-                f"being started ({reason}); the registry refused the start.{orphan}"
+                f"being started ({reason}); the registry refused the start."
+                f"{stopping}"
             )
-            if handle is not None:
+            if orphan is not None:
                 try:
                     await task_executor.cancel_detached(
-                        task, handle.executor, handle.ref
+                        task, orphan.executor, orphan.ref
                     )
                 except Exception as cancel_err:
                     logger.warning(
-                        f"Failed to stop orphaned execution {handle.ref!r} for "
+                        f"Failed to stop orphaned execution {orphan.ref!r} for "
                         f"task {task.id}; it will run until its next "
                         f"cooperative checkpoint: {cancel_err}"
                     )
@@ -1816,6 +1827,13 @@ async def build_aio(
             # survive this process, so their (executor, ref) is recorded with
             # the TASK_STARTED event below — before we block on the result.
             handle: DetachedHandle | None = claim_handle
+            # Whether *this* submission created the execution behind
+            # ``handle``, as opposed to borrowing one: ``claim_handle`` is
+            # the winner's execution after a lost claim, and the re-attach
+            # below adopts one an earlier run started. Only a handle we
+            # spawned may be cancelled when the registry refuses our start
+            # — see ``registry_task_start``.
+            spawned_here = False
             detached_ref = detached_refs.pop(task.id, None)
             if handle is None and detached_ref is not None:
                 ref_executor, ref = detached_ref
@@ -1837,6 +1855,7 @@ async def build_aio(
                     handle = await task_executor.submit_detached(
                         task, execution_id=task_states[task.id].execution_id
                     )
+                    spawned_here = True
                 except Exception as e:
                     return TaskExecutionError(
                         exception=e,
@@ -1874,7 +1893,9 @@ async def build_aio(
                 # are tolerated by the registry.
                 if state.registered:
                     try:
-                        lost = await registry_task_start(task, handle)
+                        lost = await registry_task_start(
+                            task, handle, spawned_here=spawned_here
+                        )
                         if lost is not None:
                             return lost
                         state.started = True
@@ -1889,7 +1910,9 @@ async def build_aio(
                 # happens before the spawn): record the executor ref with a
                 # plain, tolerated-duplicate start.
                 try:
-                    lost = await registry_task_start(task, handle)
+                    lost = await registry_task_start(
+                        task, handle, spawned_here=spawned_here
+                    )
                     if lost is not None:
                         return lost
                 except Exception as reg_err:

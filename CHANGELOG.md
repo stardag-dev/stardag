@@ -73,6 +73,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   worker with no identity can still be told its build or its task has
   stopped.
 
+- **Only an execution this submission spawned is ever stopped.** A handle
+  can be borrowed rather than created — the claim loser re-attaches to the
+  winner's execution, and a resumed build adopts a reference an earlier run
+  recorded. Cancelling one of those when the registry refuses a start would
+  kill a live execution belonging to somebody else, which is the damage the
+  refusal exists to prevent, done in its name.
+
 - **Losing a task is never reported as that task's failure.** Two paths
   reach the same damage and both are closed. When the resident engine's
   post-spawn start is refused, the refusal used to travel the generic
@@ -139,6 +146,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   one the build and task halves are still evaluated, which is what keeps
   a worker that was never given an identity covered for the cases a human
   causes.
+
+- The two per-build status replays mirror the row fold's
+  **claim-redelivery** guard: a re-delivered claim carries the id the task
+  already holds and no executor of its own, and must not erase the
+  reference the spawn recorded. A replay that cleared it where the row
+  preserves it would apply a later report naming a stale reference that
+  the row refuses — one task INTERRUPTED in the UI and RUNNING in the
+  frontier.
 
 - The interruption and preemption reports accept an `execution_id`,
   preferred over `executor_ref` where both are sent because the identity

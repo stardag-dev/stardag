@@ -485,6 +485,39 @@ async def test_a_refused_ref_recording_start_stops_the_container_it_orphaned(
     )
 
 
+async def test_a_borrowed_handle_is_never_cancelled_on_a_refusal(
+    default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+):
+    """Stopping the orphan must not become stopping somebody else's worker.
+
+    A handle is not always one this submission created. The claim loser
+    re-attaches to the **winner's** execution, and a resumed build adopts
+    a reference an earlier run recorded. Cancelling one of those when the
+    registry refuses our start would kill a live execution belonging to
+    another build — the exact damage the refusal exists to prevent, done
+    in its name.
+
+    Here the claim is lost to a live winner, so the handle is borrowed,
+    and the start that follows is refused. The orphan-stopping path must
+    not fire.
+    """
+    task = SyncOnlyTask(name="borrowed-handle")
+    registry = ClaimRegistry()
+    registry.seed_running(task, "fake", "fc-winner")
+    registry.refuse_ref_recording_start = "task_cancelled"
+    executor = FakeDetachedExecutor(live_refs={"fc-winner"})
+
+    with pytest.raises(Exception, match="stopped being this build's"):
+        await build_aio(
+            [task], task_executor=executor, registry=registry, claim_config=FAST_CLAIM
+        )
+
+    assert executor.cancel_detached_calls == [], (
+        "a refusal cancelled an execution this build did not start — "
+        f"{executor.cancel_detached_calls}"
+    )
+
+
 async def test_a_worker_that_stopped_itself_is_not_reported_as_a_failure(
     default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
 ):
