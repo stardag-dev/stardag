@@ -5,15 +5,7 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
-import {
-  cancelBuild,
-  completeBuild,
-  failBuild,
-  fetchBuild,
-  fetchBuildGraph,
-  fetchTasksInBuild,
-} from "../api/tasks";
-import { useAuth } from "../context/AuthContext";
+import { fetchBuild, fetchBuildGraph, fetchTasksInBuild } from "../api/tasks";
 import { useBreadcrumb, type BreadcrumbItem } from "../context/BreadcrumbContext";
 import { useEnvironment } from "../context/EnvironmentContext";
 import type {
@@ -26,13 +18,12 @@ import type {
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
-import { useClickOutside } from "../hooks/useClickOutside";
 import { rootsSatisfiedFrom } from "../utils/claims";
-import { isSyntheticScope } from "../utils/scope";
 import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildStatusBadge } from "./BuildStatusBadge";
-import { BuildStopPanel } from "./BuildStopPanel";
-import { BuildExecutorChips } from "./ExecutorBadge";
+import { BuildControlsDialog } from "./BuildControlsDialog";
+import { BuildInfoDialog } from "./BuildInfoDialog";
+import { ToolbarButton } from "./ui/ToolbarButton";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
 import {
@@ -43,7 +34,6 @@ import {
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
 import { TaskTable } from "./TaskTable";
-import { Modal } from "./Modal";
 
 interface BuildViewProps {
   buildId: string;
@@ -53,7 +43,6 @@ interface BuildViewProps {
 
 export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps) {
   const { activeEnvironment } = useEnvironment();
-  const { user } = useAuth();
   const { setItems: setBreadcrumb } = useBreadcrumb();
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
@@ -80,13 +69,6 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
   const dagPositionCacheRef = useRef<PositionCache>(createPositionCache());
 
-  // Override state dropdown
-  const [showOverrideMenu, setShowOverrideMenu] = useState(false);
-  const [overriding, setOverriding] = useState(false);
-  const [overrideError, setOverrideError] = useState<string | null>(null);
-  const [overrideNotice, setOverrideNotice] = useState<string | null>(null);
-  const overrideMenuRef = useRef<HTMLDivElement>(null);
-
   // Refresh state
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
@@ -95,7 +77,22 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // so the 5s auto-refresh drives one request stream, not two.
   const [refreshToken, setRefreshToken] = useState(0);
   const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastClickRef = useRef<number>(0);
+  // Pending single click, held for the double-click window. A timer
+  // left running past a change of identity fires with the *previous*
+  // identity's closure, which is not merely a wasted request: it bumps
+  // the shared load epoch, discarding the load legitimately in flight,
+  // then applies its own older answer. Cleared on identity change by
+  // the effect below, and here on unmount.
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (clickTimerRef.current !== null) {
+        clearTimeout(clickTimerRef.current);
+        clickTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   // Handle DAG toggle with panel resize
   const handleToggleDag = useCallback(() => {
@@ -116,6 +113,19 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   const [page, setPage] = useState(1);
   const pageSize = 20;
 
+  // What is on screen, and what was asked for. The pair is the identity
+  // of a load: the same build id read under a different environment is a
+  // different thing to show, and comparing only the build id misses an
+  // environment switch entirely — `BuildView` stays mounted through one.
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const requestedKey = `${activeEnvironment?.id ?? ""}:${buildId}`;
+  // Stale-response guard, the same shape the panels in this view already
+  // use. Without it a slow read for the previous build can land after
+  // navigation, overwrite `build`, and drop `loading` — at which point
+  // no guard downstream can tell that what is rendered is the wrong
+  // build.
+  const loadEpochRef = useRef(0);
+
   // Load build data
   const loadBuild = useCallback(async () => {
     if (!activeEnvironment?.id || !buildId) {
@@ -123,6 +133,9 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       return;
     }
 
+    const epoch = ++loadEpochRef.current;
+    const fresh = () => loadEpochRef.current === epoch;
+    const key = `${activeEnvironment.id}:${buildId}`;
     setLoading(true);
     setError(null);
     try {
@@ -135,13 +148,19 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
           max_per_type_per_level: dagControls.maxPerType,
         }),
       ]);
+      if (!fresh()) return;
       setBuild(buildData);
       setAllTasks(tasksData);
       setGraph(graphData);
+      setLoadedKey(key);
     } catch (err) {
+      if (!fresh()) return;
       setError(err instanceof Error ? err.message : "Failed to load build");
     } finally {
-      setLoading(false);
+      // Only the newest request may declare the view settled. A
+      // superseded one clearing this would expose whatever is on screen
+      // as though it were the answer.
+      if (fresh()) setLoading(false);
     }
   }, [
     activeEnvironment?.id,
@@ -155,24 +174,84 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     loadBuild();
   }, [loadBuild]);
 
-  // Reset build-scoped UI state when the user navigates between builds.
-  // Otherwise, filters/pagination from Build A can silently apply to
-  // Build B, and a previously selected task can leave the detail panel
-  // and breadcrumb pointing at stale data from the prior build.
+  // Everything a change of identity invalidates, in one place.
+  //
+  // "Identity" is the environment and the build together, not the build
+  // alone: this component stays mounted through a change of either, and
+  // an environment switch leaves `buildId` untouched. Keyed on the build
+  // alone, this kept the previous environment's filters and pagination,
+  // and kept a selected task whose own `environment_id` belonged to the
+  // environment you just left — so acting on it acted in the wrong one.
+  //
+  // The pending refresh click and the in-flight refresh marker are here
+  // for the same reason and not by coincidence: each is work aimed at
+  // the identity that was current when it started.
   useEffect(() => {
     setNameFilter("");
     setStatusFilter("");
     setPage(1);
     setSelectedTask(null);
-  }, [buildId]);
+    if (clickTimerRef.current !== null) {
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
+    refreshOwnerRef.current = null;
+    // Cleared with the marker it belongs to: with the owner check above,
+    // the abandoned refresh will decline to clear this itself, and
+    // nothing else would.
+    setRefreshing(false);
+  }, [buildId, activeEnvironment?.id]);
 
   // Refresh handler
+  // Single-flight, on a ref rather than on `refreshing`.
+  //
+  // `refreshing` is a state snapshot, and every caller cleared it on its
+  // own completion — so with the 5-second interval firing regardless of
+  // what was already in flight, an older completion could clear the flag
+  // while a newer request was still running, and the next caller would
+  // start another on top. The ref is the fact; `refreshing` is only the
+  // spin on the icon.
+  //
+  // It guards *refreshes* rather than `loadBuild` itself, because a load
+  // triggered by a change of build, environment or DAG controls is a
+  // different request and must supersede rather than be skipped.
+  // It holds *which* identity's refresh is in flight rather than merely
+  // that one is. A bare boolean stayed true across navigation until the
+  // abandoned request settled, silently dropping every refresh for the
+  // build you had moved to; and the abandoned request's own completion
+  // would then clear a marker the new identity had set.
+  const refreshOwnerRef = useRef<string | null>(null);
   const handleRefresh = useCallback(async () => {
+    if (refreshOwnerRef.current !== null) return;
+    const owner = requestedKey;
+    refreshOwnerRef.current = owner;
     setRefreshing(true);
     setRefreshToken((token) => token + 1);
-    await loadBuild();
-    setRefreshing(false);
-  }, [loadBuild]);
+    try {
+      await loadBuild();
+    } finally {
+      // Both, under the same check. `refreshing` is what the marker
+      // exists to drive, so clearing it unconditionally reintroduced the
+      // bug one line below the fix: an abandoned refresh settling would
+      // stop the icon spinning while the current identity's refresh was
+      // still in flight.
+      if (refreshOwnerRef.current === owner) {
+        refreshOwnerRef.current = null;
+        setRefreshing(false);
+      }
+    }
+  }, [loadBuild, requestedKey]);
+
+  // Auto-refreshing a build that has stopped is pointless, and the
+  // interval below has always declined to do it — but the toolbar used
+  // to light up and claim otherwise, because nothing connected the two.
+  const canAutoRefresh = build?.status === "running";
+
+  // Turn it off when the build stops running, so the control cannot go
+  // on asserting something the interval is not doing.
+  useEffect(() => {
+    if (!canAutoRefresh && autoRefresh) setAutoRefresh(false);
+  }, [canAutoRefresh, autoRefresh]);
 
   // Auto-refresh effect
   useEffect(() => {
@@ -191,52 +270,6 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     };
   }, [autoRefresh, build?.status, handleRefresh]);
 
-  // Override state handlers
-  const handleOverride = useCallback(
-    async (action: "cancel" | "complete" | "fail") => {
-      if (!activeEnvironment?.id || !buildId) return;
-
-      const actionLabels = {
-        cancel: "cancel",
-        complete: "mark as completed",
-        fail: "mark as failed",
-      };
-
-      const confirmed = window.confirm(
-        `Are you sure you want to ${actionLabels[action]} this build?`,
-      );
-      if (!confirmed) return;
-
-      setShowOverrideMenu(false);
-      setOverriding(true);
-      setOverrideError(null);
-      setOverrideNotice(null);
-
-      const userId = user?.profile?.sub;
-
-      try {
-        let updatedBuild: Build;
-        if (action === "cancel") {
-          updatedBuild = await cancelBuild(buildId, activeEnvironment.id, userId);
-        } else if (action === "complete") {
-          updatedBuild = await completeBuild(buildId, activeEnvironment.id, userId);
-        } else {
-          updatedBuild = await failBuild(buildId, activeEnvironment.id, userId);
-        }
-        setBuild(updatedBuild);
-      } catch (err) {
-        setOverrideError(
-          err instanceof Error
-            ? err.message
-            : `Failed to ${actionLabels[action]} build`,
-        );
-      } finally {
-        setOverriding(false);
-      }
-    },
-    [activeEnvironment?.id, buildId, user?.profile?.sub],
-  );
-
   // ESC to exit DAG fullscreen
   useEffect(() => {
     if (!dagFullscreen) return;
@@ -247,34 +280,52 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [dagFullscreen]);
 
-  const closeOverrideMenu = useCallback(() => setShowOverrideMenu(false), []);
-  useClickOutside(overrideMenuRef, showOverrideMenu, closeOverrideMenu);
-
-  // Double-click refresh to toggle auto-refresh
+  // Single click refreshes; double-click toggles auto-refresh.
+  //
+  // The single click is *deferred* by the double-click window rather
+  // than acted on at once. Acting immediately meant the two gestures
+  // overlapped: with auto-refresh on, the first click of a double-click
+  // turned it off and the second turned it straight back on, so the
+  // gesture could switch it on but never off.
+  //
+  // The button also stays enabled throughout, because disabling it
+  // during the in-flight first refresh is the other thing that made the
+  // double-click unreachable.
   const handleRefreshClick = useCallback(() => {
-    const now = Date.now();
-    const timeSinceLastClick = now - lastClickRef.current;
-    lastClickRef.current = now;
-
-    if (timeSinceLastClick < 300) {
-      // Double-click: toggle auto-refresh
-      setAutoRefresh((prev) => !prev);
-    } else {
-      // Single click: manual refresh (only if not in auto-refresh mode)
-      if (!autoRefresh) {
-        handleRefresh();
-      } else {
-        // Click while auto-refreshing: stop auto-refresh
-        setAutoRefresh(false);
-      }
+    if (clickTimerRef.current !== null) {
+      // Second click inside the window: this is the double.
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+      if (canAutoRefresh) setAutoRefresh((previous) => !previous);
+      else handleRefresh();
+      return;
     }
-  }, [autoRefresh, handleRefresh]);
+    clickTimerRef.current = setTimeout(() => {
+      clickTimerRef.current = null;
+      if (autoRefresh) setAutoRefresh(false);
+      else handleRefresh();
+    }, 300);
+  }, [autoRefresh, canAutoRefresh, handleRefresh]);
 
-  // Can override if build is in an active or stuck state
-  const canOverride =
-    build?.status === "running" ||
-    build?.status === "pending" ||
-    build?.status === "exit_early";
+  const handleBuildOverridden = useCallback(
+    (updated: Build) => {
+      if (updated.id !== buildId) return;
+      // Supersede any read already in flight. It was issued *before*
+      // this write and carries the pre-override record, and because it
+      // is for this same identity the epoch still considers it fresh —
+      // so without this it lands afterwards and visibly reverts the
+      // status the user just set.
+      //
+      // Clearing `loading` by hand is part of the same move: the
+      // superseded read's own `finally` is epoch-guarded and will now
+      // decline to, which would otherwise leave the view spinning.
+      loadEpochRef.current += 1;
+      setBuild(updated);
+      setLoadedKey(requestedKey);
+      setLoading(false);
+    },
+    [buildId, requestedKey],
+  );
 
   // Update breadcrumb navigation
   useEffect(() => {
@@ -401,7 +452,24 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     setPage(1);
   }, []);
 
-  if (loading) {
+  // The loader takes over the screen only when what is loaded is not
+  // what was asked for.
+  //
+  // It used to be a plain `if (loading)`, which meant every refresh
+  // replaced the whole view — toolbar included — including each
+  // 5-second auto-refresh tick. Besides the flashing, that is half of
+  // why the advertised double-click could not work: the button the
+  // second click needed had unmounted. A refresh keeps the view, and
+  // the refresh icon's own spin is the right size of signal.
+  //
+  // But `!build` is the wrong test for that, because this component
+  // stays mounted across a change of build *or environment* and holds
+  // the previous data while the new load runs — so the old DAG, rows
+  // and controls would render under the new header. Comparing what is
+  // loaded against what was asked for distinguishes the two cases: a
+  // refresh matches and keeps the view, a change of either does not and
+  // gets the loader.
+  if (loading && loadedKey !== requestedKey) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
@@ -447,131 +515,101 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
             <div className="flex h-full flex-col">
               {/* The build view tool and info bar.
 
-                  Three roles, always in the same order: narrow the task
-                  list, read what this build *is*, act on it. Everything
-                  that used to be a full-width band between the header
-                  and the DAG is reachable from here instead — the chips
-                  that were crowding the breadcrumb, and the build
-                  config that had its own strip. */}
+                  Two clusters. On the left, everything about *this list
+                  of tasks*: narrowing it, how many there are, and
+                  refreshing it. On the right, everything about *the
+                  build*: what it is, what the scheduler makes of it, and
+                  what you can do to it.
+
+                  Every one of the right-hand controls is an icon with a
+                  tooltip that appears at once — see `ui/ToolbarButton`.
+                  Between them they replaced four coloured pills and two
+                  full-width bands, so nothing now sits between this row
+                  and the DAG except a failed build's reason. */}
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-200 bg-white px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
-                {/* 1 — narrow */}
-                <div className="flex items-center gap-2">
+                {/* The task list */}
+                <div className="flex min-w-0 flex-1 items-center gap-2">
                   <TaskFilters
                     nameFilter={nameFilter}
                     onNameFilterChange={handleSetNameFilter}
                     statusFilter={statusFilter}
                     onStatusFilterChange={handleSetStatusFilter}
                   />
-                </div>
-
-                {/* 2 — what this build is. Takes the slack, so the
-                    actions stay pinned right. */}
-                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
                   <span className="text-xs whitespace-nowrap text-gray-500 dark:text-gray-400">
                     {realTasks.length} task{realTasks.length === 1 ? "" : "s"}
                   </span>
-                  <BuildExecutorChips metadata={build.executor_metadata} />
-                  <BuildScopeChip scopeKey={build.scope_key} />
-                  <BuildConfigChip config={build.build_config} />
-                </div>
-
-                {/* 3 — act */}
-                <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={handleRefreshClick}
-                    disabled={refreshing && !autoRefresh}
-                    className={`rounded-md p-1 transition-colors ${
+                  <ToolbarButton
+                    label={autoRefresh ? "Stop auto-refreshing" : "Refresh"}
+                    hint={
                       autoRefresh
-                        ? "bg-blue-100 text-blue-700 ring-2 ring-blue-400 dark:bg-blue-900/30 dark:text-blue-400"
-                        : "text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-                    } disabled:opacity-50`}
-                    title={
-                      autoRefresh
-                        ? "Auto-refreshing (click to stop)"
-                        : "Click to refresh, double-click for auto-refresh"
+                        ? "Refreshing every 5 seconds"
+                        : canAutoRefresh
+                          ? "Double-click to refresh every 5 seconds"
+                          : undefined
                     }
+                    onClick={handleRefreshClick}
+                    // Deliberately NOT disabled while refreshing. It used
+                    // to be, which quietly made the advertised
+                    // double-click impossible: the first click starts a
+                    // fetch, `refreshing` goes true, the button disables,
+                    // and the second click never lands. Re-entry is
+                    // guarded in the handler instead.
+                    active={autoRefresh}
                   >
                     <svg
+                      aria-hidden="true"
                       className={`h-4 w-4 ${
                         refreshing || autoRefresh ? "animate-spin" : ""
                       }`}
                       fill="none"
                       stroke="currentColor"
+                      strokeWidth={2}
                       viewBox="0 0 24 24"
                     >
                       <path
                         strokeLinecap="round"
                         strokeLinejoin="round"
-                        strokeWidth={2}
                         d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
                       />
                     </svg>
-                  </button>
-                  {canOverride && (
-                    <div className="relative" ref={overrideMenuRef}>
-                      <button
-                        onClick={() => setShowOverrideMenu(!showOverrideMenu)}
-                        disabled={overriding}
-                        className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
-                      >
-                        {overriding ? "..." : "Override"}
-                        <svg
-                          className={`h-3 w-3 transition-transform ${
-                            showOverrideMenu ? "rotate-180" : ""
-                          }`}
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M19 9l-7 7-7-7"
-                          />
-                        </svg>
-                      </button>
-                      {showOverrideMenu && (
-                        <div className="absolute right-0 z-10 mt-1 w-56 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 dark:bg-gray-800 dark:ring-gray-700">
-                          <div className="py-1">
-                            <button
-                              onClick={() => handleOverride("complete")}
-                              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
-                            >
-                              <span className="h-2 w-2 rounded-full bg-green-500" />
-                              Mark Completed
-                            </button>
-                            <button
-                              onClick={() => handleOverride("fail")}
-                              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
-                            >
-                              <span className="h-2 w-2 rounded-full bg-red-500" />
-                              Mark Failed
-                            </button>
-                            <button
-                              onClick={() => handleOverride("cancel")}
-                              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
-                            >
-                              <span className="h-2 w-2 rounded-full bg-gray-500" />
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                  </ToolbarButton>
+                </div>
+
+                {/* The build */}
+                <div className="flex items-center gap-1.5">
+                  <BuildInfoDialog build={build} />
+                  {activeEnvironment?.id && (
+                    <BuildSchedulingPanel
+                      buildId={buildId}
+                      environmentId={activeEnvironment.id}
+                      buildStatus={build.status}
+                      refreshToken={refreshToken}
+                      onNavigateToBuild={onNavigateToBuild}
+                      onChanged={handleRefresh}
+                    />
                   )}
-                  {overrideError && (
-                    <span className="text-xs text-red-600 dark:text-red-400">
-                      {overrideError}
-                    </span>
-                  )}
-                  {overrideNotice && (
-                    <span
-                      role="status"
-                      className="text-xs text-green-700 dark:text-green-400"
-                    >
-                      {overrideNotice}
-                    </span>
+                  {activeEnvironment?.id && (
+                    <BuildControlsDialog
+                      // Keyed by environment *and* build. The dialog
+                      // relies on remounting to clear its scan, filters,
+                      // ticks and open state rather than on a reset
+                      // effect — see its own note on why — and this view
+                      // stays mounted across an environment switch as
+                      // well as a build one, so a key naming only the
+                      // build leaves the previous environment's
+                      // executions on screen and actionable.
+                      key={`${activeEnvironment.id}:${buildId}`}
+                      buildId={buildId}
+                      environmentId={activeEnvironment.id}
+                      buildStatus={build.status}
+                      refreshToken={refreshToken}
+                      // Guarded rather than `setBuild` directly: an
+                      // override is async, this view stays mounted
+                      // across a change of build, and a slow one
+                      // resolving afterwards would write the previous
+                      // build's record into the current build's view.
+                      onBuildChanged={handleBuildOverridden}
+                    />
                   )}
                 </div>
               </div>
@@ -584,32 +622,6 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                 failedAt={build.completed_at}
                 superseded={rootsSuperseded}
               />
-
-              {/* What this build still has running, and the command that
-                  stops it. Absent unless it holds live executions — see
-                  BuildStopPanel, which never stops anything itself. */}
-              {activeEnvironment?.id && (
-                <BuildStopPanel
-                  key={buildId}
-                  buildId={buildId}
-                  environmentId={activeEnvironment.id}
-                  refreshToken={refreshToken}
-                />
-              )}
-
-              {/* Scheduler state. Renders itself only when it has something
-                  to say — see `schedulingPanelForm`. Placed above the DAG so
-                  a stalled build's explanation is the first thing read. */}
-              {activeEnvironment?.id && (
-                <BuildSchedulingPanel
-                  buildId={buildId}
-                  environmentId={activeEnvironment.id}
-                  buildStatus={build.status}
-                  refreshToken={refreshToken}
-                  onNavigateToBuild={onNavigateToBuild}
-                  onChanged={handleRefresh}
-                />
-              )}
 
               {/* DAG header - always visible */}
               <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
@@ -798,87 +810,5 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
         </div>
       )}
     </div>
-  );
-}
-
-/**
- * The one look for a chip in the tool-and-info bar's middle section.
- *
- * Shared so a reader learns "small grey chip = something this build is"
- * once, rather than per chip. Interactive chips add their own hover on
- * top; nothing else varies.
- */
-const INFO_CHIP =
-  "inline-flex max-w-[14rem] items-center gap-1 truncate rounded bg-gray-100 " +
-  "px-1.5 py-0.5 text-[10px] text-gray-600 dark:bg-gray-700 dark:text-gray-300";
-
-/**
- * The build's structure scope — `<code id>:<config hash>`, or the server's
- * synthetic `build:<id>` when nothing fixed one. Monospace and truncated;
- * the full key is in the title. Absent on servers predating scopes.
- */
-function BuildScopeChip({ scopeKey }: { scopeKey?: string | null }) {
-  if (!scopeKey) return null;
-  const synthetic = isSyntheticScope(scopeKey);
-  return (
-    <code
-      title={
-        synthetic
-          ? `Structure scope ${scopeKey} — this build's dependency edges are shared with no other build`
-          : `Structure scope ${scopeKey} — the code version and structure config this build is currently planned under. It moves when the app is redeployed: the next scheduler pass re-plans the build under the new code.`
-      }
-      className={`${INFO_CHIP} font-mono`}
-    >
-      {synthetic ? "scope: per-build" : `scope: ${scopeKey.slice(0, 12)}…`}
-    </code>
-  );
-}
-
-/**
- * The central values this build's level 2 and 3 parameters were read from.
- *
- * A chip that opens a dialog, where it used to be a full-width
- * disclosure strip above the DAG. It is JSON consulted when a result is
- * surprising, not something read on the way past, so it does not earn a
- * permanent band of the build view — and the strip was one of several
- * that between them left the graph a few pixels tall.
- *
- * Absent entirely when the build set no overrides.
- */
-function BuildConfigChip({
-  config,
-}: {
-  config?: Record<string, Record<string, unknown>> | null;
-}) {
-  const [open, setOpen] = useState(false);
-  const classCount = config ? Object.keys(config).length : 0;
-  if (classCount === 0) return null;
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        title="Show the build config these tasks' central parameters were read from"
-        className={`${INFO_CHIP} hover:bg-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-600`}
-      >
-        config: {classCount} class{classCount === 1 ? "" : "es"}
-      </button>
-      <Modal
-        isOpen={open}
-        onClose={() => setOpen(false)}
-        title="Build config"
-        maxWidthClass="max-w-2xl"
-      >
-        <p className="mb-3 text-xs text-gray-600 dark:text-gray-400">
-          The central values this build&rsquo;s level 2 and level 3 parameters were read
-          from. They are part of the structure scope, so two builds that disagree here
-          do not share dependency edges.
-        </p>
-        <pre className="max-h-[60vh] overflow-auto rounded bg-gray-50 p-3 font-mono text-[11px] text-gray-700 dark:bg-gray-900 dark:text-gray-300">
-          {JSON.stringify(config, null, 2)}
-        </pre>
-      </Modal>
-    </>
   );
 }

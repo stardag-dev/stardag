@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   cancelTask,
   fetchBuildFrontier,
@@ -25,14 +25,12 @@ import { ClaimActionDialog } from "./ClaimActionDialog";
 import { StatusBadge } from "./StatusBadge";
 import { TickSummaryTrail } from "./TickSummaryTrail";
 import { ResultBanner } from "./ui/ResultBanner";
+import { Modal } from "./Modal";
+import { ToolbarButton } from "./ui/ToolbarButton";
 
 // How many ticks to pull. Enough to see a repeating outcome without
 // turning the panel into a log viewer.
 const TICK_LIMIT = 20;
-
-// Blockers shown before the panel has to be expanded. Two is enough to
-// see whether they share a cause; past that it is a work queue.
-const COMPACT_BLOCKERS = 2;
 
 // Order the status chips read in, rather than whatever order the server's
 // GROUP BY produced. Unknown statuses (a newer SDK) are appended.
@@ -317,20 +315,22 @@ export function BuildSchedulingPanel({
 
   const [frontier, setFrontier] = useState<BuildFrontier | null>(null);
   const [frontierError, setFrontierError] = useState<string | null>(null);
+  // Tracked separately from `frontier === null`, because the previous
+  // frontier is deliberately kept on screen while the next read is in
+  // flight. Without this the spinner appeared on the first load only,
+  // and every refresh after it showed a static clock.
+  const [frontierLoading, setFrontierLoading] = useState(true);
 
   const [summaries, setSummaries] = useState<BuildTickSummary[]>([]);
   const [ticksLoading, setTicksLoading] = useState(false);
   const [ticksUnavailable, setTicksUnavailable] = useState(false);
   const [ticksError, setTicksError] = useState<string | null>(null);
 
-  // Collapsed-form disclosure.
-  const [stripOpen, setStripOpen] = useState(false);
-  // Stalled-form disclosure. The verdict, the task-status breakdown and
-  // the scheduler's tick trail are all *explanation*; the headline and the
-  // blockers themselves are the answer. Only the answer is on screen by
-  // default — this panel sits above the DAG and the task table, and at
-  // full height it pushed both off the viewport.
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  // Whether the dialog is open. It replaces the two disclosures this
+  // panel used to carry: they existed because the panel sat above the DAG
+  // and the task table and at full height pushed both off the viewport.
+  // In a dialog there is room, so everything it knows is simply shown.
+  const [open, setOpen] = useState(false);
 
   // In-flight remedy.
   const [pending, setPending] = useState<{
@@ -353,6 +353,7 @@ export function BuildSchedulingPanel({
     if (!buildId || !environmentId) return;
     const epoch = ++frontierEpochRef.current;
     const fresh = () => frontierEpochRef.current === epoch;
+    setFrontierLoading(true);
     fetchBuildFrontier(buildId, environmentId)
       .then((data) => {
         if (!fresh()) return;
@@ -364,30 +365,41 @@ export function BuildSchedulingPanel({
         setFrontierError(
           err instanceof Error ? err.message : "Failed to read scheduler state",
         );
+      })
+      .finally(() => {
+        if (fresh()) setFrontierLoading(false);
       });
   }, [buildId, environmentId, refreshToken, localNonce]);
 
-  // Reset per-build state when navigating between builds, so a previous
-  // build's blockers/ticks never show under a new one's header.
+  // Reset when either half of the identity changes. Not just the build:
+  // this component stays mounted across an environment switch too, and
+  // `buildId` does not move through one — so keying the reset on the
+  // build alone left the previous environment's frontier, ticks and open
+  // dialog in place under the new one. Same defect the controls dialog
+  // had in its key.
   useEffect(() => {
     setFrontier(null);
     setFrontierError(null);
+    setFrontierLoading(true);
     setSummaries([]);
     setTicksUnavailable(false);
     setTicksError(null);
-    setStripOpen(false);
-    setDetailsOpen(false);
+    setOpen(false);
     setNotice(null);
     setActionError(null);
-  }, [buildId]);
+    // `pending` renders ClaimActionDialog, and confirming it writes —
+    // with the *old* blocker's ids and the *new* environment. Today the
+    // parent's loader unmounts this subtree on either change so it is
+    // unreachable, but this effect exists precisely for the case where
+    // it is not, and leaving the one write out of it is the wrong thing
+    // to forget.
+    setPending(null);
+  }, [buildId, environmentId]);
 
   const form = frontier ? schedulingPanelForm(frontier, buildStatus) : "hidden";
-  // Tick history is fetched only when it will actually be read, which in
-  // both forms now means "the disclosure is open" — the stalled form keeps
-  // its trail behind `details` so the panel stays short enough to leave the
-  // DAG and the task table on screen.
-  const wantTicks =
-    (form === "stalled" && detailsOpen) || (form === "collapsed" && stripOpen);
+  // Tick history is fetched only when it will actually be read, which now
+  // means simply "the dialog is open".
+  const wantTicks = open && (form === "stalled" || form === "collapsed");
 
   useEffect(() => {
     if (!wantTicks || !buildId || !environmentId) return;
@@ -468,21 +480,97 @@ export function BuildSchedulingPanel({
     }
   }, [pending, environmentId, onChanged]);
 
-  // The first load renders nothing rather than a placeholder: this panel is
-  // an answer, and on a healthy build there is no question — flashing a
-  // "checking…" box on every build open would be worse than the ~200ms of
-  // nothing. A *failed* read is different, and does render (below).
-  if (frontierError) {
+  // The icon is always present, and carries the state the panel used to
+  // carry by existing or not: a spinner while the frontier is being read,
+  // a dot when something is wrong. An icon that came and went would be
+  // worse than one that says what it knows — a control that disappears
+  // reads as a bug, and a toolbar whose buttons move is hard to aim at.
+  const loading = frontierLoading;
+  const unhealthy = frontierError !== null || form === "stalled";
+  const trigger = (
+    <ToolbarButton
+      label="Scheduling"
+      hint={
+        frontierError
+          ? "The scheduler state could not be read"
+          : form === "stalled"
+            ? "This build is not progressing"
+            : "What the scheduler thinks this build is doing"
+      }
+      onClick={() => setOpen(true)}
+      badge={
+        unhealthy ? (
+          <span
+            aria-hidden="true"
+            className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-white dark:ring-gray-800"
+          />
+        ) : undefined
+      }
+    >
+      {loading ? (
+        <svg
+          aria-hidden="true"
+          className="h-4 w-4 animate-spin"
+          fill="none"
+          viewBox="0 0 24 24"
+        >
+          <circle
+            className="opacity-25"
+            cx="12"
+            cy="12"
+            r="10"
+            stroke="currentColor"
+            strokeWidth="3"
+          />
+          <path
+            className="opacity-75"
+            fill="currentColor"
+            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+          />
+        </svg>
+      ) : (
+        <svg
+          aria-hidden="true"
+          className="h-4 w-4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          viewBox="0 0 24 24"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+          />
+        </svg>
+      )}
+    </ToolbarButton>
+  );
+
+  if (!frontier) {
     return (
-      <div className="border-b border-gray-200 px-4 py-2 dark:border-gray-700">
-        <ResultBanner tone="warning">
-          Could not read this build&rsquo;s scheduler state, so the panel that explains
-          a stalled build is unavailable: {frontierError}
-        </ResultBanner>
-      </div>
+      <>
+        {trigger}
+        <Modal
+          isOpen={open}
+          onClose={() => setOpen(false)}
+          title="Scheduling"
+          maxWidthClass="max-w-3xl"
+        >
+          {frontierError ? (
+            <ResultBanner tone="warning">
+              Could not read this build&rsquo;s scheduler state, so what would explain a
+              stalled build is unavailable: {frontierError}
+            </ResultBanner>
+          ) : (
+            <p role="status" className="text-sm text-gray-600 dark:text-gray-400">
+              Reading this build&rsquo;s scheduler state…
+            </p>
+          )}
+        </Modal>
+      </>
     );
   }
-  if (!frontier || form === "hidden") return null;
 
   // Always empty from a current server (edges are scoped to the build, and
   // a stalled build re-closes its plan before it is reported as stalled);
@@ -491,7 +579,6 @@ export function BuildSchedulingPanel({
   const awaitingResetCount = frontier.actionable.filter((t) =>
     resetPendingLabel(t.latest_status),
   ).length;
-  const totalTasks = Object.values(frontier.status_counts).reduce((a, b) => a + b, 0);
   // A status nothing is in is not information about this build.
   const counts = Object.entries(frontier.status_counts)
     .filter(([, count]) => count > 0)
@@ -533,15 +620,30 @@ export function BuildSchedulingPanel({
     />
   );
 
-  if (form === "satisfied") {
+  let body: ReactNode;
+
+  if (form === "hidden") {
+    // A healthy build with no scheduler to reason about. As a panel this
+    // rendered nothing, which was right for a band that appeared unbidden;
+    // behind an icon somebody chose to click, saying so is the answer.
+    body = (
+      <div className="space-y-3 text-sm text-gray-700 dark:text-gray-300">
+        <p>
+          Nothing to report. This build is progressing and no scheduler tick drives it,
+          so there is no scheduler state to explain.
+        </p>
+        {countChips}
+      </div>
+    );
+  } else if (form === "satisfied") {
     // Every root is complete, so there is nothing to diagnose and nothing to
     // intervene in — however the build's own status reads. Green rather than
     // amber, and deliberately short: the interesting question ("why does the
     // status still say failed?") is answered by the failure reason above this
     // panel, not by repeating it here.
     const completedElsewhere = buildStatus !== "completed";
-    return (
-      <div className="border-b border-green-200 bg-green-50 px-4 py-1.5 dark:border-green-900/60 dark:bg-green-950/30">
+    body = (
+      <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 dark:border-green-900/60 dark:bg-green-950/30">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span aria-hidden="true" className="text-green-700 dark:text-green-400">
             ✓
@@ -564,179 +666,133 @@ export function BuildSchedulingPanel({
         )}
       </div>
     );
-  }
-
-  if (form === "collapsed") {
-    // A progressing reactive build: one line, never an empty box. It must
-    // not imply anything about blockers — the server does not look for
-    // them while a build is moving.
-    return (
-      <div className="border-b border-gray-200 bg-gray-50 px-4 py-1.5 dark:border-gray-700 dark:bg-gray-800/50">
+  } else if (form === "collapsed") {
+    // A progressing reactive build. It must not imply anything about
+    // blockers — the server does not look for them while a build is
+    // moving.
+    body = (
+      <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setStripOpen((v) => !v)}
-            aria-expanded={stripOpen}
-            className="flex items-center gap-1.5 rounded text-xs font-medium text-gray-700 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-300 dark:hover:text-gray-100"
-          >
-            <svg
-              className={`h-3 w-3 transition-transform ${stripOpen ? "rotate-90" : ""}`}
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9 5l7 7-7 7"
-              />
-            </svg>
-            Scheduling
-          </button>
           {appChip}
-          <span className="text-xs text-gray-600 dark:text-gray-400">
+          <span className="text-sm text-gray-700 dark:text-gray-300">
             {frontier.actionable.length} actionable · {frontier.running.length} running
             {awaitingResetCount > 0 ? ` · ${awaitingResetCount} awaiting reset` : ""}
             {frontier.needs_tick ? " · wake-up pending" : ""}
           </span>
         </div>
-        {stripOpen && (
-          <div className="mt-2 space-y-2 pb-1">
-            {countChips}
-            <AwaitingReset actionable={frontier.actionable} />
-            <p className="text-xs text-gray-500 dark:text-gray-400">
-              Every upstream in this build&rsquo;s structure scope is part of its plan,
-              so a stalled build is stalled on tasks of its own.
-            </p>
-            <div>
-              <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                Recent scheduler ticks
-              </h4>
-              {tickTrail}
-            </div>
-          </div>
-        )}
+        {countChips}
+        <AwaitingReset actionable={frontier.actionable} />
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          Every upstream in this build&rsquo;s structure scope is part of its plan, so a
+          stalled build is stalled on tasks of its own.
+        </p>
+        <div>
+          <h4 className="mb-1 text-xs font-semibold tracking-wide text-gray-500 uppercase dark:text-gray-400">
+            Recent scheduler ticks
+          </h4>
+          {tickTrail}
+        </div>
       </div>
     );
-  }
-
-  // --- Stalled form ---
-
-  const blockedTaskCount = new Set(blockers.map((b) => b.task_id)).size;
-
-  // One line that says what is wrong. The paragraph-length version is
-  // still below, behind the disclosure, for when the headline is not
-  // enough — but the headline is what has to survive being read at a
-  // glance above a DAG.
-  let headline: string;
-  if (blockers.length > 0) {
-    headline =
-      `${blockedTaskCount} task${blockedTaskCount === 1 ? "" : "s"} blocked by ` +
-      `${blockers.length} upstream${blockers.length === 1 ? "" : "s"} ` +
-      `held outside this build`;
-  } else if (frontier.needs_tick) {
-    headline = "Nothing runnable — a scheduler wake-up is still pending";
-  } else if (frontier.reactive_app_name) {
-    headline = "Nothing runnable, and no wake-up pending — needs intervention";
   } else {
-    headline = "Nothing runnable — this build is not reactively scheduled";
-  }
+    // --- Stalled form ---
 
-  let verdict: string;
-  if (blockers.length > 0) {
-    verdict =
-      `Nothing in this build is actionable and nothing is running. ` +
-      `${blockedTaskCount} of its task${blockedTaskCount === 1 ? " is" : "s are"} ` +
-      `held back by ${blockers.length} upstream${blockers.length === 1 ? "" : "s"} ` +
-      `whose status ${blockers.length === 1 ? "was" : "were"} set outside this build.`;
-  } else if (frontier.needs_tick) {
-    verdict =
-      "Nothing in this build is actionable and nothing is running, and no upstream " +
-      "outside the build is holding it back. A scheduler wake-up is pending, so the " +
-      "next tick may still move it.";
-  } else if (frontier.reactive_app_name) {
-    verdict =
-      "Nothing in this build is actionable and nothing is running, no upstream " +
-      "outside the build is holding it back, and no scheduler wake-up is pending. " +
-      "Nothing is going to happen without intervention.";
-  } else {
-    verdict =
-      "Nothing in this build is actionable and nothing is running, and no upstream " +
-      "outside the build is holding it back. This build is not reactively scheduled, " +
-      "so nothing will advance it on its own.";
-  }
+    const blockedTaskCount = new Set(blockers.map((b) => b.task_id)).size;
 
-  return (
-    <div className="border-b border-amber-200 bg-amber-50 px-4 py-1.5 dark:border-amber-900/60 dark:bg-amber-950/30">
-      {/* Headline row: the answer, plus the way to the reasoning. */}
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span aria-hidden="true" className="text-amber-700 dark:text-amber-400">
-          ⚠
-        </span>
-        <h3 className="text-xs font-semibold text-amber-900 dark:text-amber-200">
-          Not progressing
-        </h3>
-        <span className="text-xs text-amber-900/90 dark:text-amber-100/90">
-          — {headline}
-        </span>
-        {appChip}
-        {frontier.needs_tick && (
-          <span
-            className="rounded bg-blue-100 px-1.5 py-0.5 text-xs text-blue-800 dark:bg-blue-900/40 dark:text-blue-300"
-            title="The scheduler has a wake-up queued for this build"
-          >
-            wake-up pending
+    // One line that says what is wrong, with the paragraph-length version
+    // under it. The headline used to be all that was on screen, because the
+    // panel sat above the DAG; in a dialog both fit.
+    let headline: string;
+    if (blockers.length > 0) {
+      headline =
+        `${blockedTaskCount} task${blockedTaskCount === 1 ? "" : "s"} blocked by ` +
+        `${blockers.length} upstream${blockers.length === 1 ? "" : "s"} ` +
+        `held outside this build`;
+    } else if (frontier.needs_tick) {
+      headline = "Nothing runnable — a scheduler wake-up is still pending";
+    } else if (frontier.reactive_app_name) {
+      headline = "Nothing runnable, and no wake-up pending — needs intervention";
+    } else {
+      headline = "Nothing runnable — this build is not reactively scheduled";
+    }
+
+    let verdict: string;
+    if (blockers.length > 0) {
+      verdict =
+        `Nothing in this build is actionable and nothing is running. ` +
+        `${blockedTaskCount} of its task${blockedTaskCount === 1 ? " is" : "s are"} ` +
+        `held back by ${blockers.length} upstream${blockers.length === 1 ? "" : "s"} ` +
+        `whose status ${
+          blockers.length === 1 ? "was" : "were"
+        } set outside this build.`;
+    } else if (frontier.needs_tick) {
+      verdict =
+        "Nothing in this build is actionable and nothing is running, and no upstream " +
+        "outside the build is holding it back. A scheduler wake-up is pending, so the " +
+        "next tick may still move it.";
+    } else if (frontier.reactive_app_name) {
+      verdict =
+        "Nothing in this build is actionable and nothing is running, no upstream " +
+        "outside the build is holding it back, and no scheduler wake-up is pending. " +
+        "Nothing is going to happen without intervention.";
+    } else {
+      verdict =
+        "Nothing in this build is actionable and nothing is running, and no upstream " +
+        "outside the build is holding it back. This build is not reactively scheduled, " +
+        "so nothing will advance it on its own.";
+    }
+
+    body = (
+      <div className="space-y-2">
+        {/* Headline row: the answer. */}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span aria-hidden="true" className="text-amber-700 dark:text-amber-400">
+            ⚠
           </span>
-        )}
-        <button
-          type="button"
-          onClick={() => setDetailsOpen((v) => !v)}
-          aria-expanded={detailsOpen}
-          className="ml-auto flex items-center gap-1 rounded text-xs font-medium text-amber-900/80 hover:text-amber-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-amber-200/80 dark:hover:text-amber-100"
-        >
-          <svg
-            className={`h-3 w-3 transition-transform ${detailsOpen ? "rotate-90" : ""}`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            aria-hidden="true"
+          <h3 className="text-xs font-semibold text-amber-900 dark:text-amber-200">
+            Not progressing
+          </h3>
+          <span className="text-xs text-amber-900/90 dark:text-amber-100/90">
+            — {headline}
+          </span>
+          {appChip}
+          {frontier.needs_tick && (
+            <span
+              className="rounded bg-blue-100 px-1.5 py-0.5 text-xs text-blue-800 dark:bg-blue-900/40 dark:text-blue-300"
+              title="The scheduler has a wake-up queued for this build"
+            >
+              wake-up pending
+            </span>
+          )}
+        </div>
+
+        {notice && (
+          <ResultBanner
+            tone="success"
+            className="mt-1"
+            onDismiss={() => setNotice(null)}
           >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M9 5l7 7-7 7"
-            />
-          </svg>
-          {totalTasks} task{totalTasks === 1 ? "" : "s"} · details
-        </button>
-      </div>
+            {notice}
+          </ResultBanner>
+        )}
+        {actionError && !pending && (
+          <ResultBanner
+            tone="error"
+            className="mt-1"
+            onDismiss={() => setActionError(null)}
+          >
+            {actionError}
+          </ResultBanner>
+        )}
 
-      {notice && (
-        <ResultBanner tone="success" className="mt-1" onDismiss={() => setNotice(null)}>
-          {notice}
-        </ResultBanner>
-      )}
-      {actionError && !pending && (
-        <ResultBanner
-          tone="error"
-          className="mt-1"
-          onDismiss={() => setActionError(null)}
-        >
-          {actionError}
-        </ResultBanner>
-      )}
+        <p className="text-xs text-gray-600 dark:text-gray-400">{verdict}</p>
 
-      {/* Blockers stay visible: they carry the remedy, which is the whole
-          point of noticing a stalled build. Only a couple are shown until
-          the panel is expanded — past two, it is a list to work through
-          rather than something to read in place. */}
-      {blockers.length > 0 && (
-        <ul className="mt-1">
-          {(detailsOpen ? blockers : blockers.slice(0, COMPACT_BLOCKERS)).map(
-            (blocker) => (
+        {/* Blockers carry the remedy, which is the whole point of noticing a
+          stalled build. All of them: the dialog has the room the band
+          above the DAG did not. */}
+        {blockers.length > 0 && (
+          <ul className="mt-1">
+            {blockers.map((blocker) => (
               <BlockerCard
                 key={`${blocker.task_id}->${blocker.blocking_task_id}`}
                 blocker={blocker}
@@ -746,41 +802,62 @@ export function BuildSchedulingPanel({
                 onNavigateToBuild={onNavigateToBuild}
                 onAct={handleAct}
               />
-            ),
-          )}
-        </ul>
-      )}
-      {!detailsOpen && blockers.length > COMPACT_BLOCKERS && (
-        <button
-          type="button"
-          onClick={() => setDetailsOpen(true)}
-          className="rounded text-xs text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-300"
-        >
-          Show {blockers.length - COMPACT_BLOCKERS} more blocker
-          {blockers.length - COMPACT_BLOCKERS === 1 ? "" : "s"}
-        </button>
-      )}
+            ))}
+          </ul>
+        )}
 
-      {detailsOpen && (
-        <div className="mt-2 space-y-2 border-t border-amber-200/70 pt-2 dark:border-amber-900/50">
-          <p className="text-xs text-amber-900/90 dark:text-amber-100/90">{verdict}</p>
-          {countChips}
-          {frontier.blocked_by_external_truncated && (
-            <p className="text-xs text-amber-900/80 dark:text-amber-200/80">
-              More blockers were found than are listed here — the list is capped because
-              it is a diagnostic, not a work queue. Clearing the ones shown will reveal
-              the rest.
-            </p>
-          )}
-          <div>
-            <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-900/80 dark:text-amber-200/80">
-              Recent scheduler ticks
-            </h4>
-            {tickTrail}
+        {
+          <div className="mt-2 space-y-2 border-t border-gray-200 pt-2 dark:border-gray-700">
+            {countChips}
+            {frontier.blocked_by_external_truncated && (
+              <p className="text-xs text-amber-900/80 dark:text-amber-200/80">
+                More blockers were found than are listed here — the list is capped
+                because it is a diagnostic, not a work queue. Clearing the ones shown
+                will reveal the rest.
+              </p>
+            )}
+            <div>
+              <h4 className="mb-1 text-xs font-semibold tracking-wide text-gray-500 uppercase dark:text-gray-400">
+                Recent scheduler ticks
+              </h4>
+              {tickTrail}
+            </div>
           </div>
-        </div>
-      )}
+        }
+      </div>
+    );
+  }
 
+  return (
+    <>
+      {trigger}
+      <Modal
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        title="Scheduling"
+        maxWidthClass="max-w-3xl"
+      >
+        <div className="max-h-[70vh] overflow-y-auto">
+          {/* A failed read with a frontier already on screen. The
+              previous frontier is deliberately kept rather than
+              blanked, which makes saying so essential: otherwise the
+              dialog shows a confident, ordinary-looking answer that is
+              simply old, while the icon's own dot and tooltip say the
+              read failed. Before this panel became a dialog the error
+              check came first and so always showed; restructuring it
+              put this branch behind `!frontier`. */}
+          {frontierError && (
+            <ResultBanner tone="warning" className="mb-3">
+              Could not re-read this build&rsquo;s scheduler state, so what is below is
+              from the last successful read and may be out of date: {frontierError}
+            </ResultBanner>
+          )}
+          {body}
+        </div>
+      </Modal>
+      {/* Rendered outside the dialog, and after it, so the confirmation
+          stacks on top of the dialog it was triggered from rather than
+          being clipped inside it. */}
       {pending && pending.blocker.blocking_status_build_id && (
         <ClaimActionDialog
           action={pending.action}
@@ -798,6 +875,6 @@ export function BuildSchedulingPanel({
           }}
         />
       )}
-    </div>
+    </>
   );
 }

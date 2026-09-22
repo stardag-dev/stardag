@@ -1,4 +1,26 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
+
+/**
+ * Every open modal, outermost first.
+ *
+ * Two dialogs can legitimately be open at once — the scheduling dialog
+ * offers a remedy, and the remedy asks for confirmation — and without a
+ * stack each instance acted as if it were alone. Escape ran *both* close
+ * handlers, so confirming-or-dismissing the inner dialog also shut the
+ * outer one; and the inner dialog's unmount cleanup restored
+ * `body.overflow` while the outer dialog was still open, unlocking the
+ * page behind it.
+ *
+ * Module scope rather than context: the invariant is per-document, and a
+ * context would have to be threaded through every caller to express a
+ * fact none of them should have to know about.
+ */
+const openModals: string[] = [];
+
+/** Whether this modal is the one the user is actually looking at. */
+function isTopmost(id: string): boolean {
+  return openModals.length > 0 && openModals[openModals.length - 1] === id;
+}
 
 // TODO(a11y): this modal does not trap focus. Escape closes it and the
 // body is scroll-locked, but Tab walks straight out of the dialog into the
@@ -35,31 +57,46 @@ export function Modal({
   showCloseButton = true,
   maxWidthClass = "max-w-md",
 }: ModalProps) {
-  // Handle escape key
+  const id = useId();
+  // Read inside the Escape handler rather than captured, so the effect
+  // does not have to re-run as the stack changes.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  // Join the stack while open, and leave it on close or unmount.
   useEffect(() => {
     if (!isOpen) return;
-
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-      }
+    openModals.push(id);
+    return () => {
+      const at = openModals.lastIndexOf(id);
+      if (at !== -1) openModals.splice(at, 1);
     };
+  }, [isOpen, id]);
 
+  // Escape closes the topmost dialog only. Without the check, one
+  // keypress closes every dialog in the stack at once.
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && isTopmost(id)) onCloseRef.current();
+    };
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
-  }, [isOpen, onClose]);
+  }, [isOpen, id]);
 
-  // Prevent body scroll when modal is open
+  // Scroll stays locked until the *last* dialog closes, so an inner one
+  // closing does not unlock the page under the outer one.
   useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = "hidden";
-    } else {
-      document.body.style.overflow = "";
-    }
+    if (!isOpen) return;
+    document.body.style.overflow = "hidden";
     return () => {
-      document.body.style.overflow = "";
+      if (openModals.filter((m) => m !== id).length === 0) {
+        document.body.style.overflow = "";
+      }
     };
-  }, [isOpen]);
+  }, [isOpen, id]);
 
   if (!isOpen) return null;
 
