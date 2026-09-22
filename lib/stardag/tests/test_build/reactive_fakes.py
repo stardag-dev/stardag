@@ -637,6 +637,20 @@ class FakeReactiveRegistry(NoOpRegistry):
             skipped_task_ids=self._close_over_blocked(),
         )
 
+    # Mirrors the API's ``_propagating_statuses`` and its result filter,
+    # INTERRUPTED included in both. The server groups INTERRUPTED with
+    # pending and suspended rather than with running, because an
+    # interrupted task has no live execution that might still complete, so
+    # a failed upstream blocks it exactly as it blocks a pending one.
+    # Leaving it out here would let a reactive test with an interrupted
+    # downstream pass while the real ``/fail`` skips it.
+    _CLOSURE_SKIPPABLE = ("pending", "suspended", "interrupted")
+    _CLOSURE_PROPAGATING = (
+        "failed",
+        "cancelled",
+        "skipped",
+    ) + _CLOSURE_SKIPPABLE
+
     def _close_over_blocked(self) -> list[str]:
         """The blocked closure, as the server computes it inside /fail."""
         blocked = {
@@ -644,13 +658,13 @@ class FakeReactiveRegistry(NoOpRegistry):
             for tid, status in self.statuses.items()
             if status in ("failed", "cancelled", "skipped")
         }
-        propagating = ("failed", "cancelled", "skipped", "pending", "suspended")
+        propagating = self._CLOSURE_PROPAGATING
         skipped: list[str] = []
         changed = True
         while changed:
             changed = False
             for tid, ups in self.upstreams.items():
-                if self.statuses.get(tid) not in ("pending", "suspended"):
+                if self.statuses.get(tid) not in self._CLOSURE_SKIPPABLE:
                     continue
                 if any(
                     u in blocked and self.statuses.get(u) in propagating for u in ups
