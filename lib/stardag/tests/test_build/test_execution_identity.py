@@ -249,11 +249,16 @@ class TestALostRaceDuringTheSpawn:
         registry, executor = _setup([root], auto_complete=False)
         self._taken_over_during_spawn(registry, executor, str(root.id))
 
-        await run_tick_aio(
+        summary = await run_tick_aio(
             uuid4(), registry=registry, task_executor=executor, config=FAST_TICK
         )
 
         assert executor.cancelled_refs, (
             "the container we spawned and then lost was left running with "
             "a reference nothing recorded"
+        )
+        assert summary.cancelled_refs >= 1, (
+            "the stop was not counted on the tick's trail, so a reader "
+            "asking 'did this tick end any executions' gets the wrong "
+            "answer purely because the drain was not the mechanism"
         )

@@ -452,6 +452,12 @@ class TickSummary:
     # scheduling it — a rollover to the live deployment (see
     # ``docs/design/scope-keyed-dependency-structure.md``).
     rolled_over: int = 0
+    # Executions this tick stopped, by either route: the terminal drain
+    # cancelling what a cancelled build still holds, and the spawn path
+    # stopping a container whose reference the registry refused. Both are
+    # "this tick ended an execution", which is what a reader of the trail
+    # is asking; keeping them apart would make the count depend on which
+    # mechanism happened to get there first.
     cancelled_refs: int = 0
     iterations: int = 0
     limit_denied: int = 0

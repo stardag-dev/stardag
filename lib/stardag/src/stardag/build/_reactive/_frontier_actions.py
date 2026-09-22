@@ -1071,6 +1071,12 @@ async def _act_on_frontier(
             )
             try:
                 await task_executor.cancel_detached(task, handle.executor, handle.ref)
+                # Counted on the same line as the terminal drain's stops.
+                # A reader of the trail is asking "did this tick end any
+                # executions", and the answer must not depend on which
+                # mechanism got there first -- the drain cannot stop this
+                # one at all, because its reference was never recorded.
+                summary.cancelled_refs += 1
             except Exception as cancel_err:
                 logger.warning(
                     f"Failed to stop orphaned execution {handle.ref!r} for "
