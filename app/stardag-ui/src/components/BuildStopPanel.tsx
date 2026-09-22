@@ -20,6 +20,7 @@ import { formatAbsoluteTime, formatDuration } from "../utils/time";
 import { StatusBadge } from "./StatusBadge";
 import { Modal } from "./Modal";
 import { Checkbox } from "./ui/Checkbox";
+import { ToolbarButton } from "./ui/ToolbarButton";
 
 // The staleness options the filter offers, in seconds. Round numbers an
 // operator would actually type after `--older-than`.
@@ -244,13 +245,12 @@ export function BuildStopPanel({
 
   return (
     <>
-      <button
-        type="button"
+      <ToolbarButton
+        label="Stop running tasks"
+        hint="What this build still has running, and the command that stops it"
+        align="right"
         onClick={() => setOpen(true)}
-        title="Stop running tasks — what this build still has running, and the command that stops it"
-        className="rounded-md p-1 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
       >
-        <span className="sr-only">Stop running tasks</span>
         <svg
           aria-hidden="true"
           className="h-4 w-4"
@@ -266,7 +266,7 @@ export function BuildStopPanel({
           />
           <path strokeLinecap="round" strokeLinejoin="round" d="M9 9h6v6H9z" />
         </svg>
-      </button>
+      </ToolbarButton>
 
       <Modal
         isOpen={open}

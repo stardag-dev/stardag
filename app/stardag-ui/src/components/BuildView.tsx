@@ -28,11 +28,10 @@ import { isExtendedResponse } from "../types/task";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
 import { useClickOutside } from "../hooks/useClickOutside";
 import { rootsSatisfiedFrom } from "../utils/claims";
-import { isSyntheticScope } from "../utils/scope";
 import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { BuildStopPanel } from "./BuildStopPanel";
-import { BuildExecutorChips } from "./ExecutorBadge";
+import { BuildInfoDialog } from "./BuildInfoDialog";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
 import {
@@ -43,7 +42,6 @@ import {
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
 import { TaskTable } from "./TaskTable";
-import { Modal } from "./Modal";
 
 interface BuildViewProps {
   buildId: string;
@@ -464,15 +462,29 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                   />
                 </div>
 
-                {/* 2 — what this build is. Takes the slack, so the
-                    actions stay pinned right. */}
-                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                {/* 2 — what this build is.
+
+                    One icon, not four pills. The Modal app, the reactive
+                    flag, the structure scope and the build config are
+                    fixed facts about a build, not status, and as coloured
+                    badges they read as the latter — while being truncated
+                    so far that a scope key said nothing. They are in the
+                    dialog behind this icon, at full length. */}
+                <div className="flex min-w-0 flex-1 items-center gap-1.5">
                   <span className="text-xs whitespace-nowrap text-gray-500 dark:text-gray-400">
                     {realTasks.length} task{realTasks.length === 1 ? "" : "s"}
                   </span>
-                  <BuildExecutorChips metadata={build.executor_metadata} />
-                  <BuildScopeChip scopeKey={build.scope_key} />
-                  <BuildConfigChip config={build.build_config} />
+                  <BuildInfoDialog build={build} />
+                  {activeEnvironment?.id && (
+                    <BuildSchedulingPanel
+                      buildId={buildId}
+                      environmentId={activeEnvironment.id}
+                      buildStatus={build.status}
+                      refreshToken={refreshToken}
+                      onNavigateToBuild={onNavigateToBuild}
+                      onChanged={handleRefresh}
+                    />
+                  )}
                 </div>
 
                 {/* 3 — act */}
@@ -596,20 +608,6 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                 failedAt={build.completed_at}
                 superseded={rootsSuperseded}
               />
-
-              {/* Scheduler state. Renders itself only when it has something
-                  to say — see `schedulingPanelForm`. Placed above the DAG so
-                  a stalled build's explanation is the first thing read. */}
-              {activeEnvironment?.id && (
-                <BuildSchedulingPanel
-                  buildId={buildId}
-                  environmentId={activeEnvironment.id}
-                  buildStatus={build.status}
-                  refreshToken={refreshToken}
-                  onNavigateToBuild={onNavigateToBuild}
-                  onChanged={handleRefresh}
-                />
-              )}
 
               {/* DAG header - always visible */}
               <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
@@ -798,87 +796,5 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
         </div>
       )}
     </div>
-  );
-}
-
-/**
- * The one look for a chip in the tool-and-info bar's middle section.
- *
- * Shared so a reader learns "small grey chip = something this build is"
- * once, rather than per chip. Interactive chips add their own hover on
- * top; nothing else varies.
- */
-const INFO_CHIP =
-  "inline-flex max-w-[14rem] items-center gap-1 truncate rounded bg-gray-100 " +
-  "px-1.5 py-0.5 text-[10px] text-gray-600 dark:bg-gray-700 dark:text-gray-300";
-
-/**
- * The build's structure scope — `<code id>:<config hash>`, or the server's
- * synthetic `build:<id>` when nothing fixed one. Monospace and truncated;
- * the full key is in the title. Absent on servers predating scopes.
- */
-function BuildScopeChip({ scopeKey }: { scopeKey?: string | null }) {
-  if (!scopeKey) return null;
-  const synthetic = isSyntheticScope(scopeKey);
-  return (
-    <code
-      title={
-        synthetic
-          ? `Structure scope ${scopeKey} — this build's dependency edges are shared with no other build`
-          : `Structure scope ${scopeKey} — the code version and structure config this build is currently planned under. It moves when the app is redeployed: the next scheduler pass re-plans the build under the new code.`
-      }
-      className={`${INFO_CHIP} font-mono`}
-    >
-      {synthetic ? "scope: per-build" : `scope: ${scopeKey.slice(0, 12)}…`}
-    </code>
-  );
-}
-
-/**
- * The central values this build's level 2 and 3 parameters were read from.
- *
- * A chip that opens a dialog, where it used to be a full-width
- * disclosure strip above the DAG. It is JSON consulted when a result is
- * surprising, not something read on the way past, so it does not earn a
- * permanent band of the build view — and the strip was one of several
- * that between them left the graph a few pixels tall.
- *
- * Absent entirely when the build set no overrides.
- */
-function BuildConfigChip({
-  config,
-}: {
-  config?: Record<string, Record<string, unknown>> | null;
-}) {
-  const [open, setOpen] = useState(false);
-  const classCount = config ? Object.keys(config).length : 0;
-  if (classCount === 0) return null;
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        title="Show the build config these tasks' central parameters were read from"
-        className={`${INFO_CHIP} hover:bg-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-600`}
-      >
-        config: {classCount} class{classCount === 1 ? "" : "es"}
-      </button>
-      <Modal
-        isOpen={open}
-        onClose={() => setOpen(false)}
-        title="Build config"
-        maxWidthClass="max-w-2xl"
-      >
-        <p className="mb-3 text-xs text-gray-600 dark:text-gray-400">
-          The central values this build&rsquo;s level 2 and level 3 parameters were read
-          from. They are part of the structure scope, so two builds that disagree here
-          do not share dependency edges.
-        </p>
-        <pre className="max-h-[60vh] overflow-auto rounded bg-gray-50 p-3 font-mono text-[11px] text-gray-700 dark:bg-gray-900 dark:text-gray-300">
-          {JSON.stringify(config, null, 2)}
-        </pre>
-      </Modal>
-    </>
   );
 }

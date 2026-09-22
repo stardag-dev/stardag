@@ -97,6 +97,23 @@ function renderPanel(
   );
 }
 
+/**
+ * Render, then open the dialog.
+ *
+ * The panel is an icon in the toolbar now — a spinner while the frontier
+ * is being read, a red dot when something is wrong — and everything it
+ * has to say is inside the dialog that icon opens.
+ */
+async function openScheduling(
+  props: { buildStatus?: BuildStatus; onNavigate?: () => void } = {},
+) {
+  const result = renderPanel(props);
+  await userEvent
+    .setup()
+    .click(await screen.findByRole("button", { name: "Scheduling" }));
+  return result;
+}
+
 describe("schedulingPanelForm", () => {
   it("flags a running build with nothing actionable and nothing running", () => {
     expect(schedulingPanelForm(makeFrontier(), "running")).toBe("stalled");
@@ -166,19 +183,42 @@ describe("BuildSchedulingPanel", () => {
     vi.clearAllMocks();
   });
 
-  it("renders nothing for a healthy non-reactive build", async () => {
+  // The icon stays put whatever the verdict — a control that came and
+  // went would read as a bug, and a toolbar whose buttons move is hard to
+  // aim at. What changes is what the dialog says.
+  it("says there is nothing to report for a healthy non-reactive build", async () => {
     vi.mocked(fetchBuildFrontier).mockResolvedValue(
       makeFrontier({
         reactive_app_name: null,
         actionable: [{ task_id: "tid-a", latest_status: "pending" }],
       }),
     );
-    const { container } = renderPanel();
+    await openScheduling();
 
     await waitFor(() => expect(fetchBuildFrontier).toHaveBeenCalled());
-    expect(container).toBeEmptyDOMElement();
+    expect(await screen.findByText(/Nothing to report/)).toBeInTheDocument();
     // No point paying for tick history nobody will read.
     expect(fetchBuildTickSummaries).not.toHaveBeenCalled();
+  });
+
+  it("carries no alert dot while the build is progressing", async () => {
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(
+      makeFrontier({ actionable: [{ task_id: "tid-a", latest_status: "pending" }] }),
+    );
+    renderPanel();
+    const trigger = await screen.findByRole("button", { name: "Scheduling" });
+    await waitFor(() =>
+      expect(trigger).toHaveAccessibleDescription(/what the scheduler thinks/i),
+    );
+  });
+
+  it("marks the icon when the build is not progressing", async () => {
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(makeFrontier());
+    renderPanel();
+    const trigger = await screen.findByRole("button", { name: "Scheduling" });
+    await waitFor(() =>
+      expect(trigger).toHaveAccessibleDescription(/not progressing/i),
+    );
   });
 
   it("never claims 'no blockers' while the build is progressing", async () => {
@@ -192,7 +232,7 @@ describe("BuildSchedulingPanel", () => {
       }),
     );
     const user = userEvent.setup();
-    renderPanel();
+    await openScheduling();
 
     expect(await screen.findByText("1 actionable · 1 running")).toBeInTheDocument();
     expect(
@@ -212,7 +252,7 @@ describe("BuildSchedulingPanel", () => {
     );
     const onNavigate = vi.fn();
     const user = userEvent.setup();
-    renderPanel({ onNavigate });
+    await openScheduling({ onNavigate });
 
     expect(await screen.findByText("Not progressing")).toBeInTheDocument();
     expect(screen.getByText("GrindBeans")).toBeInTheDocument();
@@ -228,17 +268,17 @@ describe("BuildSchedulingPanel", () => {
     expect(onNavigate).toHaveBeenCalledWith(OWNER_BUILD);
   });
 
-  it("stays compact until asked to explain itself", async () => {
-    // The panel sits above the DAG and the task table. Everything that is
-    // explanation rather than answer has to be behind a disclosure, or the
-    // build view is unusable on the builds this panel exists to diagnose.
+  it("shows the answer and the reasoning together", async () => {
+    // As a band above the DAG, everything that was explanation rather
+    // than answer had to hide behind a disclosure or the build view
+    // became unusable on exactly the builds this diagnoses. The dialog
+    // has the room, so it shows the lot.
     vi.mocked(fetchBuildFrontier).mockResolvedValue(
       makeFrontier({ blocked_by_external: [makeBlocker()] }),
     );
-    const user = userEvent.setup();
-    renderPanel();
+    await openScheduling();
 
-    // Visible: the headline and the blocker itself, with its remedy.
+    // The answer.
     expect(await screen.findByText("Not progressing")).toBeInTheDocument();
     expect(
       screen.getByText(/1 task blocked by 1 upstream held outside this build/),
@@ -247,15 +287,7 @@ describe("BuildSchedulingPanel", () => {
       screen.getByRole("button", { name: "Release claim on GrindBeans" }),
     ).toBeInTheDocument();
 
-    // Hidden: the prose, the status breakdown, and the tick trail — which
-    // is not even fetched until someone asks for it.
-    expect(screen.queryByText(/Nothing in this build is actionable/)).toBeNull();
-    expect(screen.queryByText("completed")).toBeNull();
-    expect(screen.queryByText("Recent scheduler ticks")).toBeNull();
-    expect(fetchBuildTickSummaries).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: /3 tasks · details/ }));
-
+    // And the reasoning, with no second click.
     expect(
       await screen.findByText(/Nothing in this build is actionable/),
     ).toBeInTheDocument();
@@ -264,14 +296,21 @@ describe("BuildSchedulingPanel", () => {
     await waitFor(() => expect(fetchBuildTickSummaries).toHaveBeenCalledTimes(1));
   });
 
+  it("fetches no tick history until the dialog is opened", async () => {
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(
+      makeFrontier({ blocked_by_external: [makeBlocker()] }),
+    );
+    renderPanel();
+    await waitFor(() => expect(fetchBuildFrontier).toHaveBeenCalled());
+    expect(fetchBuildTickSummaries).not.toHaveBeenCalled();
+  });
+
   it("suppresses task statuses that nothing is in", async () => {
     vi.mocked(fetchBuildFrontier).mockResolvedValue(
       makeFrontier({ status_counts: { completed: 2, failed: 0, skipped: 0 } }),
     );
-    const user = userEvent.setup();
-    renderPanel();
+    await openScheduling();
 
-    await user.click(await screen.findByRole("button", { name: /2 tasks · details/ }));
     expect(await screen.findByText("completed")).toBeInTheDocument();
     // "failed 0" is not information about this build.
     expect(screen.queryByText("failed")).toBeNull();
@@ -297,7 +336,7 @@ describe("BuildSchedulingPanel", () => {
       }),
     );
     const user = userEvent.setup();
-    renderPanel();
+    await openScheduling();
 
     expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
     expect(screen.queryByText("outside this build")).toBeNull();
@@ -325,7 +364,7 @@ describe("BuildSchedulingPanel", () => {
       }),
     );
     const user = userEvent.setup();
-    renderPanel();
+    await openScheduling();
 
     expect(
       await screen.findByText("3 actionable · 0 running · 2 awaiting reset"),
@@ -347,7 +386,7 @@ describe("BuildSchedulingPanel", () => {
         blocked_by_external: [makeBlocker({ blocking_in_build: false })],
       }),
     );
-    renderPanel();
+    await openScheduling();
     expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
     expect(screen.getByText(/held outside this build/)).toBeInTheDocument();
   });
@@ -356,7 +395,7 @@ describe("BuildSchedulingPanel", () => {
     vi.mocked(fetchBuildFrontier).mockResolvedValue(
       makeFrontier({ blocked_by_external: [], actionable: [], running: [] }),
     );
-    renderPanel();
+    await openScheduling();
     await screen.findByText(/Nothing runnable/);
     expect(screen.queryByText(/outside this build/)).toBeNull();
   });
@@ -368,9 +407,7 @@ describe("BuildSchedulingPanel", () => {
         blocked_by_external_truncated: true,
       }),
     );
-    const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: /3 tasks · details/ }));
+    await openScheduling();
     expect(
       await screen.findByText(/More blockers were found than are listed here/),
     ).toBeInTheDocument();
@@ -389,9 +426,7 @@ describe("BuildSchedulingPanel", () => {
         }),
       ],
     });
-    const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: /3 tasks · details/ }));
+    await openScheduling();
 
     expect(await screen.findByText("lingered out")).toBeInTheDocument();
     // Known key: rendered with its friendly label.
@@ -413,9 +448,7 @@ describe("BuildSchedulingPanel", () => {
         makeSummary({ id: "t4", outcome: "lease_held", summary: { spawned: 0 } }),
       ],
     });
-    const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: /3 tasks · details/ }));
+    await openScheduling();
 
     expect(await screen.findByText("×3")).toBeInTheDocument();
     expect(screen.getByText("claim denied")).toBeInTheDocument();
@@ -428,9 +461,7 @@ describe("BuildSchedulingPanel", () => {
 
   it("degrades gracefully when the server has no tick-summaries endpoint", async () => {
     vi.mocked(fetchBuildTickSummaries).mockResolvedValue(null);
-    const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: /3 tasks · details/ }));
+    await openScheduling();
 
     expect(
       await screen.findByText(/does not record tick history/i),
@@ -445,7 +476,7 @@ describe("BuildSchedulingPanel", () => {
     );
     vi.mocked(cancelTask).mockResolvedValue("cancelled");
     const user = userEvent.setup();
-    renderPanel();
+    await openScheduling();
 
     await user.click(
       await screen.findByRole("button", { name: "Release claim on GrindBeans" }),
@@ -478,7 +509,7 @@ describe("BuildSchedulingPanel", () => {
     );
     vi.mocked(retryTask).mockResolvedValue(undefined);
     const user = userEvent.setup();
-    renderPanel();
+    await openScheduling();
 
     expect(
       await screen.findByRole("button", { name: "Reset to pending on GrindBeans" }),
@@ -504,7 +535,7 @@ describe("BuildSchedulingPanel", () => {
       }),
     );
     const user = userEvent.setup();
-    renderPanel();
+    await openScheduling();
 
     expect(await screen.findByText("no owning build")).toBeInTheDocument();
     expect(
@@ -523,7 +554,7 @@ describe("BuildSchedulingPanel", () => {
     vi.mocked(fetchBuildFrontier).mockResolvedValue(
       makeFrontier({ blocked_by_external: [makeBlocker()] }),
     );
-    renderPanel();
+    await openScheduling();
 
     const user = userEvent.setup();
     // The diagnosis is for everyone...
@@ -542,7 +573,7 @@ describe("BuildSchedulingPanel", () => {
 
   it("reports a frontier read failure instead of failing silently", async () => {
     vi.mocked(fetchBuildFrontier).mockRejectedValue(new Error("Build not found"));
-    renderPanel();
+    await openScheduling();
 
     expect(await screen.findByRole("status")).toHaveTextContent(
       /Could not read this build.s scheduler state.*Build not found/,
@@ -551,8 +582,7 @@ describe("BuildSchedulingPanel", () => {
 
   it("says what is pending when a stalled build still has a wake-up queued", async () => {
     vi.mocked(fetchBuildFrontier).mockResolvedValue(makeFrontier({ needs_tick: true }));
-    const user = userEvent.setup();
-    renderPanel();
+    await openScheduling();
 
     // The headline says it without being expanded — it is the difference
     // between "wait" and "intervene".
@@ -561,7 +591,6 @@ describe("BuildSchedulingPanel", () => {
       screen.getByText(/Nothing runnable — a scheduler wake-up is still pending/),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /3 tasks · details/ }));
     expect(
       await screen.findByText(
         /A scheduler wake-up is pending, so the next tick may still/,
@@ -570,13 +599,11 @@ describe("BuildSchedulingPanel", () => {
   });
 
   it("says nothing will happen when a stalled reactive build has no wake-up queued", async () => {
-    const user = userEvent.setup();
-    renderPanel();
+    await openScheduling();
     expect(
       await screen.findByText(/no wake-up pending — needs intervention/),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /3 tasks · details/ }));
     expect(
       await screen.findByText(/Nothing is going to happen without intervention/),
     ).toBeInTheDocument();

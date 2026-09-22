@@ -156,34 +156,42 @@ describe("BuildView header and tool-and-info bar", () => {
     expect(taskCrumb).toHaveAttribute("title", TASK_ID);
   });
 
-  it("shows the chips evicted from the breadcrumb in the info section", async () => {
+  // The executor, reactive flag, scope and config were four coloured
+  // pills in the toolbar. They are fixed facts about a build rather than
+  // status, and they are now one icon away instead of on screen.
+  it("keeps the build's fixed facts out of the toolbar", async () => {
     renderView();
-    expect(await screen.findByTitle(/open the Modal app dashboard/i)).toHaveTextContent(
-      "Modal: sd-stop-demo",
-    );
-    expect(screen.getByTitle(/Reactive build/i)).toBeInTheDocument();
-    expect(screen.getByText(/^scope: 5c6ed85f155d…$/)).toBeInTheDocument();
+    await screen.findByText("golden-diamond-28");
+
+    expect(screen.queryByText(/Modal: sd-stop-demo/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^reactive$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^scope:/)).not.toBeInTheDocument();
+    // The task count stays: it changes as the build runs.
     expect(screen.getByText("1 task")).toBeInTheDocument();
   });
 
-  // It used to be a full-width disclosure strip stacked above the DAG.
-  it("keeps the build config behind a chip, not a band above the DAG", async () => {
+  it("puts them in the build info dialog, at full length", async () => {
     const user = userEvent.setup();
     vi.mocked(fetchBuild).mockResolvedValue(
       makeBuild({ build_config: { "demo.Parked": { limit: 3 } } }),
     );
     renderView();
 
-    const chip = await screen.findByRole("button", { name: /config: 1 class/ });
-    expect(screen.queryByText(/"limit": 3/)).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Build info" }));
 
-    await user.click(chip);
-    expect(await screen.findByText(/"limit": 3/)).toBeInTheDocument();
+    // The scope key in full, not truncated to something incomparable.
+    expect(await screen.findByText("5c6ed85f155d9a01:2b7c")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Modal app sd-stop-demo/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Reactive:/)).toBeInTheDocument();
+    expect(screen.getByText(/"limit": 3/)).toBeInTheDocument();
   });
 
-  it("offers no config chip when the build set no overrides", async () => {
+  it("says nothing about a config the build never set", async () => {
+    const user = userEvent.setup();
     renderView();
-    await screen.findByText("golden-diamond-28");
-    expect(screen.queryByRole("button", { name: /config:/ })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Build info" }));
+    expect(screen.queryByText(/Build config/)).not.toBeInTheDocument();
   });
 });
