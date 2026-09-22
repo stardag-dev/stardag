@@ -624,20 +624,20 @@ def builds_cancel(
         False, "--yes", "-y", help="Skip the confirmation prompt."
     ),
 ) -> None:
-    """Cancel a build: record the event and stop there.
+    """Cancel a build: release its claims, and stop there.
 
-    Nothing is stopped and no claim is released. Task state is per
-    environment, so a task this build left RUNNING keeps denying its claim
-    to every future build that needs it until the claim's own expiry
-    lapses — which is why this is the command for a build you believe is
-    *already dead*, and `stardag builds stop` is the one for a build whose
-    containers are still running.
+    **Nothing is stopped.** The claims the build held are released, so its
+    tasks are available to the next build immediately — but no container
+    is touched. A worker exits at its own next checkpoint; one whose
+    `run()` has no checkpoint runs to completion.
 
-    Cancelling a live build the other way round is the mistake the split
-    exists to prevent: the release lets the next build take those tasks
-    over, so within seconds the task row names a successor's execution and
-    the one you meant to stop is no longer reachable by any query about
-    the present.
+    That is why this is the command for a build you believe is *already
+    dead*, and `stardag builds stop` is the one for a build whose
+    containers are still running. Using this on a live build is the
+    mistake the split exists to prevent: the release lets the next build
+    take those tasks over within seconds, so the task row names a
+    successor's execution while the one you meant to stop is still
+    writing, and it is no longer reachable by any query about the present.
     """
     parsed = _parse_build_id(build_id)
     if cascade:
@@ -668,9 +668,11 @@ def builds_cancel(
 
     console.print(f"[green]Cancelled build[/green] {build_id}")
     console.print(
-        "[dim]Nothing was stopped. If this build still has containers "
-        f"running, they will run to completion — 'stardag builds stop "
-        f"{build_id}' is the command that stops them first.[/dim]"
+        "[dim]Its execution claims were released, so its tasks are "
+        "available to the next build now. Nothing was stopped: a worker "
+        "still running exits at its next cooperative checkpoint, or runs "
+        "to completion if its run() has none. To stop the containers "
+        f"first, use 'stardag builds stop {build_id}'.[/dim]"
     )
 
 
@@ -863,6 +865,12 @@ def builds_stop(
                 )
 
         try:
+            # ``cascade=True`` is belt and braces. Against a current
+            # registry the release is unconditional and the parameter is
+            # an accepted no-op; against an older one it is the only thing
+            # that releases the claims, and this command's whole promise
+            # is that the stop happened first and the claims go after. So
+            # it is passed explicitly rather than relying on either.
             registry.build_cancel(parsed, cascade=True)
         except StardagError as e:
             _fail(e)

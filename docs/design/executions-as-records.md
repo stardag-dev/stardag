@@ -54,6 +54,16 @@ running this task, and is this reference still it?_
 - the cancel drain's `stopped` set, keyed on `(executor, executor_ref)`;
 - and the unit-test fake that models the listing.
 
+> **Five of those eight no longer exist** (STA-81). Everything in the list
+> that reconstructed the answer from the event log — the lookup, the
+> ranking, the `held` condition, the drain's set and the fake's listing —
+> went with automated cancellation. What is left is the three that compare
+> one identity against one column on a locked row: the claim-retry test and
+> the two report-authority rules. The count is the evidence for the
+> decision rather than an argument for a better reconstruction: eight
+> answers to one question is what a design that keeps asking about somebody
+> else's container costs, and the fix was to stop asking.
+
 Several of the review findings were regressions from fixes to earlier
 findings in the same change. Twice the concept was re-derived within one
 sitting and the two derivations disagreed: one scanned starts within a
@@ -266,9 +276,13 @@ claim is the same mistake as reading the task row as one.
   that must agree with it — a nearby reconstruction that this identity is
   shaped to answer. Not changed here, because the retry and resumption
   budgets are counted from it.
-- Does cooperative cancellation want the identity exposed to task code, so
-  a long-running task can ask "am I still wanted?" without the framework
-  asking for it at fixed checkpoints?
-- If the table is ever revived, is the drain still the only consumer that
-  wanted it? That was true when it was costed; it is worth re-asking
-  rather than assuming.
+- ~~Does cooperative cancellation want the identity exposed to task code,
+  so a long-running task can ask "am I still wanted?" without the framework
+  asking for it at fixed checkpoints?~~ **Yes** —
+  `stardag.cancellation_requested()`, alongside the two automatic
+  checkpoints, because the point inside a long `run()` where stopping is
+  safe is one only the task's author knows.
+- ~~If the table is ever revived, is the drain still the only consumer that
+  wanted it?~~ **The drain no longer exists** (STA-81), so the table's last
+  candidate consumer is gone with it. Reviving it now would need a new
+  reason, not this one.

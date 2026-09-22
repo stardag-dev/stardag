@@ -110,10 +110,15 @@ export interface Build {
 }
 
 // Response of POST /builds/{id}/cancel — a superset of Build. The cascade
-// fields are always empty/zero from this client: it never passes
-// `cascade`, because stopping a build's containers has to happen before
-// its claims are released, and only the operator's own credentials can do
-// that. Kept on the type because the server still reports them.
+// fields name the tasks whose claims the cancel released, and they are
+// populated even though this client never passes `cascade`: a cancel now
+// always releases, and the parameter is an accepted no-op. They used to
+// be empty here for that reason, so do not read "empty" as "nothing
+// happened".
+//
+// Stopping the containers is still separate, and still the operator's:
+// only their own credentials reach the execution backend, which is what
+// `stardag builds stop` is for.
 export interface BuildCancelResult extends Build {
   cascaded_task_ids: string[];
   cascaded_task_count: number;

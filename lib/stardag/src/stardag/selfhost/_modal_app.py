@@ -61,7 +61,19 @@ DEFAULT_SERVER_MODAL_ENV = "stardag-host"
 
 SERVER_IMAGE_REPO = "ghcr.io/stardag-dev/stardag-server"
 # The server release this SDK version is tested against. Bumped at SDK
-# release time; override per deployment with --server-version.
+# release time, in the release PR, once the `server-vX.Y.Z` image exists
+# — bumping it earlier points `self-host up` at an image that has not been
+# published.
+#
+# **From STA-81 on, this pin is load-bearing rather than advisory.** It
+# used to be safe to lag: an older server simply ignored what it did not
+# understand and the newer feature lay inert. It no longer is. A current
+# SDK does not drain cancels, and a server predating STA-81 does not
+# release claims on `/cancel` or `/fail` — so the pair leaves a terminal
+# build holding its tasks' claims and their concurrency-limit slots until
+# they expire, which is worse than either version alone. That is why the
+# release order is server image first, and why this constant must move
+# with it.
 DEFAULT_SERVER_VERSION = "0.4.0"
 
 # Minimum client interpreter for from-source image builds (stardag-api's

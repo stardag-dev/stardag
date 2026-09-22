@@ -956,11 +956,11 @@ class _WorkerLifecycleReporter:
         # A build that is no longer RUNNING is not flagged by the notify —
         # it cannot act on a wake-up — and spawning for it would be the
         # cancelled-build loop this closes: a cancelled build's workers keep
-        # running until a tick stops them, and every one of them reported
-        # its way out through here. The one tick a cancel does want is not
-        # lost: its own cancel sets the flag, so ``needs_tick`` stays true
-        # until a tick drains it. Unknown (an older server, or a notify that
-        # raised) spawns, as before.
+        # running until they notice, and every one of them reported its way
+        # out through here. A cancelled build wants no tick of its own — the
+        # cleanup one existed to run the cancel drain, which is gone
+        # (STA-81). Unknown (an older server, or a notify that raised)
+        # spawns, as before.
         if notified is not None and not notified.needs_tick:
             logger.debug(
                 "Build %s wants no tick (it is no longer running, or one "

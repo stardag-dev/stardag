@@ -44,7 +44,7 @@ from stardag.registry._base import (
     SchedulerLeaseResult,
     StartClaimResult,
     BuildCancelResult,
-    BuildExecutions,
+    BuildFailResult,
     BuildFrontier,
     BuildInfo,
     BuildListPage,
@@ -727,31 +727,39 @@ class APIRegistry(RegistryABC):
         )
         logger.info(f"Completed build: {build_id}")
 
-    def build_fail(self, build_id: UUID, error_message: str | None = None) -> None:
-        """Mark a build as failed."""
+    def build_fail(
+        self, build_id: UUID, error_message: str | None = None
+    ) -> BuildFailResult | None:
+        """Mark a build as failed, releasing the claims it holds."""
         params = self._get_event_params()
         if error_message:
             params["error_message"] = error_message
-        self._request(
+        response = self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/fail",
             params=params,
             operation="Fail build",
         )
         logger.info(f"Marked build as failed: {build_id}")
+        return BuildFailResult.model_validate(response.json())
 
     def build_cancel(
         self, build_id: UUID, *, cascade: bool = False
     ) -> BuildCancelResult | None:
-        """Cancel a build, optionally cascading to the claims its tasks hold.
+        """Cancel a build, releasing the claims its tasks hold.
 
-        ``cascade=True`` additionally cancels the build's RUNNING /
-        SUSPENDED tasks, releasing their execution claims and
-        concurrency-limit slots (see :meth:`RegistryABC.build_cancel`).
+        The build's RUNNING, SUSPENDED and INTERRUPTED tasks are cancelled
+        with it, freeing their execution claims and concurrency-limit
+        slots (see :meth:`RegistryABC.build_cancel`).
 
-        Returns the cancelled build. ``cascade`` and the cascade fields
-        are ignored by servers predating them, in which case the returned
-        record simply reports nothing cascaded.
+        **``cascade`` does not decide that** on a server carrying STA-81 —
+        the release is unconditional there and the parameter is an
+        accepted no-op. It still decides on an older server, so pass True
+        if you support both. A server predating the parameter entirely
+        ignores it and omits the cascade fields, which read as nothing
+        released.
+
+        Returns the cancelled build.
         """
         params = self._get_event_params()
         if cascade:
@@ -1491,18 +1499,19 @@ class APIRegistry(RegistryABC):
 
     async def build_fail_aio(
         self, build_id: UUID, error_message: str | None = None
-    ) -> None:
+    ) -> BuildFailResult | None:
         """Async version - mark a build as failed."""
         params = self._get_event_params()
         if error_message:
             params["error_message"] = error_message
-        await self._arequest(
+        response = await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/fail",
             params=params,
             operation="Fail build",
         )
         logger.info(f"Marked build as failed: {build_id}")
+        return BuildFailResult.model_validate(response.json())
 
     async def build_cancel_aio(
         self, build_id: UUID, *, cascade: bool = False
@@ -2148,36 +2157,6 @@ class APIRegistry(RegistryABC):
             operation=f"Get frontier for build {build_id}",
         )
         return BuildFrontier.model_validate(response.json())
-
-    def build_get_executions(
-        self, build_id: UUID, *, cursor: str | None = None
-    ) -> BuildExecutions:
-        """Detached executions this build must stop."""
-        params = self._get_params()
-        if cursor:
-            params["cursor"] = cursor
-        response = self._request(
-            "GET",
-            f"{self.api_url}/api/v1/builds/{build_id}/executions",
-            params=params,
-            operation=f"Get executions for build {build_id}",
-        )
-        return BuildExecutions.model_validate(response.json())
-
-    async def build_get_executions_aio(
-        self, build_id: UUID, *, cursor: str | None = None
-    ) -> BuildExecutions:
-        """Async version - detached executions this build must stop."""
-        params = self._get_params()
-        if cursor:
-            params["cursor"] = cursor
-        response = await self._arequest(
-            "GET",
-            f"{self.api_url}/api/v1/builds/{build_id}/executions",
-            params=params,
-            operation=f"Get executions for build {build_id}",
-        )
-        return BuildExecutions.model_validate(response.json())
 
     def build_get(self, build_id: UUID) -> BuildInfo:
         """Return a slim build record (lighter than the frontier)."""
@@ -2907,36 +2886,13 @@ class APIRegistry(RegistryABC):
             operation=f"Resume task {task.id}",
         )
 
-    async def task_cancel_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        *,
-        if_executor: str | None = None,
-        if_executor_ref: str | None = None,
-    ) -> None:
+    async def task_cancel_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - cancel a task."""
-        await self.task_cancel_by_id_aio(
-            build_id,
-            str(task.id),
-            if_executor=if_executor,
-            if_executor_ref=if_executor_ref,
-        )
+        await self.task_cancel_by_id_aio(build_id, str(task.id))
 
-    async def task_cancel_by_id_aio(
-        self,
-        build_id: UUID,
-        task_id: str,
-        *,
-        if_executor: str | None = None,
-        if_executor_ref: str | None = None,
-    ) -> None:
+    async def task_cancel_by_id_aio(self, build_id: UUID, task_id: str) -> None:
         """Async version - cancel a task addressed by id."""
         params = self._get_event_params()
-        if if_executor_ref is not None:
-            params["if_executor_ref"] = if_executor_ref
-        if if_executor is not None:
-            params["if_executor"] = if_executor
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task_id}/cancel",

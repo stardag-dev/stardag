@@ -179,6 +179,117 @@ Needs a registry at `server-v0.5.0` or newer. Against an older one the
 worker simply has no checkpoints, which is the behaviour of every release
 before this.
 
+### Nothing automatic stops a container any more
+
+The reactive scheduler used to end a terminal build's executions: it asked
+the registry which executions the build had started and cancelled each one
+at its backend. That is removed. Three production incidents came from this
+area and no other, and the shape was the cause rather than any single bug —
+a short-lived scheduler with no handles in memory, reconstructing "which
+container is mine" from the event log in eight places that had to agree.
+
+What replaces it is already in this release, in two halves. A worker
+carries its own execution identity and asks, at checkpoints it reaches
+anyway, whether it is still wanted; told no, it stops without writing
+output or reporting a completion. And `stardag builds stop` is the hard
+stop: it lists the build's running executions **while its claims are still
+held**, which is what makes that listing exact, ends the selected calls
+from your own credentials, and cancels the build last.
+
+**What you lose:** a task whose side effects land outside its target is not
+protected by either half, and never was by the drain either — a cancelled
+container kept running until its backend noticed.
+
+**What you gain:** cancelling a build can no longer kill a neighbour's
+worker, which is what the incidents were.
+
+#### Server first, and this one has no exception
+
+Deploy the registry before tagging the SDK. The usual test for relaxing
+that rule asks whether anything in the increment can _refuse_ an older
+server; here the problem is the opposite direction. A new SDK against an
+old registry no longer drains cancels, and an old registry releases claims
+on neither route — so a terminal build, failed or cancelled, would leave
+its running tasks claimed and their concurrency-limit slots occupied until
+the claims expire. That is worse than either version alone.
+
+**Self-hosters: `DEFAULT_SERVER_VERSION` moves with this.** `stardag
+self-host up` pins the server image this SDK is tested against, and that
+pin is bumped in the release PR once `server-v0.5.0` exists. Until then a
+`self-host up` from `main` deploys the older server, which is the pairing
+described above — so use `--server-version` if you are running from
+`main` rather than from the tag.
+
+#### A build going terminal releases its claims — cancel and fail alike
+
+`POST /builds/{id}/fail` releases the execution claims the build holds,
+where it previously wrote one event, and `POST /builds/{id}/cancel`
+releases them unconditionally rather than only when passed `cascade=true`.
+The parameter is now a no-op, accepted so existing callers keep working;
+a later cleanup removes it.
+
+Neither route reached the rule on its own before. What made it true in
+practice, for reactive builds, was the cancel drain writing TASK_CANCELLED
+per execution as a side effect of stopping containers. With the drain gone
+the release moved into the transitions themselves, where it belonged.
+
+Nothing to do — but two consequences are worth knowing.
+
+A terminal build's tasks become available to the next build **immediately**
+rather than at claim expiry. That is the point, and it is what closes the
+stall where a cancelled build denied its tasks to everyone for the
+executor's timeout plus the claim grace.
+
+And the release opens a window: the next build can take a task over within
+seconds, while the old container is still writing. Three things make that
+safe rather than merely survivable. The output is content-addressed, so
+both writers produce the same bytes. The old worker exits at its next
+cooperative checkpoint, told `build_not_running`. And one whose `run()`
+has no checkpoint simply runs to completion, harmlessly.
+
+**This is still not how you stop a live build.** `stardag builds cancel`
+keeps its warning, and `stardag builds stop` remains the command for a
+build that is still running something: it lists the executions while the
+claims make that list exact, ends those calls, and cancels last.
+
+**One known limitation, named so you can recognise it (STA-100).** A
+claiming start arriving _after_ the cancel can revive the task it just
+released: the release is what removes the `task_already_running` refusal,
+so a scheduler tick of the cancelled build that was already in flight — or
+an idempotent retry of the very claim that was cancelled — is granted and
+the task folds back to RUNNING. Pre-existing, and reachable before this
+release through `cascade=true`; a plain cancel releasing widens it to the
+default path.
+
+What you see when it happens is **one wasted container and a claim held
+until that container's next checkpoint**. The revived worker asks before
+`run()` and is told `build_not_running`, because the endpoint reads build
+status before task status, so it exits without writing output or reporting
+a completion. Never a wrong result, only waste.
+
+#### Migration: custom registries and executors
+
+| Removed                                                                | What to do                                                                                                                 |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `RegistryABC.build_get_executions` / `build_get_executions_aio`        | Delete the override. Nothing calls it.                                                                                     |
+| `BuildExecution`, `BuildExecutions` (exported from `stardag.registry`) | Delete the import.                                                                                                         |
+| `task_cancel_aio(if_executor=…, if_executor_ref=…)`                    | Drop the parameters. The engines no longer pass them; an override still declaring them is not broken, only never narrowed. |
+
+Custom **executors** are unaffected, and `cancel_detached` stays on
+`TaskExecutorABC` — but what calls it has changed, so implement it for
+the right reason. Both remaining callers are **orphan handlers**: a build
+engine stopping a container it spawned _itself_, in the pass that spawned
+it, when the registry then refused the start (the reactive path in
+`build/_reactive/_frontier_actions.py`, the resident one in
+`build/_concurrent.py`). Nothing calls it to revoke another process's
+work any more. `TickSummary.cancelled_refs` counts exactly those stops, so
+a reader of it is measuring orphan cleanup rather than revocation.
+
+Note that `stardag builds stop` does **not** go through it: the CLI ends
+the selected Modal calls directly, from the operator's own credentials,
+because the point of that command is that no server and no scheduler
+reaches an execution backend.
+
 ---
 
 ## v0.25.0 — A task is rebuilt from the registry, never from a pickle

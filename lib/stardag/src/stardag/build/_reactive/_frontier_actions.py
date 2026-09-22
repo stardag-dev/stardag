@@ -72,9 +72,10 @@ _TERMINAL_BUILD_STATUSES = ("completed", "failed", "cancelled")
 _INTERRUPTED_STATUS = "interrupted"
 
 # A revoked task. Terminal, so it never appears in the frontier's
-# actionable or running lists — which is exactly why a build that cascaded
-# its own cancel through the server needs the executions route to find the
-# containers it is still responsible for stopping.
+# actionable or running lists — which used to be why a build that cascaded
+# its own cancel needed a separate route to find the containers it was
+# still responsible for stopping. Nothing is responsible for stopping them
+# now (STA-81): the worker asks and exits.
 _CANCELLED_STATUS = "cancelled"
 
 # Statuses the frontier reports as actionable once every upstream in the

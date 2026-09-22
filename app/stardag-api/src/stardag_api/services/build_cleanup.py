@@ -2,16 +2,21 @@
 
 A build whose orchestrator died without emitting a terminal event stays
 RUNNING forever: interrupted local builds, crashed CI runs and failed
-triggers accumulate permanently. Worse, cancelling a build has never
-cascaded to its tasks, so a task left RUNNING keeps denying its execution
-claim — ``latest_status`` is environment-global — to every future build that
-needs it, and keeps occupying its concurrency-limit slots.
+triggers accumulate permanently. And a task left RUNNING keeps denying its
+execution claim — ``latest_status`` is environment-global — to every future
+build that needs it, and keeps occupying its concurrency-limit slots.
+
+Cancelling a build used not to release those either; since STA-81 it does,
+unconditionally, and so does failing one.
 
 This module is the shared machinery for fixing that: selecting builds that
 are genuinely abandoned, and cancelling a build together with the claims it
-holds. ``routes/builds.py`` exposes it (single-build cascade, bulk cancel,
-and the reaper — bulk cancel with an idleness filter); ``main.py`` can
-optionally drive the sweep on a timer.
+holds. ``routes/builds.py`` exposes it from four places: the single-build
+cancel and fail, which always release; bulk cancel, which honours its
+request's ``cascade``; and the reaper, which honours
+``ReaperSettings.cascade`` (bulk cancel with an idleness filter). ``main.py``
+can optionally drive the sweep on a timer. Removing the last two switches is
+STA-103.
 
 Everything here is idempotent. Cancelling a build that is already terminal
 is a no-op, so a retried call, two racing operators, or two API replicas
@@ -33,7 +38,6 @@ from stardag_api.models import Build, BuildStatus, Event, EventType, Task
 from stardag_api.models.base import as_utc, utc_now
 from stardag_api.services.claims import BUILD_OWNED_STATUSES
 from stardag_api.services.status import apply_event_to_build, transition_task
-from stardag_api.services.wakeups import flag_build
 
 logger = logging.getLogger(__name__)
 
@@ -206,14 +210,61 @@ async def cascade_cancel_build_tasks(
 ) -> list[Task]:
     """Emit TASK_CANCELLED for the claims ``build_id`` holds. No commit.
 
-    "Claims this build holds" means tasks that are RUNNING, SUSPENDED or INTERRUPTED
-    **and whose current status was produced by this build**
-    (``latest_status_build_id``). The ownership scope is what makes cascading
-    safe: a task this build merely referenced, while another build is
-    actually running it, belongs to that build's cancel, not this one — the
-    server cannot stop a live execution, it can only rewrite the registry's
-    view of it, so cancelling somebody else's running task would leave a live
-    worker writing into a task the registry has declared dead.
+    **The invariant: when a build's claims are released, this releases
+    them, and it releases nothing else.** One implementation for every
+    caller, so the scope of a release never depends on which route asked.
+
+    **Two callers make it unconditional and two do not**, which is the
+    part to get right before relying on it. `POST /builds/{id}/cancel`
+    and `POST /builds/{id}/fail` always release. `POST /builds/bulk-cancel`
+    honours its request's `cascade` (default true), and the reaper honours
+    `ReaperSettings.cascade` (default true, `STARDAG_API_REAPER_CASCADE`).
+    So a bulk cancel or a sweep with cascading switched off records the
+    build event and leaves the claims to expire — deliberately, since both
+    are operator-facing controls, but it means "a terminal build has
+    released its claims" is true of the defaults rather than of the
+    system. **Both switches are temporary** — removing them, so the rule
+    holds without exception, is STA-103.
+
+    Neither of the first two used to reach here on its own. A cancel
+    released only when asked (``cascade=true``) and a failure never did;
+    what made the rule true in practice, for reactive builds, was the
+    scheduler's cancel drain writing TASK_CANCELLED per execution as a side
+    effect of stopping containers. Deleting that drain (STA-81) took the
+    release with it and exposed a behaviour nobody had chosen, so the
+    release moved into those two transitions themselves, which is where it
+    belonged. The single-build cancel's own ``cascade`` survives there as an
+    accepted no-op; the bulk and reaper switches still decide, until
+    STA-103 removes them.
+
+    Precisely:
+
+    - **Released:** a task that is RUNNING, SUSPENDED or INTERRUPTED **and
+      whose current status this build produced** (``latest_status_build_id``).
+      Those are the three statuses a task can be *owned* in, shared with
+      the per-task cancel guard so the two cannot drift
+      (:data:`stardag_api.services.claims.BUILD_OWNED_STATUSES`).
+    - **Written:** one TASK_CANCELLED event per such task, attributed to
+      this build, through :func:`transition_task` — so the denormalised
+      columns, the limit slots and the neighbour wake-ups all move with it.
+    - **Never touched:** a task another build now holds. The server cannot
+      stop a live execution, only rewrite the registry's view of one, so
+      cancelling somebody else's running task would leave a live worker
+      writing into a task the registry has declared dead. PENDING tasks are
+      left alone too: they hold no claim, and a task this build merely
+      registered may be referenced by a live build elsewhere.
+
+    **Why the polarity runs this way.** Releasing a claim whose container
+    is still running is the cheap error: the output is content-addressed,
+    so a worker that runs on writes something nobody is waiting for, and it
+    stops itself at its next cooperative checkpoint once its build is no
+    longer RUNNING (``stardag.cancellation``). Not releasing is the
+    expensive one — the claim and its concurrency-limit slots are held
+    until expiry, and every later build that needs the task is denied it
+    for that whole window. This is the opposite polarity from the
+    report-validity rules, which default to refusing, and the difference is
+    deliberate: there a wrong accept corrupts state, here a wrong release
+    costs at most duplicated work.
 
     Returns the affected task rows (already mutated in the session). The
     caller commits.
@@ -315,9 +366,6 @@ async def cancel_builds(
         # its status just changed, and it can no longer be re-selected
         # (its latest_status is no longer RUNNING).
         locked.last_active_at = now
-        # A cancelled reactive build still has executions only a tick can
-        # stop; flag it so the next scheduler pass in the environment does.
-        await flag_build(db, locked, now=now)
         results.append(
             CancelledBuild(
                 build=build,

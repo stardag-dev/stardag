@@ -124,6 +124,34 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   container it belongs to is stopped there, while the handle is still
   held: its reference was never recorded, so nothing else could find it.
 
+- **The scheduler no longer stops containers.** The reactive tick's cancel
+  drain is gone: a terminal build's tick no longer lists the executions the
+  build started and cancels them at their backend. Cancellation is
+  cooperative — a worker asks at its own checkpoints whether it is still
+  wanted and exits cleanly when it is not — and a hard stop is
+  `stardag builds stop`, which lists the build's executions while its claims
+  are still held, ends those calls, and cancels the build last.
+
+  This is the removal half of STA-78: all three production incidents in this
+  area came from a short-lived scheduler reasoning about containers other
+  processes had started, and each fix opened a hole beside it.
+
+  **Breaking for custom registries.** `RegistryABC.build_get_executions` and
+  `build_get_executions_aio` are removed, with the `BuildExecution` and
+  `BuildExecutions` models exported from `stardag.registry`; an
+  implementation that overrode them can delete the override. `task_cancel_aio`
+  no longer accepts `if_executor` / `if_executor_ref` — an override still
+  declaring them keeps working, since the engines no longer pass them, but
+  the narrowing they applied is gone. See
+  [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+- `TickSummary.cancelled_refs` **stays, and now means something narrower.**
+  It counted executions the drain stopped from a recorded reference; it now
+  counts only the containers a tick spawned _itself_ and stopped while it
+  still held the handle, because the task stopped being this build's while
+  the spawn was in flight. That is the one stop a scheduler can make
+  honestly, and the only one left.
+
 ### Registry API
 
 - **A non-claiming start naming a superseded execution is refused** (409,
@@ -191,6 +219,124 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 - `latest_execution_id` is surfaced on the task read models
   (`GET /tasks`, `GET /tasks/{task_id}`).
+
+- **A build going terminal releases the claims it holds — cancel and fail
+  alike.** `POST /builds/{id}/fail` now releases them, and
+  `POST /builds/{id}/cancel` releases them unconditionally rather than only
+  when asked. One implementation serves both, and the reaper; what is
+  released, what is written and what is never touched are stated once, at
+  `services.build_cleanup.cascade_cancel_build_tasks`.
+
+  Neither route reached it on its own before. A failure wrote a single
+  BUILD_FAILED event; a cancel released only when passed `cascade=true`.
+  What made the rule true in practice, for reactive builds, was the SDK's
+  cancel drain writing TASK_CANCELLED per execution as a side effect of
+  stopping containers. Deleting the drain took the release with it — the
+  consumer nobody had listed — and exposed a behaviour nobody had chosen:
+  a terminal build holding its tasks' claims, and their concurrency-limit
+  slots, until they expired.
+
+  The cancel route's `cascade` parameter is therefore **redundant, and
+  accepted as a no-op** so existing callers keep working; a later cleanup
+  removes it.
+
+  **`POST /builds/bulk-cancel` still honours its own `cascade`**, which
+  defaults to true. So the word now means two things: on the single-build
+  route it is ignored and the claims always go, while on the bulk route
+  `cascade: false` still means "record the events and release nothing".
+  The reaper has the same switch, `ReaperSettings.cascade`
+  (`STARDAG_API_REAPER_CASCADE`, default true). Both are left that way
+  deliberately — they are operator-facing controls, and changing them is a
+  separate decision from this one — so do not carry "cascade is a no-op"
+  from the single-build route to either. **Removing both, so a terminal
+  build always releases, is tracked as STA-103.**
+
+  **The window this opens, stated honestly.** A release lets the next
+  build take the task over within seconds, while the old container is
+  still writing. Both write the same bytes, since output is
+  content-addressed; the old worker exits at its next cooperative
+  checkpoint on `build_not_running`; and one whose `run()` has no
+  checkpoint runs to completion harmlessly. This is still not the way to
+  stop a live build — `stardag builds cancel` keeps its warning, and
+  `stardag builds stop` remains the command for one that is still running
+  something.
+
+  **Known limitation (STA-100): a stale claiming start can revive a task
+  this cancel just released.** Cancelling releases the claim, so the
+  `task_already_running` refusal no longer applies, and a claiming start
+  — a scheduler tick of the cancelled build that was already in flight,
+  or an idempotent retry of the claim that was cancelled — is granted and
+  folds the task back to RUNNING.
+
+  Pre-existing, and reachable before this release through
+  `cascade=true`; making a plain cancel release widens it to the default
+  path. Two conditions must coincide: a claiming start arriving after the
+  cancel, from a build that is already terminal.
+
+  Symptom when it does: **one wasted container, and the claim held until
+  that container's next checkpoint.** The revived worker asks before
+  `run()`, is told `build_not_running` — the endpoint reads build status
+  before task status — and exits without writing output or reporting a
+  completion. Never a wrong result. The fix needs a third 409 code on the
+  claiming start and an audit of every caller that reads one, which is
+  why it is its own issue.
+
+- **`GET /builds/{id}/executions` is removed**, with the event-log
+  reconstruction behind it — two window functions, the keyset cursor, and
+  the "which execution did this build start" lookup. Nothing needs to
+  reconstruct that: a worker knows its own identity, and `builds stop` reads
+  the task row while the claims make it exact.
+
+- **The per-task cancel refuses `if_executor` / `if_executor_ref`** with
+  400 `conditional_cancel_removed`. Their only caller was the drain, and
+  the release is server-first, so an SDK old enough to still run one will
+  meet this server: it gets a 404 from the deleted executions route, falls
+  back to the frontier, and sends these conditions with a cancel it
+  believes is narrowed. Ignoring them would silently widen it, and the
+  case they excluded is real — a successor that reset the task to PENDING
+  in the window is cancellable by anybody, so the old drain would stamp
+  its freshly scheduled work. Failing costs that caller nothing: a
+  terminal build's claims are released by the transition itself now, so
+  its cancel had nothing left to do.
+
+- **A failed build completes the blocked closure itself**, in the same
+  transaction that releases its claims, so the descendants of what it just
+  released are SKIPPED rather than dangling PENDING. The scheduler still
+  asks, and that call is now a no-op.
+
+  **`POST /builds/{id}/fail` therefore reports what it skipped**, in a new
+  `skipped_task_ids` field on its response, and `RegistryABC.build_fail`
+  returns it (`BuildFailResult | None`, the same optional-return
+  convention `build_cancel` uses — an override returning `None` is
+  unaffected). Without it the count had nowhere to come from: the
+  follow-up `skip-blocked` call correctly answers empty, so a scheduler
+  counting only that answer reported zero skips on the tick that skipped
+  everything, which is the number its trail and the UI show.
+
+  It has to be here rather than left to the caller, because _when_ the
+  caller asks differs by version: every SDK up to v0.25.0 skips before it
+  fails, since its cancel drain used to cancel the running branch first
+  and make it a seed of the closure. Against this server that drain is
+  refused, so such a tick would compute the closure while the branch is
+  still RUNNING — which blocks nothing — and no later tick would retry it,
+  the build being terminal already.
+
+  A cancel deliberately does **not** do this: it is a revocation, not a
+  verdict, and a neighbour may reset the task and run it.
+
+- **A cancelled build is no longer flagged for a scheduler tick.** That
+  flag existed to run the drain again; a terminal build's tick would now
+  read a terminal frontier and return. The builds a cancel genuinely wakes
+  are the neighbours whose gating upstreams it released, and each released
+  task flags them on its own transition.
+
+### UI
+
+- The tick-summary trail's "executions cancelled" counter stays, and its
+  help text follows the counter's narrower meaning: executions this tick
+  spawned and then stopped, because the task stopped being this build's
+  while the spawn was in flight. It no longer counts drained revocations,
+  because there are none.
 
 ## [0.25.0] — 2026-09-22
 

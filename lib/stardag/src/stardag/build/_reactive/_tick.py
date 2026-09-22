@@ -452,12 +452,19 @@ class TickSummary:
     # scheduling it — a rollover to the live deployment (see
     # ``docs/design/scope-keyed-dependency-structure.md``).
     rolled_over: int = 0
-    # Executions this tick stopped, by either route: the terminal drain
-    # cancelling what a cancelled build still holds, and the spawn path
-    # stopping a container whose reference the registry refused. Both are
-    # "this tick ended an execution", which is what a reader of the trail
-    # is asking; keeping them apart would make the count depend on which
-    # mechanism happened to get there first.
+    # Containers this tick stopped while it still held their handle.
+    #
+    # Not the old cancel drain, which is gone (STA-81): that reached for
+    # executions it had only a recorded *reference* to, which is the whole
+    # class of behaviour STA-78 withdrew. What is left is the one stop a
+    # scheduler can make honestly — an execution it spawned itself, whose
+    # registry write was then refused because the task stopped being this
+    # build's while the spawn was in flight. The handle is in hand, nothing
+    # else can find that container, and stopping it is faster than waiting
+    # for its own cooperative checkpoint.
+    #
+    # So a non-zero count here means "the orphan handler fired", not
+    # "revocation is still happening".
     cancelled_refs: int = 0
     iterations: int = 0
     limit_denied: int = 0
@@ -1129,7 +1136,6 @@ async def _run_tick_body_aio(
                         frontier,
                         build_id=build_id,
                         registry=registry,
-                        task_executor=task_executor,
                         config=config,
                         summary=summary,
                         denied_this_round=denied_this_round,

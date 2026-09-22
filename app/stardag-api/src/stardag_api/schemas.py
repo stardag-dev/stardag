@@ -219,8 +219,14 @@ class BuildCancelResponse(BuildResponse):
     """Response of ``POST /builds/{id}/cancel``.
 
     A superset of :class:`BuildResponse` — clients written against the plain
-    build shape are unaffected. ``cascaded_task_ids`` is empty unless the
-    call passed ``cascade=true``.
+    build shape are unaffected.
+
+    ``cascaded_task_ids`` lists the tasks whose claims this cancel
+    released, and **is populated whether or not the call passed
+    ``cascade``**: a cancel now always releases, and the parameter is an
+    accepted no-op. It used to be empty without the flag, so a client that
+    reads "empty" as "nothing was released" is reading a contract that no
+    longer holds.
     """
 
     # Tasks this call moved to CANCELLED, releasing their execution claims
@@ -609,32 +615,6 @@ class BuildFrontierResponse(BaseModel):
     build_config: dict | None = None
 
 
-class BuildExecutionRef(BaseModel):
-    """A detached execution this build is responsible for stopping."""
-
-    task_id: str
-    latest_status: TaskStatus
-    executor: str
-    executor_ref: str
-    executor_metadata: dict | None = None
-    latest_status_at: datetime | None = None
-
-
-class BuildExecutionsResponse(BaseModel):
-    """See GET /builds/{build_id}/executions."""
-
-    build_id: UUID
-    build_status: BuildStatus
-    executions: list[BuildExecutionRef] = []
-    # True when the cap was reached and more exist — ask again with
-    # ``next_cursor``. Stopping an execution records nothing, so this answer
-    # does not shrink as a caller works through it: asking again *without*
-    # the cursor returns the same page forever, and a wide build's tail
-    # would never be reached.
-    truncated: bool = False
-    next_cursor: str | None = None
-
-
 class AddBuildRootsRequest(BaseModel):
     """Root task ids to append to a build (dedup/order handled server-side)."""
 
@@ -794,6 +774,23 @@ class BulkCancelBuildsResponse(BaseModel):
     skipped: dict[str, str] = {}
     # More builds matched the filter than ``limit`` allowed; call again.
     truncated: bool = False
+
+
+class BuildFailResponse(BuildResponse):
+    """Response of ``POST /builds/{id}/fail``.
+
+    A superset of :class:`BuildResponse`, so clients written against the
+    plain build shape are unaffected.
+
+    ``skipped_task_ids`` is what the fail *itself* skipped, completing the
+    blocked closure in the same transaction that released the claims. It
+    matters because the caller can no longer discover it: a scheduler that
+    asks ``POST /builds/{id}/skip-blocked`` afterwards gets an empty list,
+    the work having already been done, and would otherwise report having
+    skipped nothing on the tick that skipped everything.
+    """
+
+    skipped_task_ids: list[str] = []
 
 
 class SkipBlockedResponse(BaseModel):
