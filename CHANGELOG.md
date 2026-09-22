@@ -4,7 +4,15 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.25.0] — 2026-09-22
+
+**SDK-only release.** The `### Registry API` and `### UI` entries below are
+merged but not yet deployed — they ship with the next server image, and the
+hosted service and self-hosters get them then. Nothing in the SDK waits on
+that: the claim identity rides as a query parameter an older server ignores,
+so `0.25.0` runs unchanged against `server-v0.4.0`, and the idempotent claim
+starts working for existing installs the moment the registry is upgraded,
+with no SDK action.
 
 ### SDK
 
