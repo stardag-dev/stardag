@@ -60,7 +60,7 @@ const COUNTERS: Record<string, { label: string; help: string }> = {
   },
   cancelled_refs: {
     label: "executions cancelled",
-    help: "Detached executions cancelled by this tick.",
+    help: "Executions this tick spawned and then stopped, because the task stopped being this build's while the spawn was in flight.",
   },
   iterations: {
     label: "iterations",
