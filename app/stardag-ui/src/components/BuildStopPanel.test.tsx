@@ -1,9 +1,9 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Task, TaskStatus } from "../types/task";
+import type { BuildStatus, Task, TaskStatus } from "../types/task";
 import { CLAIM_PAGE_SIZE, MAX_CLAIM_PAGES } from "../utils/stoppable";
-import { BuildStopPanel } from "./BuildStopPanel";
+import { BuildStopPanel, MAX_ROWS_DRAWN } from "./BuildStopPanel";
 
 vi.mock("../api/tasks", () => ({ fetchTasks: vi.fn() }));
 
@@ -65,10 +65,27 @@ function answerWith(tasks: Task[], total = tasks.length) {
   });
 }
 
-function renderPanel() {
+function renderPanel(buildStatus: BuildStatus = "running") {
   return render(
-    <BuildStopPanel buildId={BUILD} environmentId="env-1" refreshToken={0} />,
+    <BuildStopPanel
+      buildId={BUILD}
+      environmentId="env-1"
+      buildStatus={buildStatus}
+      refreshToken={0}
+    />,
   );
+}
+
+/**
+ * Render, then open the dialog.
+ *
+ * Nothing is fetched until it is open — that is the point of the dialog
+ * (STA-83), so every test that wants a list has to open one first.
+ */
+async function openDialog(user: ReturnType<typeof userEvent.setup>) {
+  renderPanel();
+  await user.click(screen.getByRole("button", { name: /Stop running tasks/ }));
+  await waitFor(() => expect(fetchTasks).toHaveBeenCalled());
 }
 
 beforeEach(() => {
@@ -76,19 +93,36 @@ beforeEach(() => {
 });
 
 describe("BuildStopPanel", () => {
-  it("is absent when the build holds nothing", async () => {
-    // The healthy state, and by far the common one: an empty panel above
-    // the DAG would be permanent furniture saying nothing.
+  it("says nothing is running rather than showing an empty dialog", async () => {
+    // As a band above the DAG this rendered nothing at all, which was
+    // right for something that appeared unbidden. In a dialog somebody
+    // opened on purpose, silence reads as a broken dialog.
     answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
-    const { container } = renderPanel();
-    await waitFor(() => expect(fetchTasks).toHaveBeenCalled());
+    const user = userEvent.setup();
+    await openDialog(user);
+    expect(await screen.findByText(/holding no execution claims/i)).toBeInTheDocument();
+  });
+
+  it("fetches nothing until the dialog is opened", async () => {
+    // The scan is up to 20 sequential requests and it used to run on
+    // every 5s auto-refresh, drawing nothing (STA-83).
+    answerWith([makeTask()]);
+    renderPanel();
+    await waitFor(() => expect(screen.getByRole("button")).toBeInTheDocument());
+    expect(fetchTasks).not.toHaveBeenCalled();
+  });
+
+  it("offers no way in on a completed build", async () => {
+    answerWith([makeTask()]);
+    const { container } = renderPanel("completed");
     expect(container).toBeEmptyDOMElement();
+    expect(fetchTasks).not.toHaveBeenCalled();
   });
 
   it("asks only for the statuses that may still have a container", async () => {
     answerWith([]);
-    renderPanel();
-    await waitFor(() => expect(fetchTasks).toHaveBeenCalled());
+    const user = userEvent.setup();
+    await openDialog(user);
     expect(vi.mocked(fetchTasks).mock.calls[0][0]).toMatchObject({
       status: ["running", "interrupted"],
       environment_id: "env-1",
@@ -100,10 +134,9 @@ describe("BuildStopPanel", () => {
     const user = userEvent.setup();
     renderPanel();
 
-    await screen.findByText(/1 execution held by this build/);
     await user.click(screen.getByRole("button", { name: /Stop running tasks/ }));
 
-    expect(screen.getByText("GrindBeans")).toBeInTheDocument();
+    expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
     expect(screen.getByText(`stardag builds stop ${BUILD}`)).toBeInTheDocument();
   });
 
@@ -294,7 +327,8 @@ describe("BuildStopPanel", () => {
       [makeTask({ latest_status_build_id: OTHER_BUILD })],
       MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
     );
-    renderPanel();
+    const user = userEvent.setup();
+    await openDialog(user);
 
     expect(await screen.findByRole("status")).toHaveTextContent(
       /could not be determined here/,
@@ -386,7 +420,37 @@ describe("BuildStopPanel", () => {
 
   it("reports a read failure rather than looking empty", async () => {
     vi.mocked(fetchTasks).mockRejectedValue(new Error("gateway timeout"));
-    renderPanel();
+    const user = userEvent.setup();
+    await openDialog(user);
     expect(await screen.findByRole("alert")).toHaveTextContent("gateway timeout");
+  });
+
+  // STA-83: rendering was uncapped while fetching was paginated, so a wide
+  // fan-out put every execution in the DOM and pushed the page around.
+  it("caps the rows it draws and says how many it left out", async () => {
+    const many = Array.from({ length: MAX_ROWS_DRAWN + 12 }, (_, i) =>
+      makeTask({ id: `row-${i}`, task_id: `tid-${i}`, task_name: `Task${i}` }),
+    );
+    answerWith(many);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    expect(await screen.findByText("Task0")).toBeInTheDocument();
+    expect(screen.getByText(`Task${MAX_ROWS_DRAWN - 1}`)).toBeInTheDocument();
+    expect(screen.queryByText(`Task${MAX_ROWS_DRAWN}`)).toBe(null);
+    expect(screen.getByText(/12 more executions not listed/)).toBeInTheDocument();
+  });
+
+  // The command is unaffected by how much of the list is drawn.
+  it("still targets every execution when rows are left undrawn", async () => {
+    answerWith(
+      Array.from({ length: MAX_ROWS_DRAWN + 5 }, (_, i) =>
+        makeTask({ id: `row-${i}`, task_id: `tid-${i}`, task_name: `Task${i}` }),
+      ),
+    );
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    expect(await screen.findByText(`stardag builds stop ${BUILD}`)).toBeInTheDocument();
   });
 });

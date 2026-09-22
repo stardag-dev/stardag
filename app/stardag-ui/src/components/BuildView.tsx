@@ -477,6 +477,18 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
 
                 {/* 3 — act */}
                 <div className="flex items-center gap-1.5">
+                  {/* What this build still has running, and the command
+                      that stops it. An icon rather than a band above the
+                      DAG; it never stops anything itself. */}
+                  {activeEnvironment?.id && (
+                    <BuildStopPanel
+                      key={buildId}
+                      buildId={buildId}
+                      environmentId={activeEnvironment.id}
+                      buildStatus={build.status}
+                      refreshToken={refreshToken}
+                    />
+                  )}
                   <button
                     onClick={handleRefreshClick}
                     disabled={refreshing && !autoRefresh}
@@ -584,18 +596,6 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                 failedAt={build.completed_at}
                 superseded={rootsSuperseded}
               />
-
-              {/* What this build still has running, and the command that
-                  stops it. Absent unless it holds live executions — see
-                  BuildStopPanel, which never stops anything itself. */}
-              {activeEnvironment?.id && (
-                <BuildStopPanel
-                  key={buildId}
-                  buildId={buildId}
-                  environmentId={activeEnvironment.id}
-                  refreshToken={refreshToken}
-                />
-              )}
 
               {/* Scheduler state. Renders itself only when it has something
                   to say — see `schedulingPanelForm`. Placed above the DAG so

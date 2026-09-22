@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchTasks } from "../api/tasks";
+import type { BuildStatus } from "../types/task";
 import { modalFunctionCallUrl } from "../utils/modalLinks";
 import {
   CLAIM_PAGE_SIZE,
@@ -17,6 +18,7 @@ import {
 } from "../utils/stoppable";
 import { formatAbsoluteTime, formatDuration } from "../utils/time";
 import { StatusBadge } from "./StatusBadge";
+import { Modal } from "./Modal";
 import { Checkbox } from "./ui/Checkbox";
 
 // The staleness options the filter offers, in seconds. Round numbers an
@@ -29,9 +31,37 @@ const OLDER_THAN_CHOICES: { label: string; seconds: number }[] = [
   { label: "over 12h", seconds: 12 * 3600 },
 ];
 
+/**
+ * How many execution rows the table draws.
+ *
+ * The panel's job is to hand over a command, not to be a second task
+ * table — the command acts on the whole set however much of it is
+ * listed. Fifty is well past the point where anyone is reading rows one
+ * by one, and the cap is what stops a wide fan-out owning the screen
+ * (STA-83). Whatever is not drawn is stated, never silently dropped.
+ */
+export const MAX_ROWS_DRAWN = 50;
+
+/**
+ * Where `stardag builds stop` gives up — `_stop.py`'s 200 pages of 100.
+ *
+ * Kept here only so the copy can be accurate about it. It is a much
+ * larger number than this dialog's own scan, and past it the CLI raises
+ * rather than acting on a partial list, because stopping on a partial
+ * list releases the claims with containers still running.
+ */
+const CLI_MAX_CLAIM_HOLDERS = 20_000;
+
 interface BuildStopPanelProps {
   buildId: string;
   environmentId: string;
+  /**
+   * The build's status. Only decides whether the trigger is offered: a
+   * completed build has nothing left running, and anything else may,
+   * including a failed or cancelled one — that is the case this panel
+   * exists for, since cancelling a build does not stop its containers.
+   */
+  buildStatus: BuildStatus;
   /**
    * Bumped by the parent on every refresh, so this panel refetches in
    * step with the build view rather than running a timer of its own.
@@ -67,6 +97,7 @@ interface BuildStopPanelProps {
 export function BuildStopPanel({
   buildId,
   environmentId,
+  buildStatus,
   refreshToken = 0,
 }: BuildStopPanelProps) {
   const [held, setHeld] = useState<StoppableExecution[] | null>(null);
@@ -100,8 +131,12 @@ export function BuildStopPanel({
     [],
   );
 
+  // Only while the dialog is open. The scan is up to 20 sequential
+  // requests, and it used to run on every 5s auto-refresh whether or not
+  // anyone had opened the panel — 20 requests every 5 seconds to draw
+  // nothing (STA-83). Opening it is the signal that the answer is wanted.
   useEffect(() => {
-    if (!buildId || !environmentId) return;
+    if (!open || !buildId || !environmentId) return;
     const epoch = ++epochRef.current;
     collectExecutions(
       (page) =>
@@ -124,7 +159,7 @@ export function BuildStopPanel({
         if (epochRef.current !== epoch) return;
         setError(err instanceof Error ? err.message : "Failed to read running tasks");
       });
-  }, [buildId, environmentId, refreshToken]);
+  }, [open, buildId, environmentId, refreshToken]);
 
   const executions = useMemo(() => held ?? [], [held]);
   const narrowed: StopFilters = useMemo(
@@ -189,38 +224,10 @@ export function BuildStopPanel({
     }
   }, [command]);
 
-  // Nothing running under this build is the normal, healthy state — so the
-  // panel is absent rather than empty. An error is worth a line, since a
-  // reader who cannot see the list must not read that as "none".
-  if (error) {
-    return (
-      <div
-        role="alert"
-        className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-900/20 dark:text-red-400"
-      >
-        Could not read this build&rsquo;s running tasks: {error}
-      </div>
-    );
-  }
-  if (held === null) return null;
-  if (executions.length === 0) {
-    // Nothing found. That is the normal, healthy state and the panel stays
-    // out of the way — *unless* the scan gave up early, in which case
-    // "found none" and "stopped looking" are the same screen, and the
-    // difference is a build whose live executions nobody was shown.
-    if (!truncated) return null;
-    return (
-      <div
-        role="status"
-        className="rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-900/10 dark:text-amber-200"
-      >
-        This environment has {total} tasks holding an execution claim — more than this
-        page will scan, so whether this build has live executions could not be
-        determined here. <code>stardag builds stop {buildId} --dry-run</code> pages
-        through all of them.
-      </div>
-    );
-  }
+  // Offered for every build that is not finished. A cancelled or failed
+  // build is exactly when this is wanted, because cancelling a build does
+  // not stop its containers.
+  if (buildStatus === "completed") return null;
 
   const excluded = executions.length - chosen.length;
   // Split by reason, not counted together: one is permanent and one is
@@ -236,41 +243,45 @@ export function BuildStopPanel({
   ).length;
 
   return (
-    <div className="rounded-md border border-amber-200 bg-amber-50/60 dark:border-amber-900/60 dark:bg-amber-900/10">
+    <>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        onClick={() => setOpen(true)}
+        title="Stop running tasks — what this build still has running, and the command that stops it"
+        className="rounded-md p-1 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
       >
+        <span className="sr-only">Stop running tasks</span>
         <svg
-          className={`h-3 w-3 flex-shrink-0 transition-transform ${
-            open ? "rotate-90" : ""
-          }`}
+          aria-hidden="true"
+          className="h-4 w-4"
           fill="none"
           stroke="currentColor"
+          strokeWidth={2}
           viewBox="0 0 24 24"
-          aria-hidden="true"
         >
           <path
             strokeLinecap="round"
             strokeLinejoin="round"
-            strokeWidth={2}
-            d="M9 5l7 7-7 7"
+            d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
           />
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 9h6v6H9z" />
         </svg>
-        <span className="font-medium text-amber-900 dark:text-amber-200">
-          Stop running tasks
-        </span>
-        <span className="text-amber-800/80 dark:text-amber-300/80">
-          {executions.length} execution{executions.length === 1 ? "" : "s"} held by this
-          build
-        </span>
       </button>
 
-      {open && (
-        <div className="space-y-3 px-3 pb-3">
-          <p className="text-xs text-amber-900/80 dark:text-amber-200/80">
+      <Modal
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        title="Stop running tasks"
+        maxWidthClass="max-w-4xl"
+      >
+        <StopDialogBody
+          error={error}
+          held={held}
+          total={total}
+          truncated={truncated}
+          buildId={buildId}
+        >
+          <p className="text-xs text-gray-600 dark:text-gray-400">
             These are read off the task rows while this build still holds their claims,
             which is the only moment the list is exact — cancelling the build releases
             the claims, and another build may then take a task over. Stopping the
@@ -419,15 +430,84 @@ export function BuildStopPanel({
           {truncated && (
             <p className="text-xs text-amber-800 dark:text-amber-300">
               This environment has {total} tasks holding a claim, more than the{" "}
-              {MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE} this page scans —{" "}
-              <strong>the list above may be incomplete.</strong> The CLI pages through
-              all of them.
+              {MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE} this dialog scans —{" "}
+              <strong>the list above may be incomplete.</strong> The CLI scans ten times
+              further, and past {CLI_MAX_CLAIM_HOLDERS.toLocaleString("en-US")} it
+              refuses outright rather than acting on a partial list.
             </p>
           )}
-        </div>
-      )}
-    </div>
+        </StopDialogBody>
+      </Modal>
+    </>
   );
+}
+
+interface StopDialogBodyProps {
+  error: string | null;
+  held: StoppableExecution[] | null;
+  total: number;
+  truncated: boolean;
+  buildId: string;
+  children: React.ReactNode;
+}
+
+/**
+ * The three states that are not "here is the list", and the list itself.
+ *
+ * As a panel this component simply rendered nothing when a build held no
+ * executions, which was right for something that appeared unbidden above
+ * the DAG. Inside a dialog somebody has deliberately opened, silence is
+ * the wrong answer: "nothing is running" has to be said, because the
+ * alternative reading is that the dialog is broken.
+ */
+function StopDialogBody({
+  error,
+  held,
+  total,
+  truncated,
+  buildId,
+  children,
+}: StopDialogBodyProps) {
+  if (error) {
+    return (
+      <div
+        role="alert"
+        className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-900/20 dark:text-red-400"
+      >
+        Could not read this build&rsquo;s running tasks: {error}
+      </div>
+    );
+  }
+  if (held === null) {
+    return (
+      <p role="status" className="text-xs text-gray-600 dark:text-gray-400">
+        Reading this build&rsquo;s running tasks…
+      </p>
+    );
+  }
+  if (held.length === 0) {
+    // "Found none" and "stopped looking" are different answers, and only
+    // one of them means nothing is running.
+    if (truncated) {
+      return (
+        <div
+          role="status"
+          className="rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-900/10 dark:text-amber-200"
+        >
+          This environment has {total} tasks holding an execution claim — more than this
+          dialog will scan, so whether this build has live executions could not be
+          determined here. <code>stardag builds stop {buildId} --dry-run</code> scans
+          ten times further before it gives up.
+        </div>
+      );
+    }
+    return (
+      <p role="status" className="text-xs text-gray-600 dark:text-gray-400">
+        This build is holding no execution claims, so it has nothing running to stop.
+      </p>
+    );
+  }
+  return <div className="space-y-3">{children}</div>;
 }
 
 interface ExecutionTableProps {
@@ -455,98 +535,113 @@ function ExecutionTable({ executions, ticked, onToggle }: ExecutionTableProps) {
       </p>
     );
   }
+  // Two independent guards, and both are needed. The cap bounds the DOM,
+  // which is what a several-hundred-wide fan-out would otherwise blow up;
+  // the max height bounds the pixels, so even fifty rows cannot take the
+  // dialog over. Neither changes what the command acts on.
+  const drawn = executions.slice(0, MAX_ROWS_DRAWN);
+  const undrawn = executions.length - drawn.length;
   return (
-    <table className="w-full text-left text-xs">
-      <thead className="text-gray-600 dark:text-gray-400">
-        <tr>
-          <th className="w-6 py-1 pr-2 font-medium">
-            <span className="sr-only">Include</span>
-          </th>
-          <th className="py-1 pr-2 font-medium">Task</th>
-          <th className="py-1 pr-2 font-medium">Status</th>
-          <th className="py-1 pr-2 font-medium">Worker</th>
-          <th className="py-1 pr-2 font-medium">Call</th>
-          <th className="py-1 font-medium">Running for</th>
-        </tr>
-      </thead>
-      <tbody>
-        {executions.map((execution) => {
-          const callUrl = modalFunctionCallUrl(
-            execution.metadata,
-            execution.executorRef,
-          );
-          return (
-            <tr
-              key={execution.taskId}
-              className="border-t border-amber-200/60 dark:border-amber-900/40"
-            >
-              <td className="py-1 pr-2">
-                <Checkbox
-                  checked={ticked.has(execution.taskId)}
-                  onChange={(on) => onToggle(execution.taskId, on)}
-                  label={`Include ${execution.qualifiedName}`}
-                />
-              </td>
-              <td className="py-1 pr-2">
-                <span
-                  title={execution.taskId}
-                  className="font-medium text-gray-900 dark:text-gray-100"
-                >
-                  {execution.qualifiedName}
-                </span>
-              </td>
-              <td className="py-1 pr-2">
-                <StatusBadge status={execution.status} />
-                {execution.restartDue && (
+    <div className="max-h-80 overflow-y-auto">
+      <table className="w-full text-left text-xs">
+        <thead className="text-gray-600 dark:text-gray-400">
+          <tr>
+            <th className="w-6 py-1 pr-2 font-medium">
+              <span className="sr-only">Include</span>
+            </th>
+            <th className="py-1 pr-2 font-medium">Task</th>
+            <th className="py-1 pr-2 font-medium">Status</th>
+            <th className="py-1 pr-2 font-medium">Worker</th>
+            <th className="py-1 pr-2 font-medium">Call</th>
+            <th className="py-1 font-medium">Running for</th>
+          </tr>
+        </thead>
+        <tbody>
+          {drawn.map((execution) => {
+            const callUrl = modalFunctionCallUrl(
+              execution.metadata,
+              execution.executorRef,
+            );
+            return (
+              <tr
+                key={execution.taskId}
+                className="border-t border-amber-200/60 dark:border-amber-900/40"
+              >
+                <td className="py-1 pr-2">
+                  <Checkbox
+                    checked={ticked.has(execution.taskId)}
+                    onChange={(on) => onToggle(execution.taskId, on)}
+                    label={`Include ${execution.qualifiedName}`}
+                  />
+                </td>
+                <td className="py-1 pr-2">
                   <span
-                    className="ml-1 text-amber-800 dark:text-amber-300"
-                    title="The platform said it was restarting this execution and the restart has not landed yet."
+                    title={execution.taskId}
+                    className="font-medium text-gray-900 dark:text-gray-100"
                   >
-                    restart due
+                    {execution.qualifiedName}
                   </span>
-                )}
-              </td>
-              <td className="py-1 pr-2 text-gray-700 dark:text-gray-300">
-                {execution.worker ?? "—"}
-              </td>
-              <td className="py-1 pr-2">
-                {/* The ref decides first, not the URL: modalFunctionCallUrl
+                </td>
+                <td className="py-1 pr-2">
+                  <StatusBadge status={execution.status} />
+                  {execution.restartDue && (
+                    <span
+                      className="ml-1 text-amber-800 dark:text-amber-300"
+                      title="The platform said it was restarting this execution and the restart has not landed yet."
+                    >
+                      restart due
+                    </span>
+                  )}
+                </td>
+                <td className="py-1 pr-2 text-gray-700 dark:text-gray-300">
+                  {execution.worker ?? "—"}
+                </td>
+                <td className="py-1 pr-2">
+                  {/* The ref decides first, not the URL: modalFunctionCallUrl
                     still resolves an app-level link without a call id, and
                     linking that would render an empty anchor where the
                     reason belongs. */}
-                {!execution.executorRef ? (
-                  <span
-                    className="text-[11px] text-amber-800 dark:text-amber-300"
-                    title={execution.notStoppableReason ?? undefined}
-                  >
-                    not recorded yet
-                  </span>
-                ) : callUrl ? (
-                  <a
-                    href={callUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title="Open this call in the Modal dashboard"
-                    className="font-mono text-[11px] text-blue-700 hover:underline dark:text-blue-300"
-                  >
-                    {execution.executorRef}
-                  </a>
-                ) : (
-                  <code className="font-mono text-[11px] text-gray-700 dark:text-gray-300">
-                    {execution.executorRef}
-                  </code>
-                )}
-              </td>
-              <td
-                className="py-1 text-gray-700 dark:text-gray-300"
-                title={formatAbsoluteTime(execution.statusAt)}
-              >
-                {formatDuration(execution.statusAt, null)}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+                  {!execution.executorRef ? (
+                    <span
+                      className="text-[11px] text-amber-800 dark:text-amber-300"
+                      title={execution.notStoppableReason ?? undefined}
+                    >
+                      not recorded yet
+                    </span>
+                  ) : callUrl ? (
+                    <a
+                      href={callUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Open this call in the Modal dashboard"
+                      className="font-mono text-[11px] text-blue-700 hover:underline dark:text-blue-300"
+                    >
+                      {execution.executorRef}
+                    </a>
+                  ) : (
+                    <code className="font-mono text-[11px] text-gray-700 dark:text-gray-300">
+                      {execution.executorRef}
+                    </code>
+                  )}
+                </td>
+                <td
+                  className="py-1 text-gray-700 dark:text-gray-300"
+                  title={formatAbsoluteTime(execution.statusAt)}
+                >
+                  {formatDuration(execution.statusAt, null)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {undrawn > 0 && (
+        <p className="px-1 py-1.5 text-xs text-gray-600 dark:text-gray-400">
+          {undrawn} more execution{undrawn === 1 ? "" : "s"} not listed. The command
+          below still targets every one of them — narrow with the filters above to see a
+          particular set.
+        </p>
+      )}
+    </div>
   );
 }
