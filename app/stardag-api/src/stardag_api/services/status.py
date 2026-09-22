@@ -203,10 +203,121 @@ def _reports_on_the_current_execution(task: Task, event: Event) -> bool:
         or task.latest_status_build_id != event.build_id
     ):
         return False
-    reported_ref = (event.event_metadata or {}).get("executor_ref")
+    return _names_the_execution(
+        event,
+        current_execution_id=task.latest_execution_id,
+        current_ref=task.latest_executor_ref,
+    )
+
+
+def _names_the_execution(
+    event: Event,
+    *,
+    current_execution_id: UUID | None,
+    current_ref: str | None,
+) -> bool:
+    """Whether a report is about the execution the task is running under.
+
+    The identity half of the authority rule, in one place because three
+    callers need it — the task row's version above and the two per-build
+    replays — and a report the row refuses but a replay applies shows one
+    task as INTERRUPTED in the UI and RUNNING in the frontier.
+
+    **The invariant, which is what to check a change against rather than
+    the branches below:** a report is about the current execution *unless
+    an identity both sides carry contradicts it*. Absence on either side
+    is no opinion, never a mismatch. Default-allow, deliberately: refusing
+    wrongly leaves a task RUNNING behind a claim nobody will release until
+    it expires, which is worse than honouring a report from an execution
+    that has in fact been replaced.
+
+    Two identities, tried in order of how well they separate executions.
+
+    **The execution id, when the report names one.** Minted by the client
+    before it claims, so it exists for the whole life of the execution
+    rather than only after the spawn.
+
+    **Otherwise the executor ref**, which is what a report from an SDK
+    predating the id carries, and the rule that applied before it existed.
+
+    The two differ on what a *missing current* value means, and the
+    asymmetry is deliberate rather than an oversight.
+
+    A missing current **ref** is not a wildcard: a replacement's claiming
+    start clears the ref before its spawn records the new one, so treating
+    NULL as "matches anything" would make the whole acquire->spawn gap
+    accept the dead execution's report — the hole this rule exists to
+    close.
+
+    A missing current **execution id** is treated as no opinion, because
+    that gap does not exist for it. A replacement mints its id *before*
+    claiming and the claiming start carries it, so a task running under a
+    replacement always has one. NULL therefore means the current execution
+    predates the identity — an SDK that never sent one — and the honest
+    answer is to fall back to the behaviour of that era rather than to
+    refuse a report the server has no way to evaluate.
+
+    Note what neither identity separates, correctly: a backend that
+    restarts an input under the same call id — Modal's preemption — is by
+    construction still the same execution, and reuses both.
+
+    **The residual gap, ratified rather than tolerated.** A report that
+    names an id is accepted when the task carries neither identity to
+    compare it against — its id NULL *and* its ref NULL. Note which side
+    that is: the **task's** missing ref, not the report's.
+
+    That population is narrow and was re-checked against this change
+    rather than inherited. A RUNNING task reaches it only when whatever
+    established its current state named neither identity: a *pre-identity
+    SDK's* claiming start (a granted claim always writes the id, so a
+    current SDK's claim never leaves it NULL), or the concurrency
+    limiter's enforced start on a task that never had one. TASK_RETRIED
+    clears both, but sets PENDING, so the RUNNING test above already
+    excludes it. Both remaining shapes are version skew or limiter
+    bookkeeping.
+
+    Refusing there would break a legitimate first report during a
+    mixed-version rollout for no gain: accepting admits only a caller that
+    already knows the build and task ids, and it displaces no live claim,
+    because by construction there is none recorded to displace. It is the
+    same shape as preserve-on-silence in the fold, and it would be
+    incoherent for absence to be inert in every other rule and decisive
+    here.
+    """
+    metadata = event.event_metadata or {}
+    reported_execution = metadata.get("execution_id")
+    reported_ref = metadata.get("executor_ref")
+    if reported_execution is not None:
+        if current_execution_id is not None and str(reported_execution) != str(
+            current_execution_id
+        ):
+            return False
+        # The id matched, or the task has none to compare. Either way the
+        # ref still gets a vote when both sides have one, because the two
+        # are facts about the same execution and a report that agrees
+        # with one while contradicting the other is not about the
+        # execution running now.
+        #
+        # That is not belt-and-braces. A start carrying no id leaves the
+        # recorded one in place (see the fold), so an id-less
+        # *replacement* -- an older SDK re-claiming a lapsed task inside
+        # the same build, which a rollover or a rollback makes reachable
+        # -- inherits its predecessor's id along with the predecessor's
+        # build. The id and the owner would then both match a late report
+        # from the execution that is actually gone, and only the ref has
+        # moved on. Clearing instead of preserving would not help: the
+        # report would land on a NULL id and take the no-opinion branch
+        # above.
+        if (
+            reported_ref is not None
+            and current_ref is not None
+            and str(reported_ref) != str(current_ref)
+        ):
+            return False
+        return True
     if reported_ref is None:
         return True
-    return str(reported_ref) == str(task.latest_executor_ref)
+    return str(reported_ref) == str(current_ref)
 
 
 # Event-metadata key recording that a report was written but did not move
@@ -269,26 +380,32 @@ def _mark_report_refused(event: Event) -> None:
 
 
 def _replay_report_applies(
-    status: TaskStatus, event: Event, current_ref: str | None
+    status: TaskStatus,
+    event: Event,
+    current_ref: str | None,
+    current_execution_id: UUID | None = None,
 ) -> bool:
     """The replay's twin of :func:`_reports_on_the_current_execution`.
 
     Same rule, from what a replay can see. Build ownership is implicit —
     each replay walks one build's events — so what is left is "still
-    running" and "still the same execution", with ``current_ref`` tracked
+    running" and "still the same execution", with both identities tracked
     off the starts as the walk goes.
 
-    It has to be the same rule. The replays answer the per-build view that
-    the UI and the frontier read, and the row answers the environment-global
-    one; a report the row refuses but a replay applies shows the same task
-    as INTERRUPTED in one place and RUNNING in the other.
+    It has to be the same rule, which is why the comparison itself is
+    :func:`_names_the_execution` rather than a second copy of it. The
+    replays answer the per-build view that the UI and the frontier read,
+    and the row answers the environment-global one; a report the row
+    refuses but a replay applies shows the same task as INTERRUPTED in one
+    place and RUNNING in the other.
     """
     if status != TaskStatus.RUNNING:
         return False
-    reported_ref = (event.event_metadata or {}).get("executor_ref")
-    if reported_ref is None:
-        return True
-    return str(reported_ref) == str(current_ref)
+    return _names_the_execution(
+        event,
+        current_execution_id=current_execution_id,
+        current_ref=current_ref,
+    )
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -1062,6 +1179,12 @@ async def get_task_status_in_build(
     # the task row does it: a claiming start carries no ref, and treating
     # its absence as "matches anything" is the hole this closes.
     current_ref: str | None = None
+    # Its companion identity, tracked on exactly the same terms. A start
+    # from an SDK that mints one carries it from the claim onward, so this
+    # is the identity that survives the acquire->spawn gap the ref does
+    # not — see _names_the_execution for why the two differ on a missing
+    # current value.
+    current_execution_id: UUID | None = None
 
     # Process events from oldest to newest to build final state
     for event in reversed(events):
@@ -1085,7 +1208,16 @@ async def get_task_status_in_build(
         elif event.event_type == EventType.TASK_STARTED:
             status = TaskStatus.RUNNING
             started_at = event.created_at
-            current_ref = (event.event_metadata or {}).get("executor_ref")
+            start_metadata = event.event_metadata or {}
+            current_ref = start_metadata.get("executor_ref")
+            # Mirrors the fold: written when the start names an id, and
+            # otherwise left alone — except a granted claim, which always
+            # writes, including a clear. A replay that cleared where the
+            # row preserves would disagree with it, and the two answer the
+            # same question for different readers.
+            replayed_execution = _as_uuid(start_metadata.get("execution_id"))
+            if replayed_execution is not None or start_metadata.get("claim"):
+                current_execution_id = replayed_execution
         elif event.event_type == EventType.TASK_SUSPENDED:
             status = TaskStatus.SUSPENDED
         elif event.event_type == EventType.TASK_RESUMED:
@@ -1103,6 +1235,7 @@ async def get_task_status_in_build(
                 # Cleared with the status, exactly as the row fold does it —
                 # see the twin in get_all_task_statuses_in_build.
                 current_ref = None
+                current_execution_id = None
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
             # Informational: blocked by global lock, stays PENDING
             pass
@@ -1125,7 +1258,7 @@ async def get_task_status_in_build(
             # mirrors _apply_event_to_task, including the unconditional
             # error_message write (a stale one would explain this
             # interruption with an earlier failure's text).
-            if _replay_report_applies(status, event, current_ref):
+            if _replay_report_applies(status, event, current_ref, current_execution_id):
                 status = TaskStatus.INTERRUPTED
                 error_message = event.error_message
         elif event.event_type == EventType.TASK_PREEMPTED:
@@ -1171,6 +1304,8 @@ async def get_all_task_statuses_in_build(
     # Per task, the ref of its most recent start — see the twin in
     # get_task_status_in_build.
     current_refs: dict[UUID, str | None] = {}
+    # And its companion identity, per task, on the same terms.
+    current_execution_ids: dict[UUID, UUID | None] = {}
 
     for event in events:
         if event.task_id is None:
@@ -1188,7 +1323,11 @@ async def get_all_task_statuses_in_build(
         elif event.event_type == EventType.TASK_STARTED:
             status = TaskStatus.RUNNING
             started_at = event.created_at
-            current_refs[task_id] = (event.event_metadata or {}).get("executor_ref")
+            start_metadata = event.event_metadata or {}
+            current_refs[task_id] = start_metadata.get("executor_ref")
+            replayed_execution = _as_uuid(start_metadata.get("execution_id"))
+            if replayed_execution is not None or start_metadata.get("claim"):
+                current_execution_ids[task_id] = replayed_execution
         elif event.event_type == EventType.TASK_SUSPENDED:
             status = TaskStatus.SUSPENDED
         elif event.event_type == EventType.TASK_RESUMED:
@@ -1209,6 +1348,7 @@ async def get_all_task_statuses_in_build(
                 # let a delayed report from that execution be accepted
                 # after a later resume, by this replay but not by the row.
                 current_refs.pop(task_id, None)
+                current_execution_ids.pop(task_id, None)
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
             # Informational: blocked by global lock, stays PENDING
             pass
@@ -1228,7 +1368,12 @@ async def get_all_task_statuses_in_build(
             # mirrors _apply_event_to_task, including the unconditional
             # error_message write (a stale one would explain this
             # interruption with an earlier failure's text).
-            if _replay_report_applies(status, event, current_refs.get(task_id)):
+            if _replay_report_applies(
+                status,
+                event,
+                current_refs.get(task_id),
+                current_execution_ids.get(task_id),
+            ):
                 status = TaskStatus.INTERRUPTED
                 error_message = event.error_message
         elif event.event_type == EventType.TASK_PREEMPTED:

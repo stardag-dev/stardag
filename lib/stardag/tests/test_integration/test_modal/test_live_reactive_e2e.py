@@ -164,6 +164,7 @@ class MiniReactiveRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         claim_ttl_seconds=None,
+        execution_id=None,
     ):
         self.statuses[str(task.id)] = "running"
         self.refs[str(task.id)] = (executor, executor_ref)

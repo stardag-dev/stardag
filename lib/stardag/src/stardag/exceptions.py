@@ -71,6 +71,40 @@ class ResumableInterruption(StardagError):
     """
 
 
+class ExecutionCancelled(StardagError):
+    """Raise this to stop an execution the build no longer wants.
+
+    Raised by stardag itself at the two automatic cooperative-cancellation
+    checkpoints — the start of each attempt, and each dynamic-dependency
+    yield — and available to a task that finds a safe stopping point of
+    its own::
+
+        def run(self):
+            for chunk in self.chunks():
+                if sd.cancellation_requested():
+                    raise sd.ExecutionCancelled()
+                process(chunk)
+
+    The worker treats it as a **clean exit, not a failure of the task**:
+    it writes no output, reports no completion, and records no
+    end-of-attempt event. What it does *not* do is return normally, and
+    that is deliberate — a Modal call that succeeds with no output written
+    is read by a scheduler's probe as "the worker wrote it, eventual
+    consistency", which would record a completion for a target that does
+    not exist. Letting it propagate makes the call fail, which is honest
+    and recoverable.
+
+    An ordinary ``Exception``, like
+    :class:`ResumableInterruption`, so it does not slip past a task's own
+    error handling. A task that catches it should re-raise.
+
+    Not something to raise speculatively: ask
+    :func:`stardag.cancellation_requested` first, which is throttled and
+    answers False unless the registry positively said this execution has
+    been superseded or its build has stopped running.
+    """
+
+
 class APIError(StardagError):
     """Error communicating with the Stardag API.
 

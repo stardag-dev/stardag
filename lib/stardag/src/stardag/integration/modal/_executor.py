@@ -33,6 +33,7 @@ from stardag.integration.modal._metadata import (
     STARDAG_BUILD_CONFIG_ENV,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
+    STARDAG_EXECUTION_ID_ENV,
     STARDAG_SCOPE_KEY_ENV,
     STARDAG_MODAL_APP_ID_ENV,
     STARDAG_MODAL_APP_NAME_ENV,
@@ -318,7 +319,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         return float(timeout) if timeout is not None else None
 
     async def _prepare_invocation(
-        self, task: BaseTask
+        self, task: BaseTask, execution_id: UUID | None = None
     ) -> tuple[modal.Function, dict[str, str] | None, dict[str, typing.Any] | None]:
         """Resolve the worker function, env overrides, and executor metadata.
 
@@ -356,6 +357,13 @@ class ModalTaskExecutor(TaskExecutorABC):
                 ttl_seconds = claim_ttl_seconds(task, self)
                 if ttl_seconds is not None:
                     env_overrides[STARDAG_CLAIM_TTL_SECONDS_ENV] = str(ttl_seconds)
+                if execution_id is not None:
+                    # The identity of the execution this container is, so
+                    # its self-reported start and its end-of-execution
+                    # reports can name it, and so it can ask whether it is
+                    # still wanted. Only sent when the worker reports:
+                    # nothing else in the container reads it.
+                    env_overrides[STARDAG_EXECUTION_ID_ENV] = str(execution_id)
                 # The worker function's own ``timeout``, so the worker can
                 # tell a timeout from a cancellation — the two are
                 # indistinguishable from inside the container without it.
@@ -498,13 +506,15 @@ class ModalTaskExecutor(TaskExecutorABC):
             executor_metadata=executor_metadata,
         )
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
         """Spawn the task on its worker function; return a re-attachable handle."""
         (
             worker_function,
             env_overrides,
             executor_metadata,
-        ) = await self._prepare_invocation(task)
+        ) = await self._prepare_invocation(task, execution_id)
         function_call = await worker_function.spawn.aio(
             task, env_overrides=env_overrides
         )

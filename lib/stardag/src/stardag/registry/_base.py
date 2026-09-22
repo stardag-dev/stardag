@@ -431,6 +431,29 @@ class StartClaimResult(StardagBaseModel):
     execution_id: str | None = None
 
 
+class ExecutionStatus(StardagBaseModel):
+    """Whether a running worker is still the one its task is waiting for.
+
+    Cooperative cancellation's answer. **Every default here says "keep
+    running"**, which is the invariant rather than a convenience: a
+    registry that does not implement this, a server predating the
+    endpoint, and a response that did not parse must all leave the worker
+    alone. Stopping a healthy worker destroys work; a superseded one
+    running on writes a content-addressed output nobody reads.
+    """
+
+    still_current: bool = True
+    # ``build_not_running`` or ``superseded`` when not current; None
+    # otherwise. A value this client does not recognise is still a "no" —
+    # the boolean decides, this only explains.
+    reason: str | None = None
+    build_status: str | None = None
+    task_status: str | None = None
+    # The execution the task holds now, which on ``superseded`` is the one
+    # that replaced the caller's.
+    latest_execution_id: UUID | None = None
+
+
 class RegisteredTaskInfo(StardagBaseModel):
     """Slim per-task info echoed back from a bulk task registration.
 
@@ -594,6 +617,9 @@ class TaskSummary(StardagBaseModel):
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict[str, Any] | None = None
+    # The execution the task is currently running under, as minted by
+    # whoever claimed it. None from a registry predating it.
+    latest_execution_id: UUID | None = None
 
 
 class TaskListPage(StardagBaseModel):
@@ -1347,6 +1373,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Mark a task as started/running.
 
@@ -1369,9 +1396,25 @@ class RegistryABC(metaclass=abc.ABCMeta):
         execution runs under should pass it rather than accept that default
         — see ``stardag.build._reactive.claim_ttl_seconds``.
 
+        ``execution_id`` names the execution this start belongs to. A
+        worker's own start is *non-claiming*, and the registry refuses a
+        non-claiming start whose identity is not the one the task holds —
+        which is what stops a late restart from evicting the build that
+        took the task over meanwhile. Repeat the id the claim was taken
+        with; omitted, the ``(executor, executor_ref)`` pair decides, as
+        it did before identities existed.
+
         Args:
             build_id: The build UUID returned by build_start.
             task: The task that is starting.
+            execution_id: Optional identity of the execution this call
+                belongs to, minted by the caller before it claims. The
+                claim is taken before the spawn, so there is no executor
+                reference yet; this is the identity that exists anyway.
+                Repeat it on every later call about the same execution.
+                Omitted, the registry falls back to the
+                ``(executor, executor_ref)`` pair, which is the behaviour
+                of every release before it existed.
         """
         pass
 
@@ -1406,6 +1449,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         reason: str | None = None,
         executor_ref: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Record that a task's execution was interrupted by the platform.
 
@@ -1424,6 +1468,14 @@ class RegistryABC(metaclass=abc.ABCMeta):
                 on. The registry honours the report only while the task
                 still holds this ref, which is what stops a slow report
                 from applying to a replacement execution.
+            execution_id: Optional identity of the execution this call
+                belongs to, minted by the caller before it claims. The
+                claim is taken before the spawn, so there is no executor
+                reference yet; this is the identity that exists anyway.
+                Repeat it on every later call about the same execution.
+                Omitted, the registry falls back to the
+                ``(executor, executor_ref)`` pair, which is the behaviour
+                of every release before it existed.
         """
         pass
 
@@ -1433,6 +1485,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         reason: str | None = None,
         executor_ref: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Record that the platform is restarting this execution itself.
 
@@ -1454,6 +1507,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
             task: The task whose execution was preempted.
             reason: Optional description of what preempted it.
             executor_ref: As for :meth:`task_interrupt`.
+            execution_id: As for :meth:`task_interrupt`.
         """
         pass
 
@@ -1579,6 +1633,32 @@ class RegistryABC(metaclass=abc.ABCMeta):
             A TaskMetadata object containing task metadata.
         """
         pass
+
+    def execution_status(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        execution_id: UUID | None = None,
+    ) -> ExecutionStatus:
+        """Ask whether this execution is still the one the task is waiting for.
+
+        Cooperative cancellation's single question, asked by a worker
+        about *itself*. Nothing pushes a cancel into a container; the
+        container pulls, at points in its own code where stopping is
+        safe.
+
+        Not abstract, and the default answer is "still current". A
+        registry that cannot answer must not be able to stop a worker —
+        see :class:`ExecutionStatus` for why the polarity runs that way.
+
+        Args:
+            build_id: The build this execution belongs to.
+            task: The task being executed.
+            execution_id: This execution's identity, as minted at its
+                claim. Omitted, only the build half of the answer is
+                evaluated, which still catches a cancelled build.
+        """
+        return ExecutionStatus()
 
     # -------------------------------------------------------------------------
     # Async versions - default implementations delegate to sync methods
@@ -1756,6 +1836,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         claim_ttl_seconds: int | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Async version of task_start."""
         self.task_start(
@@ -1765,6 +1846,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
             claim_ttl_seconds=claim_ttl_seconds,
+            execution_id=execution_id,
         )
 
     async def task_complete_aio(self, build_id: UUID, task: "BaseTask") -> None:
@@ -1783,9 +1865,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         reason: str | None = None,
         executor_ref: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Async version of task_interrupt."""
-        self.task_interrupt(build_id, task, reason, executor_ref)
+        self.task_interrupt(
+            build_id, task, reason, executor_ref, execution_id=execution_id
+        )
 
     async def task_preempt_aio(
         self,
@@ -1793,9 +1878,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         reason: str | None = None,
         executor_ref: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
         """Async version of task_preempt."""
-        self.task_preempt(build_id, task, reason, executor_ref)
+        self.task_preempt(
+            build_id, task, reason, executor_ref, execution_id=execution_id
+        )
 
     async def task_suspend_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_suspend."""
@@ -1862,6 +1950,15 @@ class RegistryABC(metaclass=abc.ABCMeta):
     async def task_get_metadata_aio(self, task_id: UUID) -> TaskMetadata:
         """Async version of task_get_metadata."""
         return self.task_get_metadata(task_id)
+
+    async def execution_status_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        execution_id: UUID | None = None,
+    ) -> ExecutionStatus:
+        """Async version of execution_status."""
+        return self.execution_status(build_id, task, execution_id)
 
 
 class NoOpRegistry(RegistryABC):

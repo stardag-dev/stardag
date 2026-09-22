@@ -69,6 +69,31 @@ scheduler after terminal events; there is no resident orchestrator to do
 either.
 """
 
+STARDAG_EXECUTION_ID_ENV = "STARDAG_EXECUTION_ID"
+"""Env var carrying the identity of the execution this container *is*.
+
+Minted by the orchestrator before it claimed the task — the claim is
+taken before the spawn, so the executor ref does not exist yet — and
+forwarded per call so the worker can name its own execution.
+
+Three things depend on the worker having it. Its own TASK_STARTED is
+non-claiming and the registry refuses one that names an execution the
+task no longer runs under, which is what stops a late restart from
+evicting the build that took the task over meanwhile. Its interruption
+and preemption reports are honoured only while the task still holds the
+execution they name. And it is what the worker asks about at its
+cooperative-cancellation checkpoints — "is this execution still the one
+the task holds?" — so a superseded container stops rather than running
+to completion.
+
+Absent (an orchestrator predating it, or the non-detached submission
+path), the worker reports without one and the registry falls back to the
+``(executor, executor_ref)`` pair — the behaviour of every release before
+this, so a rolling deploy is safe in both directions. Cancellation still
+works in its build-level half: a worker with no identity can still be
+told its build is no longer running.
+"""
+
 STARDAG_CLAIM_TTL_SECONDS_ENV = "STARDAG_CLAIM_TTL_SECONDS"
 """Env var carrying the claim TTL the orchestrator derived for this task.
 

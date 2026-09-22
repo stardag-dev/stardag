@@ -54,6 +54,8 @@ class FakeDetachedExecutor(TaskExecutorABC):
         self.spawn_error = spawn_error
         self.submit_calls: list[UUID] = []
         self.spawn_calls: list[UUID] = []
+        # The identity each spawn was handed, in spawn order.
+        self.spawn_execution_ids: list[UUID | None] = []
         self.reattach_calls: list[tuple[UUID, str, str]] = []
         self.cancel_calls: list[UUID] = []
 
@@ -69,7 +71,10 @@ class FakeDetachedExecutor(TaskExecutorABC):
     def supports_detached(self, task: BaseTask) -> bool:
         return self.detached
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
+        self.spawn_execution_ids.append(execution_id)
         if self.spawn_error is not None:
             raise self.spawn_error
         self.spawn_calls.append(task.id)
@@ -328,8 +333,10 @@ class MetadataDetachedExecutor(FakeDetachedExecutor):
 
     METADATA = {"kind": "fake", "app_name": "meta-app", "workspace": "acme"}
 
-    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
-        handle = await super().submit_detached(task)
+    async def submit_detached(
+        self, task: BaseTask, *, execution_id: UUID | None = None
+    ) -> DetachedHandle:
+        handle = await super().submit_detached(task, execution_id=execution_id)
         return DetachedHandle(
             executor=handle.executor,
             ref=handle.ref,

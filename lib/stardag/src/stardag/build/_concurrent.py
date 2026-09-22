@@ -1417,7 +1417,14 @@ async def build_aio(
         # refuse it as a second claim, and the build would wait out a
         # claim it holds itself. A genuine second attempt gets a new id
         # by calling this function again, which is what a retry does.
+        #
+        # Held on the task's state as well as locally, because three
+        # later calls have to repeat it: the spawn that forwards it into
+        # the container, the post-spawn start that records the ref, and
+        # the worker's own reports. Cleared again on the two paths below
+        # where this build ends up with no execution of its own.
         execution_id = uuid4()
+        state.execution_id = execution_id
         try:
             claim_metadata: dict | None = None
             try:
@@ -1463,6 +1470,17 @@ async def build_aio(
                         f"Claim start failed for task {task.id}",
                         on_registry_failure,
                     )
+                    # Nothing is assumed recorded on this path, so
+                    # nothing should be asserted either: the fallback
+                    # start goes out with no identity, as it did before
+                    # identities existed. Keeping the minted id would
+                    # have the start claim an execution whose claim may
+                    # never have committed -- and against another
+                    # build's live claim that is a 409, which
+                    # ``handle_registry_error`` turns into a task failure
+                    # in the default mode, on the one path whose whole
+                    # purpose is to carry on when the claim call failed.
+                    state.execution_id = None
                     return ("unclaimed", None)
                 if result.started:
                     return ("granted", None)
@@ -1487,6 +1505,21 @@ async def build_aio(
                             f"Claim for task {task.id} lost — re-attached to "
                             f"the winning execution {attach_handle.ref!r}."
                         )
+                        # We lost, so the execution now running is not one
+                        # we minted an identity for, and the id above
+                        # belongs to a claim that was refused. Dropping it
+                        # is what keeps the start this path still records
+                        # honest: it names the winner's ref with no
+                        # identity of its own, which is exactly how this
+                        # path behaved before identities existed.
+                        #
+                        # The alternative -- adopting the winner's id from
+                        # the denial -- looks tidier and is wrong twice
+                        # over: it would assert somebody else's execution
+                        # as ours, and the server refuses precisely that,
+                        # so the re-attach would fail instead of
+                        # proceeding.
+                        state.execution_id = None
                         return ("attach", attach_handle)
                     probe = await _probe_claimed_execution(
                         task, result.executor, result.executor_ref
@@ -1575,9 +1608,17 @@ async def build_aio(
     async def registry_task_start(
         task: BaseTask, handle: DetachedHandle | None
     ) -> None:
-        """Emit TASK_STARTED, with the detached-execution ref when present."""
+        """Emit TASK_STARTED, with the detached-execution ref when present.
+
+        Carries the identity the claim was taken with, so this start
+        re-records the same execution rather than looking to the registry
+        like a different one that should be refused. None on the paths
+        that hold no claim of their own — an unclaimed fallback start, or
+        a re-attach to somebody else's winner.
+        """
+        execution_id = task_states[task.id].execution_id
         if handle is None:
-            await registry.task_start_aio(build_id, task)
+            await registry.task_start_aio(build_id, task, execution_id=execution_id)
             return
         await registry.task_start_aio(
             build_id,
@@ -1585,6 +1626,7 @@ async def build_aio(
             executor=handle.executor,
             executor_ref=handle.ref,
             executor_metadata=handle.executor_metadata,
+            execution_id=execution_id,
         )
 
     async def submit_with_lock(
@@ -1721,7 +1763,9 @@ async def build_aio(
                     )
             if handle is None and task_executor.supports_detached(task):
                 try:
-                    handle = await task_executor.submit_detached(task)
+                    handle = await task_executor.submit_detached(
+                        task, execution_id=task_states[task.id].execution_id
+                    )
                 except Exception as e:
                     return TaskExecutionError(
                         exception=e,

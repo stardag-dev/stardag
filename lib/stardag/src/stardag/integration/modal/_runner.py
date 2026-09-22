@@ -40,6 +40,7 @@ from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
+    STARDAG_EXECUTION_ID_ENV,
     STARDAG_MODAL_APP_ID_ENV,
     STARDAG_MODAL_APP_NAME_ENV,
     STARDAG_MODAL_ENVIRONMENT_ENV,
@@ -52,7 +53,12 @@ from stardag.integration.modal._metadata import (
 )
 from stardag.integration.modal._protocols import RunFunction
 from stardag.integration.modal._spawn import spawn_tick
-from stardag.exceptions import ResumableInterruption
+from stardag.cancellation import (
+    CancellationChecker,
+    cancellation_scope,
+    current_checker as _current_cancellation_checker,
+)
+from stardag.exceptions import APIError, ExecutionCancelled, ResumableInterruption
 from stardag.registry._base import NoOpRegistry, registry_provider
 from stardag.utils.env import temp_env_vars
 
@@ -437,6 +443,55 @@ def _worker_scope_preflight(env_overrides: dict[str, str] | None) -> str | None:
     return worker_scope_key(_get(STARDAG_SCOPE_KEY_ENV), build_id)
 
 
+def _execution_superseded(error: APIError) -> bool:
+    """Whether the registry refused a call because this execution lost the task.
+
+    Matched on the error code rather than the status: 409 also carries
+    the claim denials and the already-completed answer, which mean
+    different things.
+    """
+    if error.status_code != 409:
+        return False
+    return (error.payload or {}).get("error_code") == "execution_superseded"
+
+
+def _checkpoint_at_yield() -> None:
+    """The dynamic-dependency checkpoint, read off the ambient scope.
+
+    Placed here rather than threaded through :meth:`Runner.run` on
+    purpose: ``run`` is an override point, and a new parameter on it would
+    break every subclass that defines one — the same trade that keeps the
+    identity off ``TaskExecutorABC.submit``. The context variable is set
+    around ``run()`` by :meth:`Runner.__call__`, so the drivers can ask
+    without anybody passing anything.
+
+    A subclass that drives its own generator instead of using these
+    simply does not get this checkpoint. It still gets the
+    start-of-attempt one and ``stardag.cancellation_requested()``.
+    """
+    checker = _current_cancellation_checker()
+    if checker is not None:
+        checker.raise_if_cancelled("dynamic-dependency yield")
+
+
+def _parsed_execution_id(raw: str | None) -> UUID | None:
+    """The forwarded execution identity, or None if it is unusable.
+
+    Malformed values are dropped rather than raised on, for the reason
+    the claim TTL is: this decides whether a report can name its
+    execution, and no worker should fail to report its own start over it.
+    Dropping it costs only the identity-based rules, which is how a
+    worker behaved before they existed.
+    """
+    if not raw:
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        logger.warning(f"Invalid {STARDAG_EXECUTION_ID_ENV}: {raw!r}")
+        return None
+
+
 class _WorkerLifecycleReporter:
     """Reports a task's lifecycle events from inside a Modal worker.
 
@@ -464,6 +519,7 @@ class _WorkerLifecycleReporter:
         executor_metadata: dict[str, typing.Any] | None = None,
         claim_ttl_seconds: int | None = None,
         scope_key: str | None = None,
+        execution_id: UUID | None = None,
     ):
         self.registry = registry
         self.build_id = build_id
@@ -476,6 +532,22 @@ class _WorkerLifecycleReporter:
         # id with the config half of the build's scope (see
         # :func:`worker_scope_key`). None leaves it to the server.
         self.scope_key = scope_key
+        # The execution this container *is*, as the orchestrator minted it
+        # before claiming the task. Named on this worker's own start and
+        # on its end-of-execution reports, which is what lets the registry
+        # tell them from a superseded execution's -- and it is what the
+        # cancellation checker below asks about. None on an older
+        # orchestrator, or on the non-detached submission path: the
+        # reports then fall back to the executor ref, and cancellation
+        # falls back to the build's status alone.
+        self.execution_id = execution_id
+        # Cooperative cancellation, hung off the reporter because this is
+        # the object that has a registry, a build id and an identity. A
+        # worker running with ``report_lifecycle=False`` therefore has no
+        # checkpoints either, which is correct rather than incidental:
+        # that mode means a resident orchestrator is doing the reporting,
+        # and a resident orchestrator holds its own handles.
+        self.cancellation = CancellationChecker(self._ask_if_superseded)
 
     @classmethod
     def create(
@@ -556,6 +628,7 @@ class _WorkerLifecycleReporter:
             executor_metadata=executor_metadata,
             claim_ttl_seconds=ttl_seconds,
             scope_key=scope_key,
+            execution_id=_parsed_execution_id(_get(STARDAG_EXECUTION_ID_ENV)),
         )
 
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
@@ -576,6 +649,36 @@ class _WorkerLifecycleReporter:
             )
             return None
 
+    def _ask_if_superseded(self) -> bool:
+        """One registry read: is this execution still the one to run?
+
+        Returns True only when the registry positively said no. Every
+        failure returns False, which keeps the worker running — see
+        ``stardag.cancellation`` for why that polarity is the invariant
+        rather than leniency. ``APIRegistry.execution_status`` already
+        degrades this way; the guard here covers a custom registry that
+        raises instead.
+        """
+        try:
+            status = self.registry.execution_status(
+                self.build_id, self.task, self.execution_id
+            )
+        except Exception:
+            logger.warning(
+                f"Could not read execution status for task {self.task.id}; "
+                "assuming this execution is still wanted.",
+                exc_info=True,
+            )
+            return False
+        if status.still_current:
+            return False
+        logger.warning(
+            f"Task {self.task.id} is no longer waiting for this execution "
+            f"({status.reason or 'no reason given'}; build status "
+            f"{status.build_status!r}). Stopping at the next checkpoint."
+        )
+        return True
+
     def _executor_ref(self) -> str | None:
         """This container's call id — the name of the execution it is in.
 
@@ -593,15 +696,40 @@ class _WorkerLifecycleReporter:
             return None
 
     def started(self) -> None:
+        """Report this worker's own start — and read the answer.
+
+        The start is *non-claiming*, and the registry refuses one naming
+        an execution the task no longer runs under. That refusal is this
+        worker's cheapest cancellation checkpoint: the question "am I
+        still wanted" answered inside a request it was making anyway, so
+        the checkpoint after this one costs nothing.
+
+        Consumed rather than merely logged. Before cooperative
+        cancellation the 409 was a signal nothing acted on and the worker
+        ran the task regardless; now something acts on it, and leaving it
+        in ``_guard``'s blanket swallow would throw away the answer.
+        Everything *else* stays best-effort: a registry that is down must
+        not fail a task that is about to run fine.
+        """
+
         def _do() -> None:
-            self.registry.task_start(
-                self.build_id,
-                self.task,
-                executor=MODAL_EXECUTOR_NAME,
-                executor_ref=self._executor_ref(),
-                executor_metadata=self.executor_metadata,
-                claim_ttl_seconds=self.claim_ttl_seconds,
-            )
+            try:
+                self.registry.task_start(
+                    self.build_id,
+                    self.task,
+                    executor=MODAL_EXECUTOR_NAME,
+                    executor_ref=self._executor_ref(),
+                    executor_metadata=self.executor_metadata,
+                    claim_ttl_seconds=self.claim_ttl_seconds,
+                    execution_id=self.execution_id,
+                )
+            except APIError as e:
+                if not _execution_superseded(e):
+                    raise
+                self.cancellation.note_cancelled(
+                    "the registry refused its start: the task is running "
+                    "under a different execution"
+                )
 
         self._guard(_do, "start")
 
@@ -659,7 +787,11 @@ class _WorkerLifecycleReporter:
         ref = self._executor_ref()
         self._report_in_grace_window(
             lambda: self.registry.task_interrupt(
-                self.build_id, self.task, reason=reason, executor_ref=ref
+                self.build_id,
+                self.task,
+                reason=reason,
+                executor_ref=ref,
+                execution_id=self.execution_id,
             ),
             label="interrupt",
             what="interruption",
@@ -684,7 +816,11 @@ class _WorkerLifecycleReporter:
         ref = self._executor_ref()
         self._report_in_grace_window(
             lambda: self.registry.task_preempt(
-                self.build_id, self.task, reason=reason, executor_ref=ref
+                self.build_id,
+                self.task,
+                reason=reason,
+                executor_ref=ref,
+                execution_id=self.execution_id,
             ),
             label="preempt",
             what="preemption",
@@ -972,9 +1108,54 @@ class Runner(RunFunction):
                         )
                 if reporter is not None:
                     reporter.started()
+                    # Checkpoint one: is this execution still the one the
+                    # task is waiting for? Placed after the start report
+                    # because that report often answers it for free — a
+                    # start naming a superseded execution is refused, and
+                    # the reporter records the refusal, so this usually
+                    # costs nothing. ``force`` because there is nothing
+                    # to throttle yet and the answer wants to be fresh.
+                    #
+                    # Raised from here, outside the try below, so the
+                    # end-of-attempt classifier never sees it: a
+                    # cancelled execution reports nothing. Teardown still
+                    # runs.
+                    reporter.cancellation.raise_if_cancelled(
+                        "start of attempt", force=True
+                    )
                 function_timeout = _declared_function_timeout(env_overrides)
                 try:
-                    result = self.run(task)
+                    # The scope the generator drivers and the user-facing
+                    # ``stardag.cancellation_requested()`` read from. None
+                    # when nothing reports lifecycle, which disables the
+                    # checkpoints rather than breaking them.
+                    with cancellation_scope(
+                        reporter.cancellation if reporter is not None else None
+                    ):
+                        result = self.run(task)
+                except ExecutionCancelled:
+                    # A clean stop, not an end of attempt: no output was
+                    # written and nothing is reported -- not a failure,
+                    # not an interruption, not a completion. The build
+                    # that wanted this task either does not exist any more
+                    # or is running it somewhere else, and either way the
+                    # honest record is the one already there.
+                    #
+                    # Re-raised rather than returned. Returning normally
+                    # makes the backend call *succeed*, and a scheduler
+                    # probing a succeeded call whose target is missing
+                    # reads it as "the worker wrote it, eventual
+                    # consistency" and records a completion for output
+                    # that does not exist. An ordinary Exception leaving
+                    # the container is a failed call, which is both true
+                    # and recoverable -- and in the cases that get here,
+                    # nothing is left probing it anyway.
+                    logger.warning(
+                        f"Execution of task {task.id} stopped at a "
+                        "cooperative cancellation checkpoint; no output "
+                        "written and no completion reported."
+                    )
+                    raise
                 except BaseException as e:
                     kind = self._report_end_of_attempt(
                         task,
@@ -1205,6 +1386,14 @@ def _drive_sync_generator(
     try:
         while True:
             yielded = next(gen)
+            # One cooperative checkpoint per yield, *before* acting on
+            # what was yielded: a cancelled build should not pay for the
+            # completeness checks below, and above all should not reach
+            # the caller's ``suspended()``, which registers these deps as
+            # children and spawns them. Throttled, so a generator that
+            # fast-forwards over many complete batches makes at most one
+            # registry call per interval.
+            _checkpoint_at_yield()
             deps = flatten_task_struct(yielded)
             incomplete = [dep for dep in deps if not dep.complete()]
             if incomplete:
@@ -1235,6 +1424,9 @@ async def _drive_async_generator(task: BaseTask) -> None | TaskStruct:
     # instead. (A generator that raises it internally already surfaces as
     # RuntimeError, so that path never reached the handler either.)
     async for yielded in agen:
+        # See the sync driver: one checkpoint per yield, before the
+        # completeness checks and before anything registers children.
+        _checkpoint_at_yield()
         deps = flatten_task_struct(yielded)
         incomplete = [dep for dep in deps if not dep.complete()]
         if incomplete:

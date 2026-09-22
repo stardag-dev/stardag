@@ -69,6 +69,7 @@ from stardag_api.schemas import (
     FrontierExternalBlocker,
     FrontierTaskRef,
     EventResponse,
+    ExecutionStatusResponse,
     SetBuildScopeRequest,
     SetReactiveMetaRequest,
     StatusTriggeredByUser,
@@ -684,6 +685,67 @@ def _claim_is_this_same_execution(
     )
 
 
+def _report_identity(
+    executor_ref: str | None, execution_id: UUID | None
+) -> dict | None:
+    """Event metadata naming the execution an end-of-execution report is about.
+
+    Both identities ride when both are sent, so the event stays readable
+    by a replay that only knows the older one. ``is not None`` rather than
+    truthiness, for the reason ``/start`` records the ref that way: an
+    empty string dropped here would reach the fold as *no* identity and
+    take the accept-anything path that predates both.
+    """
+    metadata: dict = {}
+    if executor_ref is not None:
+        metadata["executor_ref"] = executor_ref
+    if execution_id is not None:
+        metadata["execution_id"] = str(execution_id)
+    return metadata or None
+
+
+def _supersedes_the_live_execution(db_task: Task, extra_metadata: dict | None) -> bool:
+    """Whether a non-claiming start names an execution that has been replaced.
+
+    True only when the task holds a *live* claim, both sides name an
+    execution, and they are different ones. Every other shape is either
+    a task nobody holds, a caller with no identity to compare, or the
+    current execution re-recording itself — see the call site for why
+    each of the three conditions is load-bearing.
+
+    **Ownership is deliberately not part of this test, having been tried
+    and removed.** Requiring the reporting build to be the row's owner
+    looks like the obvious hardening — it would refuse a second build
+    that named the holder's execution — but the row's owner cannot
+    distinguish that impostor from the genuine holder, because in both
+    cases the sender is not the recorded owner.
+
+    The genuine case is reachable through the SDK and the impostor is
+    not. A resident build whose claim is *denied* re-attaches to the
+    winner and still records a non-claiming start of its own, which
+    flips ``latest_status_build_id`` to the loser while leaving the
+    identity alone. The winner's own worker then checks in naming the
+    execution it really is running, and an ownership test refuses it —
+    so the row stays with the loser, the winner's later reports are
+    dropped by the authority rule's own ownership half, and its executor
+    ref is never re-recorded, leaving nothing able to address its
+    container. Refusing the true holder is the failure this whole rule
+    exists to avoid, and it buys protection only against a caller
+    sending an id it did not mint, which no SDK path does and which this
+    data cannot identify anyway.
+
+    Deciding it soundly would need "which build minted this execution", a
+    fact about the past that no column holds; if it ever matters it is a
+    second column and its own issue.
+    """
+    asking_execution = (extra_metadata or {}).get("execution_id")
+    if asking_execution is None or db_task.latest_execution_id is None:
+        return False
+    if not claim_is_live(db_task):
+        return False
+    return str(asking_execution) != str(db_task.latest_execution_id)
+
+
 async def _create_task_event(
     build_id: UUID,
     task_id: str,
@@ -780,6 +842,75 @@ async def _create_task_event(
                 status_code=409,
                 detail={"error_code": "task_already_completed"},
             )
+
+    if (
+        event_type == EventType.TASK_STARTED
+        and not claim
+        and _supersedes_the_live_execution(db_task, extra_metadata)
+    ):
+        # A start from an execution the task is demonstrably no longer
+        # running under, refused rather than applied.
+        #
+        # The hole this closes: a worker's own start is *non-claiming*, so
+        # it used to be folded in unconditionally -- new status, new owner,
+        # new executor fields and a fresh claim -- with no check on who held
+        # the claim. That was unreachable while a claim outlived its
+        # execution, and STA-44 made it reachable on purpose: a preemption
+        # brings the claim expiry forward to a short restart grace so a
+        # restart that never arrives becomes visible in minutes. If the
+        # restart is merely *late*, the claim lapses, a neighbour claims the
+        # task and spawns, and then the original restart lands and its
+        # worker's start evicts the live holder. Two executions of one task,
+        # which is the one outcome claims exist to prevent.
+        #
+        # Three conditions, and all three are needed.
+        #
+        # **A live claim.** Without one there is nothing to protect: a task
+        # that is PENDING, FAILED or past its expiry is up for grabs, and a
+        # non-claiming start taking it over is the ordinary retry and
+        # self-heal path. Gating on RUNNING alone would refuse every
+        # legitimate re-run after a failure.
+        #
+        # **Both identities present.** NULL on either side is not a
+        # mismatch, it is an absent opinion -- an SDK predating the id, or a
+        # task claimed before the column existed -- and refusing there would
+        # turn a version skew into tasks that look unstarted.
+        #
+        # **The ids differing.** A Modal preemption restarts the input under
+        # the same call id, and the restarted worker re-sends the same
+        # execution id, so a legitimate restart matches and is accepted --
+        # as are the tick's ref-recording start and the worker's own first
+        # self-report, which carry the id the claim was taken with.
+        #
+        # A 409 rather than a silently dropped event, for two reasons.
+        # Nothing is written, so no attempt is spent and no
+        # refused-report bookkeeping is needed -- the transaction simply
+        # rolls back. And it tells the caller *why*, which a dropped
+        # event does not.
+        #
+        # The worker acts on it: ``error_code`` is what cooperative
+        # cancellation's cheapest checkpoint reads, so a superseded
+        # container stops at its own next safe point instead of running
+        # to completion. It is a *signal*, still not a kill -- nothing
+        # here reaches into the backend.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "execution_superseded",
+                "message": (
+                    "This task is running under a different execution. The "
+                    "claim held by the execution this start names has "
+                    "lapsed and been taken over, so recording it would "
+                    "evict a live holder."
+                ),
+                "execution_id": str(db_task.latest_execution_id),
+                "latest_status_build_id": (
+                    str(db_task.latest_status_build_id)
+                    if db_task.latest_status_build_id
+                    else None
+                ),
+            },
+        )
 
     if event_type == EventType.TASK_CANCELLED and (
         # *Either* half enters the conditional path. Gating on the ref
@@ -3722,26 +3853,7 @@ async def register_task(
     for _ in range(len(created_ids)):
         record_entity_created(auth.workspace_id, "tasks")
 
-    return TaskResponse(
-        id=db_task.id,
-        task_id=db_task.task_id,
-        environment_id=db_task.environment_id,
-        task_namespace=db_task.task_namespace,
-        task_name=db_task.task_name,
-        task_data=db_task.task_data,
-        version=db_task.version,
-        output_uri=db_task.output_uri,
-        created_at=db_task.created_at,
-        is_phantom=db_task.is_phantom,
-        latest_executor=db_task.latest_executor,
-        latest_executor_ref=db_task.latest_executor_ref,
-        latest_executor_metadata=db_task.latest_executor_metadata,
-        latest_status=db_task.latest_status,
-        latest_status_at=db_task.latest_status_at,
-        latest_status_build_id=db_task.latest_status_build_id,
-        latest_status_expires_at=db_task.latest_status_expires_at,
-        latest_preempted_at=db_task.latest_preempted_at,
-    )
+    return TaskResponse.model_validate(db_task)
 
 
 # Cap on the number of tasks per bulk-register call. Bounds memory/transaction
@@ -4166,27 +4278,7 @@ async def register_tasks_bulk(
     # Default: full TaskResponse for each task in array order.
     return TaskBulkResponse(
         tasks=[
-            TaskResponse(
-                id=(db_task := db_task_by_task_id[t.task_id]).id,
-                task_id=db_task.task_id,
-                environment_id=db_task.environment_id,
-                task_namespace=db_task.task_namespace,
-                task_name=db_task.task_name,
-                task_data=db_task.task_data,
-                version=db_task.version,
-                output_uri=db_task.output_uri,
-                created_at=db_task.created_at,
-                is_phantom=db_task.is_phantom,
-                latest_executor=db_task.latest_executor,
-                latest_executor_ref=db_task.latest_executor_ref,
-                latest_executor_metadata=db_task.latest_executor_metadata,
-                latest_status=db_task.latest_status,
-                latest_status_at=db_task.latest_status_at,
-                latest_status_build_id=db_task.latest_status_build_id,
-                latest_status_expires_at=db_task.latest_status_expires_at,
-                latest_preempted_at=db_task.latest_preempted_at,
-            )
-            for t in tasks_in
+            TaskResponse.model_validate(db_task_by_task_id[t.task_id]) for t in tasks_in
         ]
     )
 
@@ -4429,6 +4521,91 @@ async def _check_concurrency_limits(
     return denied
 
 
+@router.get(
+    "/{build_id}/tasks/{task_id}/execution-status",
+    response_model=ExecutionStatusResponse,
+)
+async def get_execution_status(
+    build_id: UUID,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    execution_id: Annotated[
+        UUID | None,
+        Query(
+            description=(
+                "The execution asking about itself, as minted at its "
+                "claim. Omitted, only the build half of the answer is "
+                "evaluated — which is what keeps a worker that was never "
+                "given an identity (the non-detached submission path, an "
+                "orchestrator predating the field) covered for the case "
+                "this mostly exists for: somebody cancelled the build."
+            ),
+        ),
+    ] = None,
+) -> ExecutionStatusResponse:
+    """Whether a running worker is still the one this task is waiting for.
+
+    Cooperative cancellation's one question, asked by the container about
+    itself rather than answered by a scheduler reaching into it. The
+    worker calls this at its own checkpoints and, told no, stops at a
+    point where stopping is safe: no output written, no completion
+    reported.
+
+    **Read-only, and deliberately so.** It records no event, takes no
+    lock, releases no claim and touches no execution backend. Two
+    denormalised columns answer it — the build's status and the task's
+    ``latest_execution_id`` — so it is cheap enough to sit on a worker's
+    inner loop behind a throttle.
+
+    Two ways to be told no, and nothing else counts:
+
+    - **``build_not_running``** — the build that spawned this execution
+      is cancelled, failed, completed or exited early, so nothing is
+      waiting for the output. This is the common case, and the only one
+      reachable without an identity: cancelling a build releases its
+      claims but replaces no execution, so the task may still name this
+      very worker.
+    - **``superseded``** — the task's claim moved on and it now names a
+      *different* execution. The caller lost the task; the holder is
+      somebody else's container.
+
+    What deliberately does **not** answer no: an execution id on neither
+    side or on only one (nothing to compare — absence is no opinion, as
+    everywhere else in these rules), and a task whose status is not
+    RUNNING while the identity still matches, which is the ordinary
+    window around a worker's own reports rather than evidence about
+    anybody else.
+
+    A caller unable to reach this at all — a transport failure, a server
+    predating it — must read that as "keep running". The endpoint is a
+    permission to stop, never an instruction to continue.
+    """
+    build, db_task = await _get_build_and_task(build_id, task_id, db, auth)
+
+    if build.latest_status != BuildStatus.RUNNING:
+        return ExecutionStatusResponse(
+            still_current=False,
+            reason="build_not_running",
+            build_status=build.latest_status,
+            task_status=db_task.latest_status,
+            latest_execution_id=db_task.latest_execution_id,
+        )
+
+    superseded = (
+        execution_id is not None
+        and db_task.latest_execution_id is not None
+        and db_task.latest_execution_id != execution_id
+    )
+    return ExecutionStatusResponse(
+        still_current=not superseded,
+        reason="superseded" if superseded else None,
+        build_status=build.latest_status,
+        task_status=db_task.latest_status,
+        latest_execution_id=db_task.latest_execution_id,
+    )
+
+
 @router.post("/{build_id}/tasks/{task_id}/complete", response_model=TaskEventResponse)
 async def complete_task(
     build_id: UUID,
@@ -4473,6 +4650,18 @@ async def interrupt_task(
     reason: str | None = None,
     commit_hash: str | None = None,
     executor_ref: str | None = None,
+    execution_id: Annotated[
+        UUID | None,
+        Query(
+            description=(
+                "Identity of the execution being reported on, as minted "
+                "at its claim. Preferred over `executor_ref` where both "
+                "are sent, because it exists for the whole life of the "
+                "execution rather than only once the spawn returned. "
+                "Omitted (an older SDK), the reference is used instead."
+            ),
+        ),
+    ] = None,
 ):
     """Record that a task's execution was interrupted by the platform.
 
@@ -4499,6 +4688,12 @@ async def interrupt_task(
     report that took longer to land than its execution took to be replaced
     from moving a *live* task to INTERRUPTED. Omitted (an older SDK), the
     build-ownership test stands alone.
+
+    ``execution_id`` names the same execution more precisely, and is
+    preferred where both are sent: the claim exists before the spawn, so
+    the identity covers the whole life of the execution where the ref
+    only covers the part after it. Absence on either side is no opinion
+    rather than a mismatch — see ``services.status._names_the_execution``.
     """
     return await _create_task_event(
         build_id,
@@ -4508,12 +4703,7 @@ async def interrupt_task(
         auth,
         reason,
         commit_hash=commit_hash,
-        # ``is not None``, not truthiness, matching how ``/start``
-        # records the ref: an empty string dropped here would reach the
-        # fold as *no* ref and take the legacy accept-anything path.
-        extra_metadata=(
-            {"executor_ref": executor_ref} if executor_ref is not None else None
-        ),
+        extra_metadata=_report_identity(executor_ref, execution_id),
     )
 
 
@@ -4526,6 +4716,18 @@ async def preempt_task(
     reason: str | None = None,
     commit_hash: str | None = None,
     executor_ref: str | None = None,
+    execution_id: Annotated[
+        UUID | None,
+        Query(
+            description=(
+                "Identity of the execution being reported on, as minted "
+                "at its claim. Preferred over `executor_ref` where both "
+                "are sent, because it exists for the whole life of the "
+                "execution rather than only once the spawn returned. "
+                "Omitted (an older SDK), the reference is used instead."
+            ),
+        ),
+    ] = None,
 ):
     """Record that the platform is restarting this execution itself.
 
@@ -4552,6 +4754,12 @@ async def preempt_task(
     see ``services.status``. The expiry only ever moves *forward*: a claim
     shorter than the grace must not be extended by a report whose purpose
     is to shorten it.
+
+    ``execution_id`` names the same execution more precisely, and is
+    preferred where both are sent: the claim exists before the spawn, so
+    the identity covers the whole life of the execution where the ref
+    only covers the part after it. Absence on either side is no opinion
+    rather than a mismatch — see ``services.status._names_the_execution``.
     """
     return await _create_task_event(
         build_id,
@@ -4561,12 +4769,7 @@ async def preempt_task(
         auth,
         reason,
         commit_hash=commit_hash,
-        # ``is not None``, not truthiness, matching how ``/start``
-        # records the ref: an empty string dropped here would reach the
-        # fold as *no* ref and take the legacy accept-anything path.
-        extra_metadata=(
-            {"executor_ref": executor_ref} if executor_ref is not None else None
-        ),
+        extra_metadata=_report_identity(executor_ref, execution_id),
     )
 
 
