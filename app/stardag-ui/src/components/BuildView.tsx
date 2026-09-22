@@ -331,14 +331,24 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     setPage(1);
   }, []);
 
-  // Only the *first* load takes over the screen. `loadBuild` raises
-  // `loading` on every refresh too, so this used to replace the whole
-  // view — toolbar included — each time anyone hit refresh or a 5-second
-  // auto-refresh tick fired. Besides the flashing, it is the other half
-  // of why the advertised double-click could not work: the button it
-  // wanted a second click on had unmounted. The refresh icon spins to
-  // show a refresh in flight, which is the right size of signal.
-  if (loading && !build) {
+  // The loader takes over the screen only when what is loaded is not
+  // what was asked for.
+  //
+  // It used to be a plain `if (loading)`, which meant every refresh
+  // replaced the whole view — toolbar included — including each
+  // 5-second auto-refresh tick. Besides the flashing, that is half of
+  // why the advertised double-click could not work: the button the
+  // second click needed had unmounted. A refresh keeps the view, and
+  // the refresh icon's own spin is the right size of signal.
+  //
+  // But `!build` is the wrong test for that, because this component
+  // stays mounted across a change of `buildId` and holds the previous
+  // build's data while the new one loads — so the old DAG, rows and
+  // controls would render under the new build's header. Comparing the
+  // loaded id with the requested one distinguishes the two cases: a
+  // refresh matches and keeps the view, navigation does not and gets
+  // the loader.
+  if (loading && build?.id !== buildId) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />

@@ -243,6 +243,32 @@ describe("BuildView header and tool-and-info bar", () => {
     expect(screen.getByText(/sd-ticker/)).toBeInTheDocument();
   });
 
+  // Keeping the view across a refresh must not mean keeping it across a
+  // change of build: the component stays mounted and holds the previous
+  // build's data, so the old DAG and rows would render under the new
+  // build's header.
+  it("shows the loader when navigating to a different build", async () => {
+    const OTHER = "02b1d6d4-0000-7000-8000-000000000000";
+    const { rerender } = render(
+      <BreadcrumbProvider>
+        <CrumbProbe />
+        <BuildView buildId={BUILD_ID} onBack={vi.fn()} />
+      </BreadcrumbProvider>,
+    );
+    expect(await screen.findByText("Parked")).toBeInTheDocument();
+
+    // The next build's read never resolves.
+    vi.mocked(fetchBuild).mockReturnValue(new Promise(() => {}) as never);
+    rerender(
+      <BreadcrumbProvider>
+        <CrumbProbe />
+        <BuildView buildId={OTHER} onBack={vi.fn()} />
+      </BreadcrumbProvider>,
+    );
+
+    await waitFor(() => expect(screen.queryByText("Parked")).toBeNull());
+  });
+
   it("says nothing about a config the build never set", async () => {
     const user = userEvent.setup();
     renderView();
