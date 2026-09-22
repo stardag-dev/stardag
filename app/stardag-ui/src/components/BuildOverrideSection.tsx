@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { cancelBuild, completeBuild, failBuild } from "../api/tasks";
 import { useAuth } from "../context/AuthContext";
 import type { Build, BuildStatus } from "../types/task";
@@ -28,16 +28,16 @@ const ACTIONS: {
     label: "Mark failed",
     dot: "bg-red-500",
     effect:
-      "Records this build as failed. Nothing else changes: it does not stop " +
-      "anything and it does not release any claim.",
+      "Records this build as failed. It does not reach the execution " +
+      "backend, so anything already running carries on.",
   },
   {
     action: "cancel",
     label: "Cancel build",
     dot: "bg-gray-500",
     effect:
-      "Records this build as cancelled, and does nothing else. It does not " +
-      "reach the execution backend, so anything already running carries on.",
+      "Records this build as cancelled. It does not reach the execution " +
+      "backend, so anything already running carries on.",
   },
 ];
 
@@ -70,13 +70,18 @@ interface BuildOverrideSectionProps {
  * dialog, with the record on top and the work below, is what makes the
  * choice visible.
  *
- * The copy deliberately says nothing about what cancelling does to the
- * *claims*. `POST /builds/{id}/cancel` takes a `cascade` flag that this
- * call does not set, so today it releases none of them; STA-81 is
- * changing that, and the bulk-cancel path already passes `cascade: true`.
- * Whichever way that settles, "it does not stop what is running" stays
- * true and is the fact the decision turns on — so that is what is
- * stated, and the claim semantics are left to the one place that owns
+ * The copy deliberately says nothing about what an override does to the
+ * *claims*, in either direction. That behaviour has now changed twice
+ * under this file: before STA-81 a cancel released none of them, and
+ * since STA-81 both cancel and fail release them all. Each time, copy
+ * that named the claims went stale the moment the server moved, and
+ * once it went stale in the worst way — asserting the opposite of the
+ * truth about a destructive action.
+ *
+ * What does not move is the fact the decision actually turns on: an
+ * override edits the record and does not stop what is running. That is
+ * true on both sides of every change so far, so it is what is said
+ * here, and the claim semantics are left to the CLI docs that own
  * them.
  */
 export function BuildOverrideSection({
@@ -101,6 +106,7 @@ export function BuildOverrideSection({
   const [pending, setPending] = useState<OverrideAction | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const headingId = useId();
 
   const confirm = useCallback(async () => {
     if (!pending) return;
@@ -130,8 +136,14 @@ export function BuildOverrideSection({
   const chosen = ACTIONS.find((a) => a.action === pending) ?? null;
 
   return (
-    <section className="space-y-2">
-      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+    // Named, so it is a landmark: this dialog has two halves that do
+    // different things to different subjects, and a screen-reader user
+    // navigating it should be able to tell which one they are in.
+    <section aria-labelledby={headingId} className="space-y-2">
+      <h3
+        id={headingId}
+        className="text-sm font-semibold text-gray-900 dark:text-gray-100"
+      >
         Override the recorded status
       </h3>
       <p className="text-xs text-gray-600 dark:text-gray-400">
