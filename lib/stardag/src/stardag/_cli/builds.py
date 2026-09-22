@@ -668,9 +668,11 @@ def builds_cancel(
 
     console.print(f"[green]Cancelled build[/green] {build_id}")
     console.print(
-        "[dim]Nothing was stopped. If this build still has containers "
-        f"running, they will run to completion — 'stardag builds stop "
-        f"{build_id}' is the command that stops them first.[/dim]"
+        "[dim]Its execution claims were released, so its tasks are "
+        "available to the next build now. Nothing was stopped: a worker "
+        "still running exits at its next cooperative checkpoint, or runs "
+        "to completion if its run() has none. To stop the containers "
+        f"first, use 'stardag builds stop {build_id}'.[/dim]"
     )
 
 
