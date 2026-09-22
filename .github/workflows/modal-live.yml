@@ -330,6 +330,71 @@ jobs:
       - name: Install tox
         run: pip install tox
 
+      # **The workflow and the code it runs come from different commits**,
+      # and that gap has already produced a confidently wrong report. For
+      # a `pull_request` event GitHub takes the workflow file from the
+      # merge ref -- the PR's branch merged into its base -- while the
+      # checkout above deliberately asks for the PR's own head. So a
+      # branch that has not been rebased since the diagnostics landed runs
+      # *this* file's markers, retry and log dump against a tree that
+      # contains none of the code behind them.
+      #
+      # On 2026-09-22 that reported "no scenario reported a transport
+      # timeout" for a run whose own pytest log holds two ReadTimeouts,
+      # and failed the log dump with `invalid choice: 'logs'` -- one
+      # cause, two symptoms, and the second printed the diagnosis in
+      # plain text where nobody read it (STA-92).
+      #
+      # It is self-healing: rebasing past the instrument fixes it. What is
+      # not self-healing is the *claim*, so an absent instrument must read
+      # as "not measured", never as "measured and found nothing".
+      - name: Check the checkout carries the diagnostics instrument
+        id: instrument
+        # **Three capabilities, checked separately, because they landed in
+        # two different PRs and the next one will make it three.** A single
+        # boolean over all of them fails the wrong way: a branch carrying
+        # the classifier but not the verdict join would have been treated
+        # as having neither, and would have lost its *Modal log dump* --
+        # the most useful thing in the artifact, and a capability that
+        # branch has. Gate each consumer on what it actually calls.
+        run: |
+          set -uo pipefail
+          live=integration-tests/src/stardag_integration_tests/registry_live
+
+          # Writes the markers the retry reads, and the records and probe.
+          classifier=yes
+          [ -f "$live/_diagnostics.py" ] || classifier=no
+
+          # `provision logs`, checked where it is declared rather than by
+          # file. This is the one whose absence used to fail unreadably,
+          # with `invalid choice: 'logs'` in a step nobody reads.
+          log_dump=yes
+          grep -q '"logs"' "$live/provision.py" || log_dump=no
+
+          # The access-log join. Newest of the three, so it is the one a
+          # branch is most likely to be missing.
+          verdict=yes
+          [ -f "$live/diagnose.py" ] || verdict=no
+
+          {
+            echo "classifier=$classifier"
+            echo "log_dump=$log_dump"
+            echo "verdict=$verdict"
+          } >> "$GITHUB_OUTPUT"
+
+          missing=""
+          [ "$classifier" = yes ] || missing="$missing the classifier,"
+          [ "$log_dump" = yes ] || missing="$missing the log dump,"
+          [ "$verdict" = yes ] || missing="$missing the verdict pass,"
+          if [ -n "$missing" ]; then
+            echo "::warning title=Registry-live instrument incomplete::This" \
+              "checkout is missing${missing%,}, so that much of the" \
+              "diagnosis will not happen. The workflow comes from the merge" \
+              "ref and the code from the PR head, so a branch not rebased" \
+              "past a harness change runs the new workflow against the old" \
+              "code; rebase onto main. (STA-92)"
+          fi
+
       # A separate step from the run below, so a provisioning failure reads
       # as one rather than as a scenario failing for reasons of its own.
       - name: Provision the registry and the scenario app
@@ -405,6 +470,12 @@ jobs:
           STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR: ${{ runner.temp }}/registry-live-diagnostics
           STARDAG_REGISTRY_LIVE_RECYCLE_MARKER: ${{ runner.temp }}/registry-live-diagnostics/registry-recycled
           POSARGS: ${{ inputs.serial && '-- -n0 tests_registry_live' || '' }}
+          # Whether the tree this runs has the classifier the branches
+          # below read markers from. See the step that computes it.
+          # Only the classifier matters to this step: it is what writes
+          # the markers the branches below read. A checkout with the
+          # classifier and nothing else still classifies correctly.
+          INSTRUMENT_PRESENT: ${{ steps.instrument.outputs.classifier }}
         run: |
           set -uo pipefail
           diag="$STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR"
@@ -482,6 +553,18 @@ jobs:
                  "those failures pass on a second attempt, which is the" \
                  "outcome the discriminator exists to prevent."
             exit 1
+          elif [ "$INSTRUMENT_PRESENT" != yes ]; then
+            # Not the same sentence as the one below, and the difference
+            # is the whole of STA-92: with no classifier in the tree,
+            # "no scenario reported a transport timeout" is true only in
+            # the sense that no scenario could. Saying it anyway turns an
+            # unmeasured run into a measured one.
+            echo "The tier failed, and nothing classified the failures:" \
+                 "this checkout predates the diagnostics instrument, so" \
+                 "the markers this step reads could not have been written" \
+                 "by anything. Not retried -- and not evidence that the" \
+                 "failures were real. Rebase onto main and run it again."
+            exit 1
           else
             echo "The tier failed against the registry container it started" \
                  "with, and no scenario reported a transport timeout. A real" \
@@ -529,7 +612,9 @@ jobs:
       # `continue-on-error` on both steps: this is the diagnosis of a
       # verdict already reached, and it must never be what decides one.
       - name: Dump the Modal logs for the run
-        if: failure() || steps.scenarios.outputs.diagnose == 'true'
+        if: |
+          (failure() || steps.scenarios.outputs.diagnose == 'true')
+          && steps.instrument.outputs.log_dump == 'yes'
         continue-on-error: true
         # Belt and braces with the dump's own budget. Both exist because
         # the job's deadline is the one thing that would take the artifact
@@ -540,6 +625,27 @@ jobs:
           uv run --project integration-tests --python 3.12 \
             python -m stardag_integration_tests.registry_live.provision logs \
               --output-dir "${{ runner.temp }}/registry-live-diagnostics"
+
+      # The verdict, which cannot be reached from inside the run. The
+      # probe that fires at the moment of failure can only establish
+      # whether the container was serving; telling a slow handler from a
+      # response that was produced and never arrived needs the registry's
+      # access log, and that is only on disk once the step above has run.
+      #
+      # It decides nothing and exits 0 whatever it finds. Its output goes
+      # to the job log as well as into the artifact, so the answer is
+      # readable without downloading anything -- which matters because the
+      # question it answers is the one people give up on.
+      - name: Reconcile the timeouts with the registry's access log
+        if: |
+          (failure() || steps.scenarios.outputs.diagnose == 'true')
+          && steps.instrument.outputs.verdict == 'yes'
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          uv run --project integration-tests --python 3.12 \
+            python -m stardag_integration_tests.registry_live.diagnose \
+              --dir "${{ runner.temp }}/registry-live-diagnostics"
 
       - name: Upload the registry-live diagnostics
         if: failure() || steps.scenarios.outputs.diagnose == 'true'
