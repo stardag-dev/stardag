@@ -26,6 +26,7 @@ import type {
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
+import { useClickOutside } from "../hooks/useClickOutside";
 import { rootsSatisfiedFrom } from "../utils/claims";
 import { isSyntheticScope } from "../utils/scope";
 import { BuildFailureReason } from "./BuildFailureReason";
@@ -42,6 +43,7 @@ import {
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
 import { TaskTable } from "./TaskTable";
+import { Modal } from "./Modal";
 
 interface BuildViewProps {
   buildId: string;
@@ -245,19 +247,8 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [dagFullscreen]);
 
-  // Close override menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (
-        overrideMenuRef.current &&
-        !overrideMenuRef.current.contains(event.target as Node)
-      ) {
-        setShowOverrideMenu(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  const closeOverrideMenu = useCallback(() => setShowOverrideMenu(false), []);
+  useClickOutside(overrideMenuRef, showOverrideMenu, closeOverrideMenu);
 
   // Double-click refresh to toggle auto-refresh
   const handleRefreshClick = useCallback(() => {
@@ -291,17 +282,25 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       { label: "Builds", onClick: onBack },
       {
         label: build?.name ?? buildId.slice(0, 8),
+        title: buildId,
+        // The status badge and nothing else. The executor, reactive and
+        // scope chips say what this build *is* rather than where you
+        // are, so they belong in the info section of the toolbar below —
+        // in the trail they crowded out the one thing a breadcrumb is
+        // for, which is knowing which build you have open.
         detail: build ? (
-          <span className="flex items-center gap-1.5">
-            <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
-            <BuildExecutorChips metadata={build.executor_metadata} />
-            <BuildScopeChip scopeKey={build.scope_key} />
-          </span>
+          <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
         ) : undefined,
       },
     ];
     if (selectedTask) {
-      items.push({ label: selectedTask.task_id });
+      // A task id is a full UUID and the trail is not where it is read —
+      // the detail pane shows it in full, with a copy button. Here it
+      // only has to distinguish one task from another.
+      items.push({
+        label: selectedTask.task_id.slice(0, 8),
+        title: selectedTask.task_id,
+      });
     }
     setBreadcrumb(items);
     return () => setBreadcrumb([]);
@@ -446,9 +445,17 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
           {/* Left column: Filters + DAG + List */}
           <Panel defaultSize={selectedTask ? 70 : 100} minSize={40}>
             <div className="flex h-full flex-col">
-              {/* Filters + build actions */}
-              <div className="flex items-center gap-2 border-b border-gray-200 bg-white px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
-                <div className="flex flex-1 gap-3">
+              {/* The build view tool and info bar.
+
+                  Three roles, always in the same order: narrow the task
+                  list, read what this build *is*, act on it. Everything
+                  that used to be a full-width band between the header
+                  and the DAG is reachable from here instead — the chips
+                  that were crowding the breadcrumb, and the build
+                  config that had its own strip. */}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-200 bg-white px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
+                {/* 1 — narrow */}
+                <div className="flex items-center gap-2">
                   <TaskFilters
                     nameFilter={nameFilter}
                     onNameFilterChange={handleSetNameFilter}
@@ -456,10 +463,20 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                     onStatusFilterChange={handleSetStatusFilter}
                   />
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-gray-500 dark:text-gray-400">
-                    {realTasks.length} tasks
+
+                {/* 2 — what this build is. Takes the slack, so the
+                    actions stay pinned right. */}
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                  <span className="text-xs whitespace-nowrap text-gray-500 dark:text-gray-400">
+                    {realTasks.length} task{realTasks.length === 1 ? "" : "s"}
                   </span>
+                  <BuildExecutorChips metadata={build.executor_metadata} />
+                  <BuildScopeChip scopeKey={build.scope_key} />
+                  <BuildConfigChip config={build.build_config} />
+                </div>
+
+                {/* 3 — act */}
+                <div className="flex items-center gap-1.5">
                   <button
                     onClick={handleRefreshClick}
                     disabled={refreshing && !autoRefresh}
@@ -567,8 +584,6 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                 failedAt={build.completed_at}
                 superseded={rootsSuperseded}
               />
-
-              <BuildConfigDisclosure config={build.build_config} />
 
               {/* What this build still has running, and the command that
                   stops it. Absent unless it holds live executions — see
@@ -787,6 +802,17 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
 }
 
 /**
+ * The one look for a chip in the tool-and-info bar's middle section.
+ *
+ * Shared so a reader learns "small grey chip = something this build is"
+ * once, rather than per chip. Interactive chips add their own hover on
+ * top; nothing else varies.
+ */
+const INFO_CHIP =
+  "inline-flex max-w-[14rem] items-center gap-1 truncate rounded bg-gray-100 " +
+  "px-1.5 py-0.5 text-[10px] text-gray-600 dark:bg-gray-700 dark:text-gray-300";
+
+/**
  * The build's structure scope — `<code id>:<config hash>`, or the server's
  * synthetic `build:<id>` when nothing fixed one. Monospace and truncated;
  * the full key is in the title. Absent on servers predating scopes.
@@ -801,7 +827,7 @@ function BuildScopeChip({ scopeKey }: { scopeKey?: string | null }) {
           ? `Structure scope ${scopeKey} — this build's dependency edges are shared with no other build`
           : `Structure scope ${scopeKey} — the code version and structure config this build is currently planned under. It moves when the app is redeployed: the next scheduler pass re-plans the build under the new code.`
       }
-      className="max-w-[14rem] truncate rounded bg-gray-100 px-1 py-0.5 font-mono text-[10px] text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+      className={`${INFO_CHIP} font-mono`}
     >
       {synthetic ? "scope: per-build" : `scope: ${scopeKey.slice(0, 12)}…`}
     </code>
@@ -809,27 +835,50 @@ function BuildScopeChip({ scopeKey }: { scopeKey?: string | null }) {
 }
 
 /**
- * The build config levels 2 and 3 parameters are read from. Collapsed by
- * default and absent entirely when the build has no overrides.
+ * The central values this build's level 2 and 3 parameters were read from.
+ *
+ * A chip that opens a dialog, where it used to be a full-width
+ * disclosure strip above the DAG. It is JSON consulted when a result is
+ * surprising, not something read on the way past, so it does not earn a
+ * permanent band of the build view — and the strip was one of several
+ * that between them left the graph a few pixels tall.
+ *
+ * Absent entirely when the build set no overrides.
  */
-function BuildConfigDisclosure({
+function BuildConfigChip({
   config,
 }: {
   config?: Record<string, Record<string, unknown>> | null;
 }) {
-  if (!config || Object.keys(config).length === 0) return null;
+  const [open, setOpen] = useState(false);
+  const classCount = config ? Object.keys(config).length : 0;
+  if (classCount === 0) return null;
+
   return (
-    <details className="border-b border-gray-200 px-4 py-1.5 text-xs dark:border-gray-700">
-      <summary className="cursor-pointer font-medium text-gray-700 dark:text-gray-300">
-        Build config
-        <span className="ml-1 font-normal text-gray-500 dark:text-gray-400">
-          ({Object.keys(config).length} task class
-          {Object.keys(config).length === 1 ? "" : "es"})
-        </span>
-      </summary>
-      <pre className="mt-1 overflow-x-auto rounded bg-gray-50 p-2 font-mono text-[11px] text-gray-700 dark:bg-gray-900 dark:text-gray-300">
-        {JSON.stringify(config, null, 2)}
-      </pre>
-    </details>
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        title="Show the build config these tasks' central parameters were read from"
+        className={`${INFO_CHIP} hover:bg-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-600`}
+      >
+        config: {classCount} class{classCount === 1 ? "" : "es"}
+      </button>
+      <Modal
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        title="Build config"
+        maxWidthClass="max-w-2xl"
+      >
+        <p className="mb-3 text-xs text-gray-600 dark:text-gray-400">
+          The central values this build&rsquo;s level 2 and level 3 parameters were read
+          from. They are part of the structure scope, so two builds that disagree here
+          do not share dependency edges.
+        </p>
+        <pre className="max-h-[60vh] overflow-auto rounded bg-gray-50 p-3 font-mono text-[11px] text-gray-700 dark:bg-gray-900 dark:text-gray-300">
+          {JSON.stringify(config, null, 2)}
+        </pre>
+      </Modal>
+    </>
   );
 }

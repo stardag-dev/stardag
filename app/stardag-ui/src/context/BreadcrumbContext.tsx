@@ -7,7 +7,15 @@ import {
 } from "react";
 
 export interface BreadcrumbItem {
+  /** What is drawn. Shortened where the full value is long — see `title`. */
   label: string;
+  /**
+   * The full value, when `label` is an abbreviation of it. Rendered as
+   * the crumb's tooltip, so shortening a long id in the trail does not
+   * put it out of reach.
+   */
+  title?: string;
+  /** Status and other at-a-glance marks drawn after the label. */
   detail?: ReactNode;
   onClick?: () => void;
 }

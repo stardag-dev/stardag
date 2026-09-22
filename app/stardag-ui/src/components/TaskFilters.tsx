@@ -20,7 +20,10 @@ export function TaskFilters({
         placeholder="Filter by task name..."
         value={nameFilter}
         onChange={(e) => onNameFilterChange(e.target.value)}
-        className="min-w-0 flex-1 rounded-md border border-gray-300 px-3 py-1 text-xs text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder-gray-400"
+        // Capped, not fluid. This input used to take every pixel the
+        // toolbar had spare, which is what pushed the build's own
+        // information off to the right edge of a wide screen.
+        className="w-44 min-w-0 rounded-md border border-gray-300 px-3 py-1 text-xs lg:w-64 text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder-gray-400"
       />
       <select
         value={statusFilter}
