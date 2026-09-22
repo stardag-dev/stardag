@@ -179,7 +179,6 @@ Needs a registry at `server-v0.5.0` or newer. Against an older one the
 worker simply has no checkpoints, which is the behaviour of every release
 before this.
 
-
 ### Nothing automatic stops a container any more
 
 The reactive scheduler used to end a terminal build's executions: it asked
