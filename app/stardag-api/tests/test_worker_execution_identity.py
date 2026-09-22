@@ -130,26 +130,6 @@ async def _expire(session: AsyncSession, task_id: str) -> None:
     await session.commit()
 
 
-async def _replayed_for_all(session: AsyncSession, build_id: str, task_id: str) -> str:
-    """``get_all_task_statuses_in_build``'s answer for one task.
-
-    Called directly rather than through a route, because it has no route:
-    the whole-build replay is exported by ``services.status`` and reached
-    only from tests today. That is worth knowing and is not a reason to
-    leave it untested — it is the twin of the per-task replay, it has to
-    give the same answer, and the first consumer to appear will not come
-    with a test of its own.
-    """
-    from stardag_api.services.status import get_all_task_statuses_in_build
-
-    session.expire_all()
-    row = (
-        await session.execute(select(Task).where(Task.task_id == task_id))
-    ).scalar_one()
-    statuses = await get_all_task_statuses_in_build(session, uuid.UUID(build_id))
-    return statuses[row.id][0].value
-
-
 # --- STA-49: a superseded start cannot take the task back ----------------
 
 
@@ -532,10 +512,6 @@ async def test_the_replays_agree_with_the_row(
         "get_task_status_in_build disagrees with the row it must match"
     )
 
-    assert await _replayed_for_all(async_session, build_id, task_id) == expected, (
-        "get_all_task_statuses_in_build disagrees with the row it must match"
-    )
-
 
 async def test_the_replays_survive_a_claim_redelivery(
     client: AsyncClient, async_session: AsyncSession
@@ -555,8 +531,6 @@ async def test_the_replays_survive_a_claim_redelivery(
     frontier. The parametrised test above misses it because every case
     there reaches the report in one start.
     """
-    from stardag_api.services.status import get_all_task_statuses_in_build
-
     execution_id = _eid()
     build_id = await _running(client, "redelivered", execution_id, ref="fc-1")
 
@@ -588,10 +562,6 @@ async def test_the_replays_survive_a_claim_redelivery(
     assert row.latest_status == "running", "the row applied a stale report"
     assert reported.json()["status"] == "running", (
         "the per-task replay applied a report the row refused"
-    )
-    statuses = await get_all_task_statuses_in_build(async_session, uuid.UUID(build_id))
-    assert statuses[row.id][0].value == "running", (
-        "the whole-build replay applied a report the row refused"
     )
 
 
@@ -646,9 +616,12 @@ async def test_a_replay_keeps_its_own_view_after_a_takeover(
     assert str(row.latest_execution_id) == b_execution
     assert row.latest_executor_ref == "fc-b"
 
-    # A's own view moves, in both replays, and that is the intent.
+    # A's own view moves, and that is the intent.
     assert reported.json()["status"] == "interrupted"
-    assert await _replayed_for_all(async_session, build_a, "takeover") == "interrupted"
+    a_status, _, _, _, _ = await get_task_status_in_build(
+        async_session, uuid.UUID(build_a), row.id
+    )
+    assert a_status.value == "interrupted"
 
     # B's is untouched by a report about somebody else's execution.
     b_status, _, _, _, _ = await get_task_status_in_build(

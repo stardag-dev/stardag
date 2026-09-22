@@ -1286,8 +1286,7 @@ async def get_task_status_in_build(
                 status = TaskStatus.PENDING
                 completed_at = None
                 error_message = None
-                # Cleared with the status, exactly as the row fold does it —
-                # see the twin in get_all_task_statuses_in_build.
+                # Cleared with the status, exactly as the row fold does it.
                 current_ref = None
                 current_execution_id = None
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
@@ -1330,125 +1329,6 @@ async def get_task_status_in_build(
             completed_at = event.created_at
 
     return status, started_at, completed_at, error_message, attempt_count
-
-
-async def get_all_task_statuses_in_build(
-    db: AsyncSession, build_id: UUID
-) -> dict[UUID, tuple[TaskStatus, datetime | None, datetime | None, str | None]]:
-    """Get derived status for all tasks in a build.
-
-    Returns:
-        Dict mapping task_db_id to (status, started_at, completed_at, error_message)
-    """
-    result = await db.execute(
-        select(Event)
-        .where(Event.build_id == build_id)
-        .where(Event.task_id.isnot(None))
-        # id (UUID7) breaks created_at ties, as the single-task replay
-        # does. The ref tracking below is order-dependent, so without it a
-        # replacement start and a stale report sharing a timestamp could
-        # replay either way round and refuse or apply the report at random.
-        .order_by(Event.created_at.asc(), Event.id.asc())
-    )
-    events = result.scalars().all()
-
-    # Build status for each task
-    statuses: dict[
-        UUID, tuple[TaskStatus, datetime | None, datetime | None, str | None]
-    ] = {}
-    # Per task, the ref of its most recent start — see the twin in
-    # get_task_status_in_build.
-    current_refs: dict[UUID, str | None] = {}
-    # And its companion identity, per task, on the same terms.
-    current_execution_ids: dict[UUID, UUID | None] = {}
-
-    for event in events:
-        if event.task_id is None:
-            continue
-
-        task_id = event.task_id
-        current = statuses.get(task_id, (TaskStatus.PENDING, None, None, None))
-        status, started_at, completed_at, error_message = current
-
-        if event.event_type == EventType.TASK_PENDING:
-            status = TaskStatus.PENDING
-        elif event.event_type == EventType.TASK_REFERENCED:
-            # Informational: task already existed, stays PENDING
-            pass
-        elif event.event_type == EventType.TASK_STARTED:
-            status = TaskStatus.RUNNING
-            started_at = event.created_at
-            start_metadata = event.event_metadata or {}
-            # The claim-redelivery guard again — see the twin in
-            # get_task_status_in_build, and the fold it mirrors.
-            if not _is_claim_redelivery(
-                start_metadata, current_execution_ids.get(task_id)
-            ):
-                current_refs[task_id] = start_metadata.get("executor_ref")
-            replayed_execution = _as_uuid(start_metadata.get("execution_id"))
-            if replayed_execution is not None or start_metadata.get("claim"):
-                current_execution_ids[task_id] = replayed_execution
-        elif event.event_type == EventType.TASK_SUSPENDED:
-            status = TaskStatus.SUSPENDED
-        elif event.event_type == EventType.TASK_RESUMED:
-            status = TaskStatus.RUNNING
-        elif event.event_type == EventType.TASK_RETRIED:
-            # Retry: reset a retryable status back to PENDING so the task is
-            # schedulable again (a re-trigger of a failed build, a new build
-            # referencing a previously-failed task, or an abandoned
-            # suspension). No-op for completed/running — a retry never
-            # downgrades those. See _RETRYABLE_STATUSES.
-            if status in _RETRYABLE_STATUSES:
-                status = TaskStatus.PENDING
-                completed_at = None
-                error_message = None
-                # The row fold clears the executor ref here too: a retry
-                # re-runs from scratch, so the ref of the execution that
-                # will never resume must not survive it. Keeping it would
-                # let a delayed report from that execution be accepted
-                # after a later resume, by this replay but not by the row.
-                current_refs.pop(task_id, None)
-                current_execution_ids.pop(task_id, None)
-        elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
-            # Informational: blocked by global lock, stays PENDING
-            pass
-        elif event.event_type == EventType.TASK_COMPLETED:
-            status = TaskStatus.COMPLETED
-            completed_at = event.created_at
-        elif event.event_type == EventType.TASK_FAILED:
-            status = TaskStatus.FAILED
-            completed_at = event.created_at
-            error_message = event.error_message
-        elif event.event_type == EventType.TASK_INTERRUPTED:
-            # Only while this build's own view has the task running on the
-            # execution being reported on — see get_task_status_in_build,
-            # whose rule this mirrors.
-            #
-            # Not an ending, so completed_at is deliberately untouched —
-            # mirrors _apply_event_to_task, including the unconditional
-            # error_message write (a stale one would explain this
-            # interruption with an earlier failure's text).
-            if _replay_report_applies(
-                status,
-                event,
-                current_refs.get(task_id),
-                current_execution_ids.get(task_id),
-            ):
-                status = TaskStatus.INTERRUPTED
-                error_message = event.error_message
-        elif event.event_type == EventType.TASK_PREEMPTED:
-            # Status-neutral — see get_task_status_in_build.
-            pass
-        elif event.event_type == EventType.TASK_SKIPPED:
-            status = TaskStatus.SKIPPED
-            completed_at = event.created_at
-        elif event.event_type == EventType.TASK_CANCELLED:
-            status = TaskStatus.CANCELLED
-            completed_at = event.created_at
-
-        statuses[task_id] = (status, started_at, completed_at, error_message)
-
-    return statuses
 
 
 async def get_task_global_status(

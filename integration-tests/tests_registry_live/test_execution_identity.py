@@ -250,7 +250,7 @@ def test_a_superseded_workers_start_cannot_take_the_task_back() -> None:
     )
 
 
-def test_a_cancelled_tasks_worker_stops_itself(deployment) -> None:
+def test_a_cancelled_builds_worker_stops_itself(deployment) -> None:
     """Cooperative cancellation, with nothing reaching into the container.
 
     Nothing calls Modal here. The cancel releases the task's claim and
@@ -259,17 +259,21 @@ def test_a_cancelled_tasks_worker_stops_itself(deployment) -> None:
     ``stardag.cancellation_requested()`` between sleeps, which is the
     surface no unit test can exercise against a real registry.
 
-    **The task is cancelled rather than the build, and that is not a
-    weaker case.** It is the *cascade's* shape, which is the one STA-78
-    names: the claim is released so the next build may have the task, and
-    until one does the row still names this very execution -- so the
-    identity comparison cannot see it and only the task's own status can.
-    It is also the only variant that isolates the worker from the
-    machinery STA-81 is about to delete: a lingering tick still drains
-    cancels for a cancelled *build*, and an earlier version of this
-    scenario passed with ``cancelled_refs=1`` in the tick summary, having
-    proved nothing about the worker at all. Once STA-81 removes the
-    drain, a build cancel becomes equally testable here.
+    **The build is cancelled**, which is the case this issue names and
+    the one a human actually causes. It was written against a *task*
+    cancel while the tick's cancel drain still existed: a lingering tick
+    would drain a cancelled build's executions and the scenario passed
+    with ``cancelled_refs=1`` in the tick summary, having proved nothing
+    about the worker at all. STA-81 deleted the drain, so the container
+    now has nothing but its own checkpoint to end it, and the stronger
+    case is the testable one.
+
+    Note which of the endpoint's three answers this exercises. A build
+    cancel without ``cascade`` leaves the task RUNNING under this very
+    execution, so neither ``task_cancelled`` nor ``superseded`` can fire
+    -- the worker stops on ``build_not_running``, and it is the only
+    reason available. The task-status and supersession answers have their
+    own unit coverage.
 
     Three assertions, failing from three directions. The call being
     **gone** catches a worker that ignored the answer -- it would still be
@@ -341,7 +345,7 @@ def test_a_cancelled_tasks_worker_stops_itself(deployment) -> None:
     ref = find_task(str(worker_task.id), task_name="Cooperative").latest_executor_ref
     assert ref is not None
 
-    registry.task_cancel_by_id(build_id, str(worker_task.id))
+    registry.build_cancel(build_id)
 
     wait_until(
         lambda: _call_outcome(ref) is not _STILL_RUNNING,
