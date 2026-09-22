@@ -489,7 +489,15 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                   )}
                   {activeEnvironment?.id && (
                     <BuildControlsDialog
-                      key={buildId}
+                      // Keyed by environment *and* build. The dialog
+                      // relies on remounting to clear its scan, filters,
+                      // ticks and open state rather than on a reset
+                      // effect — see its own note on why — and this view
+                      // stays mounted across an environment switch as
+                      // well as a build one, so a key naming only the
+                      // build leaves the previous environment's
+                      // executions on screen and actionable.
+                      key={`${activeEnvironment.id}:${buildId}`}
                       buildId={buildId}
                       environmentId={activeEnvironment.id}
                       buildStatus={build.status}

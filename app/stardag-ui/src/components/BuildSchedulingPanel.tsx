@@ -371,8 +371,12 @@ export function BuildSchedulingPanel({
       });
   }, [buildId, environmentId, refreshToken, localNonce]);
 
-  // Reset per-build state when navigating between builds, so a previous
-  // build's blockers/ticks never show under a new one's header.
+  // Reset when either half of the identity changes. Not just the build:
+  // this component stays mounted across an environment switch too, and
+  // `buildId` does not move through one — so keying the reset on the
+  // build alone left the previous environment's frontier, ticks and open
+  // dialog in place under the new one. Same defect the controls dialog
+  // had in its key.
   useEffect(() => {
     setFrontier(null);
     setFrontierError(null);
@@ -383,7 +387,7 @@ export function BuildSchedulingPanel({
     setOpen(false);
     setNotice(null);
     setActionError(null);
-  }, [buildId]);
+  }, [buildId, environmentId]);
 
   const form = frontier ? schedulingPanelForm(frontier, buildStatus) : "hidden";
   // Tick history is fetched only when it will actually be read, which now

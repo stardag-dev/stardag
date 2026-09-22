@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,7 +19,18 @@ vi.mock("../context/AuthContext", () => ({
 // The graph and the two self-fetching panels are not what this file is
 // about, and each drags in a renderer or a request stream of its own.
 vi.mock("./DagGraph", () => ({ DagGraph: () => <div data-testid="dag" /> }));
-vi.mock("./BuildControlsDialog", () => ({ BuildControlsDialog: () => null }));
+// Counts mounts, so the key can be tested for what it is actually for:
+// the dialog clears its scan, filters and ticks by remounting rather
+// than by a reset effect.
+const controlsMounted = vi.hoisted(() => vi.fn());
+vi.mock("./BuildControlsDialog", () => ({
+  BuildControlsDialog: () => {
+    useEffect(() => {
+      controlsMounted();
+    }, []);
+    return null;
+  },
+}));
 vi.mock("./BuildSchedulingPanel", () => ({ BuildSchedulingPanel: () => null }));
 vi.mock("./TaskDetail", () => ({ TaskDetail: () => <div data-testid="detail" /> }));
 
@@ -119,6 +131,7 @@ function renderView() {
 describe("BuildView header and tool-and-info bar", () => {
   beforeEach(() => {
     mockEnvironmentId = "env-1";
+    controlsMounted.mockClear();
     vi.mocked(fetchBuild).mockResolvedValue(makeBuild());
     vi.mocked(fetchTasksInBuild).mockResolvedValue([makeTask()]);
     vi.mocked(fetchBuildGraph).mockResolvedValue({ nodes: [], edges: [] });
@@ -319,6 +332,25 @@ describe("BuildView header and tool-and-info bar", () => {
     // It must neither render nor declare the view settled.
     expect(screen.queryByText("golden-diamond-28")).toBeNull();
     expect(screen.queryByText("Parked")).toBeNull();
+  });
+
+  // The dialog clears its execution scan, filters and ticks by
+  // remounting, so its key has to name everything that invalidates them
+  // — the environment as much as the build.
+  it("remounts the controls dialog when the environment changes", async () => {
+    const view = renderView();
+    await screen.findByText("Parked");
+    expect(controlsMounted).toHaveBeenCalledTimes(1);
+
+    mockEnvironmentId = "env-2";
+    view.rerender(
+      <BreadcrumbProvider>
+        <CrumbProbe />
+        <BuildView buildId={BUILD_ID} onBack={vi.fn()} />
+      </BreadcrumbProvider>,
+    );
+
+    await waitFor(() => expect(controlsMounted).toHaveBeenCalledTimes(2));
   });
 
   it("says nothing about a config the build never set", async () => {

@@ -97,6 +97,18 @@ function renderPanel(
   );
 }
 
+/** Re-render the panel under a different environment, same build. */
+let lastRender: ReturnType<typeof render> | null = null;
+function rerenderIn(environmentId: string) {
+  lastRender?.rerender(
+    <BuildSchedulingPanel
+      buildId={VIEWED_BUILD}
+      environmentId={environmentId}
+      buildStatus="running"
+    />,
+  );
+}
+
 /**
  * Render, then open the dialog.
  *
@@ -108,6 +120,7 @@ async function openScheduling(
   props: { buildStatus?: BuildStatus; onNavigate?: () => void } = {},
 ) {
   const result = renderPanel(props);
+  lastRender = result;
   await userEvent
     .setup()
     .click(await screen.findByRole("button", { name: "Scheduling" }));
@@ -247,6 +260,22 @@ describe("BuildSchedulingPanel", () => {
           .querySelector(".animate-spin"),
       ).not.toBeNull(),
     );
+  });
+
+  // The panel stays mounted across an environment switch and `buildId`
+  // does not move through one, so a reset keyed on the build alone left
+  // the previous environment's frontier on screen under the new one.
+  it("drops the previous environment's frontier when the environment changes", async () => {
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(
+      makeFrontier({ blocked_by_external: [makeBlocker()] }),
+    );
+    await openScheduling();
+    expect(await screen.findByText("Not progressing")).toBeInTheDocument();
+
+    vi.mocked(fetchBuildFrontier).mockReturnValue(new Promise(() => {}));
+    rerenderIn("env-2");
+
+    await waitFor(() => expect(screen.queryByText("Not progressing")).toBeNull());
   });
 
   it("marks the icon when the build is not progressing", async () => {
