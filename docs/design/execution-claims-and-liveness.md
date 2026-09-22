@@ -118,9 +118,17 @@ point, and it is the reverse of what the scheduler was attempting. **The
 server never reaches an execution backend**; the command does, from the
 operator's own credentials.
 
-**A build going terminal releases the claims it holds**, by every route out
-— cancelled, failed, or swept as abandoned — and it stops there. One
-implementation serves all three.
+**A build going terminal releases the claims it holds**, and stops there.
+One implementation serves every route that releases, so the scope never
+depends on which one asked.
+
+Unconditional for the two a build reaches on its own — `cancel` and
+`fail`. The two _operator_ routes keep a switch: bulk-cancel honours its
+request's `cascade`, and the reaper honours `ReaperSettings.cascade`, both
+defaulting to on. With either turned off the build event is recorded and
+the claims lapse on their own expiry. So the rule below describes the
+defaults rather than the system, and the exception is a control somebody
+asked for rather than an oversight.
 
 That rule was the decision, and it was not what the code did. A cancel
 released only when asked (`cascade=true`) and a failure never did; what

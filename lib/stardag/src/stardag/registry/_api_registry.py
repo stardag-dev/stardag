@@ -742,15 +742,20 @@ class APIRegistry(RegistryABC):
     def build_cancel(
         self, build_id: UUID, *, cascade: bool = False
     ) -> BuildCancelResult | None:
-        """Cancel a build, optionally cascading to the claims its tasks hold.
+        """Cancel a build, releasing the claims its tasks hold.
 
-        ``cascade=True`` additionally cancels the build's RUNNING /
-        SUSPENDED tasks, releasing their execution claims and
-        concurrency-limit slots (see :meth:`RegistryABC.build_cancel`).
+        The build's RUNNING, SUSPENDED and INTERRUPTED tasks are cancelled
+        with it, freeing their execution claims and concurrency-limit
+        slots (see :meth:`RegistryABC.build_cancel`).
 
-        Returns the cancelled build. ``cascade`` and the cascade fields
-        are ignored by servers predating them, in which case the returned
-        record simply reports nothing cascaded.
+        **``cascade`` does not decide that** on a server carrying STA-81 —
+        the release is unconditional there and the parameter is an
+        accepted no-op. It still decides on an older server, so pass True
+        if you support both. A server predating the parameter entirely
+        ignores it and omits the cascade fields, which read as nothing
+        released.
+
+        Returns the cancelled build.
         """
         params = self._get_event_params()
         if cascade:

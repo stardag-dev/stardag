@@ -778,20 +778,26 @@ class RegistryABC(metaclass=abc.ABCMeta):
     def build_cancel(
         self, build_id: UUID, *, cascade: bool = False
     ) -> "BuildCancelResult | None":
-        """Cancel a build, optionally releasing the claims its tasks hold.
+        """Cancel a build, releasing the claims its tasks hold.
 
-        Cancelling a build records a build-level event and nothing else,
-        which is why it has never actually cleaned anything up: task rows
-        are per *environment* with a denormalised global status, so a task
-        the build left RUNNING keeps denying its execution claim — and
-        occupying its concurrency-limit slots — long after the build is
-        gone. ``cascade=True`` cancels those tasks too.
+        A task the build left RUNNING keeps denying its execution claim —
+        and occupying its concurrency-limit slots — long after the build
+        is gone, because task rows are per *environment* with a
+        denormalised global status. So a cancel releases them.
 
-        Default False: cascading is a behaviour change for existing
-        callers, and the build engine's own fail-fast path already cancels
-        its running tasks itself.
+        **``cascade`` no longer decides that**, on a server carrying
+        STA-81: the release is unconditional and the parameter is accepted
+        as a no-op, kept so existing callers keep working. It is still
+        honoured by an older server, where passing False means the claims
+        are left to expire — so keep passing True if you support both.
 
-        Returns the cancelled build plus what the cascade released, or
+        Nothing is *stopped* either way. The server never reaches an
+        execution backend; a worker exits at its own next checkpoint, and
+        one whose ``run()`` has no checkpoint finishes. ``stardag builds
+        stop`` is what ends the containers, from the operator's own
+        credentials, before cancelling.
+
+        Returns the cancelled build plus what the cancel released, or
         None for backends that don't report it (the default). The return
         value exists for operator tooling; lifecycle callers ignore it.
         Same optional-return convention as ``task_register_bulk``.
