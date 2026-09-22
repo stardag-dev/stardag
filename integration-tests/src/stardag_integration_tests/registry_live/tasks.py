@@ -77,6 +77,39 @@ def slow(values: sd.Depends[list[int]], seconds: int, limit_key: str = "") -> li
     return values
 
 
+@sd.task(name="Cooperative")
+def cooperative(values: sd.Depends[list[int]], seconds: int) -> list[int]:
+    """Sleeps in slices, asking between them whether it is still wanted.
+
+    The cooperative-cancellation scenario's worker. ``Slow`` cannot serve
+    it: one long ``time.sleep`` has no point at which the task's author
+    could stop, which is exactly the case the design says it cannot
+    protect. This one has such a point, and that is the whole difference
+    the scenario measures.
+
+    ``seconds`` is deliberately far longer than the scenario waits. The
+    assertion is that the container is *gone* well before it would have
+    finished on its own, so a worker that ignored the cancel keeps running
+    and the poll times out rather than passing slowly.
+
+    The slice is short relative to the check interval (30s by default), so
+    the loop is never what delays the answer -- the throttle is, which is
+    the thing under test.
+    """
+    import time
+
+    import stardag as sd_
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if sd_.cancellation_requested():
+            # No output written and no completion reported: the runner
+            # recognises this and records nothing for it.
+            raise sd_.ExecutionCancelled("the build no longer wants this execution")
+        time.sleep(2)
+    return values
+
+
 @sd.task(name="Fails")
 def fails(values: sd.Depends[list[int]], seconds: int) -> list[int]:
     """Runs for ``seconds``, then fails deterministically.
