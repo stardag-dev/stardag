@@ -30,6 +30,7 @@ import sys
 import pytest
 
 from stardag_integration_tests.registry_live._diagnostics import (
+    CLASSIFICATION_FAILED,
     record_non_timeout_failure,
     record_transport_timeout,
     transport_timeout,
@@ -129,6 +130,13 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
     ``finally`` afterwards -- so a failure at either end is as real as one
     in the body, and must forbid the retry just the same.
 
+    **Every failed report is classified, exception or not**, because a
+    strict ``xfail`` that passes carries none and would otherwise leave
+    the run retryable. And anything that goes wrong in here fails
+    *closed*: it prints ``CLASSIFICATION_FAILED``, which the workflow
+    refuses to retry over, because an absent marker is read as proof that
+    nothing real broke.
+
     The exemption is ``RegistryContainerRecycled`` and nothing else. That
     one has its own marker and its own retry, which re-provisions because
     the replacement's database is empty; recording it here would disarm
@@ -150,20 +158,26 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
     try:
         _classify(item, call, report)
     except Exception as error:  # pragma: no cover - diagnostics only
-        print(f"[harness] failure classification errored: {error!r}", file=sys.stderr)
+        # Fail closed, loudly. A classifier that died has decided nothing,
+        # and CI reads an absent marker as "nothing real broke" -- so the
+        # run must become non-retryable on the strength of this line.
+        print(f"{CLASSIFICATION_FAILED}: {error!r}", file=sys.stderr)
     return report
 
 
 def _classify(
     item: pytest.Item, call: pytest.CallInfo[None], report: pytest.TestReport
 ) -> None:
-    if not report.failed or call.excinfo is None or _deployment is None:
+    if not report.failed or _deployment is None:
         return
     if report.when not in ("setup", "call", "teardown"):
         return
 
-    error = call.excinfo.value
-    timeout = transport_timeout(error)
+    # Not gated on ``call.excinfo``. A strict ``xfail`` that passes is a
+    # failed report carrying no exception at all, and dropping it would
+    # leave the run retryable over an XPASS.
+    error = call.excinfo.value if call.excinfo is not None else None
+    timeout = transport_timeout(error) if error is not None else None
     if timeout is not None:
         record_transport_timeout(
             _deployment,

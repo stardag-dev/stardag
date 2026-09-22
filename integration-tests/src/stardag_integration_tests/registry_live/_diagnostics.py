@@ -70,6 +70,18 @@ TIMEOUT_MARKER_NAME = "transport-timeouts"
 # recovery of its own.
 NON_TIMEOUT_MARKER_NAME = "non-timeout-failures"
 
+# What the harness says when it could not classify or could not record.
+#
+# The markers above are files, and a file that could not be written is
+# indistinguishable from a failure that did not happen -- which is the one
+# direction this must never fail in, because CI reads an absent
+# ``non-timeout-failures`` as proof that nothing real broke. So every
+# write failure and every unexpected error in the classifier prints this,
+# and the workflow refuses to retry a run whose log contains it. Printing
+# is the right channel precisely because it does not depend on the
+# filesystem the markers live on: the runner tees the tier's output.
+CLASSIFICATION_FAILED = "STARDAG_REGISTRY_LIVE_CLASSIFICATION_FAILED"
+
 # Short on purpose. The question the probe asks is not "does the registry
 # work" but "did it answer *promptly* while a real call was timing out",
 # and a generous timeout blurs exactly that distinction. Fifteen seconds
@@ -234,14 +246,17 @@ def transport_timeout(error: BaseException) -> BaseException | None:
 def _chain(error: BaseException) -> Iterator[BaseException]:
     """Every exception reachable from ``error``, causes and context alike.
 
-    Both links are followed because the two matter for different call
-    sites: ``__cause__`` for anything re-raised explicitly, ``__context__``
-    for a timeout that surfaces from inside an ``except`` block. That is
-    the whole of it -- exception *groups* are not unpacked, because
-    nothing in this tier raises one: the one scenario that runs calls
-    concurrently uses a bare ``asyncio.gather``, which re-raises the first
-    exception rather than collecting them. A ``TaskGroup`` here would need
-    this to grow a case.
+    Three links are followed. ``__cause__`` for anything re-raised
+    explicitly, ``__context__`` for a timeout surfacing from inside an
+    ``except`` block, and a group's members -- which is not hypothetical
+    here: pytest wraps *multiple failing fixture finalizers* in an
+    ``ExceptionGroup``, and this tier has two teardown fixtures that talk
+    to the registry (``slot_limit``'s cleanup and the autouse boot
+    check). Verified rather than assumed, by running two raising
+    finalizers against this pytest. Without the third link a teardown
+    holding two transport timeouts reads as a non-timeout failure: not
+    dangerous, since that forbids the retry rather than granting one, but
+    wrong, and it loses the probe.
 
     Cycle-guarded by identity: an exception raised inside its own handler
     can make ``__context__`` circular, and this runs on the failure path
@@ -258,6 +273,14 @@ def _chain(error: BaseException) -> Iterator[BaseException]:
         for linked in (current.__cause__, current.__context__):
             if linked is not None:
                 queue.append(linked)
+        # A group's members, matched structurally rather than by naming
+        # ``BaseExceptionGroup``: this repo pins no ruff ``target-version``
+        # anywhere, so the builtin reads as undefined and fails the lint.
+        # The membership test keeps it honest whatever carries the
+        # attribute.
+        members = getattr(current, "exceptions", None)
+        if isinstance(members, tuple):
+            queue.extend(item for item in members if isinstance(item, BaseException))
 
 
 def _is_timeout(error: BaseException) -> bool:
@@ -376,14 +399,15 @@ def record_transport_timeout(
                 )
     except OSError as failure:  # pragma: no cover - diagnostics only
         print(
-            f"Could not write the timeout diagnostics to {directory}: {failure}",
+            f"{CLASSIFICATION_FAILED}: could not write the timeout "
+            f"diagnostics to {directory}: {failure}",
             file=sys.stderr,
         )
     return probe
 
 
 def record_non_timeout_failure(
-    *, nodeid: str, phase: str, error: BaseException
+    *, nodeid: str, phase: str, error: BaseException | None
 ) -> None:
     """Name a failure that the retry must not be allowed to paper over.
 
@@ -392,6 +416,12 @@ def record_non_timeout_failure(
     worker says nothing about what the other eleven met; CI reads this
     file and refuses to retry a run that holds any, so a real failure
     cannot be carried to green on the back of somebody else's timeout.
+
+    ``error`` may be ``None``: a strict ``xfail`` that passes is a failed
+    report carrying no exception at all, and dropping it would let the
+    retry turn an XPASS green. Anything that failed and is not a
+    transport timeout belongs here, whether or not it brought an
+    exception with it.
 
     Every phase writes here, because fixtures talk to the registry at
     both ends of a scenario and a fixture failing for real must end the
@@ -407,10 +437,14 @@ def record_non_timeout_failure(
     try:
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / NON_TIMEOUT_MARKER_NAME).open("a") as marker:
-            marker.write(f"{nodeid} [{phase}] -- {type(error).__name__}\n")
+            described = type(error).__name__ if error else "failed with no exception"
+            marker.write(f"{nodeid} [{phase}] -- {described}\n")
     except OSError as failure:  # pragma: no cover - diagnostics only
+        # Fail closed. An unwritten marker is read by CI as "nothing real
+        # broke", so say so where the marker cannot be forged away.
         print(
-            f"Could not write the failure marker to {directory}: {failure}",
+            f"{CLASSIFICATION_FAILED}: could not write the failure marker "
+            f"to {directory}: {failure}",
             file=sys.stderr,
         )
 

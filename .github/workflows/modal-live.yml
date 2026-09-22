@@ -379,7 +379,15 @@ jobs:
       #    registry I/O at both ends of a scenario -- and the presence of
       #    that marker ends the run. Exactly one failure is exempt, by
       #    type rather than by phase: the recycle assertion, which is
-      #    case 1 above and has its own recovery. The recycle branch above is deliberately not gated the
+      #    case 1 above and has its own recovery.
+      #
+      #    **And it fails closed.** An absent marker is read here as
+      #    proof that nothing real broke, so a marker the harness could
+      #    not write, or a classifier that raised, would grant a retry
+      #    rather than deny one. Both print a sentinel instead, on a
+      #    channel that does not depend on the filesystem the markers
+      #    live on, and its presence in the run's own output ends the
+      #    run the same way a real failure does. The recycle branch above is deliberately not gated the
       #    same way: a lost database explains *every* failure in the run,
       #    which is why its retry re-provisions, whereas one scenario's
       #    timeout explains only that scenario.
@@ -404,6 +412,10 @@ jobs:
           mkdir -p "$diag"
           timeouts="$diag/transport-timeouts"
           others="$diag/non-timeout-failures"
+          # Printed by the harness when it could not classify a failure or
+          # could not record one. Kept in step with
+          # `_diagnostics.CLASSIFICATION_FAILED`.
+          unclassified="STARDAG_REGISTRY_LIVE_CLASSIFICATION_FAILED"
 
           if tox -e registry-modal-live $POSARGS 2>&1 \
                | tee "$diag/pytest-attempt-1.log"; then
@@ -421,6 +433,14 @@ jobs:
               "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER") -- the run's database" \
               "went with it. Re-provisioning and running the tier once more."
             reprovision=yes
+          elif grep -q "$unclassified" "$diag/pytest-attempt-1.log"; then
+            echo "The harness could not classify or could not record a" \
+                 "failure in this run:"
+            grep "$unclassified" "$diag/pytest-attempt-1.log" | sed 's/^/  /'
+            echo "Not retried. An unwritten marker is indistinguishable" \
+                 "from a run with nothing wrong in it, so this fails" \
+                 "closed."
+            exit 1
           elif [ -f "$timeouts" ] && [ ! -f "$others" ]; then
             echo "::warning title=Registry transport timeout::$(tr '\n' ';' \
               < "$timeouts") -- no HTTP response arrived. Running the tier" \

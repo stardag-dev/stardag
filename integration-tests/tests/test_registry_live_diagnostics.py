@@ -21,6 +21,7 @@ from stardag.exceptions import APIError
 from stardag_integration_tests.registry_live import _diagnostics
 from stardag_integration_tests.registry_live._diagnostics import (
     BOOT_PROBE_PROMPT_SECONDS,
+    CLASSIFICATION_FAILED,
     NON_TIMEOUT_MARKER_NAME,
     TIMEOUT_MARKER_NAME,
     BootProbe,
@@ -189,6 +190,65 @@ def test_only_the_boot_check_skips_the_probe(
     )
     assert len(probes) == 1
     assert skipped.probed is False
+
+
+def test_a_timeout_inside_an_exception_group_is_found() -> None:
+    """pytest wraps multiple failing fixture finalizers in one.
+
+    Not hypothetical: this tier has two teardown fixtures that talk to
+    the registry, and two raising finalizers were confirmed to arrive as
+    an ``ExceptionGroup`` against this pytest. Missing it would forbid a
+    retry the run was entitled to and lose the probe with it.
+    """
+    timeout = httpx.PoolTimeout("no connection free", request=_REQUEST)
+    group = _raised(ExceptionGroup("teardown", [timeout, timeout]))  # noqa: F821
+    assert transport_timeout(group) is timeout
+
+
+def test_a_group_holding_a_real_failure_is_not_retryable() -> None:
+    """One veto in the group is enough, exactly as in a cause chain."""
+    group = _raised(
+        ExceptionGroup(  # noqa: F821
+            "teardown",
+            [
+                httpx.ReadTimeout("timed out", request=_REQUEST),
+                APIError("cleanup failed", status_code=500),
+            ],
+        )
+    )
+    assert transport_timeout(group) is None
+
+
+def test_a_failure_with_no_exception_is_still_recorded(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A strict ``xfail`` that passes is a failed report carrying nothing.
+
+    Dropping it would leave the run retryable over an XPASS -- confirmed
+    to be the shape pytest produces, rather than assumed.
+    """
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    record_non_timeout_failure(nodeid="x::y", phase="call", error=None)
+    assert (tmp_path / NON_TIMEOUT_MARKER_NAME).read_text() == (
+        "x::y [call] -- failed with no exception\n"
+    )
+
+
+def test_an_unwritable_marker_fails_closed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """CI reads an absent marker as "nothing real broke", so say so aloud.
+
+    The sentinel goes to stderr rather than to a file on purpose: the
+    thing that just failed is writing files.
+    """
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("")
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(blocked / "sub"))
+    record_non_timeout_failure(
+        nodeid="x::y", phase="call", error=AssertionError("boom")
+    )
+    assert CLASSIFICATION_FAILED in capsys.readouterr().err
 
 
 def test_a_connection_error_is_not_a_timeout() -> None:
