@@ -221,10 +221,13 @@ than at claim expiry.
 | `RegistryABC.build_get_executions` / `build_get_executions_aio`        | Delete the override. Nothing calls it.                                                                                     |
 | `BuildExecution`, `BuildExecutions` (exported from `stardag.registry`) | Delete the import.                                                                                                         |
 | `task_cancel_aio(if_executor=…, if_executor_ref=…)`                    | Drop the parameters. The engines no longer pass them; an override still declaring them is not broken, only never narrowed. |
-| `TickSummary.cancelled_refs`                                           | Drop any reader. It could only ever be zero once the drain went.                                                           |
 
-Custom **executors** are unaffected: `cancel_detached` stays on
-`TaskExecutorABC` and is what `stardag builds stop` reaches through.
+Custom **executors** are unaffected. `cancel_detached` stays on
+`TaskExecutorABC`, with two callers left: `stardag builds stop`, and the
+tick stopping a container it spawned itself and had its registry write
+refused for. `TickSummary.cancelled_refs` counts the second of those and
+nothing else now, so a reader of it is measuring orphan cleanup rather
+than revocation.
 
 ---
 

@@ -145,9 +145,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   the narrowing they applied is gone. See
   [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-- `TickSummary.cancelled_refs` is removed. Nothing could increment it once
-  the drain went, and a counter permanently reporting zero reads as "nothing
-  was cancelled" rather than "nothing cancels".
+- `TickSummary.cancelled_refs` **stays, and now means something narrower.**
+  It counted executions the drain stopped from a recorded reference; it now
+  counts only the containers a tick spawned _itself_ and stopped while it
+  still held the handle, because the task stopped being this build's while
+  the spawn was in flight. That is the one stop a scheduler can make
+  honestly, and the only one left.
 
 ### Registry API
 

@@ -2888,30 +2888,6 @@ async def get_build_frontier(
     )
 
 
-# Cap on GET /builds/{id}/executions. Generous, because stopping them is
-# the whole point and a truncated answer costs another round-trip.
-_MAX_BUILD_EXECUTIONS = 500
-
-# Events by which a build learns that an execution it started has ended.
-# A *worker* reported one of these, so there is no container left to stop.
-#
-# TASK_CANCELLED is deliberately absent, and that absence is the whole
-# point of this endpoint: a cancel is a request to stop, not evidence that
-# anything stopped. The server cannot stop an execution — it can only
-# record that the claim is gone — so a task this build cancelled is
-# precisely a task whose container it still has to go and kill.
-#
-# TASK_INTERRUPTED is absent for a different reason: the platform ended one
-# attempt and the backend may be retrying under the same call, so the ref
-# can still be live. That is the premise the tick's backend-retry guard
-# already rests on.
-_EXECUTION_ENDED_EVENTS = (
-    EventType.TASK_COMPLETED,
-    EventType.TASK_FAILED,
-    EventType.TASK_SUSPENDED,
-)
-
-
 # --- Tasks within Builds ---
 
 
