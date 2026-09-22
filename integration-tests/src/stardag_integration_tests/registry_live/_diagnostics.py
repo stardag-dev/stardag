@@ -41,7 +41,12 @@ from typing import Iterator
 
 import httpx
 
-from ._harness import Deployment, read_boot_id, record_recycle
+from ._harness import (
+    CLASSIFICATION_FAILED,
+    Deployment,
+    read_boot_id,
+    record_recycle,
+)
 
 # Where the harness leaves everything a failed run should be diagnosed
 # from. CI sets it to a directory it uploads as a workflow artifact, and
@@ -70,17 +75,9 @@ TIMEOUT_MARKER_NAME = "transport-timeouts"
 # recovery of its own.
 NON_TIMEOUT_MARKER_NAME = "non-timeout-failures"
 
-# What the harness says when it could not classify or could not record.
-#
-# The markers above are files, and a file that could not be written is
-# indistinguishable from a failure that did not happen -- which is the one
-# direction this must never fail in, because CI reads an absent
-# ``non-timeout-failures`` as proof that nothing real broke. So every
-# write failure and every unexpected error in the classifier prints this,
-# and the workflow refuses to retry a run whose log contains it. Printing
-# is the right channel precisely because it does not depend on the
-# filesystem the markers live on: the runner tees the tier's output.
-CLASSIFICATION_FAILED = "STARDAG_REGISTRY_LIVE_CLASSIFICATION_FAILED"
+# ``CLASSIFICATION_FAILED`` is imported from ``_harness`` above rather
+# than defined here: ``record_recycle`` lives there and has to fail
+# closed too, and this module already depends on that one.
 
 # Short on purpose. The question the probe asks is not "does the registry
 # work" but "did it answer *promptly* while a real call was timing out",
@@ -233,9 +230,42 @@ def transport_timeout(error: BaseException) -> BaseException | None:
     write and pool. Nothing else -- not a connection reset, not a
     protocol error -- because the evidence names timeouts and a wider net
     would start covering failures nobody has looked at.
+
+    **A cause chain and an exception group are read differently, and the
+    difference is load-bearing.** A chain is one failure described at
+    several levels, so a ``RuntimeError`` wrapping a ``ReadTimeout`` is
+    still a timeout. A group is several *independent* failures that
+    happened to arrive together -- pytest builds one from multiple
+    failing fixture finalizers -- so a non-timeout sibling is a real
+    failure of its own, and the whole group is a timeout only if every
+    member is. Treating a group like a chain is how
+    ``[ReadTimeout, RuntimeError]`` would buy a retry over the
+    ``RuntimeError``.
     """
+    return _timeout_in(error, set())
+
+
+def _timeout_in(error: BaseException, groups_seen: set[int]) -> BaseException | None:
     found: BaseException | None = None
     for current in _chain(error):
+        members = _group_members(current)
+        if members is not None:
+            # Only *groups* are guarded against revisiting, and only to
+            # stop a self-referential one recursing forever. Guarding
+            # every exception instead conflates "seen this already" with
+            # "not a timeout", and a group holding the same timeout
+            # object twice -- which is what a pair of identical fixture
+            # failures looks like -- then vetoes itself.
+            if id(current) in groups_seen:
+                continue
+            groups_seen.add(id(current))
+            for member in members:
+                nested = _timeout_in(member, groups_seen)
+                if nested is None:
+                    return None
+                found = found or nested
+            continue
+
         if _carries_http_status(current) or isinstance(current, AssertionError):
             return None
         if found is None and _is_timeout(current):
@@ -243,20 +273,33 @@ def transport_timeout(error: BaseException) -> BaseException | None:
     return found
 
 
-def _chain(error: BaseException) -> Iterator[BaseException]:
-    """Every exception reachable from ``error``, causes and context alike.
+def _group_members(error: BaseException) -> tuple[BaseException, ...] | None:
+    """A group's members, or ``None`` for anything that is not a group.
 
-    Three links are followed. ``__cause__`` for anything re-raised
-    explicitly, ``__context__`` for a timeout surfacing from inside an
-    ``except`` block, and a group's members -- which is not hypothetical
-    here: pytest wraps *multiple failing fixture finalizers* in an
-    ``ExceptionGroup``, and this tier has two teardown fixtures that talk
-    to the registry (``slot_limit``'s cleanup and the autouse boot
-    check). Verified rather than assumed, by running two raising
-    finalizers against this pytest. Without the third link a teardown
-    holding two transport timeouts reads as a non-timeout failure: not
-    dangerous, since that forbids the retry rather than granting one, but
-    wrong, and it loses the probe.
+    Matched structurally rather than by naming ``BaseExceptionGroup``:
+    this repo pins no ruff ``target-version`` anywhere, so the builtin
+    reads as undefined and fails the lint. The membership test keeps it
+    honest whatever carries the attribute.
+    """
+    members = getattr(error, "exceptions", None)
+    if not isinstance(members, tuple) or not members:
+        return None
+    if not all(isinstance(member, BaseException) for member in members):
+        return None
+    return members
+
+
+def _chain(error: BaseException) -> Iterator[BaseException]:
+    """Every exception reachable from ``error`` through its own links.
+
+    Two links, and only two: ``__cause__`` for anything re-raised
+    explicitly, and ``__context__`` for a timeout surfacing from inside an
+    ``except`` block. Both describe *one* failure at several levels, which
+    is why a non-timeout wrapper does not veto.
+
+    Groups are deliberately not expanded here. They are several
+    independent failures rather than one described twice, so they need the
+    opposite rule, and the caller applies it -- see ``transport_timeout``.
 
     Cycle-guarded by identity: an exception raised inside its own handler
     can make ``__context__`` circular, and this runs on the failure path
@@ -273,14 +316,6 @@ def _chain(error: BaseException) -> Iterator[BaseException]:
         for linked in (current.__cause__, current.__context__):
             if linked is not None:
                 queue.append(linked)
-        # A group's members, matched structurally rather than by naming
-        # ``BaseExceptionGroup``: this repo pins no ruff ``target-version``
-        # anywhere, so the builtin reads as undefined and fails the lint.
-        # The membership test keeps it honest whatever carries the
-        # attribute.
-        members = getattr(current, "exceptions", None)
-        if isinstance(members, tuple):
-            queue.extend(item for item in members if isinstance(item, BaseException))
 
 
 def _is_timeout(error: BaseException) -> bool:

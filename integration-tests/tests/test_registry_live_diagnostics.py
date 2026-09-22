@@ -33,6 +33,7 @@ from stardag_integration_tests.registry_live._harness import (
     BootCheckUnanswered,
     Deployment,
     RegistryContainerRecycled,
+    record_recycle,
 )
 
 _REQUEST = httpx.Request("GET", "https://registry.invalid/api/v1/builds")
@@ -199,24 +200,77 @@ def test_a_timeout_inside_an_exception_group_is_found() -> None:
     the registry, and two raising finalizers were confirmed to arrive as
     an ``ExceptionGroup`` against this pytest. Missing it would forbid a
     retry the run was entitled to and lose the probe with it.
+    The two members are deliberately the *same object*, which is what a
+    pair of identical fixture failures looks like. An earlier version
+    guarded every exception against revisiting rather than only groups,
+    which conflated "seen this already" with "not a timeout" and made
+    such a group veto itself.
     """
     timeout = httpx.PoolTimeout("no connection free", request=_REQUEST)
     group = _raised(ExceptionGroup("teardown", [timeout, timeout]))  # noqa: F821
     assert transport_timeout(group) is timeout
 
 
-def test_a_group_holding_a_real_failure_is_not_retryable() -> None:
-    """One veto in the group is enough, exactly as in a cause chain."""
+def test_a_group_of_distinct_timeouts_is_a_timeout() -> None:
+    first = httpx.ReadTimeout("timed out", request=_REQUEST)
+    second = httpx.ConnectTimeout("timed out", request=_REQUEST)
+    group = _raised(ExceptionGroup("teardown", [first, second]))  # noqa: F821
+    assert transport_timeout(group) in (first, second)
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    [
+        pytest.param(APIError("cleanup failed", status_code=500), id="a-status-error"),
+        pytest.param(AssertionError("the build stalled"), id="an-assertion"),
+        # The one that matters most and reads least like a veto: an
+        # ordinary fixture error is neither of the two named exclusions,
+        # but in a *group* it is a second, independent failure -- and
+        # retrying over it is exactly the laundering this forbids.
+        pytest.param(RuntimeError("concurrency_limit_delete blew up"), id="any-error"),
+    ],
+)
+def test_a_group_is_a_timeout_only_if_every_member_is(sibling: Exception) -> None:
+    """A group is several failures at once, not one described twice.
+
+    The opposite rule to a cause chain, and the distinction is the whole
+    point: a ``RuntimeError`` *wrapping* a timeout is still that timeout,
+    while a ``RuntimeError`` *beside* one is a real failure of its own.
+    """
     group = _raised(
         ExceptionGroup(  # noqa: F821
             "teardown",
+            [httpx.ReadTimeout("timed out", request=_REQUEST), sibling],
+        )
+    )
+    assert transport_timeout(group) is None
+
+
+def test_a_nested_group_is_walked_to_the_bottom() -> None:
+    group = _raised(
+        ExceptionGroup(  # noqa: F821
+            "outer",
             [
-                httpx.ReadTimeout("timed out", request=_REQUEST),
-                APIError("cleanup failed", status_code=500),
+                ExceptionGroup(  # noqa: F821
+                    "inner", [httpx.ReadTimeout("timed out", request=_REQUEST)]
+                ),
+                RuntimeError("and a real one"),
             ],
         )
     )
     assert transport_timeout(group) is None
+
+
+def test_a_wrapper_around_a_timeout_is_still_a_timeout() -> None:
+    """The chain rule, stated next to the group rule so the two are visible."""
+    timeout = httpx.ReadTimeout("timed out", request=_REQUEST)
+    try:
+        try:
+            raise timeout
+        except httpx.ReadTimeout as cause:
+            raise RuntimeError("the lease call failed") from cause
+    except RuntimeError as wrapper:
+        assert transport_timeout(wrapper) is timeout
 
 
 def test_a_failure_with_no_exception_is_still_recorded(
@@ -232,6 +286,24 @@ def test_a_failure_with_no_exception_is_still_recorded(
     assert (tmp_path / NON_TIMEOUT_MARKER_NAME).read_text() == (
         "x::y [call] -- failed with no exception\n"
     )
+
+
+def test_an_unwritable_recycle_marker_fails_closed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both its callers are exempt from the non-timeout marker.
+
+    So a recycle nobody could record is a recycle nobody records at all,
+    and CI would take the plain-timeout branch and re-run against an
+    empty database.
+    """
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("")
+    monkeypatch.setenv(
+        "STARDAG_REGISTRY_LIVE_RECYCLE_MARKER", str(blocked / "sub" / "marker")
+    )
+    record_recycle("boot-one", "boot-two")
+    assert CLASSIFICATION_FAILED in capsys.readouterr().err
 
 
 def test_an_unwritable_marker_fails_closed(

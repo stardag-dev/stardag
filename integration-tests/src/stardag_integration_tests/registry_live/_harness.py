@@ -52,6 +52,18 @@ DEFAULT_ENVIRONMENT_SLUG = "main"
 # message is the whole story.
 RECYCLE_MARKER_ENV = "STARDAG_REGISTRY_LIVE_RECYCLE_MARKER"
 
+# What the harness says when it could not record what it found. Defined
+# here rather than in ``_diagnostics`` only because that module imports
+# this one and not the reverse; ``_diagnostics`` re-exports it, and it is
+# one spelling either way.
+#
+# An unwritten marker is indistinguishable from a run with nothing wrong
+# in it, and CI reads it that way -- so every failure to write one has to
+# be said aloud on a channel that does not depend on the filesystem the
+# markers live on. The runner tees the tier's output; the workflow
+# refuses to retry a run whose log holds this.
+CLASSIFICATION_FAILED = "STARDAG_REGISTRY_LIVE_CLASSIFICATION_FAILED"
+
 # Reading the boot id at provisioning time waits out a cold start, so it
 # gets a long timeout and one try. The post-scenario check cannot: it runs
 # after every scenario, so its worst case has to stay small enough to sit
@@ -108,8 +120,14 @@ def record_recycle(previous: str, current: str) -> None:
     try:
         Path(path).write_text(f"{previous} -> {current}\n")
     except OSError as error:  # pragma: no cover - diagnostics only
+        # Fail closed. Both callers are exempt from the non-timeout
+        # marker -- the recycle assertion by type, the probe's finding by
+        # design -- so a recycle nobody could record is a recycle nobody
+        # records at all, and CI would take the plain-timeout branch and
+        # re-run against an empty database.
         print(
-            f"Could not write the recycle marker to {path!r}: {error}",
+            f"{CLASSIFICATION_FAILED}: could not write the recycle marker "
+            f"to {path!r}: {error}",
             file=sys.stderr,
         )
 
