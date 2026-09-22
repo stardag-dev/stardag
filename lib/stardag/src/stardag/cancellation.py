@@ -200,12 +200,13 @@ def cancellation_requested() -> bool:
                 process(chunk)
             target.write(...)
 
-    Or return early and leave the target unwritten — anything that does
-    not produce output is a clean stop. Raising
-    :class:`~stardag.exceptions.ExecutionCancelled` is the tidier form
-    because the worker recognises it and reports nothing for it, where an
-    ordinary early ``return`` reads as "the task completed" and *is*
-    reported as one.
+    **Raise it; do not return early.** An early ``return`` writes no
+    output, which looks like a clean stop and is not one: the worker
+    cannot tell it from a task that finished, so it reports
+    ``TASK_COMPLETED`` — a completion for a target that does not exist,
+    which every consumer downstream then believes. Only
+    :class:`~stardag.exceptions.ExecutionCancelled` is recognised, and
+    only it records nothing.
 
     Two checkpoints are automatic and need no help: the start of each
     attempt, before ``run()``, and each dynamic-dependency yield. This is

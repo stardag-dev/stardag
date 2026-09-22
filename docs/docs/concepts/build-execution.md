@@ -181,9 +181,11 @@ implement the question. Stopping needs _positive evidence_ that the
 execution is no longer wanted, because stopping wrongly destroys work
 while running on wrongly writes a content-addressed output nobody reads.
 
-**Raise rather than return.** Returning normally from `run()` writes the
-output and is reported as a completion. `ExecutionCancelled` is recognised
-by the worker and records nothing at all.
+**Raise rather than return.** An early `return` writes no output, which
+looks like a clean stop and is not one: the worker cannot tell it from a
+task that finished, so it reports a completion — for a target that does not
+exist. `ExecutionCancelled` is the only thing recognised, and the only
+thing that records nothing.
 
 **Side-effecting tasks are not covered, and never were.** A task that
 writes to somebody else's database or sends an email has already done so
