@@ -398,8 +398,9 @@ profile / environment other than the active one.
 - `builds stop` — end a build that is still running something: stop its live
   executions, then cancel it (see
   [Stopping a build that is still running](#stopping-a-build-that-is-still-running)).
-- `builds cancel` — cancel one build and nothing else. No claim is released
-  and nothing is stopped; for a build you believe is already dead.
+- `builds cancel` — cancel one build: its claims are released, and nothing
+  is stopped. For a build you believe is already dead; use `builds stop`
+  for one whose containers are still running.
 - `builds cleanup` — find and cancel abandoned builds (see
   [Cleaning up abandoned builds](#cleaning-up-abandoned-builds)).
 - `tasks list` — tasks by their environment-global status. `--status running`

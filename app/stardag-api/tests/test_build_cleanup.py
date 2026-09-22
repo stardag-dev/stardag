@@ -135,6 +135,68 @@ async def test_a_terminal_transition_releases_the_builds_claims(
 
 
 @pytest.mark.asyncio
+async def test_a_failed_build_completes_the_blocked_closure(client: AsyncClient):
+    """The descendants of what it just released are SKIPPED, not PENDING.
+
+    Server-side, in the same transaction, and that placement is the point.
+    The scheduler asks for this too, but *when* it asks differs by SDK
+    version: every release up to v0.25.0 skips before it fails, because
+    its cancel drain used to cancel the running branch first and make it a
+    seed. Against this server that drain is refused, so such a tick would
+    compute the closure while the branch is still RUNNING — which blocks
+    nothing, since a running task may still complete — and no later tick
+    retries it, because the build is already terminal. The descendants
+    would dangle PENDING for good.
+
+    Doing it here makes the answer independent of the caller's ordering.
+
+    **Failure only, deliberately.** A cancel releases claims too, but no
+    engine asks for the closure there and none should: a cancel is a
+    revocation rather than a verdict, and a neighbour may reset the task
+    and run it. Skipping its descendants would pre-judge that. The
+    reactive tick calls skip-blocked on its failure terminals only
+    (``build/_reactive/_terminal.py``), and the resident engine likewise.
+    """
+    build_id = await _new_build(client)
+    await _start(client, build_id, "upstream")
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json=_register("downstream", deps=["upstream"]),
+    )
+
+    response = await client.post(f"/api/v1/builds/{build_id}/fail")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "failed"
+
+    assert await _task_status(client, "upstream") == "cancelled"
+    assert await _task_status(client, "downstream") == "skipped", (
+        "the descendant of a released claim was left dangling PENDING"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_build_does_not_skip_the_descendants(client: AsyncClient):
+    """The other side of that line, pinned so it is not "fixed" by symmetry.
+
+    A cancel releases the claim, which is a revocation and not a verdict:
+    the next build resets the task and runs it, and its descendants are
+    still wanted. Skipping them here would pre-judge that, and nothing
+    asks this route to.
+    """
+    build_id = await _new_build(client)
+    await _start(client, build_id, "revoked")
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json=_register("after-revoked", deps=["revoked"]),
+    )
+
+    await client.post(f"/api/v1/builds/{build_id}/cancel")
+
+    assert await _task_status(client, "revoked") == "cancelled"
+    assert await _task_status(client, "after-revoked") == "pending"
+
+
+@pytest.mark.asyncio
 async def test_cascade_on_the_single_build_cancel_is_a_no_op(client: AsyncClient):
     """The parameter is accepted and ignored, which is what keeps existing
     callers working while the behaviour it selected became the only

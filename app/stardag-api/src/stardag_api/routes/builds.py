@@ -1691,7 +1691,19 @@ async def fail_build(
         build_id,
         event_metadata=(metadata or {}) | {"cancelled_by": "build_fail"},
     )
-    if released:
+    # The blocked closure, computed *after* the release so the tasks it
+    # just cancelled are seeds of it, and in the same transaction.
+    #
+    # The scheduler also asks for this, and that call becomes a no-op
+    # rather than redundant work — the closure is empty once these rows
+    # are SKIPPED. Doing it here is what makes the answer not depend on
+    # the caller: an SDK that skips *before* it fails (every release up to
+    # v0.25.0 does, because its cancel drain used to cancel the branch
+    # first) computes the closure while the branch is still RUNNING, which
+    # blocks nothing, and no later tick retries it — the build is already
+    # terminal. Its descendants would dangle PENDING for good.
+    blocked = await _blocked_by_failures(db, build_id, build.scope_key)
+    if released or blocked:
         _raise_if_limit_exceeded(
             await check_entity_creation_limit(
                 db,
@@ -1701,8 +1713,19 @@ async def fail_build(
                 # +1 for the BUILD_FAILED event written below; the earlier
                 # single-event check reserves nothing, so counting only the
                 # released claims lets `1 + len(released)` cross the limit.
-                amount=len(released) + 1,
+                amount=len(released) + len(blocked) + 1,
             )
+        )
+    for task in blocked:
+        await transition_task(
+            db,
+            task,
+            Event(
+                build_id=build_id,
+                task_id=task.id,
+                event_type=EventType.TASK_SKIPPED,
+                event_metadata=metadata,
+            ),
         )
 
     event = Event(
@@ -1719,7 +1742,7 @@ async def fail_build(
     # holding claims.
     await db.commit()
 
-    for _ in range(len(released) + 1):
+    for _ in range(len(released) + len(blocked) + 1):
         record_entity_created(auth.workspace_id, "events")
 
     return await _build_to_response(db, build)
@@ -2512,26 +2535,18 @@ async def set_build_scope(
     return await _build_to_response(db, build)
 
 
-@router.post("/{build_id}/skip-blocked", response_model=SkipBlockedResponse)
-async def skip_blocked_tasks(
-    build_id: UUID,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
-    commit_hash: str | None = None,
-):
-    """Emit TASK_SKIPPED for tasks transitively blocked by failures.
+async def _blocked_by_failures(
+    db: AsyncSession, build_id: UUID, scope_key: str
+) -> list[Task]:
+    """Tasks transitively blocked by a failure, for one build. No commit.
 
-    Computes (recursive CTE over dependency edges) the pending/suspended
-    tasks in the build that are downstream of a failed/cancelled/skipped
-    task, and records TASK_SKIPPED for each in one transaction. Called by
-    reactive scheduler ticks when a build reaches a failure terminal, so
-    blocked tasks show as skipped instead of dangling pending forever —
-    mirroring the resident engine's skip emission.
+    The closure behind ``POST /builds/{id}/skip-blocked``, shared so that a
+    build going terminal can complete it in the same transaction that
+    releases its claims. It has to be the same computation rather than a
+    second one: two answers that disagree is a build whose blocked work is
+    SKIPPED on one path and PENDING on the other.
     """
-    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    build = await _get_build_checked(build_id, db, auth)
-
-    build_task_pks = _plan_task_ids(build_id, build.scope_key)
+    build_task_pks = _plan_task_ids(build_id, scope_key)
 
     # Transitive closure downward from terminal-blocking seeds. Blockage
     # only propagates through nodes that will themselves never complete:
@@ -2569,7 +2584,7 @@ async def skip_blocked_tasks(
             Task.latest_status.in_(_propagating_statuses),
             # Blockage propagates along the edges this build evaluates its
             # readiness over — its own scope — and no others.
-            TaskDependency.scope_key == build.scope_key,
+            TaskDependency.scope_key == scope_key,
         )
     )
     closure = seeds.union(downstream)
@@ -2600,6 +2615,29 @@ async def skip_blocked_tasks(
         .all()
     )
 
+    return list(blocked_tasks)
+
+
+@router.post("/{build_id}/skip-blocked", response_model=SkipBlockedResponse)
+async def skip_blocked_tasks(
+    build_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    commit_hash: str | None = None,
+):
+    """Emit TASK_SKIPPED for tasks transitively blocked by failures.
+
+    Computes (recursive CTE over dependency edges) the pending/suspended
+    tasks in the build that are downstream of a failed/cancelled/skipped
+    task, and records TASK_SKIPPED for each in one transaction. Called by
+    reactive scheduler ticks when a build reaches a failure terminal, so
+    blocked tasks show as skipped instead of dangling pending forever —
+    mirroring the resident engine's skip emission.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    build = await _get_build_checked(build_id, db, auth)
+
+    blocked_tasks = await _blocked_by_failures(db, build_id, build.scope_key)
     if blocked_tasks:
         _raise_if_limit_exceeded(
             await check_entity_creation_limit(

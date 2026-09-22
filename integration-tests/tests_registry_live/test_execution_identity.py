@@ -268,12 +268,15 @@ def test_a_cancelled_builds_worker_stops_itself(deployment) -> None:
     now has nothing but its own checkpoint to end it, and the stronger
     case is the testable one.
 
-    Note which of the endpoint's three answers this exercises. A build
-    cancel without ``cascade`` leaves the task RUNNING under this very
-    execution, so neither ``task_cancelled`` nor ``superseded`` can fire
-    -- the worker stops on ``build_not_running``, and it is the only
-    reason available. The task-status and supersession answers have their
-    own unit coverage.
+    Note which of the endpoint's three answers this exercises, because
+    the reason changed under it. A cancel now releases the build's claims
+    too, so the task is CANCELLED as well -- both facts are true at once,
+    written in one transaction. The endpoint evaluates the build first
+    (``routes/builds.py``: build status, then task status, then identity),
+    so the answer is deterministically ``build_not_running`` rather than a
+    race between two correct ones. ``superseded`` cannot fire here at all:
+    nothing takes the task over. The other two answers have their own unit
+    coverage.
 
     Three assertions, failing from three directions. The call being
     **gone** catches a worker that ignored the answer -- it would still be

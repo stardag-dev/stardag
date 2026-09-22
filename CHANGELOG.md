@@ -268,6 +268,22 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   terminal build's claims are released by the transition itself now, so
   its cancel had nothing left to do.
 
+- **A failed build completes the blocked closure itself**, in the same
+  transaction that releases its claims, so the descendants of what it just
+  released are SKIPPED rather than dangling PENDING. The scheduler still
+  asks, and that call is now a no-op.
+
+  It has to be here rather than left to the caller, because _when_ the
+  caller asks differs by version: every SDK up to v0.25.0 skips before it
+  fails, since its cancel drain used to cancel the running branch first
+  and make it a seed of the closure. Against this server that drain is
+  refused, so such a tick would compute the closure while the branch is
+  still RUNNING — which blocks nothing — and no later tick would retry it,
+  the build being terminal already.
+
+  A cancel deliberately does **not** do this: it is a revocation, not a
+  verdict, and a neighbour may reset the task and run it.
+
 - **A cancelled build is no longer flagged for a scheduler tick.** That
   flag existed to run the drain again; a terminal build's tick would now
   read a terminal frontier and return. The builds a cancel genuinely wakes
