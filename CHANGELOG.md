@@ -250,6 +250,26 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `stardag builds stop` remains the command for one that is still running
   something.
 
+  **Known limitation (STA-100): a stale claiming start can revive a task
+  this cancel just released.** Cancelling releases the claim, so the
+  `task_already_running` refusal no longer applies, and a claiming start
+  — a scheduler tick of the cancelled build that was already in flight,
+  or an idempotent retry of the claim that was cancelled — is granted and
+  folds the task back to RUNNING.
+
+  Pre-existing, and reachable before this release through
+  `cascade=true`; making a plain cancel release widens it to the default
+  path. Two conditions must coincide: a claiming start arriving after the
+  cancel, from a build that is already terminal.
+
+  Symptom when it does: **one wasted container, and the claim held until
+  that container's next checkpoint.** The revived worker asks before
+  `run()`, is told `build_not_running` — the endpoint reads build status
+  before task status — and exits without writing output or reporting a
+  completion. Never a wrong result. The fix needs a third 409 code on the
+  claiming start and an audit of every caller that reads one, which is
+  why it is its own issue.
+
 - **`GET /builds/{id}/executions` is removed**, with the event-log
   reconstruction behind it — two window functions, the keyset cursor, and
   the "which execution did this build start" lookup. Nothing needs to

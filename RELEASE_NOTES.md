@@ -245,6 +245,21 @@ keeps its warning, and `stardag builds stop` remains the command for a
 build that is still running something: it lists the executions while the
 claims make that list exact, ends those calls, and cancels last.
 
+**One known limitation, named so you can recognise it (STA-100).** A
+claiming start arriving _after_ the cancel can revive the task it just
+released: the release is what removes the `task_already_running` refusal,
+so a scheduler tick of the cancelled build that was already in flight — or
+an idempotent retry of the very claim that was cancelled — is granted and
+the task folds back to RUNNING. Pre-existing, and reachable before this
+release through `cascade=true`; a plain cancel releasing widens it to the
+default path.
+
+What you see when it happens is **one wasted container and a claim held
+until that container's next checkpoint**. The revived worker asks before
+`run()` and is told `build_not_running`, because the endpoint reads build
+status before task status, so it exits without writing output or reporting
+a completion. Never a wrong result, only waste.
+
 #### Migration: custom registries and executors
 
 | Removed                                                                | What to do                                                                                                                 |
