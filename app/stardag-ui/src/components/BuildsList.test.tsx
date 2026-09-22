@@ -25,6 +25,13 @@ vi.mock("../api/tasks", () => ({
 
 import { bulkCancelBuilds, fetchBuilds } from "../api/tasks";
 
+// Real build ids are UUIDs. The fixtures used to carry short slugs, which
+// silently made any assertion about abbreviating an id vacuous —
+// `slice(0, 8)` of a seven-character id is the whole id.
+const STALE_ID = "01a0c5c3-f18e-7d22-bcaf-add71bd0287c";
+const BUSY_ID = "01a0c5d4-2a7f-7e31-9dbc-0b4e21f7c9aa";
+const DONE_ID = "01a0c5e5-3b80-7f42-ae0d-1c5f32a8dab1";
+
 const HOUR = 3600 * 1000;
 const DAY = 24 * HOUR;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
@@ -52,20 +59,20 @@ function makeBuild(overrides: Partial<Build> & Pick<Build, "id" | "name">): Buil
 // Three obviously fictional builds: one stale, one busy reactive build,
 // one already finished.
 const staleBuild = makeBuild({
-  id: "b-stale",
+  id: STALE_ID,
   name: "nightly-refresh",
   description: "Refresh the demo warehouse",
   commit_hash: "abcdef1234567",
   last_activity_at: ago(3 * DAY),
 });
 const busyBuild = makeBuild({
-  id: "b-busy",
+  id: BUSY_ID,
   name: "hourly-ingest",
   reactive_app_name: "demo-scheduler",
   last_activity_at: ago(5 * 60 * 1000),
 });
 const doneBuild = makeBuild({
-  id: "b-done",
+  id: DONE_ID,
   name: "feature-sandbox",
   status: "completed",
   completed_at: ago(2 * HOUR),
@@ -159,7 +166,9 @@ describe("BuildsList", () => {
     const chip = await screen.findByRole("button", {
       name: `Copy build id ${staleBuild.id}`,
     });
+    // Both halves matter: the short form is drawn, and the full id is not.
     expect(chip).toHaveTextContent(staleBuild.id.slice(0, 8));
+    expect(chip).not.toHaveTextContent(staleBuild.id);
 
     await user.click(chip);
     expect(await window.navigator.clipboard.readText()).toBe(staleBuild.id);
@@ -354,11 +363,11 @@ describe("BuildsList", () => {
     nameButton.focus();
     expect(nameButton).toHaveFocus();
     await user.keyboard("{Enter}");
-    expect(onSelectBuild).toHaveBeenCalledWith("b-stale");
+    expect(onSelectBuild).toHaveBeenCalledWith(STALE_ID);
 
     onSelectBuild.mockClear();
     await user.click(within(rowFor("feature-sandbox")).getByText("feature-sandbox"));
-    expect(onSelectBuild).toHaveBeenCalledWith("b-done");
+    expect(onSelectBuild).toHaveBeenCalledWith(DONE_ID);
   });
 
   it("clears the selection when the page changes", async () => {
@@ -385,14 +394,14 @@ describe("BuildsList", () => {
             dry_run: true,
             builds: [
               {
-                build_id: "b-stale",
+                build_id: STALE_ID,
                 name: "nightly-refresh",
                 last_activity_at: staleBuild.last_activity_at ?? null,
                 reactive_app_name: null,
                 cascaded_task_ids: ["t-1", "t-2"],
               },
               {
-                build_id: "b-busy",
+                build_id: BUSY_ID,
                 name: "hourly-ingest",
                 last_activity_at: busyBuild.last_activity_at ?? null,
                 reactive_app_name: "demo-scheduler",
@@ -401,7 +410,7 @@ describe("BuildsList", () => {
             ],
             build_count: 2,
             task_count: 3,
-            skipped: { "b-done": "not_running" },
+            skipped: { [DONE_ID]: "not_running" },
           })
         : bulkResponse({ build_count: 2, task_count: 3, skipped: {} }),
     );
@@ -424,7 +433,7 @@ describe("BuildsList", () => {
         dry_run: true,
         cascade: true,
         include_reactive: false,
-        build_ids: ["b-stale", "b-busy", "b-done"],
+        build_ids: [STALE_ID, BUSY_ID, DONE_ID],
       }),
       "env-1",
     );
