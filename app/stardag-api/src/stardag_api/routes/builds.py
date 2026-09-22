@@ -4608,6 +4608,8 @@ async def cancel_task(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     commit_hash: str | None = None,
+    if_executor: Annotated[str | None, Query(deprecated=True)] = None,
+    if_executor_ref: Annotated[str | None, Query(deprecated=True)] = None,
 ):
     """Cancel a task, releasing its execution claim and limit slots.
 
@@ -4624,7 +4626,41 @@ async def cancel_task(
     list`` prints it, and ``stardag tasks cancel`` has documented that
     argument as the claim holder since it shipped). What the guard removes
     is a build declaring somebody else's live worker dead.
+
+    **``if_executor`` / ``if_executor_ref`` are refused with 400**, rather
+    than removed outright or quietly ignored. They narrowed a cancel to
+    one named execution, and their only caller was the scheduler's cancel
+    drain, which this release deletes. But the release is server-first, so
+    an SDK old enough to still run that drain will meet this server: it
+    gets a 404 from the deleted executions route, falls back to filtering
+    the frontier, and sends these conditions with a cancel it believes is
+    narrowed. Ignoring them would silently widen it — and the case they
+    excluded is real, a successor having reset the task to PENDING in the
+    window, where ``may_revoke`` permits the cancel and it would stamp the
+    successor's freshly scheduled work.
+
+    So the request fails, which for that caller is the path it already has
+    for a cancel it could not record (logged, best-effort, no claim
+    touched). Nothing is lost by failing: on this server the claims of a
+    terminal build are released by the transition itself, so the old
+    drain's cancel had nothing left to do.
     """
+    if if_executor is not None or if_executor_ref is not None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": "conditional_cancel_removed",
+                "message": (
+                    "if_executor and if_executor_ref have been removed. They "
+                    "narrowed a cancel to one execution for the scheduler's "
+                    "cancel drain, which no longer exists: nothing automated "
+                    "stops containers, a worker exits at its own checkpoint, "
+                    "and a build going terminal releases its claims. Refused "
+                    "rather than ignored, because ignoring them would widen "
+                    "the cancel this caller asked to narrow."
+                ),
+            },
+        )
     return await _create_task_event(
         build_id,
         task_id,

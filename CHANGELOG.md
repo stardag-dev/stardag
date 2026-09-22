@@ -256,14 +256,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   reconstruct that: a worker knows its own identity, and `builds stop` reads
   the task row while the claims make it exact.
 
-- **The per-task cancel no longer takes `if_executor` / `if_executor_ref`.**
-  Their only caller was the drain. An old client still sending them gets a
-  plain cancel — unknown query parameters are ignored — so the narrowing
-  they asked for is not applied. The `not_claim_holder` authority rule
-  still decides whether the caller may cancel at all, which is the
-  protection that mattered; what is lost is the finer "and only if it is
-  still _this_ execution" test. Reachable only by an SDK old enough to
-  still run a drain, against a server new enough to have none.
+- **The per-task cancel refuses `if_executor` / `if_executor_ref`** with
+  400 `conditional_cancel_removed`. Their only caller was the drain, and
+  the release is server-first, so an SDK old enough to still run one will
+  meet this server: it gets a 404 from the deleted executions route, falls
+  back to the frontier, and sends these conditions with a cancel it
+  believes is narrowed. Ignoring them would silently widen it, and the
+  case they excluded is real — a successor that reset the task to PENDING
+  in the window is cancellable by anybody, so the old drain would stamp
+  its freshly scheduled work. Failing costs that caller nothing: a
+  terminal build's claims are released by the transition itself now, so
+  its cancel had nothing left to do.
 
 - **A cancelled build is no longer flagged for a scheduler tick.** That
   flag existed to run the drain again; a terminal build's tick would now
@@ -273,8 +276,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### UI
 
-- The tick-summary trail drops the "executions cancelled" counter, which
-  the SDK no longer reports.
+- The tick-summary trail's "executions cancelled" counter stays, and its
+  help text follows the counter's narrower meaning: executions this tick
+  spawned and then stopped, because the task stopped being this build's
+  while the spawn was in flight. It no longer counts drained revocations,
+  because there are none.
 
 ## [0.25.0] — 2026-09-22
 

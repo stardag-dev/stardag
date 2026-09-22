@@ -510,10 +510,17 @@ class TaskExecutorABC(ABC):
         recorded reference.
 
         **No scheduler calls this to revoke another process's work any
-        more** (STA-81). What remains is a tick stopping a container it
-        spawned *itself*, in the pass that spawned it, when the registry
-        then refused the start — the execution is orphaned, nothing else
-        can find it, and the handle is still in hand. Default: no-op.
+        more** (STA-81). Both remaining callers are orphan handlers: an
+        engine stopping a container it spawned *itself*, in the pass that
+        spawned it, when the registry then refused the start — the
+        execution is orphaned, nothing else can find it, and the handle is
+        still in hand. The reactive path is in
+        ``build/_reactive/_frontier_actions.py``, the resident one in
+        ``build/_concurrent.py``.
+
+        Note ``stardag builds stop`` does not come through here: it ends
+        the selected calls directly, from the operator's credentials.
+        Default: no-op.
         """
         pass
 

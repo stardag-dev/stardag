@@ -253,12 +253,20 @@ claims make that list exact, ends those calls, and cancels last.
 | `BuildExecution`, `BuildExecutions` (exported from `stardag.registry`) | Delete the import.                                                                                                         |
 | `task_cancel_aio(if_executor=…, if_executor_ref=…)`                    | Drop the parameters. The engines no longer pass them; an override still declaring them is not broken, only never narrowed. |
 
-Custom **executors** are unaffected. `cancel_detached` stays on
-`TaskExecutorABC`, with two callers left: `stardag builds stop`, and the
-tick stopping a container it spawned itself and had its registry write
-refused for. `TickSummary.cancelled_refs` counts the second of those and
-nothing else now, so a reader of it is measuring orphan cleanup rather
-than revocation.
+Custom **executors** are unaffected, and `cancel_detached` stays on
+`TaskExecutorABC` — but what calls it has changed, so implement it for
+the right reason. Both remaining callers are **orphan handlers**: a build
+engine stopping a container it spawned _itself_, in the pass that spawned
+it, when the registry then refused the start (the reactive path in
+`build/_reactive/_frontier_actions.py`, the resident one in
+`build/_concurrent.py`). Nothing calls it to revoke another process's
+work any more. `TickSummary.cancelled_refs` counts exactly those stops, so
+a reader of it is measuring orphan cleanup rather than revocation.
+
+Note that `stardag builds stop` does **not** go through it: the CLI ends
+the selected Modal calls directly, from the operator's own credentials,
+because the point of that command is that no server and no scheduler
+reaches an execution backend.
 
 ---
 

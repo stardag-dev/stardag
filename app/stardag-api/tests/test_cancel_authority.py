@@ -161,21 +161,56 @@ async def test_the_executions_listing_is_gone(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_a_cancel_no_longer_takes_an_execution_condition(client: AsyncClient):
-    """``if_executor`` / ``if_executor_ref`` are gone, and unknown query
-    parameters are ignored rather than honoured — so an old client's
-    conditional cancel becomes a plain one instead of silently doing
-    nothing. That is the safe direction: the caller wanted the claim
-    released, and the authority rule below still decides whether it may."""
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"if_executor": "modal", "if_executor_ref": "fc-x"},
+        {"if_executor_ref": "fc-x"},
+        {"if_executor": "modal"},
+    ],
+)
+async def test_a_conditional_cancel_is_refused_rather_than_widened(
+    client: AsyncClient, params: dict
+):
+    """The legacy narrowing fails closed (400), it is not ignored.
+
+    This release is server-first, so an SDK old enough to still run the
+    cancel drain will meet this server: it gets a 404 from the deleted
+    executions route, falls back to the frontier, and sends these
+    conditions with a cancel it believes is narrowed. FastAPI would ignore
+    unknown query parameters, which silently turns that into an
+    unconditional cancel — and the case the conditions excluded is real: a
+    successor that reset the task to PENDING in the window is cancellable
+    by anybody (``may_revoke`` permits PENDING), so the old drain would
+    stamp its freshly scheduled work.
+
+    Failing is free here. On this server a terminal build's claims are
+    released by the transition itself, so the old drain's cancel has
+    nothing left to do, and its caller already treats a failed cancel as
+    best-effort.
+    """
     owner = await _new_build(client)
     await _start(client, owner, "conditioned")
 
     response = await client.post(
-        f"/api/v1/builds/{owner}/tasks/conditioned/cancel",
-        params={"if_executor": "modal", "if_executor_ref": "fc-something-else"},
+        f"/api/v1/builds/{owner}/tasks/conditioned/cancel", params=params
     )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error_code"] == "conditional_cancel_removed"
+    assert await _task_status(client, "conditioned") == "running", (
+        "the refused request still changed the task"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_plain_cancel_is_unaffected(client: AsyncClient):
+    """The guard is scoped to the legacy parameters and nothing else."""
+    owner = await _new_build(client)
+    await _start(client, owner, "ordinary")
+
+    response = await client.post(f"/api/v1/builds/{owner}/tasks/ordinary/cancel")
     assert response.status_code == 200, response.text
-    assert await _task_status(client, "conditioned") == "cancelled"
+    assert await _task_status(client, "ordinary") == "cancelled"
 
 
 # ---------------------------------------------------------------------------
