@@ -719,6 +719,24 @@ def _describes_an_execution(extra_metadata: dict | None) -> bool:
     executor, no reference and no identity; the fold already treats that
     as "describes no execution at all". Scoping the cancelled-task
     refusal the same way is what keeps the limiter's start out of it.
+
+    **The limit this leaves, stated rather than implied.** The limiter is
+    not the only caller that names nothing: so do the sequential engine,
+    the Prefect integration, and the concurrent engine with
+    ``claim=False``. A start from any of those can still revive a
+    cancelled task. Closing that would mean an explicit "this is
+    bookkeeping" marker threaded from the SDK, because the alternative —
+    refusing every identity-less non-claiming start — breaks the
+    sequential engine, which does not reset a task before starting it.
+
+    Nothing regresses by leaving it: before this refusal existed *every*
+    non-claiming start revived a cancelled task, so this narrows the hole
+    rather than opening one. And a start naming no identity has no
+    identity-based checkpoint to lose either; what its worker keeps is
+    the build-status half of the cancellation check, which is the case a
+    human actually causes. Raised by review on #368 and declined there
+    with this reasoning; if it starts to matter, the marker is the fix
+    and it wants its own issue.
     """
     asking = extra_metadata or {}
     return any(
