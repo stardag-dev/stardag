@@ -18,13 +18,28 @@ under twelve concurrent clients. That would make this a *product* signal
 rather than an infrastructure one, and the answer would be upstream in
 the registry's locking.
 
-``/_harness/boot`` separates them, because it is the one endpoint that
-returns a closure variable and touches no database. If it answers
-promptly while a real endpoint has just timed out, the container is alive
-and serving and the *database path* is what is blocked -- hypothesis B.
-If it does not answer either, the container itself is unreachable --
-hypothesis A. One probe at the moment of failure turns the next
-occurrence into a diagnosis instead of another row in a table.
+**C. The server answers and the answer does not arrive.** Nothing on the
+registry is slow at all; the response is produced and lost between the
+container and the runner.
+
+``/_harness/boot`` settles exactly one of these, and the discipline of
+this module is to claim no more than that. It is the one endpoint that
+returns a closure variable and touches no database, so a *slow or absent*
+answer while a real endpoint is timing out means the container is not
+serving -- hypothesis A. A **prompt** answer refutes A and nothing else:
+it establishes that the process is alive and handing back twenty bytes,
+which is equally true under B and under C. An earlier version of this
+module read a prompt probe as proof of B and named the registry's locking
+as the lever; the run that first exercised it answered 6257 requests with
+a maximum handler time of 460 ms, so the verdict was contradicted by
+evidence in its own artifact (STA-92).
+
+**What separates B from C is the registry's access log**, which prints
+``duration`` and ``execution`` per request -- queueing against handler
+time -- and is dumped into the same artifact. That join happens after the
+run, in ``diagnose.py``, because the log is not readable from inside it.
+This module therefore writes *facts* -- when, which request, what the
+probe said -- and a label covering only what it can support.
 
 Nothing here retries or suppresses anything by itself. It classifies, it
 probes, and it writes down what it found; CI reads the marker and decides.
@@ -32,12 +47,14 @@ probes, and it writes down what it found; CI reads the marker and decides.
 
 from __future__ import annotations
 
+import datetime as dt
+import json
 import os
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import httpx
 
@@ -98,6 +115,20 @@ BOOT_PROBE_TIMEOUT_SECONDS = 15.0
 # reached by a near miss.
 BOOT_PROBE_PROMPT_SECONDS = 3.0
 
+# The label a prompt probe earns. Deliberately not "HYPOTHESIS B": it
+# states what was observed -- the container is alive and answering -- and
+# leaves the choice between B and C to the pass that can actually make it.
+# A label that names a hypothesis is read as a diagnosis, and this one
+# would be a diagnosis of whichever hypothesis happened to be written down
+# first.
+CONTAINER_SERVING = "CONTAINER SERVING"
+
+# One machine-readable sidecar per occurrence, next to the human record.
+# The prose is for whoever opens the artifact; this is what the
+# access-log join reads, because parsing back a paragraph that exists to
+# be rewritten is how the two drift apart.
+SIDECAR_SUFFIX = ".json"
+
 
 @dataclass(frozen=True)
 class BootProbe:
@@ -115,14 +146,23 @@ class BootProbe:
     probed: bool = True
 
     def label(self, expected_boot_id: str) -> str:
-        """Which hypothesis this probe supports, as a word CI can count."""
+        """What this probe establishes, as a word CI can count.
+
+        Three outcomes, not four, and the asymmetry is deliberate. A
+        failed or slow probe *identifies* hypothesis A: nothing was
+        serving, and that is a complete answer. A prompt probe only
+        *refutes* A -- it says the container is alive and serving, which
+        both of the remaining hypotheses predict. So the third label
+        names what was observed rather than a hypothesis, and the
+        access-log pass in ``diagnose.py`` is what turns it into one.
+        """
         if not self.answered:
             return "HYPOTHESIS A"
         if self.boot_id != expected_boot_id:
             return "RECYCLE"
         if self.elapsed > BOOT_PROBE_PROMPT_SECONDS:
             return "HYPOTHESIS A"
-        return "HYPOTHESIS B"
+        return CONTAINER_SERVING
 
     def verdict(self, expected_boot_id: str) -> str:
         """The same judgement in a sentence, derived from ``label``.
@@ -172,10 +212,17 @@ class BootProbe:
             detail = (
                 f"the boot probe answered in {self.elapsed:.1f}s, from the "
                 f"same container ({self.boot_id}). The process is alive and "
-                f"serving HTTP promptly, so what timed out is the *database* "
-                f"path: pool exhaustion or lock waits under concurrent "
-                f"clients. That makes this a product signal, and the lever "
-                f"is upstream in the registry's locking."
+                f"serving HTTP promptly, which rules out hypothesis A and "
+                f"nothing else -- a container that is starved would have "
+                f"failed this. It does *not* show that the database path "
+                f"was blocked: this endpoint returns a closure variable and "
+                f"touches no database, so it answers exactly as fast whether "
+                f"the handler behind the timed-out call was slow "
+                f"(hypothesis B) or the response was produced and never "
+                f"arrived (hypothesis C). The registry's access log "
+                f"separates those, and diagnose.py reads it once the logs "
+                f"are dumped. No lever is named here, because none is "
+                f"identified yet."
             )
         return f"{label} -- {detail}"
 
@@ -334,6 +381,40 @@ def _is_timeout(error: BaseException) -> bool:
     )
 
 
+def _request_of(error: BaseException) -> tuple[str, str] | None:
+    """The method and path of the request that timed out, if it is knowable.
+
+    ``httpx`` attaches the ``Request`` to the exception it raises, so the
+    chain walk that found the timeout also finds what was being asked.
+    The ``httpcore`` exception underneath it carries no such thing, which
+    is why this walks rather than reading the timeout directly.
+
+    Only the path is kept. The host is the registry in every case, and a
+    query string would carry ids that make two occurrences of the same
+    call look like different endpoints to the join downstream.
+    """
+    for current in _chain(error):
+        # ``getattr`` with a default does not make this safe, and that is
+        # not a hypothetical: ``httpx.HTTPError.request`` is a *property*
+        # that raises ``RuntimeError("The .request property has not been
+        # set.")`` when the exception was constructed without one, and a
+        # raising property propagates straight through the default. Left
+        # unguarded this turns every timeout raised without a request --
+        # anything the harness constructs itself, and anything a future
+        # httpx raises before it has a request to attach -- into a
+        # classifier that dies, which CI reads as a run it must not retry.
+        try:
+            request = getattr(current, "request", None)
+        except Exception:
+            continue
+        method = getattr(request, "method", None)
+        url = getattr(request, "url", None)
+        path = getattr(url, "path", None)
+        if isinstance(method, str) and isinstance(path, str):
+            return method, path
+    return None
+
+
 def _carries_http_status(error: BaseException) -> bool:
     """Whether the registry answered, whatever it answered with.
 
@@ -372,6 +453,14 @@ def record_transport_timeout(
     and only its own raiser knows that; inferring it from the teardown
     phase swallowed the probe for any fixture whose cleanup timed out.
     """
+    # Taken before the probe, which is allowed fifteen seconds. The join
+    # downstream looks for this request in the registry's access log
+    # within a window around this instant, and a timestamp taken after the
+    # probe would put the failure up to fifteen seconds late -- wide
+    # enough to catch a neighbouring call to the same endpoint instead.
+    observed_at = dt.datetime.now(dt.timezone.utc)
+    request = _request_of(error)
+
     probe = (
         probe_boot(deployment.api_url)
         if not already_probed
@@ -391,6 +480,8 @@ def record_transport_timeout(
         error=error,
         timeout=timeout,
         probe=probe,
+        observed_at=observed_at,
+        request=request,
     )
 
     # Always visible, marker or no marker. A developer running the tier
@@ -422,7 +513,26 @@ def record_transport_timeout(
 
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / _record_name(nodeid, phase)).write_text(record + "\n")
+        stem = _record_name(nodeid, phase)
+        (directory / f"{stem}.txt").write_text(record + "\n")
+        (directory / f"{stem}{SIDECAR_SUFFIX}").write_text(
+            json.dumps(
+                _facts(
+                    deployment,
+                    nodeid=nodeid,
+                    phase=phase,
+                    error=error,
+                    timeout=timeout,
+                    probe=probe,
+                    label=label,
+                    observed_at=observed_at,
+                    request=request,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
         if label != "RECYCLE":
             # One line per occurrence, appended: twelve xdist workers write
             # this file, in separate processes, and a whole-file write would
@@ -490,16 +600,58 @@ def _diagnostics_dir() -> Path | None:
 
 
 def _record_name(nodeid: str, phase: str) -> str:
-    """A filename per occurrence.
+    """The shared stem of one occurrence's two files, without a suffix.
 
     Node id, phase and pid together. The phase is not decoration: fixture
     teardown runs after a failed call, so one scenario can produce a
     call-phase record and a teardown-phase one, and without it the second
     would overwrite the first -- losing the probe, which only the first
     one carries.
+
+    The stem is shared by the human record and its JSON sidecar, so the
+    two are obviously one occurrence in a directory listing.
     """
     slug = "".join(char if char.isalnum() else "-" for char in nodeid).strip("-")
-    return f"timeout-{phase}-{slug[:120]}-{os.getpid()}.txt"
+    return f"timeout-{phase}-{slug[:120]}-{os.getpid()}"
+
+
+def _facts(
+    deployment: Deployment,
+    *,
+    nodeid: str,
+    phase: str,
+    error: BaseException,
+    timeout: BaseException,
+    probe: BootProbe,
+    label: str,
+    observed_at: dt.datetime,
+    request: tuple[str, str] | None,
+) -> dict[str, Any]:
+    """Everything the access-log join needs, and nothing it has to parse.
+
+    Deliberately facts only. There is no verdict field here: the verdict
+    is what the join produces, and a sidecar carrying a provisional one
+    would be quoted as the answer by anyone who read it first.
+    """
+    return {
+        "nodeid": nodeid,
+        "phase": phase,
+        "observed_at": observed_at.isoformat(),
+        "request_method": request[0] if request else None,
+        "request_path": request[1] if request else None,
+        "raised": f"{type(error).__module__}.{type(error).__name__}",
+        "timeout": f"{type(timeout).__module__}.{type(timeout).__name__}",
+        "message": str(error),
+        "boot_id_at_provisioning": deployment.boot_id,
+        "probe": {
+            "probed": probe.probed,
+            "answered": probe.answered,
+            "elapsed": round(probe.elapsed, 3),
+            "boot_id": probe.boot_id,
+            "error": probe.error,
+        },
+        "probe_label": label,
+    }
 
 
 # What a timeout at each phase cost, which is no longer the same sentence
@@ -523,6 +675,8 @@ def _render(
     error: BaseException,
     timeout: BaseException,
     probe: BootProbe,
+    observed_at: dt.datetime,
+    request: tuple[str, str] | None,
 ) -> str:
     return "\n".join(
         [
@@ -533,6 +687,8 @@ def _render(
             "=" * 72,
             f"  scenario:  {nodeid}",
             f"  phase:     {phase}",
+            f"  at:        {observed_at.isoformat(timespec='seconds')}",
+            "  request:   " + (f"{request[0]} {request[1]}" if request else "unknown"),
             f"  raised:    {type(error).__module__}.{type(error).__name__}: {error}",
             f"  timeout:   {type(timeout).__module__}.{type(timeout).__name__}",
             f"  registry:  {deployment.api_url}",

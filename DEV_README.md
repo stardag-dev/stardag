@@ -263,13 +263,42 @@ from.** One exemption exists and it is by type, not by phase:
 its own. A fixture failing to clean up is a real failure and ends the run.
 
 **On a timeout the harness probes `/_harness/boot` before the scenario gives
-up**, and that probe is the point of the exercise. It returns a closure
-variable and touches no database, so an answer in half a second while a real
-endpoint has just timed out means the container is alive and the _database_
-path is what is blocked — which would make this a product signal rather than
-an infrastructure one. A probe that also times out means the container, or the
-runner the probe runs on, is starved. The verdict goes into the artifact in
-those words.
+up.** It returns a closure variable and touches no database, so a probe that
+does not answer, or takes seconds to, means the container itself is not
+serving — that is hypothesis A, identified outright.
+
+**A prompt answer refutes A and establishes nothing else**, which is worth
+stating flatly because the first version of this claimed otherwise. It read a
+fast probe as proof that the _database_ path was blocked and named the
+registry's locking as the lever; the endpoint it asks touches no database, so
+it answers exactly as fast whether the timed-out handler was slow or its
+response was produced and lost. The run that first exercised it served 6257
+requests with a maximum handler time of 460 ms, so the verdict was contradicted
+by evidence in its own artifact (STA-92). The label for that case is
+`CONTAINER SERVING` — an observation, not a hypothesis.
+
+**What separates the remaining hypotheses is the access log**, and the join is
+a separate pass because the log is not readable from inside the run. After the
+dump, `diagnose.py` reconciles each timeout's JSON sidecar with the registry's
+own account of that request and writes `verdicts.txt`:
+
+| What the log shows for the timed-out request   | Verdict                                       |
+| ---------------------------------------------- | --------------------------------------------- |
+| Seconds inside the handler                     | **B** — the database path; a product signal   |
+| Fast handler, long total: it sat queued        | **A** — a starved container                   |
+| Served in milliseconds, or never logged at all | **C** — the server was not what took the time |
+| Nothing, and the log does not cover the window | **no verdict** — a gap, not evidence          |
+
+C is a positive finding rather than a fallback, and it is what the live data
+shows: the traceback ends in `httpcore._receive_response_body`, so the
+response head arrived and the body did not.
+
+**Two rules the pass follows, both learned by getting them wrong.** A probe
+that found nothing serving is never overturned by a later reading of a log — a
+direct observation outranks an inference, and the log would be quiet in exactly
+that case. And a positive verdict says how many requests matched: paths that
+create a resource carry no id, twelve workers issue them at once, so a slow
+line in the window is a candidate rather than an identification.
 
 **Everything a red run should be diagnosed from is uploaded as one artifact**,
 `registry-live-diagnostics-<attempt>`. That is not a convenience: `modal
@@ -277,16 +306,30 @@ environment delete` takes the registry container, the scenario apps and every
 line they logged, minutes after the run goes red, and three separate
 occurrences were diagnosable only because somebody happened to pull the logs
 by hand while the other tier was still running. The artifact holds both marker
-files, one record per timeout with its boot probe, each attempt's pytest
-output, and `modal app logs` for all four apps — the registry, both scenario
-apps and the one `test_rollover` deploys for itself — with timestamps and
-container ids. Worth knowing when reading those: the registry's access log reports
-`duration` and `execution` separately per request, which is the line-level
-form of the same question — time spent queued against time spent in the
-handler.
+files, one record per timeout with its boot probe — plus a JSON sidecar of the
+same facts, which is what the join reads, so rewriting a sentence in the record
+cannot silently break it — `verdicts.txt`, each attempt's pytest output, and
+`modal app logs` for all four apps — the registry, both scenario apps and the
+one `test_rollover` deploys for itself — with timestamps and container ids. The
+registry's access log reports `duration` and `execution` separately per
+request, which is the line-level form of the same question — time spent queued
+against time spent in the handler.
+
+**The workflow and the code it runs come from different commits.** For a
+`pull_request` event GitHub takes the workflow file from the merge ref, while
+this job checks out the PR's own head on purpose. A branch not rebased since
+the instrument landed therefore runs the markers, retry and log dump against a
+tree that has none of the code behind them — which once reported "no scenario
+reported a transport timeout" for a run holding two of them, and failed the
+dump with `invalid choice: 'logs'`. A step checks for the instrument up front
+now and says "not measured" rather than "measured and found nothing"; the fix
+is to rebase.
 
 Locally none of that is configured and the record is printed to stderr
-instead. `provision logs --output-dir <dir>` is the log dump on its own.
+instead. `provision logs --output-dir <dir>` is the log dump on its own, and
+`python -m stardag_integration_tests.registry_live.diagnose --dir <dir>` runs
+the verdict pass over any directory holding a `registry.log` and some records —
+including one downloaded from a CI run with `gh run download`.
 
 Both retries are counted as workflow annotations, titled
 `Registry transport timeout` and `Registry container recycled`, so the rate is

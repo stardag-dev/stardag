@@ -14,6 +14,9 @@ It needs none of this directory's docker-compose services.
 
 from __future__ import annotations
 
+import datetime as dt
+import json
+
 import httpx
 import pytest
 from stardag.exceptions import APIError
@@ -22,6 +25,7 @@ from stardag_integration_tests.registry_live import _diagnostics
 from stardag_integration_tests.registry_live._diagnostics import (
     BOOT_PROBE_PROMPT_SECONDS,
     CLASSIFICATION_FAILED,
+    CONTAINER_SERVING,
     NON_TIMEOUT_MARKER_NAME,
     TIMEOUT_MARKER_NAME,
     BootProbe,
@@ -179,7 +183,7 @@ def test_only_the_boot_check_skips_the_probe(
     )
     assert len(probes) == 1
     assert probe.probed is True
-    assert probe.label("boot-one") == "HYPOTHESIS B"
+    assert probe.label("boot-one") == CONTAINER_SERVING
 
     skipped = record_transport_timeout(
         _deployment(),
@@ -344,10 +348,18 @@ _SLOW = BOOT_PROBE_PROMPT_SECONDS + 1.0
 @pytest.mark.parametrize(
     ("probe", "expected"),
     [
+        # A prompt answer *refutes* hypothesis A and establishes nothing
+        # else. This endpoint returns a closure variable and touches no
+        # database, so it answers just as fast whether the timed-out
+        # handler was slow or its response was produced and lost -- which
+        # is why the label names the observation rather than a
+        # hypothesis. The earlier version read it as proof of B and sent
+        # readers to the registry's locking; the first run to exercise it
+        # had a maximum handler time of 460ms (STA-92).
         pytest.param(
             BootProbe(answered=True, elapsed=0.2, boot_id="abc", error=None),
-            "HYPOTHESIS B",
-            id="prompt-answer-means-the-database-path-is-blocked",
+            CONTAINER_SERVING,
+            id="prompt-answer-only-rules-out-a-starved-container",
         ),
         pytest.param(
             BootProbe(answered=False, elapsed=15.0, boot_id=None, error="x"),
@@ -520,3 +532,88 @@ def test_two_phases_of_one_test_leave_two_records(
     assert records[0].startswith("timeout-call-")
     assert records[1].startswith("timeout-teardown-")
     assert len((tmp_path / TIMEOUT_MARKER_NAME).read_text().splitlines()) == 2
+
+
+def test_each_occurrence_leaves_machine_readable_facts_beside_its_record(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidecar the access-log join reads, rather than the prose.
+
+    The record is written to be read by a person and rewritten whenever a
+    sentence in it is wrong. Parsing a verdict back out of it would make
+    every such rewrite a silent break in the pass downstream, which is
+    the pass that exists because the prose was wrong once already.
+
+    It carries facts only. There is deliberately no verdict field: the
+    verdict is what the join produces, and a provisional one sitting in
+    the artifact would be quoted as the answer by whoever read it first.
+    """
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        _diagnostics,
+        "probe_boot",
+        lambda *a, **k: BootProbe(
+            answered=True, elapsed=0.3, boot_id="boot-one", error=None
+        ),
+    )
+    timeout = httpx.ReadTimeout("timed out", request=_REQUEST)
+
+    record_transport_timeout(
+        _deployment(),
+        nodeid="tests_registry_live/test_x.py::test_a",
+        phase="call",
+        error=timeout,
+        timeout=timeout,
+    )
+
+    sidecars = list(tmp_path.glob("timeout-*.json"))
+    assert len(sidecars) == 1
+    facts = json.loads(sidecars[0].read_text())
+
+    # The request the join matches against the access log. Taken off the
+    # httpx exception, which carries it; the httpcore one underneath does
+    # not, which is why the chain is walked for it.
+    assert facts["request_method"] == "GET"
+    assert facts["request_path"] == "/api/v1/builds"
+    # Parseable and tz-aware, since the window it anchors is compared
+    # against the registry's own timestamps.
+    assert dt.datetime.fromisoformat(facts["observed_at"]).tzinfo is not None
+    assert facts["probe_label"] == CONTAINER_SERVING
+    assert "verdict" not in facts
+    # Named the same as its record, so a directory listing shows the two
+    # as one occurrence.
+    assert sidecars[0].stem == next(tmp_path.glob("timeout-*.txt")).stem
+
+
+def test_a_timeout_with_no_request_on_it_still_records(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``httpx`` attaches the request; nothing guarantees every raiser does.
+
+    A sidecar missing the request is worth strictly less to the join --
+    it falls back to reading the whole window -- but it must still be
+    written, because the marker, the probe and the timestamp are all
+    still true and the retry keys on the marker.
+    """
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        _diagnostics,
+        "probe_boot",
+        lambda *a, **k: BootProbe(
+            answered=True, elapsed=0.3, boot_id="boot-one", error=None
+        ),
+    )
+    timeout = httpx.ReadTimeout("timed out")
+
+    record_transport_timeout(
+        _deployment(),
+        nodeid="tests_registry_live/test_x.py::test_a",
+        phase="call",
+        error=timeout,
+        timeout=timeout,
+    )
+
+    facts = json.loads(next(tmp_path.glob("timeout-*.json")).read_text())
+    assert facts["request_method"] is None
+    assert facts["request_path"] is None
+    assert len((tmp_path / TIMEOUT_MARKER_NAME).read_text().splitlines()) == 1
