@@ -187,12 +187,19 @@ jobs:
           done
 
       # **The one thing a reader of a cancelled check cannot find out from
-      # the check itself.** GitHub keeps at most one running and one
-      # pending job per concurrency group, so when a third run wants the
-      # registry-live group, the *older pending* job is cancelled -- and a
-      # job cancelled before it starts executes no steps, so it can leave
-      # no logs and no summary of its own. The explanation has to be
-      # written by a job that did run, before the fact, which is this one.
+      # the check itself.** A job cancelled before it starts executes no
+      # steps, so it can leave no logs and no summary of its own; the
+      # explanation has to be written by a job that did run, before the
+      # fact, which is this one.
+      #
+      # **Two things cancel it, and the note names both** rather than
+      # attributing every logless cancellation to the newer one. The
+      # workflow-level group above has `cancel-in-progress: true` for pull
+      # requests, so pushing again to the same PR kills the previous run
+      # wherever it had got to. The job-level group keeps at most one
+      # running and one pending job, so a third run takes the pending slot
+      # and the *older pending* job is cancelled. The remedy is the same
+      # either way, which is why one note covers both.
       - name: Note how a cancelled registry-live tier will read
         if: steps.decide.outputs.registry_live == 'true'
         run: |
@@ -208,11 +215,16 @@ jobs:
             echo "So it may sit pending for ten minutes or so behind"
             echo "another PR. That is expected and needs nothing from you."
             echo
-            echo "**If it shows as \`cancelled\` with no logs**, a third"
-            echo "run claimed the queue slot: GitHub keeps only one"
-            echo "running and one pending job per group and drops the"
-            echo "older pending one. It is not a failure and not a flake."
-            echo "Re-run the job, or push again. (STA-91)"
+            echo "**If it shows as \`cancelled\` with no logs**, one of"
+            echo "two things took it, and neither is a failure or a flake:"
+            echo
+            echo "- you pushed again to this PR, and the per-PR group"
+            echo "  cancelled the previous run wherever it had got to; or"
+            echo "- a third run claimed the queue slot, because GitHub"
+            echo "  keeps only one running and one pending job per group"
+            echo "  and drops the older pending one."
+            echo
+            echo "Either way: re-run the job, or push again. (STA-91)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   modal-live:
