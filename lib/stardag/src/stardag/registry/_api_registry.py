@@ -134,24 +134,32 @@ _RETRY_CONFIG = Retry(
     # **It can be refused by state its own first attempt created.** This
     # is the harmful kind, because the refusal is indistinguishable from
     # losing a race to somebody else, and standing down is the right
-    # response to that. One instance is answered and one is half-answered:
+    # response to that. Both known instances are answered:
     #
     # The scheduler lease grants an acquire by the owner already holding
     # it, and that covers every caller, because a tick's owner id travels
     # on the request.
     #
-    # ``/tasks/{id}/start?claim=true`` grants one by the execution already
-    # holding the claim -- same build, and the same ``(executor,
-    # executor_ref)`` pair -- so a genuine second attempt of the same
-    # build is still refused, and so is a start from a different backend
-    # that happened to reuse the ref string, since a ref only names an
-    # execution alongside the executor that minted it. But **the claim
-    # this SDK takes carries no ref**: it is taken before the worker
-    # is spawned, and the ref is the spawn's own id, so the reactive
-    # engine's claim is exactly the ref-less case the server still refuses.
-    # A retried claim from here therefore still reports a loss to the
-    # worker that won it. Tracked; the fix wants an identity the claim can
-    # carry before it has an execution to name.
+    # ``/tasks/{id}/start?claim=true`` grants one by the attempt already
+    # holding the claim. It used to do that by the ``(executor,
+    # executor_ref)`` pair, which left the case that matters open: **the
+    # claim this SDK takes carries no ref**, since it is taken before the
+    # worker is spawned and the ref is the spawn's own id. So a retried
+    # claim was the ref-less case the server refused, and it reported a
+    # loss to the build that had won -- which stood down from a task it
+    # held the claim on, leaving it claimed and not running until the
+    # claim expired.
+    #
+    # Both engines now mint an ``execution_id`` before claiming and
+    # re-send it, and the server compares that: the same id from the same
+    # build is that attempt asking again and is granted, a different one
+    # is a second attempt and is denied as before. A caller that sends
+    # none still falls back to the pair, so nothing about the older
+    # behaviour changed for it. The resident engine is the one this
+    # mattered most for -- its claim sits in a wait-and-retry loop, so a
+    # lost response is followed by another attempt by construction --
+    # which is why its id is minted outside that loop and re-sent on
+    # every iteration.
     #
     # **It can append a second record.** The event log is append-only and
     # a retried transition writes another row. Mostly visible rather than
