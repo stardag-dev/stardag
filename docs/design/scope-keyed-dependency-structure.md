@@ -1,5 +1,9 @@
 # Scope-keyed dependency structure
 
+> **Superseded** by [registry-v2/design.md](registry-v2/design.md)
+> (2026-09-23). Kept for its record of the problem and of the two designs
+> abandoned before it; the mechanics described here are v1's.
+
 What a task id promises and what it does not, why the registry keeps a
 task's dependency edges per _structure scope_ rather than globally or per
 build, and what that makes of the three kinds of parameter a task can have.
