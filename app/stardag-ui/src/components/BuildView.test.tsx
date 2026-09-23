@@ -26,16 +26,22 @@ const controlsMounted = vi.hoisted(() => vi.fn());
 // Also captures `onBuildChanged`, so a test can play the part of a
 // confirmed override without reaching through the real dialog.
 const captureOverride = vi.hoisted(() => vi.fn());
+const captureHoldsClaims = vi.hoisted(() => vi.fn());
 vi.mock("./BuildControlsDialog", () => ({
   BuildControlsDialog: ({
     onBuildChanged,
+    holdsClaims,
   }: {
     onBuildChanged: (build: Build) => void;
+    holdsClaims: boolean;
   }) => {
     useEffect(() => {
       controlsMounted();
       captureOverride(onBuildChanged);
     }, [onBuildChanged]);
+    useEffect(() => {
+      captureHoldsClaims(holdsClaims);
+    }, [holdsClaims]);
     return null;
   },
 }));
@@ -145,6 +151,7 @@ describe("BuildView header and tool-and-info bar", () => {
     mockEnvironmentId = "env-1";
     controlsMounted.mockClear();
     captureOverride.mockClear();
+    captureHoldsClaims.mockClear();
     vi.mocked(fetchBuild).mockResolvedValue(makeBuild());
     vi.mocked(fetchTasksInBuild).mockResolvedValue([makeTask()]);
     vi.mocked(fetchBuildGraph).mockResolvedValue({ nodes: [], edges: [] });
@@ -528,6 +535,53 @@ describe("BuildView header and tool-and-info bar", () => {
       await Promise.resolve();
     });
     expect(spinning()).toBe(true);
+  });
+
+  // The gate reads `status`/`status_build_id`, which is what
+  // `GET /builds/{id}/tasks` actually returns. It once read the
+  // `latest_*` pair, which that endpoint does not populate — so the
+  // predicate was false for every task and the gate never fired, while
+  // tests whose fixtures invented those fields passed happily. This
+  // fixture carries only what the endpoint sends.
+  it("sees a claim this build holds, from the fields the endpoint sends", async () => {
+    const held: Task = {
+      ...makeTask({ status: "suspended" }),
+      status_build_id: BUILD_ID,
+    };
+    delete (held as Partial<Task>).latest_status;
+    delete (held as Partial<Task>).latest_status_build_id;
+    vi.mocked(fetchTasksInBuild).mockResolvedValue([held]);
+
+    renderView();
+    await screen.findByText("golden-diamond-28");
+
+    await waitFor(() => expect(captureHoldsClaims.mock.calls.at(-1)?.[0]).toBe(true));
+  });
+
+  // `status_build_id` is null for rows predating status denormalisation.
+  // A running task whose holder cannot be named might be this build's.
+  it("counts a claim whose owner is unknown", async () => {
+    const orphan: Task = { ...makeTask({ status: "running" }) };
+    delete (orphan as Partial<Task>).status_build_id;
+    vi.mocked(fetchTasksInBuild).mockResolvedValue([orphan]);
+
+    renderView();
+    await screen.findByText("golden-diamond-28");
+
+    await waitFor(() => expect(captureHoldsClaims.mock.calls.at(-1)?.[0]).toBe(true));
+  });
+
+  it("reports no claim when the holder is a different build", async () => {
+    const elsewhere: Task = {
+      ...makeTask({ status: "running" }),
+      status_build_id: "02b1d6d4-0000-7000-8000-000000000000",
+    };
+    vi.mocked(fetchTasksInBuild).mockResolvedValue([elsewhere]);
+
+    renderView();
+    await screen.findByText("golden-diamond-28");
+
+    await waitFor(() => expect(captureHoldsClaims.mock.calls.at(-1)?.[0]).toBe(false));
   });
 
   it("says nothing about a config the build never set", async () => {

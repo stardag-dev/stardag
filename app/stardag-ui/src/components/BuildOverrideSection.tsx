@@ -19,25 +19,19 @@ const ACTIONS: {
     action: "complete",
     label: "Mark completed",
     dot: "bg-green-500",
-    effect:
-      "Records this build as completed. Use it to reconcile a record that is " +
-      "wrong — most often a build whose roots were finished by another build.",
+    effect: "Records completion.",
   },
   {
     action: "fail",
     label: "Mark failed",
     dot: "bg-red-500",
-    effect:
-      "Records this build as failed. It does not reach the execution " +
-      "backend, so anything already running carries on.",
+    effect: "Releases the claims and skips the tasks blocked behind the failure.",
   },
   {
     action: "cancel",
     label: "Cancel build",
     dot: "bg-gray-500",
-    effect:
-      "Records this build as cancelled. It does not reach the execution " +
-      "backend, so anything already running carries on.",
+    effect: "Releases the build's claims; other builds may take its tasks over.",
   },
 ];
 
@@ -46,15 +40,31 @@ interface BuildOverrideSectionProps {
   environmentId: string;
   buildStatus: BuildStatus;
   /**
-   * Whether the build still has executions running.
+   * Whether the build holds any execution claim.
    *
-   * Three values, not two. `"unknown"` is the scan still running or
-   * failed, and it has to be distinguishable: treating it as `"none"`
-   * silently withholds the warning that is the whole reason these two
-   * controls share a dialog, and it withholds it in the state where the
-   * operator has *least* information.
+   * Binary because the caller answers it from the build's own task list,
+   * which is complete and build-scoped. It was briefly three-valued when
+   * it was inferred from the stop scan, which could be stale, truncated,
+   * or blind to a suspended claim — an instrument that could not answer
+   * the question being asked of it.
    */
-  liveExecutions: "unknown" | "none" | "some";
+  holdsClaims: boolean;
+  /**
+   * Whether any of those claims has a running execution behind it.
+   *
+   * A separate question from `holdsClaims`, and the two genuinely
+   * differ: a SUSPENDED task holds a claim with nothing running. Using
+   * one for both is how a suspended-only build gets told it has "tasks
+   * running" and is sent to a stop command with nothing to stop.
+   *
+   * Three-valued where `holdsClaims` is binary, because the two are
+   * answered by different sources: claims come from the build's own
+   * complete task list, while this comes from the stop scan, which has
+   * not answered yet on first paint and may fail. For a *warning*,
+   * "not known" has to behave like "maybe" — withholding it while
+   * unsure is the one direction that costs something.
+   */
+  runningExecutions: "unknown" | "none" | "some";
   onChanged: (build: Build) => void;
 }
 
@@ -67,28 +77,27 @@ interface BuildOverrideSectionProps {
  * a panel below it, so the obvious-looking move on a build you wanted
  * stopped was to pick "Cancel" — which writes one BUILD_CANCELLED event
  * and nothing else, leaving every container running. Putting them in one
- * dialog, with the record on top and the work below, is what makes the
+ * dialog — the work first, the record after it — is what makes the
  * choice visible.
  *
- * The copy deliberately says nothing about what an override does to the
- * *claims*, in either direction. That behaviour has now changed twice
- * under this file: before STA-81 a cancel released none of them, and
- * since STA-81 both cancel and fail release them all. Each time, copy
- * that named the claims went stale the moment the server moved, and
- * once it went stale in the worst way — asserting the opposite of the
- * truth about a destructive action.
+ * **The copy names the claims exactly where an action changes them**,
+ * and nowhere else. That rule replaced an earlier one — say nothing
+ * about claims at all — which was right only while the behaviour was in
+ * flight: before STA-81 a cancel released none of them, and since
+ * STA-81 both cancel and fail release them all, so for a day no
+ * sentence was true on both sides and silence was the only honest
+ * option. The behaviour has settled, so accuracy is now the better
+ * constraint, and a test pins each sentence to it.
  *
- * What does not move is the fact the decision actually turns on: an
- * override edits the record and does not stop what is running. That is
- * true on both sides of every change so far, so it is what is said
- * here, and the claim semantics are left to the CLI docs that own
- * them.
+ * What still does not move, and leads every description here: an
+ * override edits the record and does not stop what is running.
  */
 export function BuildOverrideSection({
   buildId,
   environmentId,
   buildStatus,
-  liveExecutions,
+  holdsClaims,
+  runningExecutions,
   onChanged,
 }: BuildOverrideSectionProps) {
   const { user } = useAuth();
@@ -110,6 +119,18 @@ export function BuildOverrideSection({
 
   const confirm = useCallback(async () => {
     if (!pending) return;
+    // Re-checked here, not only when the list was drawn. The scan
+    // refreshes underneath an open confirmation, so a task can start
+    // between choosing "Mark completed" and confirming it — and that is
+    // the one override that would strand its claim.
+    if (pending === "complete" && holdsClaims) {
+      setError(
+        "This build holds execution claims again, and Mark completed is the " +
+          "one outcome that releases none. Close and choose Cancel build or " +
+          "Mark failed.",
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     const userId = user?.profile?.sub;
@@ -129,11 +150,23 @@ export function BuildOverrideSection({
     } finally {
       if (alive.current) setBusy(false);
     }
-  }, [pending, buildId, environmentId, user?.profile?.sub, onChanged]);
+  }, [pending, holdsClaims, buildId, environmentId, user?.profile?.sub, onChanged]);
 
   if (!canOverrideStatus(buildStatus)) return null;
 
   const chosen = ACTIONS.find((a) => a.action === pending) ?? null;
+
+  // "Mark completed" is the one terminal override that releases nothing
+  // (STA-103), so offering it while the build holds any claim invites
+  // stranding every one of them until expiry.
+  //
+  // Keyed on claims, not on running work: a SUSPENDED task holds a claim
+  // with nothing running behind it, and it is the claim that completion
+  // fails to release. `runningExecutions` answers the other question and
+  // gates the cancel warning, which is about work that a stop command
+  // could end.
+  const completedIsSafe = !holdsClaims;
+  const offered = ACTIONS.filter((a) => a.action !== "complete" || completedIsSafe);
 
   return (
     // Named, so it is a landmark: this dialog has two halves that do
@@ -144,17 +177,16 @@ export function BuildOverrideSection({
         id={headingId}
         className="text-sm font-semibold text-gray-900 dark:text-gray-100"
       >
-        Override the recorded status
+        Record an outcome instead
       </h3>
       <p className="text-xs text-gray-600 dark:text-gray-400">
-        This changes what the registry says about the build.{" "}
-        <strong>It does not reach the execution backend</strong>, so nothing that is
-        running stops.
+        For a build that will not finish on its own. Changes the record only; nothing
+        running is stopped.
       </p>
 
       {chosen === null ? (
         <div className="flex flex-wrap gap-2">
-          {ACTIONS.map(({ action, label, dot }) => (
+          {offered.map(({ action, label, dot }) => (
             <button
               key={action}
               type="button"
@@ -168,6 +200,12 @@ export function BuildOverrideSection({
               {label}
             </button>
           ))}
+          {!completedIsSafe && (
+            <p className="w-full text-xs text-gray-500 dark:text-gray-400">
+              Mark completed is not offered while this build holds execution claims: it
+              is the one outcome that releases no claims.
+            </p>
+          )}
         </div>
       ) : (
         <div className="space-y-2 rounded-md border border-gray-300 bg-gray-50 px-3 py-2 dark:border-gray-600 dark:bg-gray-900/40">
@@ -177,20 +215,30 @@ export function BuildOverrideSection({
               the override is almost certainly not what was wanted —
               and when we cannot yet tell, saying nothing would be the
               same as saying there is none. */}
-          {chosen.action === "cancel" && liveExecutions === "unknown" && (
+          {/* Names the command rather than pointing at it. Every state
+              that produces "unknown" is a state in which the stop
+              section above rendered a notice instead of its children,
+              so there is no command on screen to point at. */}
+          {chosen.action === "cancel" && runningExecutions === "unknown" && (
             <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
-              Whether this build still has executions running is not known yet — the
-              list below has not finished loading, or could not be read. Cancelling here
-              would not stop them either way. If anything may still be running, stop it
-              with the command below rather than cancelling here.
+              Whether this build has executions running is not known yet. If any are,
+              cancelling here will not stop them.{" "}
+              <code>stardag builds stop {buildId}</code> ends them first and cancels the
+              build afterwards.
             </p>
           )}
-          {chosen.action === "cancel" && liveExecutions === "some" && (
+          {/* Names the command, like the "unknown" copy above, rather
+              than pointing at the stop section. That section draws the
+              command for most of this state but not all of it: ticking
+              rows and then filtering them out leaves it explaining that
+              no command is offered, and a warning that points at a place
+              has to be right about every state that reaches it. */}
+          {chosen.action === "cancel" && runningExecutions === "some" && (
             <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
               This build still has executions running, and cancelling here will not stop
-              them. The command below is the one that does: it ends the selected
-              containers first and cancels the build afterwards. Reach for it instead —
-              you do not need both.
+              them. <code>stardag builds stop {buildId}</code> is the command that does:
+              it ends the containers first and cancels the build afterwards. Reach for
+              it instead — you do not need both.
             </p>
           )}
 

@@ -18,7 +18,7 @@ import type {
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
-import { rootsSatisfiedFrom } from "../utils/claims";
+import { CLAIM_HOLDING_STATUSES, rootsSatisfiedFrom } from "../utils/claims";
 import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { BuildControlsDialog } from "./BuildControlsDialog";
@@ -366,6 +366,49 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // from the task list this view already fetched rather than from the frontier,
   // which only the scheduling panel holds; both call the same rule so the two
   // cannot disagree about the same build.
+  // Whether this build holds any execution claim, answered from its own
+  // task list rather than from the stop scan.
+  //
+  // The stop scan is the wrong instrument for this question: it asks for
+  // the *stoppable* statuses, and a SUSPENDED task holds a claim while
+  // having nothing to stop, so an empty stop list does not mean an empty
+  // claim list. It is also environment-wide and paginated, so it can
+  // truncate. This list is already fetched, already scoped to the build,
+  // and complete.
+  //
+  // **`status` and `status_build_id`, not the `latest_*` pair.** This
+  // list comes from `GET /builds/{id}/tasks`, whose
+  // `TaskWithStatusResponse` carries the global status as `status` and
+  // its owning build as `status_build_id`, and does not populate
+  // `latest_status`/`latest_status_build_id` at all. Reading the latter
+  // here compared `undefined` to a build id, so the predicate was false
+  // for every task and the gate silently never fired — the failure that
+  // looks like working code and passes any test whose fixture invents
+  // the fields.
+  //
+  // It is a snapshot, so it is a guard rather than a guarantee: a task
+  // can start between refreshes. The guarantee belongs server-side, and
+  // STA-103 owns it by making Mark completed release claims like the
+  // other two terminal overrides — after which this gate is redundant
+  // rather than load-bearing.
+  const holdsClaims = useMemo(
+    () =>
+      allTasks.some(
+        (t) =>
+          CLAIM_HOLDING_STATUSES.includes(t.status) &&
+          // An unknown owner counts as ours. `status_build_id` is null
+          // for rows predating status denormalisation, and a running
+          // task whose holder cannot be named might be this build's —
+          // so the two errors are a button withheld that could have
+          // been offered, or a claim stranded until its TTL expires.
+          // Only one of those is recoverable by waiting a moment.
+          (t.status_build_id === undefined ||
+            t.status_build_id === null ||
+            t.status_build_id === buildId),
+      ),
+    [allTasks, buildId],
+  );
+
   const rootsSuperseded = useMemo(() => {
     const statusById = new Map(
       allTasks.map((t) => [t.task_id, t.latest_status ?? t.status]),
@@ -602,6 +645,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                       buildId={buildId}
                       environmentId={activeEnvironment.id}
                       buildStatus={build.status}
+                      holdsClaims={holdsClaims}
                       refreshToken={refreshToken}
                       // Guarded rather than `setBuild` directly: an
                       // override is async, this view stays mounted

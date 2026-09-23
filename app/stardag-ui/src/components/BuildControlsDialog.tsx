@@ -67,6 +67,13 @@ interface BuildControlsDialogProps {
    */
   buildStatus: BuildStatus;
   /**
+   * Whether this build holds any execution claim, from its own task
+   * list. Not inferred from the stop scan below: that asks for the
+   * stoppable statuses only, so a SUSPENDED task — a claim with nothing
+   * to stop — is invisible to it, and it can truncate besides.
+   */
+  holdsClaims: boolean;
+  /**
    * Bumped by the parent on every refresh, so this dialog refetches in
    * step with the build view rather than running a timer of its own.
    */
@@ -104,6 +111,7 @@ export function BuildControlsDialog({
   buildId,
   environmentId,
   buildStatus,
+  holdsClaims,
   refreshToken = 0,
   onBuildChanged,
 }: BuildControlsDialogProps) {
@@ -272,9 +280,6 @@ export function BuildControlsDialog({
     (execution) =>
       !execution.stoppable && !pendingReasons.includes(execution.notStoppableReason),
   ).length;
-  const unspawned = chosen.filter((execution) =>
-    pendingReasons.includes(execution.notStoppableReason),
-  ).length;
 
   return (
     <>
@@ -307,41 +312,8 @@ export function BuildControlsDialog({
         title="Build controls"
         maxWidthClass="max-w-4xl"
       >
-        {/* The record first, then the work — and a rule between them,
-            because the whole difficulty is that these are two different
-            things and the UI used to present them as unrelated. */}
-        {canOverrideStatus(buildStatus) && (
-          <>
-            <BuildOverrideSection
-              buildId={buildId}
-              environmentId={environmentId}
-              buildStatus={buildStatus}
-              liveExecutions={
-                // `held` is null until the scan answers, and stays null if
-                // it fails. Both are "not known", and neither is "none".
-                held === null ? "unknown" : held.length > 0 ? "some" : "none"
-              }
-              onChanged={(updated) => {
-                setStatusNotice(`This build is now recorded as ${updated.status}.`);
-                onBuildChanged(updated);
-              }}
-            />
-            <hr className="my-4 border-gray-200 dark:border-gray-700" />
-          </>
-        )}
-
-        {statusNotice && (
-          <ResultBanner
-            tone="success"
-            className="mb-3"
-            onDismiss={() => setStatusNotice(null)}
-          >
-            {statusNotice} Nothing was stopped — see below for what is still running.
-          </ResultBanner>
-        )}
-
         <h3 className="mb-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
-          Stop running tasks
+          Stop what is running
         </h3>
         <StopDialogBody
           error={error}
@@ -351,12 +323,9 @@ export function BuildControlsDialog({
           buildId={buildId}
         >
           <p className="text-xs text-gray-600 dark:text-gray-400">
-            These are read off the task rows while this build still holds their claims,
-            which is the only moment the list is exact — releasing the claims lets
-            another build take a task over. Stopping the containers is the
-            operator&rsquo;s to do:{" "}
-            <strong>stardag never reaches the execution backend from here.</strong> Run
-            the command below, or open a call in Modal and kill it there.
+            Ends the listed Modal calls from your credentials, then cancels the build
+            and releases every claim it holds. Rows without a call id exit at their next
+            checkpoint.
           </p>
 
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -444,20 +413,14 @@ export function BuildControlsDialog({
               : `The command below names the ${chosen.length} you ticked.`}
           </p>
 
+          {/* The spawn-reporting explanation is gone: the section's own
+              first line already says rows without a call id exit at their
+              next checkpoint. What survives is the case that is permanent
+              rather than a moment — another backend entirely. */}
           {unreachable > 0 && (
             <p className="text-xs text-gray-600 dark:text-gray-400">
-              {unreachable} of these run on an executor stardag cannot stop. They are
-              listed so nothing is invisible; ending them is that backend&rsquo;s own
-              business.
-            </p>
-          )}
-
-          {unspawned > 0 && (
-            <p className="text-xs text-gray-600 dark:text-gray-400">
-              {unspawned} of these have no call id on their row, so the command has
-              nothing to cancel for them and they keep running. A spawn reports its id
-              within a container start — refresh, and anything still listed without one
-              is running in this build&rsquo;s own process.
+              {unreachable} run on an executor stardag cannot stop; ending those is that
+              backend&rsquo;s own business.
             </p>
           )}
 
@@ -473,9 +436,9 @@ export function BuildControlsDialog({
               No command is offered, because one with no targets would stop everything.
             </p>
           ) : (
-            <div className="space-y-1">
+            <div className="space-y-3 py-1">
               <div className="flex items-center gap-2">
-                <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded bg-gray-900 px-2 py-1 font-mono text-[11px] text-gray-100">
+                <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded bg-gray-900 px-3 py-2 font-mono text-[11px] text-gray-100">
                   {command}
                 </code>
                 <button
@@ -487,10 +450,7 @@ export function BuildControlsDialog({
                 </button>
               </div>
               <p className="text-xs text-gray-600 dark:text-gray-400">
-                It stops these calls first and cancels the build afterwards, in that
-                order — so <strong>this is the whole operation</strong>, and there is no
-                need to override the status above as well. Add <code>--dry-run</code> to
-                see its own list before anything happens.
+                Add <code>--dry-run</code> to see its own list before anything happens.
                 {excluded > 0 && (
                   <>
                     {" "}
@@ -512,6 +472,65 @@ export function BuildControlsDialog({
             </p>
           )}
         </StopDialogBody>
+
+        {/* The work first, then the record. Stopping is what an
+            operator opening this dialog almost always came for, and
+            the rule between the two halves is doing the work the old
+            separate controls did not: these act on different things.
+            The notice sits outside the override block because a
+            successful override can take the build out of the
+            overridable statuses, which unmounts that block. */}
+        {(canOverrideStatus(buildStatus) || statusNotice) && (
+          <hr className="my-4 border-gray-200 dark:border-gray-700" />
+        )}
+
+        {canOverrideStatus(buildStatus) && (
+          <BuildOverrideSection
+            buildId={buildId}
+            environmentId={environmentId}
+            buildStatus={buildStatus}
+            holdsClaims={holdsClaims}
+            // The stop scan answers this one: it lists exactly the
+            // executions that can be ended, which a suspended claim is
+            // not one of.
+            //
+            // Empty is only "none" from an *exhaustive* scan that
+            // answered *just now*. Three things break that, and each
+            // leaves a "none" the operator should not be shown:
+            //
+            //  - `held === null`: no scan has answered yet.
+            //  - a truncated empty result: it found nothing only because
+            //    it stopped looking, and this build's executions can sit
+            //    entirely on pages it never read.
+            //  - `error`: a refresh failed, and the catch leaves the
+            //    previous `held` in place — so an empty answer from
+            //    minutes ago would keep reading as a fresh one.
+            //
+            // All three are "unknown", which for a warning behaves like
+            // "maybe".
+            runningExecutions={
+              held === null || error !== null || (truncated && held.length === 0)
+                ? "unknown"
+                : held.length > 0
+                  ? "some"
+                  : "none"
+            }
+            onChanged={(updated) => {
+              setStatusNotice(`This build is now recorded as ${updated.status}.`);
+              onBuildChanged(updated);
+            }}
+          />
+        )}
+
+        {statusNotice && (
+          <ResultBanner
+            tone="success"
+            className="mt-3"
+            onDismiss={() => setStatusNotice(null)}
+          >
+            {statusNotice} Nothing running was stopped.
+          </ResultBanner>
+        )}
       </Modal>
     </>
   );
@@ -578,7 +597,7 @@ function StopDialogBody({
     }
     return (
       <p role="status" className="text-xs text-gray-600 dark:text-gray-400">
-        This build is holding no execution claims, so it has nothing running to stop.
+        This build has nothing running that can be stopped from here.
       </p>
     );
   }

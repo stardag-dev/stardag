@@ -16,7 +16,7 @@ vi.mock("../context/AuthContext", () => ({
   useAuth: () => ({ user: { profile: { sub: "user-1" } } }),
 }));
 
-import { cancelBuild, completeBuild, fetchTasks } from "../api/tasks";
+import { cancelBuild, completeBuild, failBuild, fetchTasks } from "../api/tasks";
 
 const BUILD = "11111111-1111-1111-1111-111111111111";
 const OTHER_BUILD = "22222222-2222-2222-2222-222222222222";
@@ -76,12 +76,13 @@ function answerWith(tasks: Task[], total = tasks.length) {
 
 const onBuildChanged = vi.fn();
 
-function renderPanel(buildStatus: BuildStatus = "running") {
+function renderPanel(buildStatus: BuildStatus = "running", holdsClaims = true) {
   return render(
     <BuildControlsDialog
       buildId={BUILD}
       environmentId="env-1"
       buildStatus={buildStatus}
+      holdsClaims={holdsClaims}
       refreshToken={0}
       onBuildChanged={onBuildChanged}
     />,
@@ -104,10 +105,30 @@ beforeEach(() => {
   vi.mocked(fetchTasks).mockReset();
   vi.mocked(cancelBuild).mockReset();
   vi.mocked(completeBuild).mockReset();
+  vi.mocked(failBuild).mockReset();
   onBuildChanged.mockReset();
 });
 
 describe("BuildControlsDialog", () => {
+  // The suspended case the two signals exist for: a claim with nothing
+  // behind it to stop. The stop half must not call that "no claims", and
+  // the cancel warning must not send the user to a command with nothing
+  // to do — while Mark completed is still withheld.
+  it("separates a held claim from a running execution", async () => {
+    answerWith([]);
+    const user = userEvent.setup();
+    renderPanel("running", true);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+
+    expect(
+      await screen.findByText(/nothing running that can be stopped from here/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Cancel build" }));
+    expect(screen.queryByText(/cancelling here will not stop them/i)).toBeNull();
+  });
+
   it("says nothing is running rather than showing an empty dialog", async () => {
     // As a band above the DAG this rendered nothing at all, which was
     // right for something that appeared unbidden. In a dialog somebody
@@ -115,7 +136,9 @@ describe("BuildControlsDialog", () => {
     answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
     const user = userEvent.setup();
     await openDialog(user);
-    expect(await screen.findByText(/holding no execution claims/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/nothing running that can be stopped from here/i),
+    ).toBeInTheDocument();
   });
 
   it("fetches nothing until the dialog is opened", async () => {
@@ -410,7 +433,9 @@ describe("BuildControlsDialog", () => {
     await user.click(await screen.findByRole("button", { name: "Build controls" }));
 
     expect(screen.getByText("not recorded yet")).toBeInTheDocument();
-    expect(screen.getByText(/have no call id on their row/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Rows without a call id exit at their next checkpoint/),
+    ).toBeInTheDocument();
     // The pending wording, not the other-executor one.
     expect(screen.queryByText(/executor stardag cannot stop/)).toBe(null);
   });
@@ -432,8 +457,10 @@ describe("BuildControlsDialog", () => {
 
     // Ambiguous, so it is grouped with the pending rows and the wording
     // names both possibilities rather than promising a call id.
-    expect(screen.getByText(/have no call id on their row/)).toBeInTheDocument();
-    expect(screen.getByText(/own process/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Rows without a call id exit at their next checkpoint/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("not recorded yet")).toBeInTheDocument();
     expect(screen.queryByText(/executor stardag cannot stop/)).toBe(null);
   });
 
@@ -444,25 +471,17 @@ describe("BuildControlsDialog", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("gateway timeout");
   });
 
-  // The warning is the reason these two controls share a dialog, so the
-  // states where it is withheld matter as much as the state where it
-  // shows. "Not known yet" is not "none".
-  it("warns while the scan is still running", async () => {
+  // The warning is the reason these two controls share a dialog. It is
+  // driven by the build's own task list now, so it does not depend on
+  // whether the stop scan has answered — it is right from first paint.
+  it("warns about running work before the stop scan has answered", async () => {
     vi.mocked(fetchTasks).mockReturnValue(new Promise(() => {}) as never);
     const user = userEvent.setup();
-    renderPanel();
+    renderPanel("running", true);
     await user.click(screen.getByRole("button", { name: "Build controls" }));
 
     await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
-  });
-
-  it("warns when the scan failed, rather than implying nothing is running", async () => {
-    vi.mocked(fetchTasks).mockRejectedValue(new Error("gateway timeout"));
-    const user = userEvent.setup();
-    await openDialog(user);
-
-    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    // Not known is not none, for a warning.
     expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
   });
 
@@ -481,6 +500,7 @@ describe("BuildControlsDialog", () => {
         buildId={BUILD}
         environmentId="env-1"
         buildStatus="completed"
+        holdsClaims
         refreshToken={0}
         onBuildChanged={onBuildChanged}
       />,
@@ -491,20 +511,20 @@ describe("BuildControlsDialog", () => {
 
   it("confirms an override where the override section cannot", async () => {
     answerWith([makeTask()]);
-    vi.mocked(completeBuild).mockResolvedValue({
+    vi.mocked(failBuild).mockResolvedValue({
       id: BUILD,
-      status: "completed",
+      status: "failed",
     } as never);
     const user = userEvent.setup();
     await openDialog(user);
 
-    await user.click(await screen.findByRole("button", { name: "Mark completed" }));
-    await user.click(screen.getByRole("button", { name: "Mark completed" }));
+    await user.click(await screen.findByRole("button", { name: "Mark failed" }));
+    await user.click(screen.getByRole("button", { name: "Mark failed" }));
 
     // The section itself unmounts once the status is no longer
     // overridable, so the confirmation has to live outside it.
-    expect(await screen.findByText(/now recorded as completed/i)).toBeInTheDocument();
-    expect(screen.getByText(/Nothing was stopped/i)).toBeInTheDocument();
+    expect(await screen.findByText(/now recorded as failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/Nothing running was stopped/i)).toBeInTheDocument();
   });
 
   // Auto-refresh re-runs the effect every 5s and a scan is up to 20
@@ -522,6 +542,7 @@ describe("BuildControlsDialog", () => {
           buildId={BUILD}
           environmentId="env-1"
           buildStatus="running"
+          holdsClaims
           refreshToken={token}
           onBuildChanged={onBuildChanged}
         />,
@@ -554,6 +575,7 @@ describe("BuildControlsDialog", () => {
         buildId={BUILD}
         environmentId="env-1"
         buildStatus="running"
+        holdsClaims
         refreshToken={1}
         onBuildChanged={onBuildChanged}
       />,
@@ -572,31 +594,72 @@ describe("BuildControlsDialog", () => {
   // stopped, "Cancel" looked like the answer, and it releases the claims
   // while every container runs on.
 
-  // Twice now the server has changed what an override does to the
-  // claims — none released before STA-81, all released after — and both
-  // times this copy went stale, once asserting the exact opposite of the
-  // truth about a destructive action. The rule it settled on is that the
-  // copy says what does not move: an override edits the record and does
-  // not stop what is running. This test pins the silence, so the next
-  // server change cannot quietly make the dialog wrong again.
-  it("says nothing about claims in either direction", async () => {
+  // #375 pinned this copy to say *nothing* about claims, because the
+  // behaviour was mid-flight: STA-81 was about to make a terminal
+  // transition release them, and no sentence was true on both sides. It
+  // has landed, so the honest constraint is no longer silence but
+  // accuracy — each action names the claims exactly when it changes
+  // them. Same discipline, a settled fact to attach it to.
+  it("names the claims exactly where the action changes them", async () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();
     await openDialog(user);
 
-    // Scoped to the override half, and rejecting the *word*. Scanning
-    // the whole dialog would have tested the stop section's copy, which
-    // legitimately does discuss claims; and rejecting two particular
-    // phrasings would let "the claims remain held" through, which is
-    // just as much a promise this must not make.
     const override = () =>
-      screen.getByRole("region", { name: /Override the recorded status/ });
+      screen.getByRole("region", { name: /Record an outcome instead/ });
 
-    for (const label of ["Mark completed", "Mark failed", "Cancel build"]) {
-      await user.click(await screen.findByRole("button", { name: label }));
-      expect(override().textContent ?? "").not.toMatch(/claim/i);
-      await user.click(screen.getByRole("button", { name: "Back" }));
-    }
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    expect(override().textContent ?? "").toMatch(/releases the build's claims/i);
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    await user.click(screen.getByRole("button", { name: "Mark failed" }));
+    expect(override().textContent ?? "").toMatch(/releases the claims/i);
+    await user.click(screen.getByRole("button", { name: "Back" }));
+  });
+
+  // The one terminal override that releases nothing (STA-103), so it is
+  // withheld while the build holds any claim. Gated on `holdsClaims`,
+  // which comes from the build's own task list and includes SUSPENDED —
+  // not on the stop scan, which cannot see a claim with nothing to stop.
+  it("withholds Mark completed while the build holds claims", async () => {
+    answerWith([makeTask()]);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
+    expect(
+      screen.getByText(/is the one outcome that releases no claims/i),
+    ).toBeInTheDocument();
+  });
+
+  // The gate reads the build's own task list, not the stop scan — which
+  // asks for the *stoppable* statuses, so a SUSPENDED task holds a claim
+  // it cannot see, and which can truncate besides. A build whose only
+  // task is suspended has an empty stop list and a held claim.
+  it("withholds Mark completed for a claim the stop list cannot see", async () => {
+    answerWith([]);
+    const user = userEvent.setup();
+    renderPanel("running", true);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+
+    expect(
+      await screen.findByText(/nothing running that can be stopped from here/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
+    expect(
+      screen.getByText(/is the one outcome that releases no claims/i),
+    ).toBeInTheDocument();
+  });
+
+  it("offers Mark completed once the build holds no claims", async () => {
+    answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
+    const user = userEvent.setup();
+    renderPanel("running", false);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+
+    expect(
+      await screen.findByRole("button", { name: "Mark completed" }),
+    ).toBeInTheDocument();
   });
 
   it("warns that cancelling does not stop what is running", async () => {
@@ -604,39 +667,142 @@ describe("BuildControlsDialog", () => {
     const user = userEvent.setup();
     await openDialog(user);
 
-    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    // The section's own line carries the non-effect for every action;
+    // the per-action warning carries the one that only bites while
+    // something is actually running.
+    expect(screen.getByText(/nothing running is stopped/i)).toBeInTheDocument();
 
-    // The claim the copy must not make is that cancelling stops
-    // anything: `POST /cancel` without `cascade` writes one event.
-    expect(
-      screen.getByText(
-        /does not reach the execution backend, so anything already running carries on/i,
-      ),
-    ).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
     expect(screen.getByText(/cancelling here will not stop them/i)).toBeInTheDocument();
     expect(
-      screen.getByText(
-        /ends the selected containers first and cancels the build afterwards/i,
-      ),
+      screen.getByText(/ends the containers first and cancels the build afterwards/i),
     ).toBeInTheDocument();
-    // Nothing happened yet: the first click only asks.
     expect(cancelBuild).not.toHaveBeenCalled();
   });
 
-  it("says the command needs no override alongside it", async () => {
+  // Ticking a row and then filtering it out leaves the stop section
+  // explaining that no command is offered. A warning that pointed at
+  // "the command above" would be pointing at that explanation.
+  it("keeps the warning usable when the stop section offers no command", async () => {
+    answerWith([
+      makeTask({
+        task_id: "gpu-task",
+        task_name: "Featurise",
+        latest_executor_metadata: { function_name: "worker_gpu" },
+      }),
+      makeTask({
+        task_id: "cpu-task",
+        task_name: "Aggregate",
+        latest_executor_metadata: { function_name: "worker_cpu" },
+      }),
+    ]);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    // Tick one row, then narrow to the other: nothing ticked is shown,
+    // so there is no command to draw.
+    const rows = await screen.findAllByRole("checkbox");
+    await user.click(rows[0]);
+    await user.selectOptions(screen.getByLabelText("Worker"), "cpu");
+    expect(screen.getByText(/No command is offered/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel build" }));
+    const warning = screen
+      .getByText(/cancelling here will not stop them/i)
+      .closest("p");
+    expect(warning?.textContent).toContain(`stardag builds stop ${BUILD}`);
+    expect(warning?.textContent).not.toMatch(/command above|command below/i);
+  });
+
+  // The old copy said in words that no override was needed alongside the
+  // command. The structure says it now — stop first, record second — so
+  // what has to hold is that the stop line states the build is cancelled
+  // and its claims released, which is what makes an override redundant.
+  it("says the command cancels the build and releases its claims", async () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();
     await openDialog(user);
 
     expect(
-      await screen.findByText(/no need to override the status above as well/i),
+      await screen.findByText(
+        /then cancels the build and releases every claim it holds/i,
+      ),
     ).toBeInTheDocument();
   });
 
-  it("does not warn about running work when there is none", async () => {
+  // An empty truncated scan found nothing only because it stopped
+  // looking; this build's executions can sit on pages it never read.
+  it("warns about running work when a truncated scan found none", async () => {
+    answerWith(
+      [makeTask({ latest_status_build_id: OTHER_BUILD })],
+      MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
+    );
+    const user = userEvent.setup();
+    renderPanel("running", true);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
+  });
+
+  // A failed refresh leaves the previous result in place, so an empty
+  // answer from minutes ago would otherwise keep reading as a fresh one.
+  it("warns about running work once a refresh of an empty scan fails", async () => {
+    answerWith([]);
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <BuildControlsDialog
+        buildId={BUILD}
+        environmentId="env-1"
+        buildStatus="running"
+        holdsClaims={true}
+        refreshToken={0}
+        onBuildChanged={onBuildChanged}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+    await screen.findByText(/nothing running that can be stopped/i);
+
+    vi.mocked(fetchTasks).mockRejectedValue(new Error("network down"));
+    rerender(
+      <BuildControlsDialog
+        buildId={BUILD}
+        environmentId="env-1"
+        buildStatus="running"
+        holdsClaims={true}
+        refreshToken={1}
+        onBuildChanged={onBuildChanged}
+      />,
+    );
+    await screen.findByText(/Could not read this build/i);
+
+    await user.click(screen.getByRole("button", { name: "Cancel build" }));
+    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
+  });
+
+  // The unknown states are exactly the states in which the stop section
+  // renders a notice instead of the command, so the warning must name
+  // the command rather than point at a place on screen.
+  it("names the stop command in the warning rather than pointing at it", async () => {
+    answerWith(
+      [makeTask({ latest_status_build_id: OTHER_BUILD })],
+      MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
+    );
+    const user = userEvent.setup();
+    renderPanel("running", true);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    const warning = screen.getByText(/is not known yet/i).closest("p");
+    expect(warning?.textContent).toContain(`stardag builds stop ${BUILD}`);
+    expect(warning?.textContent).not.toMatch(/command above|command below/i);
+  });
+
+  it("does not warn about running work when the build holds no claims", async () => {
     answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
     const user = userEvent.setup();
-    await openDialog(user);
+    renderPanel("running", false);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
 
     await user.click(await screen.findByRole("button", { name: "Cancel build" }));
     expect(screen.queryByText(/cancelling here will not stop them/i)).toBeNull();
@@ -644,16 +810,16 @@ describe("BuildControlsDialog", () => {
 
   it("overrides only after the second, confirming click", async () => {
     answerWith([makeTask()]);
-    vi.mocked(completeBuild).mockResolvedValue({ id: BUILD } as never);
+    vi.mocked(failBuild).mockResolvedValue({ id: BUILD } as never);
     const user = userEvent.setup();
     await openDialog(user);
 
-    await user.click(await screen.findByRole("button", { name: "Mark completed" }));
-    expect(completeBuild).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "Mark failed" }));
+    expect(failBuild).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Mark completed" }));
+    await user.click(screen.getByRole("button", { name: "Mark failed" }));
     await waitFor(() =>
-      expect(completeBuild).toHaveBeenCalledWith(BUILD, "env-1", "user-1"),
+      expect(failBuild).toHaveBeenCalledWith(BUILD, "env-1", "user-1"),
     );
     expect(onBuildChanged).toHaveBeenCalled();
   });

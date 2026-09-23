@@ -373,7 +373,7 @@ describe("BuildSchedulingPanel", () => {
       screen.getByText(/1 task blocked by 1 upstream held outside this build/),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Release claim on GrindBeans" }),
+      screen.getByRole("button", { name: "Release claim and retry on GrindBeans" }),
     ).toBeInTheDocument();
 
     // And the reasoning, with no second click.
@@ -568,18 +568,20 @@ describe("BuildSchedulingPanel", () => {
     await openScheduling();
 
     await user.click(
-      await screen.findByRole("button", { name: "Release claim on GrindBeans" }),
+      await screen.findByRole("button", {
+        name: "Release claim and retry on GrindBeans",
+      }),
     );
     // The dialog names the build the action is addressed to.
     expect(
-      await screen.findByText("Release this task's execution claim"),
+      await screen.findByText("Release this task's claim and let the build retry it"),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/a different build from the one you are viewing/),
     ).toBeInTheDocument();
     expect(cancelTask).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Release claim" }));
+    await user.click(screen.getByRole("button", { name: "Release claim and retry" }));
     await waitFor(() =>
       // Addressed to the OWNING build, not the one on screen.
       expect(cancelTask).toHaveBeenCalledWith(OWNER_BUILD, "tid-grind-beans", "env-1"),
@@ -605,7 +607,7 @@ describe("BuildSchedulingPanel", () => {
     ).toBeInTheDocument();
     // A failed task holds no claim, so there is nothing to release.
     expect(
-      screen.queryByRole("button", { name: "Release claim on GrindBeans" }),
+      screen.queryByRole("button", { name: "Release claim and retry on GrindBeans" }),
     ).not.toBeInTheDocument();
 
     await user.click(
