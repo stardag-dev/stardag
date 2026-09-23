@@ -1,75 +1,72 @@
-"""Deployment records: which code versions of an app have been deployed.
+"""``deployment``: one deployed (or locally derived) code version of an app.
 
-A deployment here is exactly the execution backend's: one code version of
-one app name. The backend keeps one live per name — a redeploy replaces it,
-in-flight inputs finish on the old version and every new spawn lands on the
-new one — and a running build **follows** it: the first scheduler pass on
-new code re-plans the build under its own structure scope. So nothing is
-kept alive beside the current deployment and nothing needs collecting;
-the record is provenance ("which code was live when") and the answer to
-"what is current", which is simply the newest row for the app.
-
-See ``docs/design/scope-keyed-dependency-structure.md``, "Rollover".
+Half of the deterministic scope ``(deployment_id, settings_hash)``. A Modal
+deployment is created by ``POST /deployments`` **before** the deploy (the
+server assigns ``generation``) and activated after it succeeded; a
+``local`` one is looked up or created by ``(environment, kind, code_id)``
+and born activated. "Current" for an app is the **activated row with the
+highest generation**. Referenced ``ON DELETE RESTRICT`` from everywhere, so
+retention of a retired deployment's instances has to be explicit.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint, Uuid
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import DateTime, Index, Integer, String, UniqueConstraint, Uuid, text
+from sqlalchemy.orm import Mapped, mapped_column
 
-from stardag_api.models.base import Base, TimestampMixin, generate_uuid7, utc_now
-
-if TYPE_CHECKING:
-    from stardag_api.models.environment import Environment
+from stardag_api.models.base import Base, EnvironmentScopedMixin, pg_enum
+from stardag_api.models.enums import DeploymentKind
 
 
-class Deployment(Base, TimestampMixin):
-    """One deployed code version of one app, in one environment."""
+class Deployment(EnvironmentScopedMixin, Base):
+    """One deployment: a scope half, and the answer to "what is current"."""
 
-    __tablename__ = "deployments"
+    __tablename__ = "deployment"
     __table_args__ = (
+        UniqueConstraint("environment_id", "id", name="uq_deployment_environment_id"),
         UniqueConstraint(
-            "environment_id", "app_name", "code_id", name="uq_deployment_app_code"
-        ),
-        # The listing's question: the deployments of an app, newest first.
-        Index(
-            "ix_deployments_environment_app_deployed",
             "environment_id",
+            "kind",
             "app_name",
-            "deployed_at",
+            "generation",
+            name="uq_deployment_app_generation",
+        ),
+        Index(
+            "ix_deployment_app_generation_desc",
+            "environment_id",
+            "kind",
+            "app_name",
+            text("generation DESC"),
+        ),
+        # A local deployment is derived from its code id: one per code id.
+        Index(
+            "uq_deployment_local_code_id",
+            "environment_id",
+            "code_id",
+            unique=True,
+            postgresql_where=text("kind = 'local'"),
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        Uuid,
-        primary_key=True,
-        default=generate_uuid7,
+    # Client-minted (uuid7), baked into the image as STARDAG_DEPLOYMENT_ID.
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    kind: Mapped[DeploymentKind] = mapped_column(
+        pg_enum(DeploymentKind, "deployment_kind"), nullable=False
     )
-    environment_id: Mapped[UUID] = mapped_column(
-        Uuid,
-        ForeignKey("environments.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    # The app name as written and as deployed: what ``reactive_app_name``
-    # on a build holds, and what ticks and workers are spawned on.
     app_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    # The code identity baked into the deployment: a full git SHA for a
-    # clean tree, a UUID hex for a dirty one. The first component of every
-    # scope key a build planned on this deployment gets.
-    code_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    # When this code was (last) deployed. Refreshed when the same code is
-    # deployed again; the newest row per app is the current deployment.
+    code_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    image_id: Mapped[str | None] = mapped_column(String(128))
+    modal_app_id: Mapped[str | None] = mapped_column(String(64))
     deployed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utc_now
+        DateTime(timezone=True), nullable=False
     )
-    # The backend's own identifier for this deployment, when the deploy knew
-    # it: Modal's app id (``ap-...``). Refreshed on re-record, so the UI can
-    # link to the deployment the backend is actually running.
-    modal_app_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-
-    environment: Mapped[Environment] = relationship()
+    # Server-assigned at create, monotonic per (environment, kind, app_name).
+    # Order is fixed when a deploy *starts*, so a late record cannot roll a
+    # build back to older code.
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Set by /activate after the deploy succeeded (by the insert, for a
+    # local row). NULL rows are never current and cannot host a plan.
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
