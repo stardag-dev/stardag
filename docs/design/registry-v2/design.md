@@ -106,10 +106,13 @@ Hashing rules, stated so both hashes are pure functions of the body:
 - `task_id` is computed exactly as v1 computes it (uuid5 over the canonical
   hash-mode dump), minus the removed exclusion modes.
 - `instance_hash` is uuid5 over the canonical dump of **all** fields,
-  defaults included, in which a nested task contributes its own
-  `instance_hash` (not its `task_id` — otherwise two bodies could share one
-  instance hash at the nested level). Nested `StardagBaseModel`s carry
-  `significant` on their own fields, which affects `task_id` only.
+  defaults included. A nested task appears in that dump as its full body,
+  exactly as it must for the dump to deserialize, so the outer hash covers
+  the nested task's parameters in full. (It is not represented by its
+  `task_id`, which would let two bodies share one instance hash at the
+  nested level, and not by a nested hash of its own, which the body does
+  not contain.) Nested `StardagBaseModel`s carry `significant` on their own
+  fields, which affects `task_id` only.
 - The scope is a storage key for the body, not a hash input.
 - Rehydration of a body is strict for significant fields (the recomputed
   `task_id` must match) and lenient for non-significant ones: unknown keys
