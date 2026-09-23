@@ -36,7 +36,7 @@ from stardag import (
     TaskStruct,
     flatten_task_struct,
 )
-from stardag._core.instance import SeenInstances
+from stardag._core.instance import SeenInstances, extend_path
 from stardag._core.base_task import (
     _has_custom_run,
     _has_custom_run_aio,
@@ -791,8 +791,11 @@ async def build_aio(
     # finally below.
     _build_id_token = current_build_id_var.set(build_id)
 
-    async def discover(task: BaseTask) -> None:
+    async def discover(task: BaseTask, parent_path: str | None = None) -> None:
         """Recursively discover tasks, stopping at already-complete tasks.
+
+        ``parent_path`` is the construction path of the task that reached
+        this one (None for a root), for ``InstanceConflictError``.
 
         Discovery only populates local state and ``pending_registrations``;
         the actual ``task_register_bulk_aio`` call fires once via
@@ -816,8 +819,9 @@ async def build_aio(
         eliminate.
         """
         # Check if already discovered and reserve our spot (with lock)
+        path = extend_path(parent_path, task)
         async with discover_lock:
-            seen_instances.observe(task)
+            seen_instances.observe(task, path)
             if task.id in task_states:
                 done_event = discover_done[task.id]
                 already_seen = True
@@ -873,7 +877,7 @@ async def build_aio(
             # below.
             async with asyncio.TaskGroup() as tg:
                 for dep in static_deps:
-                    tg.create_task(discover(dep))
+                    tg.create_task(discover(dep, path))
 
             # Append self after children — preserves post-order within
             # subtree.
@@ -1134,9 +1138,13 @@ async def build_aio(
             # this way the upstream row exists when the edge insert runs,
             # and _reconcile_dependency_edges doesn't have to phantom-
             # create it.
+            parent_path = seen_instances.path_of(task.id) or extend_path(None, task)
             for dep in dynamic_deps:
                 if dep.id not in task_states:
-                    await discover(dep)
+                    await discover(dep, parent_path)
+                else:
+                    # Already planned: still one instance per task id.
+                    seen_instances.observe(dep, extend_path(parent_path, dep))
             await flush_pending_registrations()
 
             # Now record yielded deps as edges so the DAG view shows them.

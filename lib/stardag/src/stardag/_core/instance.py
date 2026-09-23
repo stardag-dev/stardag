@@ -138,6 +138,14 @@ def _differs(a: Any, b: Any) -> bool:
         return True
 
 
+def extend_path(parent_path: str | None, task: "BaseTask") -> str:
+    """The construction path of ``task`` reached from ``parent_path``:
+    ``"Root[1a2b3c4d] -> Mid[5e6f7a8b] -> Leaf[9c0d1e2f]"`` (task name and
+    the first eight hex digits of its task id, root first)."""
+    label = f"{task.get_name()}[{task.id.hex[:8]}]"
+    return label if parent_path is None else f"{parent_path} -> {label}"
+
+
 class SeenInstances:
     """The instances seen in one discovery pass, keyed by task id.
 
@@ -158,13 +166,19 @@ class SeenInstances:
     def __contains__(self, task_id: object) -> bool:
         return task_id in self._first
 
+    def path_of(self, task_id: UUID) -> str | None:
+        """The construction path recorded for ``task_id``'s first
+        construction, if it was observed with one."""
+        seen = self._first.get(task_id)
+        return None if seen is None else seen[1]
+
     def observe(self, task: "BaseTask", path: str | None = None) -> bool:
         """Record ``task``; return True the first time its task id is seen.
 
         Args:
             task: The task object reached by the walk.
-            path: How it was reached (e.g. ``"Root -> Mid -> task"``), for the
-                error message. Optional.
+            path: How it was reached, root first (see :func:`extend_path`),
+                for the error message. Optional.
 
         Raises:
             InstanceConflictError: ``task`` has the task id of an earlier
