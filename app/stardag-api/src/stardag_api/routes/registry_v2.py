@@ -31,6 +31,7 @@ from stardag_api.schemas_v2 import (
     StartRequest,
     TransitionResponse,
 )
+from stardag_api.routes.registry_v2_builds import router as builds_router
 from stardag_api.routes.registry_v2_scope import router as scope_router
 from stardag_api.services import builds, frontier, plans, registration, transitions
 from stardag_api.services.transitions import Transition
@@ -54,6 +55,7 @@ async def create_build(body: BuildCreate, db: Db, auth: Auth):
         description=body.description,
         root_task_ids=body.root_task_ids,
         user_id=auth.user.id if auth.user else None,
+        executor_metadata=body.executor_metadata,
     )
 
 
@@ -183,4 +185,5 @@ async def renew_claim(task_id: str, body: RenewRequest, db: Db, auth: Auth):
 
 # -- sub-routers ----------------------------------------------------------------
 
+router.include_router(builds_router)
 router.include_router(scope_router)

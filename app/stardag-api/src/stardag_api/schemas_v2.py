@@ -101,8 +101,11 @@ class BuildCreate(BaseModel):
     id: UUID | None = None
     name: str | None = Field(default=None, max_length=64)
     description: str | None = None
-    #: The request at completion-id level.
-    root_task_ids: list[str] = Field(default_factory=list)
+    #: The request at completion-id level; every plan's roots must match.
+    root_task_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        min_length=1
+    )
+    executor_metadata: dict[str, Any] | None = None
 
 
 class BuildResponse(BaseModel):
@@ -116,6 +119,35 @@ class BuildResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    last_active_at: datetime
+    is_resumed: bool
+    status_triggered_by_user_id: str | None
+    executor_metadata: dict[str, Any] | None
+
+
+class BuildCompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: Override outstanding members — never a missing seal or an excluded
+    #: root.
+    force: bool = False
+
+
+class BuildFailRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    error_message: str | None = None
+
+
+class BuildResumeRequest(BaseModel):
+    """The caller's scope, to reuse or reactivate its plan; omitted, the
+    resume only makes the build RUNNING again."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deployment_id: UUID | None = None
+    settings: dict[str, str] = Field(default_factory=dict)
+    executor_metadata: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +176,16 @@ class PlanResponse(BaseModel):
     sealed_at: datetime | None
     superseded_at: datetime | None
     created: bool
+
+
+class ResumeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    build: BuildResponse
+    #: The plan for the caller's scope, if one exists; None means discovery
+    #: runs and the caller creates it (``POST /builds/{id}/plans``).
+    plan: PlanResponse | None
+    changed: bool
 
 
 class MembersRequest(BaseModel):

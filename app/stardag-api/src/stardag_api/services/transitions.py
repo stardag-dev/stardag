@@ -85,6 +85,8 @@ class TransitionKind(str, enum.Enum):
     # Written by registration, from a driver's observation of the target.
     OBSERVE_COMPLETE = "observe_complete"
     INVALIDATE = "invalidate"
+    # Written by a build's terminal transition (complete / fail / cancel).
+    RELEASE = "release"
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,8 @@ class Transition:
     #: A claiming start's concurrency-limit keys, computed by the tick from
     #: the instance body it is about to run; replace the task's keys.
     limit_keys: tuple[str, ...] = ()
+    #: Why a claim is released (the build transition that released it).
+    reason: str | None = None
 
     @classmethod
     def start(
@@ -142,6 +146,10 @@ class Transition:
     @classmethod
     def retry(cls) -> Transition:
         return cls(TransitionKind.RETRY)
+
+    @classmethod
+    def release(cls, reason: str) -> Transition:
+        return cls(TransitionKind.RELEASE, reason=reason)
 
     @classmethod
     def renew(
@@ -308,6 +316,8 @@ async def transition_task(
         return await step.observe_complete()
     if kind is TransitionKind.INVALIDATE:
         return await step.invalidate()
+    if kind is TransitionKind.RELEASE:
+        return await step.release()
     raise AssertionError(kind)  # pragma: no cover
 
 
@@ -684,6 +694,28 @@ class _Step:
                 execution_id=str(eid),
             )
         t.claim_expires_at = self.now + _ttl(self.transition.claim_ttl_seconds)
+        await self.session.flush()
+        return self.outcome(applied=True)
+
+    async def release(self) -> TransitionOutcome:
+        """A build's terminal transition releases the claim its plan holds
+        (``claim_outcome = released``): the task goes CANCELLED — the build
+        stopped wanting it, which is not a result, so CANCELLED is
+        ACTIONABLE for every other build ("revocation is not a result").
+        A no-op unless ``plan_id`` holds the task's claim, live or lapsed.
+        The execution is not touched: it may still be running, and its
+        report, now late, is recorded and refused."""
+        t = self.task
+        if t.status != TaskStatus.RUNNING or t.claim_plan_id != self.plan_id:
+            return self.outcome(applied=False)
+        execution_id = t.execution_id
+        await self.close_claim(ClaimOutcome.RELEASED)
+        self.move(TaskStatus.CANCELLED)
+        await self.record(
+            EventType.TASK_CANCELLED,
+            execution_id=execution_id,
+            metadata={"released_by": self.transition.reason},
+        )
         await self.session.flush()
         return self.outcome(applied=True)
 

@@ -183,7 +183,7 @@ async def test_s15_crash_mid_registration_is_finished_by_a_resend(h: Harness):
     leaf = item("Leaf")
     root = item("Root", upstreams=[leaf])
     deployment = await h.new_deployment()
-    build = await h.new_build()
+    build = await h.new_build([root])
     plan_id = uuid4()
     plan = await h.plan(build, deployment, [root], plan_id=plan_id)
     assert plan.created and plan.activated_at is not None
@@ -387,8 +387,8 @@ async def test_s38_retrigger_with_a_changed_non_significant_root_field(h: Harnes
     ``root_instance_conflict``: a build is one request (roots recorded on
     the plan). The same roots are a lookup, not a second plan."""
     deployment = await h.new_deployment()
-    build = await h.new_build()
     root = item("Root", params={"day": 1}, extra={"label": "a"})
+    build = await h.new_build([root])
     first = await h.plan(build, deployment, [root])
 
     same = await h.plan(build, deployment, [root])
@@ -408,8 +408,8 @@ async def test_plans_are_generations_of_a_build_and_only_the_first_activates(
     server assigns ``generation`` per build; the first plan is activated on
     create, a replacement is not (it activates at seal)."""
     deployment = await h.new_deployment()
-    build = await h.new_build()
     root = item("Root")
+    build = await h.new_build([root])
     first = await h.plan(build, deployment, [root])
     second = await h.plan(build, deployment, [root], settings={"THREADS": "4"})
     assert (first.generation, second.generation) == (1, 2)
@@ -421,7 +421,7 @@ async def test_plans_are_generations_of_a_build_and_only_the_first_activates(
 async def test_create_plan_refuses_a_deployment_that_is_not_activated(h: Harness):
     """A deployment with ``activated_at IS NULL`` cannot host a plan (400)."""
     deployment = await h.new_deployment(activated=False)
-    build = await h.new_build()
+    build = await h.new_build([item("Root")])
     with pytest.raises(BadRequest) as exc:
         await h.plan(build, deployment, [item("Root")])
     assert exc.value.code == "deployment_not_activated"
@@ -504,8 +504,8 @@ async def test_seal_latest_request_wins_and_supersedes_the_active_plan(h: Harnes
     the same transaction; a plan with a higher-generation sibling is 409
     ``plan_superseded``."""
     deployment = await h.new_deployment()
-    build = await h.new_build()
     root = item("Root")
+    build = await h.new_build([root])
     p1 = await h.plan(build, deployment, [root])
     await h.register(p1.id, [root])
     await h.seal(p1.id)
@@ -523,10 +523,11 @@ async def test_seal_latest_request_wins_and_supersedes_the_active_plan(h: Harnes
     assert frontier.plan_id == p3.id
 
 
-async def test_seal_verifies_closure_over_edges_another_plan_added(h: Harness):
-    """``/seal`` verifies every edge from a member has its upstream as a
-    member. Another plan's expansion of a shared instance can add an edge
-    this plan does not hold; the closure step admits it."""
+async def test_seal_runs_the_closure_step_before_it_verifies(h: Harness):
+    """``/seal`` runs the closure step first, then verifies every edge from
+    a member has its upstream as a member. Another plan's expansion of a
+    shared instance can add an edge this plan does not hold; the closure
+    admits it, so a correct seal does not fail on it."""
     deployment = await h.new_deployment()
     u = item("U")
     x = item("X", upstreams=[u])
@@ -535,10 +536,24 @@ async def test_seal_verifies_closure_over_edges_another_plan_added(h: Harness):
     # B expands the same instance of X (same scope): edge X -> U.
     await h.planned([item("RB", upstreams=[x])], [u, x], deployment_id=deployment)
 
-    with pytest.raises(Conflict) as exc:
-        await h.seal(a.id)
-    assert exc.value.code == "plan_incomplete_registration"
-    closed = await h.closure(a.id)
-    assert closed.admitted == 1 and not closed.conflicts
-    assert (await h.members(a.id))[u.task_id]["admitted_by"] == "closure"
     assert (await h.seal(a.id)).sealed_at is not None
+    assert (await h.members(a.id))[u.task_id]["admitted_by"] == "closure"
+
+
+async def test_seal_refuses_when_its_closure_step_finds_a_conflict(h: Harness):
+    """A conflict the seal's closure step finds fails the build (committed)
+    and refuses the seal with ``instance_conflict``."""
+    deployment = await h.new_deployment()
+    u1 = item("U", extra={"mode": "fast"})
+    u2 = item("U", extra={"mode": "slow"})
+    x = item("X", upstreams=[u2])
+    root = item("RA", upstreams=[x])
+    build, plan = await h.planned(
+        [root], [u1, observed(unexpanded(x), True), root], deployment_id=deployment
+    )
+    await h.planned([item("RB", upstreams=[x])], [u2, x], deployment_id=deployment)
+
+    with pytest.raises(Conflict) as exc:
+        await h.seal(plan.id)
+    assert exc.value.code == "instance_conflict"
+    assert (await h.build(build))["status"] == "failed"

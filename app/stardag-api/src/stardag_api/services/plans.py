@@ -6,7 +6,7 @@ mechanism") and "Rollover" (the seal's deployment check).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -18,9 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
     AdmittedBy,
-    Build,
-    BuildStatus,
-    EventType,
     Plan,
     PlanMember,
     Task,
@@ -30,7 +27,8 @@ from stardag_api.models import (
 from stardag_api.models.base import utc_now
 from stardag_api.services import event_log
 from stardag_api.services.deployments import verify_deployment_current
-from stardag_api.services.errors import Conflict
+from stardag_api.services.builds import fail_build_for_conflicts
+from stardag_api.services.errors import Conflict, RecordedConflict
 from stardag_api.services.event_log import EventClock
 from stardag_api.services.registration import PlanState, get_plan, lock_build
 from stardag_api.services.registration_chunk import admit_members, differing_fields
@@ -63,8 +61,14 @@ class ClosureResult:
 async def seal_plan(
     session: AsyncSession, environment_id: UUID, plan_id: UUID
 ) -> PlanState:
-    """Verify the static phase is fully stated, then seal (and, for a
-    replacement, activate and supersede) in one transaction.
+    """Run the closure step, verify the static phase is fully stated, then
+    seal (and, for a replacement, activate and supersede) in one
+    transaction.
+
+    Closure first: an edge another plan added from a shared instance to an
+    instance this plan does not hold must not make a correct seal fail. A
+    conflict the closure finds fails the build (committed) and the seal is
+    refused with ``instance_conflict``.
 
     Idempotent by state: a sealed plan is returned unchanged.
     """
@@ -75,6 +79,17 @@ async def seal_plan(
         if plan.sealed_at is not None:
             return PlanState.of(plan)
 
+        closed = await close_plan(session, environment_id, plan, now=utc_now())
+        if closed.build_failed:
+            raise RecordedConflict(
+                "instance_conflict",
+                "the closure step reached a second instance of a member's"
+                " completion; the build is failed",
+                plan_id=str(plan.id),
+                conflicts=[
+                    {"task_id": c.task_id, "fields": c.fields} for c in closed.conflicts
+                ],
+            )
         await _verify_registration(session, plan)
         await verify_deployment_current(session, environment_id, plan.deployment_id)
         higher = await session.scalar(
@@ -263,65 +278,3 @@ async def close_plan(
     return ClosureResult(
         admitted=admitted, conflicts=conflicts, build_failed=build_failed
     )
-
-
-async def fail_build_for_conflicts(
-    session: AsyncSession,
-    environment_id: UUID,
-    plan: Plan,
-    conflicts: Sequence[ClosureConflict],
-    *,
-    at: datetime,
-) -> bool:
-    """Fail the build over closure conflicts (``BUILD_FAILED``), once.
-
-    Build lifecycle routes arrive in step 3; this is the one build
-    transition the static path itself needs. Returns True when the build is
-    failed (now or already, by this cause).
-    """
-    build = await session.scalar(
-        select(Build)
-        .where(Build.environment_id == environment_id, Build.id == plan.build_id)
-        .with_for_update(key_share=True)
-    )
-    assert build is not None  # FK
-    if build.status == BuildStatus.FAILED:
-        return True
-    message = "instance_conflict: " + "; ".join(
-        f"plan {plan.id} holds instance {c.member_instance_id} of task"
-        f" {c.task_id}, and an edge reaches instance {c.other_instance_id}"
-        f" (fields that differ: {', '.join(c.fields) or '-'})"
-        for c in conflicts
-    )
-    build.status = BuildStatus.FAILED
-    build.completed_at = at
-    build.last_active_at = at
-    build.is_resumed = False
-    build.status_triggered_by_user_id = None
-    await event_log.append(
-        session,
-        [
-            event_log.event_row(
-                environment_id,
-                EventType.BUILD_FAILED,
-                at=at,
-                build_id=build.id,
-                error_message=message,
-                metadata={
-                    "reason": "instance_conflict",
-                    "plan_id": str(plan.id),
-                    "conflicts": [
-                        {
-                            "task_id": c.task_id,
-                            "member_instance_id": str(c.member_instance_id),
-                            "other_instance_id": str(c.other_instance_id),
-                            "fields": c.fields,
-                        }
-                        for c in conflicts
-                    ],
-                },
-            )
-        ],
-    )
-    await session.flush()
-    return True

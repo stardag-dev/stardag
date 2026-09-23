@@ -162,7 +162,16 @@ async def create_plan(
         )
     async with transaction(session):
         now = utc_now()
-        await lock_build(session, environment_id, build_id)
+        build = await lock_build(session, environment_id, build_id)
+        requested = {r.task_id for r in roots}
+        if requested != set(build.root_task_ids):
+            raise BadRequest(
+                "root_mismatch",
+                "a plan's roots are the build's request: their task ids must be"
+                " the build's root_task_ids",
+                unexpected=sorted(requested - set(build.root_task_ids)),
+                missing=sorted(set(build.root_task_ids) - requested),
+            )
         deployment = await session.scalar(
             select(Deployment).where(
                 Deployment.environment_id == environment_id,

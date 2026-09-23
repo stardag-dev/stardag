@@ -30,9 +30,9 @@ async def test_s36_retried_granted_start_after_a_seal_is_a_no_op(h: Harness):
     ``plan_superseded``. The ordering of the two checks decides it; a
     different execution through the superseded plan is refused."""
     deployment = await h.new_deployment()
-    build = await h.new_build()
     t, w = item("T"), item("W")
     root = item("Root", upstreams=[t, w])
+    build = await h.new_build([root])
     p1 = await h.plan(build, deployment, [root])
     await h.register(p1.id, [t, w, root])
     await h.seal(p1.id)
