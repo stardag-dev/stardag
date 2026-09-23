@@ -57,14 +57,15 @@ architecture-health review, and v2 restates rather than reopens them:
   over different upstream sets; the duplicated upstream work is **accepted,
   not prevented**.
 - Environment variables may affect execution, never output or structure,
-  except through the deployment or `exec_config`, which are part of the
+  except through the deployment or `settings`, which are part of the
   scope by construction.
 - A build is a request, not an owner. The claim (RUNNING plus expiry,
   arbitrated `FOR UPDATE` in the same transaction as the event) is the only
   cross-build coordination. Nothing revokes an execution automatically; the
   server never reaches a backend; cancellation is cooperative.
-- COMPLETED is a fact about the world (the target exists). v2 adds one
-  explicit way to _withdraw_ it (below); nothing else can.
+- COMPLETED is a fact about the world (the target exists). v2 lets the
+  registry _follow_ that world when a target is observed missing (below);
+  nothing else withdraws a completion, and nobody can by fiat.
 - A build follows the live deployment: rollover re-plans it. Retraction of
   edges ("an edge is evidence asserted by an act") stays abandoned.
 - The registry is the scheduler state: a status write flags the reactive
@@ -109,6 +110,46 @@ Hashing rules, stated so both hashes are pure functions of the body:
   are dropped with a warning, missing ones take the class default. This is
   what lets an old plan's root bodies be re-read under new code at rollover.
 
+Three rules make the instance hash safe to build on:
+
+1. **The instance hash is the hash of the body, not of a separate view.**
+   `instance_hash = hash(canonical_json(body))`, where canonical means sorted
+   keys, sorted sets, compact separators, UTF-8. `instance_hash ↔ body` is
+   then 1:1 by construction — the hash is of the stored bytes — and the
+   server's `instance_body_conflict` reduces to "same hash, different bytes",
+   which can only be a client bug.
+2. **User control over hashing stays on `task_id` only.** Custom serializers
+   under the `"hash"` serialization mode and `compat_default` shape the
+   completion identity, which is the promise the user owns. The body has no
+   hash mode to customise: what the user controls there is ordinary pydantic
+   serialization, and the only thing stardag demands of it is stability.
+3. **Stability means a fixed point, and the SDK checks it.**
+   `dump(validate(dump(x))) == dump(x)`. At registration the driver runs that
+   round trip once per distinct instance and refuses the build with
+   `UnstableSerializationError` naming the field that moved. That turns every
+   instability below into a trigger-time error instead of an
+   `instance_conflict` between two processes later.
+
+The instabilities the check exists for: a `set[str]` iterates in a different
+order per process (string hashing is randomised), so sets must be sorted in
+the body dump too, not only in hash mode; floats are stable when the value is
+(`repr` is the shortest round-trip form), but `-0.0` vs `0.0`, `NaN`, numpy
+scalar types and a float computed non-deterministically in `__init__` are
+not; naive vs aware datetimes and custom serializers that drop precision fail
+the round trip; and because the body includes fields not set at init, a
+changed class default under a new deployment is a new instance hash — correct
+(a new scope anyway) and worth a sentence in the user docs.
+
+Two words, kept apart everywhere in code, docs and the UI: an **instance** is
+a registry row, a construction of a task under a scope; the Python object is
+a **task object**. One task object constructed under two deployments is two
+instances; one instance rehydrates into any number of task objects. Because
+the row key is `(deployment_id, settings_hash, instance_hash)`, `instance_hash`
+is **never a public identifier on its own**: routes, the CLI and the UI
+address an instance by its row id or by the full scope triple, so the
+tempting misreading — "the instance hash identifies the instance" — cannot be
+acted on.
+
 Two instances with the same `task_id` and different `instance_hash` are two
 ways of asking for one completion. Globally the registry stores any number
 of them per scope. **Within one plan there may be only one.**
@@ -121,7 +162,7 @@ the output location was not.
 
 ## The deterministic scope
 
-`scope = (deployment_id, exec_config_hash)`: the pair under which code
+`scope = (deployment_id, settings_hash)`: the pair under which code
 behaviour — output, structure, execution — is deterministic by contract.
 
 **Deployment.** One row per `stardag modal deploy`, with an id minted by the
@@ -158,36 +199,45 @@ refuses a worker whose `STARDAG_DEPLOYMENT_ID` differs from the plan's
 (409 `deployment_mismatch`), and the worker fails the task with that
 message. A pure local build plans under its `local` deployment. When both
 `STARDAG_DEPLOYMENT_ID` and `STARDAG_CODE_ID` are set, the former wins; the
-latter only feeds the local lookup.
+latter only feeds the local lookup. The principle for every case in this
+paragraph: where the registry cannot guarantee that a driver's code matches
+the deployment, it does not try — the simplest mechanism, and the
+responsibility on the user, stated in the docs.
 
-**`exec_config`** is a `dict[str, str]` of environment variables applied in
+**`settings`** is a flat `dict[str, str]` of environment variables applied in
 every process of the build (bootstrap, tick, worker, resident driver), chosen
-per trigger or per `sd.build()`. Its body is stored in the registry under a
-content hash (sha256 of canonical JSON — sorted keys, compact separators,
-UTF-8 — stable across code versions, unlike the task hashes; the empty
-config hashes `{}` and is created lazily by the first plan that needs it).
-It is for build-wide behaviour a user chooses not to put in task parameters
-(a global thread count, a feature flag); **never credentials** — secrets
-live in Modal secrets, deployment env vars or a secret manager.
+per trigger (`build_trigger(settings=...)`), per `sd.build(settings=...)` or
+on the command line (`--settings KEY=VALUE`, repeatable). Its body is stored
+in the registry under a content hash (sha256 of canonical JSON — sorted keys,
+compact separators, UTF-8 — stable across code versions, unlike the task
+hashes; the empty settings hash as `{}` and are created lazily by the first plan
+that needs them). They are for build-wide behaviour a user chooses not to put
+in task parameters (a global thread count, a feature flag), and the intended
+way to read them is the pydantic-settings pattern: the user declares a
+`BaseSettings` subclass and stardag sets the variables it reads. **Never
+credentials** — secrets live in Modal secrets, deployment env vars or a
+secret manager.
 
-Its contract, which the user docs state next to `significant`: `exec_config`
+The contract, which the user docs state next to `significant`: settings
 **may change structure and execution, never output**. Anything that affects
 output is a significant parameter. Completion is global, so a value here
 that changed output would let one build reuse another's different result.
 
-Mechanics: precedence when a key appears in several places is `exec_config`
-
-> the worker selector's per-task env > the deployment's env; keys starting
-> `STARDAG_` or `MODAL_` are refused at the trigger; values are applied in a
-> scoped `temp_env_vars` around the run in workers and ticks, and for the
-> duration of the build in a resident driver (two concurrent `sd.build()`
-> calls in one process with different configs are refused); the docs say
-> "read at run time, not import time", because warm containers import before
-> they know the build. The name is deliberately not `env_overrides`, which
-> remains the worker selector's per-task env.
+Mechanics. When a key appears in several places, settings win over the
+worker selector's per-task env, which wins over the deployment's env. Keys
+starting `STARDAG_` or `MODAL_` are refused at the trigger. Values are
+applied in a scoped `temp_env_vars` around the run in workers and ticks, and
+for the duration of the build in a resident driver (two concurrent
+`sd.build()` calls in one process with different settings are refused). The
+docs say "read at run time, not import time", because warm containers import
+before they know the build. Two names it is deliberately not: `env_overrides`,
+which remains the worker selector's per-task env fixed at deploy; and the
+SDK's own connection configuration (profile, registry URL), which stays under
+`stardag.config` — settings are what _user_ code reads, and the reserved-key
+rule keeps the two apart mechanically.
 
 Consequences: a plan is identified by its build and its scope; a resume or
-re-trigger under a different `exec_config` is a new plan in the same build,
+re-trigger under different settings is a new plan in the same build,
 not a refusal (v1's 409 `scope_mismatch` goes away). A re-trigger whose root
 **instances** differ from the plan's recorded roots under the same scope is
 409 `root_instance_conflict` ("start a new build"): a build is one request.
@@ -242,28 +292,28 @@ Index `(environment_id, kind, app_name, generation DESC)`; unique
 `(environment_id, kind, app_name, generation)`; partial unique
 `(environment_id, code_id) WHERE kind = 'local'`.
 
-### `exec_config`
+### `settings`
 
-| Column       | Notes                                                                                                                                                         |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hash`       | sha256 hex of canonical JSON; PK with `environment_id`                                                                                                        |
-| `body` JSONB | `dict[str, str]`; the empty config hashes `{}` and is created by the same lookup-or-create as any other, so a fresh registry has no rows until its first plan |
+| Column       | Notes                                                                                                                                                                  |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hash`       | sha256 hex of canonical JSON; PK with `environment_id`                                                                                                                 |
+| `body` JSONB | flat `dict[str, str]`; the empty settings hash as `{}` and are created by the same lookup-or-create as any other, so a fresh registry has no rows until its first plan |
 
 ### `task_instance` — a task as constructed under a scope
 
-| Column                                    | Notes                                                                                                                                                                               |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id` PK                                   |                                                                                                                                                                                     |
-| `deployment_id` FK, `exec_config_hash` FK | the scope                                                                                                                                                                           |
-| `instance_hash`                           | hash of all parameters, computed by the SDK under that scope                                                                                                                        |
-| `task_pk` FK task                         | the completion this instance realises                                                                                                                                               |
-| `body` JSONB                              | all parameters, registry-mode dump; nested tasks as full dumps                                                                                                                      |
-| `expanded_at`                             | **the closure flag**: set when this instance's `requires()` was evaluated under its scope and every resulting edge recorded (zero edges included). NULL means "not yet looked for". |
+| Column                                 | Notes                                                                                                                                                                               |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id` PK                                |                                                                                                                                                                                     |
+| `deployment_id` FK, `settings_hash` FK | the scope                                                                                                                                                                           |
+| `instance_hash`                        | hash of all parameters, computed by the SDK under that scope                                                                                                                        |
+| `task_pk` FK task                      | the completion this instance realises                                                                                                                                               |
+| `body` JSONB                           | all parameters, registry-mode dump; nested tasks as full dumps                                                                                                                      |
+| `expanded_at`                          | **the closure flag**: set when this instance's `requires()` was evaluated under its scope and every resulting edge recorded (zero edges included). NULL means "not yet looked for". |
 
-`UNIQUE (deployment_id, exec_config_hash, instance_hash)`; `UNIQUE (id,
+`UNIQUE (deployment_id, settings_hash, instance_hash)`; `UNIQUE (id,
 task_pk)` (target of the composite FK from `plan_member`); `UNIQUE (id,
-deployment_id, exec_config_hash)` (target of the composite FKs from edges);
-index `(deployment_id, exec_config_hash, task_pk)`.
+deployment_id, settings_hash)` (target of the composite FKs from edges);
+index `(deployment_id, settings_hash, task_pk)`.
 
 Invariants per scope: `instance_hash ↔ body` is 1:1 — an insert that hits
 the unique key with a **different body** is 409 `instance_body_conflict`,
@@ -274,11 +324,11 @@ are different constructions of one promise).
 
 ### `task_instance_dependency`
 
-| Column                                           | Notes                                                                                                                                                                                                                                  |
-| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `downstream_instance_id`, `upstream_instance_id` | PK is the pair                                                                                                                                                                                                                         |
-| `deployment_id`, `exec_config_hash`              | denormalised scope; composite FKs `(downstream_instance_id, deployment_id, exec_config_hash)` and `(upstream_instance_id, deployment_id, exec_config_hash)` → `task_instance` make "both ends share a scope" a constraint, not a check |
-| `is_dynamic`                                     | set at first insert, never changed                                                                                                                                                                                                     |
+| Column                                           | Notes                                                                                                                                                                                                                            |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `downstream_instance_id`, `upstream_instance_id` | PK is the pair                                                                                                                                                                                                                   |
+| `deployment_id`, `settings_hash`                 | denormalised scope; composite FKs `(downstream_instance_id, deployment_id, settings_hash)` and `(upstream_instance_id, deployment_id, settings_hash)` → `task_instance` make "both ends share a scope" a constraint, not a check |
+| `is_dynamic`                                     | set at first insert, never changed                                                                                                                                                                                               |
 
 Edges belong to no plan and are never deleted (retention of instances and
 edges of retired deployments is STA-68's question, unchanged; `deployment`
@@ -286,30 +336,30 @@ is `ON DELETE RESTRICT` from every table, so retention has to be explicit).
 
 ### `plan` — one request, under one scope
 
-| Column                                    | Notes                                                                                                                |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `id` PK                                   | client-minted (idempotent create)                                                                                    |
-| `build_id` FK                             |                                                                                                                      |
-| `deployment_id` FK, `exec_config_hash` FK | the scope                                                                                                            |
-| `activated_at`                            | the plan is the build's active plan from here; the first plan activates on create, a replacement activates on `seal` |
-| `sealed_at`                               | the static phase is fully stated and verified (roots expanded, closure holds, deployment still current)              |
-| `superseded_at`                           | set when a replacement plan activated                                                                                |
+| Column                                 | Notes                                                                                                                |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `id` PK                                | client-minted (idempotent create)                                                                                    |
+| `build_id` FK                          |                                                                                                                      |
+| `deployment_id` FK, `settings_hash` FK | the scope                                                                                                            |
+| `activated_at`                         | the plan is the build's active plan from here; the first plan activates on create, a replacement activates on `seal` |
+| `sealed_at`                            | the static phase is fully stated and verified (roots expanded, closure holds, deployment still current)              |
+| `superseded_at`                        | set when a replacement plan activated                                                                                |
 
-`UNIQUE (build_id, deployment_id, exec_config_hash)`; partial unique
+`UNIQUE (build_id, deployment_id, settings_hash)`; partial unique
 `(build_id) WHERE activated_at IS NOT NULL AND superseded_at IS NULL` —
 **exactly one active plan per build**, while a replacement can be registered
 alongside it. Reactivating an old scope on resume flips the timestamps.
 
 ### `plan_member` — membership
 
-| Column                              | Notes                                                                                                                                                                                                                                                                                                     |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plan_id` FK, `task_pk` FK          | **PK (plan_id, task_pk)** — the one-instance-per-completion-per-plan rule                                                                                                                                                                                                                                 |
-| `instance_id`                       | composite FK `(instance_id, task_pk)` → `task_instance (id, task_pk)`, so a member's instance realises the member's task by construction; `UNIQUE (plan_id, instance_id)` follows                                                                                                                         |
-| `deployment_id`, `exec_config_hash` | denormalised scope, with composite FKs `(plan_id, deployment_id, exec_config_hash)` → `plan` and `(instance_id, deployment_id, exec_config_hash)` → `task_instance`, so a member's instance is in its plan's scope by constraint, not by check                                                            |
-| `is_root`                           | the build's request, as instances of this plan                                                                                                                                                                                                                                                            |
-| `admitted_by`                       | `root` \| `static` \| `dynamic` \| `closure`                                                                                                                                                                                                                                                              |
-| `excluded_at`, `excluded_reason`    | "given up on" (STA-104): not scheduled, does not gate the build's completion; exclusion **cascades to the member's downstream closure within the plan** (like skip-blocked, otherwise a downstream is neither runnable nor excluded) and **an excluded root fails the build** (the request cannot be met) |
+| Column                           | Notes                                                                                                                                                                                                                                                                                                     |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plan_id` FK, `task_pk` FK       | **PK (plan_id, task_pk)** — the one-instance-per-completion-per-plan rule                                                                                                                                                                                                                                 |
+| `instance_id`                    | composite FK `(instance_id, task_pk)` → `task_instance (id, task_pk)`, so a member's instance realises the member's task by construction; `UNIQUE (plan_id, instance_id)` follows                                                                                                                         |
+| `deployment_id`, `settings_hash` | denormalised scope, with composite FKs `(plan_id, deployment_id, settings_hash)` → `plan` and `(instance_id, deployment_id, settings_hash)` → `task_instance`, so a member's instance is in its plan's scope by constraint, not by check                                                                  |
+| `is_root`                        | the build's request, as instances of this plan                                                                                                                                                                                                                                                            |
+| `admitted_by`                    | `root` \| `static` \| `dynamic` \| `closure`                                                                                                                                                                                                                                                              |
+| `excluded_at`, `excluded_reason` | "given up on" (STA-104): not scheduled, does not gate the build's completion; exclusion **cascades to the member's downstream closure within the plan** (like skip-blocked, otherwise a downstream is neither runnable nor excluded) and **an excluded root fails the build** (the request cannot be met) |
 
 No counters: attempts and interruptions are counted from `execution` rows
 over the build's plans.
@@ -411,7 +461,7 @@ trigger if two constructions of one `task_id` differ. It then registers:
 
 ```
 POST /builds/{id}/plans
-  { plan_id, deployment_id, exec_config, roots: [<items, declared_upstreams = null>] }
+  { plan_id, deployment_id, settings, roots: [<items, declared_upstreams = null>] }
   -> lookup-or-create by (build, scope); the roots are admitted first, unexpanded
      (is_root, admitted_by = root); 409 root_instance_conflict if the existing plan's
      root instances differ; the first plan of a build is activated here
@@ -501,12 +551,32 @@ orders. A failure to register is **not** swallowed: the worker reports
 `TASK_FAILED` with the error rather than suspending a parent with no
 children; an `instance_conflict` here is non-retryable.
 
-**Invalidation.** Discovery's `observed_complete: false` on a COMPLETED task
-is the ordinary path out of COMPLETED, applied in the chunk transaction
-(above). Operators get `POST /tasks/{task_id}/invalidate {reason,
-if_status_at}` with a precondition, so a delayed retry cannot un-complete a
-fresh output. Either path is refused (409) while a live claim exists. Nothing
-else leaves COMPLETED.
+**Invalidation: the registry follows the world.** The only path out of
+COMPLETED is discovery's `observed_complete: false` on a task whose registry
+status is COMPLETED, applied in the chunk transaction above with the
+`observed_at` guard, refused while a live claim exists, and recorded as
+`TASK_INVALIDATED{reason: target_missing, observed_at, plan_id}`. There is
+**no operator route** that declares a task incomplete: an operator who needs
+a re-run acts on the target (deletes it), then triggers a build, which
+observes and invalidates. `stardag tasks check <task_id>` is a convenience
+that runs `complete()` locally and reports the observation, since the SDK has
+target access.
+
+The narrow case this serves is "the target is gone, the promise is
+unchanged": a retention policy or bucket lifecycle deleted it, a developer
+cleared a directory, a corrupt partial output was removed. Re-running then
+produces, by the task-id contract, the same output, so the record stays
+truthful: downstream tasks were produced from an output identical to the one
+that exists again, and the ledger shows the completion by execution E1, the
+invalidation, and the re-completion by E2 in order. **"I want to fix its
+output" is not a use of invalidation**, and the docs say so: changing what a
+task produces is a change of promise, so it needs a new `task_id` — bump
+`__version__` or add a significant parameter. That cascades on its own,
+because a downstream task that takes the upstream as a parameter hashes its
+id, and it leaves the old outputs and their history intact. A cascading
+"uncomplete" in the registry could do neither: the registry cannot touch
+targets, other builds rely on the global completion, and "complete" can be a
+compound world state.
 
 ## The runnable rule
 
@@ -590,7 +660,7 @@ If they differ:
    its own code, recomputes their `task_id`s and compares them with
    `build.root_task_ids`; a difference fails the build with "re-trigger it
    as a new build".
-3. It runs the static phase under `(own deployment, plan.exec_config_hash)`
+3. It runs the static phase under `(own deployment, plan.settings_hash)`
    — lookup-or-create; a plan for that scope may already exist and be
    sealed, in which case nothing is discovered — and seals. `/seal`
    re-checks that the plan's deployment is still the app's current one and
@@ -670,13 +740,13 @@ Every scenario names the column or constraint that decides it.
 | S5 (§4.2) | A COMPLETED task's target is deleted                                                                         | Discovery finds the target missing → the chunk item carries `observed_complete: false` → COMPLETED → PENDING in the same transaction as the instance and its edges, before any downstream chunk lands; runnable once its upstreams are complete. Without discovery seeing it, it stays COMPLETED (sticky) | `TASK_INVALIDATED` in the chunk transaction, the flag                 |
 | S6        | Redeploy with no code change                                                                                 | New deployment row, new scope, re-plan of running reactive builds; instances re-registered (cheap, bodies identical); no behaviour change                                                                                                                                                                 | `deployment.id` per deploy (D6)                                       |
 | S7        | Old-deployment execution yields after the switch                                                             | Accepted into the superseded plan (inert); parent SUSPENDED globally; new plan's instance has no dynamic edges → runnable → restarted under new code; old children run on as duplicates                                                                                                                   | `/yield` accepts superseded `plan_id`; SUSPENDED ∈ ACTIONABLE         |
-| S8        | Two builds, different `exec_config`, sharing a completion                                                    | Two scopes, two instances, one `task` row; claim decides who runs; the other reuses the result                                                                                                                                                                                                            | `exec_config_hash` in the scope                                       |
+| S8        | Two builds, different `settings`, sharing a completion                                                       | Two scopes, two instances, one `task` row; claim decides who runs; the other reuses the result                                                                                                                                                                                                            | `settings_hash` in the scope                                          |
 | S9        | Local placeholder deployment vs a real one                                                                   | Cannot collide: `kind` is in the lookup; a local `code_id` equal to a Modal `code_id` is a different deployment                                                                                                                                                                                           | `deployment.kind`                                                     |
 | S10       | Annotation-only difference for one completion in one plan                                                    | Same as S2: rejected with the field named ("`label='nightly'` vs `label='backfill'`") — rare, meaningless, fixed in seconds                                                                                                                                                                               | `plan_member` PK                                                      |
 | S11       | Concurrent workers yielding into one plan                                                                    | Each `/yield` is one transaction; membership inserts are `DO NOTHING`; a conflicting instance is 409; the frontier is defined over committed batches                                                                                                                                                      | `/yield` atomicity, `plan_member` PK                                  |
 | S12       | Complete-at-discovery task registered                                                                        | The item carries `declared_upstreams = null, observed_complete = true` → the instance lands unexpanded and the task is set COMPLETED in the same transaction (no live claim); nothing can run it in between                                                                                               | the flag + `TASK_OBSERVED_COMPLETE` in the chunk transaction          |
 | S13       | Registration of a yield fails mid-way                                                                        | No partial children (one transaction); the worker reports FAILED with the error instead of suspending; retry budget applies                                                                                                                                                                               | `/yield` transaction; no swallow                                      |
-| S14       | Resume under a different `exec_config`                                                                       | New plan in the same build, registered alongside the active one, activated at seal; discovery runs; completed members are reused via global status                                                                                                                                                        | `plan` unique on `(build, scope)`; `activated_at`/`superseded_at`     |
+| S14       | Resume under a different `settings`                                                                          | New plan in the same build, registered alongside the active one, activated at seal; discovery runs; completed members are reused via global status                                                                                                                                                        | `plan` unique on `(build, scope)`; `activated_at`/`superseded_at`     |
 | S15       | Resume under the same scope after a crash mid-registration                                                   | Plan exists unsealed with its roots as discovery jobs; any tick or a re-send finishes it; seal verifies roots expanded and closure                                                                                                                                                                        | roots-first, idempotent inserts, `/seal` checks                       |
 | S16       | Two builds register the same brand-new task concurrently (STA-48)                                            | Both `DO NOTHING … RETURNING`; one creates, both reference; no 500, no `FOR UPDATE` on a missing row; chunk rows sorted by `(task_id, instance_hash)` so two chunks cannot deadlock on unique-index waits                                                                                                 | insert pattern, sort order                                            |
 | S17       | Deleted build                                                                                                | Refused (409) while a plan of it holds a live claim or an execution of it is unended (`builds stop` ends them first); otherwise plans, members and executions cascade, events keep their rows with `build_id` and `plan_id` NULL                                                                          | delete guard, FK actions                                              |
@@ -687,13 +757,13 @@ Every scenario names the column or constraint that decides it.
 | S22       | Shared instance across two plans; A yields C; A is cancelled or excludes C                                   | B's frontier closure step admits C (and its closure) into B before evaluating gates; B runs C itself; no stall                                                                                                                                                                                            | closure at every frontier read                                        |
 | S23       | B admitted an instance unexpanded (pruned-complete); it is invalidated; A expands it first                   | B's closure step admits the new upstreams; B's discovery job for it is skipped (flag now set); no gate B does not hold                                                                                                                                                                                    | closure + shared `expanded_at`                                        |
 | S24       | Two instances of one completion in one scope, different plans, dynamic yield (v1's `shared_structure_scope`) | The two instances do **not** share dynamic edges: B's instance is SUSPENDED-runnable while A's children run, so the pre-yield section re-runs once. Accepted cost of the second identity; only identical instances share yields                                                                           | edges on instances                                                    |
-| S25       | Resident `sd.build()` with thread/process pools                                                              | Every execution claims (a TTL the driver renews); the resident yield keeps the claim (`suspend: false`); `exec_config` applied for the build's duration in-process; a dead process is released by the idle reaper                                                                                         | D11                                                                   |
+| S25       | Resident `sd.build()` with thread/process pools                                                              | Every execution claims (a TTL the driver renews); the resident yield keeps the claim (`suspend: false`); `settings` applied for the build's duration in-process; a dead process is released by the idle reaper                                                                                            | D11                                                                   |
 | S26       | Local driver with Modal workers (hybrid)                                                                     | Plans under the app's current deployment; workers' `/yield` matches; a laptop whose code differs is the user's YOLO, as before                                                                                                                                                                            | D13, `deployment_mismatch`                                            |
-| S27       | `exec_config` sets a `STARDAG_*` key or one the worker selector sets                                         | `STARDAG_*`/`MODAL_*` refused at the trigger; selector keys are overridden by `exec_config` (documented precedence)                                                                                                                                                                                       | trigger validation                                                    |
+| S27       | `settings` sets a `STARDAG_*` key or one the worker selector sets                                            | `STARDAG_*`/`MODAL_*` refused at the trigger; selector keys are overridden by `settings` (documented precedence)                                                                                                                                                                                          | trigger validation                                                    |
 | S28       | Yielded child already COMPLETED but its target is missing                                                    | The child item carries `observed_complete: false` → invalidated in the yield transaction → runnable under the parent's plan                                                                                                                                                                               | chunk-transaction invalidation                                        |
 | S29       | Yielded child RUNNING in another build                                                                       | Admitted with its edges; not runnable while the claim is live; the parent waits on the global status                                                                                                                                                                                                      | global claim                                                          |
-| S30       | `invalidate` racing a claiming start                                                                         | Both lock the task row; the loser sees the other's state: invalidate is 409 against a live claim, a claiming start against COMPLETED is 409 `task_already_completed`                                                                                                                                      | row lock, preconditions                                               |
-| S31       | Retried `invalidate` after the task re-completed                                                             | `if_status_at` no longer matches → 409, nothing changes                                                                                                                                                                                                                                                   | precondition                                                          |
+| S30       | An `observed_complete: false` chunk racing a claiming start                                                  | Both lock the task row; the loser sees the other's state: the observation is skipped against a live claim (recorded, not applied), a claiming start against COMPLETED is 409 `task_already_completed`                                                                                                     | row lock, `observed_at` guard                                         |
+| S31       | Delayed duplicate observation after the task re-completed                                                    | `completed_at` is after the item's `observed_at` → not applied, nothing changes                                                                                                                                                                                                                           | `observed_at` guard                                                   |
 | S32       | `/seal` while a timed-out chunk retry is in flight                                                           | Seal verifies closure and roots; if the chunk had not landed, the seal is 409 `plan_incomplete_registration`; the retry lands, seal is re-sent                                                                                                                                                            | `/seal` verification                                                  |
 | S33       | Two ticks under deployments D2 and D3 both roll over                                                         | Both register plans; `/seal` re-checks "current deployment is mine": D2's seal is refused, D3's supersedes the old plan; D2's tick exits `superseded`                                                                                                                                                     | `/seal` deployment check                                              |
 | S34       | Discovery job for a class the tick cannot import                                                             | Member fails after one attempt with `UnknownTaskClassError`; build fails per fail mode; not retried every tick                                                                                                                                                                                            | discovery-job failure rule                                            |
@@ -708,7 +778,7 @@ Every scenario names the column or constraint that decides it.
 - Instances are stored per scope: N deployments × the DAG size in
   `task_instance` rows and bodies. Retention of retired scopes is STA-68.
 - Two hashes computed per task construction.
-- Every process of a build must know its `plan_id` and apply `exec_config`;
+- Every process of a build must know its `plan_id` and apply `settings`;
   both travel as environment variables, which every process boundary already
   carries, and nothing else is transported.
 - A registry cannot be upgraded in place: v2 is a new line and existing
