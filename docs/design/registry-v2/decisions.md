@@ -141,3 +141,14 @@ never re-selected; the task-id rule states that all `significant=False`
 fields are excluded; framework-owned `STARDAG*\*` identifiers are written
 last and cannot be overridden by settings, selector or deployment env.
 Nothing rejected in these rounds.
+
+## Methodology (2026-09-24)
+
+Agreed with the maintainer and recorded in `plan.md`: a vertical spike (I0)
+before the surfaces; a must-still-hold list of registry-live scenarios whose
+assertions survive v2, canonical `api-pg` tests for the registration and
+transition invariants written before the service, and a test tier per
+scenario in `design.md`; seven engineering rules traceable to v1 defects;
+and two standing mechanisms that tell reviewers, Copilot included, what a
+PR against `v2` deliberately leaves out (`.github/copilot-instructions.md`
+and the `v2.md` PR template).
