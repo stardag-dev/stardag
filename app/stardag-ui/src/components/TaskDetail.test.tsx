@@ -19,6 +19,7 @@ vi.mock("../api/tasks", () => ({
 }));
 
 import { cancelTask } from "../api/tasks";
+import { CLAIM_ACTION_LABELS } from "../utils/claims";
 import { ModalExecutionCallRef, ModalExecutionDetails, TaskDetail } from "./TaskDetail";
 
 const fullMetadata = {
@@ -428,6 +429,55 @@ describe("TaskDetail claim holder", () => {
   // "not cross-build" is true by construction — so an admin gate written
   // as `!crossBuild` would fall open exactly where the user has least
   // context about whose work they are releasing.
+  // A legacy row: RUNNING with no recorded holder. Before the fallback,
+  // this had no action at all — while `BuildView` counted it as a held
+  // claim and withheld Mark completed, so the UI refused to finish the
+  // build because of a claim it offered no way to release.
+  it("addresses an unrecorded holder to the build in view", async () => {
+    vi.mocked(cancelTask).mockResolvedValue("cancelled");
+    const user = userEvent.setup();
+    const orphan = makeTask();
+    delete (orphan as Partial<Task>).latest_status_build_id;
+    delete (orphan as Partial<Task>).status_build_id;
+
+    render(
+      <TaskDetail
+        task={orphan}
+        buildId={VIEWED_BUILD}
+        onClose={() => {}}
+        onTaskCancelled={() => {}}
+      />,
+    );
+
+    // And it does not invent the one fact that is missing.
+    expect(
+      screen.getByText(/The build holding its claim was not recorded/),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: `${CLAIM_ACTION_LABELS.release}…` }),
+    );
+    await user.click(
+      screen.getAllByRole("button", { name: CLAIM_ACTION_LABELS.release }).slice(-1)[0],
+    );
+    await waitFor(() =>
+      expect(cancelTask).toHaveBeenCalledWith(VIEWED_BUILD, "tid-grind-beans", "env-1"),
+    );
+  });
+
+  it("offers nothing for an unrecorded holder with no build in view", async () => {
+    const orphan = makeTask();
+    delete (orphan as Partial<Task>).latest_status_build_id;
+    delete (orphan as Partial<Task>).status_build_id;
+
+    render(<TaskDetail task={orphan} onClose={() => {}} onTaskCancelled={() => {}} />);
+
+    // Correct rather than unfortunate: there is no build to address.
+    expect(
+      screen.queryByRole("button", { name: `${CLAIM_ACTION_LABELS.release}…` }),
+    ).toBeNull();
+  });
+
   it("still requires admin when there is no build in view", async () => {
     mockWorkspaceRole = "member";
     render(

@@ -365,7 +365,20 @@ export function TaskDetail({
     holderBuildId && buildId && holderBuildId !== buildId,
   );
   const crossBuild = Boolean(holderBuildId) && holderBuildId !== buildId;
-  const showClaimHolder = holdsClaim && Boolean(holderBuildId);
+  // The build the release is addressed to. Normally the recorded holder;
+  // when that is null — legacy rows predating status denormalisation —
+  // the build in view, if there is one.
+  //
+  // Without this an unrecorded holder is a dead end: no action is
+  // offered, while `BuildView` counts the same row as a held claim and
+  // withholds Mark completed for it. The UI would refuse to finish the
+  // build because of a claim it gave no way to release. The API permits
+  // the cancel with the viewed build as the addressee, so that is the
+  // honest fallback; the task explorer, having no build, still offers
+  // nothing, which is correct rather than unfortunate.
+  const releaseTarget = holderBuildId ?? buildId ?? null;
+  const holderRecorded = Boolean(holderBuildId);
+  const showClaimHolder = holdsClaim && Boolean(releaseTarget);
   // Releasing another build's claim is an admin act; releasing your own
   // build's is not. "Another build" includes "no build in view".
   const canReleaseClaim = isAdmin || !crossBuild;
@@ -436,17 +449,17 @@ export function TaskDetail({
   );
 
   const handleClaimAction = useCallback(async () => {
-    if (!claimAction || !holderBuildId) return;
-    if (await runTaskAction(claimAction, holderBuildId)) {
+    if (!claimAction || !releaseTarget) return;
+    if (await runTaskAction(claimAction, releaseTarget)) {
       setClaimNotice(
         claimAction === "release"
-          ? `Released the claim under build ${holderBuildId.slice(0, 8)}.`
-          : `Reset to pending under build ${holderBuildId.slice(0, 8)}.`,
+          ? `Released the claim under build ${releaseTarget.slice(0, 8)}.`
+          : `Reset to pending under build ${releaseTarget.slice(0, 8)}.`,
       );
       setClaimAction(null);
       onTaskCancelled();
     }
-  }, [claimAction, holderBuildId, runTaskAction, onTaskCancelled]);
+  }, [claimAction, releaseTarget, runTaskAction, onTaskCancelled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -554,28 +567,38 @@ export function TaskDetail({
               do — and the task is usually fine. The explanation and the
               confirmation both live in the dialog now, which is where
               someone who has decided to act will read them. */}
-          {showClaimHolder && holderBuildId && (
+          {showClaimHolder && releaseTarget && (
             <div className="mt-1.5 space-y-1.5">
               <p className="text-xs text-gray-600 dark:text-gray-400">
                 {globalStatus === "running" ? "Running" : "Suspended"}
                 {heldFor && heldFor !== "—" ? (
                   <span title={formatAbsoluteTime(claimSince)}> {heldFor}</span>
-                ) : null}{" "}
-                under build{" "}
-                {onStatusBuildClick ? (
-                  <button
-                    type="button"
-                    onClick={() => onStatusBuildClick(holderBuildId)}
-                    title={`Go to build ${holderBuildId}`}
-                    className="rounded font-mono text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-300"
-                  >
-                    {holderBuildId.slice(0, 8)}
-                  </button>
+                ) : null}
+                {holderRecorded ? (
+                  <>
+                    {" "}
+                    under build{" "}
+                    {onStatusBuildClick ? (
+                      <button
+                        type="button"
+                        onClick={() => onStatusBuildClick(releaseTarget)}
+                        title={`Go to build ${releaseTarget}`}
+                        className="rounded font-mono text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-300"
+                      >
+                        {releaseTarget.slice(0, 8)}
+                      </button>
+                    ) : (
+                      <code className="font-mono">{releaseTarget.slice(0, 8)}</code>
+                    )}
+                    {viewingAnotherBuild ? " (not the build you are viewing)" : ""},
+                    which holds its claim.
+                  </>
                 ) : (
-                  <code className="font-mono">{holderBuildId.slice(0, 8)}</code>
+                  // A legacy row: the status is there, the build that
+                  // produced it is not. Naming the build in view here
+                  // would invent the one fact that is missing.
+                  <>. The build holding its claim was not recorded.</>
                 )}
-                {viewingAnotherBuild ? " (not the build you are viewing)" : ""}, which
-                holds its claim.
               </p>
 
               {canReleaseClaim ? (
@@ -600,7 +623,7 @@ export function TaskDetail({
 
               <p className="text-xs text-gray-500 dark:text-gray-400">
                 To stop what is running, use Build controls &rarr; Stop on build{" "}
-                {holderBuildId.slice(0, 8)}.
+                {releaseTarget.slice(0, 8)}.
               </p>
             </div>
           )}
@@ -763,12 +786,12 @@ export function TaskDetail({
         )}
       </div>
 
-      {holderBuildId && (
+      {releaseTarget && (
         <ClaimActionDialog
           action={claimAction}
           taskName={task.task_name}
           taskId={task.task_id}
-          ownerBuildId={holderBuildId}
+          ownerBuildId={releaseTarget}
           currentBuildId={buildId}
           status={globalStatus}
           busy={cancelling}
