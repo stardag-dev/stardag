@@ -20,7 +20,6 @@ from stardag_api.models import (
     AdmittedBy,
     Build,
     BuildStatus,
-    Deployment,
     EventType,
     Plan,
     PlanMember,
@@ -30,6 +29,7 @@ from stardag_api.models import (
 )
 from stardag_api.models.base import utc_now
 from stardag_api.services import event_log
+from stardag_api.services.deployments import verify_deployment_current
 from stardag_api.services.errors import Conflict
 from stardag_api.services.event_log import EventClock
 from stardag_api.services.registration import PlanState, get_plan, lock_build
@@ -76,7 +76,7 @@ async def seal_plan(
             return PlanState.of(plan)
 
         await _verify_registration(session, plan)
-        await _verify_deployment_current(session, environment_id, plan)
+        await verify_deployment_current(session, environment_id, plan.deployment_id)
         higher = await session.scalar(
             select(func.count())
             .select_from(Plan)
@@ -153,39 +153,6 @@ async def _verify_registration(session: AsyncSession, plan: Plan) -> None:
             "an edge from a member reaches an instance that is not a member",
             reason="closure_open",
             edges=[[str(d), str(u)] for d, u in open_edges],
-        )
-
-
-async def current_deployment_id(
-    session: AsyncSession, environment_id: UUID, deployment: Deployment
-) -> UUID | None:
-    """The activated deployment with the highest generation for the app."""
-    return await session.scalar(
-        select(Deployment.id)
-        .where(
-            Deployment.environment_id == environment_id,
-            Deployment.kind == deployment.kind,
-            Deployment.app_name == deployment.app_name,
-            Deployment.activated_at.is_not(None),
-        )
-        .order_by(Deployment.generation.desc())
-        .limit(1)
-    )
-
-
-async def _verify_deployment_current(
-    session: AsyncSession, environment_id: UUID, plan: Plan
-) -> None:
-    deployment = await session.get(Deployment, plan.deployment_id)
-    assert deployment is not None  # FK
-    current = await current_deployment_id(session, environment_id, deployment)
-    if current != plan.deployment_id:
-        raise Conflict(
-            "deployment_not_current",
-            "the plan's deployment is no longer the app's current one;"
-            " rollover only moves forward",
-            deployment_id=str(plan.deployment_id),
-            current_deployment_id=str(current) if current else None,
         )
 
 

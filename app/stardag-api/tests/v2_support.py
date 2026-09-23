@@ -127,16 +127,21 @@ class Harness:
             await s.commit()
         return deployment_id
 
-    async def new_build(self) -> UUID:
+    async def new_build(self, roots: Sequence[RegistrationItem] = ()) -> UUID:
+        """A RUNNING build requesting ``roots`` (its ``root_task_ids``)."""
         build_id = uuid4()
         async with self.sf() as s:
             await s.execute(
                 text(
                     "INSERT INTO build (id, environment_id, name, root_task_ids,"
-                    " last_active_at, status) VALUES (:id, :env, 'b', '[]', now(),"
-                    " 'running')"
+                    " last_active_at, status) VALUES (:id, :env, 'b',"
+                    " CAST(:roots AS jsonb), now(), 'running')"
                 ),
-                {"id": build_id, "env": ENV},
+                {
+                    "id": build_id,
+                    "env": ENV,
+                    "roots": json.dumps(sorted({r.task_id for r in roots})),
+                },
             )
             await s.commit()
         return build_id
@@ -228,7 +233,7 @@ class Harness:
     ) -> tuple[UUID, registration.PlanState]:
         """A new build with a first (active) plan; returns (build, plan)."""
         deployment_id = deployment_id or await self.new_deployment()
-        build_id = await self.new_build()
+        build_id = await self.new_build(roots)
         plan = await self.plan(build_id, deployment_id, roots, settings=settings)
         if members:
             await self.register(plan.id, members)

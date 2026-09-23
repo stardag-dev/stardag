@@ -25,15 +25,12 @@ Locking, which is what makes concurrent registration safe (S16):
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -41,11 +38,15 @@ from stardag_api.models import (
     Deployment,
     Plan,
     PlanMember,
-    SettingsRecord,
     TaskInstance,
 )
 from stardag_api.models.base import utc_now
 from stardag_api.schemas_v2 import RegistrationItem
+from stardag_api.services.deployments import (
+    canonical_json,
+    ensure_settings,
+    settings_hash,
+)
 from stardag_api.services.errors import BadRequest, Conflict, NotFound
 from stardag_api.services.registration_chunk import MembersResult, register_items
 from stardag_api.services.tx import transaction
@@ -99,23 +100,6 @@ class PlanState:
             superseded_at=plan.superseded_at,
             created=created,
         )
-
-
-# ---------------------------------------------------------------------------
-# Hashing
-# ---------------------------------------------------------------------------
-
-
-def canonical_json(value: object) -> bytes:
-    """Sorted keys, compact separators, UTF-8."""
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-
-
-def settings_hash(body: Mapping[str, str]) -> str:
-    """sha256 hex of the canonical JSON of a settings body."""
-    return hashlib.sha256(canonical_json(dict(body))).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -198,13 +182,9 @@ async def create_plan(
                 deployment_id=str(deployment_id),
             )
 
-        body = dict(settings_body)
-        shash = settings_hash(body)
-        await session.execute(
-            pg_insert(SettingsRecord)
-            .values(environment_id=environment_id, hash=shash, body=body)
-            .on_conflict_do_nothing(constraint="pk_settings")
-        )
+        # Validated here as well as at the trigger (400
+        # ``reserved_settings_key``).
+        shash = await ensure_settings(session, environment_id, settings_body)
 
         existing = await session.scalar(
             select(Plan).where(

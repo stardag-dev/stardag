@@ -31,6 +31,7 @@ from stardag_api.schemas_v2 import (
     StartRequest,
     TransitionResponse,
 )
+from stardag_api.routes.registry_v2_scope import router as scope_router
 from stardag_api.services import builds, frontier, plans, registration, transitions
 from stardag_api.services.transitions import Transition
 
@@ -178,3 +179,8 @@ async def renew_claim(task_id: str, body: RenewRequest, db: Db, auth: Auth):
         execution_id=body.execution_id,
         claim_ttl_seconds=body.claim_ttl_seconds,
     )
+
+
+# -- sub-routers ----------------------------------------------------------------
+
+router.include_router(scope_router)

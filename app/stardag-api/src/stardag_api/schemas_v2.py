@@ -14,7 +14,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from stardag_api.models.enums import BuildStatus, TaskStatus
+from stardag_api.models.enums import BuildStatus, DeploymentKind, TaskStatus
 
 
 class RegistrationItem(BaseModel):
@@ -43,7 +43,54 @@ class RegistrationItem(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Builds (minimal: lifecycle routes arrive in step 3)
+# Deployments and settings
+# ---------------------------------------------------------------------------
+
+
+class DeploymentCreate(BaseModel):
+    """``POST /deployments``. A Modal deployment names its client-minted
+    ``id`` and its ``app_name``; a local one is looked up by ``code_id``
+    (``id`` optional, ``app_name`` defaults to ``"local"``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID | None = None
+    kind: DeploymentKind
+    app_name: str | None = Field(default=None, min_length=1, max_length=64)
+    code_id: str = Field(min_length=1, max_length=64)
+    image_id: str | None = Field(default=None, max_length=128)
+    modal_app_id: str | None = Field(default=None, max_length=64)
+
+
+class DeploymentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    kind: DeploymentKind
+    app_name: str
+    code_id: str
+    image_id: str | None
+    modal_app_id: str | None
+    generation: int
+    deployed_at: datetime
+    activated_at: datetime | None
+    is_current: bool
+    created: bool
+
+
+class DeploymentListResponse(BaseModel):
+    deployments: list[DeploymentResponse]
+
+
+class SettingsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    hash: str
+    body: dict[str, str]
+
+
+# ---------------------------------------------------------------------------
+# Builds
 # ---------------------------------------------------------------------------
 
 
