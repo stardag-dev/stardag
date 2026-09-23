@@ -110,6 +110,25 @@ beforeEach(() => {
 });
 
 describe("BuildControlsDialog", () => {
+  // The suspended case the two signals exist for: a claim with nothing
+  // behind it to stop. The stop half must not call that "no claims", and
+  // the cancel warning must not send the user to a command with nothing
+  // to do — while Mark completed is still withheld.
+  it("separates a held claim from a running execution", async () => {
+    answerWith([]);
+    const user = userEvent.setup();
+    renderPanel("running", true);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+
+    expect(
+      await screen.findByText(/nothing running that can be stopped from here/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Cancel build" }));
+    expect(screen.queryByText(/cancelling here will not stop them/i)).toBeNull();
+  });
+
   it("says nothing is running rather than showing an empty dialog", async () => {
     // As a band above the DAG this rendered nothing at all, which was
     // right for something that appeared unbidden. In a dialog somebody
@@ -117,7 +136,9 @@ describe("BuildControlsDialog", () => {
     answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
     const user = userEvent.setup();
     await openDialog(user);
-    expect(await screen.findByText(/holding no execution claims/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/nothing running that can be stopped from here/i),
+    ).toBeInTheDocument();
   });
 
   it("fetches nothing until the dialog is opened", async () => {
@@ -453,14 +474,15 @@ describe("BuildControlsDialog", () => {
   // The warning is the reason these two controls share a dialog. It is
   // driven by the build's own task list now, so it does not depend on
   // whether the stop scan has answered — it is right from first paint.
-  it("warns before the stop scan has answered", async () => {
+  it("warns about running work before the stop scan has answered", async () => {
     vi.mocked(fetchTasks).mockReturnValue(new Promise(() => {}) as never);
     const user = userEvent.setup();
     renderPanel("running", true);
     await user.click(screen.getByRole("button", { name: "Build controls" }));
 
     await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    expect(screen.getByText(/cancelling here will not stop them/i)).toBeInTheDocument();
+    // Not known is not none, for a warning.
+    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
   });
 
   // As a panel, vanishing on `completed` was invisible. As a dialog
@@ -618,7 +640,9 @@ describe("BuildControlsDialog", () => {
     renderPanel("running", true);
     await user.click(screen.getByRole("button", { name: "Build controls" }));
 
-    expect(await screen.findByText(/holding no execution claims/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/nothing running that can be stopped from here/i),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
     expect(
       screen.getByText(/is the one outcome that releases no claims/i),

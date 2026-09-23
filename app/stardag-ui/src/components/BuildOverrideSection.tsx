@@ -49,6 +49,22 @@ interface BuildOverrideSectionProps {
    * the question being asked of it.
    */
   holdsClaims: boolean;
+  /**
+   * Whether any of those claims has a running execution behind it.
+   *
+   * A separate question from `holdsClaims`, and the two genuinely
+   * differ: a SUSPENDED task holds a claim with nothing running. Using
+   * one for both is how a suspended-only build gets told it has "tasks
+   * running" and is sent to a stop command with nothing to stop.
+   *
+   * Three-valued where `holdsClaims` is binary, because the two are
+   * answered by different sources: claims come from the build's own
+   * complete task list, while this comes from the stop scan, which has
+   * not answered yet on first paint and may fail. For a *warning*,
+   * "not known" has to behave like "maybe" — withholding it while
+   * unsure is the one direction that costs something.
+   */
+  runningExecutions: "unknown" | "none" | "some";
   onChanged: (build: Build) => void;
 }
 
@@ -81,6 +97,7 @@ export function BuildOverrideSection({
   environmentId,
   buildStatus,
   holdsClaims,
+  runningExecutions,
   onChanged,
 }: BuildOverrideSectionProps) {
   const { user } = useAuth();
@@ -108,8 +125,9 @@ export function BuildOverrideSection({
     // the one override that would strand its claim.
     if (pending === "complete" && holdsClaims) {
       setError(
-        "This build has tasks running again, and Mark completed would leave " +
-          "their claims held. Close and choose Cancel build or Mark failed.",
+        "This build holds execution claims again, and Mark completed is the " +
+          "one outcome that releases none. Close and choose Cancel build or " +
+          "Mark failed.",
       );
       return;
     }
@@ -194,7 +212,13 @@ export function BuildOverrideSection({
               the override is almost certainly not what was wanted —
               and when we cannot yet tell, saying nothing would be the
               same as saying there is none. */}
-          {chosen.action === "cancel" && holdsClaims && (
+          {chosen.action === "cancel" && runningExecutions === "unknown" && (
+            <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
+              Whether this build has executions running is not known yet. If any are,
+              cancelling here will not stop them — the command above ends them first.
+            </p>
+          )}
+          {chosen.action === "cancel" && runningExecutions === "some" && (
             <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
               This build still has executions running, and cancelling here will not stop
               them. The command below is the one that does: it ends the selected

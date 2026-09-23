@@ -490,6 +490,12 @@ export function BuildControlsDialog({
             environmentId={environmentId}
             buildStatus={buildStatus}
             holdsClaims={holdsClaims}
+            // The stop scan answers this one: it lists exactly the
+            // executions that can be ended, which a suspended claim is
+            // not one of. Null until it answers, and it can fail.
+            runningExecutions={
+              held === null ? "unknown" : held.length > 0 ? "some" : "none"
+            }
             onChanged={(updated) => {
               setStatusNotice(`This build is now recorded as ${updated.status}.`);
               onBuildChanged(updated);
@@ -572,7 +578,7 @@ function StopDialogBody({
     }
     return (
       <p role="status" className="text-xs text-gray-600 dark:text-gray-400">
-        This build is holding no execution claims, so it has nothing running to stop.
+        This build has nothing running that can be stopped from here.
       </p>
     );
   }
