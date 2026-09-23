@@ -126,14 +126,20 @@ behaviour — output, structure, execution — is deterministic by contract.
 
 **Deployment.** One row per `stardag modal deploy`, with an id minted by the
 CLI (uuid7), baked into the Modal image as the `STARDAG_DEPLOYMENT_ID`
-secret (replacing `STARDAG_CODE_ID`), and recorded with `POST /deployments`
-after the deploy succeeded (a failed recording exits non-zero; a tick whose
-deployment id the registry does not know cannot create a plan). A redeploy
-of unchanged code is a new deployment and therefore a new scope; running
+secret (replacing `STARDAG_CODE_ID`), and registered in two steps:
+`POST /deployments` **before** the deploy creates the row and the server
+assigns it a `generation`, monotonic per environment and app; `POST
+/deployments/{id}/activate` after the deploy succeeded marks it live (a
+failed activation exits non-zero; a tick whose deployment id the registry
+does not know, or has not activated, cannot create a plan). A redeploy of
+unchanged code is a new deployment and therefore a new scope; running
 reactive builds re-plan, which is cheap and rare in production. The row
 holds `kind` (`modal` | `local`), `app_name`, `code_id`, `image_id`
-(nullable), `modal_app_id` (nullable), `deployed_at`. "Current" for an app
-is the latest `deployed_at` among `kind='modal'` rows.
+(nullable), `modal_app_id` (nullable), `generation`, `deployed_at`,
+`activated_at`. "Current" for an app is the **activated row with the highest
+generation**: order is fixed when a deploy starts, not when its record
+lands, so a record that arrives late cannot roll a build back to older
+code.
 
 **Local builds** have no deploy event, so their deployment is derived: the
 SDK does an idempotent lookup-or-create on `(environment, kind='local',
@@ -224,21 +230,24 @@ Dropped from v1: `task_data`, `is_phantom`, `latest_status_scope_key`,
 
 ### `deployment`
 
-| Column                                                           | Notes              |
-| ---------------------------------------------------------------- | ------------------ |
-| `id` PK                                                          | client-minted      |
-| `kind`                                                           | `modal` \| `local` |
-| `app_name`, `code_id`, `image_id`, `modal_app_id`, `deployed_at` |                    |
+| Column                                                           | Notes                                                                                                                      |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `id` PK                                                          | client-minted                                                                                                              |
+| `kind`                                                           | `modal` \| `local`                                                                                                         |
+| `app_name`, `code_id`, `image_id`, `modal_app_id`, `deployed_at` |                                                                                                                            |
+| `generation`                                                     | server-assigned at create, monotonic per `(environment_id, kind, app_name)`; decides which activated deployment is current |
+| `activated_at`                                                   | set by `/activate` after the deploy succeeded; NULL rows are never current and cannot host a plan                          |
 
-Index `(environment_id, kind, app_name, deployed_at DESC)`; partial unique
+Index `(environment_id, kind, app_name, generation DESC)`; unique
+`(environment_id, kind, app_name, generation)`; partial unique
 `(environment_id, code_id) WHERE kind = 'local'`.
 
 ### `exec_config`
 
-| Column       | Notes                                                                          |
-| ------------ | ------------------------------------------------------------------------------ |
-| `hash`       | sha256 hex of canonical JSON; PK with `environment_id`                         |
-| `body` JSONB | `dict[str, str]`; the empty config has a well-known hash and is always present |
+| Column       | Notes                                                                                                                                                         |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hash`       | sha256 hex of canonical JSON; PK with `environment_id`                                                                                                        |
+| `body` JSONB | `dict[str, str]`; the empty config hashes `{}` and is created by the same lookup-or-create as any other, so a fresh registry has no rows until its first plan |
 
 ### `task_instance` — a task as constructed under a scope
 
@@ -293,13 +302,14 @@ alongside it. Reactivating an old scope on resume flips the timestamps.
 
 ### `plan_member` — membership
 
-| Column                           | Notes                                                                                                                                                                                                                                                                                                     |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plan_id` FK, `task_pk` FK       | **PK (plan_id, task_pk)** — the one-instance-per-completion-per-plan rule                                                                                                                                                                                                                                 |
-| `instance_id`                    | composite FK `(instance_id, task_pk)` → `task_instance (id, task_pk)`, so a member's instance realises the member's task by construction; `UNIQUE (plan_id, instance_id)` follows                                                                                                                         |
-| `is_root`                        | the build's request, as instances of this plan                                                                                                                                                                                                                                                            |
-| `admitted_by`                    | `root` \| `static` \| `dynamic` \| `closure`                                                                                                                                                                                                                                                              |
-| `excluded_at`, `excluded_reason` | "given up on" (STA-104): not scheduled, does not gate the build's completion; exclusion **cascades to the member's downstream closure within the plan** (like skip-blocked, otherwise a downstream is neither runnable nor excluded) and **an excluded root fails the build** (the request cannot be met) |
+| Column                              | Notes                                                                                                                                                                                                                                                                                                     |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plan_id` FK, `task_pk` FK          | **PK (plan_id, task_pk)** — the one-instance-per-completion-per-plan rule                                                                                                                                                                                                                                 |
+| `instance_id`                       | composite FK `(instance_id, task_pk)` → `task_instance (id, task_pk)`, so a member's instance realises the member's task by construction; `UNIQUE (plan_id, instance_id)` follows                                                                                                                         |
+| `deployment_id`, `exec_config_hash` | denormalised scope, with composite FKs `(plan_id, deployment_id, exec_config_hash)` → `plan` and `(instance_id, deployment_id, exec_config_hash)` → `task_instance`, so a member's instance is in its plan's scope by constraint, not by check                                                            |
+| `is_root`                           | the build's request, as instances of this plan                                                                                                                                                                                                                                                            |
+| `admitted_by`                       | `root` \| `static` \| `dynamic` \| `closure`                                                                                                                                                                                                                                                              |
+| `excluded_at`, `excluded_reason`    | "given up on" (STA-104): not scheduled, does not gate the build's completion; exclusion **cascades to the member's downstream closure within the plan** (like skip-blocked, otherwise a downstream is neither runnable nor excluded) and **an excluded root fails the build** (the request cannot be met) |
 
 No counters: attempts and interruptions are counted from `execution` rows
 over the build's plans.
@@ -316,14 +326,14 @@ with both paths named; the server is authoritative via the primary key.
 
 ### `execution` — the ledger
 
-| Column                                          | Notes                                                                                                                                                                                      |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `id` PK                                         | client-minted; this is the `execution_id` of STA-50                                                                                                                                        |
-| `task_pk` FK, `plan_id` FK, `instance_id` FK    | which promise, under which request, from which body                                                                                                                                        |
-| `executor`, `executor_ref`, `executor_metadata` | the one place these live                                                                                                                                                                   |
-| `started_at`                                    | the claim was granted                                                                                                                                                                      |
-| `claim_released_at`, `claim_outcome`            | written by the **server** when the claim moves: `completed, failed, suspended, cancelled, taken_over` (a later claiming start took a lapsed claim), `released` (build terminal transition) |
-| `ended_at`, `outcome`                           | written only by the **execution's own report** or an operator stop: `completed, failed, suspended, interrupted, preempted, stopped`                                                        |
+| Column                                          | Notes                                                                                                                                                                                                       |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id` PK                                         | client-minted; this is the `execution_id` of STA-50                                                                                                                                                         |
+| `task_pk`, `plan_id`, `instance_id`             | which promise, under which request, from which body; composite FKs `(instance_id, task_pk)` → `task_instance` and `(plan_id, instance_id)` → `plan_member`, so an execution names one consistent membership |
+| `executor`, `executor_ref`, `executor_metadata` | the one place these live                                                                                                                                                                                    |
+| `started_at`                                    | the claim was granted                                                                                                                                                                                       |
+| `claim_released_at`, `claim_outcome`            | written by the **server** when the claim moves: `completed, failed, suspended, cancelled, taken_over` (a later claiming start took a lapsed claim), `released` (build terminal transition)                  |
+| `ended_at`, `outcome`                           | written only by the **execution's own report** or an operator stop: `completed, failed, suspended, interrupted, preempted, stopped`                                                                         |
 
 One row per execution, updated only at its two ends. It never decides
 anything: liveness is the claim on `task`. `ended_at IS NULL` means "no
@@ -348,10 +358,11 @@ Keeps the append-only log. `build_id` becomes nullable with a CHECK tying
 it to the event type (operator `invalidate` and limit-slot `evict` have no
 build); `task_pk` nullable (build-level events); adds `plan_id` (replaces
 `scope_key`; NULL for build-level events) and `execution_id` (nullable);
-`report_applied` becomes a real column, here only. `build_id` is `ON DELETE
-SET NULL`, not CASCADE: v1's cascade deleted the sources of the global
-status fold. Event types unchanged plus `TASK_INVALIDATED`, `TASK_EXCLUDED`,
-`TASK_OBSERVED_COMPLETE`.
+`report_applied` becomes a real column, here only. `build_id`, `plan_id` and
+`execution_id` are `ON DELETE SET NULL`, not CASCADE: v1's cascade deleted
+the sources of the global status fold. Event types unchanged plus
+`TASK_INVALIDATED`, `TASK_EXCLUDED`, `TASK_OBSERVED_COMPLETE`,
+`TASK_STRUCTURE_DIVERGED`.
 
 ### Peripheral tables, re-pointed
 
@@ -362,7 +373,11 @@ non-significant fields, so it is per instance; a slot is a limit key plus a
 live claim). `distributed_lock` is **retired** (D11). `build_tick_summary`
 unchanged. The 24-hour creation quota counts `task_instance` rows — the
 table a non-significant field can inflate. Deleting a build is refused
-(409) while any of its plans holds a live claim.
+(409) while any of its plans holds a live claim **or any of its executions
+has `ended_at IS NULL`**; `stardag builds stop` is how those are ended first
+(it writes `ended_at` with outcome `stopped`, also for a container the
+backend reports gone), so the ledger is never cascaded away under a worker
+that may still report.
 
 ## Registration
 
@@ -381,6 +396,7 @@ STA-51 documented — the registration transaction takes no `FOR UPDATE` on
   instance_hash, body,
   declared_upstreams: [instance_hash, ...] | null,   -- null = not expanded (pruned)
   observed_complete: true | false,                    -- the driver checked the target
+  observed_at,                                        -- when it checked (driver clock)
   limit_keys: [...] | null }
 ```
 
@@ -406,17 +422,26 @@ POST /plans/{plan_id}/members   (chunk, ≤1000 items, post-order, sorted within
      edges           insert-if-absent for declared_upstreams; each upstream must exist as an
                      instance in this scope (400) and is admitted to the plan if it is not
                      yet a member (admitted_by = closure; 409 instance_conflict if the plan
-                     holds another instance of that task)
+                     holds another instance of that task). An already-expanded instance whose
+                     declared set differs from its recorded static edges gets the new edges
+                     appended and a TASK_STRUCTURE_DIVERGED event: edges only grow, and a
+                     within-scope divergence is a contract breach that over-gates (v1's rule)
      expanded_at     set when declared_upstreams is a list (possibly empty); untouched when null
      plan_member     insert-if-absent by (plan_id, task_pk); 409 instance_conflict otherwise
      status          observed_complete = true and no live claim -> COMPLETED (TASK_OBSERVED_COMPLETE);
                      observed_complete = false and status COMPLETED -> PENDING (TASK_INVALIDATED)
                      -- in this transaction, so no downstream in a later chunk can run against
-                     -- a status the driver has already seen to be false
+                     -- a status the driver has already seen to be false; and only if the
+                     -- task's status_at (completed_at for an invalidation) precedes the item's
+                     -- observed_at, so a delayed duplicate cannot undo a completion that
+                     -- happened after the driver looked (the driver's clock only has to be
+                     -- right to within the minutes such a race spans)
      event           TASK_PENDING (new task) or TASK_REFERENCED, gated on the member insert
 POST /plans/{plan_id}/seal
-  -> verifies: every root member is expanded; every edge from a member has its upstream as a
-     member (closure holds); plan.deployment_id is still the app's current deployment
+  -> verifies: every root member is expanded or COMPLETED (a root whose target already existed
+     is admitted unexpanded and stays so until an invalidation makes it a discovery job);
+     every edge from a member has its upstream as a member (closure holds); plan.deployment_id
+     is still the app's current deployment
      (rollover only moves forward — checked here, not only at the start);
      then sealed_at = now(), and if this plan is a replacement, activated_at = now() and the
      previous active plan gets superseded_at, in the same transaction
@@ -438,8 +463,10 @@ plan admitted unexpanded) can add an edge from one of _my_ members to an
 instance that is not _my_ member, and the frontier must not gate on a
 member it does not hold. Every frontier read therefore starts with a
 closure step: admit, in one transaction, every upstream instance reachable
-over edges from the plan's members that is not COMPLETED and not yet a
-member (`admitted_by = closure`); a conflict found there fails the build
+over edges from the plan's members that is not yet a member, whatever its
+status (`admitted_by = closure`; a COMPLETED upstream is admitted too, so
+membership and edges always agree and the seal check above holds); a
+conflict found there fails the build
 naming both members. It is a recursive query over `task_instance_dependency`
 ∪ `plan_member`, and it is what v1 ran only at stall.
 
@@ -448,15 +475,20 @@ yield batch**:
 
 ```
 POST /plans/{plan_id}/members/{task_id}/yield
-  { execution_id, deployment_id,
+  { execution_id, deployment_id, batch_id,
     items: [<items, post-order, the yielded children and their static closure>],
     yielded: [instance_hash, ...],
     suspend: true | false }
 ```
 
 In one transaction: `deployment_id` must equal the plan's (409
-`deployment_mismatch`); `execution_id` must be the task's current execution
-(else recorded, `report_applied = false`, 409); the items land exactly as a
+`deployment_mismatch`); a batch already applied for this `execution_id` and
+`batch_id` (found on the recorded yield event) is replayed with its stored
+result rather than re-checked — a `suspend: true` yield releases the claim,
+so the plain execution check would otherwise refuse the worker's own retry
+after a lost response; otherwise `execution_id` must be the task's current
+execution (else recorded, `report_applied = false`, 409); the items land
+exactly as a
 static chunk; parent→child edges to every `yielded` instance are inserted
 with `is_dynamic = true`; with `suspend: true` the parent's `TASK_SUSPENDED`
 is applied and its claim released. Very large yields may be split into
@@ -528,12 +560,14 @@ the server does not flip it inside task transactions (that would lock every
 build holding the task on each completion, the inversion `_flag_builds`
 avoids with `SKIP LOCKED`). What changes is that completion is **verified**:
 the frontier response carries `plan_complete` (= sealed, and every
-non-excluded member COMPLETED), and `/complete` is refused with 409
-`plan_incomplete` unless it is true or `force` is set (the operator override
+non-excluded member COMPLETED) as a diagnostic, and `/complete` **recomputes
+the same predicate in its own transaction** and is refused with 409
+`plan_incomplete` unless it holds or `force` is set (the operator override
 that v1's unchecked `/complete` was). `complete`, `fail` and `cancel` release
 the claims held by the build's plans, in one server-side place — v1 released
-on two of three; `exit-early` releases nothing (a resident build's in-flight
-tasks keep reporting) and the idle reaper handles what never returns.
+on two of three; `exit-early` releases nothing: a resident build's in-flight
+tasks keep reporting, and if the process is gone their claims lapse like any
+other worker's.
 
 A build is **resumable** when a plan can be created or reactivated under the
 caller's scope. An existing sealed plan is reused **without re-evaluating
@@ -619,7 +653,9 @@ of active plans (not "any event in the build"); flagging on every transition
 scheduler lease (its own columns on `build`, no longer on the lock table)
 and the watchdog carry over. Concurrency slots are `task_limit_key` rows
 joined to a live claim. The `distributed_lock` table and `/locks` routes are
-retired: the claim is the only mutual exclusion (D11).
+retired: the claim is the only mutual exclusion (D11); the one thing kept
+from them is renewal, as `POST …/tasks/{task_id}/claim/renew` for in-process
+executions, whose driver is alive to call it.
 
 ## Scenario checklist
 
@@ -643,7 +679,7 @@ Every scenario names the column or constraint that decides it.
 | S14       | Resume under a different `exec_config`                                                                       | New plan in the same build, registered alongside the active one, activated at seal; discovery runs; completed members are reused via global status                                                                                                                                                        | `plan` unique on `(build, scope)`; `activated_at`/`superseded_at`     |
 | S15       | Resume under the same scope after a crash mid-registration                                                   | Plan exists unsealed with its roots as discovery jobs; any tick or a re-send finishes it; seal verifies roots expanded and closure                                                                                                                                                                        | roots-first, idempotent inserts, `/seal` checks                       |
 | S16       | Two builds register the same brand-new task concurrently (STA-48)                                            | Both `DO NOTHING … RETURNING`; one creates, both reference; no 500, no `FOR UPDATE` on a missing row; chunk rows sorted by `(task_id, instance_hash)` so two chunks cannot deadlock on unique-index waits                                                                                                 | insert pattern, sort order                                            |
-| S17       | Deleted build                                                                                                | Refused (409) while a plan of it holds a live claim; otherwise plans, members and executions cascade, events keep their rows with `build_id = NULL`                                                                                                                                                       | delete guard, FK actions                                              |
+| S17       | Deleted build                                                                                                | Refused (409) while a plan of it holds a live claim or an execution of it is unended (`builds stop` ends them first); otherwise plans, members and executions cascade, events keep their rows with `build_id` and `plan_id` NULL                                                                          | delete guard, FK actions                                              |
 | S18       | Operator gives up on a member (STA-104)                                                                      | `excluded_at` set; not scheduled, not gating completion; exclusion cascades to its downstream closure in the plan; an excluded root fails the build; the global status untouched                                                                                                                          | `plan_member.excluded_at`                                             |
 | S19       | A stale worker's `/complete` for another build's running task                                                | Applied only if its `execution_id` is current; otherwise recorded, `report_applied=false`, 409                                                                                                                                                                                                            | `transition_task()` authority                                         |
 | S20       | Root identity changed by new code at rollover                                                                | Build FAILED "re-trigger it as a new build"                                                                                                                                                                                                                                                               | `build.root_task_ids` comparison                                      |
@@ -651,7 +687,7 @@ Every scenario names the column or constraint that decides it.
 | S22       | Shared instance across two plans; A yields C; A is cancelled or excludes C                                   | B's frontier closure step admits C (and its closure) into B before evaluating gates; B runs C itself; no stall                                                                                                                                                                                            | closure at every frontier read                                        |
 | S23       | B admitted an instance unexpanded (pruned-complete); it is invalidated; A expands it first                   | B's closure step admits the new upstreams; B's discovery job for it is skipped (flag now set); no gate B does not hold                                                                                                                                                                                    | closure + shared `expanded_at`                                        |
 | S24       | Two instances of one completion in one scope, different plans, dynamic yield (v1's `shared_structure_scope`) | The two instances do **not** share dynamic edges: B's instance is SUSPENDED-runnable while A's children run, so the pre-yield section re-runs once. Accepted cost of the second identity; only identical instances share yields                                                                           | edges on instances                                                    |
-| S25       | Resident `sd.build()` with thread/process pools                                                              | Every execution claims (`claim_expires_at = NULL`); the resident yield keeps the claim (`suspend: false`); `exec_config` applied for the build's duration in-process; a dead process is released by the idle reaper                                                                                       | D11                                                                   |
+| S25       | Resident `sd.build()` with thread/process pools                                                              | Every execution claims (a TTL the driver renews); the resident yield keeps the claim (`suspend: false`); `exec_config` applied for the build's duration in-process; a dead process is released by the idle reaper                                                                                         | D11                                                                   |
 | S26       | Local driver with Modal workers (hybrid)                                                                     | Plans under the app's current deployment; workers' `/yield` matches; a laptop whose code differs is the user's YOLO, as before                                                                                                                                                                            | D13, `deployment_mismatch`                                            |
 | S27       | `exec_config` sets a `STARDAG_*` key or one the worker selector sets                                         | `STARDAG_*`/`MODAL_*` refused at the trigger; selector keys are overridden by `exec_config` (documented precedence)                                                                                                                                                                                       | trigger validation                                                    |
 | S28       | Yielded child already COMPLETED but its target is missing                                                    | The child item carries `observed_complete: false` → invalidated in the yield transaction → runnable under the parent's plan                                                                                                                                                                               | chunk-transaction invalidation                                        |
@@ -681,8 +717,10 @@ Every scenario names the column or constraint that decides it.
   (S24): the pre-yield part of a suspending task can run once per distinct
   instance.
 - Every frontier read runs a closure query before evaluating gates.
-- In-process executions hold claims with no expiry; a dead resident process
-  is a reaper case, not a timeout.
+- In-process executions hold claims with a TTL that the resident driver
+  renews (as v1 renewed the distributed lock), so a dead resident process
+  lapses like any other worker; the renewal is one request per interval per
+  running task.
 
 ## Superseded
 
