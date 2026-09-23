@@ -618,7 +618,9 @@ describe("BuildControlsDialog", () => {
   });
 
   // The one terminal override that releases nothing (STA-103), so it is
-  // withheld unless the scan has positively said nothing is running.
+  // withheld while the build holds any claim. Gated on `holdsClaims`,
+  // which comes from the build's own task list and includes SUSPENDED —
+  // not on the stop scan, which cannot see a claim with nothing to stop.
   it("withholds Mark completed while the build holds claims", async () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();

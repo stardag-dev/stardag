@@ -202,8 +202,8 @@ export function BuildOverrideSection({
           ))}
           {!completedIsSafe && (
             <p className="w-full text-xs text-gray-500 dark:text-gray-400">
-              Mark completed is not offered while this build may still have tasks
-              running: it is the one outcome that releases no claims.
+              Mark completed is not offered while this build holds execution claims: it
+              is the one outcome that releases no claims.
             </p>
           )}
         </div>
