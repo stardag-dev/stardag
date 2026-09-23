@@ -77,7 +77,7 @@ interface BuildOverrideSectionProps {
  * a panel below it, so the obvious-looking move on a build you wanted
  * stopped was to pick "Cancel" — which writes one BUILD_CANCELLED event
  * and nothing else, leaving every container running. Putting them in one
- * dialog, with the record on top and the work below, is what makes the
+ * dialog — the work first, the record after it — is what makes the
  * choice visible.
  *
  * **The copy names the claims exactly where an action changes them**,
@@ -215,16 +215,25 @@ export function BuildOverrideSection({
               the override is almost certainly not what was wanted —
               and when we cannot yet tell, saying nothing would be the
               same as saying there is none. */}
+          {/* Names the command rather than pointing at it. Every state
+              that produces "unknown" is a state in which the stop
+              section above rendered a notice instead of its children,
+              so there is no command on screen to point at. */}
           {chosen.action === "cancel" && runningExecutions === "unknown" && (
             <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
               Whether this build has executions running is not known yet. If any are,
-              cancelling here will not stop them — the command above ends them first.
+              cancelling here will not stop them.{" "}
+              <code>stardag builds stop {buildId}</code> ends them first and cancels the
+              build afterwards.
             </p>
           )}
+          {/* "Above": the stop section is the first half of this
+              dialog, and with executions found it has drawn the command
+              in full. */}
           {chosen.action === "cancel" && runningExecutions === "some" && (
             <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
               This build still has executions running, and cancelling here will not stop
-              them. The command below is the one that does: it ends the selected
+              them. The command above is the one that does: it ends the selected
               containers first and cancels the build afterwards. Reach for it instead —
               you do not need both.
             </p>

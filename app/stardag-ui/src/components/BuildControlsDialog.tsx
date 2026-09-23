@@ -494,14 +494,22 @@ export function BuildControlsDialog({
             // executions that can be ended, which a suspended claim is
             // not one of.
             //
-            // Empty is only "none" from an exhaustive scan. Null is the
-            // scan not yet answered or failed, and an empty *truncated*
-            // result found nothing only because it stopped looking — this
-            // build's executions can sit entirely on pages it never
-            // read. Both are "unknown", which for a warning behaves like
+            // Empty is only "none" from an *exhaustive* scan that
+            // answered *just now*. Three things break that, and each
+            // leaves a "none" the operator should not be shown:
+            //
+            //  - `held === null`: no scan has answered yet.
+            //  - a truncated empty result: it found nothing only because
+            //    it stopped looking, and this build's executions can sit
+            //    entirely on pages it never read.
+            //  - `error`: a refresh failed, and the catch leaves the
+            //    previous `held` in place — so an empty answer from
+            //    minutes ago would keep reading as a fresh one.
+            //
+            // All three are "unknown", which for a warning behaves like
             // "maybe".
             runningExecutions={
-              held === null || (truncated && held.length === 0)
+              held === null || error !== null || (truncated && held.length === 0)
                 ? "unknown"
                 : held.length > 0
                   ? "some"

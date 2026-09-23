@@ -713,6 +713,59 @@ describe("BuildControlsDialog", () => {
     expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
   });
 
+  // A failed refresh leaves the previous result in place, so an empty
+  // answer from minutes ago would otherwise keep reading as a fresh one.
+  it("warns about running work once a refresh of an empty scan fails", async () => {
+    answerWith([]);
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <BuildControlsDialog
+        buildId={BUILD}
+        environmentId="env-1"
+        buildStatus="running"
+        holdsClaims={true}
+        refreshToken={0}
+        onBuildChanged={onBuildChanged}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+    await screen.findByText(/nothing running that can be stopped/i);
+
+    vi.mocked(fetchTasks).mockRejectedValue(new Error("network down"));
+    rerender(
+      <BuildControlsDialog
+        buildId={BUILD}
+        environmentId="env-1"
+        buildStatus="running"
+        holdsClaims={true}
+        refreshToken={1}
+        onBuildChanged={onBuildChanged}
+      />,
+    );
+    await screen.findByText(/Could not read this build/i);
+
+    await user.click(screen.getByRole("button", { name: "Cancel build" }));
+    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
+  });
+
+  // The unknown states are exactly the states in which the stop section
+  // renders a notice instead of the command, so the warning must name
+  // the command rather than point at a place on screen.
+  it("names the stop command in the warning rather than pointing at it", async () => {
+    answerWith(
+      [makeTask({ latest_status_build_id: OTHER_BUILD })],
+      MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
+    );
+    const user = userEvent.setup();
+    renderPanel("running", true);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    const warning = screen.getByText(/is not known yet/i).closest("p");
+    expect(warning?.textContent).toContain(`stardag builds stop ${BUILD}`);
+    expect(warning?.textContent).not.toMatch(/command above|command below/i);
+  });
+
   it("does not warn about running work when the build holds no claims", async () => {
     answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
     const user = userEvent.setup();
