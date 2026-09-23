@@ -375,12 +375,27 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // claim list. It is also environment-wide and paginated, so it can
   // truncate. This list is already fetched, already scoped to the build,
   // and complete.
+  //
+  // **`status` and `status_build_id`, not the `latest_*` pair.** This
+  // list comes from `GET /builds/{id}/tasks`, whose
+  // `TaskWithStatusResponse` carries the global status as `status` and
+  // its owning build as `status_build_id`, and does not populate
+  // `latest_status`/`latest_status_build_id` at all. Reading the latter
+  // here compared `undefined` to a build id, so the predicate was false
+  // for every task and the gate silently never fired — the failure that
+  // looks like working code and passes any test whose fixture invents
+  // the fields.
+  //
+  // It is a snapshot, so it is a guard rather than a guarantee: a task
+  // can start between refreshes. The guarantee belongs server-side, and
+  // STA-103 owns it by making Mark completed release claims like the
+  // other two terminal overrides — after which this gate is redundant
+  // rather than load-bearing.
   const holdsClaims = useMemo(
     () =>
       allTasks.some(
         (t) =>
-          t.latest_status_build_id === buildId &&
-          CLAIM_HOLDING_STATUSES.includes(t.latest_status ?? t.status),
+          t.status_build_id === buildId && CLAIM_HOLDING_STATUSES.includes(t.status),
       ),
     [allTasks, buildId],
   );
