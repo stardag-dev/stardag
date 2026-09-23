@@ -424,6 +424,22 @@ describe("TaskDetail claim holder", () => {
     expect(screen.getByText(/requires the workspace admin role/)).toBeInTheDocument();
   });
 
+  // The task explorer renders this pane with no build context, where
+  // "not cross-build" is true by construction — so an admin gate written
+  // as `!crossBuild` would fall open exactly where the user has least
+  // context about whose work they are releasing.
+  it("still requires admin when there is no build in view", async () => {
+    mockWorkspaceRole = "member";
+    render(
+      <TaskDetail task={makeTask()} onClose={() => {}} onTaskCancelled={() => {}} />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Release claim and retry…" }),
+    ).toBeNull();
+    expect(screen.getByText(/requires the workspace admin role/)).toBeInTheDocument();
+  });
+
   it("says nothing about claims for a task that holds none", async () => {
     render(
       <TaskDetail

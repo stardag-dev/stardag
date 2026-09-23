@@ -64,19 +64,17 @@ interface BuildOverrideSectionProps {
  * dialog, with the record on top and the work below, is what makes the
  * choice visible.
  *
- * The copy deliberately says nothing about what an override does to the
- * *claims*, in either direction. That behaviour has now changed twice
- * under this file: before STA-81 a cancel released none of them, and
- * since STA-81 both cancel and fail release them all. Each time, copy
- * that named the claims went stale the moment the server moved, and
- * once it went stale in the worst way — asserting the opposite of the
- * truth about a destructive action.
+ * **The copy names the claims exactly where an action changes them**,
+ * and nowhere else. That rule replaced an earlier one — say nothing
+ * about claims at all — which was right only while the behaviour was in
+ * flight: before STA-81 a cancel released none of them, and since
+ * STA-81 both cancel and fail release them all, so for a day no
+ * sentence was true on both sides and silence was the only honest
+ * option. The behaviour has settled, so accuracy is now the better
+ * constraint, and a test pins each sentence to it.
  *
- * What does not move is the fact the decision actually turns on: an
- * override edits the record and does not stop what is running. That is
- * true on both sides of every change so far, so it is what is said
- * here, and the claim semantics are left to the CLI docs that own
- * them.
+ * What still does not move, and leads every description here: an
+ * override edits the record and does not stop what is running.
  */
 export function BuildOverrideSection({
   buildId,
@@ -104,6 +102,17 @@ export function BuildOverrideSection({
 
   const confirm = useCallback(async () => {
     if (!pending) return;
+    // Re-checked here, not only when the list was drawn. The scan
+    // refreshes underneath an open confirmation, so a task can start
+    // between choosing "Mark completed" and confirming it — and that is
+    // the one override that would strand its claim.
+    if (pending === "complete" && liveExecutions !== "none") {
+      setError(
+        "This build has tasks running again, and Mark completed would leave " +
+          "their claims held. Close and choose Cancel build or Mark failed.",
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     const userId = user?.profile?.sub;
@@ -123,7 +132,7 @@ export function BuildOverrideSection({
     } finally {
       if (alive.current) setBusy(false);
     }
-  }, [pending, buildId, environmentId, user?.profile?.sub, onChanged]);
+  }, [pending, liveExecutions, buildId, environmentId, user?.profile?.sub, onChanged]);
 
   if (!canOverrideStatus(buildStatus)) return null;
 

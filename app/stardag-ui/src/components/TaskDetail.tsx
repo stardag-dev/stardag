@@ -352,8 +352,23 @@ export function TaskDetail({
   // In the task explorer there is no build in view, so every holder is
   // "elsewhere" — which is exactly the claim-holder question being asked
   // there. The copy below adapts rather than the condition.
-  const crossBuild = Boolean(holderBuildId && buildId && holderBuildId !== buildId);
+  // Two different questions, and conflating them is what broke the gate.
+  //
+  // `viewingAnotherBuild` is about *wording*: only say "not the build you
+  // are viewing" when there is a build in view and it is a different one.
+  // `crossBuild` is about *permission*: releasing a claim you do not own
+  // is an admin act, and "no build in view" is not ownership — the task
+  // explorer renders this pane with no `buildId`, which would otherwise
+  // drop the gate exactly where the user has least context about whose
+  // work they are releasing.
+  const viewingAnotherBuild = Boolean(
+    holderBuildId && buildId && holderBuildId !== buildId,
+  );
+  const crossBuild = Boolean(holderBuildId) && holderBuildId !== buildId;
   const showClaimHolder = holdsClaim && Boolean(holderBuildId);
+  // Releasing another build's claim is an admin act; releasing your own
+  // build's is not. "Another build" includes "no build in view".
+  const canReleaseClaim = isAdmin || !crossBuild;
   const claimSince =
     task.latest_status_at ?? (globalStatus === "running" ? task.started_at : null);
   const heldFor = claimSince ? formatDuration(claimSince, null) : null;
@@ -559,11 +574,11 @@ export function TaskDetail({
                 ) : (
                   <code className="font-mono">{holderBuildId.slice(0, 8)}</code>
                 )}
-                {crossBuild ? " (not the build you are viewing)" : ""}, which holds its
-                claim.
+                {viewingAnotherBuild ? " (not the build you are viewing)" : ""}, which
+                holds its claim.
               </p>
 
-              {isAdmin || !crossBuild ? (
+              {canReleaseClaim ? (
                 <button
                   type="button"
                   disabled={cancelling}

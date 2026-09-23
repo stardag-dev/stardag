@@ -613,6 +613,18 @@ describe("BuildControlsDialog", () => {
     ).toBeInTheDocument();
   });
 
+  // A truncated scan found nothing only because it stopped looking.
+  it("withholds Mark completed when the scan was truncated", async () => {
+    answerWith(
+      [makeTask({ latest_status_build_id: OTHER_BUILD })],
+      MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
+    );
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
+  });
+
   it("offers Mark completed once nothing is running", async () => {
     answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
     const user = userEvent.setup();

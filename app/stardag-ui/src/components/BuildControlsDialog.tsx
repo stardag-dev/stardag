@@ -482,9 +482,20 @@ export function BuildControlsDialog({
             environmentId={environmentId}
             buildStatus={buildStatus}
             liveExecutions={
-              // `held` is null until the scan answers, and stays null if
-              // it fails. Both are "not known", and neither is "none".
-              held === null ? "unknown" : held.length > 0 ? "some" : "none"
+              // "none" is a strong claim and only an exhaustive scan can
+              // make it. `held` is null until the scan answers and stays
+              // null if it fails; a truncated scan found nothing only
+              // because it stopped looking. Any of those is "unknown".
+              //
+              // Known gap: this scan asks for the *stoppable* statuses,
+              // so a SUSPENDED task — which holds a claim but has
+              // nothing to stop — is invisible to it and an empty result
+              // does not prove the build holds no claims. The gate is
+              // therefore a guard against the common case, not a
+              // guarantee; the guarantee belongs with STA-103, which
+              // already owns making Mark completed release claims like
+              // the other two.
+              held === null || truncated ? "unknown" : held.length > 0 ? "some" : "none"
             }
             onChanged={(updated) => {
               setStatusNotice(`This build is now recorded as ${updated.status}.`);
