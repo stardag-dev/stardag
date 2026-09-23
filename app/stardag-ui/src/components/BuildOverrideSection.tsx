@@ -157,11 +157,14 @@ export function BuildOverrideSection({
   const chosen = ACTIONS.find((a) => a.action === pending) ?? null;
 
   // "Mark completed" is the one terminal override that releases nothing
-  // (STA-103), so offering it while the build still holds executions
-  // invites stranding every one of their claims until expiry. It is
-  // withheld unless the scan has positively said nothing is running —
-  // "not known yet" is not "none", and here the unsafe reading is the
-  // optimistic one.
+  // (STA-103), so offering it while the build holds any claim invites
+  // stranding every one of them until expiry.
+  //
+  // Keyed on claims, not on running work: a SUSPENDED task holds a claim
+  // with nothing running behind it, and it is the claim that completion
+  // fails to release. `runningExecutions` answers the other question and
+  // gates the cancel warning, which is about work that a stop command
+  // could end.
   const completedIsSafe = !holdsClaims;
   const offered = ACTIONS.filter((a) => a.action !== "complete" || completedIsSafe);
 
