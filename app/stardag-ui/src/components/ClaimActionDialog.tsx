@@ -1,6 +1,6 @@
 import type { TaskStatus } from "../types/task";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
-import type { ClaimAction } from "../utils/claims";
+import { CLAIM_ACTION_LABELS, type ClaimAction } from "../utils/claims";
 
 interface ClaimActionDialogProps {
   action: ClaimAction | null;
@@ -68,7 +68,7 @@ export function ClaimActionDialog({
           : "Release this task's claim and let the build retry it"
       }
       destructive
-      confirmLabel={action === "retry" ? "Reset to pending" : "Release claim and retry"}
+      confirmLabel={CLAIM_ACTION_LABELS[action ?? "release"]}
       busyLabel={action === "retry" ? "Resetting…" : "Releasing…"}
       cancelLabel="Close"
       busy={busy}

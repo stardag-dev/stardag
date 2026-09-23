@@ -13,7 +13,7 @@ import type {
   EventType,
   ExecutorMetadata,
 } from "../types/task";
-import { type ClaimAction } from "../utils/claims";
+import { CLAIM_ACTION_LABELS, type ClaimAction } from "../utils/claims";
 import {
   isModalMetadata,
   modalAppUrl,
@@ -589,7 +589,7 @@ export function TaskDetail({
                   }}
                   className="rounded-md border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
                 >
-                  Release claim and retry…
+                  {CLAIM_ACTION_LABELS.release}…
                 </button>
               ) : (
                 <p className="text-xs text-gray-500 dark:text-gray-400">

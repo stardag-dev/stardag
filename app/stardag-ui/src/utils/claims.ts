@@ -12,8 +12,17 @@ import type { BuildFrontier, BuildStatus, TaskStatus } from "../types/task";
  */
 export type ClaimAction = "release" | "retry";
 
+/**
+ * One name per action, everywhere it is offered.
+ *
+ * "Release claim" described the mechanism and left every surface free to
+ * call it something else — which is how this UI ended up with "Cancel
+ * task" and "Release claim" as two names for one route. The name states
+ * the consequence instead: releasing the claim is what lets the holding
+ * build retry the task.
+ */
 export const CLAIM_ACTION_LABELS: Record<ClaimAction, string> = {
-  release: "Release claim",
+  release: "Release claim and retry",
   retry: "Reset to pending",
 };
 
