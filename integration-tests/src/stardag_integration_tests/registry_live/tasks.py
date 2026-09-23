@@ -274,9 +274,7 @@ class ConfiguredChain(sd.Task[int]):
     """
 
     salt: str
-    upstream_seconds: Annotated[
-        int, sd.StardagField(significance="dependencies_only")
-    ] = 90
+    upstream_seconds: Annotated[int, sd.StardagField(significant=False)] = 90
 
     def requires(self):
         return slow(
@@ -306,7 +304,7 @@ class ConfiguredFanOut(sd.Task[list[int]]):
     """
 
     salt: str
-    children: Annotated[int, sd.StardagField(significance="dependencies_only")] = 4
+    children: Annotated[int, sd.StardagField(significant=False)] = 4
     child_seconds: int = 30
     pre_yield_seconds: int = 20
 
