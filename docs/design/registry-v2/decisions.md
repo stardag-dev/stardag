@@ -1,0 +1,171 @@
+# Registry v2: decisions log
+
+Each decision is recorded with its recommendation and the runner-up it
+displaced; flipping one is a local edit to the design, not a re-plan.
+Dated entries are added as the line evolves.
+
+## Decisions D1–D13 (2026-09-23)
+
+| #   | Decision                                        | Recommendation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Runner-up                                                                                                                                       |
+| --- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | Name of the completion-keyed table              | **`task`**, keyed by `task_id` (the completion hash keeps its user-facing name and format). The row is the task's global fact record: identity-by-promise, status, claim, execution pointer. "Claim" is one of its states, so `task_claim` over-names it; `task_outcome` names something the row does not store.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `task_claim` (the maintainer's draft)                                                                                                           |
+| D2  | Name of the per-scope body table                | **`task_instance`**; "deterministic" is carried by the scope columns, not the name (the row does not make anything deterministic; the scope's contract does). Hash column `instance_hash`. Settled 2026-09-23 with two rules instead of a longer name: the vocabulary rule (an _instance_ is a registry row under a scope; the Python object is a _task object_; repeated in code docs at the critical places) and the API rule (`instance_hash` is never a public identifier on its own; instances are addressed by row id or the full scope triple).                                                                                                                                                                                                                                                                                                                                                                                                             | `deterministic_task_instance`, `scoped_task_instance`                                                                                           |
+| D3  | Second identity naming                          | `task_id` (completion) and `instance_hash` (all parameters). Field flag is `StardagField(significant: bool = True)`. Not "completion_hash"/"instance_hash" pair: renaming `task_id` renames a user-visible concept (target paths, CLI, UI) for no user gain.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `task_completion_hash` / `task_instance_hash`                                                                                                   |
+| D4  | Per-trigger config name                         | **`settings`** everywhere: `build_trigger(settings=)`, `sd.build(settings=)`, CLI `--settings KEY=VALUE`, table `settings`, column `settings_hash`, scope `(deployment_id, settings_hash)` (settled 2026-09-23; the draft said `exec_config`). A flat `dict[str, str]` applied as env vars in every process of the build; the intended consumer is the pydantic-settings pattern. Not `env_overrides` (the worker selector's per-task env, an app-deploy setting, stays), not `build_config` (v1's deleted mechanism; it also belongs to no build), not `build_settings` (same objection). Precedence settings > selector env > deployment env; `STARDAG_*` and `MODAL_*` keys refused at the trigger. Contract: may change structure and execution, **never output**.                                                                                                                                                                                             | `exec_config` (the draft), `build_env`                                                                                                          |
+| D5  | `execution` ledger table                        | **Add it**, one row per claim granted. Two ends, written by two hands: `claim_released_at`/`claim_outcome` by the server when the claim moves (taken over, lapsed-at-takeover, released by cancel/fail); `ended_at`/`outcome` only by the execution's own report or an operator stop. It is a record, not coordination: the claim stays on `task`; a row with `ended_at IS NULL` may still be a running container, which is exactly what `builds stop` wants to list. Needed by: orphan definition (STA-67), attempts-as-rows (D9), the stop list, STA-65's per-execution end, STA-94, the UI executions view. STA-78 dropped it when it was going to _arbitrate_; here it only records.                                                                                                                                                                                                                                                                           | keep `task.execution_id` only and define orphans over plan membership                                                                           |
+| D6  | Modal deployment identity                       | **One row per deploy**, id minted by `stardag modal deploy` (uuid7) and baked into the image as `STARDAG_DEPLOYMENT_ID`; created **before** the deploy (the server assigns a monotonic `generation` per app) and activated after it succeeds, so "current" is the activated row with the highest generation and a late record cannot roll a build back (amended 2026-09-23 after the first Copilot round). Redeploy of unchanged code = new deployment = new scope (the maintainer's stated position). Local builds: lookup-or-create by `(environment, kind='local', code_id)` with `code_id` from `STARDAG_CODE_ID` → clean git SHA → fresh uuid, so the existing `STARDAG_CODE_ID` is the pin.                                                                                                                                                                                                                                                                  | dedupe Modal deploys by `(app_name, code_id)` too, so a no-code-change redeploy shares scope (sound under the env-var contract, fewer re-plans) |
+| D7  | Completion invalidation                         | **The registry follows the world, and only that** (narrowed 2026-09-23): the sole path out of COMPLETED is discovery's `observed_complete: false` with the `observed_at` guard, recorded as `TASK_INVALIDATED{target_missing}`. No operator route declares a task incomplete; an operator acts on the target and triggers a build (`stardag tasks check` reports the observation). The record stays truthful because the promise is unchanged — the same output is re-produced. "Fix its output" is a change of promise and needs a new `task_id` (version bump or new significant parameter), which cascades to downstream ids on its own; a cascading uncomplete in the registry is neither feasible (no target access, compound completion states) nor sound (other builds rely on global completion).                                                                                                                                                          | the draft's operator `POST /tasks/{id}/invalidate`; or keep COMPLETED sticky forever                                                            |
+| D8  | Static-phase atomicity                          | **Chunked registration in post-order + `plan.sealed_at`.** Each chunk is self-consistent (an instance lands with its declared edges; upstreams are in the same or an earlier chunk); the frontier may run on an unsealed plan; build completion requires `sealed_at`. Not one giant transaction: plans reach thousands of tasks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | one request per plan                                                                                                                            |
+| D9  | Per-(plan, task) state                          | **No counters.** Attempts and interruptions per build are counted from `execution` rows over the build's plans (the ledger is the one source); `plan_member` carries only membership facts and `excluded_at`. Replaces the three per-build event replays in `services/status.py`. (Flipped by the review: per-plan counters diverge from the global claim and restart at every re-plan, STA-44's "budget silently grew".)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | per-plan counters                                                                                                                               |
+| D10 | STA-78 stabilisation window vs v2               | **v2 is the bet and has the highest priority** (Anders, 2026-09-23). It is the explicit exception to STA-78's decision 3; STA-78 continues at reduced priority, and small v1 fixes may still land under it when chosen (see the "Continue on v1 unchanged" list in [plan.md](plan.md)'s Adjacent issues section).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | pause v2 until STA-78 done-when                                                                                                                 |
+| D11 | Claims in the resident engine                   | **Every execution claims**, uniformly, with a TTL: detached executors get theirs from the start request; in-process (thread/process pool) executions get a short one that the resident driver **renews** (`…/claim/renew`), exactly as v1's resident engine renewed the distributed lock, so a dead resident process lapses like any other worker and no reaper or NULL-expiry special case is needed (amended 2026-09-23 after the first Copilot round; the draft held in-process claims with no expiry). The resident engine yields with `suspend: false` (the parent stays claimed while its in-process generator is alive). `distributed_lock` is **retired**: the claim is the mutual exclusion. v1 claimed only when `supports_detached`, leaving pool executions on the deprecated global lock. Applies only when a build has a registry: a single-process `sd.build()` without one has no claims, no plan and no instance rows, and stays fully supported. | keep the lock table for in-process runs                                                                                                         |
+| D12 | `compat_default` and the two hashes             | **`compat_default` kept**, on significant fields only (a value equal to it is dropped from `task_id`, so a field can be added without re-keying every downstream — the #340 cascade), together with custom `"hash"`-mode serializers: user control over hashing stays on `task_id`. Only `significance=` and `hash_exclude=` are removed. The **`instance_hash` is the hash of the canonical body itself** — no hash mode, no user control beyond ordinary pydantic serialization — and the SDK enforces the one thing it needs, round-trip stability (`dump(validate(dump(x))) == dump(x)`), at registration with `UnstableSerializationError`. Settled 2026-09-23.                                                                                                                                                                                                                                                                                               | remove `compat_default`; or a user-customisable instance hash                                                                                   |
+| D13 | Which deployment a non-Modal driver plans under | A driver whose tasks run on a Modal app (hybrid `sd.build()` with `ModalTaskExecutor`, or `reactive_discovery="local"`) plans under **the app's current deployment**; the laptop code matching it is on the user, as today's clean-tree sharing was. A pure local build plans under a `local` deployment. `/yield` refuses a worker whose `STARDAG_DEPLOYMENT_ID` differs from the plan's (409 `deployment_mismatch`). Principle (Anders, 2026-09-23): where nothing can be guaranteed, take the simplest mechanism and put the responsibility on the user, stated in the docs.                                                                                                                                                                                                                                                                                                                                                                                    | plan under a local deployment and roll over at the first deployed tick (discovers everything twice)                                             |
+
+## Review dispositions (2026-09-23)
+
+Thirty findings; the full findings are in
+[research/review-2026-09-23.md](research/review-2026-09-23.md). Accepted
+and folded in (the design above is post-review): settings must never
+affect output (F1); closure stays as a frontier-time mechanism because
+instances are shared across plans (F2, F23-static); lapsed claims are
+ACTIONABLE (F3); `output_uri` is checked per instance (F4); invalidation
+and observed completion land in the chunk transaction (F5, F29); roots
+first and a verifying `/seal` (F6); exclusion cascades, excluded root fails
+the build (F7); uniform claims, resident `suspend: false`, lock table
+retired (F8 → D11); `/seal` re-checks the current deployment (F9); the
+ledger's two ends split (F10); idempotency rules for reports, claims,
+invalidate and chunk events (F11); `FOR NO KEY UPDATE`, sorted chunk
+inserts, build status not flipped in task transactions (F12);
+`activated_at` (F13); build delete guard and `event.build_id SET NULL`
+(F14, F15); counters dropped (F16 → D9); limit keys at claim time (F17);
+composite FKs, executor fields only on `execution`, `deployment`
+RESTRICT, quota on instances (F18); root instance conflict and body
+conflict are 409s (F19); resume re-observes targets and retries (F20);
+`/yield` checks the worker's deployment and hybrid drivers plan under the
+app's deployment (F21 → D13); `compat_default` kept (F22 → D12);
+`exit-early` releases nothing (F23); dynamic `instance_conflict` is
+non-retryable (F24); eighteen scenarios added (F25); request shapes and
+hashing rules stated (F26, F28); `settings` reserved keys, scoping,
+empty hash (F27); `expanded_at`, `plan_member`, `taken_over` (F30).
+
+Rejected, with reason: renaming `settings` to `build_env` ("env"
+collides with the `environment` entity; recorded as D4's runner-up);
+`completion_id` in the API (the user-facing name stays `task_id`);
+splitting `superseded` further (the plan timestamp and the tick exit are
+the same fact seen from two sides; only the execution outcome was
+renamed).
+
+## Maintainer review, round 1 (2026-09-23) — all thirteen settled
+
+Anders went through D1–D13 on 2026-09-23. Settled as recommended: D1, D3,
+D5, D6, D8, D9. Amended in place above: D2 (two rules instead of a longer
+name), D4 (`exec_config` → `settings`), D7 (narrowed to the observed path,
+no operator route), D10 (v2 is the bet), D11 (registry-free builds stay
+supported), D12 (the instance hash is the hash of the body; round-trip
+stability enforced), D13 (simplest mechanism, responsibility on the user).
+One rule confirmed along the way: a within-scope divergence of an expanded
+instance's declared upstreams can only come from user code breaking the
+env-var or snapshot contract, and it is appended and recorded
+(`TASK_STRUCTURE_DIVERGED`), never refused.
+
+## Copilot review, round 1 (2026-09-23) — dispositions
+
+Seventeen threads on PR #379. Accepted and folded into the design:
+deployment `generation` assigned at create, activation after deploy (D6
+amended); resident claims renew a TTL instead of holding a NULL expiry (D11
+amended); scope columns with composite FKs on `plan_member`; composite FKs
+on `execution`; build deletion also refused while an execution is unended;
+`observed_at` on items so a delayed duplicate observation cannot undo a
+later completion; seal accepts a COMPLETED unexpanded root; the frontier
+closure admits COMPLETED upstreams too, so seal's closure check holds;
+`batch_id` on `/yield` so a retry after a lost response is replayed rather
+than refused; `/complete` recomputes `plan_complete` in its own transaction;
+`event.plan_id` and `event.execution_id` are `SET NULL`; the empty
+`settings` is created lazily (the "always present" wording was the
+contradiction); `plan.md` corrected on the members route, on
+`compat_default` (kept, D12) and on where `reactive_discovery="local"` plans
+(the app's deployment, D13).
+
+Rejected: refusing a re-registration of an expanded instance whose static
+upstream set differs. Within a scope edges only grow and gating can only
+over-approximate; that is the soundness argument the design rests on, and a
+409 there would fail builds on a benign env-var contract breach. The design
+appends the edges and records `TASK_STRUCTURE_DIVERGED`, as v1 warned.
+
+## Copilot review, round 2 (2026-09-23) — dispositions
+
+Eight threads. Accepted: `local` deployments are created already activated;
+the composite FK `(environment_id, settings_hash)` on `task_instance` and
+`plan`, with the scope columns NOT NULL; `UNIQUE (id, deployment_id,
+settings_hash)` on `plan` as the target of `plan_member`'s composite FK; a
+per-build `plan.generation` so `/seal` activates only the latest request
+(two replacements with different settings can no longer leave the build on
+the older one); late reports defined against `claim_released_at` and stated
+to write the ledger end without touching task status; the D4 rendering and
+the S25 reaper wording fixed (both already superseded by the settled
+decisions).
+
+Accepted in bounded form: the `observed_at` guard compares a driver clock
+with a server clock. The alternative — a registry status version captured
+before the target check — needs a registry read per task inside discovery,
+which is exactly the coupling discovery avoids. Instead the server refuses an
+`observed_at` ahead of its own clock by more than a few seconds, the only
+skew direction that can pass the check wrongly; backward skew only skips an
+observation. The residual worst case is a spurious re-run that re-produces
+the same output under the task-id contract, never wrong output, and it is
+recorded as an intentional limitation.
+
+## Copilot review, rounds 3–5 (2026-09-23/24) — dispositions
+
+Twenty-one threads over three passes on successive commits; five were
+already fixed by the time they were read (nested body, local activation,
+settings FK, plan unique key, the D11 table) and two were stale wording
+(`FOR UPDATE` in the carry-over bullet, I4 in plan.md). Accepted from the
+fourteen distinct points: `claim_expires_at` NOT NULL whenever RUNNING, so
+liveness is a finite expiry and nothing is live forever; composite FKs tying
+`task.claim_plan_id` to the membership and `task.execution_id` to an
+execution of the same task; one schema rule that every FK between
+environment-scoped tables carries `environment_id`; identity metadata
+(namespace, name, version, output*uri) compared on registration, 409
+`task_identity_conflict`; `/complete` reads the members' task rows `FOR
+SHARE` so it serialises with a concurrent invalidation, and `force` never
+overrides a missing seal; the claiming start re-checks upstream completion
+under its own lock (409 `upstream_incomplete`) — the frontier is a hint, the
+claim is the decision (S39); renewal names its execution and is granted only
+to the live holder; `claim_outcome` gains `interrupted` and `lapsed`, and
+every move off RUNNING closes the current claim on the ledger, the observed
+completion of a lapsed-claim task included; a failed discovery job excludes
+the member (`discovery_failed`) instead of failing the global task, so it is
+never re-selected; the task-id rule states that all `significant=False`
+fields are excluded; framework-owned `STARDAG*\*` identifiers are written
+last and cannot be overridden by settings, selector or deployment env.
+Nothing rejected in these rounds.
+
+## Methodology (2026-09-24)
+
+Agreed with the maintainer and recorded in `plan.md`: a vertical spike (I0)
+before the surfaces; a must-still-hold list of registry-live scenarios whose
+assertions survive v2, canonical `api-pg` tests for the registration and
+transition invariants written before the service, and a test tier per
+scenario in `design.md`; seven engineering rules traceable to v1 defects;
+and two standing mechanisms that tell reviewers, Copilot included, what a
+PR against `v2` deliberately leaves out (`.github/copilot-instructions.md`
+and the `v2.md` PR template).
+
+## Copilot review, round 6 (2026-09-24) — dispositions
+
+Seven threads on 20feadf2. Accepted: NOT NULL stated on every composite-FK
+column (a composite FK skips rows with a NULL referencing column); the FK
+from the claim pointer written in the membership key's column order, and the
+execution's FKs naming their exact target keys; lifecycle transitions
+(`complete`, `fail`, `cancel`, `exit-early`, `resume`, `/activate`, `/seal`)
+idempotent by state — a re-delivery finds the state and writes nothing; the
+invalidation guard names `task.completed_at` explicitly; the yield's
+`batch_id` becomes a typed `event` column with a unique index, looked up
+under the parent's row lock (the JSON-metadata version violated engineering
+rule 4); a tick finishing another driver's unsealed plan re-observes
+unexpanded members' targets before sealing; `force` never overrides an
+excluded root. On the FK column order: PostgreSQL matches referenced columns
+to a unique constraint as a set, so the original text was creatable, but
+writing it in key order costs nothing and removes the doubt.
