@@ -4,7 +4,6 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from stardag_api.limits import LimitsSettings
-from stardag_api.sdk_compat import SdkCompatSettings
 
 
 class Settings(BaseSettings):
@@ -60,148 +59,6 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> list[str]:
         """Get list of allowed CORS origins."""
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
-
-
-class ReaperSettings(BaseSettings):
-    """Optional in-process sweep that cancels abandoned RUNNING builds.
-
-    Same operation as ``POST /builds/bulk-cancel`` with ``idle_for_seconds``
-    — the endpoint is the supported, auditable way to drive it (a CLI
-    ``builds cleanup`` sits on top). This is for deployments that want it to
-    happen unattended, with nothing scheduled outside the API process.
-
-    **Off by default**, and deliberately so: a reaper cancels other people's
-    work, and whether a build quiet for N hours is abandoned or merely slow
-    is a judgement only the operator of that environment can make. Turn it
-    on once you have run the endpoint with ``dry_run`` and agree with what
-    it selects.
-
-    **Multi-replica caveat.** Every replica runs its own timer; there is no
-    leader election. Cancelling an already-terminal build is a no-op, so
-    concurrent sweeps are wasteful, not wrong — they duplicate the scan and
-    race harmlessly on the same rows. With more than a couple of replicas,
-    prefer an external scheduler calling the endpoint once.
-    """
-
-    enabled: bool = False
-    # Seconds between sweeps. The first runs one interval after startup, so
-    # a crash-looping process never reaps.
-    interval_seconds: int = 900
-    # A build with no activity for this long is considered abandoned. The
-    # default is deliberately generous: a day of complete silence is hard to
-    # explain for a live build, and the cost of reaping too eagerly (killing
-    # real work) is far higher than reaping late.
-    idle_for_seconds: int = 24 * 60 * 60
-    # Include reactive builds. Off: they are quiet between ticks by design
-    # and have their own watchdog.
-    include_reactive: bool = False
-    # Also release the claims the reaped builds hold. On — the whole point.
-    cascade: bool = True
-    # Builds cancelled per sweep, across all environments. Bounds the write
-    # set of a single transaction; a backlog drains over successive sweeps.
-    max_builds_per_sweep: int = 100
-
-    model_config = SettingsConfigDict(env_prefix="STARDAG_API_REAPER_")
-
-
-# Bounds on a claim TTL, shared by the ``claim_ttl_seconds`` query parameter
-# and by :class:`ClaimSettings`. Both ends reject values that can only be
-# mistakes:
-#
-# - Below a minute a claim can expire while its own executor is still
-#   starting up, and one clock-skewed client would hand the task to a second
-#   claimant *while the first is running it*. A claim is not a heartbeat
-#   lease; there is nothing that renews it mid-execution.
-# - Above a month the expiry stops being liveness evidence at all — it is
-#   indistinguishable from the "forever" it replaces, and NULL already says
-#   that more honestly.
-MIN_CLAIM_TTL_SECONDS = 60
-MAX_CLAIM_TTL_SECONDS = 30 * 24 * 60 * 60
-
-
-class ClaimSettings(BaseSettings):
-    """Expiry of the per-task execution claim (``Task.latest_status_expires_at``).
-
-    A task whose ``latest_status`` is RUNNING holds the environment-global
-    execution claim (see ``services.claims`` for the predicates).
-    Recording *when that claim stops being believable* is what lets a third
-    party — another build, the concurrency-limit counter — decide the holder
-    is gone without probing anything.
-
-    The TTL is written once, at claim time, and is **not** renewed by a
-    heartbeat. Callers should therefore pass ``claim_ttl_seconds`` on the
-    start, derived from their executor's own timeout plus a small grace:
-    the caller is the only party that knows how long the execution it is
-    about to spawn can legitimately take.
-    """
-
-    # Used when the claiming start supplies no TTL of its own.
-    #
-    # Deliberately generous, because the two failure modes are not symmetric:
-    # expiring late merely delays the self-heal of a task that is wedged
-    # forever today, whereas expiring early hands a *live* task to a second
-    # claimant — a double execution, the one thing the claim exists to
-    # prevent.
-    #
-    # A week rather than a day specifically because this default is what an
-    # SDK that does NOT derive a TTL falls back to — every SDK released before
-    # claim expiry existed, and any newer one whose executor declares no
-    # timeout. Such a caller gets a bound it never agreed to, so the bound has
-    # to be one no realistic task reaches. A day is not: it is exactly the
-    # maximum function timeout of a backend stardag drives, so a task running
-    # right at that limit would race its own claim.
-    #
-    # This is a backstop, not the primary cleanup path, and reading it as the
-    # latter makes it look far too slow:
-    #
-    # - a claim held by an *abandoned build* is released within
-    #   ``ReaperSettings.idle_for_seconds`` (a day) by the reaper's cascade;
-    # - a claim held by a *live* build whose worker died is released by this
-    #   expiry, or sooner by the scheduler probing the executor ref;
-    # - an operator can always release one immediately (cancel / retry).
-    #
-    # Shortening it is safe once every caller derives its own TTL, which is
-    # what the SDK does from its executor's timeout.
-    default_ttl_seconds: int = 7 * 24 * 60 * 60
-
-    # How long a claim stays believable after the platform said it was
-    # restarting the execution itself (TASK_PREEMPTED). Replaces the
-    # remaining TTL for as long as the restart is outstanding; the restarted
-    # execution's TASK_STARTED re-grants the full one.
-    #
-    # This is the one place a *short* expiry is right, and for the opposite
-    # reason to ``default_ttl_seconds`` above. There, expiring early risks
-    # handing a live task to a second claimant. Here the execution is
-    # already gone and something has promised to bring it back, so the
-    # expiry is measuring a promise rather than a task: past it, the promise
-    # was not kept. Sized well above the restart it is waiting for
-    # (measured at ~7s on Modal, whose grace ladder to a hard kill is ~60s)
-    # and well below the worker timeouts it replaces, which run to a day.
-    #
-    # **But expiring early is not free, which is what sets the value.** A
-    # lapsed claim does not start anything by itself — a scheduler that
-    # finds one probes the executor ref first and leaves a ref answering
-    # "running" alone. A *claiming start* from another build does not
-    # probe, though: it asks only whether the claim is live. So past this
-    # expiry a neighbour can take the task and spawn a second execution,
-    # and if the promised restart then lands, its worker's own
-    # (non-claiming) TASK_STARTED overwrites the new holder. Two
-    # executions, which is the one outcome claims exist to prevent.
-    #
-    # That is reachable only if the backend takes longer than this to
-    # restart an input — a queued GPU under capacity pressure is the
-    # realistic way — so the value is set for that, not for the ~7s a
-    # restart normally takes. 900s matches the SDK's own
-    # ``_CLAIM_TTL_GRACE_SECONDS``, which answers the same question ("how
-    # long past its deadline is an execution still plausibly alive?") and
-    # is the number this codebase already settled on for it.
-    #
-    # The cost of the larger value is only detection latency for a restart
-    # that never comes, and that is measured against the alternative this
-    # replaced: the worker's whole declared timeout, up to a day.
-    preempt_restart_grace_seconds: int = 900
-
-    model_config = SettingsConfigDict(env_prefix="STARDAG_API_CLAIM_")
 
 
 class JWTSettings(BaseSettings):
@@ -341,11 +198,8 @@ class OIDCSettings(BaseSettings):
 
 
 settings = Settings()
-reaper_settings = ReaperSettings()
-claim_settings = ClaimSettings()
 jwt_settings = JWTSettings()
 auth_settings = AuthSettings()
 oidc_settings = OIDCSettings()
 email_settings = EmailSettings()
 limits_settings = LimitsSettings()
-sdk_compat_settings = SdkCompatSettings()

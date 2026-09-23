@@ -1,4 +1,3 @@
-import asyncio
 import os
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
@@ -8,25 +7,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from stardag_api.auth.tokens import get_token_manager
-from stardag_api.config import (
-    auth_settings,
-    reaper_settings,
-    sdk_compat_settings,
-    settings,
-)
-from stardag_api.middleware import GZipRequestMiddleware, SdkVersionMiddleware
+from stardag_api.config import auth_settings, settings
+from stardag_api.middleware import GZipRequestMiddleware
 from stardag_api.routes import (
     auth_router,
-    builds_router,
-    concurrency_limits_router,
-    deployments_router,
-    locks_router,
-    workspaces_router,
-    search_router,
     target_roots_router,
-    tasks_router,
-    tick_summaries_router,
     ui_router,
+    workspaces_router,
 )
 
 
@@ -54,22 +41,7 @@ async def lifespan(app: FastAPI):
             await ensure_bootstrap_admin(session)
             await ensure_primary_workspace(session)
 
-    # Optional unattended stale-build reaper. Off unless explicitly enabled
-    # (STARDAG_API_REAPER_ENABLED) — it cancels builds, and every replica
-    # runs its own timer with no leader election. See ReaperSettings.
-    reaper_stop = asyncio.Event()
-    reaper_task: asyncio.Task | None = None
-    if reaper_settings.enabled:
-        from stardag_api.services.build_cleanup import run_periodic_sweep
-
-        reaper_task = asyncio.create_task(run_periodic_sweep(reaper_stop))
-
-    try:
-        yield
-    finally:
-        if reaper_task is not None:
-            reaper_stop.set()
-            await reaper_task
+    yield
 
 
 app = FastAPI(
@@ -78,15 +50,6 @@ app = FastAPI(
     version="0.0.1",
     lifespan=lifespan,
 )
-
-# Read (and record) the calling SDK's version, and refuse it when it is
-# below a configured minimum — which is unset by default, so out of the box
-# this rejects nothing. See stardag_api.sdk_compat.
-#
-# Registered *before* CORSMiddleware, and Starlette wraps last-added
-# outermost, so CORS ends up outside this: a 426 still carries the CORS
-# headers a browser needs to read it at all.
-app.add_middleware(SdkVersionMiddleware)
 
 # CORS for frontend
 app.add_middleware(
@@ -99,8 +62,7 @@ app.add_middleware(
 
 # Decompress incoming gzipped request bodies (the SDK's bulk-register path
 # gzips bodies above ~1KB to keep large batches manageable on the wire).
-# Pass-through for non-gzipped requests so existing SDK versions and
-# direct callers keep working unchanged.
+# Pass-through for non-gzipped requests.
 app.add_middleware(GZipRequestMiddleware)
 
 # Auth routes - included twice with different prefixes:
@@ -113,18 +75,9 @@ app.include_router(auth_router, prefix="/api/v1")  # Exchange
 app.include_router(ui_router, prefix="/api/v1")
 app.include_router(workspaces_router, prefix="/api/v1")
 
-# SDK routes (API key or internal JWT auth)
-app.include_router(builds_router, prefix="/api/v1")
-# Build sub-resource, same /builds prefix — its own module only because
-# routes/builds.py is already large.
-app.include_router(tick_summaries_router, prefix="/api/v1")
-app.include_router(locks_router, prefix="/api/v1")
-app.include_router(concurrency_limits_router, prefix="/api/v1")
-app.include_router(deployments_router, prefix="/api/v1")
-# search_router must come before tasks_router because tasks_router has /{task_id}
-# which would match "search" as a task_id
-app.include_router(search_router, prefix="/api/v1")
-app.include_router(tasks_router, prefix="/api/v1")
+# SDK routes (API key or internal JWT auth). The v1 core routes (builds,
+# tasks, locks, deployments, search, ...) are deleted; the v2 ones arrive
+# with the registration service and the frontier.
 app.include_router(target_roots_router, prefix="/api/v1")
 
 
@@ -135,14 +88,7 @@ async def health_check():
 
 @app.get("/api/v1/version")
 async def version():
-    """Server + API package versions, and the SDK compatibility policy.
-
-    ``minimum_sdk_version`` is the oldest stardag SDK this server accepts,
-    or ``null`` — the default — when it accepts every version. It is
-    published here so the SDK, the docs and support all read one number from
-    one place, including the client that was just refused: this endpoint is
-    never gated, precisely so a rejected client can find out what it is
-    being asked to upgrade to. See ``stardag_api.sdk_compat``.
+    """Server + API package versions.
 
     ``server_version`` is the release version of the combined server
     (API + UI) image, injected via the STARDAG_SERVER_VERSION environment
@@ -165,5 +111,4 @@ async def version():
     return {
         "server_version": os.environ.get("STARDAG_SERVER_VERSION", "dev"),
         "api_version": api_version,
-        "minimum_sdk_version": sdk_compat_settings.minimum_version,
     }

@@ -1,27 +1,11 @@
 from stardag_api.routes.auth import router as auth_router
-from stardag_api.routes.builds import router as builds_router
-from stardag_api.routes.concurrency_limits import (
-    router as concurrency_limits_router,
-)
-from stardag_api.routes.deployments import router as deployments_router
-from stardag_api.routes.locks import router as locks_router
-from stardag_api.routes.workspaces import router as workspaces_router
-from stardag_api.routes.search import router as search_router
 from stardag_api.routes.target_roots import router as target_roots_router
-from stardag_api.routes.tasks import router as tasks_router
-from stardag_api.routes.tick_summaries import router as tick_summaries_router
 from stardag_api.routes.ui import router as ui_router
+from stardag_api.routes.workspaces import router as workspaces_router
 
 __all__ = [
     "auth_router",
-    "builds_router",
-    "concurrency_limits_router",
-    "deployments_router",
-    "locks_router",
-    "workspaces_router",
-    "search_router",
     "target_roots_router",
-    "tasks_router",
-    "tick_summaries_router",
     "ui_router",
+    "workspaces_router",
 ]
