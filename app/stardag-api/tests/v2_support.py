@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stardag_api.schemas_v2 import RegistrationItem
 from stardag_api.services import frontier as frontier_service
-from stardag_api.services import registration, transitions
+from stardag_api.services import plans, registration, transitions
 from stardag_api.services.transitions import Transition
 from tests.conftest import DEFAULT_ENVIRONMENT_ID
 
@@ -171,11 +171,11 @@ class Harness:
 
     async def seal(self, plan_id: UUID) -> registration.PlanState:
         async with self.sf() as s:
-            return await registration.seal_plan(s, ENV, plan_id)
+            return await plans.seal_plan(s, ENV, plan_id)
 
-    async def closure(self, plan_id: UUID) -> registration.ClosureResult:
+    async def closure(self, plan_id: UUID) -> plans.ClosureResult:
         async with self.sf() as s:
-            return await registration.closure(s, ENV, plan_id)
+            return await plans.closure(s, ENV, plan_id)
 
     async def frontier(self, build_id: UUID) -> frontier_service.Frontier:
         async with self.sf() as s:

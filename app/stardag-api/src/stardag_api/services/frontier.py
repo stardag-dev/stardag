@@ -13,7 +13,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models.enums import TaskStatus
-from stardag_api.services.registration import ClosureResult
+from stardag_api.services.plans import ClosureResult
 
 
 @dataclass(frozen=True)

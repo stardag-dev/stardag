@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 from datetime import timedelta
 from uuid import uuid4
 
@@ -265,7 +266,8 @@ async def test_s16_concurrent_builds_register_one_new_dag_without_error(
     completion, exactly one ``TASK_PENDING`` per completion and a
     ``TASK_REFERENCED`` for every other plan. The server sorts chunk rows
     by ``(task_id, instance_hash)``, so input order cannot deadlock, and
-    takes no ``FOR UPDATE`` (nor any row lock on ``task``) to register."""
+    takes no ``FOR UPDATE``, and no row lock on ``task`` at all, to register
+    (the root's first expansion locks its ``task_instance`` row only)."""
     leaves = [item("Leaf", params={"i": i}) for i in range(40)]
     top = item("Top", upstreams=leaves)
     deployment = await h.new_deployment()
@@ -292,7 +294,10 @@ async def test_s16_concurrent_builds_register_one_new_dag_without_error(
 
     assert sum(r.tasks_created for r in results) == len(leaves)
     assert not [s for s in statements if "FOR UPDATE" in s.upper()]
-    assert not [s for s in statements if "FOR NO KEY UPDATE" in s.upper()]
+    row_locks = [
+        s for s in statements if re.search(r"\bFOR (NO KEY UPDATE|SHARE)\b", s)
+    ]
+    assert not [s for s in row_locks if re.search(r"\bFROM task\b(?!_)", s)]
     for leaf in leaves[:5]:
         assert await h.task_count(leaf) == 1
         types = [e["type"] for e in await h.events(leaf)]
