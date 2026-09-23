@@ -447,3 +447,14 @@ async def role_auth_switcher(async_engine):
             app.dependency_overrides[require_sdk_auth] = previous
 
     return {"member": lambda: _as(member_auth), "api_key": lambda: _as(api_key_auth)}
+
+
+@pytest.fixture
+def session_factory(async_engine) -> async_sessionmaker[AsyncSession]:
+    """A session factory on the migrated test database.
+
+    The v2 services commit their own transaction, so a test opens a fresh
+    session per call — and two of them when it needs two concurrent
+    transactions.
+    """
+    return async_sessionmaker(async_engine, expire_on_commit=False)
