@@ -32,13 +32,9 @@ from stardag_api.models.base import utc_now
 from stardag_api.services import event_log
 from stardag_api.services.errors import Conflict
 from stardag_api.services.event_log import EventClock
-from stardag_api.services.registration import (
-    PlanState,
-    get_plan,
-    lock_build,
-    transaction,
-)
+from stardag_api.services.registration import PlanState, get_plan, lock_build
 from stardag_api.services.registration_chunk import admit_members, differing_fields
+from stardag_api.services.tx import transaction
 
 
 @dataclass(frozen=True)

@@ -27,8 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
@@ -49,6 +48,7 @@ from stardag_api.models.base import utc_now
 from stardag_api.schemas_v2 import RegistrationItem
 from stardag_api.services.errors import BadRequest, Conflict, NotFound
 from stardag_api.services.registration_chunk import MembersResult, register_items
+from stardag_api.services.tx import transaction
 
 __all__ = [
     "MAX_CHUNK_ITEMS",
@@ -60,7 +60,6 @@ __all__ = [
     "lock_build",
     "register_members",
     "settings_hash",
-    "transaction",
 ]
 
 #: The largest chunk ``register_members`` accepts.
@@ -122,17 +121,6 @@ def settings_hash(body: Mapping[str, str]) -> str:
 # ---------------------------------------------------------------------------
 # Transactions and shared reads
 # ---------------------------------------------------------------------------
-
-
-@asynccontextmanager
-async def transaction(session: AsyncSession) -> AsyncIterator[None]:
-    """Commit on success, roll back on any exception."""
-    try:
-        yield
-        await session.commit()
-    except BaseException:
-        await session.rollback()
-        raise
 
 
 async def get_plan(session: AsyncSession, environment_id: UUID, plan_id: UUID) -> Plan:

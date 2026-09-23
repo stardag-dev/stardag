@@ -271,6 +271,27 @@ async def test_retry_is_idempotent_by_state(h: Harness):
     assert exc.value.code == "task_already_running"
 
 
+async def test_observed_completion_closes_a_lapsed_claim_and_spares_a_live_one(
+    h: Harness,
+):
+    """Whatever moves a task off RUNNING closes the current claim: an
+    observed completion of a task whose claim lapsed writes ``claim_outcome
+    = lapsed`` (``ended_at`` stays NULL — no report arrived); against a live
+    claim the observation changes nothing (the holder will report)."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    held = await h.start(plan.id, t)
+    await h.register(plan.id, [observed(t, True)])
+    assert (await h.task(t))["status"] == "running"
+
+    await h.lapse_claim(t)
+    await h.register(plan.id, [observed(t, True)])
+    task = await h.task(t)
+    assert task["status"] == "completed" and task["claim_plan_id"] is None
+    ledger = await h.execution(held)
+    assert ledger["claim_outcome"] == "lapsed" and ledger["ended_at"] is None
+
+
 @pytest.mark.xfail(reason="v2: I0 step 3", strict=True)
 async def test_a_transition_flags_the_other_builds_holding_the_task(h: Harness):
     """A status write flags the reactive builds whose active plans hold the

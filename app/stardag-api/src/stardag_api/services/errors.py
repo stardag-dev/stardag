@@ -48,3 +48,9 @@ class Conflict(RegistryError):
     """The request is well-formed but contradicts recorded state (409)."""
 
     status_code = 409
+
+
+class RecordedConflict(Conflict):
+    """A 409 whose record (a refused-report event, a ledger end) is already
+    in the session: :func:`stardag_api.services.tx.transaction` commits it
+    before the refusal propagates."""
