@@ -92,3 +92,26 @@ upstream set differs. Within a scope edges only grow and gating can only
 over-approximate; that is the soundness argument the design rests on, and a
 409 there would fail builds on a benign env-var contract breach. The design
 appends the edges and records `TASK_STRUCTURE_DIVERGED`, as v1 warned.
+
+## Copilot review, round 2 (2026-09-23) — dispositions
+
+Eight threads. Accepted: `local` deployments are created already activated;
+the composite FK `(environment_id, settings_hash)` on `task_instance` and
+`plan`, with the scope columns NOT NULL; `UNIQUE (id, deployment_id,
+settings_hash)` on `plan` as the target of `plan_member`'s composite FK; a
+per-build `plan.generation` so `/seal` activates only the latest request
+(two replacements with different settings can no longer leave the build on
+the older one); late reports defined against `claim_released_at` and stated
+to write the ledger end without touching task status; the D4 rendering and
+the S25 reaper wording fixed (both already superseded by the settled
+decisions).
+
+Accepted in bounded form: the `observed_at` guard compares a driver clock
+with a server clock. The alternative — a registry status version captured
+before the target check — needs a registry read per task inside discovery,
+which is exactly the coupling discovery avoids. Instead the server refuses an
+`observed_at` ahead of its own clock by more than a few seconds, the only
+skew direction that can pass the check wrongly; backward skew only skips an
+observation. The residual worst case is a spurious re-run that re-produces
+the same output under the task-id contract, never wrong output, and it is
+recorded as an intentional limitation.

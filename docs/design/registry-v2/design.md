@@ -188,7 +188,10 @@ code_id)` at `sd.build()` start, where `code_id` is `STARDAG_CODE_ID` if set,
 else the clean git HEAD SHA, else a fresh uuid per process (warned). A clean
 tree therefore shares its scope across local builds at the same commit; a
 dirty tree never shares; `STARDAG_CODE_ID` is the explicit pin and is on the
-user. `kind` keeps local and Modal deployments from ever colliding.
+user. `kind` keeps local and Modal deployments from ever colliding. A `local`
+row has no deploy step to wait for, so lookup-or-create returns it **already
+activated** (`activated_at` set in the same insert, `generation` assigned as
+for any row); the two-step create/activate is for Modal deployments only.
 
 **A driver that is not the deployment.** A hybrid `sd.build()` whose tasks
 run on a Modal app, and `reactive_discovery="local"`, plan under **the
@@ -301,14 +304,14 @@ Index `(environment_id, kind, app_name, generation DESC)`; unique
 
 ### `task_instance` — a task as constructed under a scope
 
-| Column                                 | Notes                                                                                                                                                                               |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id` PK                                |                                                                                                                                                                                     |
-| `deployment_id` FK, `settings_hash` FK | the scope                                                                                                                                                                           |
-| `instance_hash`                        | hash of all parameters, computed by the SDK under that scope                                                                                                                        |
-| `task_pk` FK task                      | the completion this instance realises                                                                                                                                               |
-| `body` JSONB                           | all parameters, registry-mode dump; nested tasks as full dumps                                                                                                                      |
-| `expanded_at`                          | **the closure flag**: set when this instance's `requires()` was evaluated under its scope and every resulting edge recorded (zero edges included). NULL means "not yet looked for". |
+| Column                                     | Notes                                                                                                                                                                               |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id` PK                                    |                                                                                                                                                                                     |
+| `deployment_id`, `settings_hash`, NOT NULL | the scope; `settings_hash` references `settings` through the composite FK `(environment_id, settings_hash)`, since `settings` is keyed per environment                              |
+| `instance_hash`                            | hash of all parameters, computed by the SDK under that scope                                                                                                                        |
+| `task_pk` FK task                          | the completion this instance realises                                                                                                                                               |
+| `body` JSONB                               | all parameters, registry-mode dump; nested tasks as full dumps                                                                                                                      |
+| `expanded_at`                              | **the closure flag**: set when this instance's `requires()` was evaluated under its scope and every resulting edge recorded (zero edges included). NULL means "not yet looked for". |
 
 `UNIQUE (deployment_id, settings_hash, instance_hash)`; `UNIQUE (id,
 task_pk)` (target of the composite FK from `plan_member`); `UNIQUE (id,
@@ -336,16 +339,19 @@ is `ON DELETE RESTRICT` from every table, so retention has to be explicit).
 
 ### `plan` — one request, under one scope
 
-| Column                                 | Notes                                                                                                                |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `id` PK                                | client-minted (idempotent create)                                                                                    |
-| `build_id` FK                          |                                                                                                                      |
-| `deployment_id` FK, `settings_hash` FK | the scope                                                                                                            |
-| `activated_at`                         | the plan is the build's active plan from here; the first plan activates on create, a replacement activates on `seal` |
-| `sealed_at`                            | the static phase is fully stated and verified (roots expanded, closure holds, deployment still current)              |
-| `superseded_at`                        | set when a replacement plan activated                                                                                |
+| Column                                     | Notes                                                                                                                                                                                                                                         |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id` PK                                    | client-minted (idempotent create)                                                                                                                                                                                                             |
+| `build_id` FK                              |                                                                                                                                                                                                                                               |
+| `deployment_id`, `settings_hash`, NOT NULL | the scope; composite FK `(environment_id, settings_hash)` → `settings`, as on `task_instance`                                                                                                                                                 |
+| `generation`                               | server-assigned per build at create, monotonic; `/seal` activates a plan only if no higher-generation plan exists for the build, so two replacements racing (same deployment, different settings) cannot leave the build on the older request |
+| `activated_at`                             | the plan is the build's active plan from here; the first plan activates on create, a replacement activates on `seal`                                                                                                                          |
+| `sealed_at`                                | the static phase is fully stated and verified (roots expanded, closure holds, deployment still current)                                                                                                                                       |
+| `superseded_at`                            | set when a replacement plan activated                                                                                                                                                                                                         |
 
-`UNIQUE (build_id, deployment_id, settings_hash)`; partial unique
+`UNIQUE (build_id, deployment_id, settings_hash)`; `UNIQUE (id,
+deployment_id, settings_hash)` (target of the composite FK from
+`plan_member`); `UNIQUE (build_id, generation)`; partial unique
 `(build_id) WHERE activated_at IS NOT NULL AND superseded_at IS NULL` —
 **exactly one active plan per build**, while a replacement can be registered
 alongside it. Reactivating an old scope on resume flips the timestamps.
@@ -484,15 +490,22 @@ POST /plans/{plan_id}/members   (chunk, ≤1000 items, post-order, sorted within
                      -- a status the driver has already seen to be false; and only if the
                      -- task's status_at (completed_at for an invalidation) precedes the item's
                      -- observed_at, so a delayed duplicate cannot undo a completion that
-                     -- happened after the driver looked (the driver's clock only has to be
-                     -- right to within the minutes such a race spans)
+                     -- happened after the driver looked. observed_at is the driver's clock:
+                     -- a value ahead of server time by more than a few seconds is refused
+                     -- (400 clock_skew), because forward skew is the only direction that
+                     -- could pass this check wrongly; backward skew only makes an
+                     -- observation look older, which skips it. The residual worst case is
+                     -- a spurious re-run that re-produces the same output, never wrong
+                     -- output (see decisions.md, Copilot round 2)
      event           TASK_PENDING (new task) or TASK_REFERENCED, gated on the member insert
 POST /plans/{plan_id}/seal
   -> verifies: every root member is expanded or COMPLETED (a root whose target already existed
      is admitted unexpanded and stays so until an invalidation makes it a discovery job);
      every edge from a member has its upstream as a member (closure holds); plan.deployment_id
      is still the app's current deployment
-     (rollover only moves forward — checked here, not only at the start);
+     (rollover only moves forward — checked here, not only at the start); no plan with a
+     higher generation exists for this build (409 plan_superseded otherwise: the latest
+     request wins, and its roots are already discovery jobs any tick can finish);
      then sealed_at = now(), and if this plan is a replacement, activated_at = now() and the
      previous active plan gets superseded_at, in the same transaction
 ```
@@ -706,9 +719,13 @@ generator `run` and will restart under the new code.
   build's active plan (409 `plan_superseded` otherwise). A superseded tick
   therefore cannot start new work.
 - Every report (complete, fail, suspend, interrupt, preempt, skip, yield)
-  names its `execution_id`; it is applied only if that is `task.execution_id`
-  (or the task holds no claim and the id is the latest ended execution, for
-  late reports), otherwise recorded with `report_applied = false`. One
+  names its `execution_id`; it changes the task's status only if that is
+  `task.execution_id` and the claim is live. A **late report** — one naming an
+  execution whose `claim_released_at` is already set because the claim
+  lapsed, was taken over or was released by a build transition — writes that
+  execution's ledger end (`ended_at`, `outcome`) and is recorded as an event
+  with `report_applied = false`; it never touches `task`. Anything else
+  (unknown execution, second terminal report) is recorded and refused. One
   `transition_task()` implements this for every event type — v1 guarded four
   of eight routes, and the lock-release route committed a completion before
   its ownership check.
@@ -757,7 +774,7 @@ Every scenario names the column or constraint that decides it.
 | S22       | Shared instance across two plans; A yields C; A is cancelled or excludes C                                   | B's frontier closure step admits C (and its closure) into B before evaluating gates; B runs C itself; no stall                                                                                                                                                                                            | closure at every frontier read                                        |
 | S23       | B admitted an instance unexpanded (pruned-complete); it is invalidated; A expands it first                   | B's closure step admits the new upstreams; B's discovery job for it is skipped (flag now set); no gate B does not hold                                                                                                                                                                                    | closure + shared `expanded_at`                                        |
 | S24       | Two instances of one completion in one scope, different plans, dynamic yield (v1's `shared_structure_scope`) | The two instances do **not** share dynamic edges: B's instance is SUSPENDED-runnable while A's children run, so the pre-yield section re-runs once. Accepted cost of the second identity; only identical instances share yields                                                                           | edges on instances                                                    |
-| S25       | Resident `sd.build()` with thread/process pools                                                              | Every execution claims (a TTL the driver renews); the resident yield keeps the claim (`suspend: false`); `settings` applied for the build's duration in-process; a dead process is released by the idle reaper                                                                                            | D11                                                                   |
+| S25       | Resident `sd.build()` with thread/process pools                                                              | Every execution claims (a TTL the driver renews); the resident yield keeps the claim (`suspend: false`); settings applied for the build's duration in-process; a dead process stops renewing and its claims lapse like any other worker's                                                                 | D11                                                                   |
 | S26       | Local driver with Modal workers (hybrid)                                                                     | Plans under the app's current deployment; workers' `/yield` matches; a laptop whose code differs is the user's YOLO, as before                                                                                                                                                                            | D13, `deployment_mismatch`                                            |
 | S27       | `settings` sets a `STARDAG_*` key or one the worker selector sets                                            | `STARDAG_*`/`MODAL_*` refused at the trigger; selector keys are overridden by `settings` (documented precedence)                                                                                                                                                                                          | trigger validation                                                    |
 | S28       | Yielded child already COMPLETED but its target is missing                                                    | The child item carries `observed_complete: false` → invalidated in the yield transaction → runnable under the parent's plan                                                                                                                                                                               | chunk-transaction invalidation                                        |
