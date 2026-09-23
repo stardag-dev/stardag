@@ -395,7 +395,16 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     () =>
       allTasks.some(
         (t) =>
-          t.status_build_id === buildId && CLAIM_HOLDING_STATUSES.includes(t.status),
+          CLAIM_HOLDING_STATUSES.includes(t.status) &&
+          // An unknown owner counts as ours. `status_build_id` is null
+          // for rows predating status denormalisation, and a running
+          // task whose holder cannot be named might be this build's —
+          // so the two errors are a button withheld that could have
+          // been offered, or a claim stranded until its TTL expires.
+          // Only one of those is recoverable by waiting a moment.
+          (t.status_build_id === undefined ||
+            t.status_build_id === null ||
+            t.status_build_id === buildId),
       ),
     [allTasks, buildId],
   );

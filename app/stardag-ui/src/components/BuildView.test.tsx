@@ -558,6 +558,19 @@ describe("BuildView header and tool-and-info bar", () => {
     await waitFor(() => expect(captureHoldsClaims.mock.calls.at(-1)?.[0]).toBe(true));
   });
 
+  // `status_build_id` is null for rows predating status denormalisation.
+  // A running task whose holder cannot be named might be this build's.
+  it("counts a claim whose owner is unknown", async () => {
+    const orphan: Task = { ...makeTask({ status: "running" }) };
+    delete (orphan as Partial<Task>).status_build_id;
+    vi.mocked(fetchTasksInBuild).mockResolvedValue([orphan]);
+
+    renderView();
+    await screen.findByText("golden-diamond-28");
+
+    await waitFor(() => expect(captureHoldsClaims.mock.calls.at(-1)?.[0]).toBe(true));
+  });
+
   it("reports no claim when the holder is a different build", async () => {
     const elsewhere: Task = {
       ...makeTask({ status: "running" }),
