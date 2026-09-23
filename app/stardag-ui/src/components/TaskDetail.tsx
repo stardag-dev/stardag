@@ -621,10 +621,19 @@ export function TaskDetail({
                 </p>
               )}
 
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                To stop what is running, use Build controls &rarr; Stop on build{" "}
-                {releaseTarget.slice(0, 8)}.
-              </p>
+              {/* Only where the stop list could actually act. It selects
+                  on `latest_status_build_id === buildId` and the stoppable
+                  statuses, so a SUSPENDED task (a claim with nothing
+                  running) and a legacy row with no recorded holder both
+                  fail to appear in it — and sending someone to Stop for a
+                  task that will not be listed there is worse than saying
+                  nothing. */}
+              {globalStatus === "running" && holderRecorded && (
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  To stop what is running, use Build controls &rarr; Stop on build{" "}
+                  {releaseTarget.slice(0, 8)}.
+                </p>
+              )}
             </div>
           )}
         </div>

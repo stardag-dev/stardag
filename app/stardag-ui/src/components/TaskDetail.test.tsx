@@ -392,6 +392,28 @@ describe("TaskDetail claim holder", () => {
     expect(onTaskCancelled).toHaveBeenCalled();
   });
 
+  // The stop list selects on a recorded holder and the stoppable
+  // statuses, so a suspended task never appears in it — pointing someone
+  // there for one is a dead end.
+  it("does not point at Stop for a task the stop list cannot select", async () => {
+    render(
+      <TaskDetail
+        task={makeTask({ status: "suspended", latest_status: "suspended" })}
+        buildId={VIEWED_BUILD}
+        onClose={() => {}}
+        onTaskCancelled={() => {}}
+      />,
+    );
+
+    expect(
+      screen.queryByText(/To stop what is running, use Build controls/),
+    ).toBeNull();
+    // The claim action is still offered: a suspended task holds one.
+    expect(
+      screen.getByRole("button", { name: `${CLAIM_ACTION_LABELS.release}…` }),
+    ).toBeInTheDocument();
+  });
+
   it("points at the build-level stop where a task-level one would be", async () => {
     render(
       <TaskDetail
