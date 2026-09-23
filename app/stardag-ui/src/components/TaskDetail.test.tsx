@@ -412,6 +412,12 @@ describe("TaskDetail claim holder", () => {
     expect(
       screen.getByRole("button", { name: `${CLAIM_ACTION_LABELS.release}…` }),
     ).toBeInTheDocument();
+    // And it is the *only* one. SUSPENDED is the one status for which
+    // `availableClaimActions` returns two, so it is the only place a
+    // second button could come back without anything else changing.
+    expect(
+      screen.queryByRole("button", { name: CLAIM_ACTION_LABELS.retry }),
+    ).toBeNull();
   });
 
   it("points at the build-level stop where a task-level one would be", async () => {
