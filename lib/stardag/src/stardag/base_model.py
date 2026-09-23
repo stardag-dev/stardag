@@ -14,8 +14,10 @@ Implements a base model with advanced polymorphic serialization + validation fea
    - mode="registry": the instance body — **every** field, defaults
      included, nothing dropped. The instance hash is the hash of this dump
      (see ``stardag._core.instance``); it has no user-facing hash mode.
-   - both modes sort sets, so a set's per-process iteration order never
-     reaches a hash or a stored body.
+   - both modes sort sets at every nesting level (a set inside a list,
+     dict or ``Any`` field too), so a set's per-process iteration order
+     never reaches a hash or a stored body. The order is defined in one
+     place, ``stardag._core.task_id.canonicalize_sets``.
    - mode="compat": validation of a stored body. A missing field with a
      ``compat_default`` is populated with it; an unknown key (a field the
      class no longer declares) is dropped with a warning.
@@ -30,7 +32,6 @@ Implements a base model with advanced polymorphic serialization + validation fea
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal, Type, TypeVar
@@ -256,6 +257,8 @@ class StardagBaseModel(BaseModel):
         )
         if mode not in ("hash", "registry") or not isinstance(data, dict):
             return data
+        # Local import: task_id imports this module.
+        from stardag._core.task_id import canonicalize_sets
 
         out: dict[str, Any] = {}
         for name, value in data.items():
@@ -285,7 +288,9 @@ class StardagBaseModel(BaseModel):
                 ):
                     continue
 
-            out[name] = _sort_if_set(getattr(self, name, None), value, field)
+            out[name] = canonicalize_sets(
+                getattr(self, name, None), value, info.context
+            )
 
         if mode == "registry":
             return out
@@ -295,37 +300,6 @@ class StardagBaseModel(BaseModel):
         """Final cleanup for hash mode serialization."""
         # Currently no-op, but could be used for additional processing if needed.
         return data
-
-
-def _sort_if_set(raw: Any, serialized: Any, field: FieldInfo) -> Any:
-    """``serialized`` sorted, when the field holds a (frozen)set.
-
-    A set iterates in an order that differs between processes (string
-    hashing is randomised), so its dump must be sorted wherever it is hashed
-    or stored. ``HashableSet`` sorts itself, by its own ``sort_key``; that
-    order is kept. Anything else is sorted by value, falling back to the
-    items' canonical JSON when they do not compare (mixed types, dicts).
-    Only a set held directly by a field is reached here; a set nested in
-    another container is not.
-    """
-    if not isinstance(raw, (set, frozenset)) or not isinstance(serialized, list):
-        return serialized
-    if _has_own_set_sorting(field):
-        return serialized
-    try:
-        return sorted(serialized)
-    except TypeError:
-        return sorted(
-            serialized,
-            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
-        )
-
-
-def _has_own_set_sorting(field: FieldInfo) -> bool:
-    # Local import: hashable_set imports this module.
-    from stardag._core.hashable_set import HashSafeSetSerializer
-
-    return any(isinstance(meta, HashSafeSetSerializer) for meta in field.metadata)
 
 
 _AnnotationType = TypeVar("_AnnotationType")

@@ -150,6 +150,73 @@ class TestSetsAreSortedInBothModes:
         # Numeric order (the sort key), not the JSON-string order.
         assert task.instance_body()["values"] == [9, 10, 100]
 
+    # 8 and 16 share a slot in a small set's hash table, so which one a
+    # set iterates first depends on insertion order: two equal sets with
+    # different iteration orders in one process, standing in for the
+    # per-process order of a string set.
+    FORWARD = frozenset([8, 16])
+    BACKWARD = frozenset([16, 8])
+
+    def test_the_collision_pair_iterates_in_two_orders(self):
+        assert self.FORWARD == self.BACKWARD
+        assert list(self.FORWARD) != list(self.BACKWARD)
+
+    def test_sets_nested_at_any_level_are_sorted(self):
+        class Nested(sd.Task[int]):
+            __namespace__ = "instance_tests"
+            anything: Any = None
+            listed: list[frozenset[int]] = []
+            keyed: dict[str, frozenset[int]] = {}
+
+            def run(self) -> None:
+                return None
+
+        def build(s: frozenset[int]) -> Nested:
+            return Nested(
+                anything=[s, (s,), {"k": s}, frozenset([s, frozenset([3])])],
+                listed=[s],
+                keyed={"k": s},
+            )
+
+        forward, backward = build(self.FORWARD), build(self.BACKWARD)
+        body = forward.instance_body()
+        assert body["anything"] == [[8, 16], [[8, 16]], {"k": [8, 16]}, [[3], [8, 16]]]
+        assert body["listed"] == [[8, 16]]
+        assert body["keyed"] == {"k": [8, 16]}
+        assert forward._instance_body_json == backward._instance_body_json
+        assert forward.instance_hash == backward.instance_hash
+        assert forward.id == backward.id
+        check_serialization_stability(forward)
+
+    def test_hashable_set_breaks_sort_key_ties_canonically(self):
+        class Tied(sd.Task[int]):
+            __namespace__ = "instance_tests"
+            values: Annotated[
+                frozenset[int], sd.HashSafeSetSerializer(sort_key=lambda _: 0)
+            ]
+
+            def run(self) -> None:
+                return None
+
+        forward = Tied(values=self.FORWARD)
+        backward = Tied(values=self.BACKWARD)
+        # The tie-break is the items' canonical JSON: "16" < "8".
+        assert forward.instance_body()["values"] == [16, 8]
+        assert backward.instance_body()["values"] == [16, 8]
+        assert forward.instance_hash == backward.instance_hash
+        assert forward.id == backward.id
+
+    def test_a_nested_hashable_set_keeps_its_own_key(self):
+        class Keyed(sd.Task[int]):
+            __namespace__ = "instance_tests"
+            groups: list[sd.HashableSet[int]]
+
+            def run(self) -> None:
+                return None
+
+        task = Keyed(groups=[frozenset({10, 9, 100})])
+        assert task.instance_body()["groups"] == [[9, 10, 100]]
+
 
 # --- the stability check ---------------------------------------------------
 

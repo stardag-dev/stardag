@@ -5,6 +5,11 @@ from typing import TYPE_CHECKING, Annotated, Any, Callable, TypeVar, get_args
 from pydantic import GetCoreSchemaHandler, TypeAdapter
 from pydantic_core import core_schema
 
+from stardag._core.task_id import (
+    canonical_item_key,
+    canonicalize_sets,
+    record_ordered_set,
+)
 from stardag.base_model import CONTEXT_MODE_KEY, SerializationContextMode
 
 
@@ -16,10 +21,12 @@ class HashSafeSetSerializer:
     """
     For a field typed as frozenset[T], serialize as a list.
 
-    Sorted deterministically (by ``sort_key``) in the two modes that are
-    hashed or stored — "hash" (the task id) and "registry" (the instance
-    body, whose hash is the instance hash) — because a set's iteration order
-    differs between processes. Other dumps keep iteration order.
+    Sorted deterministically in the two modes that are hashed or stored —
+    "hash" (the task id) and "registry" (the instance body, whose hash is
+    the instance hash) — because a set's iteration order differs between
+    processes: by ``sort_key`` first, and by each item's canonical JSON where
+    two items share a key (a stable sort would otherwise keep the set's
+    iteration order for ties). Other dumps keep iteration order.
     """
 
     def __init__(self, sort_key: Callable[[Any], Any] | None = None) -> None:
@@ -55,10 +62,21 @@ class HashSafeSetSerializer:
             mode: SerializationContextMode = (
                 info.context.get(CONTEXT_MODE_KEY) if info.context else None
             )
-            if mode in ("hash", "registry"):
-                serialized_items.sort(key=lambda x: sort_key(x[0]))
+            if mode not in ("hash", "registry"):
+                return [item[1] for item in serialized_items]
 
-            return [item[1] for item in serialized_items]
+            # Items may hold sets of their own; order those first, so the
+            # tie-break key below is itself canonical.
+            canonical_items = [
+                (item, canonicalize_sets(item, dumped, info.context))
+                for item, dumped in serialized_items
+            ]
+            canonical_items.sort(
+                key=lambda x: (sort_key(x[0]), canonical_item_key(x[1]))
+            )
+            ordered = [item[1] for item in canonical_items]
+            record_ordered_set(info.context, v, ordered)
+            return ordered
 
         schema["serialization"] = core_schema.plain_serializer_function_ser_schema(
             serialize_set,
