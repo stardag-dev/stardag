@@ -115,3 +115,29 @@ skew direction that can pass the check wrongly; backward skew only skips an
 observation. The residual worst case is a spurious re-run that re-produces
 the same output under the task-id contract, never wrong output, and it is
 recorded as an intentional limitation.
+
+## Copilot review, rounds 3–5 (2026-09-23/24) — dispositions
+
+Twenty-one threads over three passes on successive commits; five were
+already fixed by the time they were read (nested body, local activation,
+settings FK, plan unique key, the D11 table) and two were stale wording
+(`FOR UPDATE` in the carry-over bullet, I4 in plan.md). Accepted from the
+fourteen distinct points: `claim_expires_at` NOT NULL whenever RUNNING, so
+liveness is a finite expiry and nothing is live forever; composite FKs tying
+`task.claim_plan_id` to the membership and `task.execution_id` to an
+execution of the same task; one schema rule that every FK between
+environment-scoped tables carries `environment_id`; identity metadata
+(namespace, name, version, output*uri) compared on registration, 409
+`task_identity_conflict`; `/complete` reads the members' task rows `FOR
+SHARE` so it serialises with a concurrent invalidation, and `force` never
+overrides a missing seal; the claiming start re-checks upstream completion
+under its own lock (409 `upstream_incomplete`) — the frontier is a hint, the
+claim is the decision (S39); renewal names its execution and is granted only
+to the live holder; `claim_outcome` gains `interrupted` and `lapsed`, and
+every move off RUNNING closes the current claim on the ledger, the observed
+completion of a lapsed-claim task included; a failed discovery job excludes
+the member (`discovery_failed`) instead of failing the global task, so it is
+never re-selected; the task-id rule states that all `significant=False`
+fields are excluded; framework-owned `STARDAG*\*` identifiers are written
+last and cannot be overridden by settings, selector or deployment env.
+Nothing rejected in these rounds.
