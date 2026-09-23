@@ -375,7 +375,7 @@ class TestBuildIdInjection:
         class Configured(sd.Task[int]):
             __namespace__ = "detached_executor_tests"
             key: str
-            width: Annotated[int, sd.StardagField(significance="dependencies_only")] = 1
+            width: Annotated[int, sd.StardagField(significant=False)] = 1
 
             def run(self) -> None:
                 pass

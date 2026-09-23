@@ -8,6 +8,7 @@ from functools import partial
 from typing import Callable, Coroutine, Sequence
 from uuid import UUID
 
+from stardag._core.instance import SeenInstances
 from stardag import (
     BaseTask,
     TaskStruct,
@@ -261,6 +262,8 @@ async def discover_and_register_aio(
     # mutation itself, so it never serialises the I/O below.
     visit_lock = asyncio.Lock()
     visited: set[UUID] = set()
+    # One instance per task id per plan (v2 design, "Two hashes, one flag").
+    seen_instances = SeenInstances()
     # ONE semaphore for the whole walk (not one per recursion level, which
     # would bound nothing), gating exactly the remote call: the target
     # existence check. Mirrors ``build/_concurrent.py``'s
@@ -277,6 +280,7 @@ async def discover_and_register_aio(
         is the same set the serial walk visited.
         """
         async with visit_lock:
+            seen_instances.observe(task)
             if task.id in visited:
                 return
             visited.add(task.id)

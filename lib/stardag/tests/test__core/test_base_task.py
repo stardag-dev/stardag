@@ -3,7 +3,6 @@ from datetime import datetime
 from typing import Annotated, Type
 from unittest.mock import Mock
 
-import warnings
 
 import pytest
 
@@ -141,11 +140,8 @@ class BasicTask(MockBaseTask):
     a: int
 
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-
-    class HashExcludeTask(MockBaseTask):
-        a: Annotated[int, StardagField(hash_exclude=True)]
+class NonSignificantTask(MockBaseTask):
+    a: Annotated[int, StardagField(significant=False)]
 
 
 class CompatDefaultTask(MockBaseTask):
@@ -156,13 +152,10 @@ class WithNestedTask(MockBaseTask):
     task: BasicTask
 
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-
-    class NonTaskModel(StardagBaseModel):
-        a: Annotated[int, StardagField(hash_exclude=True)]
-        b: Annotated[str, StardagField(compat_default="default")]
-        tasks: tuple[SubClass[BaseTask], ...]
+class NonTaskModel(StardagBaseModel):
+    a: Annotated[int, StardagField(significant=False)]
+    b: Annotated[str, StardagField(compat_default="default")]
+    tasks: tuple[SubClass[BaseTask], ...]
 
 
 class ComplexNestedTask(MockBaseTask):
@@ -183,10 +176,10 @@ class ComplexNestedTask(MockBaseTask):
             },
         ),
         (
-            "hash exclude (a) should be excluded",
-            HashExcludeTask(a=10),
+            "non-significant (a) should be excluded",
+            NonSignificantTask(a=10),
             {
-                NAME_KEY: "HashExcludeTask",
+                NAME_KEY: "NonSignificantTask",
                 NAMESPACE_KEY: "",
                 "version": "",
             },

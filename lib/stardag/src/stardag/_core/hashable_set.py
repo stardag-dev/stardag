@@ -15,7 +15,11 @@ def _identity(x: Any) -> Any:
 class HashSafeSetSerializer:
     """
     For a field typed as frozenset[T], serialize as a list.
-    Only sort deterministically when context mode is "hash".
+
+    Sorted deterministically (by ``sort_key``) in the two modes that are
+    hashed or stored — "hash" (the task id) and "registry" (the instance
+    body, whose hash is the instance hash) — because a set's iteration order
+    differs between processes. Other dumps keep iteration order.
     """
 
     def __init__(self, sort_key: Callable[[Any], Any] | None = None) -> None:
@@ -51,7 +55,7 @@ class HashSafeSetSerializer:
             mode: SerializationContextMode = (
                 info.context.get(CONTEXT_MODE_KEY) if info.context else None
             )
-            if mode == "hash":
+            if mode in ("hash", "registry"):
                 serialized_items.sort(key=lambda x: sort_key(x[0]))
 
             return [item[1] for item in serialized_items]

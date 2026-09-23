@@ -1,3 +1,12 @@
+"""The two task hashes, and the one place each is computed.
+
+- The **task id** (:func:`_get_task_id_from_jsonable`): uuid5 over the
+  hash-mode dump — significant fields only, compat defaults dropped.
+- The **instance hash** (:func:`instance_hash_of_body`): uuid5 over the
+  canonical JSON of the instance body — every field — under a namespace
+  derived from the task-id namespace, so the two can never coincide.
+"""
+
 import json
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid5
@@ -17,6 +26,11 @@ task_uuid5_namespace_provider = resource_provider(
     lambda: _DEFAULT_TASK_UUID5_NAMESPACE,
     "Namespace for task UUID5 generation.",
 )
+
+
+# The instance-hash namespace is derived, not fixed: an override of the task
+# namespace moves both, and the two are distinct for any task namespace.
+_INSTANCE_HASH_SALT = "stardag.instance_hash.v1"
 
 
 def _hash_safe_json_dumps(obj):
@@ -55,3 +69,30 @@ def _get_task_id_jsonable(task: "BaseTask") -> dict[str, Any]:
         mode="json",
         context={CONTEXT_MODE_KEY: "hash"},
     )
+
+
+def canonical_body_json(body: Any) -> str:
+    """The canonical JSON of an instance body: sorted keys, compact
+    separators, non-ASCII kept as is (the string is hashed as UTF-8).
+
+    Sets are already sorted by the registry-mode dump (see
+    ``stardag.base_model``). ``NaN`` and infinities are refused
+    (``ValueError``): they are not JSON, and a registry could not store them.
+    """
+    return json.dumps(
+        body,
+        separators=(",", ":"),
+        sort_keys=True,
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def instance_hash_of_body(body_json: str) -> UUID:
+    """The instance hash of a canonical body (see :func:`canonical_body_json`).
+
+    Rule 1 of the design: the instance hash is the hash of the stored
+    bytes, so ``instance_hash <-> body`` is 1:1 by construction.
+    """
+    namespace = uuid5(task_uuid5_namespace_provider.get(), _INSTANCE_HASH_SALT)
+    return uuid5(namespace, body_json)

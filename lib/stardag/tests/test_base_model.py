@@ -1,6 +1,5 @@
 import enum
-import warnings
-from typing import Annotated, Any, Generic, Type, TypeVar
+from typing import Annotated, Any, Type
 
 import pytest
 from pydantic import ValidationError, WrapSerializer
@@ -201,20 +200,9 @@ def test_stardag_base_model_validate(
         assert actual == expected, f"Failed: {description}"
 
 
-# ``hash_exclude`` is deprecated in favour of ``significance``; it keeps its
-# hash-mode behaviour (and, unlike the new levels, still allows init) for one
-# release, which is what these expectations pin.
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-
-    class ModelWithHashExclude(StardagBaseModel):
-        a: Annotated[int, StardagField(hash_exclude=True)]
-        b: int
-
-
-def test_hash_exclude_is_deprecated() -> None:
-    with pytest.warns(DeprecationWarning, match="execution_only"):
-        StardagField(hash_exclude=True)
+class ModelWithNonSignificant(StardagBaseModel):
+    a: Annotated[int, StardagField(significant=False)]
+    b: int
 
 
 class Color(str, enum.Enum):  # `str, Enum` for Python 3.10 (StrEnum is 3.11+)
@@ -270,16 +258,28 @@ class ModelWithCustomSerializerCompatDefault(StardagBaseModel):
             {},
         ),
         (
-            "with hash exclude",
-            ModelWithHashExclude(a=5, b=10),
+            "with compat default registry mode keeps the value",
+            ModelWithCompatDefault(a=0),
+            "registry",
+            {"a": 0},
+        ),
+        (
+            "non-significant",
+            ModelWithNonSignificant(a=5, b=10),
             None,
             {"a": 5, "b": 10},
         ),
         (
-            "with hash exclude hash mode",
-            ModelWithHashExclude(a=5, b=10),
+            "non-significant hash mode",
+            ModelWithNonSignificant(a=5, b=10),
             "hash",
             {"b": 10},
+        ),
+        (
+            "non-significant registry mode keeps every field",
+            ModelWithNonSignificant(a=5, b=10),
+            "registry",
+            {"a": 5, "b": 10},
         ),
         # Enum-tuple compat default (issue #146): serialized form is a list of
         # strings, but the field is at its compat default -> dropped in hash
@@ -345,25 +345,15 @@ def test_stardag_base_model_serialize(
 
 
 # ---------------------------------------------------------------------------
-# The three levels of parameter significance on the model: resolved from the
-# build config, refused at init, dropped from the hash and registry payloads.
-# The config module itself is tested in ``tests/test_build_config.py``; the
-# scope key in ``tests/test_build/test_scope.py``. Design:
-# ``docs/design/scope-keyed-dependency-structure.md``.
+# ``StardagField(significant=...)``: the one flag of v2. A non-significant
+# field is an ordinary parameter (passed at init, stored in the body) that
+# is left out of the task id only. Design: docs/design/registry-v2/design.md,
+# "Two hashes, one flag". The two hashes themselves, the stability check and
+# conflict detection are in tests/test__core/test_instance.py.
 # ---------------------------------------------------------------------------
 
 import stardag as sd  # noqa: E402
-from stardag.base_model import field_significance  # noqa: E402
-from stardag.build_config import (  # noqa: E402
-    BuildConfigError,
-    build_config_scope,
-    canonical_structure_config,
-    get_build_config,
-    get_build_config_class,
-    rebind_to_build_config,
-)
-from stardag.polymorphic import PolymorphicRoot  # noqa: E402
-from stardag.target import InMemoryTarget  # noqa: E402
+from stardag.base_model import is_significant  # noqa: E402
 
 
 class Fanout(sd.Task[int]):
@@ -371,29 +361,15 @@ class Fanout(sd.Task[int]):
     __version__ = "1"
 
     key: str
-    partition_size: Annotated[int, StardagField(significance="dependencies_only")] = 100
-    threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-    def run(self) -> None:
-        self.target().save(self.partition_size)
-
-    def target(self) -> InMemoryTarget[int]:  # type: ignore[override]
-        return InMemoryTarget(key=str(self.id))
-
-
-class Required(sd.Task[int]):
-    """A level 2 field with no default: the config must supply it."""
-
-    __namespace__ = "sig_tests"
-    key: str
-    width: Annotated[int, StardagField(significance="dependencies_only")]
+    partition_size: Annotated[int, StardagField(significant=False)] = 100
+    threads: Annotated[int, StardagField(significant=False)] = 1
 
     def run(self) -> None:
         return None
 
 
 class Holder(sd.Task[int]):
-    """A task whose parameter is a configured task."""
+    """A task whose parameter is a task with non-significant fields."""
 
     __namespace__ = "sig_tests"
     inner: Fanout
@@ -402,421 +378,101 @@ class Holder(sd.Task[int]):
         return None
 
 
-KEY = "sig_tests.Fanout"
+class Options(StardagBaseModel):
+    """A nested plain model carrying ``significant`` on its own fields."""
+
+    pattern: str
+    max_workers: Annotated[int, StardagField(significant=False)] = 4
 
 
-class TestSignificanceOnTheModel:
-    def test_defaults_apply_without_a_build_config(self):
-        task = Fanout(key="a")
-        assert (task.partition_size, task.threads) == (100, 1)
-        assert get_build_config() is None
+class Parse(sd.Task[int]):
+    __namespace__ = "sig_tests"
+    options: Options
 
-    @pytest.mark.parametrize("field", ["partition_size", "threads"])
-    def test_non_identity_fields_cannot_be_passed_at_init(self, field: str):
-        with pytest.raises(ValidationError, match="build config"):
-            # Plain validation is init: only ``mode="compat"`` (registry data)
-            # tolerates the field being present.
-            Fanout.model_validate({"key": "a", field: 7})
+    def run(self) -> None:
+        return None
 
-    def test_values_are_resolved_from_the_build_config(self):
-        with build_config_scope({KEY: {"partition_size": 250, "threads": 8}}):
-            task = Fanout(key="a")
-        assert (task.partition_size, task.threads) == (250, 8)
 
-    def test_levels_two_and_three_do_not_move_the_id(self):
-        plain = Fanout(key="a")
-        with build_config_scope({KEY: {"partition_size": 250, "threads": 8}}):
-            configured = Fanout(key="a")
-        assert configured.id == plain.id
+class TestStardagField:
+    def test_defaults(self):
+        field = StardagField()
+        assert field.significant is True
+        assert StardagField(significant=False).significant is False
 
-    def test_registry_mode_dump_carries_identity_only(self):
-        with build_config_scope({KEY: {"partition_size": 250, "threads": 8}}):
-            task = Fanout(key="a")
-        data = task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
-        assert "partition_size" not in data and "threads" not in data
-        assert data["key"] == "a"
-        assert data["__name"] == "Fanout"
-        # ...and the ordinary dump still shows the effective values.
-        assert task.model_dump()["partition_size"] == 250
+    @pytest.mark.parametrize("removed", ["significance", "hash_exclude"])
+    def test_removed_options_are_a_hard_error_naming_the_replacement(
+        self, removed: str
+    ):
+        value = "execution_only" if removed == "significance" else True
+        with pytest.raises(TypeError, match=r"significant=False"):
+            StardagField(**{removed: value})  # type: ignore[arg-type]
 
-    def test_compat_validation_strips_a_stale_value(self):
-        """Registry data written before significance existed carries the
-        value; rehydration drops it and resolves from the config instead."""
-        with build_config_scope({KEY: {"partition_size": 9}}):
-            task = Fanout.model_validate(
-                {"key": "a", "version": "1", "partition_size": 42, "threads": 3},
-                context={CONTEXT_MODE_KEY: "compat"},
-            )
-        assert task.partition_size == 9
-        assert task.threads == 1
+    def test_an_unknown_option_is_refused(self):
+        with pytest.raises(TypeError, match="nope"):
+            StardagField(nope=1)  # type: ignore[arg-type]
 
-    def test_compat_mode_lets_the_config_win_over_a_stale_value(self):
-        """Both present: the stored value is old data, the config is the
-        build's; the config wins for every non-identity field it names."""
-        with build_config_scope({KEY: {"partition_size": 9, "threads": 4}}):
-            task = Fanout.model_validate(
-                {"key": "a", "version": "1", "partition_size": 42, "threads": 3},
-                context={CONTEXT_MODE_KEY: "compat"},
-            )
-        assert (task.partition_size, task.threads) == (9, 4)
+    def test_significant_must_be_a_bool(self):
+        with pytest.raises(TypeError, match="bool"):
+            StardagField(significant="no")  # type: ignore[arg-type]
 
-    def test_rebind_re_resolves_from_the_installed_config(self):
-        task = Fanout(key="a")
-        with build_config_scope({KEY: {"partition_size": 3}}):
-            rebound = rebind_to_build_config(task)
-        assert isinstance(rebound, Fanout)
-        assert rebound.partition_size == 3
-        assert rebound.id == task.id
-
-    def test_a_required_level_two_field_needs_the_config(self):
-        # ``model_validate`` rather than the constructor: the field has no
-        # default, so the static signature demands it, while at runtime the
-        # build config is the only place it may come from.
-        with pytest.raises(ValidationError, match="width"):
-            Required.model_validate({"key": "a"})
-        with build_config_scope({"sig_tests.Required": {"width": 5}}):
-            assert Required.model_validate({"key": "a"}).width == 5
-
-    def test_compat_default_is_refused_on_a_non_identity_field(self):
+    def test_compat_default_is_refused_on_a_non_significant_field(self):
         with pytest.raises(ValueError, match="compat_default"):
-            StardagField(compat_default=1, significance="execution_only")
+            StardagField(compat_default=1, significant=False)
 
-    def test_hash_exclude_reads_as_execution_only(self):
-        with pytest.warns(DeprecationWarning):
-            legacy = StardagField(hash_exclude=True)
-        assert legacy.effective_significance == "execution_only"
-        assert not legacy.is_identity
-        assert field_significance(Fanout.model_fields["key"]) == "identity"
-        assert (
-            field_significance(Fanout.model_fields["partition_size"])
-            == "dependencies_only"
-        )
+    def test_compat_default_on_a_significant_field_is_fine(self):
+        assert StardagField(compat_default=1).compat_default == 1
 
-    def test_field_significance_by_kind(self):
-        with pytest.warns(DeprecationWarning):
+    def test_is_significant(self):
+        fields = Fanout.model_fields
+        assert is_significant(fields["key"])
+        assert not is_significant(fields["partition_size"])
 
-            class Mixed(StardagBaseModel):
-                plain: int = 0
-                legacy: Annotated[int, StardagField(hash_exclude=True)] = 0
-                explicit: Annotated[
-                    int, StardagField(significance="execution_only")
-                ] = 0
-                compat: Annotated[int, StardagField(compat_default=0)] = 0
-
-        fields = Mixed.model_fields
-        assert field_significance(fields["plain"]) == "identity"
-        assert field_significance(fields["legacy"]) == "execution_only"
-        assert field_significance(fields["explicit"]) == "execution_only"
-        assert field_significance(fields["compat"]) == "identity"
-
-    def test_non_identity_fields_are_the_build_config_fields_and_cached(self):
-        # Not ``Mixed``: a model with a build-config field is indexed under
-        # its bare class name, and the one above already holds that key.
-        with pytest.warns(DeprecationWarning):
-
-            class MixedCached(StardagBaseModel):
-                plain: int = 0
-                legacy: Annotated[int, StardagField(hash_exclude=True)] = 0
-                deps: Annotated[int, StardagField(significance="dependencies_only")] = 0
-                exec_: Annotated[int, StardagField(significance="execution_only")] = 0
-
-        first = MixedCached._non_identity_fields()
-        assert first == ("deps", "exec_")
-        assert MixedCached._non_identity_fields() is first
-
-    def test_registry_dump_drops_nested_non_identity_fields_too(self):
-        """A configured task nested as a parameter is serialised by its own
-        class, under the same context, so its level 2/3 fields are dropped
-        from the outer payload as well."""
-        with build_config_scope({KEY: {"partition_size": 250, "threads": 8}}):
-            holder = Holder(inner=Fanout(key="a"))
-        data = holder.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
-        assert data["inner"]["key"] == "a"
-        assert "partition_size" not in data["inner"]
-        assert "threads" not in data["inner"]
-        # And rehydration under compat mode resolves the nested task from the
-        # config installed at that point.
-        with build_config_scope({KEY: {"partition_size": 3}}):
-            rebuilt = Holder.model_validate(data, context={CONTEXT_MODE_KEY: "compat"})
-        assert rebuilt.inner.partition_size == 3
-        assert rebuilt.id == holder.id
+    def test_fields_are_frozen_and_comparable(self):
+        field = StardagField(significant=False)
+        assert field == StardagField(significant=False)
+        assert field != StardagField()
+        with pytest.raises(AttributeError):
+            field.significant = True  # type: ignore[misc]
 
 
-class TestLegacyHashExcludeInPayloads:
-    """A deprecated ``hash_exclude=True`` field may still be passed at init,
-    so a task registered with a non-default value must rehydrate with it:
-    dropped from the hash, kept in the registry payload. An explicit
-    ``execution_only`` field is in neither — its value lives in the build
-    config."""
+class TestNonSignificantFields:
+    def test_passable_at_init(self):
+        task = Fanout(key="a", partition_size=7, threads=2)
+        assert (task.partition_size, task.threads) == (7, 2)
 
-    @pytest.fixture
-    def legacy(self):
-        with pytest.warns(DeprecationWarning):
+    def test_do_not_move_the_task_id(self):
+        assert Fanout(key="a", partition_size=7).id == Fanout(key="a").id
+        assert Fanout(key="a").id != Fanout(key="b").id
 
-            class Legacy(sd.Task[int]):
-                __namespace__ = "sig_legacy"
-                key: str
-                knob: Annotated[int, StardagField(hash_exclude=True)] = 1
-                threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-                def run(self):
-                    return None
-
-        return Legacy
-
-    def test_hash_excluded_value_is_stored_but_not_hashed(self, legacy):
-        task = legacy(key="a", knob=7)
-        registry_data = task.model_dump(
-            mode="json", context={CONTEXT_MODE_KEY: "registry"}
-        )
-        hash_data = task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "hash"})
-        assert registry_data["knob"] == 7
-        assert "knob" not in hash_data
-        assert "threads" not in registry_data and "threads" not in hash_data
-        # And the id does not move with the knob.
-        assert legacy(key="a", knob=7).id == legacy(key="a").id
-
-    def test_a_stored_value_rehydrates(self, legacy):
-        data = legacy(key="a", knob=7).model_dump(
-            mode="json", context={CONTEXT_MODE_KEY: "registry"}
-        )
-        rebuilt = legacy.model_validate(data, context={CONTEXT_MODE_KEY: "compat"})
-        assert rebuilt.knob == 7
-
-
-class TestSignificanceIsChecked:
-    def test_hash_exclude_with_an_explicit_significance_is_refused(self):
-        """The deprecated flag and an explicit non-identity significance
-        disagree about init (one allows it, the other refuses), so the pair
-        is contradictory rather than redundant."""
-        with pytest.warns(DeprecationWarning):
-            with pytest.raises(ValueError, match="contradictory"):
-                StardagField(hash_exclude=True, significance="execution_only")
-        with pytest.warns(DeprecationWarning):
-            legacy = StardagField(hash_exclude=True)
-        assert legacy.is_legacy_hash_exclude and not legacy.is_build_config_field
-        assert legacy.effective_significance == "execution_only"
-        explicit = StardagField(significance="dependencies_only")
-        assert explicit.is_build_config_field and not explicit.is_legacy_hash_exclude
-
-    def test_a_typo_is_refused_at_field_creation(self):
-        """A Literal is a hint; an unchecked typo would read as non-identity
-        on the model and as execution-only in the structure hash."""
-        with pytest.raises(ValueError, match="dependencies_only") as excinfo:
-            StardagField(significance="dependencies-only")  # type: ignore[arg-type]
-        assert "identity" in str(excinfo.value)
-        assert "execution_only" in str(excinfo.value)
-
-
-class TestBuildConfigRegistration:
-    """Which classes a build config may name, and under which key.
-
-    A model that declares a level 2 or 3 field is looked up by key when the
-    build's structure scope is hashed, so it has to be findable then — not
-    only when a field is resolved at validation. Tasks are found through the
-    task registry; this is the other half (STA-77).
-    """
-
-    def test_a_model_with_a_build_config_field_is_registered_by_its_name(self):
-        class Indexed(StardagBaseModel):
-            a: int = 0
-            threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-        assert get_build_config_class("Indexed") is Indexed
-
-    def test_a_namespace_separates_the_key(self):
-        class Namespaced(StardagBaseModel):
-            __namespace__ = "sig_tests"
-            threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-        assert get_build_config_class("sig_tests.Namespaced") is Namespaced
-        assert get_build_config_class("Namespaced") is None
-        assert Namespaced._build_config_key() == "sig_tests.Namespaced"
-
-    def test_a_polymorphic_model_is_keyed_by_its_registered_type_id(self):
-        """A non-task polymorphic model is keyed like a task: the namespace
-        and name it was *registered* under, overrides included. That id is
-        set as the class is defined, so this index is filled after it."""
-
-        class Strategy(PolymorphicRoot):
-            __namespace__ = "sig_tests"
-
-        class Chunked(Strategy, namespace_override="other_ns"):
-            threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-        assert Chunked._build_config_key() == "other_ns.Chunked"
-        assert get_build_config_class("other_ns.Chunked") is Chunked
-        assert get_build_config_class("sig_tests.Chunked") is None
-        # ...and the scope hash resolves that key.
-        assert canonical_structure_config({"other_ns.Chunked": {"threads": 8}}) == {}
-        with build_config_scope({"other_ns.Chunked": {"threads": 8}}):
-            assert Chunked().threads == 8
-
-    def test_an_abstract_model_is_not_registered_and_keeps_its_own_name(self):
-        """A family does not register its abstract members, so they have no
-        ``__type_id__`` of their own — and reading the inherited one would
-        index them under their nearest registered ancestor's key. They are
-        not indexed at all: a field is resolved under the key of the class
-        being constructed, which an abstract class never is."""
-
-        class Strategy(PolymorphicRoot):
-            __namespace__ = "sig_tests"
-
-        class Registered(Strategy):
-            pass
-
-        class AbstractLeg(Registered):
-            __stardag_abstract__ = True
-            threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-        class Leg(AbstractLeg):
-            pass
-
-        assert AbstractLeg._build_config_key() == "sig_tests.AbstractLeg"
-        assert get_build_config_class("sig_tests.AbstractLeg") is None
-        assert get_build_config_class("sig_tests.Registered") is None
-        # The concrete subclass is the one a config can name.
-        assert get_build_config_class("sig_tests.Leg") is Leg
-        with build_config_scope({"sig_tests.Leg": {"threads": 6}}):
-            assert Leg().threads == 6
-
-    def test_a_model_without_build_config_fields_is_not_registered(self):
-        class Ordinary(StardagBaseModel):
-            a: int = 0
-
-        assert get_build_config_class("Ordinary") is None
-
-    def test_a_legacy_hash_exclude_model_is_not_registered(self):
-        """``hash_exclude=True`` is passable at init and needs no config
-        entry, so it does not make the class nameable."""
-        with pytest.warns(DeprecationWarning):
-
-            class LegacyOnly(StardagBaseModel):
-                threads: Annotated[int, StardagField(hash_exclude=True)] = 1
-
-        assert get_build_config_class("LegacyOnly") is None
-
-    def test_a_parameterized_generic_alias_resolves_through_its_origin(self):
-        """The alias is not indexed — it is not a real class — but it can
-        be constructed, and its fields are the origin's, so it has to
-        resolve against the key the origin holds. Keying it by its own
-        ``__name__`` would make ``Box[int]`` silently unconfigurable."""
-        T = TypeVar("T")
-
-        class Box(StardagBaseModel, Generic[T]):
-            item: T
-            threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-        assert Box[int].__name__ == "Box[int]"
-        assert get_build_config_class("Box") is Box
-        assert get_build_config_class("Box[int]") is None
-        assert Box[int]._build_config_key() == "Box"
-        with build_config_scope({"Box": {"threads": 8}}):
-            assert Box(item=1).threads == 8
-            assert Box[int](item=1).threads == 8
-
-    def test_a_task_class_is_left_to_the_task_registry(self):
-        assert get_build_config_class(KEY) is None
-        assert get_build_config_class("Fanout") is None
-        # ...and the config still resolves it, through that registry.
-        assert canonical_structure_config({KEY: {"partition_size": 7}}) == {
-            KEY: {"partition_size": 7}
+    def test_hash_mode_drops_them_and_registry_mode_keeps_them(self):
+        task = Fanout(key="a", partition_size=7)
+        registry = task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
+        assert registry["partition_size"] == 7
+        assert registry["threads"] == 1  # defaults included
+        # The hash-mode dump of a task finalizes to its id; check the fields
+        # through a nested plain model instead, which does not finalize.
+        options = Options(pattern="*", max_workers=9)
+        assert options.model_dump(mode="json", context={CONTEXT_MODE_KEY: "hash"}) == {
+            "pattern": "*"
         }
 
-    def test_a_model_taking_a_task_s_key_is_refused_at_definition(self):
-        """The lookup asks the task registry first, so a model under a
-        task's key could never be reached through it."""
-        with pytest.raises(BuildConfigError) as excinfo:
+    def test_a_nested_task_carries_its_own_flags(self):
+        a = Holder(inner=Fanout(key="a", partition_size=1))
+        b = Holder(inner=Fanout(key="a", partition_size=2))
+        assert a.id == b.id
+        body = a.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
+        assert body["inner"]["partition_size"] == 1
 
-            class Fanout(StardagBaseModel):  # noqa: F811
-                __namespace__ = "sig_tests"
-                threads: Annotated[int, StardagField(significance="execution_only")] = 1
+    def test_a_nested_plain_model_carries_its_own_flags(self):
+        a = Parse(options=Options(pattern="*.log", max_workers=1))
+        b = Parse(options=Options(pattern="*.log", max_workers=8))
+        assert a.id == b.id
+        assert Parse(options=Options(pattern="*.txt")).id != a.id
+        assert a.instance_hash != b.instance_hash
 
-        message = str(excinfo.value)
-        assert "'sig_tests.Fanout'" in message
-        assert "__namespace__" in message
-
-    def test_a_task_taking_a_model_s_key_is_refused_at_lookup(self):
-        """The other definition order: the task registry knows nothing
-        about this index, so the clash surfaces where the key is used."""
-
-        class Shadowed(StardagBaseModel):
-            __namespace__ = "sig_tests"
-            threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-        # The task is declared under the model's key by an override, since
-        # two same-named classes in one scope are a redeclaration.
-        class ShadowingTask(sd.Task[int], name_override="Shadowed"):
-            __namespace__ = "sig_tests"
-
-            def run(self) -> None:
-                return None
-
-        with pytest.raises(BuildConfigError, match="names both task class"):
-            canonical_structure_config({"sig_tests.Shadowed": {"threads": 2}})
-
-    def test_two_models_with_one_key_are_refused_at_definition(self):
-        # Two *different* classes with one key: different qualified names,
-        # as two modules each defining a ``Duplicated`` would have. (Same
-        # module and qualified name is a re-creation, below.)
-        def first():
-            class Duplicated(StardagBaseModel):
-                threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-            return Duplicated
-
-        def second():
-            class Duplicated(StardagBaseModel):
-                threads: Annotated[int, StardagField(significance="execution_only")] = 2
-
-            return Duplicated
-
-        first()
-        with pytest.raises(BuildConfigError) as excinfo:
-            second()
-
-        message = str(excinfo.value)
-        assert "'Duplicated'" in message
-        # Both classes are named, so the user can find the two definitions.
-        assert ".first.<locals>.Duplicated" in message
-        assert ".second.<locals>.Duplicated" in message
-        assert "__namespace__" in message
-
-    def test_a_namespace_resolves_a_collision(self):
-        """The same two definitions as above — one class name, two
-        qualified names — except that the second carries a namespace. That
-        is the whole difference between the error and this."""
-
-        def plain():
-            class Separated(StardagBaseModel):
-                threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-            return Separated
-
-        def namespaced():
-            class Separated(StardagBaseModel):
-                __namespace__ = "other_ns"
-                threads: Annotated[int, StardagField(significance="execution_only")] = 2
-
-            return Separated
-
-        first, second = plain(), namespaced()
-        assert get_build_config_class("Separated") is first
-        assert get_build_config_class("other_ns.Separated") is second
-        with build_config_scope({"other_ns.Separated": {"threads": 9}}):
-            assert second().threads == 9
-            assert first().threads == 1
-
-    def test_a_class_recreated_under_the_same_name_replaces_it(self):
-        """What cloudpickle does to a by-value class in a worker: the class
-        object is new, its module and qualified name are not."""
-
-        def define():
-            class Recreated(StardagBaseModel):
-                threads: Annotated[int, StardagField(significance="execution_only")] = 1
-
-            return Recreated
-
-        first, second = define(), define()
-        assert first is not second
-        assert get_build_config_class("Recreated") is second
+    def test_rehydrate_from_the_registry_mode_dump(self):
+        task = Holder(inner=Fanout(key="a", partition_size=3))
+        body = task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
+        rebuilt = Holder.model_validate(body, context={CONTEXT_MODE_KEY: "compat"})
+        assert rebuilt == task
+        assert rebuilt.inner.partition_size == 3

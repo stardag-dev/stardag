@@ -40,7 +40,7 @@ def test_hashable_set_serialization(
 
 class CustomHashTask(BaseTask):
     a: int
-    b: Annotated[str, StardagField(significance="execution_only")] = "constant"
+    b: Annotated[str, StardagField(significant=False)] = "constant"
 
     def complete(self) -> bool:
         return True

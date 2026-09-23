@@ -78,9 +78,7 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
     """
 
     # No ``StardagField`` annotation: the field *does* determine the id,
-    # through the ``id`` and ``_hash_mode_finalize`` overrides below, so the
-    # ``hash_exclude=True`` it used to carry was misleading signalling
-    # rather than a mechanism.
+    # through the ``id`` and ``_hash_mode_finalize`` overrides below.
     aliased: AliasedMetadata
 
     @classmethod

@@ -36,6 +36,7 @@ from stardag import (
     TaskStruct,
     flatten_task_struct,
 )
+from stardag._core.instance import SeenInstances
 from stardag._core.base_task import (
     _has_custom_run,
     _has_custom_run_aio,
@@ -744,6 +745,9 @@ async def build_aio(
     # re-evaluates ``requires()``.
     declared_deps: dict[UUID, list[BaseTask]] = {}
 
+    # One instance per task id per build (v2 design, "Two hashes, one flag").
+    seen_instances = SeenInstances()
+
     # Synchronization for concurrent discovery
     discover_lock = asyncio.Lock()
     discover_semaphore = asyncio.Semaphore(max_concurrent_discover)
@@ -813,6 +817,7 @@ async def build_aio(
         """
         # Check if already discovered and reserve our spot (with lock)
         async with discover_lock:
+            seen_instances.observe(task)
             if task.id in task_states:
                 done_event = discover_done[task.id]
                 already_seen = True

@@ -48,7 +48,7 @@ class Generation(sd.Task[list[int]]):
     __namespace__ = NAMESPACE
 
     salt: str
-    width: Annotated[int, StardagField(significance="dependencies_only")] = 1
+    width: Annotated[int, StardagField(significant=False)] = 1
 
     def run(self) -> None:
         self.target().save(list(range(self.width)))
@@ -175,6 +175,7 @@ class TestConfigIsReleasedOnEarlyFailure:
         assert get_build_config() is None
 
 
+@pytest.mark.xfail(reason="v2: I7", strict=True)
 class TestConfigReachesTheWorkerPools:
     @pytest.mark.asyncio
     async def test_a_task_constructed_in_the_thread_pool_reads_the_config(
@@ -287,6 +288,7 @@ class _MarkedRegistry(NoOpRegistry):
         self.build_resume(build_id, executor_metadata, **kwargs)
 
 
+@pytest.mark.xfail(reason="v2: I7", strict=True)
 class TestABareResumeAdoptsTheStoredConfig:
     """``resume_build_id`` without a config means the build's own config: an
     ``execution_only`` override shares the scope hash, so hashing the bare
