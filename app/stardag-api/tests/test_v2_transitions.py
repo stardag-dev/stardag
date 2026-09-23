@@ -69,9 +69,10 @@ async def test_s39_claim_rechecks_upstreams_under_the_row_lock(h: Harness):
 
 async def test_s19_stale_report_is_recorded_and_refused(h: Harness):
     """S19 — a stale worker's ``/complete`` for a task another build now
-    runs: applied only if its ``execution_id`` is current and the claim
-    live; otherwise its ledger end is written, the report recorded with
-    ``report_applied = false``, and refused (409)."""
+    runs: applied only if its ``execution_id`` is current and its claim not
+    yet released; otherwise its ledger end is written, the report recorded
+    with ``report_applied = false``, and refused (409). Here the stale
+    execution's lapsed claim was taken over, which is what makes it late."""
     deployment = await h.new_deployment()
     t = item("T")
     _, plan_a = await h.planned([t], [t], deployment_id=deployment)
@@ -290,6 +291,48 @@ async def test_observed_completion_closes_a_lapsed_claim_and_spares_a_live_one(
     assert task["status"] == "completed" and task["claim_plan_id"] is None
     ledger = await h.execution(held)
     assert ledger["claim_outcome"] == "lapsed" and ledger["ended_at"] is None
+
+
+async def test_report_after_the_claim_lapsed_but_before_takeover_is_applied(
+    h: Harness,
+):
+    """The authority rule keys on the execution, not on the clock: a worker
+    whose claim lapsed seconds before it reports completion still names the
+    task's current execution (nothing has taken the claim over), so its
+    completion is applied — the target exists, discarding it would cost a
+    re-run for nothing. The ledger closes as ``completed``, not ``lapsed``."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    await h.lapse_claim(t)
+    outcome = await h.transition(plan.id, t, Transition.complete(execution))
+    assert outcome.applied and outcome.status == "completed"
+    ledger = await h.execution(execution)
+    assert (ledger["claim_outcome"], ledger["outcome"]) == ("completed", "completed")
+    assert all(e["report_applied"] for e in await h.events(t))
+
+
+async def test_limit_keys_are_written_at_claim_and_replaced_on_every_claim(
+    h: Harness,
+):
+    """Limit keys travel with the claiming start (the tick computes them
+    from the instance body) and replace the task's keys on every claim."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    await h.start(plan.id, t, limit_keys=["gpu", "db", "gpu"])
+    rows = await h._rows(
+        "SELECT key FROM task_limit_key WHERE task_pk = :t ORDER BY key",
+        t=(await h.task(t))["id"],
+    )
+    assert [r["key"] for r in rows] == ["db", "gpu"]
+
+    await h.lapse_claim(t)
+    await h.start(plan.id, t, limit_keys=["cpu"])
+    rows = await h._rows(
+        "SELECT key FROM task_limit_key WHERE task_pk = :t",
+        t=(await h.task(t))["id"],
+    )
+    assert [r["key"] for r in rows] == ["cpu"]
 
 
 @pytest.mark.xfail(reason="v2: I0 step 3", strict=True)

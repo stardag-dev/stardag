@@ -9,7 +9,7 @@ route converts and does nothing else.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,7 +40,6 @@ class RegistrationItem(BaseModel):
     declared_upstreams: list[str] | None = None
     observed_complete: bool = False
     observed_at: datetime
-    limit_keys: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +183,13 @@ class StartRequest(BaseModel):
     executor: str | None = Field(default=None, max_length=32)
     executor_ref: str | None = Field(default=None, max_length=255)
     executor_metadata: dict[str, Any] | None = None
+    #: A claiming start's concurrency-limit keys, computed by the tick from
+    #: the instance body it runs (limit-key selection may read
+    #: non-significant fields, so they are per instance). Written to
+    #: ``task_limit_key`` at claim and replaced on every claim.
+    limit_keys: list[Annotated[str, Field(min_length=1, max_length=255)]] = Field(
+        default_factory=list, max_length=64
+    )
 
 
 class ReportRequest(BaseModel):

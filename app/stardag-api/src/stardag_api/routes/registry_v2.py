@@ -121,6 +121,7 @@ async def start(plan_id: UUID, task_id: str, body: StartRequest, db: Db, auth: A
             executor=body.executor,
             executor_ref=body.executor_ref,
             executor_metadata=body.executor_metadata,
+            limit_keys=body.limit_keys,
         ),
     )
 

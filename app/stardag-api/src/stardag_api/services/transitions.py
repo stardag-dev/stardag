@@ -18,10 +18,16 @@ rules, in one place:
   an upstream not COMPLETED — re-read under a share lock, so an invalidation
   in flight is waited for — 409 ``upstream_incomplete`` (S39). A lapsed claim
   is taken over (``claim_outcome = taken_over``, S21).
-- **Authority.** A report changes status only if it names the task's current
-  execution and the claim is live. Otherwise it writes that execution's
-  ledger end, is recorded with ``report_applied = false`` and refused
-  (S19). One terminal report per execution (S35).
+- **Authority.** A report changes status when it names the task's current
+  execution (``task.execution_id``) whose claim has not been released —
+  **whether or not the claim has lapsed**: a lapsed claim still names its
+  execution until a claiming start takes it over, and a worker finishing
+  seconds after expiry must not have a real completion discarded. Only
+  once the claim is released (taken over, closed by an observation, or
+  released by a build transition — ``execution.claim_released_at`` set) is
+  a report *late*: it writes that execution's ledger end, is recorded with
+  ``report_applied = false`` and refused (S19). One terminal report per
+  execution (S35).
 - **The ledger's two ends.** Every move off RUNNING closes the current
   execution's claim (``claim_released_at``/``claim_outcome``, the server's
   end); ``ended_at``/``outcome`` are written only by the execution's own
@@ -31,6 +37,7 @@ rules, in one place:
 from __future__ import annotations
 
 import enum
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -53,6 +60,7 @@ from stardag_api.models import (
 )
 from stardag_api.models.base import utc_now
 from stardag_api.services import event_log
+from stardag_api.services.claim_limits import replace_limit_keys
 from stardag_api.services.errors import (
     BadRequest,
     Conflict,
@@ -90,6 +98,9 @@ class Transition:
     executor_metadata: dict[str, Any] | None = None
     error_message: str | None = None
     observed_at: datetime | None = None
+    #: A claiming start's concurrency-limit keys, computed by the tick from
+    #: the instance body it is about to run; replace the task's keys.
+    limit_keys: tuple[str, ...] = ()
 
     @classmethod
     def start(
@@ -101,6 +112,7 @@ class Transition:
         executor: str | None = None,
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        limit_keys: Sequence[str] = (),
     ) -> Transition:
         return cls(
             TransitionKind.START,
@@ -110,6 +122,7 @@ class Transition:
             executor=executor,
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
+            limit_keys=tuple(limit_keys),
         )
 
     @classmethod
@@ -488,6 +501,13 @@ class _Step:
         t.claim_expires_at = expires_at
         t.error_message = None
         t.preempted_at = None
+        await replace_limit_keys(
+            self.session,
+            self.environment_id,
+            t.id,
+            self.transition.limit_keys,
+            now=self.now,
+        )
         await self.record(
             EventType.TASK_STARTED,
             execution_id=eid,
@@ -603,17 +623,23 @@ class _Step:
         # The execution's own end, whether or not it may still move the task.
         execution.ended_at = self.now
         execution.outcome = outcome
-        if t.execution_id != eid or not self.live:
+        # Current and not yet released — a lapsed claim included: it names
+        # this execution until a claiming start takes it over.
+        if t.execution_id != eid or execution.claim_released_at is not None:
             await self.record(
                 event_type, execution_id=eid, report_applied=False, error_message=error
             )
             await self.session.flush()
             raise RecordedConflict(
                 "execution_not_current",
-                "the execution does not hold the task's live claim; its end is"
-                " recorded and the task is unchanged",
+                "the execution's claim has been released (taken over, closed or"
+                " released by its build); its end is recorded and the task is"
+                " unchanged",
                 execution_id=str(eid),
             )
+        # An unreleased claim of the current execution is RUNNING: every
+        # move off RUNNING releases it.
+        assert t.status == TaskStatus.RUNNING, t.status
         await self.close_claim(claim_outcome)
         self.move(status)
         if status == TaskStatus.COMPLETED:
