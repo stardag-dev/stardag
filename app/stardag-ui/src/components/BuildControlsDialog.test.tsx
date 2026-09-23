@@ -698,6 +698,21 @@ describe("BuildControlsDialog", () => {
     ).toBeInTheDocument();
   });
 
+  // An empty truncated scan found nothing only because it stopped
+  // looking; this build's executions can sit on pages it never read.
+  it("warns about running work when a truncated scan found none", async () => {
+    answerWith(
+      [makeTask({ latest_status_build_id: OTHER_BUILD })],
+      MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
+    );
+    const user = userEvent.setup();
+    renderPanel("running", true);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+
+    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
+    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
+  });
+
   it("does not warn about running work when the build holds no claims", async () => {
     answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
     const user = userEvent.setup();

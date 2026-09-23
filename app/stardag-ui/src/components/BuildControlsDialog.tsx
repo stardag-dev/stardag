@@ -492,9 +492,20 @@ export function BuildControlsDialog({
             holdsClaims={holdsClaims}
             // The stop scan answers this one: it lists exactly the
             // executions that can be ended, which a suspended claim is
-            // not one of. Null until it answers, and it can fail.
+            // not one of.
+            //
+            // Empty is only "none" from an exhaustive scan. Null is the
+            // scan not yet answered or failed, and an empty *truncated*
+            // result found nothing only because it stopped looking — this
+            // build's executions can sit entirely on pages it never
+            // read. Both are "unknown", which for a warning behaves like
+            // "maybe".
             runningExecutions={
-              held === null ? "unknown" : held.length > 0 ? "some" : "none"
+              held === null || (truncated && held.length === 0)
+                ? "unknown"
+                : held.length > 0
+                  ? "some"
+                  : "none"
             }
             onChanged={(updated) => {
               setStatusNotice(`This build is now recorded as ${updated.status}.`);
