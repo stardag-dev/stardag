@@ -227,15 +227,18 @@ export function BuildOverrideSection({
               build afterwards.
             </p>
           )}
-          {/* "Above": the stop section is the first half of this
-              dialog, and with executions found it has drawn the command
-              in full. */}
+          {/* Names the command, like the "unknown" copy above, rather
+              than pointing at the stop section. That section draws the
+              command for most of this state but not all of it: ticking
+              rows and then filtering them out leaves it explaining that
+              no command is offered, and a warning that points at a place
+              has to be right about every state that reaches it. */}
           {chosen.action === "cancel" && runningExecutions === "some" && (
             <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
               This build still has executions running, and cancelling here will not stop
-              them. The command above is the one that does: it ends the selected
-              containers first and cancels the build afterwards. Reach for it instead —
-              you do not need both.
+              them. <code>stardag builds stop {buildId}</code> is the command that does:
+              it ends the containers first and cancels the build afterwards. Reach for
+              it instead — you do not need both.
             </p>
           )}
 

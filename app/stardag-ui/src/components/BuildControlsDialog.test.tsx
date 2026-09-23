@@ -675,11 +675,43 @@ describe("BuildControlsDialog", () => {
     await user.click(await screen.findByRole("button", { name: "Cancel build" }));
     expect(screen.getByText(/cancelling here will not stop them/i)).toBeInTheDocument();
     expect(
-      screen.getByText(
-        /ends the selected containers first and cancels the build afterwards/i,
-      ),
+      screen.getByText(/ends the containers first and cancels the build afterwards/i),
     ).toBeInTheDocument();
     expect(cancelBuild).not.toHaveBeenCalled();
+  });
+
+  // Ticking a row and then filtering it out leaves the stop section
+  // explaining that no command is offered. A warning that pointed at
+  // "the command above" would be pointing at that explanation.
+  it("keeps the warning usable when the stop section offers no command", async () => {
+    answerWith([
+      makeTask({
+        task_id: "gpu-task",
+        task_name: "Featurise",
+        latest_executor_metadata: { function_name: "worker_gpu" },
+      }),
+      makeTask({
+        task_id: "cpu-task",
+        task_name: "Aggregate",
+        latest_executor_metadata: { function_name: "worker_cpu" },
+      }),
+    ]);
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    // Tick one row, then narrow to the other: nothing ticked is shown,
+    // so there is no command to draw.
+    const rows = await screen.findAllByRole("checkbox");
+    await user.click(rows[0]);
+    await user.selectOptions(screen.getByLabelText("Worker"), "cpu");
+    expect(screen.getByText(/No command is offered/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel build" }));
+    const warning = screen
+      .getByText(/cancelling here will not stop them/i)
+      .closest("p");
+    expect(warning?.textContent).toContain(`stardag builds stop ${BUILD}`);
+    expect(warning?.textContent).not.toMatch(/command above|command below/i);
   });
 
   // The old copy said in words that no override was needed alongside the
