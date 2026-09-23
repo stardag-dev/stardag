@@ -56,9 +56,15 @@ architecture-health review, and v2 restates rather than reopens them:
   unreachable. Two builds in different scopes may materialise one completion
   over different upstream sets; the duplicated upstream work is **accepted,
   not prevented**.
-- Environment variables may affect execution, never output or structure,
-  except through the deployment or `settings`, which are part of the
-  scope by construction.
+- Three rules on what may affect what. **Output** is a function of the
+  significant parameters and nothing else: not the code version, not an
+  environment variable, not settings — that is the task-id promise, and it is
+  the user's to keep (`__version__`). **Structure** may depend on environment
+  variables only through the two things that are in the scope, the
+  deployment's environment and `settings`; within a scope it is therefore
+  deterministic, and an environment variable that reaches `requires()` any
+  other way is a contract breach that over-gates, never one that produces
+  wrong output. **Execution** may depend on anything.
 - A build is a request, not an owner. The claim (RUNNING plus expiry,
   arbitrated `FOR UPDATE` in the same transaction as the event) is the only
   cross-build coordination. Nothing revokes an execution automatically; the
