@@ -26,6 +26,10 @@ Two mechanics worth knowing:
   ``ON DELETE SET NULL (col)``: a plain SET NULL on a composite FK would
   null ``environment_id`` and ``id`` too. The same form is used for the
   nullable pointers on ``event``.
+- Those five pointer FKs are ``DEFERRABLE INITIALLY DEFERRED``: deleting a
+  build reaches one event (or task) row along several of them in one
+  cascade, and an immediate check of the second would fail on a row the
+  cascade has already deleted but whose SET NULL has not yet run.
 
 Revision ID: 630d475de408
 Revises: a3c1f0d47b28
@@ -834,18 +838,24 @@ def upgrade() -> None:
             ["build.environment_id", "build.id"],
             name="fk_event_build",
             ondelete="SET NULL (build_id)",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         sa.ForeignKeyConstraint(
             ["environment_id", "execution_id"],
             ["execution.environment_id", "execution.id"],
             name="fk_event_execution",
             ondelete="SET NULL (execution_id)",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         sa.ForeignKeyConstraint(
             ["environment_id", "plan_id"],
             ["plan.environment_id", "plan.id"],
             name="fk_event_plan",
             ondelete="SET NULL (plan_id)",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         sa.ForeignKeyConstraint(
             ["environment_id", "task_pk"],
@@ -887,6 +897,8 @@ def upgrade() -> None:
         ["environment_id", "claim_plan_id", "id"],
         ["environment_id", "plan_id", "task_pk"],
         ondelete="SET NULL (claim_plan_id)",
+        deferrable=True,
+        initially="DEFERRED",
     )
     op.create_foreign_key(
         "fk_task_execution",
@@ -895,6 +907,8 @@ def upgrade() -> None:
         ["environment_id", "id", "execution_id"],
         ["environment_id", "task_pk", "id"],
         ondelete="SET NULL (execution_id)",
+        deferrable=True,
+        initially="DEFERRED",
     )
 
 

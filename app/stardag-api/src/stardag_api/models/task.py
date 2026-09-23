@@ -61,7 +61,9 @@ class Task(EnvironmentScopedMixin, Base):
         ),
         # The holder: a claim can only name a plan that holds this task.
         # SET NULL on the pointer column only — a plain SET NULL would null
-        # ``environment_id`` and ``id`` too.
+        # ``environment_id`` and ``id`` too. Both pointer FKs are deferred
+        # to commit, for the reason given on ``event``: one build deletion
+        # reaches this row through both of them.
         ForeignKeyConstraint(
             ["environment_id", "claim_plan_id", "id"],
             [
@@ -71,6 +73,8 @@ class Task(EnvironmentScopedMixin, Base):
             ],
             name="fk_task_claim_plan_member",
             ondelete="SET NULL (claim_plan_id)",
+            deferrable=True,
+            initially="DEFERRED",
             use_alter=True,
         ),
         # The current execution, which must be an execution of this task.
@@ -79,6 +83,8 @@ class Task(EnvironmentScopedMixin, Base):
             ["execution.environment_id", "execution.task_pk", "execution.id"],
             name="fk_task_execution",
             ondelete="SET NULL (execution_id)",
+            deferrable=True,
+            initially="DEFERRED",
             use_alter=True,
         ),
         Index("ix_task_environment_status", "environment_id", "status", "status_at"),

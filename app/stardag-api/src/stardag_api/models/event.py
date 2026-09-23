@@ -46,6 +46,14 @@ class Event(EnvironmentScopedMixin, Base):
     """
 
     __tablename__ = "event"
+    # The three pointer FKs are DEFERRABLE INITIALLY DEFERRED. Deleting a
+    # build reaches one event row along all three (build -> SET NULL; build
+    # -> plan -> SET NULL; build -> plan -> member -> execution -> SET
+    # NULL). Once the first action has rewritten the row, Postgres
+    # re-checks the row's other FKs, and an immediate check fails on an
+    # execution already deleted whose own SET NULL has not run yet.
+    # Deferred to commit, every action has run by the time anything is
+    # checked.
     __table_args__ = (
         CheckConstraint(
             f"plan_id IS NULL OR event_type NOT IN ({_BUILD_EVENT_LABELS})",
@@ -56,6 +64,8 @@ class Event(EnvironmentScopedMixin, Base):
             ["build.environment_id", "build.id"],
             name="fk_event_build",
             ondelete="SET NULL (build_id)",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         ForeignKeyConstraint(
             ["environment_id", "task_pk"],
@@ -67,12 +77,16 @@ class Event(EnvironmentScopedMixin, Base):
             ["plan.environment_id", "plan.id"],
             name="fk_event_plan",
             ondelete="SET NULL (plan_id)",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         ForeignKeyConstraint(
             ["environment_id", "execution_id"],
             ["execution.environment_id", "execution.id"],
             name="fk_event_execution",
             ondelete="SET NULL (execution_id)",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         Index("ix_event_build_created", "build_id", "created_at"),
         Index("ix_event_task_created", "task_pk", "created_at"),
