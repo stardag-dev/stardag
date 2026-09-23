@@ -211,8 +211,12 @@ assignee the maintainer.
 
 - [x] Design approved for review (PR against v2)
 - [ ] I0 — Vertical spike: in progress — step 1 (schema, deletion, Postgres
-      default) done; steps 2–4 (registration service and frontier, worker
-      path, live scenario) pending. PR #380. (skipped: —)
+      default) done; step 2 (registration, frontier and transitions for the
+      static path, server side, under `/api/v2`) done; steps 3–4 (build
+      lifecycle, deployments, wake-ups, yield, worker path; live scenario)
+      pending. PR #380. (skipped so far: skip-blocked and the exclusion
+      cascade, `xfail("v2: I3")`; wake-up flagging,
+      `xfail("v2: I0 step 3")`)
 - [ ] I1 — v2 schema
 - [ ] I2 — Registration service
 - [ ] I3 — Frontier and transitions

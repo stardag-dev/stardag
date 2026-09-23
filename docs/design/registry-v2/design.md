@@ -204,6 +204,8 @@ user. `kind` keeps local and Modal deployments from ever colliding. A `local`
 row has no deploy step to wait for, so lookup-or-create returns it **already
 activated** (`activated_at` set in the same insert, `generation` assigned as
 for any row); the two-step create/activate is for Modal deployments only.
+A `local` row's `app_name` is `"local"` unless the driver names an app, so
+its generations are ordered like any app's.
 
 **A driver that is not the deployment.** A hybrid `sd.build()` whose tasks
 run on a Modal app, and `reactive_discovery="local"`, plan under **the
@@ -271,7 +273,10 @@ stated. One rule for every reference between environment-scoped tables:
 **the FK carries `environment_id`** (a composite FK onto a `(environment_id,
 id)` unique key on the parent), so a row can never point at another
 environment's build, deployment, task, plan, instance, settings or
-execution by constraint rather than by query discipline. The listings name
+execution by constraint rather than by query discipline. The registry
+requires **PostgreSQL 15 or newer**: the pointer FKs use the column-list
+`ON DELETE SET NULL (col)` form, which clears the pointer without clearing
+the composite key's `environment_id`. The listings name
 the composite FKs that carry something more; the environment column is
 implied in all of them.
 
@@ -381,14 +386,14 @@ alongside it. Reactivating an old scope on resume flips the timestamps.
 
 ### `plan_member` — membership
 
-| Column                                     | Notes                                                                                                                                                                                                                                                                                                     |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plan_id` FK, `task_pk` FK                 | **PK (plan_id, task_pk)** — the one-instance-per-completion-per-plan rule                                                                                                                                                                                                                                 |
-| `instance_id`                              | composite FK `(instance_id, task_pk)` → `task_instance (id, task_pk)`, so a member's instance realises the member's task by construction; `UNIQUE (plan_id, instance_id)` follows                                                                                                                         |
-| `deployment_id`, `settings_hash`, NOT NULL | denormalised scope, with composite FKs `(plan_id, deployment_id, settings_hash)` → `plan` and `(instance_id, deployment_id, settings_hash)` → `task_instance`, so a member's instance is in its plan's scope by constraint, not by check                                                                  |
-| `is_root`                                  | the build's request, as instances of this plan                                                                                                                                                                                                                                                            |
-| `admitted_by`                              | `root` \| `static` \| `dynamic` \| `closure`                                                                                                                                                                                                                                                              |
-| `excluded_at`, `excluded_reason`           | "given up on" (STA-104): not scheduled, does not gate the build's completion; exclusion **cascades to the member's downstream closure within the plan** (like skip-blocked, otherwise a downstream is neither runnable nor excluded) and **an excluded root fails the build** (the request cannot be met) |
+| Column                                     | Notes                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plan_id` FK, `task_pk` FK                 | **PK (plan_id, task_pk)** — the one-instance-per-completion-per-plan rule                                                                                                                                                                                                                                                                                                                                                   |
+| `instance_id`                              | composite FK `(instance_id, task_pk)` → `task_instance (id, task_pk)`, so a member's instance realises the member's task by construction; `UNIQUE (plan_id, instance_id)` follows                                                                                                                                                                                                                                           |
+| `deployment_id`, `settings_hash`, NOT NULL | denormalised scope, with composite FKs `(plan_id, deployment_id, settings_hash)` → `plan` and `(instance_id, deployment_id, settings_hash)` → `task_instance`, so a member's instance is in its plan's scope by constraint, not by check                                                                                                                                                                                    |
+| `is_root`                                  | the build's request, as instances of this plan                                                                                                                                                                                                                                                                                                                                                                              |
+| `admitted_by`                              | `root` \| `static` \| `dynamic` \| `closure`                                                                                                                                                                                                                                                                                                                                                                                |
+| `excluded_at`, `excluded_reason`           | `excluded_reason` ∈ `operator \| discovery_failed \| upstream_excluded`, set together with `excluded_at` (CHECK). "Given up on" (STA-104): not scheduled, does not gate the build's completion; exclusion **cascades to the member's downstream closure within the plan** (like skip-blocked, otherwise a downstream is neither runnable nor excluded) and **an excluded root fails the build** (the request cannot be met) |
 
 No counters: attempts and interruptions are counted from `execution` rows
 over the build's plans.
@@ -433,15 +438,23 @@ active plan is found through `plan`, not stored twice.
 
 ### `event`
 
-Keeps the append-only log. `build_id` becomes nullable with a CHECK tying
-it to the event type (operator `invalidate` and limit-slot `evict` have no
-build); `task_pk` nullable (build-level events); adds `plan_id` (replaces
-`scope_key`; NULL for build-level events) and `execution_id` (nullable);
-`report_applied` becomes a real column, here only, as does `batch_id`
-(nullable; unique on `(execution_id, batch_id)` where set). `build_id`, `plan_id` and
-`execution_id` are `ON DELETE SET NULL`, not CASCADE: v1's cascade deleted
-the sources of the global status fold. Event types unchanged plus
-`TASK_INVALIDATED`, `TASK_EXCLUDED`, `TASK_OBSERVED_COMPLETE`,
+Keeps the append-only log. `task_pk` nullable (build-level events); adds
+`plan_id` (replaces `scope_key`; NULL for build-level events, by CHECK) and
+`execution_id`; `report_applied` becomes a real column, here only, as does
+`batch_id` (nullable; unique on `(execution_id, batch_id)` where set).
+`build_id`, `plan_id` and `execution_id` are **nullable pointers**: NULL for
+an event that has none (operator `invalidate` and limit-slot `evict` have no
+build), and set NULL when what they point at is deleted — `ON DELETE SET
+NULL (col)`, the column-list form, so only the pointer is cleared and not
+the composite key's `environment_id`, and not CASCADE: v1's cascade deleted
+the sources of the global status fold. All three FKs are `DEFERRABLE
+INITIALLY DEFERRED`, because a build delete reaches one event row along
+three paths (build; build → plan; build → plan → member → execution): once
+the first action rewrites the row, Postgres re-checks its other FKs, and an
+immediate check fails on an execution already deleted whose own SET NULL
+has not run yet. Deferred to commit, every action has run first. Event
+types unchanged, except `TASK_WAITING_FOR_LOCK`, removed with the lock
+table, plus `TASK_INVALIDATED`, `TASK_EXCLUDED`, `TASK_OBSERVED_COMPLETE`,
 `TASK_STRUCTURE_DIVERGED`, `TASK_YIELDED`.
 
 ### Peripheral tables, re-pointed
@@ -467,9 +480,13 @@ CONFLICT DO NOTHING … RETURNING`; the only contended rows are `task` (claim
 arbitration), locked in `task_id` order, and never in the same transaction as
 instance/edge/membership inserts except through the FK `KEY SHARE` locks
 STA-51 documented — the registration transaction takes no `FOR UPDATE` on
-`task` at all. Every composite FK in this design has all its columns NOT
-NULL, because a PostgreSQL composite FK does not check a row in which any
-referencing column is NULL. Build and deployment **lifecycle** transitions
+`task` at all. Every composite FK in this design has its **scope** columns
+(`environment_id` and the keys it scopes) NOT NULL, because a PostgreSQL
+composite FK does not check a row in which any referencing column is NULL.
+The pointer columns on `task` (`claim_plan_id`, `execution_id`) and on
+`event` (`build_id`, `plan_id`, `execution_id`) are nullable, and Postgres
+skipping the check when they are NULL is the intended "no claim" / "no
+such parent". Build and deployment **lifecycle** transitions
 (`complete`, `fail`, `cancel`, `exit-early`, `resume`, `/activate`, `/seal`)
 are idempotent by state, not by key: a re-delivered transition finds the row
 already in the requested state, returns it, and writes no event and no
