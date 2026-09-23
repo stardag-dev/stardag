@@ -3,18 +3,21 @@ from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _package_version
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from stardag_api.auth.tokens import get_token_manager
 from stardag_api.config import auth_settings, settings
 from stardag_api.middleware import GZipRequestMiddleware
 from stardag_api.routes import (
     auth_router,
+    registry_v2_router,
     target_roots_router,
     ui_router,
     workspaces_router,
 )
+from stardag_api.services.errors import RegistryError
 
 
 # Eagerly construct the InternalTokenManager so its (potentially ephemeral)
@@ -76,9 +79,16 @@ app.include_router(ui_router, prefix="/api/v1")
 app.include_router(workspaces_router, prefix="/api/v1")
 
 # SDK routes (API key or internal JWT auth). The v1 core routes (builds,
-# tasks, locks, deployments, search, ...) are deleted; the v2 ones arrive
-# with the registration service and the frontier.
+# tasks, locks, deployments, search, ...) are deleted; their v2
+# replacements live under /api/v2.
 app.include_router(target_roots_router, prefix="/api/v1")
+app.include_router(registry_v2_router, prefix="/api/v2")
+
+
+@app.exception_handler(RegistryError)
+async def registry_error_handler(_: Request, exc: RegistryError) -> JSONResponse:
+    """A v2 service refusal: its status code, and its code and detail."""
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.to_dict()})
 
 
 @app.get("/health")
