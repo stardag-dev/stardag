@@ -206,6 +206,24 @@ class TestSetsAreSortedInBothModes:
         assert forward.instance_hash == backward.instance_hash
         assert forward.id == backward.id
 
+    def test_a_set_inside_a_hashable_set_member_is_sorted(self):
+        """A member's own nested set is canonicalised too, not only the
+        member order (a dict is unhashable, so the member is a tuple)."""
+
+        class Members(sd.Task[int]):
+            __namespace__ = "instance_tests"
+            values: sd.HashableSet[tuple[str, frozenset[int]]]
+
+            def run(self) -> None:
+                return None
+
+        forward = Members(values=frozenset({("m", self.FORWARD)}))
+        backward = Members(values=frozenset({("m", self.BACKWARD)}))
+        assert forward.instance_body()["values"] == [["m", [8, 16]]]
+        assert backward.instance_body()["values"] == [["m", [8, 16]]]
+        assert forward.instance_hash == backward.instance_hash
+        assert forward.id == backward.id
+
     def test_a_nested_hashable_set_keeps_its_own_key(self):
         class Keyed(sd.Task[int]):
             __namespace__ = "instance_tests"

@@ -67,14 +67,16 @@ class HashSafeSetSerializer:
 
             # Items may hold sets of their own; order those first, so the
             # tie-break key below is itself canonical.
+            # (raw member, its canonicalised dump): the dump is what is
+            # returned, so a member's nested sets are ordered in the output.
             canonical_items = [
-                (item, canonicalize_sets(item, dumped, info.context))
-                for item, dumped in serialized_items
+                (raw, canonicalize_sets(raw, dumped, info.context))
+                for raw, dumped in serialized_items
             ]
             canonical_items.sort(
-                key=lambda x: (sort_key(x[0]), canonical_item_key(x[1]))
+                key=lambda pair: (sort_key(pair[0]), canonical_item_key(pair[1]))
             )
-            ordered = [item[1] for item in canonical_items]
+            ordered = [canonical for _, canonical in canonical_items]
             record_ordered_set(info.context, v, ordered)
             return ordered
 
