@@ -152,3 +152,20 @@ scenario in `design.md`; seven engineering rules traceable to v1 defects;
 and two standing mechanisms that tell reviewers, Copilot included, what a
 PR against `v2` deliberately leaves out (`.github/copilot-instructions.md`
 and the `v2.md` PR template).
+
+## Copilot review, round 6 (2026-09-24) — dispositions
+
+Seven threads on 20feadf2. Accepted: NOT NULL stated on every composite-FK
+column (a composite FK skips rows with a NULL referencing column); the FK
+from the claim pointer written in the membership key's column order, and the
+execution's FKs naming their exact target keys; lifecycle transitions
+(`complete`, `fail`, `cancel`, `exit-early`, `resume`, `/activate`, `/seal`)
+idempotent by state — a re-delivery finds the state and writes nothing; the
+invalidation guard names `task.completed_at` explicitly; the yield's
+`batch_id` becomes a typed `event` column with a unique index, looked up
+under the parent's row lock (the JSON-metadata version violated engineering
+rule 4); a tick finishing another driver's unsealed plan re-observes
+unexpanded members' targets before sealing; `force` never overrides an
+excluded root. On the FK column order: PostgreSQL matches referenced columns
+to a unique constraint as a set, so the original text was creatable, but
+writing it in key order costs nothing and removes the doubt.

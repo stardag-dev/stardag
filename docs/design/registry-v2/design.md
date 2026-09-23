@@ -287,7 +287,7 @@ Replaces v1 `tasks`. Holds no parameters.
 | `status`                                                   | `PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, SKIPPED, SUSPENDED, INTERRUPTED` — a native enum or a CHECK; v1's `UNREGISTERED` phantom status is gone                                                                                                                                |
 | `status_at`, `started_at`, `completed_at`, `error_message` | as v1 `latest_*`                                                                                                                                                                                                                                                                        |
 | `claim_expires_at`                                         | CHECK: NOT NULL whenever `status = RUNNING`. The claim is **live** when `status = RUNNING AND claim_expires_at > now()`; RUNNING with a past expiry is a **lapsed** claim, which the next claiming start takes over. Every execution has a finite expiry (D11); nothing is live forever |
-| `claim_plan_id`, SET NULL                                  | the holder; implies the build, and via `plan_member` the instance body that is running. Composite FK `(id, claim_plan_id)` → `plan_member (task_pk, plan_id)`, so a claim can only name a plan that holds this task                                                                     |
+| `claim_plan_id`, SET NULL                                  | the holder; implies the build, and via `plan_member` the instance body that is running. Composite FK `(claim_plan_id, id)` → `plan_member (plan_id, task_pk)`, its primary key, so a claim can only name a plan that holds this task                                                    |
 | `execution_id`, SET NULL                                   | current execution, minted by the client before the claim (STA-50 rule unchanged); executor details are read from the execution row, not copied. Composite FK `(id, execution_id)` → `execution (task_pk, id)`                                                                           |
 | `preempted_at`                                             | as v1 (`waiting_for_lock` goes with the lock table)                                                                                                                                                                                                                                     |
 
@@ -353,7 +353,7 @@ are different constructions of one promise).
 | Column                                           | Notes                                                                                                                                                                                                                            |
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `downstream_instance_id`, `upstream_instance_id` | PK is the pair                                                                                                                                                                                                                   |
-| `deployment_id`, `settings_hash`                 | denormalised scope; composite FKs `(downstream_instance_id, deployment_id, settings_hash)` and `(upstream_instance_id, deployment_id, settings_hash)` → `task_instance` make "both ends share a scope" a constraint, not a check |
+| `deployment_id`, `settings_hash`, NOT NULL       | denormalised scope; composite FKs `(downstream_instance_id, deployment_id, settings_hash)` and `(upstream_instance_id, deployment_id, settings_hash)` → `task_instance` make "both ends share a scope" a constraint, not a check |
 | `is_dynamic`                                     | set at first insert, never changed                                                                                                                                                                                               |
 
 Edges belong to no plan and are never deleted (retention of instances and
@@ -381,14 +381,14 @@ alongside it. Reactivating an old scope on resume flips the timestamps.
 
 ### `plan_member` — membership
 
-| Column                           | Notes                                                                                                                                                                                                                                                                                                     |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plan_id` FK, `task_pk` FK       | **PK (plan_id, task_pk)** — the one-instance-per-completion-per-plan rule                                                                                                                                                                                                                                 |
-| `instance_id`                    | composite FK `(instance_id, task_pk)` → `task_instance (id, task_pk)`, so a member's instance realises the member's task by construction; `UNIQUE (plan_id, instance_id)` follows                                                                                                                         |
-| `deployment_id`, `settings_hash` | denormalised scope, with composite FKs `(plan_id, deployment_id, settings_hash)` → `plan` and `(instance_id, deployment_id, settings_hash)` → `task_instance`, so a member's instance is in its plan's scope by constraint, not by check                                                                  |
-| `is_root`                        | the build's request, as instances of this plan                                                                                                                                                                                                                                                            |
-| `admitted_by`                    | `root` \| `static` \| `dynamic` \| `closure`                                                                                                                                                                                                                                                              |
-| `excluded_at`, `excluded_reason` | "given up on" (STA-104): not scheduled, does not gate the build's completion; exclusion **cascades to the member's downstream closure within the plan** (like skip-blocked, otherwise a downstream is neither runnable nor excluded) and **an excluded root fails the build** (the request cannot be met) |
+| Column                                     | Notes                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plan_id` FK, `task_pk` FK                 | **PK (plan_id, task_pk)** — the one-instance-per-completion-per-plan rule                                                                                                                                                                                                                                 |
+| `instance_id`                              | composite FK `(instance_id, task_pk)` → `task_instance (id, task_pk)`, so a member's instance realises the member's task by construction; `UNIQUE (plan_id, instance_id)` follows                                                                                                                         |
+| `deployment_id`, `settings_hash`, NOT NULL | denormalised scope, with composite FKs `(plan_id, deployment_id, settings_hash)` → `plan` and `(instance_id, deployment_id, settings_hash)` → `task_instance`, so a member's instance is in its plan's scope by constraint, not by check                                                                  |
+| `is_root`                                  | the build's request, as instances of this plan                                                                                                                                                                                                                                                            |
+| `admitted_by`                              | `root` \| `static` \| `dynamic` \| `closure`                                                                                                                                                                                                                                                              |
+| `excluded_at`, `excluded_reason`           | "given up on" (STA-104): not scheduled, does not gate the build's completion; exclusion **cascades to the member's downstream closure within the plan** (like skip-blocked, otherwise a downstream is neither runnable nor excluded) and **an excluded root fails the build** (the request cannot be met) |
 
 No counters: attempts and interruptions are counted from `execution` rows
 over the build's plans.
@@ -408,7 +408,7 @@ with both paths named; the server is authoritative via the primary key.
 | Column                                          | Notes                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `id` PK                                         | client-minted; this is the `execution_id` of STA-50                                                                                                                                                                                                                                                                                                                                                                         |
-| `task_pk`, `plan_id`, `instance_id`             | which promise, under which request, from which body; composite FKs `(instance_id, task_pk)` → `task_instance` and `(plan_id, instance_id)` → `plan_member`, so an execution names one consistent membership                                                                                                                                                                                                                 |
+| `task_pk`, `plan_id`, `instance_id`             | which promise, under which request, from which body; composite FKs `(instance_id, task_pk)` → `task_instance (id, task_pk)` and `(plan_id, instance_id)` → `plan_member (plan_id, instance_id)` (its unique key), so an execution names one consistent membership                                                                                                                                                           |
 | `executor`, `executor_ref`, `executor_metadata` | the one place these live                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `started_at`                                    | the claim was granted                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `claim_released_at`, `claim_outcome`            | written by the **server** whenever the task leaves RUNNING or the claim changes hands, uniformly in `transition_task()`: `completed, failed, suspended, interrupted, cancelled` (the report that moved the task), `taken_over` (a later claiming start took a lapsed claim), `lapsed` (a lapsed claim closed by something other than a claiming start, e.g. an observed completion), `released` (build terminal transition) |
@@ -437,11 +437,12 @@ Keeps the append-only log. `build_id` becomes nullable with a CHECK tying
 it to the event type (operator `invalidate` and limit-slot `evict` have no
 build); `task_pk` nullable (build-level events); adds `plan_id` (replaces
 `scope_key`; NULL for build-level events) and `execution_id` (nullable);
-`report_applied` becomes a real column, here only. `build_id`, `plan_id` and
+`report_applied` becomes a real column, here only, as does `batch_id`
+(nullable; unique on `(execution_id, batch_id)` where set). `build_id`, `plan_id` and
 `execution_id` are `ON DELETE SET NULL`, not CASCADE: v1's cascade deleted
 the sources of the global status fold. Event types unchanged plus
 `TASK_INVALIDATED`, `TASK_EXCLUDED`, `TASK_OBSERVED_COMPLETE`,
-`TASK_STRUCTURE_DIVERGED`.
+`TASK_STRUCTURE_DIVERGED`, `TASK_YIELDED`.
 
 ### Peripheral tables, re-pointed
 
@@ -466,7 +467,13 @@ CONFLICT DO NOTHING … RETURNING`; the only contended rows are `task` (claim
 arbitration), locked in `task_id` order, and never in the same transaction as
 instance/edge/membership inserts except through the FK `KEY SHARE` locks
 STA-51 documented — the registration transaction takes no `FOR UPDATE` on
-`task` at all.
+`task` at all. Every composite FK in this design has all its columns NOT
+NULL, because a PostgreSQL composite FK does not check a row in which any
+referencing column is NULL. Build and deployment **lifecycle** transitions
+(`complete`, `fail`, `cancel`, `exit-early`, `resume`, `/activate`, `/seal`)
+are idempotent by state, not by key: a re-delivered transition finds the row
+already in the requested state, returns it, and writes no event and no
+timestamp. Only a transition that changes the state writes.
 
 **The item.** Every registration route carries the same item shape:
 
@@ -516,7 +523,8 @@ POST /plans/{plan_id}/members   (chunk, ≤1000 items, post-order, sorted within
                      observed_complete = false and status COMPLETED -> PENDING (TASK_INVALIDATED)
                      -- in this transaction, so no downstream in a later chunk can run against
                      -- a status the driver has already seen to be false; and only if the
-                     -- task's status_at (completed_at for an invalidation) precedes the item's
+                     -- task's status_at (for an invalidation: task.completed_at, the timestamp of
+                     -- the completion being withdrawn) precedes the item's
                      -- observed_at, so a delayed duplicate cannot undo a completion that
                      -- happened after the driver looked. observed_at is the driver's clock:
                      -- a value ahead of server time by more than a few seconds is refused
@@ -539,7 +547,11 @@ POST /plans/{plan_id}/seal
 ```
 
 Roots first, unexpanded, makes a crash at any point recoverable: any tick
-finds the roots as discovery jobs (below) and finishes the static phase.
+finds the roots as discovery jobs (below) and finishes the static phase. A
+tick that finishes someone else's unsealed plan treats it as a resume: before
+sealing it re-observes the targets of the plan's unexpanded members and sends
+the observations, so a member recorded COMPLETED by the crashed driver whose
+target has since vanished is invalidated rather than sealed over.
 Each chunk is self-consistent (an instance lands with its edges; its
 upstreams exist and are members), so a partially registered plan is closed
 under dependencies for everything it contains; the frontier may act on an
@@ -573,9 +585,13 @@ POST /plans/{plan_id}/members/{task_id}/yield
 ```
 
 In one transaction: `deployment_id` must equal the plan's (409
-`deployment_mismatch`); a batch already applied for this `execution_id` and
-`batch_id` (found on the recorded yield event) is replayed with its stored
-result rather than re-checked — a `suspend: true` yield releases the claim,
+`deployment_mismatch`); the parent's `task` row is locked first (the same
+lock a transition takes), and a batch already applied for this
+`execution_id` and `batch_id` — a `TASK_YIELDED` event whose typed
+`batch_id` column carries a unique index on `(execution_id, batch_id)`, so
+two concurrent retries cannot both miss the lookup — is replayed with its
+stored result rather than re-checked — a `suspend: true` yield releases the
+claim,
 so the plain execution check would otherwise refuse the worker's own retry
 after a lost response; otherwise `execution_id` must be the task's current
 execution (else recorded, `report_applied = false`, 409); the items land
@@ -685,8 +701,9 @@ non-excluded member COMPLETED) as a diagnostic, and `/complete` **recomputes
 the same predicate in its own transaction** and is refused with 409
 `plan_incomplete` unless it holds or `force` is set (the operator override
 that v1's unchecked `/complete` was; `force` overrides outstanding members,
-**never a missing seal** — an unsealed plan is a request not yet fully
-stated, and the way out of one is `fail` or `cancel`). To be atomic with a
+**never a missing seal and never an excluded root** — an unsealed plan is a
+request not yet fully stated, an excluded root is a request that cannot be
+met, and the way out of either is `fail` or `cancel`). To be atomic with a
 concurrent observation, `/complete` reads the active plan's member task rows
 `FOR SHARE` in `task_id` order inside its transaction, which serialises with
 the `FOR NO KEY UPDATE` an invalidation takes. `complete`, `fail` and `cancel` release
