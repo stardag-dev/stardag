@@ -40,15 +40,15 @@ interface BuildOverrideSectionProps {
   environmentId: string;
   buildStatus: BuildStatus;
   /**
-   * Whether the build still has executions running.
+   * Whether the build holds any execution claim.
    *
-   * Three values, not two. `"unknown"` is the scan still running or
-   * failed, and it has to be distinguishable: treating it as `"none"`
-   * silently withholds the warning that is the whole reason these two
-   * controls share a dialog, and it withholds it in the state where the
-   * operator has *least* information.
+   * Binary because the caller answers it from the build's own task list,
+   * which is complete and build-scoped. It was briefly three-valued when
+   * it was inferred from the stop scan, which could be stale, truncated,
+   * or blind to a suspended claim — an instrument that could not answer
+   * the question being asked of it.
    */
-  liveExecutions: "unknown" | "none" | "some";
+  holdsClaims: boolean;
   onChanged: (build: Build) => void;
 }
 
@@ -80,7 +80,7 @@ export function BuildOverrideSection({
   buildId,
   environmentId,
   buildStatus,
-  liveExecutions,
+  holdsClaims,
   onChanged,
 }: BuildOverrideSectionProps) {
   const { user } = useAuth();
@@ -106,7 +106,7 @@ export function BuildOverrideSection({
     // refreshes underneath an open confirmation, so a task can start
     // between choosing "Mark completed" and confirming it — and that is
     // the one override that would strand its claim.
-    if (pending === "complete" && liveExecutions !== "none") {
+    if (pending === "complete" && holdsClaims) {
       setError(
         "This build has tasks running again, and Mark completed would leave " +
           "their claims held. Close and choose Cancel build or Mark failed.",
@@ -132,7 +132,7 @@ export function BuildOverrideSection({
     } finally {
       if (alive.current) setBusy(false);
     }
-  }, [pending, liveExecutions, buildId, environmentId, user?.profile?.sub, onChanged]);
+  }, [pending, holdsClaims, buildId, environmentId, user?.profile?.sub, onChanged]);
 
   if (!canOverrideStatus(buildStatus)) return null;
 
@@ -144,7 +144,7 @@ export function BuildOverrideSection({
   // withheld unless the scan has positively said nothing is running —
   // "not known yet" is not "none", and here the unsafe reading is the
   // optimistic one.
-  const completedIsSafe = liveExecutions === "none";
+  const completedIsSafe = !holdsClaims;
   const offered = ACTIONS.filter((a) => a.action !== "complete" || completedIsSafe);
 
   return (
@@ -194,15 +194,7 @@ export function BuildOverrideSection({
               the override is almost certainly not what was wanted —
               and when we cannot yet tell, saying nothing would be the
               same as saying there is none. */}
-          {chosen.action === "cancel" && liveExecutions === "unknown" && (
-            <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
-              Whether this build still has executions running is not known yet — the
-              list below has not finished loading, or could not be read. Cancelling here
-              would not stop them either way. If anything may still be running, stop it
-              with the command below rather than cancelling here.
-            </p>
-          )}
-          {chosen.action === "cancel" && liveExecutions === "some" && (
+          {chosen.action === "cancel" && holdsClaims && (
             <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
               This build still has executions running, and cancelling here will not stop
               them. The command below is the one that does: it ends the selected

@@ -76,12 +76,13 @@ function answerWith(tasks: Task[], total = tasks.length) {
 
 const onBuildChanged = vi.fn();
 
-function renderPanel(buildStatus: BuildStatus = "running") {
+function renderPanel(buildStatus: BuildStatus = "running", holdsClaims = true) {
   return render(
     <BuildControlsDialog
       buildId={BUILD}
       environmentId="env-1"
       buildStatus={buildStatus}
+      holdsClaims={holdsClaims}
       refreshToken={0}
       onBuildChanged={onBuildChanged}
     />,
@@ -449,26 +450,17 @@ describe("BuildControlsDialog", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("gateway timeout");
   });
 
-  // The warning is the reason these two controls share a dialog, so the
-  // states where it is withheld matter as much as the state where it
-  // shows. "Not known yet" is not "none".
-  it("warns while the scan is still running", async () => {
+  // The warning is the reason these two controls share a dialog. It is
+  // driven by the build's own task list now, so it does not depend on
+  // whether the stop scan has answered — it is right from first paint.
+  it("warns before the stop scan has answered", async () => {
     vi.mocked(fetchTasks).mockReturnValue(new Promise(() => {}) as never);
     const user = userEvent.setup();
-    renderPanel();
+    renderPanel("running", true);
     await user.click(screen.getByRole("button", { name: "Build controls" }));
 
     await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
-  });
-
-  it("warns when the scan failed, rather than implying nothing is running", async () => {
-    vi.mocked(fetchTasks).mockRejectedValue(new Error("gateway timeout"));
-    const user = userEvent.setup();
-    await openDialog(user);
-
-    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/cancelling here will not stop them/i)).toBeInTheDocument();
   });
 
   // As a panel, vanishing on `completed` was invisible. As a dialog
@@ -486,6 +478,7 @@ describe("BuildControlsDialog", () => {
         buildId={BUILD}
         environmentId="env-1"
         buildStatus="completed"
+        holdsClaims
         refreshToken={0}
         onBuildChanged={onBuildChanged}
       />,
@@ -527,6 +520,7 @@ describe("BuildControlsDialog", () => {
           buildId={BUILD}
           environmentId="env-1"
           buildStatus="running"
+          holdsClaims
           refreshToken={token}
           onBuildChanged={onBuildChanged}
         />,
@@ -559,6 +553,7 @@ describe("BuildControlsDialog", () => {
         buildId={BUILD}
         environmentId="env-1"
         buildStatus="running"
+        holdsClaims
         refreshToken={1}
         onBuildChanged={onBuildChanged}
       />,
@@ -602,7 +597,7 @@ describe("BuildControlsDialog", () => {
 
   // The one terminal override that releases nothing (STA-103), so it is
   // withheld unless the scan has positively said nothing is running.
-  it("withholds Mark completed while the build may still hold claims", async () => {
+  it("withholds Mark completed while the build holds claims", async () => {
     answerWith([makeTask()]);
     const user = userEvent.setup();
     await openDialog(user);
@@ -613,22 +608,28 @@ describe("BuildControlsDialog", () => {
     ).toBeInTheDocument();
   });
 
-  // A truncated scan found nothing only because it stopped looking.
-  it("withholds Mark completed when the scan was truncated", async () => {
-    answerWith(
-      [makeTask({ latest_status_build_id: OTHER_BUILD })],
-      MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
-    );
+  // The gate reads the build's own task list, not the stop scan — which
+  // asks for the *stoppable* statuses, so a SUSPENDED task holds a claim
+  // it cannot see, and which can truncate besides. A build whose only
+  // task is suspended has an empty stop list and a held claim.
+  it("withholds Mark completed for a claim the stop list cannot see", async () => {
+    answerWith([]);
     const user = userEvent.setup();
-    await openDialog(user);
+    renderPanel("running", true);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
 
+    expect(await screen.findByText(/holding no execution claims/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
+    expect(
+      screen.getByText(/is the one outcome that releases no claims/i),
+    ).toBeInTheDocument();
   });
 
-  it("offers Mark completed once nothing is running", async () => {
+  it("offers Mark completed once the build holds no claims", async () => {
     answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
     const user = userEvent.setup();
-    await openDialog(user);
+    renderPanel("running", false);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
 
     expect(
       await screen.findByRole("button", { name: "Mark completed" }),
@@ -671,10 +672,11 @@ describe("BuildControlsDialog", () => {
     ).toBeInTheDocument();
   });
 
-  it("does not warn about running work when there is none", async () => {
+  it("does not warn about running work when the build holds no claims", async () => {
     answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
     const user = userEvent.setup();
-    await openDialog(user);
+    renderPanel("running", false);
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
 
     await user.click(await screen.findByRole("button", { name: "Cancel build" }));
     expect(screen.queryByText(/cancelling here will not stop them/i)).toBeNull();

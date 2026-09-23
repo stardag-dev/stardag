@@ -18,7 +18,7 @@ import type {
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
-import { rootsSatisfiedFrom } from "../utils/claims";
+import { CLAIM_HOLDING_STATUSES, rootsSatisfiedFrom } from "../utils/claims";
 import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { BuildControlsDialog } from "./BuildControlsDialog";
@@ -366,6 +366,25 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // from the task list this view already fetched rather than from the frontier,
   // which only the scheduling panel holds; both call the same rule so the two
   // cannot disagree about the same build.
+  // Whether this build holds any execution claim, answered from its own
+  // task list rather than from the stop scan.
+  //
+  // The stop scan is the wrong instrument for this question: it asks for
+  // the *stoppable* statuses, and a SUSPENDED task holds a claim while
+  // having nothing to stop, so an empty stop list does not mean an empty
+  // claim list. It is also environment-wide and paginated, so it can
+  // truncate. This list is already fetched, already scoped to the build,
+  // and complete.
+  const holdsClaims = useMemo(
+    () =>
+      allTasks.some(
+        (t) =>
+          t.latest_status_build_id === buildId &&
+          CLAIM_HOLDING_STATUSES.includes(t.latest_status ?? t.status),
+      ),
+    [allTasks, buildId],
+  );
+
   const rootsSuperseded = useMemo(() => {
     const statusById = new Map(
       allTasks.map((t) => [t.task_id, t.latest_status ?? t.status]),
@@ -602,6 +621,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                       buildId={buildId}
                       environmentId={activeEnvironment.id}
                       buildStatus={build.status}
+                      holdsClaims={holdsClaims}
                       refreshToken={refreshToken}
                       // Guarded rather than `setBuild` directly: an
                       // override is async, this view stays mounted
