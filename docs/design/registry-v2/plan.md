@@ -298,7 +298,7 @@ assignee the maintainer.
       search/explorer, claim triage, bulk cancel, concurrency limits; the
       build failure reason and the task event log (so
       `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
-- [ ] I10 — tests
+- [ ] I10 — tests. docker-compose e2e tier re-pointed to v2 (STA-110).
 - [ ] I11 — docs
 - [ ] I12 — release
 

@@ -88,7 +88,7 @@ class TestTokenTypeValidation:
     ) -> None:
         """Test that /builds rejects OIDC tokens (requires internal token)."""
         response = httpx.get(
-            f"{docker_services.api}/api/v1/builds",
+            f"{docker_services.api}/api/v2/builds",
             params={"environment_id": test_environment_id},
             headers={"Authorization": f"Bearer {oidc_token.access_token}"},
             timeout=30.0,
@@ -103,7 +103,7 @@ class TestTokenTypeValidation:
     ) -> None:
         """Test that /builds accepts internal tokens."""
         response = internal_authenticated_client.get(
-            "/api/v1/builds",
+            "/api/v2/builds",
             params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
@@ -114,9 +114,11 @@ class TestTokenTypeValidation:
         oidc_token: TokenSet,
         test_environment_id: str,
     ) -> None:
-        """Test /tasks endpoint rejects OIDC tokens (requires internal token or API key)."""
+        """Test /tasks/{id} rejects OIDC tokens (requires internal token or
+        API key). The task need not exist: auth is checked before the
+        lookup."""
         response = httpx.get(
-            f"{docker_services.api}/api/v1/tasks",
+            f"{docker_services.api}/api/v2/tasks/does-not-exist",
             params={"environment_id": test_environment_id},
             headers={"Authorization": f"Bearer {oidc_token.access_token}"},
             timeout=30.0,
@@ -128,13 +130,15 @@ class TestTokenTypeValidation:
         self,
         internal_authenticated_client: httpx.Client,
         test_environment_id: str,
+        built_task_id: str,
     ) -> None:
-        """Test that /tasks accepts internal tokens with environment_id."""
+        """Test that /tasks/{id} accepts internal tokens with environment_id."""
         response = internal_authenticated_client.get(
-            "/api/v1/tasks",
+            f"/api/v2/tasks/{built_task_id}",
             params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
+        assert response.json()["status"] == "completed"
 
     def test_ui_me_accepts_oidc_token(
         self,
@@ -206,16 +210,19 @@ class TestApiKeyAuth:
 
         # Use the API key to create a build (API key implies environment)
         response = httpx.post(
-            f"{docker_services.api}/api/v1/builds",
+            f"{docker_services.api}/api/v2/builds",
             headers={"X-API-Key": api_key},
-            json={"description": "Test build via API key"},
+            json={
+                "description": "Test build via API key",
+                "root_task_ids": ["test-root-task"],
+            },
             timeout=30.0,
         )
         # API key auth should work - the key is scoped to an environment
-        assert response.status_code == 201, f"API key auth failed: {response.text}"
+        assert response.status_code == 200, f"API key auth failed: {response.text}"
         data = response.json()
         assert "id" in data
-        assert "environment_id" in data
+        assert data["root_task_ids"] == ["test-root-task"]
 
     def test_api_key_auth_get_builds_works(
         self,
@@ -236,7 +243,7 @@ class TestApiKeyAuth:
 
         # Use the API key to GET builds - this should work
         response = httpx.get(
-            f"{docker_services.api}/api/v1/builds",
+            f"{docker_services.api}/api/v2/builds",
             headers={"X-API-Key": api_key},
             timeout=30.0,
         )
@@ -247,31 +254,21 @@ class TestApiKeyAuth:
 
     def test_api_key_auth_get_tasks_works(
         self,
-        internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_workspace_id: str,
-        test_environment_id: str,
+        sdk_api_key: str,
+        built_task_id: str,
     ) -> None:
-        """Test that GET /tasks supports API key auth."""
-        # Create an API key
-        response = internal_authenticated_client.post(
-            f"/api/v1/ui/workspaces/{test_workspace_id}"
-            f"/environments/{test_environment_id}/api-keys",
-            json={"name": "Tasks Test Key"},
-        )
-        assert response.status_code == 201
-        api_key = response.json()["key"]
-
-        # Use the API key to GET tasks - this should work
+        """Test that GET /tasks/{id} supports API key auth."""
+        # Use the API key to GET the task - this should work
         response = httpx.get(
-            f"{docker_services.api}/api/v1/tasks",
-            headers={"X-API-Key": api_key},
+            f"{docker_services.api}/api/v2/tasks/{built_task_id}",
+            headers={"X-API-Key": sdk_api_key},
             timeout=30.0,
         )
-        # API key auth works for GET /tasks (environment comes from key)
+        # API key auth works for GET /tasks/{id} (environment comes from key)
         assert response.status_code == 200
         data = response.json()
-        assert "tasks" in data
+        assert data["task_id"] == built_task_id
 
     def test_invalid_api_key_rejected(
         self,
@@ -279,9 +276,9 @@ class TestApiKeyAuth:
     ) -> None:
         """Test that invalid API keys are rejected for POST endpoints."""
         response = httpx.post(
-            f"{docker_services.api}/api/v1/builds",
+            f"{docker_services.api}/api/v2/builds",
             headers={"X-API-Key": "invalid-key"},
-            json={"description": "Should fail"},
+            json={"description": "Should fail", "root_task_ids": ["some-task"]},
             timeout=30.0,
         )
         assert response.status_code == 401
@@ -300,8 +297,7 @@ class TestEndpointAccess:
     ) -> None:
         """Test that protected endpoints return 401 without auth."""
         endpoints = [
-            "/api/v1/builds",
-            "/api/v1/tasks",
+            "/api/v2/builds",
             "/api/v1/ui/me",
         ]
 
@@ -320,8 +316,7 @@ class TestEndpointAccess:
             ("/health", 200),  # Health endpoint (no auth, root level)
             ("/api/v1/auth/exchange", 401),  # Auth router (POST only, so 401 for GET)
             ("/api/v1/ui/me", 401),  # UI router
-            ("/api/v1/builds", 401),  # Builds router
-            ("/api/v1/tasks", 401),  # Tasks router
+            ("/api/v2/builds", 401),  # Registry-v2 router
         ]
 
         for path, expected_status in endpoints_to_check:
@@ -342,7 +337,7 @@ class TestEndpointAccess:
         # Try to access an environment that doesn't exist in that workspace
         fake_environment_id = "00000000-0000-0000-0000-000000000000"
         response = httpx.get(
-            f"{docker_services.api}/api/v1/builds",
+            f"{docker_services.api}/api/v2/builds",
             params={"environment_id": fake_environment_id},
             headers={"Authorization": f"Bearer {internal_token}"},
             timeout=30.0,
@@ -351,91 +346,9 @@ class TestEndpointAccess:
         assert response.status_code in (403, 404)
 
 
-class TestTaskSearchApi:
-    """Tests for the /tasks/search endpoint."""
-
-    def test_search_endpoint_exists(
-        self,
-        internal_authenticated_client: httpx.Client,
-        test_environment_id: str,
-    ) -> None:
-        """Test that /tasks/search endpoint exists and returns 200."""
-        response = internal_authenticated_client.get(
-            "/api/v1/tasks/search",
-            params={"environment_id": test_environment_id},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert "tasks" in data
-        assert "total" in data
-
-    def test_search_keys_endpoint(
-        self,
-        internal_authenticated_client: httpx.Client,
-        test_environment_id: str,
-    ) -> None:
-        """Test that /tasks/search/keys endpoint returns available keys."""
-        response = internal_authenticated_client.get(
-            "/api/v1/tasks/search/keys",
-            params={"environment_id": test_environment_id},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert "keys" in data
-        # Should include core keys
-        key_names = [k["key"] for k in data["keys"]]
-        assert "task_name" in key_names
-        assert "status" in key_names
-
-    def test_search_with_name_filter(
-        self,
-        internal_authenticated_client: httpx.Client,
-        test_environment_id: str,
-    ) -> None:
-        """Test search with task_name filter."""
-        response = internal_authenticated_client.get(
-            "/api/v1/tasks/search",
-            params={
-                "environment_id": test_environment_id,
-                "filter": "task_name:~:test",
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert "tasks" in data
-
-    def test_search_with_numeric_filter(
-        self,
-        internal_authenticated_client: httpx.Client,
-        test_environment_id: str,
-    ) -> None:
-        """Test search with numeric param filter (param.x:>=:10)."""
-        response = internal_authenticated_client.get(
-            "/api/v1/tasks/search",
-            params={
-                "environment_id": test_environment_id,
-                "filter": "param.sample_size:>=:10",
-            },
-        )
-        # Should return 200 (even if no results)
-        assert response.status_code == 200
-        data = response.json()
-        assert "tasks" in data
-
-    def test_search_with_nested_param_filter(
-        self,
-        internal_authenticated_client: httpx.Client,
-        test_environment_id: str,
-    ) -> None:
-        """Test search with nested param filter (param.data.value:>:5)."""
-        response = internal_authenticated_client.get(
-            "/api/v1/tasks/search",
-            params={
-                "environment_id": test_environment_id,
-                "filter": "param.data_source.sample_size:>=:10",
-            },
-        )
-        # Should return 200 (even if no results)
-        assert response.status_code == 200
-        data = response.json()
-        assert "tasks" in data
+# TestTaskSearchApi (task_name/status/param search over /tasks/search and
+# /tasks/search/keys) is deleted: v2 has no search route. plan.md's status
+# section lists it explicitly as "removed for want of a v2 route" alongside
+# claim triage, bulk cancel and concurrency limits -- it is not scheduled to
+# come back under I10, so there is no v2 mechanism left to re-point these
+# tests at.

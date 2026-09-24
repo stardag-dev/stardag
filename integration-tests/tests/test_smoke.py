@@ -78,7 +78,7 @@ class TestAuthFixtures:
         unauthenticated_client: httpx.Client,
     ) -> None:
         """Test that unauthenticated requests are rejected."""
-        response = unauthenticated_client.get("/api/v1/builds")
+        response = unauthenticated_client.get("/api/v2/builds")
         assert response.status_code == 401
 
 
@@ -102,12 +102,12 @@ class TestWorkspaceAndEnvironmentFixtures:
     ) -> None:
         """Test that internal auth client can access builds endpoint."""
         response = internal_authenticated_client.get(
-            "/api/v1/builds",
+            "/api/v2/builds",
             params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
         data = response.json()
-        assert "items" in data or "total" in data
+        assert "builds" in data
 
     def test_environment_fixture(self, test_environment_id: str) -> None:
         """Test that environment fixture returns a valid ID."""

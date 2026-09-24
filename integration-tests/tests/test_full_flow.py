@@ -3,12 +3,9 @@
 These tests verify complete workflows across API, SDK, and UI components.
 """
 
-import typing
 from pathlib import Path
 
 import httpx
-import pytest
-from stardag.testing import target_roots_override
 
 from stardag_integration_tests.conftest import (
     TokenSet,
@@ -25,33 +22,40 @@ class TestBuildWorkflow:
         internal_authenticated_client: httpx.Client,
         test_environment_id: str,
     ) -> None:
-        """Test creating a build and verifying it in the list."""
+        """Test creating a build and verifying it in the list.
+
+        Bare build creation (no plan) is still a raw-HTTP concern in v2:
+        ``root_task_ids`` just names the request at completion-id level, no
+        plan required yet.
+        """
         # Create a build
         response = internal_authenticated_client.post(
-            "/api/v1/builds",
-            json={"description": "Integration test build"},
+            "/api/v2/builds",
+            json={
+                "description": "Integration test build",
+                "root_task_ids": ["placeholder-root"],
+            },
             params={"environment_id": test_environment_id},
         )
-        assert response.status_code == 201
+        assert response.status_code == 200
         build = response.json()
         build_id = build["id"]
         assert build["status"] == "running"
 
         # Verify build appears in list
         response = internal_authenticated_client.get(
-            "/api/v1/builds",
+            "/api/v2/builds",
             params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
         builds = response.json()
-        # API returns {"builds": [...], "total": ..., "page": ..., "page_size": ...}
         assert "builds" in builds
         build_ids = [b["id"] for b in builds["builds"]]
         assert build_id in build_ids
 
         # Get build details
         response = internal_authenticated_client.get(
-            f"/api/v1/builds/{build_id}",
+            f"/api/v2/builds/{build_id}",
             params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
@@ -61,90 +65,83 @@ class TestBuildWorkflow:
 
     def test_create_build_with_tasks_via_api_key(
         self,
-        internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_workspace_id: str,
-        test_environment_id: str,
+        sdk_api_key: str,
+        temporary_default_target_root: Path,
     ) -> None:
-        """Test creating a build with tasks using API key (SDK auth).
+        """Test creating a build with a real task using API key (SDK auth).
 
-        The task registration endpoint requires SdkAuth, so we use API key auth.
+        v2 ties task registration to the plan protocol (design.md,
+        "Registration"): there is no ad-hoc ``POST /builds/{id}/tasks`` left,
+        so "creating a build with tasks" means running the real SDK build
+        flow, exactly as an SDK user would.
         """
-        # Create an API key
-        response = internal_authenticated_client.post(
-            f"/api/v1/ui/workspaces/{test_workspace_id}"
-            f"/environments/{test_environment_id}/api-keys",
-            json={"name": "Task Registration Key"},
-        )
-        assert response.status_code == 201
-        api_key = response.json()["key"]
+        import uuid
 
-        # Create a build with API key
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds",
-            headers={"X-API-Key": api_key},
-            json={"description": "Build with tasks"},
+        import stardag as sd
+        from stardag.registry import APIRegistry
+
+        @sd.task
+        def task_registration_demo(value: str) -> str:
+            return value
+
+        # A fresh value per run: this test environment is long-lived, and a
+        # fixed value would collide (409 task_identity_conflict) with an
+        # earlier run's output_uri for the same completion.
+        task = task_registration_demo(value=str(uuid.uuid4()))
+        registry = APIRegistry(api_url=docker_services.api, api_key=sdk_api_key)
+        try:
+            build_summary = sd.build_sequential([task], registry=registry)
+        finally:
+            registry.close()
+
+        response = httpx.get(
+            f"{docker_services.api}/api/v2/tasks/{task.id}",
+            headers={"X-API-Key": sdk_api_key},
             timeout=30.0,
         )
-        assert response.status_code == 201
-        build_id = response.json()["id"]
-
-        # Register a task using API key
-        task_data = {
-            "task_id": "test-task-001",
-            "task_name": "TestTask",
-            "task_namespace": "integration_tests",
-            "task_data": {"param": "value"},
-        }
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
-            headers={"X-API-Key": api_key},
-            json=task_data,
-            timeout=30.0,
-        )
-        assert response.status_code == 201, f"Task registration failed: {response.text}"
-        task = response.json()
-        assert task["task_id"] == "test-task-001"
+        assert response.status_code == 200, f"Task registration failed: {response.text}"
+        registered = response.json()
+        assert registered["task_id"] == str(task.id)
+        assert registered["task_name"] == "task_registration_demo"
+        assert registered["status"] == "completed"
+        assert build_summary.build_id is not None
 
     def test_complete_build_workflow(
         self,
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_workspace_id: str,
+        sdk_api_key: str,
         test_environment_id: str,
+        temporary_default_target_root: Path,
     ) -> None:
-        """Test completing a build using API key auth."""
-        # Create an API key
-        response = internal_authenticated_client.post(
-            f"/api/v1/ui/workspaces/{test_workspace_id}"
-            f"/environments/{test_environment_id}/api-keys",
-            json={"name": "Complete Build Key"},
-        )
-        assert response.status_code == 201
-        api_key = response.json()["key"]
+        """Test completing a build using API key auth.
 
-        # Create a build
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds",
-            headers={"X-API-Key": api_key},
-            json={"description": "Build to complete"},
-            timeout=30.0,
-        )
-        assert response.status_code == 201
-        build_id = response.json()["id"]
-        assert response.json()["status"] == "running"
+        ``POST /builds/{id}/complete`` now refuses (409 ``plan_incomplete``)
+        unless the active plan is sealed and every member is COMPLETED
+        (services/builds.py, ``_verify_plan_complete``), so a build can no
+        longer be completed bare -- it has to actually run something,
+        exactly as ``sd.build_sequential`` does.
+        """
+        import uuid
 
-        # Complete the build (no body needed)
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds/{build_id}/complete",
-            headers={"X-API-Key": api_key},
-            timeout=30.0,
-        )
-        assert response.status_code == 200, f"Complete build failed: {response.text}"
+        import stardag as sd
+        from stardag.registry import APIRegistry
+
+        @sd.task
+        def build_to_complete(value: str) -> str:
+            return value
+
+        task = build_to_complete(value=str(uuid.uuid4()))
+        registry = APIRegistry(api_url=docker_services.api, api_key=sdk_api_key)
+        try:
+            build_summary = sd.build_sequential([task], registry=registry)
+        finally:
+            registry.close()
 
         # Verify build is completed
         response = internal_authenticated_client.get(
-            f"/api/v1/builds/{build_id}",
+            f"/api/v2/builds/{build_summary.build_id}",
             params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
@@ -157,56 +154,36 @@ class TestApiKeyWorkflow:
 
     def test_api_key_build_workflow(
         self,
-        internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_workspace_id: str,
-        test_environment_id: str,
+        sdk_api_key: str,
+        temporary_default_target_root: Path,
     ) -> None:
-        """Test creating builds using API key auth."""
-        # Create an API key
-        response = internal_authenticated_client.post(
-            f"/api/v1/ui/workspaces/{test_workspace_id}"
-            f"/environments/{test_environment_id}/api-keys",
-            json={"name": "Workflow Test Key"},
-        )
-        assert response.status_code == 201
-        api_key = response.json()["key"]
+        """Test the full build-a-task-and-complete workflow using API key
+        auth, via the real SDK flow (see ``TestBuildWorkflow`` for why: v2
+        has no ad-hoc task-registration or bare-complete route left)."""
+        import uuid
 
-        # Use API key to create a build
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds",
-            headers={"X-API-Key": api_key},
-            json={"description": "Build via API key"},
+        import stardag as sd
+        from stardag.registry import APIRegistry
+
+        @sd.task
+        def api_key_workflow_task(value: str) -> str:
+            return value
+
+        task = api_key_workflow_task(value=str(uuid.uuid4()))
+        registry = APIRegistry(api_url=docker_services.api, api_key=sdk_api_key)
+        try:
+            build_summary = sd.build_sequential([task], registry=registry)
+        finally:
+            registry.close()
+
+        response = httpx.get(
+            f"{docker_services.api}/api/v2/builds/{build_summary.build_id}",
+            headers={"X-API-Key": sdk_api_key},
             timeout=30.0,
         )
-        assert response.status_code == 201
-        build = response.json()
-        build_id = build["id"]
-        assert build["environment_id"] == test_environment_id
-
-        # Register a task using API key
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
-            headers={"X-API-Key": api_key},
-            json={
-                "task_id": "api-key-task-001",
-                "task_name": "ApiKeyTask",
-                "task_namespace": "api_key_tests",
-                "task_data": {"key": "value"},
-                "version": "1.0.0",
-            },
-            timeout=30.0,
-        )
-        assert response.status_code == 201
-
-        # Complete build using API key
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds/{build_id}/complete",
-            headers={"X-API-Key": api_key},
-            json={"status": "completed"},
-            timeout=30.0,
-        )
-        assert response.status_code in (200, 204)
+        assert response.status_code == 200
+        assert response.json()["status"] == "completed"
 
 
 class TestWorkspaceWorkflow:
@@ -265,7 +242,7 @@ class TestTokenRefreshFlow:
 
         # Internal token should work for builds endpoint
         response = httpx.get(
-            f"{docker_services.api}/api/v1/builds",
+            f"{docker_services.api}/api/v2/builds",
             params={
                 "environment_id": "any"
             },  # Will fail environment check but auth should pass
@@ -309,12 +286,15 @@ class TestCrossComponentFlow:
 
         # Use the key for SDK operations
         response = httpx.post(
-            f"{docker_services.api}/api/v1/builds",
+            f"{docker_services.api}/api/v2/builds",
             headers={"X-API-Key": api_key},
-            json={"description": "Created with UI-generated key"},
+            json={
+                "description": "Created with UI-generated key",
+                "root_task_ids": ["placeholder-root"],
+            },
             timeout=30.0,
         )
-        assert response.status_code == 201
+        assert response.status_code == 200
 
     def test_builds_visible_across_auth_methods(
         self,
@@ -334,35 +314,88 @@ class TestCrossComponentFlow:
 
         # Create build with API key
         response = httpx.post(
-            f"{docker_services.api}/api/v1/builds",
+            f"{docker_services.api}/api/v2/builds",
             headers={"X-API-Key": api_key},
-            json={"description": "Created with API key"},
+            json={
+                "description": "Created with API key",
+                "root_task_ids": ["placeholder-root"],
+            },
             timeout=30.0,
         )
-        assert response.status_code == 201
+        assert response.status_code == 200
         api_key_build_id = response.json()["id"]
 
         # Create build with JWT
         response = internal_authenticated_client.post(
-            "/api/v1/builds",
-            json={"description": "Created with JWT"},
+            "/api/v2/builds",
+            json={
+                "description": "Created with JWT",
+                "root_task_ids": ["placeholder-root"],
+            },
             params={"environment_id": test_environment_id},
         )
-        assert response.status_code == 201
+        assert response.status_code == 200
         jwt_build_id = response.json()["id"]
 
         # Both should be visible when listing with JWT
         response = internal_authenticated_client.get(
-            "/api/v1/builds",
+            "/api/v2/builds",
             params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
         builds = response.json()
-        # API returns {"builds": [...], "total": ..., ...}
         build_ids = [b["id"] for b in builds["builds"]]
 
         assert api_key_build_id in build_ids
         assert jwt_build_id in build_ids
+
+
+def _build_task_with_artifacts(
+    docker_services: ServiceEndpoints,
+    api_key: str,
+    label: str,
+) -> str:
+    """Build one task whose ``artifacts()`` returns a markdown and a JSON
+    artifact, via the real SDK flow. Artifacts belong to the promise
+    (design.md, "Peripheral tables, re-pointed") and are uploaded by the
+    build session itself through ``POST
+    /plans/{plan_id}/members/{task_id}/artifacts`` once the task
+    completes -- there is no ad-hoc "upload an artifact for this task_id"
+    route independent of a real build. Returns the task id.
+
+    ``label`` is combined with a fresh uuid4 into the task's only
+    significant field, so every call gets its own task id -- this test
+    environment is long-lived, and a fixed value would collide (409
+    ``task_identity_conflict``) with an earlier run's output_uri for the
+    same completion.
+    """
+    import uuid
+
+    import stardag as sd
+    from stardag.artifact import Artifact, JSONArtifact, MarkdownArtifact
+    from stardag.registry import APIRegistry
+
+    @sd.task
+    def artifact_producer(marker: str) -> str:
+        return marker
+
+    def _artifacts(self: object) -> list[Artifact]:
+        return [
+            MarkdownArtifact(
+                name="report", body="# Test Report\n\nThis is a test report."
+            ),
+            JSONArtifact(name="metrics", body={"accuracy": 0.95, "loss": 0.05}),
+        ]
+
+    artifact_producer.artifacts = _artifacts  # type: ignore[attr-defined]
+
+    task = artifact_producer(marker=f"{label}-{uuid.uuid4()}")
+    registry = APIRegistry(api_url=docker_services.api, api_key=api_key)
+    try:
+        sd.build_sequential([task], registry=registry)
+    finally:
+        registry.close()
+    return str(task.id)
 
 
 class TestTaskArtifactsWorkflow:
@@ -376,73 +409,19 @@ class TestTaskArtifactsWorkflow:
 
     def test_upload_and_fetch_artifacts_via_api_key(
         self,
-        internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_workspace_id: str,
-        test_environment_id: str,
+        sdk_api_key: str,
+        temporary_default_target_root: Path,
     ) -> None:
         """Test uploading and fetching artifacts using API key."""
-        # Create an API key
-        response = internal_authenticated_client.post(
-            f"/api/v1/ui/workspaces/{test_workspace_id}"
-            f"/environments/{test_environment_id}/api-keys",
-            json={"name": "Artifact Test Key"},
+        task_id = _build_task_with_artifacts(
+            docker_services, sdk_api_key, label="upload-and-fetch"
         )
-        assert response.status_code == 201
-        api_key = response.json()["key"]
-
-        # Create a build
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds",
-            headers={"X-API-Key": api_key},
-            json={"description": "Build with artifacts"},
-            timeout=30.0,
-        )
-        assert response.status_code == 201
-        build_id = response.json()["id"]
-
-        # Register a task
-        task_id = "artifact-test-task-001"
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
-            headers={"X-API-Key": api_key},
-            json={
-                "task_id": task_id,
-                "task_name": "ArtifactTestTask",
-                "task_namespace": "artifact_tests",
-                "task_data": {"param": "value"},
-            },
-            timeout=30.0,
-        )
-        assert response.status_code == 201
-
-        # Upload artifacts
-        artifacts = [
-            {
-                "type": "markdown",
-                "name": "report",
-                "body": {"content": "# Test Report\n\nThis is a test report."},
-            },
-            {
-                "type": "json",
-                "name": "metrics",
-                "body": {"accuracy": 0.95, "loss": 0.05},
-            },
-        ]
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds/{build_id}/tasks/{task_id}/artifacts",
-            headers={"X-API-Key": api_key},
-            json=artifacts,
-            timeout=30.0,
-        )
-        assert response.status_code == 201
-        uploaded = response.json()
-        assert len(uploaded["artifacts"]) == 2
 
         # Fetch artifacts using API key
         response = httpx.get(
-            f"{docker_services.api}/api/v1/tasks/{task_id}/artifacts",
-            headers={"X-API-Key": api_key},
+            f"{docker_services.api}/api/v2/tasks/{task_id}/artifacts",
+            headers={"X-API-Key": sdk_api_key},
             timeout=30.0,
         )
         assert response.status_code == 200
@@ -458,62 +437,24 @@ class TestTaskArtifactsWorkflow:
 
     def test_fetch_artifacts_via_jwt_requires_environment_id(
         self,
-        internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_workspace_id: str,
+        sdk_api_key: str,
         test_environment_id: str,
         internal_token: str,
+        temporary_default_target_root: Path,
     ) -> None:
         """Test that fetching artifacts with JWT requires environment_id.
 
         This is the critical test for the UI flow - JWT auth requires
         environment_id to be passed as a query parameter.
         """
-        # Create an API key for setup
-        response = internal_authenticated_client.post(
-            f"/api/v1/ui/workspaces/{test_workspace_id}"
-            f"/environments/{test_environment_id}/api-keys",
-            json={"name": "JWT Artifact Test Key"},
+        task_id = _build_task_with_artifacts(
+            docker_services, sdk_api_key, label="jwt-requires-environment-id"
         )
-        assert response.status_code == 201
-        api_key = response.json()["key"]
-
-        # Create build, task, and upload artifact using API key
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds",
-            headers={"X-API-Key": api_key},
-            json={"description": "Build for JWT artifact test"},
-            timeout=30.0,
-        )
-        assert response.status_code == 201
-        build_id = response.json()["id"]
-
-        task_id = "jwt-artifact-test-task"
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
-            headers={"X-API-Key": api_key},
-            json={
-                "task_id": task_id,
-                "task_name": "JwtArtifactTestTask",
-                "task_namespace": "jwt_tests",
-                "task_data": {},
-            },
-            timeout=30.0,
-        )
-        assert response.status_code == 201
-
-        # Upload an artifact
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds/{build_id}/tasks/{task_id}/artifacts",
-            headers={"X-API-Key": api_key},
-            json=[{"type": "json", "name": "data", "body": {"key": "value"}}],
-            timeout=30.0,
-        )
-        assert response.status_code == 201
 
         # Try to fetch artifacts with JWT but WITHOUT environment_id - should fail
         response = httpx.get(
-            f"{docker_services.api}/api/v1/tasks/{task_id}/artifacts",
+            f"{docker_services.api}/api/v2/tasks/{task_id}/artifacts",
             headers={"Authorization": f"Bearer {internal_token}"},
             timeout=30.0,
         )
@@ -524,7 +465,7 @@ class TestTaskArtifactsWorkflow:
 
         # Fetch with environment_id - should succeed
         response = httpx.get(
-            f"{docker_services.api}/api/v1/tasks/{task_id}/artifacts",
+            f"{docker_services.api}/api/v2/tasks/{task_id}/artifacts",
             headers={"Authorization": f"Bearer {internal_token}"},
             params={"environment_id": test_environment_id},
             timeout=30.0,
@@ -533,87 +474,35 @@ class TestTaskArtifactsWorkflow:
             f"Failed with environment_id: {response.text}"
         )
         fetched = response.json()
-        assert len(fetched["artifacts"]) == 1
-        assert fetched["artifacts"][0]["name"] == "data"
+        assert len(fetched["artifacts"]) == 2
+        names = {a["name"] for a in fetched["artifacts"]}
+        assert names == {"report", "metrics"}
 
     def test_artifacts_visible_across_auth_methods(
         self,
-        internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_workspace_id: str,
+        sdk_api_key: str,
         test_environment_id: str,
         internal_token: str,
+        temporary_default_target_root: Path,
     ) -> None:
-        """Test that artifacts uploaded via API key are visible via JWT and vice versa."""
-        # Create an API key
-        response = internal_authenticated_client.post(
-            f"/api/v1/ui/workspaces/{test_workspace_id}"
-            f"/environments/{test_environment_id}/api-keys",
-            json={"name": "Cross-Auth Artifact Key"},
+        """Test that artifacts uploaded via API key are visible via JWT."""
+        task_id = _build_task_with_artifacts(
+            docker_services, sdk_api_key, label="cross-auth-visibility"
         )
-        assert response.status_code == 201
-        api_key = response.json()["key"]
-
-        # Create build and task
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds",
-            headers={"X-API-Key": api_key},
-            json={"description": "Cross-auth artifact test"},
-            timeout=30.0,
-        )
-        assert response.status_code == 201
-        build_id = response.json()["id"]
-
-        task_id = "cross-auth-artifact-task"
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
-            headers={"X-API-Key": api_key},
-            json={
-                "task_id": task_id,
-                "task_name": "CrossAuthTask",
-                "task_namespace": "cross_auth_tests",
-                "task_data": {},
-            },
-            timeout=30.0,
-        )
-        assert response.status_code == 201
-
-        # Upload artifact with API key
-        response = httpx.post(
-            f"{docker_services.api}/api/v1/builds/{build_id}/tasks/{task_id}/artifacts",
-            headers={"X-API-Key": api_key},
-            json=[
-                {
-                    "type": "json",
-                    "name": "api-key-artifact",
-                    "body": {"source": "api_key"},
-                }
-            ],
-            timeout=30.0,
-        )
-        assert response.status_code == 201
 
         # Verify visible via JWT (with environment_id)
         response = httpx.get(
-            f"{docker_services.api}/api/v1/tasks/{task_id}/artifacts",
+            f"{docker_services.api}/api/v2/tasks/{task_id}/artifacts",
             headers={"Authorization": f"Bearer {internal_token}"},
             params={"environment_id": test_environment_id},
             timeout=30.0,
         )
         assert response.status_code == 200
         artifacts = response.json()["artifacts"]
-        assert len(artifacts) == 1
-        assert artifacts[0]["body"]["source"] == "api_key"
-
-
-@pytest.fixture(scope="function")
-def temporary_default_target_root(
-    tmp_path: Path,
-) -> typing.Generator[Path, None, None]:
-    """Fixture to set temporary target roots for tests."""
-    target_roots = {"default": str(tmp_path)}
-    with target_roots_override(target_roots):
-        yield tmp_path
+        assert len(artifacts) == 2
+        metrics = next(a for a in artifacts if a["name"] == "metrics")
+        assert metrics["body"]["accuracy"] == 0.95
 
 
 class TestSDKBuildWorkflow:
@@ -627,10 +516,8 @@ class TestSDKBuildWorkflow:
 
     def test_sdk_build_simple_dag(
         self,
-        internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_workspace_id: str,
-        test_environment_id: str,
+        sdk_api_key: str,
         temporary_default_target_root: Path,
     ) -> None:
         """Test building a simple DAG using the SDK.
@@ -639,21 +526,18 @@ class TestSDKBuildWorkflow:
         Verifies all tasks are registered and build is completed.
         """
 
+        import uuid
+
         import stardag as sd
         from stardag.registry import APIRegistry
 
-        # Create an API key for this test
-        response = internal_authenticated_client.post(
-            f"/api/v1/ui/workspaces/{test_workspace_id}"
-            f"/environments/{test_environment_id}/api-keys",
-            json={"name": "SDK Build Test Key"},
-        )
-        assert response.status_code == 201
-        api_key = response.json()["key"]
-
         @sd.task
-        def add_numbers(a: int, b: int) -> int:
-            """Add two numbers."""
+        def add_numbers(a: int, b: int, run_id: str) -> int:
+            """Add two numbers. ``run_id`` is otherwise unused: it just
+            gives the root task a fresh id per test run, so a re-run
+            against this long-lived test environment doesn't collide
+            (409 ``task_identity_conflict``) with an earlier run's
+            output_uri for the same (a, b)."""
             return a + b
 
         @sd.task
@@ -667,14 +551,14 @@ class TestSDKBuildWorkflow:
             return f"Result: {value}"
 
         # Create a simple DAG
-        step1 = add_numbers(a=1, b=2)  # = 3
+        step1 = add_numbers(a=1, b=2, run_id=str(uuid.uuid4()))  # = 3
         step2 = multiply_by_two(value=step1)  # = 6
         final_task = format_result(value=step2)
 
         # Create registry with API key
         registry = APIRegistry(
             api_url=docker_services.api,
-            api_key=api_key,
+            api_key=sdk_api_key,
         )
 
         # Build the DAG (use build_sequential to avoid event loop conflict
@@ -690,36 +574,36 @@ class TestSDKBuildWorkflow:
 
         # Verify build exists and is completed
         response = httpx.get(
-            f"{docker_services.api}/api/v1/builds/{build_id}",
-            headers={"X-API-Key": api_key},
+            f"{docker_services.api}/api/v2/builds/{build_id}",
+            headers={"X-API-Key": sdk_api_key},
             timeout=30.0,
         )
         assert response.status_code == 200
         build = response.json()
         assert build["status"] == "completed"
 
-        # Verify tasks were registered
-        response = httpx.get(
-            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
-            headers={"X-API-Key": api_key},
-            timeout=30.0,
-        )
-        assert response.status_code == 200
-        tasks = response.json()
-        assert len(tasks) == 3
-
-        # All tasks should be completed
-        task_statuses = {t["task_name"]: t["status"] for t in tasks}
-        assert task_statuses.get("add_numbers") == "completed"
-        assert task_statuses.get("multiply_by_two") == "completed"
-        assert task_statuses.get("format_result") == "completed"
+        # v2 has no "list tasks of a build" route (registration is
+        # plan-scoped, not build-scoped -- design.md, "Registration"), so
+        # each task is checked individually by its own task id.
+        for task, expected_name in (
+            (step1, "add_numbers"),
+            (step2, "multiply_by_two"),
+            (final_task, "format_result"),
+        ):
+            response = httpx.get(
+                f"{docker_services.api}/api/v2/tasks/{task.id}",
+                headers={"X-API-Key": sdk_api_key},
+                timeout=30.0,
+            )
+            assert response.status_code == 200
+            task_data = response.json()
+            assert task_data["task_name"] == expected_name
+            assert task_data["status"] == "completed"
 
     def test_sdk_build_with_diamond_dag(
         self,
-        internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_workspace_id: str,
-        test_environment_id: str,
+        sdk_api_key: str,
         temporary_default_target_root: Path,
     ) -> None:
         r"""Test building a diamond-shaped DAG using the SDK.
@@ -734,21 +618,16 @@ class TestSDKBuildWorkflow:
         This tests that the SDK correctly handles shared dependencies.
         """
 
+        import uuid
+
         import stardag as sd
         from stardag.registry import APIRegistry
 
-        # Create an API key for this test
-        response = internal_authenticated_client.post(
-            f"/api/v1/ui/workspaces/{test_workspace_id}"
-            f"/environments/{test_environment_id}/api-keys",
-            json={"name": "SDK Diamond DAG Test Key"},
-        )
-        assert response.status_code == 201
-        api_key = response.json()["key"]
-
         @sd.task
-        def start_value(x: int) -> int:
-            """Starting value."""
+        def start_value(x: int, run_id: str) -> int:
+            """Starting value. ``run_id`` is otherwise unused: see
+            ``add_numbers`` in ``test_sdk_build_simple_dag`` for why the
+            root of the DAG needs a fresh id per test run."""
             return x
 
         @sd.task
@@ -767,7 +646,7 @@ class TestSDKBuildWorkflow:
             return left + right
 
         # Create diamond DAG
-        start = start_value(x=5)  # = 5
+        start = start_value(x=5, run_id=str(uuid.uuid4()))  # = 5
         left = left_branch(value=start)  # = 10
         right = right_branch(value=start)  # = 15
         final_task = merge_branches(left=left, right=right)  # = 25
@@ -775,7 +654,7 @@ class TestSDKBuildWorkflow:
         # Create registry with API key
         registry = APIRegistry(
             api_url=docker_services.api,
-            api_key=api_key,
+            api_key=sdk_api_key,
         )
 
         # Build the DAG (use build_sequential to avoid event loop conflict
@@ -791,38 +670,38 @@ class TestSDKBuildWorkflow:
 
         # Verify build is completed
         response = httpx.get(
-            f"{docker_services.api}/api/v1/builds/{build_id}",
-            headers={"X-API-Key": api_key},
+            f"{docker_services.api}/api/v2/builds/{build_id}",
+            headers={"X-API-Key": sdk_api_key},
             timeout=30.0,
         )
         assert response.status_code == 200
         build = response.json()
         assert build["status"] == "completed"
 
-        # Verify all 4 tasks were registered
-        response = httpx.get(
-            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
-            headers={"X-API-Key": api_key},
-            timeout=30.0,
-        )
-        assert response.status_code == 200
-        tasks = response.json()
-        assert len(tasks) == 4
+        # Verify all 4 tasks were registered and completed. v2 has no
+        # "list tasks of a build" route, so each is checked by its own
+        # task id (see test_sdk_build_simple_dag).
+        for task, expected_name in (
+            (start, "start_value"),
+            (left, "left_branch"),
+            (right, "right_branch"),
+            (final_task, "merge_branches"),
+        ):
+            response = httpx.get(
+                f"{docker_services.api}/api/v2/tasks/{task.id}",
+                headers={"X-API-Key": sdk_api_key},
+                timeout=30.0,
+            )
+            assert response.status_code == 200
+            task_data = response.json()
+            assert task_data["task_name"] == expected_name
+            assert task_data["status"] == "completed"
 
-        # All tasks should be completed
-        for task in tasks:
-            assert task["status"] == "completed", f"{task['task_name']} not completed"
-
-        # Verify the task graph structure
-        response = httpx.get(
-            f"{docker_services.api}/api/v1/builds/{build_id}/graph",
-            headers={"X-API-Key": api_key},
-            timeout=30.0,
-        )
-        assert response.status_code == 200
-        graph = response.json()
-
-        # Should have 4 nodes and 4 edges
-        # (start->left, start->right, left->merge, right->merge)
-        assert len(graph["nodes"]) == 4
-        assert len(graph["edges"]) == 4
+        # The task graph structure (nodes/edges) has no v2 read route yet
+        # -- plan.md's status section lists "the graph over instance
+        # edges as a read route" among what I0 skipped, owned by I4 --
+        # so the shared-dependency shape can no longer be asserted
+        # end-to-end here. The 4 completed tasks above, reached only
+        # because the SDK walked the diamond and registered each once,
+        # already exercise the shared-dependency path; a dedicated
+        # graph-shape assertion belongs with that route once it exists.
