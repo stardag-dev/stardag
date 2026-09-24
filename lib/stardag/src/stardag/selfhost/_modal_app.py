@@ -74,7 +74,7 @@ SERVER_IMAGE_REPO = "ghcr.io/stardag-dev/stardag-server"
 # they expire, which is worse than either version alone. That is why the
 # release order is server image first, and why this constant must move
 # with it.
-DEFAULT_SERVER_VERSION = "0.4.0"
+DEFAULT_SERVER_VERSION = "0.5.0"
 
 # Minimum client interpreter for from-source image builds (stardag-api's
 # requires-python; the image gets the client's version via add_python).
