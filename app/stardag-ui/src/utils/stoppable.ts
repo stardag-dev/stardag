@@ -33,9 +33,21 @@ export const NO_EXECUTOR =
   "no executor recorded — it runs in the build's own process, or its " +
   "spawn has not reported yet; refresh to see whether a call id appears";
 
+/**
+ * The recorded executor, or the `kind` its metadata declares (a claim
+ * written before its spawn reported) — `_stop.executor_of`. Every rule
+ * below reads the executor through this, as the CLI does, so the list the
+ * panel narrows to and the one the command selects cannot differ.
+ */
+export function executorOf(execution: Execution): string | null {
+  if (execution.executor) return execution.executor;
+  const kind = execution.executor_metadata?.kind;
+  return typeof kind === "string" && kind ? kind : null;
+}
+
 /** Why an execution can only be listed, or null when it can be stopped. */
 export function notStoppableReason(execution: Execution): string | null {
-  const executor = execution.executor || execution.executor_metadata?.kind || "";
+  const executor = executorOf(execution);
   if (!executor) return NO_EXECUTOR;
   if (executor !== MODAL_EXECUTOR)
     return `stardag cannot stop a '${executor}' execution`;
@@ -75,7 +87,7 @@ export function matchesFilters(
 ): boolean {
   if (filters.notInCurrentPlan && execution.in_current_plan) return false;
   if (filters.taskIds && !filters.taskIds.includes(execution.task_id)) return false;
-  if (filters.executor && (execution.executor ?? "") !== filters.executor) return false;
+  if (filters.executor && executorOf(execution) !== filters.executor) return false;
   if (filters.worker && workerOf(execution) !== filters.worker) return false;
   if (filters.olderThanSeconds) {
     const started = Date.parse(execution.started_at);
@@ -97,7 +109,8 @@ export function workersIn(executions: Execution[]): string[] {
 export function executorsIn(executions: Execution[]): string[] {
   const names = new Set<string>();
   for (const execution of executions) {
-    if (execution.executor) names.add(execution.executor);
+    const executor = executorOf(execution);
+    if (executor) names.add(executor);
   }
   return [...names].sort();
 }

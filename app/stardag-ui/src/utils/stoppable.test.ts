@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Execution } from "../types/task";
 import {
+  executorOf,
+  executorsIn,
   matchesFilters,
   NO_EXECUTOR,
   NO_REF_YET,
@@ -115,5 +117,37 @@ describe("stopCommandEffect", () => {
     expect(effect).not.toMatch(/then cancels the build/);
     expect(effect).toMatch(/does not cancel the build/);
     expect(effect).toMatch(/keeps running on its active plan/);
+  });
+});
+
+describe("executorOf (mirrors _stop.executor_of)", () => {
+  // Claimed before the spawn reported: no `executor`, only the kind the
+  // metadata declares. The CLI selects it under --executor modal.
+  const metadataOnly = execution({
+    executor: null,
+    executor_ref: null,
+    executor_metadata: { kind: "modal", function_name: "worker_gpu" },
+  });
+
+  it("falls back to the metadata kind", () => {
+    expect(executorOf(metadataOnly)).toBe("modal");
+    expect(executorOf(execution({ executor: null, executor_metadata: null }))).toBe(
+      null,
+    );
+  });
+
+  it("keeps a metadata-only row under the executor filter, as the CLI does", () => {
+    expect(matchesFilters(metadataOnly, { executor: "modal" })).toBe(true);
+    expect(matchesFilters(metadataOnly, { executor: "local" })).toBe(false);
+  });
+
+  it("offers the metadata kind as an executor choice", () => {
+    expect(
+      executorsIn([metadataOnly, execution({ id: "e-2", executor: "local" })]),
+    ).toEqual(["local", "modal"]);
+  });
+
+  it("reads a metadata-only row as not spawned yet, not as unattributed", () => {
+    expect(notStoppableReason(metadataOnly)).toBe(NO_REF_YET);
   });
 });
