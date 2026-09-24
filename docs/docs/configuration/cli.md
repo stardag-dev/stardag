@@ -422,8 +422,10 @@ each value parsed as JSON when it parses, else taken as a string).
     uv run stardag builds fail <build-id> [--message TEXT] [--yes] [--json]
     ```
 
-All commands accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
-profile / environment other than the active one.
+All of these accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
+profile / environment other than the active one. `stardag build` above is
+the exception: it takes only `-p/--stardag-profile` (no `--stardag-env`
+option).
 
 - `builds list` — builds, most recently active first (`--status`, `--app`
   filter on a reactively-scheduled build's owning app).
@@ -512,10 +514,13 @@ holds a claim.
   or a re-trigger under new settings) — and **implies `--no-cancel`**: the
   build keeps running on its current plan; only the stray executions of
   its old one are stopped.
-- `--mark-lost` additionally ends any selected execution that has no call
-  id to cancel, with outcome `lost`, after its own confirmation. No report
-  from a marked-lost execution is ever applied afterwards — if it is in
-  fact still running, its result is discarded.
+- `--mark-lost` attempts to additionally end any selected execution that
+  has no call id to cancel, with outcome `lost`, after its own
+  confirmation — but the v2 server currently accepts only `outcome:
+"stopped"` on this endpoint and rejects the `lost` request with 422, so
+  today this reports every such execution as "not marked lost" rather
+  than ending it. Backend support for a distinct `lost` outcome has not
+  landed yet.
 - Only Modal executions can be cancelled from here; one running in a
   driver's own process, or whose spawn has not yet reported a call id, is
   listed with the reason and left alone (re-run to catch the latter once

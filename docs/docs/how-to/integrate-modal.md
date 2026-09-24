@@ -841,7 +841,13 @@ stardag modal deployments       # deployments recorded in this environment, newe
 The registry assigns the row its `generation` at the create step, so a
 record that lands late can never roll a build back to older code; a
 failed activation exits non-zero and leaves the new code unable to plan
-anything until you re-run the command (idempotent — same deployment id).
+anything until you re-run the command. That re-run is not a retry of the
+same row, though: `StardagApp.deployment_id` is minted fresh on each
+command invocation, so re-running after a failure records (and, if
+Modal's own deploy already succeeded, deploys) a new deployment rather
+than retrying the original activation. The server-side activate call
+itself is idempotent for a given id; the CLI simply never sends the same
+id twice.
 
 Deploy from a clean checkout: a dirty tree gets a one-off code id, so
 every deploy of it is a new scope that shares nothing with the last. A

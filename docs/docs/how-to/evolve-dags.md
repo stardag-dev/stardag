@@ -92,8 +92,10 @@ Read it back with the [pydantic-settings](https://docs.pydantic.dev/latest/conce
 pattern, at run time rather than at import time — a warm container imports
 before it knows which build it is serving.
 
-A misspelled or reserved key (`STARDAG_*`, `MODAL_*`) is refused at the
-trigger, before a build exists. A re-trigger of an existing build
+A reserved key (`STARDAG_*`, `MODAL_*`) is refused at the trigger, before
+a build exists — a plain typo in the key is not caught; `settings` is an
+arbitrary flat mapping and only the reserved prefixes and the
+string-value requirement are validated. A re-trigger of an existing build
 (`build_trigger(build_id=...)`) with `settings` omitted reuses the
 build's stored settings; passing different ones starts a new plan in the
 same build — see [The deterministic
@@ -175,8 +177,14 @@ One precondition, checked by the tick and again at its `/seal`: **the
 deployment must be the registry's current one for the app.** `stardag
 modal deploy` records and activates each deploy; if either step fails
 (the registry was unreachable), the command exits non-zero and says so,
-and no build rolls over to that code until you re-run it — both steps are
-idempotent (same client-minted deployment id).
+and no build rolls over to that code until you re-run it. Re-running is
+safe, not a retry of the same row: the deployment id is minted fresh by
+the `StardagApp` object each time the command's process runs, so a
+re-run after a failed record creates a new deployment row (and, if the
+Modal deploy itself already succeeded, deploys again) rather than
+retrying the original activation. The _server-side_ activate call is
+idempotent for a given id — re-sending it changes nothing — but the CLI
+gives it a new id on every invocation.
 
 What makes a rollover code-safe at all is that a task object has no
 representation outside a running process other than the registry's stored

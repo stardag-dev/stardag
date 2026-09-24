@@ -202,9 +202,14 @@ exists for:
   dump, so this is handled for you, but a custom serializer that bypasses
   the ordinary dump path can reintroduce it.
 - **Floats** are stable when the value is (`repr` is the shortest
-  round-trip form), but `-0.0` vs `0.0`, `NaN`, infinities, and numpy
-  scalar types are not, and neither is a float computed
-  non-deterministically in `__init__`.
+  round-trip form). `-0.0` round-trips fine — it is simply a different,
+  intentionally distinct value from `0.0` for hashing purposes — and a
+  numpy scalar on a typed field is coerced to a plain Python value before
+  it is ever dumped. Only a non-finite float (`NaN`, an infinity) is
+  actually rejected — not merely unstable, but refused outright, since it
+  is not valid JSON. A float computed non-deterministically in `__init__`
+  is the real risk: nothing catches that until the round trip disagrees
+  with itself.
 - **Datetimes**: naive vs aware, or a custom serializer that drops
   precision, fail the round trip.
 - **Defaults**: the instance body includes every field, set at init or
@@ -233,8 +238,10 @@ The task ID is derived from:
 - Task namespace
 - Task version
 - Every **significant** parameter value (recursively hashed; a nested
-  task appears by its own full body, so the outer id covers the nested
-  task's parameters in full)
+  task appears by its own task id, not its full body — that id already
+  reflects only _its_ significant fields, recursively, so the outer id
+  inherits the nested task's significant identity but not its
+  non-significant fields)
 
 This recursive hashing ensures that:
 
