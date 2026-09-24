@@ -1,9 +1,18 @@
-import type { Execution } from "../types/task";
+import type { Execution, TaskStatus } from "../types/task";
 import { shortTaskId } from "../utils/ids";
+import { qualifiedName } from "../utils/instances";
 import { modalFunctionCallUrl, modalFunctionUrl } from "../utils/modalLinks";
 import { notStoppableReason, workerOf } from "../utils/stoppable";
 import { formatAbsoluteTime, formatDuration } from "../utils/time";
+import { StatusBadge } from "./StatusBadge";
 import { Checkbox } from "./ui/Checkbox";
+
+/** What the build's plan says about a task: its name and global status. */
+export interface ExecutionTaskInfo {
+  namespace: string;
+  name: string;
+  status: TaskStatus;
+}
 
 /** How many rows the table draws; the rest are counted, never dropped. */
 export const MAX_ROWS_DRAWN = 50;
@@ -14,6 +23,9 @@ interface ExecutionTableProps {
   ticked?: Set<string>;
   onToggle?: (taskId: string, on: boolean) => void;
   onOpenTask?: (taskId: string) => void;
+  // Task names and statuses by task id, from the build's active plan. A
+  // task it does not hold (an orphan's) falls back to its short id.
+  taskInfo?: Map<string, ExecutionTaskInfo>;
 }
 
 function OrphanBadge({ execution }: { execution: Execution }) {
@@ -57,14 +69,21 @@ function ClaimCell({ execution }: { execution: Execution }) {
 }
 
 /**
- * Executions, one row each: which task, under which plan (orphans marked),
- * on which worker and call, since when, and what became of the claim.
+ * Executions, one row each: which task and its status, under which plan
+ * (orphans marked), on which worker and call, since when, and what became
+ * of the claim.
+ *
+ * Boxes reflect `ticked` literally, so none are checked until someone
+ * ticks one — and no tick at all means the command targets every row
+ * (v1's choice: rendering them all checked would make the first click
+ * read as "not that one" while it means "only that one").
  */
 export function ExecutionTable({
   executions,
   ticked,
   onToggle,
   onOpenTask,
+  taskInfo,
 }: ExecutionTableProps) {
   if (executions.length === 0) {
     return (
@@ -85,6 +104,7 @@ export function ExecutionTable({
               </th>
             )}
             <th className="py-1 pr-2 font-medium">Task</th>
+            <th className="py-1 pr-2 font-medium">Status</th>
             <th className="py-1 pr-2 font-medium">Plan</th>
             <th className="py-1 pr-2 font-medium">Worker</th>
             <th className="py-1 pr-2 font-medium">Call</th>
@@ -94,6 +114,10 @@ export function ExecutionTable({
         </thead>
         <tbody>
           {drawn.map((execution) => {
+            const info = taskInfo?.get(execution.task_id);
+            const name = info
+              ? qualifiedName(info.namespace, info.name)
+              : shortTaskId(execution.task_id);
             // modalFunctionCallUrl falls back to the coarser app page when
             // function_id is missing (other callers rely on that shared
             // fallback), but a link rendered here as the call ref itself
@@ -117,7 +141,7 @@ export function ExecutionTable({
                     <Checkbox
                       checked={ticked.has(execution.task_id)}
                       onChange={(on) => onToggle(execution.task_id, on)}
-                      label={`Include task ${shortTaskId(execution.task_id)}`}
+                      label={`Include ${name}`}
                     />
                   </td>
                 )}
@@ -127,15 +151,23 @@ export function ExecutionTable({
                       type="button"
                       onClick={() => onOpenTask(execution.task_id)}
                       title={execution.task_id}
-                      className="font-mono text-blue-700 hover:underline dark:text-blue-300"
+                      className={`text-blue-700 hover:underline dark:text-blue-300 ${
+                        info ? "font-medium" : "font-mono"
+                      }`}
                     >
-                      {shortTaskId(execution.task_id)}
+                      {name}
                     </button>
                   ) : (
-                    <code title={execution.task_id} className="font-mono">
-                      {shortTaskId(execution.task_id)}
-                    </code>
+                    <span
+                      title={execution.task_id}
+                      className={info ? "font-medium" : "font-mono"}
+                    >
+                      {name}
+                    </span>
                   )}
+                </td>
+                <td className="py-1 pr-2">
+                  {info ? <StatusBadge status={info.status} /> : "—"}
                 </td>
                 <td className="py-1 pr-2">
                   <OrphanBadge execution={execution} />
@@ -184,6 +216,13 @@ export function ExecutionTable({
       {undrawn > 0 && (
         <p className="px-1 py-1.5 text-xs text-gray-600 dark:text-gray-400">
           {undrawn} more execution{undrawn === 1 ? "" : "s"} not listed.
+          {selectable &&
+            (ticked.size > 0
+              ? // Ticking switches the command to exact task ids, so the
+                // undrawn rows really are excluded; claiming otherwise errs
+                // towards "everything is covered", the dangerous direction.
+                " Ticked rows are named individually, so these are not included — clear the ticks to target the whole list."
+              : " The command below still targets every one of them — narrow with the filters above to see a particular set.")}
         </p>
       )}
     </div>

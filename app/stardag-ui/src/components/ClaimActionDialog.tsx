@@ -7,7 +7,8 @@ interface ClaimActionDialogProps {
   action: ClaimAction | null;
   taskName: string;
   taskId: string;
-  // The build acting, through its active plan.
+  // The build the action is addressed to: for a release, the one whose
+  // plan holds the claim; for a reset, the plan's build.
   buildId: string;
   status: TaskStatus;
   busy: boolean;
@@ -17,9 +18,10 @@ interface ClaimActionDialogProps {
 }
 
 /**
- * Confirmation for one remedy on one task, addressed through the viewed
- * build's active plan. A release is refused unless this build's plans
- * hold the claim (`not_claim_holder`); the refusal is shown as the error.
+ * Confirmation for one remedy on one task. A release is addressed to the
+ * plan holding the claim, so it is honoured from any view; if the claim
+ * moved in the meantime the server refuses (`not_claim_holder`) and the
+ * refusal is shown as the error.
  */
 export function ClaimActionDialog({
   action,
@@ -67,9 +69,10 @@ export function ClaimActionDialog({
         <>
           <p className="text-sm text-gray-600 dark:text-gray-400">
             Cancels {target} as build{" "}
-            <code className="text-xs">{shortBuildId(buildId)}</code>, releasing its
-            claim so the build retries it on its next tick. Only the build holding the
-            claim can do this.
+            <code className="text-xs">{shortBuildId(buildId)}</code>, the build holding
+            its claim, releasing the claim so that build retries it on its next tick.
+            Any workspace member may do this; it is recorded on the task&rsquo;s event
+            log.
           </p>
           <p className="text-sm text-gray-600 dark:text-gray-400">
             It stops nothing: if the worker is still running, it finds out at its next

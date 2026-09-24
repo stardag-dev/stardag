@@ -56,7 +56,10 @@ export type ExecutionOutcome =
   | "suspended"
   | "interrupted"
   | "preempted"
-  | "stopped";
+  | "stopped"
+  // An operator end for an execution that cannot be stopped: no report of
+  // it will ever be applied.
+  | "lost";
 
 // Descriptive metadata about the executor backend that ran an execution or
 // triggered a build. For Modal: {kind: "modal", app_name, workspace,
@@ -107,6 +110,12 @@ export interface BuildListResponse {
   total: number;
   // Pass back as `cursor` for the next page; null on the last one.
   next_cursor: string | null;
+}
+
+/** `GET /builds/{id}/notify`: whether a wake-up is queued for the build. */
+export interface BuildNotify {
+  build_id: string;
+  needs_tick: boolean;
 }
 
 // ---- The frontier: what a scheduler tick sees of the active plan ----
@@ -160,14 +169,6 @@ export interface BuildFrontier {
   closure: Closure | null;
 }
 
-export interface PlanRoots {
-  plan_id: string;
-  build_id: string;
-  deployment_id: string;
-  settings_hash: string;
-  roots: FrontierMember[];
-}
-
 /**
  * One of a build's plans, as `GET /builds/{id}/plans` lists them (newest
  * generation first): lifecycle, scope with its deployment, member counts.
@@ -202,19 +203,16 @@ export interface PlanListResponse {
   plans: PlanDetail[];
 }
 
-// ---- Plan membership and edges (assumed: not served on this branch yet) ----
+// ---- Plan membership and edges: `GET /plans/{id}/graph` ----
 
 export type AdmittedBy = "root" | "static" | "dynamic" | "closure";
 export type ExclusionReason = "operator" | "discovery_failed" | "upstream_excluded";
 
 /**
- * One member of a plan, as `GET /plans/{plan_id}/graph` is assumed to
- * return it. **Assumed**: this branch's registry does not serve the route
- * yet (see `api/registry.ts`, `fetchPlanGraph`); the shape mirrors
- * `PlanGraphMemberResponse` (`schemas_v2_reads.py`, STA-106) —
- * `plan_member`'s columns joined to the task's identity and global status,
- * plus the attempt/interruption counts the frontier already carries for a
- * runnable member.
+ * One member of a plan, as `GET /plans/{plan_id}/graph` returns it
+ * (`PlanGraphMemberResponse`): `plan_member`'s columns joined to the
+ * task's identity and global status, plus the attempt/interruption counts
+ * the frontier carries for a runnable member.
  */
 export interface PlanMember {
   task_id: string;
@@ -224,7 +222,7 @@ export interface PlanMember {
   task_name: string;
   status: TaskStatus;
   is_root: boolean;
-  admitted_by: AdmittedBy | null;
+  admitted_by: AdmittedBy;
   excluded_at: string | null;
   excluded_reason: ExclusionReason | null;
   // Executions of the task under any of the build's plans, and those of
@@ -233,7 +231,7 @@ export interface PlanMember {
   interruptions: number;
 }
 
-/** An instance edge, `task_instance_dependency` (assumed route). */
+/** An instance edge, `task_instance_dependency`, between two members. */
 export interface PlanEdge {
   upstream_instance_id: string;
   downstream_instance_id: string;
@@ -365,6 +363,12 @@ export interface Execution {
 
 export interface ExecutionListResponse {
   build_id: string;
+  executions: Execution[];
+}
+
+/** `GET /tasks/{id}/executions`: across builds, newest first. */
+export interface TaskExecutionListResponse {
+  task_id: string;
   executions: Execution[];
 }
 

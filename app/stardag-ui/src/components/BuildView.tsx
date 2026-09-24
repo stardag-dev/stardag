@@ -10,8 +10,11 @@ import { useEnvironment } from "../context/EnvironmentContext";
 import { useBuildPlan } from "../hooks/useBuildPlan";
 import { useDeployments } from "../hooks/useDeployments";
 import type { Build, TaskStatus } from "../types/task";
+import { rootsCompleted } from "../utils/builds";
 import { shortTaskId } from "../utils/ids";
+import { DEFAULT_GROUP_AFTER } from "../utils/planGraph";
 import { BuildControlsDialog } from "./BuildControlsDialog";
+import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildInfoDialog } from "./BuildInfoDialog";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
 import { BuildStatusBadge } from "./BuildStatusBadge";
@@ -30,6 +33,8 @@ interface BuildViewProps {
   buildId: string;
   onBack: () => void;
   onOpenTask?: (taskId: string) => void;
+  // Jump to another build: a claim holder, an execution's build.
+  onOpenBuild?: (buildId: string) => void;
 }
 
 const PAGE_SIZE = 20;
@@ -59,11 +64,14 @@ function BuildViewForIdentity({
   buildId,
   onBack,
   onOpenTask,
+  onOpenBuild,
   environmentId,
 }: BuildViewProps & { environmentId: string | undefined }) {
   const { setItems: setBreadcrumb } = useBreadcrumb();
   const plan = useBuildPlan(buildId, environmentId);
-  const { byId: deploymentsById } = useDeployments(environmentId);
+  const { byId: deploymentsById } = useDeployments(environmentId, [
+    plan.frontier?.deployment_id,
+  ]);
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [nameFilter, setNameFilter] = useState("");
@@ -72,6 +80,9 @@ function BuildViewForIdentity({
   const [refreshToken, setRefreshToken] = useState(0);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [showDag, setShowDag] = useState(true);
+  const [dagFullscreen, setDagFullscreen] = useState(false);
+  // Shared by the inline and the fullscreen graph.
+  const [groupAfter, setGroupAfter] = useState(DEFAULT_GROUP_AFTER);
   const [dagDirection, setDagDirection] = useState<LayoutDirection>("LR");
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
   const positionCacheRef = useRef<PositionCache>(createPositionCache());
@@ -79,10 +90,28 @@ function BuildViewForIdentity({
   const requestedKey = `${environmentId ?? ""}:${buildId}`;
   const { build, frontier, view, reload, setBuild } = plan;
 
-  const refresh = useCallback(async () => {
+  // A refresh after something changed (a remedy on a task): always runs,
+  // superseding any read in flight, which may predate the change.
+  const refreshNow = useCallback(async () => {
     setRefreshToken((t) => t + 1);
     await reload();
   }, [reload]);
+
+  // The button's and the 5-second interval's refresh: single-flight
+  // (v1's guard), so a slow registry does not get a new read stacked on
+  // the unanswered one every five seconds. On a ref, not state: the ref
+  // is the fact. The view remounts on a change of build or environment,
+  // so the marker never outlives its identity.
+  const refreshInFlightRef = useRef(false);
+  const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    try {
+      await refreshNow();
+    } finally {
+      refreshInFlightRef.current = false;
+    }
+  }, [refreshNow]);
 
   // Auto-refreshing a build that has stopped is pointless: the interval
   // declines to run, and the control is switched off (adjusted during
@@ -124,6 +153,16 @@ function BuildViewForIdentity({
     }, DOUBLE_CLICK_MS);
   }, [autoRefresh, canAutoRefresh, refresh]);
 
+  // Esc leaves the fullscreen graph (v1's overlay).
+  useEffect(() => {
+    if (!dagFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDagFullscreen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [dagFullscreen]);
+
   const handleBuildChanged = useCallback(
     (updated: Build) => {
       if (updated.id !== buildId) return;
@@ -162,6 +201,16 @@ function BuildViewForIdentity({
       ),
     [members, nameFilter, statusFilter],
   );
+  const taskInfo = useMemo(
+    () =>
+      new Map(
+        members.map((m) => [
+          m.task_id,
+          { namespace: m.task_namespace, name: m.task_name, status: m.status },
+        ]),
+      ),
+    [members],
+  );
   const mutedTaskIds = useMemo(() => {
     if (!nameFilter && !statusFilter) return undefined;
     const kept = new Set(filtered.map((m) => m.task_id));
@@ -196,13 +245,15 @@ function BuildViewForIdentity({
 
   const dag = (
     <DagGraph
-      view={view ?? { members: [], edges: [], complete: true }}
+      view={view ?? { members: [], edges: [] }}
       selectedTaskId={selectedTaskId}
       onTaskClick={setSelectedTaskId}
       mutedTaskIds={mutedTaskIds}
       direction={dagDirection}
       onDirectionChange={setDagDirection}
       positionCache={positionCacheRef}
+      groupAfter={groupAfter}
+      onGroupAfterChange={setGroupAfter}
     />
   );
 
@@ -273,7 +324,6 @@ function BuildViewForIdentity({
                     frontier={frontier}
                     frontierError={plan.frontierError}
                     refreshToken={refreshToken}
-                    membershipComplete={view?.complete ?? true}
                     onOpenTask={setSelectedTaskId}
                   />
                   <BuildControlsDialog
@@ -284,9 +334,19 @@ function BuildViewForIdentity({
                     refreshToken={refreshToken}
                     onBuildChanged={handleBuildChanged}
                     onOpenTask={setSelectedTaskId}
+                    taskInfo={taskInfo}
                   />
                 </div>
               </div>
+
+              {/* Why it failed, kept on screen: the scheduling dialog goes
+                  quiet on a failed build. See BuildFailureReason. */}
+              <BuildFailureReason
+                status={build.status}
+                message={build.error_message}
+                failedAt={build.completed_at}
+                superseded={rootsCompleted(members)}
+              />
 
               <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
                 <button
@@ -319,6 +379,30 @@ function BuildViewForIdentity({
                   </svg>
                   <span className="font-medium">Plan graph</span>
                 </button>
+                {showDag && (
+                  <button
+                    type="button"
+                    onClick={() => setDagFullscreen(true)}
+                    aria-label="Fullscreen plan graph"
+                    title="Fullscreen plan graph"
+                    className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      className="h-4 w-4"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"
+                      />
+                    </svg>
+                  </button>
+                )}
               </div>
 
               <PanelGroup direction="vertical" className="flex-1">
@@ -330,9 +414,18 @@ function BuildViewForIdentity({
                   onCollapse={() => setShowDag(false)}
                   onExpand={() => setShowDag(true)}
                 >
-                  {showDag && (
+                  {showDag && !dagFullscreen && (
                     <div id="build-dag-panel" className="h-full">
-                      {dag}
+                      {plan.planError ? (
+                        <p
+                          role="alert"
+                          className="p-4 text-sm text-red-600 dark:text-red-400"
+                        >
+                          {plan.planError}
+                        </p>
+                      ) : (
+                        dag
+                      )}
                     </div>
                   )}
                 </Panel>
@@ -370,8 +463,9 @@ function BuildViewForIdentity({
                       onOpenTaskPage={
                         onOpenTask ? () => onOpenTask(selectedTaskId) : undefined
                       }
-                      onChanged={refresh}
+                      onChanged={refreshNow}
                       refreshToken={refreshToken}
+                      onOpenBuild={onOpenBuild}
                     />
                   </div>
                 </div>
@@ -380,6 +474,52 @@ function BuildViewForIdentity({
           )}
         </PanelGroup>
       </div>
+
+      {dagFullscreen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Plan graph, fullscreen"
+          className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-900"
+        >
+          <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              Plan graph
+            </span>
+            <button
+              type="button"
+              onClick={() => setDagFullscreen(false)}
+              aria-label="Exit fullscreen"
+              title="Exit fullscreen (Esc)"
+              className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+            >
+              <svg
+                aria-hidden="true"
+                className="h-5 w-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          </div>
+          <div className="flex-1">
+            {plan.planError ? (
+              <p role="alert" className="p-4 text-sm text-red-600 dark:text-red-400">
+                {plan.planError}
+              </p>
+            ) : (
+              dag
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import type { PlanDetail } from "../types/task";
 import { deploymentLabel } from "../utils/deployments";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
+import { Spinner } from "./ui/Spinner";
 
 interface BuildPlansProps {
   // Null while the first read is in flight.
@@ -8,8 +9,6 @@ interface BuildPlansProps {
   error: string | null;
   // The active plan's completeness, from the frontier.
   activePlanComplete: boolean;
-  // False when the member list is built from the roots and frontier only.
-  membershipComplete: boolean;
 }
 
 function Chip({ children, title }: { children: React.ReactNode; title?: string }) {
@@ -51,12 +50,7 @@ function Stamp({
  * member counts, with the active plan marked. Shown in the "Plans and
  * scheduling" dialog, so nothing is stacked above the DAG and task table.
  */
-export function BuildPlans({
-  plans,
-  error,
-  activePlanComplete,
-  membershipComplete,
-}: BuildPlansProps) {
+export function BuildPlans({ plans, error, activePlanComplete }: BuildPlansProps) {
   return (
     <div>
       <h4 className="mb-1 text-xs font-semibold tracking-wide text-gray-500 uppercase dark:text-gray-400">
@@ -65,9 +59,7 @@ export function BuildPlans({
       {error ? (
         <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
       ) : plans === null ? (
-        <p role="status" className="text-xs text-gray-500 dark:text-gray-400">
-          Reading this build&rsquo;s plans…
-        </p>
+        <Spinner>Reading this build&rsquo;s plans…</Spinner>
       ) : plans.length === 0 ? (
         <p className="text-xs text-gray-500 dark:text-gray-400">
           No plan yet: the build&rsquo;s first registration has not landed.
@@ -134,13 +126,6 @@ export function BuildPlans({
             </li>
           ))}
         </ul>
-      )}
-      {!membershipComplete && (
-        <p className="mt-1 text-xs text-amber-800 dark:text-amber-300">
-          Partial: this registry does not serve plan membership, so the build view lists
-          only the roots and the frontier&rsquo;s runnable, running and discovery-job
-          members, and draws no edges.
-        </p>
       )}
     </div>
   );

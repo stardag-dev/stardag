@@ -72,6 +72,16 @@ describe("BuildsList", () => {
     expect(mocked.mock.calls[2][1]).toMatchObject({ cursor: undefined });
   });
 
+  it("says the list is ordered by last activity, as the server orders it", async () => {
+    mocked.mockResolvedValueOnce(page(["a"], 1, null));
+    renderList();
+    await screen.findByText("build a");
+    const header = screen.getByRole("columnheader", { name: /last active/i });
+    expect(header).toHaveAttribute("aria-sort", "descending");
+    expect(header.title).toMatch(/most recent first/);
+    expect(screen.queryByText(/newest/i)).not.toBeInTheDocument();
+  });
+
   it("returns to page 1 when a filter changes", async () => {
     mocked
       .mockResolvedValueOnce(page(["a"], 45, "cursor-2"))

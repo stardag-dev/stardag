@@ -22,13 +22,14 @@ export function claimState(
 }
 
 /**
- * The two operator remedies on one task, both through a plan of the build
- * being viewed (`/plans/{plan_id}/members/{task_id}/...`).
+ * The two operator remedies on one task, each through a plan
+ * (`/plans/{plan_id}/members/{task_id}/...`).
  *
  * - `release` cancels the task: its claim is released with outcome
- *   `cancelled`. Only the build holding the claim may (409
- *   `not_claim_holder` otherwise), and it stops nothing — the worker finds
- *   out at its next checkpoint.
+ *   `cancelled`. Addressed to the plan holding the claim
+ *   (`task.claim_plan_id`) — the server refuses any other with 409
+ *   `not_claim_holder` — and open to any workspace member, as with the
+ *   CLI. It stops nothing: the worker finds out at its next checkpoint.
  * - `retry` resets the task to PENDING. Refused on COMPLETED and on a live
  *   claim; a lapsed claim is closed first.
  */

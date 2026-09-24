@@ -90,7 +90,8 @@ function setPlan(build: Build) {
     build,
     frontier,
     frontierError: null,
-    view: { members: [member], edges: [], complete: true },
+    view: { members: [member], edges: [] },
+    planError: null,
     loading: false,
     error: null,
     loadedKey: `env-1:${BUILD_ID}`,
@@ -144,6 +145,31 @@ describe("BuildView auto-refresh", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  it("runs one refresh at a time", async () => {
+    // The first read never answers, so it stays in flight.
+    reload.mockImplementationOnce(() => new Promise(() => {}));
+    renderView();
+    const button = screen.getByRole("button", { name: "Refresh" });
+    fireEvent.click(button);
+    act(() => vi.advanceTimersByTime(300));
+    expect(reload).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(button);
+    act(() => vi.advanceTimersByTime(300));
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not stack auto-refreshes on an unanswered read", () => {
+    reload.mockImplementation(() => new Promise(() => {}));
+    renderView();
+    const button = screen.getByRole("button", { name: "Refresh" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    act(() => vi.advanceTimersByTime(20000));
+    expect(reload).toHaveBeenCalledTimes(1);
+    reload.mockImplementation(async () => {});
+  });
+
   it("does not offer auto-refresh for a build that is not running", () => {
     setPlan(makeBuild({ status: "completed" }));
     renderView();
@@ -163,6 +189,55 @@ describe("BuildView layout", () => {
     expect(screen.queryByText("Active plan")).not.toBeInTheDocument();
     expect(screen.queryByText(/^settings /)).not.toBeInTheDocument();
     expect(screen.getByTestId("dag")).toBeInTheDocument();
+  });
+});
+
+describe("BuildView failure reason", () => {
+  it("shows why a failed build failed, above the DAG", () => {
+    setPlan(makeBuild({ status: "failed", error_message: "Root failed: boom" }));
+    renderView();
+    expect(screen.getByRole("alert")).toHaveTextContent("Root failed: boom");
+  });
+
+  it("shows no reason for a build that is not failed", () => {
+    renderView();
+    expect(screen.queryByText("Why this build failed")).not.toBeInTheDocument();
+  });
+});
+
+describe("BuildView fullscreen graph", () => {
+  it("opens the plan graph fullscreen and leaves it on Esc", () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Fullscreen plan graph" }));
+    const overlay = screen.getByRole("dialog", { name: "Plan graph, fullscreen" });
+    expect(overlay).toContainElement(screen.getByTestId("dag"));
+    // Drawn once: the inline graph gives way to the overlay.
+    expect(screen.getAllByTestId("dag")).toHaveLength(1);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByTestId("dag")).toBeInTheDocument();
+  });
+
+  it("leaves fullscreen from its close button", () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Fullscreen plan graph" }));
+    fireEvent.click(screen.getByRole("button", { name: "Exit fullscreen" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+describe("BuildView missing plan", () => {
+  it("says the active plan is missing rather than drawing a partial one", () => {
+    setPlan(makeBuild());
+    planState.current = {
+      ...planState.current,
+      view: { members: [], edges: [] },
+      planError: "The build's active plan plan-1 was not found.",
+    };
+    renderView();
+    expect(screen.getByRole("alert")).toHaveTextContent("plan-1 was not found");
+    expect(screen.queryByTestId("dag")).not.toBeInTheDocument();
   });
 });
 

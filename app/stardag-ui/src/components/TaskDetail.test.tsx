@@ -8,12 +8,17 @@ vi.mock("../api/registry", () => ({
   fetchTaskArtifacts: vi.fn(async () => ({ artifacts: [] })),
   fetchTaskEvents: vi.fn(async () => []),
   EVENT_LIST_LIMIT: 500,
-  fetchBuildExecutions: vi.fn(async () => []),
+  fetchTaskExecutions: vi.fn(async () => []),
+  TASK_EXECUTION_LIMIT: 100,
   fetchDeployments: vi.fn(async () => []),
+  fetchDeployment: vi.fn(async () => {
+    throw new Error("404");
+  }),
 }));
 vi.mock("./TaskClaimPanel", () => ({ TaskClaimPanel: () => null }));
 
-import { fetchTask, fetchTaskEvents } from "../api/registry";
+import { fetchTask, fetchTaskEvents, fetchTaskExecutions } from "../api/registry";
+import type { Execution } from "../types/task";
 import { TaskDetail } from "./TaskDetail";
 
 const TASK_ID = "df0c8b03-fab2-5ddd-9743-09fb4a634cf5";
@@ -145,5 +150,113 @@ describe("TaskDetail", () => {
       "title",
       JSON.stringify({ added: ["x"] }, null, 2),
     );
+  });
+
+  it("jumps to an event's build from the event log's Build column", async () => {
+    const BUILD = "01a0c5c3-f18e-7d22-bcaf-add71bd0287c";
+    vi.mocked(fetchTaskEvents).mockResolvedValue([
+      {
+        id: "e1",
+        event_type: "task_started",
+        created_at: "2026-09-24T00:00:00Z",
+        build_id: BUILD,
+        plan_id: "p",
+        execution_id: null,
+        task_id: TASK_ID,
+        report_applied: true,
+        error_message: null,
+        event_metadata: null,
+      },
+    ]);
+    const onOpenBuild = vi.fn();
+    render(
+      <TaskDetail taskId={TASK_ID} environmentId="env-1" onOpenBuild={onOpenBuild} />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "See full event log" }));
+    fireEvent.click(await screen.findByRole("button", { name: "…1bd0287c" }));
+    expect(onOpenBuild).toHaveBeenCalledWith(BUILD);
+  });
+
+  it("lists every execution across builds, ended ones included", async () => {
+    const OTHER = "01a0c5c3-f18e-7d22-bcaf-00000000cccc";
+    const base: Execution = {
+      id: "0199aaaa-0000-7000-8000-000000000001",
+      task_id: TASK_ID,
+      build_id: "b",
+      plan_id: "p",
+      instance_id: "i-1",
+      executor: "modal",
+      executor_ref: "fc-01ABC",
+      executor_metadata: {
+        kind: "modal",
+        workspace: "ws",
+        environment: "main",
+        app_name: "app",
+        function_name: "worker_gpu",
+      },
+      started_at: "2026-09-24T00:00:00Z",
+      claim_released_at: null,
+      claim_outcome: null,
+      ended_at: null,
+      outcome: null,
+      in_current_plan: true,
+    };
+    vi.mocked(fetchTaskExecutions).mockResolvedValue([
+      base,
+      {
+        ...base,
+        id: "0199aaaa-0000-7000-8000-000000000002",
+        build_id: OTHER,
+        executor: null,
+        executor_ref: "fc-02DEF",
+        ended_at: "2026-09-24T00:05:00Z",
+        outcome: "failed",
+        claim_outcome: "failed",
+        claim_released_at: "2026-09-24T00:05:00Z",
+        in_current_plan: false,
+      },
+    ]);
+    const onOpenBuild = vi.fn();
+    render(
+      <TaskDetail
+        taskId={TASK_ID}
+        environmentId="env-1"
+        context={{ buildId: "b", planId: "p", planInstanceId: "i-1", member }}
+        onOpenBuild={onOpenBuild}
+      />,
+    );
+    expect(await screen.findByText("Executions (2)")).toBeInTheDocument();
+    expect(vi.mocked(fetchTaskExecutions)).toHaveBeenCalledWith(TASK_ID, "env-1");
+    expect(screen.getByText("this build")).toBeInTheDocument();
+    expect(screen.getByText("running, holds the claim")).toBeInTheDocument();
+    expect(screen.getByText("ended failed")).toBeInTheDocument();
+    // The executor falls back to the metadata kind, as the CLI reads it.
+    expect(screen.getAllByText("⚡ Modal")).toHaveLength(2);
+    expect(screen.getByText("fc-02DEF")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "…0000cccc" }));
+    expect(onOpenBuild).toHaveBeenCalledWith(OTHER);
+    // The Modal ids table, one click away.
+    fireEvent.click(screen.getAllByRole("button", { name: "More details" })[0]);
+    expect(screen.getByText("Workspace")).toBeInTheDocument();
+  });
+
+  it("lists executions on the task page too, with no build in view", async () => {
+    vi.mocked(fetchTaskExecutions).mockResolvedValue([]);
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    expect(await screen.findByText("Executions (0)")).toBeInTheDocument();
+    expect(screen.getByText(/No execution recorded/)).toBeInTheDocument();
+  });
+
+  it("says the executions could not be read rather than that there are none", async () => {
+    vi.mocked(fetchTaskExecutions).mockRejectedValueOnce(new Error("503"));
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    expect(
+      await screen.findByText(/Could not read this task.s executions: 503/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No execution recorded/)).not.toBeInTheDocument();
+    vi.mocked(fetchTaskExecutions).mockResolvedValue([]);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText(/No execution recorded/)).toBeInTheDocument();
+    expect(screen.queryByText(/Could not read/)).not.toBeInTheDocument();
   });
 });

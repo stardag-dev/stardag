@@ -29,10 +29,13 @@ export function TaskEventLog({
   taskId,
   taskLabel,
   environmentId,
+  onOpenBuild,
 }: {
   taskId: string;
   taskLabel: string;
   environmentId: string;
+  // Jump to an event's build (v1's `onNavigateToBuild`).
+  onOpenBuild?: (buildId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [events, setEvents] = useState<TaskEvent[] | null>(null);
@@ -127,7 +130,19 @@ export function TaskEventLog({
                   </thead>
                   <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-900">
                     {events.map((event) => (
-                      <EventRow key={event.id} event={event} />
+                      <EventRow
+                        key={event.id}
+                        event={event}
+                        onOpenBuild={
+                          onOpenBuild
+                            ? (buildId) => {
+                                epochRef.current += 1;
+                                setOpen(false);
+                                onOpenBuild(buildId);
+                              }
+                            : undefined
+                        }
+                      />
                     ))}
                   </tbody>
                 </table>
@@ -140,7 +155,13 @@ export function TaskEventLog({
   );
 }
 
-function EventRow({ event }: { event: TaskEvent }) {
+function EventRow({
+  event,
+  onOpenBuild,
+}: {
+  event: TaskEvent;
+  onOpenBuild?: (buildId: string) => void;
+}) {
   const metadataKeys = event.event_metadata ? Object.keys(event.event_metadata) : [];
   return (
     <tr className="hover:bg-gray-50 dark:hover:bg-gray-800">
@@ -165,7 +186,16 @@ function EventRow({ event }: { event: TaskEvent }) {
         )}
       </td>
       <td className="px-4 py-3 font-mono text-sm whitespace-nowrap text-gray-500 dark:text-gray-400">
-        {event.build_id ? (
+        {event.build_id && onOpenBuild ? (
+          <button
+            type="button"
+            onClick={() => onOpenBuild(event.build_id!)}
+            title={`Go to build ${event.build_id}`}
+            className="rounded text-blue-600 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-400"
+          >
+            {shortBuildId(event.build_id)}
+          </button>
+        ) : event.build_id ? (
           <span title={event.build_id}>{shortBuildId(event.build_id)}</span>
         ) : (
           "—"

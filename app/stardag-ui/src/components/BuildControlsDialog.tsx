@@ -9,11 +9,12 @@ import {
   NO_EXECUTOR,
   NO_REF_YET,
   stopCommand,
+  stopCommandEffect,
   workersIn,
   type StopFilters,
 } from "../utils/stoppable";
 import { BuildOverrideSection } from "./BuildOverrideSection";
-import { ExecutionTable } from "./ExecutionTable";
+import { ExecutionTable, type ExecutionTaskInfo } from "./ExecutionTable";
 import { Modal } from "./Modal";
 import { Checkbox } from "./ui/Checkbox";
 import { ResultBanner } from "./ui/ResultBanner";
@@ -38,6 +39,8 @@ interface BuildControlsDialogProps {
   refreshToken?: number;
   onBuildChanged: (build: Build) => void;
   onOpenTask?: (taskId: string) => void;
+  // Task names and statuses from the build's active plan, for the rows.
+  taskInfo?: Map<string, ExecutionTaskInfo>;
 }
 
 /**
@@ -58,6 +61,7 @@ export function BuildControlsDialog({
   refreshToken = 0,
   onBuildChanged,
   onOpenTask,
+  taskInfo,
 }: BuildControlsDialogProps) {
   const [executions, setExecutions] = useState<Execution[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -120,7 +124,9 @@ export function BuildControlsDialog({
     ? narrowed
     : chosen.length
       ? {
-          notInCurrentPlan: narrowed.notInCurrentPlan,
+          // The filters stay on the command: `--task-id` alone would also
+          // select a ticked task's executions the filters hid.
+          ...narrowed,
           taskIds: [...new Set(chosen.map((e) => e.task_id))],
         }
       : null;
@@ -131,6 +137,19 @@ export function BuildControlsDialog({
     const reason = notStoppableReason(e);
     return reason !== null && !pendingReasons.includes(reason);
   }).length;
+  // Selected rows with no call id: the command cannot cancel them.
+  const noCallId = chosen.filter((e) => {
+    const reason = notStoppableReason(e);
+    return reason !== null && pendingReasons.includes(reason);
+  }).length;
+  // Listed rows the command does not name: they keep running.
+  const notSelected = all.length - chosen.length;
+  const anyFilterSet = Boolean(
+    narrowed.notInCurrentPlan ||
+      narrowed.worker ||
+      narrowed.executor ||
+      narrowed.olderThanSeconds,
+  );
 
   const toggle = useCallback((taskId: string, on: boolean) => {
     setTicked((previous) => {
@@ -209,8 +228,6 @@ export function BuildControlsDialog({
           <div className="space-y-3">
             <p className="text-xs text-gray-600 dark:text-gray-400">
               Executions with no end reported, under any of this build&rsquo;s plans.
-              The command ends the listed Modal calls from your credentials, records
-              them stopped, then cancels the build.
               {orphanCount > 0 &&
                 ` ${orphanCount} ${
                   orphanCount === 1 ? "is an orphan" : "are orphans"
@@ -271,6 +288,11 @@ export function BuildControlsDialog({
                   ))}
                 </select>
               </label>
+              {notSelected > 0 && (
+                <span className="text-gray-600 dark:text-gray-400">
+                  {notSelected} not selected
+                </span>
+              )}
               {ticked.size > 0 && (
                 <button
                   type="button"
@@ -287,7 +309,25 @@ export function BuildControlsDialog({
               ticked={ticked}
               onToggle={toggle}
               onOpenTask={onOpenTask}
+              taskInfo={taskInfo}
             />
+
+            <p className="text-xs text-gray-600 dark:text-gray-400">
+              {ticked.size === 0
+                ? "Nothing ticked — the command below targets every execution listed. Tick rows to narrow it to those."
+                : `The command below names the ${chosen.length} you ticked.`}
+            </p>
+
+            {noCallId > 0 && (
+              <p className="text-xs text-gray-600 dark:text-gray-400">
+                {noCallId} selected {noCallId === 1 ? "has" : "have"} no call id, so the
+                command cannot stop {noCallId === 1 ? "it" : "them"}: re-run it in a few
+                seconds to catch a spawn about to report one, add{" "}
+                <code>--mark-lost</code> to end {noCallId === 1 ? "it" : "them"} as lost
+                (no later report is applied), or <code>--no-cancel</code> to leave the
+                build running.
+              </p>
+            )}
 
             {unreachable > 0 && (
               <p className="text-xs text-gray-600 dark:text-gray-400">
@@ -298,8 +338,13 @@ export function BuildControlsDialog({
 
             {command === null ? (
               <p role="status" className="text-xs text-amber-800 dark:text-amber-300">
-                None of the rows you ticked are listed any more, so there is nothing to
-                stop. No command is offered, because one with no targets would stop
+                {anyFilterSet
+                  ? "None of the rows you ticked match these filters, so there is nothing to stop. Clear the ticks or widen the filters."
+                  : // No filter is set, so the ticked rows did not fall out of
+                    // a narrowing — they fell out of the list: they reported
+                    // an end between ticking and the last read.
+                    "The executions you ticked are no longer listed — they reported an end — so there is nothing to stop. Clear the ticks to target whatever is still listed."}{" "}
+                No command is offered, because one with no targets would stop
                 everything.
               </p>
             ) : (
@@ -317,8 +362,14 @@ export function BuildControlsDialog({
                   </button>
                 </div>
                 <p className="text-xs text-gray-600 dark:text-gray-400">
-                  Add <code>--dry-run</code> to see its own list before anything
-                  happens.
+                  {stopCommandEffect(narrowed)} Add <code>--dry-run</code> to see its
+                  own list before anything happens.
+                  {notSelected > 0 &&
+                    ` The ${notSelected} execution${
+                      notSelected === 1 ? "" : "s"
+                    } it does not name will keep running${
+                      narrowed.notInCurrentPlan ? "" : " once the build is cancelled"
+                    }.`}
                 </p>
               </div>
             )}

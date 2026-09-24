@@ -8,6 +8,7 @@ import {
   type EdgeProps,
   type EdgeTypes,
   getBezierPath,
+  Panel,
   useNodesState,
   useEdgesState,
   type NodeTypes,
@@ -17,7 +18,14 @@ import "@xyflow/react/dist/style.css";
 import Dagre from "@dagrejs/dagre";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
-import { flowModel, type PlanView } from "../utils/planGraph";
+import {
+  DEFAULT_GROUP_AFTER,
+  flowModel,
+  groupFlowModel,
+  type PlanView,
+} from "../utils/planGraph";
+import { BatchNode, type BatchNodeData } from "./BatchNode";
+import { GroupAfterControl } from "./GroupAfterControl";
 import { LayoutToggle } from "./LayoutToggle";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
 import {
@@ -40,15 +48,20 @@ interface DagGraphProps {
   direction?: LayoutDirection;
   onDirectionChange?: (direction: LayoutDirection) => void;
   positionCache?: React.MutableRefObject<PositionCache>;
+  // "Group after" (v1's per-type cap); controlled when both are given, so
+  // the inline and the fullscreen graph share it.
+  groupAfter?: number;
+  onGroupAfterChange?: (value: number) => void;
 }
 
-const nodeTypes: NodeTypes = { taskNode: TaskNode };
+const nodeTypes: NodeTypes = { taskNode: TaskNode, batchNode: BatchNode };
 
-type TaskNodeType = Node<TaskNodeData>;
+type TaskNodeType = Node<TaskNodeData | BatchNodeData>;
 
 const NODE_MIN_WIDTH = 160;
 const NODE_MAX_WIDTH = 300;
 const NODE_HEIGHT = 90;
+const BATCH_NODE_HEIGHT = 100;
 const CHAR_WIDTH_ESTIMATE = 8;
 const NODE_PADDING = 40;
 
@@ -127,8 +140,10 @@ function layout(
     marginx: 20,
     marginy: 20,
   });
+  const heightOf = (node: TaskNodeType) =>
+    node.type === "batchNode" ? BATCH_NODE_HEIGHT : NODE_HEIGHT;
   for (const node of nodes) {
-    g.setNode(node.id, { width: nodeWidth(node.data.label), height: NODE_HEIGHT });
+    g.setNode(node.id, { width: nodeWidth(node.data.label), height: heightOf(node) });
   }
   for (const edge of edges) g.setEdge(edge.source, edge.target);
   Dagre.layout(g);
@@ -138,7 +153,7 @@ function layout(
       ...node,
       position: {
         x: pos.x - nodeWidth(node.data.label) / 2,
-        y: pos.y - NODE_HEIGHT / 2,
+        y: pos.y - heightOf(node) / 2,
       },
     };
   });
@@ -154,6 +169,8 @@ export function DagGraph({
   direction: controlledDirection,
   onDirectionChange: controlledOnDirectionChange,
   positionCache: externalPositionCache,
+  groupAfter: controlledGroupAfter,
+  onGroupAfterChange,
 }: DagGraphProps) {
   const { theme } = useTheme();
   const isControlled =
@@ -167,15 +184,69 @@ export function DagGraph({
   const localPositionCacheRef = useRef<PositionCache>(createPositionCache());
   const positionCacheRef = externalPositionCache ?? localPositionCacheRef;
 
+  const [localGroupAfter, setLocalGroupAfter] = useState(DEFAULT_GROUP_AFTER);
+  const groupAfter =
+    controlledGroupAfter !== undefined && onGroupAfterChange
+      ? controlledGroupAfter
+      : localGroupAfter;
+  const setGroupAfter = onGroupAfterChange ?? setLocalGroupAfter;
+  // Batches expanded by a click; reset when the cap changes.
+  const [expanded, setExpanded] = useState<{ cap: number; ids: Set<string> }>({
+    cap: groupAfter,
+    ids: new Set(),
+  });
+  const expandedIds = expanded.cap === groupAfter ? expanded.ids : null;
+
+  const expand = useCallback(
+    (batchId: string) =>
+      setExpanded((previous) => ({
+        cap: groupAfter,
+        ids: new Set([...(previous.cap === groupAfter ? previous.ids : []), batchId]),
+      })),
+    [groupAfter],
+  );
+
+  const model = useMemo(() => flowModel(view), [view]);
+  const grouped = useMemo(() => {
+    const ids = new Set(expandedIds ?? []);
+    const first = groupFlowModel(model, groupAfter, ids);
+    // A task selected from the table must be visible: open its batch.
+    const holding = first.batches.find(
+      (b) => selectedTaskId !== null && b.taskIds.includes(selectedTaskId),
+    );
+    if (!holding) return first;
+    ids.add(holding.id);
+    return groupFlowModel(model, groupAfter, ids);
+  }, [model, groupAfter, expandedIds, selectedTaskId]);
+
   const { layoutedNodes, layoutedEdges } = useMemo(() => {
-    const model = flowModel(view);
-    const statusById = new Map(model.nodes.map((n) => [n.id, n.status]));
+    const statusById = new Map<string, string>(
+      model.nodes.map((n) => [n.id, n.status]),
+    );
+    for (const batch of grouped.batches) statusById.set(batch.id, batch.status);
     const mutedIds = new Set(
       model.nodes
         .filter((n) => n.excluded || (mutedTaskIds?.has(n.taskId) ?? false))
         .map((n) => n.id),
     );
-    const nodes: TaskNodeType[] = model.nodes.map((n) => ({
+    for (const batch of grouped.batches) {
+      if (batch.memberIds.every((id) => mutedIds.has(id))) mutedIds.add(batch.id);
+    }
+    const batchNodes: TaskNodeType[] = grouped.batches.map((b) => ({
+      id: b.id,
+      type: "batchNode" as const,
+      position: { x: 0, y: 0 },
+      data: {
+        label: b.label,
+        taskType: b.taskType,
+        count: b.memberIds.length,
+        status: b.status,
+        isMuted: mutedIds.has(b.id),
+        direction,
+        onExpand: () => expand(b.id),
+      },
+    }));
+    const nodes: TaskNodeType[] = grouped.nodes.map((n) => ({
       id: n.id,
       type: "taskNode" as const,
       position: { x: 0, y: 0 },
@@ -189,7 +260,8 @@ export function DagGraph({
         direction,
       },
     }));
-    const edges: Edge[] = model.edges.map((e) => ({
+    nodes.push(...batchNodes);
+    const edges: Edge[] = grouped.edges.map((e) => ({
       id: e.id,
       source: e.source,
       target: e.target,
@@ -202,7 +274,7 @@ export function DagGraph({
       ...(e.isDynamic ? { type: "dynamicEdge" } : {}),
     }));
     return { layoutedNodes: layout(nodes, edges, direction), layoutedEdges: edges };
-  }, [view, mutedTaskIds, theme, direction]);
+  }, [model, grouped, mutedTaskIds, theme, direction, expand]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(layoutedEdges);
@@ -224,10 +296,12 @@ export function DagGraph({
   useEffect(() => {
     setNodes((current) =>
       current.map((node) => {
-        const selected = node.data.taskId === selectedTaskId;
-        return node.data.isSelected === selected
+        if (node.type === "batchNode") return node;
+        const data = node.data as TaskNodeData;
+        const selected = data.taskId === selectedTaskId;
+        return data.isSelected === selected
           ? node
-          : { ...node, data: { ...node.data, isSelected: selected } };
+          : { ...node, data: { ...data, isSelected: selected } };
       }),
     );
   }, [selectedTaskId, setNodes]);
@@ -281,7 +355,13 @@ export function DagGraph({
         edges={edges}
         onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
-        onNodeClick={(_, node) => onTaskClick((node.data as TaskNodeData).taskId)}
+        onNodeClick={(_, node) => {
+          if (node.type === "batchNode") {
+            expand(node.id);
+          } else {
+            onTaskClick((node.data as TaskNodeData).taskId);
+          }
+        }}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         colorMode={colorMode}
@@ -297,6 +377,24 @@ export function DagGraph({
           onDirectionChange={handleDirectionChange}
           onResetLayout={handleResetLayout}
         />
+        <Panel position="top-left">
+          <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-white px-2 py-1 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+            <GroupAfterControl
+              value={groupAfter}
+              onChange={setGroupAfter}
+              batchCount={grouped.batches.length}
+            />
+            {expandedIds && expandedIds.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setExpanded({ cap: groupAfter, ids: new Set() })}
+                className="text-xs text-blue-600 hover:underline dark:text-blue-400"
+              >
+                Regroup
+              </button>
+            )}
+          </div>
+        </Panel>
       </ReactFlow>
     </div>
   );

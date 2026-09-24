@@ -52,6 +52,8 @@ const LAST_ACTIVE_EXPLAINER =
   "The build's last lifecycle change: created, resumed or finished. Task " +
   "activity does not move it, so a long-running busy build also reads as idle.";
 
+const SORT_EXPLAINER = "Sorted by last active, most recent first.";
+
 const CONTROL =
   "rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100";
 
@@ -290,10 +292,22 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
                   <th
                     key={h}
                     scope="col"
-                    title={h === "Last active" ? LAST_ACTIVE_EXPLAINER : undefined}
+                    // The server's order (`last_active_at desc`), which is
+                    // the one this column shows: not creation order.
+                    aria-sort={h === "Last active" ? "descending" : undefined}
+                    title={
+                      h === "Last active"
+                        ? `${SORT_EXPLAINER} ${LAST_ACTIVE_EXPLAINER}`
+                        : undefined
+                    }
                     className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400"
                   >
                     {h}
+                    {h === "Last active" && (
+                      <span aria-hidden="true" className="ml-1">
+                        ↓
+                      </span>
+                    )}
                   </th>
                 ))}
               </tr>

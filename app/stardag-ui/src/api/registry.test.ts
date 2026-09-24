@@ -71,9 +71,12 @@ describe("registry API", () => {
     });
   });
 
-  it("reads a 404 on the assumed plan-graph route as not served", async () => {
-    respond(404, { detail: "Not Found" });
-    await expect(fetchPlanGraph("p", "env-1")).resolves.toBeNull();
+  it("reads a 404 on the plan-graph route as a missing plan, not a missing route", async () => {
+    respond(404, { detail: { code: "plan_not_found", detail: "no such plan" } });
+    await expect(fetchPlanGraph("p", "env-1")).rejects.toMatchObject({
+      status: 404,
+      message: "no such plan",
+    });
   });
 
   it("does not hide a 404 on a served route", async () => {

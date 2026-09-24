@@ -33,9 +33,21 @@ export const NO_EXECUTOR =
   "no executor recorded — it runs in the build's own process, or its " +
   "spawn has not reported yet; refresh to see whether a call id appears";
 
+/**
+ * The recorded executor, or the `kind` its metadata declares (a claim
+ * written before its spawn reported) — `_stop.executor_of`. Every rule
+ * below reads the executor through this, as the CLI does, so the list the
+ * panel narrows to and the one the command selects cannot differ.
+ */
+export function executorOf(execution: Execution): string | null {
+  if (execution.executor) return execution.executor;
+  const kind = execution.executor_metadata?.kind;
+  return typeof kind === "string" && kind ? kind : null;
+}
+
 /** Why an execution can only be listed, or null when it can be stopped. */
 export function notStoppableReason(execution: Execution): string | null {
-  const executor = execution.executor || execution.executor_metadata?.kind || "";
+  const executor = executorOf(execution);
   if (!executor) return NO_EXECUTOR;
   if (executor !== MODAL_EXECUTOR)
     return `stardag cannot stop a '${executor}' execution`;
@@ -75,7 +87,7 @@ export function matchesFilters(
 ): boolean {
   if (filters.notInCurrentPlan && execution.in_current_plan) return false;
   if (filters.taskIds && !filters.taskIds.includes(execution.task_id)) return false;
-  if (filters.executor && (execution.executor ?? "") !== filters.executor) return false;
+  if (filters.executor && executorOf(execution) !== filters.executor) return false;
   if (filters.worker && workerOf(execution) !== filters.worker) return false;
   if (filters.olderThanSeconds) {
     const started = Date.parse(execution.started_at);
@@ -97,7 +109,8 @@ export function workersIn(executions: Execution[]): string[] {
 export function executorsIn(executions: Execution[]): string[] {
   const names = new Set<string>();
   for (const execution of executions) {
-    if (execution.executor) names.add(execution.executor);
+    const executor = executorOf(execution);
+    if (executor) names.add(executor);
   }
   return [...names].sort();
 }
@@ -108,6 +121,28 @@ export function formatDurationFlag(seconds: number): string {
   if (seconds % 3600 === 0) return `${seconds / 3600}h`;
   if (seconds % 60 === 0) return `${seconds / 60}m`;
   return `${seconds}s`;
+}
+
+/**
+ * What the printed command does, in the order it does it — per mode, as
+ * `builds_stop.py` runs it. The build is cancelled unless
+ * `--not-in-current-plan` (which implies `--no-cancel`) is on the command;
+ * narrowing by task, worker, executor or age does **not** spare the build.
+ */
+export function stopCommandEffect(filters: StopFilters): string {
+  if (filters.notInCurrentPlan) {
+    return (
+      "The command ends the selected orphans' Modal calls from your credentials " +
+      "and records each one stopped. It does not cancel the build " +
+      "(--not-in-current-plan implies --no-cancel): the build keeps running on " +
+      "its active plan."
+    );
+  }
+  return (
+    "The command ends the selected Modal calls from your credentials, records " +
+    "each one stopped, then cancels the build, which releases every claim its " +
+    "plans hold."
+  );
 }
 
 /** The exact command for what is on screen — the panel's actual output. */
@@ -122,8 +157,9 @@ export function stopCommand(buildId: string, filters: StopFilters): string {
       );
     }
     for (const taskId of filters.taskIds) parts.push(`--task-id ${taskId}`);
-    return parts.join(" ");
   }
+  // Conjunctive with --task-id, as `_stop.Filters.matches` is: a ticked
+  // task with several executions is narrowed to the rows on screen.
   if (filters.worker) parts.push(`--worker ${filters.worker}`);
   if (filters.executor) parts.push(`--executor ${filters.executor}`);
   if (filters.olderThanSeconds) {

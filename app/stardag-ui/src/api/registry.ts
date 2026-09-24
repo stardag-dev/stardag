@@ -9,6 +9,7 @@ import type {
   Build,
   BuildFrontier,
   BuildListResponse,
+  BuildNotify,
   BuildStatus,
   BuildTickSummaryListResponse,
   ConcurrencyLimit,
@@ -22,11 +23,11 @@ import type {
   PlanDetail,
   PlanGraph,
   PlanListResponse,
-  PlanRoots,
   Settings,
   Task,
   TaskArtifactListResponse,
   TaskEvent,
+  TaskExecutionListResponse,
   TransitionResponse,
 } from "../types/task";
 import { fetchWithAuth } from "./client";
@@ -186,6 +187,17 @@ export async function fetchBuildExecutions(
   return data.executions;
 }
 
+/** Whether a wake-up is queued for the build (`needs_tick`). */
+export function fetchBuildNotify(
+  buildId: string,
+  environmentId: string,
+): Promise<BuildNotify> {
+  return getJson(
+    url(`/builds/${buildId}/notify`, environmentId),
+    "Failed to read the build's wake-up flag",
+  );
+}
+
 // ---- Build overrides ----
 
 /**
@@ -240,31 +252,19 @@ export async function fetchBuildPlans(
   return data.plans;
 }
 
-export function fetchPlanRoots(
-  planId: string,
-  environmentId: string,
-): Promise<PlanRoots> {
-  return getJson(
-    url(`/plans/${planId}/roots`, environmentId),
-    "Failed to fetch plan roots",
-  );
-}
-
 /**
- * The plan's members and instance edges.
- *
- * **Assumed route**: the registry does not serve `GET /plans/{id}/graph`
- * yet. Returns `null` on 404 so the build view can fall back to what the
- * frontier and the plan's roots carry, and says so on screen.
+ * The plan's members (each joined to its task's identity and global
+ * status) and the instance edges between member instances. A 404 is a
+ * plan that does not exist in this environment.
  */
-export async function fetchPlanGraph(
+export function fetchPlanGraph(
   planId: string,
   environmentId: string,
-): Promise<PlanGraph | null> {
-  const response = await fetchWithAuth(url(`/plans/${planId}/graph`, environmentId));
-  if (response.status === 404) return null;
-  if (!response.ok) throw await toError(response, "Failed to fetch plan graph");
-  return response.json() as Promise<PlanGraph>;
+): Promise<PlanGraph> {
+  return getJson(
+    url(`/plans/${planId}/graph`, environmentId),
+    "Failed to fetch plan graph",
+  );
 }
 
 /**
@@ -311,6 +311,29 @@ export function fetchTaskArtifacts(
   );
 }
 
+/** The server's default page of a task's executions (its cap is 500). */
+export const TASK_EXECUTION_LIMIT = 100;
+
+/**
+ * Every execution of the task, **across builds**, newest first — ended
+ * ones included unless `includeEnded` is false. At most
+ * `TASK_EXECUTION_LIMIT` rows (the route has no cursor).
+ */
+export async function fetchTaskExecutions(
+  taskId: string,
+  environmentId: string,
+  includeEnded = true,
+): Promise<Execution[]> {
+  const data = await getJson<TaskExecutionListResponse>(
+    url(`/tasks/${taskId}/executions`, environmentId, {
+      include_ended: String(includeEnded),
+      limit: String(TASK_EXECUTION_LIMIT),
+    }),
+    "Failed to fetch task executions",
+  );
+  return data.executions;
+}
+
 /** The server's cap on one event read. */
 export const EVENT_LIST_LIMIT = 500;
 
@@ -354,6 +377,17 @@ export async function fetchDeployments(
     "Failed to fetch deployments",
   );
   return data.deployments;
+}
+
+/** One deployment by id — for one the list's first page does not hold. */
+export function fetchDeployment(
+  deploymentId: string,
+  environmentId: string,
+): Promise<Deployment> {
+  return getJson(
+    url(`/deployments/${deploymentId}`, environmentId),
+    "Failed to fetch deployment",
+  );
 }
 
 export function fetchSettings(
