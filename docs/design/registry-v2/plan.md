@@ -403,6 +403,13 @@ assignee the maintainer.
       against a live v2 registry, which nobody has done; two pre-existing
       `mkdocs build --strict` warnings; then marking draft PR #378
       (`v2` → `main`) ready and merging it once.
+      A first manual sanity pass against a local stack found six defects,
+      fixed in PR #395: a terminal build status is now sticky
+      (`build_terminal`, and a stopped driver exits `STOPPED`), a failed
+      `stardag build` prints its summary, the `/fail` reason names the
+      failed task, in-process executions record their executor,
+      `tasks exclude` reports per call, and the version route is
+      `/api/v2/version`.
 
 ## Delivery steps
 
