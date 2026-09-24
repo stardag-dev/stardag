@@ -151,6 +151,12 @@ def builds_stop(
         if not json_output:
             _render(selected, excluded, build_id, not_in_current_plan)
         if not selected and not cancel_build:
+            if json_output:
+                payload["stop_results"] = []
+                payload["stopped_count"] = 0
+                payload["lost"] = []
+                payload["build_cancelled"] = cancel_build
+                emit_json(payload)
             return
         if not yes:
             typer.confirm(

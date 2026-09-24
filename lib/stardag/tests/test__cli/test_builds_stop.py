@@ -78,6 +78,30 @@ class TestStop:
         assert not fake_registry.called("build_cancel")
         assert "no orphaned executions" in result.output
 
+    def test_orphan_filter_json_emits_a_document_even_with_nothing_selected(
+        self, fake_registry, running_build
+    ):
+        with _from_id() as from_id:
+            result = runner.invoke(
+                app,
+                [
+                    "stop",
+                    str(running_build.build_id),
+                    "--not-in-current-plan",
+                    "--yes",
+                    "--json",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["selected"] == []
+        assert payload["stop_results"] == []
+        assert payload["stopped_count"] == 0
+        assert payload["lost"] == []
+        assert payload["build_cancelled"] is False
+        from_id.assert_not_called()
+        assert not fake_registry.called("build_cancel")
+
     def test_a_failed_cancel_is_not_reported_stopped(
         self, fake_registry, running_build
     ):

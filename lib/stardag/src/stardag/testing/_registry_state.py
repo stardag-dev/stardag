@@ -303,12 +303,27 @@ class RegistryState:
         )
 
     def current_deployment(self, kind: str, app_name: str) -> DeploymentRow | None:
+        """Mirrors the server's ``current_deployment_id``: a local
+        deployment is never current, no matter its activation state."""
+        if kind == "local":
+            return None
         rows = [
             d
             for d in self.deployments.values()
             if d.kind == kind and d.app_name == app_name and d.activated_at is not None
         ]
         return max(rows, key=lambda d: d.generation) if rows else None
+
+    def verify_deployment_current(self, deployment: DeploymentRow) -> None:
+        """Mirrors the server's ``verify_deployment_current``: a no-op for
+        a local deployment, which is authoritative for its own plans;
+        otherwise 409 ``deployment_not_current`` unless it is its app's
+        current (highest-generation, activated) row."""
+        if deployment.kind == "local":
+            return
+        current = self.current_deployment(deployment.kind, deployment.app_name)
+        if current is None or current.id != deployment.id:
+            raise refuse("deployment_not_current")
 
     # -- the ledger and wake-ups ----------------------------------------------------
 

@@ -169,11 +169,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
                 )
                 if plan is not None and plan.superseded_at is not None:
                     deployment = self.deployments[deployment_id]
-                    current = self.current_deployment(
-                        deployment.kind, deployment.app_name
-                    )
-                    if current is None or current.id != deployment_id:
-                        raise refuse("deployment_not_current")
+                    self.verify_deployment_current(deployment)
                     active = self.active_plan(build_id)
                     if active is not None:
                         active.superseded_at = self.now()

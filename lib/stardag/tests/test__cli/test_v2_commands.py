@@ -167,6 +167,28 @@ class TestDeployments:
         result = invoke("deployments", "list", "--kind", "cloud")
         assert result.exit_code == 1
 
+    def test_a_local_deployment_is_never_current(self, fake_registry):
+        """Local rows are born activated (design.md, "The deterministic
+        scope"), but that never makes one current — the server's
+        ``current_deployment_id`` returns ``None`` outright for
+        ``kind=local``, and the fake must match it."""
+        local_id = fake_registry.add_deployment(kind="local", code_id="d" * 20)
+        modal_id = fake_registry.add_deployment(
+            kind="modal", app_name="app", code_id="e" * 20
+        )
+        result = invoke("deployments", "list", "--json")
+        assert result.exit_code == 0, result.output
+        rows = {r["id"]: r for r in json.loads(result.stdout)["deployments"]}
+        assert rows[str(local_id)]["is_current"] is False
+        assert rows[str(modal_id)]["is_current"] is True
+        # --current excludes it too, not just the marker in the listing.
+        current_result = invoke("deployments", "list", "--current", "--json")
+        current_ids = {
+            r["id"] for r in json.loads(current_result.stdout)["deployments"]
+        }
+        assert str(local_id) not in current_ids
+        assert str(modal_id) in current_ids
+
     def test_activation_conflict_mirrors_the_server(self, fake_registry):
         """The server raises 409 ``deployment_activation_conflict`` with
         every clashing field (services/deployments.py, activate_deployment)
