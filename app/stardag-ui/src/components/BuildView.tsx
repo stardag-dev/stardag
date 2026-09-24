@@ -183,6 +183,16 @@ function BuildViewForIdentity({
       ),
     [members, nameFilter, statusFilter],
   );
+  const taskInfo = useMemo(
+    () =>
+      new Map(
+        members.map((m) => [
+          m.task_id,
+          { namespace: m.task_namespace, name: m.task_name, status: m.status },
+        ]),
+      ),
+    [members],
+  );
   const mutedTaskIds = useMemo(() => {
     if (!nameFilter && !statusFilter) return undefined;
     const kept = new Set(filtered.map((m) => m.task_id));
@@ -306,6 +316,7 @@ function BuildViewForIdentity({
                     refreshToken={refreshToken}
                     onBuildChanged={handleBuildChanged}
                     onOpenTask={setSelectedTaskId}
+                    taskInfo={taskInfo}
                   />
                 </div>
               </div>
