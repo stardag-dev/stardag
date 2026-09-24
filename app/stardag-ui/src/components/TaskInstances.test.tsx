@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { Deployment, TaskInstance } from "../types/task";
 import { TaskInstances } from "./TaskInstances";
@@ -49,5 +49,29 @@ describe("TaskInstances", () => {
     expect(screen.getByText("in this plan")).toBeInTheDocument();
     // Parameters without the discriminator keys.
     expect(screen.queryByText(/__name/)).not.toBeInTheDocument();
+  });
+
+  it("expands the whole instance, or only its parameters, from v1's icons", () => {
+    render(
+      <TaskInstances
+        instances={[instance("i-1", "info", "h1".repeat(8))]}
+        deploymentsById={new Map([["dep-1", DEPLOYMENT]])}
+      />,
+    );
+    expect(screen.queryByText("View fullscreen")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("View parameters fullscreen"));
+    let dialog = screen.getByRole("heading", { name: "Instance parameters" })
+      .parentElement!.parentElement!;
+    expect(within(dialog).getByText(/"epochs": 3/)).toBeInTheDocument();
+    expect(within(dialog).queryByText("Instance hash")).not.toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    fireEvent.click(screen.getByTitle("View instance fullscreen"));
+    dialog = screen.getByRole("heading", { name: "Instance" }).parentElement!
+      .parentElement!;
+    expect(within(dialog).getByText("h1".repeat(8))).toBeInTheDocument();
+    expect(within(dialog).getByText("modal etl gen 3")).toBeInTheDocument();
+    expect(within(dialog).getByText(/"epochs": 3/)).toBeInTheDocument();
   });
 });
