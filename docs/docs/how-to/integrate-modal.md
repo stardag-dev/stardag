@@ -737,15 +737,18 @@ budget — nothing about it is tracked across ticks, so there is no "still
 under budget" state for a retry to restore. Two failure shapes that look
 similar are **not** covered by it at all:
 
-- **A container Modal killed, or a worker that died without reporting**
-  (OOM, a preemption whose restart never arrives, a network partition).
-  Its claim simply lapses on its TTL, and the next claiming start takes
-  the execution over as a fresh attempt — uncapped; whether it should be
-  is an open question (`docs/design/registry-v2/plan.md`).
+- **A worker that died with no restart coming** (OOM, a crash, a
+  network partition, or a timeout nothing caught). Its claim simply
+  lapses on its TTL, and the next claiming start takes the execution
+  over as a fresh attempt — uncapped; whether it should be is an open
+  question (`docs/design/registry-v2/plan.md`). This is **not** the same
+  as a preemption, which keeps its claim across Modal's own restart on
+  the same call id — see [Preemption and
+  timeouts](#preemption-and-timeouts).
 - **A task that raises inside the container.** The worker self-reports
-  the failure, and the tick never retries a `FAILED` task — the build's
-  `fail_mode` decides, and only a retry (below) gives it another try.
-  This is what `retries=` is for.
+  the failure, and the tick never retries a `FAILED` task automatically
+  — the build's `fail_mode` decides, and only a retry (below) gives it
+  another try. This is what `retries=` is for.
 
 Set the two together — `retries=` for flaky task code, `max_attempts` for
 a spawn that keeps failing before any container starts:
@@ -760,12 +763,14 @@ app.build_trigger(
 retry the spawn).
 
 **A `FAILED` task is recovered by retrying it — a bare retry works just as
-well as a re-trigger.** `stardag tasks retry <task-id>` (or the UI's Retry)
-moves it back to `PENDING`, and the next tick claims and spawns it fresh
-with its own `max_attempts` budget; there is no stale "already at budget"
-state that would make the scheduler refuse it again. Re-triggering an
-existing build id does the same for every not-complete member at once and
-records `BUILD_RESUMED`:
+well as a re-trigger.** `stardag tasks retry <task-id> --build <build-id>`
+(or the UI's Retry) moves it back to `PENDING`, and the next tick claims
+and spawns it fresh with its own `max_attempts` budget; there is no stale
+"already at budget" state that would make the scheduler refuse it again.
+`--build` is required here: it defaults to the build holding the task's
+claim, and a `FAILED` task holds none. Re-triggering an existing build id
+does the same for every not-complete member at once and records
+`BUILD_RESUMED`:
 
 ```{.python notest}
 # Resets every FAILED member to PENDING and re-runs it. Optionally raise

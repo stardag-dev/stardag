@@ -129,13 +129,17 @@ can live to finish. Truncation re-reads immediately; it is never a stall.
 A tick retries only the one failure no backend can retry for you — a spawn
 that fails before any container starts — up to `TickConfig.max_attempts`
 (default 2) within that single claim; nothing about the budget persists
-across ticks. An execution Modal killed or lost, and an exception _inside_
-your task, both bypass it: the first recovers when its claim lapses and
-the next claiming start takes it over, uncapped (an open design question,
-`docs/design/registry-v2/plan.md`); the second is reported by the worker
-as `FAILED` and is never retried by the tick — the build's `fail_mode`
-decides, and only a retry moves it back to `PENDING`. That is what Modal's
-own `retries=` is for.
+across ticks. Two other failure shapes bypass it entirely, and are not
+each other: a worker that dies with no restart coming (OOM, a crash, a
+timeout nothing caught) simply lets its claim lapse, and the next claiming
+start takes the execution over as a fresh attempt, uncapped (an open
+design question, `docs/design/registry-v2/plan.md`) — **not** the same as
+a **preemption**, which keeps its claim across Modal's own restart, below.
+An exception _inside_ your task is a third shape: the worker reports it
+`FAILED` itself, and the tick never retries a `FAILED` task automatically
+— the build's `fail_mode` decides, and only `stardag tasks retry` or a
+re-trigger (not Modal's own `retries=`, which never touches registry
+state) moves it back to `PENDING`.
 
 A task past its `timeout` that caught the interruption, checkpointed and
 raised `ResumableInterruption` is recorded `INTERRUPTED` and resumed, up to
