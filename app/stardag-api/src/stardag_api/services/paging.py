@@ -31,9 +31,23 @@ def encode_cursor(at: datetime, row_id: UUID) -> str:
 def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
-        at, row_id = json.loads(base64.urlsafe_b64decode(padded.encode()))
+        decoded = json.loads(base64.urlsafe_b64decode(padded.encode()))
+        if (
+            not isinstance(decoded, list)
+            or len(decoded) != 2
+            or not isinstance(decoded[0], str)
+            or not isinstance(decoded[1], str)
+        ):
+            raise ValueError("cursor does not have the [at, id] shape")
+        at, row_id = decoded
         return datetime.fromisoformat(at), UUID(row_id)
-    except (binascii.Error, ValueError, TypeError, UnicodeDecodeError) as exc:
+    except (
+        binascii.Error,
+        ValueError,
+        TypeError,
+        UnicodeDecodeError,
+        AttributeError,
+    ) as exc:
         raise BadRequest("invalid_cursor", "the cursor does not decode") from exc
 
 
