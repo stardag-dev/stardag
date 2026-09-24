@@ -64,6 +64,7 @@ from stardag.registry._models import (
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
+    StopOutcome,
     TaskArtifactInfo,
     TaskInfo,
     TickSummaryRecord,
@@ -516,8 +517,10 @@ class APIRegistry(HTTPTransport, RegistryABC):
     ) -> list[ExecutionInfo]:
         return self.call(_executions_req(build_id, not_in_current_plan))
 
-    def execution_report_stopped(self, execution_id: UUID) -> TransitionResult:
-        return self.call(_stopped_req(execution_id))
+    def execution_report_stopped(
+        self, execution_id: UUID, *, outcome: StopOutcome = "stopped"
+    ) -> TransitionResult:
+        return self.call(_stopped_req(execution_id, outcome))
 
     def task_get(self, task_id: str) -> TaskInfo:
         return self.call(

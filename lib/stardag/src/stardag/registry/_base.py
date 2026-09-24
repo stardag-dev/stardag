@@ -44,6 +44,7 @@ from stardag.registry._models import (
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
+    StopOutcome,
     TaskArtifactInfo,
     TaskInfo,
     TickSummaryRecord,
@@ -486,9 +487,15 @@ class RegistryABC:
         ``not_in_current_plan`` keeps the orphans."""
         raise _missing(self, "build_list_executions")
 
-    def execution_report_stopped(self, execution_id: UUID) -> TransitionResult:
-        """``POST /executions/{id}/stopped``: an execution the caller stopped
-        (``outcome = stopped``); releases its claim if it still holds it."""
+    def execution_report_stopped(
+        self, execution_id: UUID, *, outcome: StopOutcome = "stopped"
+    ) -> TransitionResult:
+        """``POST /executions/{id}/stopped``: an operator ends an execution —
+        ``stopped`` (its call was cancelled) or ``lost`` (it could not be,
+        and no report of it will ever be applied). If it is the task's
+        current execution with its claim unreleased, the claim is released
+        ``cancelled`` and the task is CANCELLED (a revocation is not a
+        result)."""
         raise _missing(self, "execution_report_stopped")
 
     # -- tasks ------------------------------------------------------------------

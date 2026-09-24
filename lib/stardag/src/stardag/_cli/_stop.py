@@ -29,6 +29,8 @@ Each stopped call is reported with ``POST /executions/{id}/stopped``
 if it still holds one. A call that could not be cancelled is **not**
 reported: nothing is known about it, and a stop written for a container
 that is still running would make its eventual completion a late report.
+``--mark-lost`` is the operator's explicit end for an execution with no call
+id (outcome ``lost``): no report of it will ever be applied.
 
 The UI's ``utils/stoppable.ts`` mirrors these rules; this module is the
 reference.

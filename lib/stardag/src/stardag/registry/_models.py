@@ -335,6 +335,11 @@ class TaskArtifactInfo(_Response):
 
 DeploymentKind = Literal["modal", "local"]
 
+#: What an operator reports on ``POST /executions/{id}/stopped``: ``stopped``
+#: (the CLI cancelled the call) or ``lost`` (it could not, and gives up on
+#: it: no report of that execution will ever be applied).
+StopOutcome = Literal["stopped", "lost"]
+
 
 class DeploymentInfo(_Response):
     """One deployment: a ``stardag modal deploy`` (``kind="modal"``,
@@ -415,6 +420,7 @@ __all__ = [
     "ResumeResult",
     "SchedulerLeaseResult",
     "SettingsInfo",
+    "StopOutcome",
     "TaskArtifactInfo",
     "TaskInfo",
     "TaskInstanceInfo",

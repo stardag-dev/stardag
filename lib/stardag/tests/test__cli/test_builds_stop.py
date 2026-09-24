@@ -32,6 +32,9 @@ class TestStop:
         assert reported["execution_id"] == running_build.execution_id
         execution = fake_registry.executions[running_build.execution_id]
         assert execution.outcome == "stopped"
+        # The server's rule: a revocation is not a result.
+        assert execution.claim_outcome == "cancelled"
+        assert fake_registry.status_of(running_build.leaf.id) == "cancelled"
         assert fake_registry.builds[running_build.build_id].status == "cancelled"
         assert fake_registry.build_list_executions(running_build.build_id) == []
 
@@ -107,6 +110,58 @@ class TestStop:
         assert result.exit_code == 0, result.output
         from_id.assert_not_called()
         assert "excluded by a filter" in result.output
+
+
+class TestMarkLost:
+    def _without_call_id(self, fake_registry, running_build):
+        fake_registry.executions[running_build.execution_id].executor_ref = None
+
+    def test_marks_an_uncancellable_execution_lost(self, fake_registry, running_build):
+        self._without_call_id(fake_registry, running_build)
+        with _from_id() as from_id:
+            result = runner.invoke(
+                app,
+                ["stop", str(running_build.build_id), "--mark-lost", "--no-cancel"],
+                input="y\ny\n",
+            )
+        assert result.exit_code == 0, result.output
+        from_id.assert_not_called()
+        (reported,) = fake_registry.calls_to("execution_report_stopped")
+        assert reported["outcome"] == "lost"
+        execution = fake_registry.executions[running_build.execution_id]
+        assert (execution.outcome, execution.claim_outcome) == ("lost", "cancelled")
+        assert "will ever be applied" in result.output
+        assert "marked 1 lost" in result.output
+
+    def test_declining_the_second_prompt_marks_nothing(
+        self, fake_registry, running_build
+    ):
+        self._without_call_id(fake_registry, running_build)
+        result = runner.invoke(
+            app,
+            ["stop", str(running_build.build_id), "--mark-lost"],
+            input="y\nn\n",
+        )
+        assert result.exit_code == 1
+        assert not fake_registry.called("execution_report_stopped")
+        assert not fake_registry.called("build_cancel")
+
+    def test_without_the_flag_nothing_is_marked(self, fake_registry, running_build):
+        self._without_call_id(fake_registry, running_build)
+        result = runner.invoke(app, ["stop", str(running_build.build_id), "-y"])
+        assert result.exit_code == 0, result.output
+        assert not fake_registry.called("execution_report_stopped")
+
+    def test_the_fake_refuses_an_unknown_outcome(self, fake_registry, running_build):
+        import pytest
+
+        from stardag.exceptions import APIError
+
+        with pytest.raises(APIError):
+            fake_registry.execution_report_stopped(
+                running_build.execution_id,
+                outcome="gone",  # type: ignore[arg-type]
+            )
 
 
 class TestStoppable:

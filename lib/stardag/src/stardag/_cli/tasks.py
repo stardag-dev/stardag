@@ -164,8 +164,8 @@ def tasks_check(
     report: bool = typer.Option(
         False,
         "--report",
-        help="Send the observation to the registry. Not available yet: no "
-        "route accepts a bare observation (see below).",
+        help="Refused: this command prints the observation; trigger a build "
+        "to let the registry observe the task.",
     ),
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
@@ -176,18 +176,17 @@ def tasks_check(
     registry's status.
 
     Reads ``GET /tasks/{id}``; reads the task's target (this process's
-    target configuration). Writes nothing. The registry follows the world
-    (D7): a task whose target is gone is invalidated by the next build
-    that observes it, so after deleting a target, trigger a build.
-    ``--report`` is refused: the registry has no route for an observation
-    outside a plan's registration chunk.
+    target configuration). Writes nothing: it prints; trigger a build to
+    let the registry observe. The registry follows the world (D7): a task
+    whose target is gone is invalidated by the next build that observes
+    it, and there is no operator path to an invalidation, so ``--report``
+    is refused.
     """
     if report:
         error_console.print(
-            "[bold red]Error:[/bold red] --report is not available: the "
-            "registry accepts an observation only as part of a plan's "
-            "registration (POST /plans/{id}/members). Trigger a build of the "
-            "task to have the registry observe it."
+            "[bold red]Error:[/bold red] --report is refused: tasks check "
+            "prints; trigger a build to let the registry observe. There is no "
+            "operator path to an invalidation (D7)."
         )
         raise typer.Exit(1)
     _import_modules(module)

@@ -39,7 +39,7 @@ from stardag.registry import (
     TransitionResult,
     WakeCandidate,
 )
-from stardag.registry._models import DeploymentKind
+from stardag.registry._models import DeploymentKind, StopOutcome
 from stardag.testing._registry_exclusion import ExclusionMixin
 from stardag.testing._registry_plans import _outcome, plan_info
 from stardag.testing._registry_state import (
@@ -312,17 +312,31 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         ]
         return [r for r in rows if not (not_in_current_plan and r.in_current_plan)]
 
-    def execution_report_stopped(self, execution_id: UUID) -> TransitionResult:
-        self._record("execution_report_stopped", execution_id=execution_id)
+    def execution_report_stopped(
+        self, execution_id: UUID, *, outcome: StopOutcome = "stopped"
+    ) -> TransitionResult:
+        self._record(
+            "execution_report_stopped", execution_id=execution_id, outcome=outcome
+        )
+        if outcome not in ("stopped", "lost"):
+            raise refuse("invalid_request", f"outcome {outcome!r}", status=422)
         execution = self.executions.get(execution_id)
         if execution is None:
             raise refuse("unknown_execution", status=404)
         task = self.task(execution.task_id)
         if execution.ended_at is None:
             execution.ended_at = self.now()
-            execution.outcome = "stopped"
-        if task.execution_id == execution_id and self.live(task):
-            self.close_claim(task, "stopped")
+            execution.outcome = outcome
+        # The server's rule: the current execution's unreleased claim is
+        # released ``cancelled`` and the task CANCELLED (actionable) — a
+        # revocation is not a result.
+        if (
+            task.execution_id == execution_id
+            and execution.claim_released_at is None
+            and task.status == "running"
+        ):
+            self.close_claim(task, "cancelled")
+            self.move(task, "cancelled")
         return _outcome(task)
 
     def task_get(self, task_id: str) -> TaskInfo:

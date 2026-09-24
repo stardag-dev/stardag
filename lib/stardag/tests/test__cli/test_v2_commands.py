@@ -152,7 +152,7 @@ class TestTasks:
             "tasks", "check", running_build.root.id, "-m", "json", "--report"
         )
         assert result.exit_code == 1
-        assert "no route" in result.output or "not available" in result.output
+        assert "trigger a build to let the registry observe" in result.output
 
     def test_cancel_then_retry_through_the_active_plan(
         self, fake_registry, running_build

@@ -397,6 +397,8 @@ class TestRoutes:
         assert recorder.requests[-1].url.params["not_in_current_plan"] == "true"
         registry.execution_report_stopped(execution_id)
         assert recorder.body() == {"outcome": "stopped"}
+        registry.execution_report_stopped(execution_id, outcome="lost")
+        assert recorder.body() == {"outcome": "lost"}
 
     def test_the_scheduling_decisions_carry_no_execution(self):
         plan_id = uuid4()

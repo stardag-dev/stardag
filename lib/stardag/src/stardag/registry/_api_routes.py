@@ -26,6 +26,7 @@ from stardag.registry._models import (
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
+    StopOutcome,
     TaskArtifactInfo,
     TransitionResult,
     WakeCandidate,
@@ -266,13 +267,13 @@ def _task_artifacts_req(task_id: str) -> Request[list[TaskArtifactInfo]]:
     )
 
 
-def _stopped_req(execution_id: UUID) -> Request[TransitionResult]:
+def _stopped_req(execution_id: UUID, outcome: StopOutcome) -> Request[TransitionResult]:
     return Request(
         "POST",
         f"/executions/{execution_id}/stopped",
         TransitionResult.model_validate,
-        json={"outcome": "stopped"},
-        operation=f"Report execution {execution_id} stopped",
+        json={"outcome": outcome},
+        operation=f"Report execution {execution_id} {outcome}",
     )
 
 

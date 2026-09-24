@@ -3,6 +3,7 @@ one stopped, then cancel the build. Selection rules: :mod:`._stop`."""
 
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
+from uuid import UUID
 
 import typer
 from rich.console import Console
@@ -38,7 +39,8 @@ def builds_stop(
         "--not-in-current-plan",
         help="Only orphans: executions started under a plan that is no longer "
         "the build's active one (after a rollover or a re-trigger under new "
-        "settings). Implies --no-cancel: the build itself keeps running.",
+        "settings). Implies --no-cancel: the build is not cancelled, it keeps "
+        "running on its active plan.",
     ),
     executor: Optional[str] = typer.Option(
         None, "--executor", help="Only executions on this executor, e.g. 'modal'."
@@ -56,6 +58,14 @@ def builds_stop(
     ),
     no_cancel: bool = typer.Option(
         False, "--no-cancel", help="Stop and report the executions; leave the build."
+    ),
+    mark_lost: bool = typer.Option(
+        False,
+        "--mark-lost",
+        help="Also end the selected executions that have no call id to cancel "
+        "(outcome 'lost'). No report of a lost execution will ever be applied: "
+        "if it is in fact still running, its result is discarded. Asks for its "
+        "own confirmation.",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the list and exit; stop and write nothing."
@@ -76,8 +86,11 @@ def builds_stop(
     2. reports each one it cancelled with
        ``POST /executions/{id}/stopped`` (outcome ``stopped``), which ends
        it on the ledger and releases its claim if it still holds one;
-    3. cancels the build (``POST /builds/{id}/cancel``) unless
-       ``--no-cancel`` or ``--not-in-current-plan``.
+    3. with ``--mark-lost``, ends each selected execution that has no call
+       id with ``POST /executions/{id}/stopped`` (outcome ``lost``);
+    4. cancels the build (``POST /builds/{id}/cancel``) unless
+       ``--no-cancel`` or ``--not-in-current-plan`` (which implies
+       ``--no-cancel``).
 
     Executions on another executor, in a driver's own process, or whose
     spawn has not reported a call id yet are listed with the reason and
@@ -118,6 +131,7 @@ def builds_stop(
         selected, excluded = _stop.split(executions, filters)
         stoppable = [e for e in selected if _stop.is_stoppable(e)]
         unstoppable = [e for e in selected if not _stop.is_stoppable(e)]
+        losable = [e for e in unstoppable if not e.executor_ref] if mark_lost else []
         payload: dict[str, Any] = {
             "build_id": str(parsed),
             "not_in_current_plan": not_in_current_plan,
@@ -147,6 +161,8 @@ def builds_stop(
         # written at the end, when everything it states has happened.
         report = error_console if json_output else console
         results = _stop_and_report(registry, stoppable, report)
+        lost = _mark_lost(registry, losable, report, yes=yes)
+        unstoppable = [e for e in unstoppable if e.id not in lost]
         if cancel_build:
             try:
                 registry.build_cancel(parsed)
@@ -154,6 +170,7 @@ def builds_stop(
                 _fail(e)
         payload["stop_results"] = results
         payload["stopped_count"] = sum(1 for r in results if r["reported"])
+        payload["lost"] = sorted(str(i) for i in lost)
         payload["build_cancelled"] = cancel_build
     finally:
         registry.close()
@@ -164,12 +181,13 @@ def builds_stop(
     if cancel_build:
         report.print(
             f"[green]Cancelled build[/green] {build_id} — stopped {stopped} "
-            "execution(s)."
+            "execution(s)" + (f", marked {len(lost)} lost." if lost else ".")
         )
     else:
         report.print(
-            f"[green]Stopped {stopped} execution(s)[/green] of build {build_id}; "
-            "the build was not cancelled."
+            f"[green]Stopped {stopped} execution(s)[/green] of build {build_id}"
+            + (f", marked {len(lost)} lost" if lost else "")
+            + "; the build was not cancelled."
         )
     if unstoppable:
         report.print(
@@ -241,6 +259,35 @@ def _stop_and_report(
             "dashboard. Re-running reports any that are still unended."
         )
     return results
+
+
+def _mark_lost(
+    registry, losable: Sequence[ExecutionInfo], report: Console, *, yes: bool
+) -> set[UUID]:
+    """End the executions with no call id as ``lost``, after a warning and
+    a confirmation of their own. Returns the ids reported."""
+    if not losable:
+        return set()
+    error_console.print(
+        f"[bold yellow]Warning:[/bold yellow] {len(losable)} execution(s) have "
+        "no call id and will be marked LOST. No report of a lost execution "
+        "will ever be applied: if one is in fact still running (a spawn about "
+        "to report, or a live in-process run), its result is discarded."
+    )
+    if not yes:
+        typer.confirm(f"Mark {len(losable)} execution(s) lost?", abort=True)
+    lost: set[UUID] = set()
+    for execution in losable:
+        try:
+            registry.execution_report_stopped(execution.id, outcome="lost")
+        except StardagError as e:
+            report.print(
+                f"  [red]not marked lost[/red] {execution.id}  {escape(str(e))}"
+            )
+        else:
+            lost.add(execution.id)
+            report.print(f"  [yellow]lost[/yellow] {execution.id}  {execution.task_id}")
+    return lost
 
 
 def _render(
