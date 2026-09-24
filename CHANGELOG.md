@@ -274,7 +274,11 @@ list --build`; new `deployments show`; `executions list --task` and
   and the new commands and flags are documented. `platform/api.md` lists
   the served reads it missed (`GET /plans/{id}`, `/plans/{id}/graph`,
   `/builds/{id}/plans`, `GET /tasks`, `/tasks/{id}/executions`,
-  `/deployments/{id}`).
+  `/deployments/{id}`). `DEV_README.md`, `reference/exceptions.md` and the
+  self-hosting troubleshooting no longer describe v1's minimum-SDK gate
+  (`SDKVersionUnsupportedError`, `426`): v2 has no version check in either
+  direction, and a mismatched SDK and server fail on the first missing
+  route (`NotFoundError`, `is_missing_route_error`).
 - `stardag modal deploy` records the deployment before the deploy and
   activates it after; a failed create or activation exits non-zero.
 - **Changed: a failed `stardag build` prints its summary.** Build id,

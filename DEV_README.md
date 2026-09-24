@@ -842,30 +842,27 @@ for fixes and dependency floors.
 Bump `DEFAULT_SERVER_VERSION` in the same PR — the pin is what a fresh
 `stardag self-host up` gets.
 
-### Dropping support for older SDKs
+### SDK and server versions: upgraded together
 
-The hosted service always runs the latest API, so the compatibility case
-that actually happens is an **old SDK against a new API**. The server
-accepts every SDK version by default; the floor lives in
-`STARDAG_API_SDK_MINIMUM_VERSION` (see
-`app/stardag-api/src/stardag_api/sdk_compat.py`) and is published as
-`minimum_sdk_version` on `GET /api/v2/version`.
+There is no version gate in either direction on the v2 line. The SDK and
+the registry server are one release line and are upgraded together: the
+server does not read the client's version (the SDK sends a `User-Agent`
+for logs only, `registry/_api_http.py`) and has no minimum-SDK setting,
+and the SDK does not check the server's version before calling it.
+`GET /api/v2/version` reports `server_version` and `api_version` for
+humans and the UI, nothing more.
 
-Raising that floor is a product decision, not an implementation detail: it
-breaks working deployments on purpose. **An API change that raises
-`minimum_sdk_version` must say so in all three places a user could look:**
+A mismatch fails on the first call to a route the other side does not
+serve: a v2 SDK against a v1 registry gets a 404 on its first `/api/v2`
+request (`NotFoundError`, detail `"Not Found"`, which
+`stardag.exceptions.is_missing_route_error` tells apart from a
+resource-level 404), and a v1 SDK against a v2 registry gets the same on
+the removed `/api/v1` registry routes. The hosted service is upgraded
+server-first and the SDK tagged after it; a self-hoster upgrades the server
+and the SDK together. A change that breaks an existing SDK is therefore a
+release-line decision, recorded in `CHANGELOG.md` and `RELEASE_NOTES.md`,
+not a server setting.
 
-1. `CHANGELOG.md` — under the release's Registry API section, with the new
-   minimum and what stopped working below it.
-2. `RELEASE_NOTES.md` — under the SDK release that clears the bar, as a
-   migration note. This is the file users are pointed at when they upgrade.
-3. **The error the server returns** — which is automatic, provided you set
-   the value rather than special-casing anything: the 426 body names the
-   client's version, the required version and the upgrade command.
-
-A newer SDK against an older self-hosted API is not a supported
-configuration and nothing tries to keep it working — self-hosters upgrade
-the server and the SDK together.
 The image definition is `app/server.Dockerfile` (build context = repo root):
 
 ```bash
