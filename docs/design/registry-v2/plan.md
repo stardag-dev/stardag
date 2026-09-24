@@ -312,7 +312,7 @@ assignee the maintainer.
       executions per task — are served by I5 (#390); the task event log was
       already served (#386). Removed for want of a v2 route: task search,
       claim triage, bulk cancel, concurrency-limits admin.
-- [ ] I10 — tests
+- [ ] I10 — tests. docker-compose e2e tier re-pointed to v2 (STA-110, PR #391 merged).
 - [ ] I11 — docs
 - [ ] I12 — release
 

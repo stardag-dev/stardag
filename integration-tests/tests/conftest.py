@@ -7,8 +7,10 @@ so they are available to all tests in this directory.
 import os
 import re
 import tempfile
+import typing
 from pathlib import Path
 
+import httpx
 import pytest
 
 # Re-export all fixtures from the package
@@ -19,6 +21,81 @@ from stardag_integration_tests.docker_fixtures import (
     TEST_USER_PASSWORD,
     ServiceEndpoints,
 )
+
+# --- v2 SDK build helpers -----------------------------------------------
+#
+# The v2 registry ties task registration to the plan protocol (design.md,
+# "Registration"): there is no ad-hoc "register one task" route left, the
+# way v1's ``POST /builds/{id}/tasks`` was. The realistic way to get a real,
+# COMPLETED task to query is to run one through the actual SDK build flow
+# (``sd.build_sequential`` against ``APIRegistry``), exactly as a real SDK
+# user would. These fixtures do that once so individual tests can just ask
+# for a task id.
+
+
+@pytest.fixture
+def sdk_api_key(
+    internal_authenticated_client: httpx.Client,
+    test_workspace_id: str,
+    test_environment_id: str,
+) -> str:
+    """A fresh API key scoped to the test environment, for SDK/API-key flows."""
+    response = internal_authenticated_client.post(
+        f"/api/v1/ui/workspaces/{test_workspace_id}"
+        f"/environments/{test_environment_id}/api-keys",
+        json={"name": "Integration Test SDK Key"},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["key"]
+
+
+@pytest.fixture
+def temporary_default_target_root(
+    tmp_path: Path,
+) -> typing.Generator[Path, None, None]:
+    """Point the SDK's default target root at a throwaway directory, so a
+    task built in a test can determine its own completion."""
+    from stardag.testing import target_roots_override
+
+    target_roots = {"default": str(tmp_path)}
+    with target_roots_override(target_roots):
+        yield tmp_path
+
+
+@pytest.fixture
+def built_task_id(
+    docker_services: ServiceEndpoints,  # noqa: F811
+    sdk_api_key: str,
+    temporary_default_target_root: Path,
+) -> str:
+    """Build one trivial task through the real SDK build flow (API-key
+    auth) and return its task id (the completion hash) -- a real, COMPLETED
+    task for tests that just need one to query.
+
+    ``marker`` is a fresh uuid4 per call and is the task's only significant
+    field, so every call gets its own task id -- reusing one across test
+    functions would otherwise hit ``task_identity_conflict`` (409): the
+    tests share one long-lived environment, and ``output_uri`` (derived
+    from ``temporary_default_target_root``, unique per test) is
+    identity-level, so the *same* task id re-registered under a *different*
+    output_uri is correctly refused.
+    """
+    import uuid
+
+    import stardag as sd
+    from stardag.registry import APIRegistry
+
+    @sd.task
+    def one_task(marker: str) -> str:
+        return marker
+
+    task = one_task(marker=str(uuid.uuid4()))
+    registry = APIRegistry(api_url=docker_services.api, api_key=sdk_api_key)
+    try:
+        sd.build_sequential([task], registry=registry)
+    finally:
+        registry.close()
+    return str(task.id)
 
 
 # Playwright timeout configuration (10s instead of default 30s)
