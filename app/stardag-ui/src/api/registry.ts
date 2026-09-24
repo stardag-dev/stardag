@@ -23,7 +23,6 @@ import type {
   PlanDetail,
   PlanGraph,
   PlanListResponse,
-  PlanRoots,
   Settings,
   Task,
   TaskArtifactListResponse,
@@ -253,31 +252,19 @@ export async function fetchBuildPlans(
   return data.plans;
 }
 
-export function fetchPlanRoots(
-  planId: string,
-  environmentId: string,
-): Promise<PlanRoots> {
-  return getJson(
-    url(`/plans/${planId}/roots`, environmentId),
-    "Failed to fetch plan roots",
-  );
-}
-
 /**
- * The plan's members and instance edges.
- *
- * **Assumed route**: the registry does not serve `GET /plans/{id}/graph`
- * yet. Returns `null` on 404 so the build view can fall back to what the
- * frontier and the plan's roots carry, and says so on screen.
+ * The plan's members (each joined to its task's identity and global
+ * status) and the instance edges between member instances. A 404 is a
+ * plan that does not exist in this environment.
  */
-export async function fetchPlanGraph(
+export function fetchPlanGraph(
   planId: string,
   environmentId: string,
-): Promise<PlanGraph | null> {
-  const response = await fetchWithAuth(url(`/plans/${planId}/graph`, environmentId));
-  if (response.status === 404) return null;
-  if (!response.ok) throw await toError(response, "Failed to fetch plan graph");
-  return response.json() as Promise<PlanGraph>;
+): Promise<PlanGraph> {
+  return getJson(
+    url(`/plans/${planId}/graph`, environmentId),
+    "Failed to fetch plan graph",
+  );
 }
 
 /**

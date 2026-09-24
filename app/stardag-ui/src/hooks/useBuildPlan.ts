@@ -3,31 +3,34 @@ import {
   fetchBuild,
   fetchBuildFrontier,
   fetchPlanGraph,
-  fetchPlanRoots,
+  RegistryError,
 } from "../api/registry";
 import type { Build, BuildFrontier } from "../types/task";
-import { fullPlanView, partialPlanView, type PlanView } from "../utils/planGraph";
+import { fullPlanView, type PlanView } from "../utils/planGraph";
 
 export interface BuildPlanState {
   build: Build | null;
   frontier: BuildFrontier | null;
   frontierError: string | null;
   view: PlanView | null;
+  // The active plan's graph could not be read (a 404: the plan is gone).
+  planError: string | null;
   loading: boolean;
   error: string | null;
   // The environment:build pair what is on screen was loaded for.
   loadedKey: string | null;
 }
 
-const EMPTY_VIEW: PlanView = { members: [], edges: [], complete: true };
+const EMPTY_VIEW: PlanView = { members: [], edges: [] };
 
 /**
  * A build, the frontier of its active plan, and the plan's members and
  * edges — read together, with a stale-response guard, since the build
  * view stays mounted across a change of build or environment.
  *
- * Membership comes from `GET /plans/{id}/graph` when the registry serves
- * it, and otherwise from the plan's roots plus the frontier (partial).
+ * Membership and edges come from `GET /plans/{id}/graph`. A 404 there is
+ * a plan that does not exist (deleted between the frontier read and this
+ * one), reported as such — never papered over with a partial view.
  */
 export function useBuildPlan(
   buildId: string,
@@ -38,6 +41,7 @@ export function useBuildPlan(
     frontier: null,
     frontierError: null,
     view: null,
+    planError: null,
     loading: true,
     error: null,
     loadedKey: null,
@@ -60,13 +64,13 @@ export function useBuildPlan(
         frontierError = err instanceof Error ? err.message : "Failed to read frontier";
       }
       let view: PlanView = EMPTY_VIEW;
+      let planError: string | null = null;
       if (frontier?.plan_id) {
-        const graph = await fetchPlanGraph(frontier.plan_id, environmentId);
-        if (graph) {
-          view = fullPlanView(graph);
-        } else {
-          const roots = await fetchPlanRoots(frontier.plan_id, environmentId);
-          view = partialPlanView(roots.roots, frontier);
+        try {
+          view = fullPlanView(await fetchPlanGraph(frontier.plan_id, environmentId));
+        } catch (err) {
+          if (!(err instanceof RegistryError && err.status === 404)) throw err;
+          planError = `The build's active plan ${frontier.plan_id} was not found: it may have been deleted since the build was read.`;
         }
       }
       if (!fresh()) return;
@@ -75,6 +79,7 @@ export function useBuildPlan(
         frontier,
         frontierError,
         view,
+        planError,
         loading: false,
         error: null,
         loadedKey: key,

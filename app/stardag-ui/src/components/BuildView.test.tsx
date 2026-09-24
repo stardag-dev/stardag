@@ -90,7 +90,8 @@ function setPlan(build: Build) {
     build,
     frontier,
     frontierError: null,
-    view: { members: [member], edges: [], complete: true },
+    view: { members: [member], edges: [] },
+    planError: null,
     loading: false,
     error: null,
     loadedKey: `env-1:${BUILD_ID}`,
@@ -176,6 +177,20 @@ describe("BuildView failure reason", () => {
   it("shows no reason for a build that is not failed", () => {
     renderView();
     expect(screen.queryByText("Why this build failed")).not.toBeInTheDocument();
+  });
+});
+
+describe("BuildView missing plan", () => {
+  it("says the active plan is missing rather than drawing a partial one", () => {
+    setPlan(makeBuild());
+    planState.current = {
+      ...planState.current,
+      view: { members: [], edges: [] },
+      planError: "The build's active plan plan-1 was not found.",
+    };
+    renderView();
+    expect(screen.getByRole("alert")).toHaveTextContent("plan-1 was not found");
+    expect(screen.queryByTestId("dag")).not.toBeInTheDocument();
   });
 });
 

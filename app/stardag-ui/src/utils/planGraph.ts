@@ -1,78 +1,17 @@
 /**
- * The build view's model of its active plan: members and instance edges.
- *
- * Two sources. The full one is `GET /plans/{id}/graph` (assumed — not
- * served yet). Until it exists the view falls back to what the registry
- * does serve: the plan's roots and the frontier's runnable, discovery-job
- * and running items. That is a **partial** membership — a member that is
- * complete, or pending behind an upstream, appears in neither — and it has
- * no edges, so the view says so rather than drawing it as the plan.
+ * The build view's model of its active plan: members and instance edges,
+ * from `GET /plans/{id}/graph`.
  */
 
-import type {
-  BuildFrontier,
-  FrontierItem,
-  FrontierMember,
-  PlanEdge,
-  PlanGraph,
-  PlanMember,
-  TaskStatus,
-} from "../types/task";
-import { identityOf } from "./instances";
+import type { PlanEdge, PlanGraph, PlanMember, TaskStatus } from "../types/task";
 
 export interface PlanView {
   members: PlanMember[];
   edges: PlanEdge[];
-  // False when built from the roots and the frontier only.
-  complete: boolean;
-}
-
-function memberFromFrontier(item: FrontierMember | FrontierItem): PlanMember {
-  const { namespace, name } = identityOf(item.body);
-  // Roots and discovery jobs are plain FrontierMembers, with no attempt
-  // count; runnable and running items are FrontierItems and carry one.
-  const counted = "attempts" in item;
-  return {
-    task_id: item.task_id,
-    instance_id: item.instance_id,
-    instance_hash: item.instance_hash,
-    task_namespace: namespace,
-    task_name: name,
-    status: item.status,
-    is_root: item.is_root,
-    admitted_by: item.is_root ? "root" : null,
-    excluded_at: null,
-    excluded_reason: null,
-    attempts: counted ? item.attempts : 0,
-    interruptions: counted ? item.interruptions : 0,
-  };
-}
-
-/**
- * The partial membership: roots first, then every frontier item not yet
- * seen, keyed by instance id (a plan holds one instance per completion,
- * so the instance id is also unique per task within it).
- */
-export function partialPlanView(
-  roots: FrontierMember[],
-  frontier: BuildFrontier,
-): PlanView {
-  const byInstance = new Map<string, PlanMember>();
-  for (const item of [
-    ...roots,
-    ...frontier.running,
-    ...frontier.runnable,
-    ...frontier.discovery_jobs,
-  ]) {
-    if (!byInstance.has(item.instance_id)) {
-      byInstance.set(item.instance_id, memberFromFrontier(item));
-    }
-  }
-  return { members: [...byInstance.values()], edges: [], complete: false };
 }
 
 export function fullPlanView(graph: PlanGraph): PlanView {
-  return { members: graph.members, edges: graph.edges, complete: true };
+  return { members: graph.members, edges: graph.edges };
 }
 
 /** The graph's nodes and edges as the DAG draws them. */

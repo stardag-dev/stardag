@@ -89,8 +89,6 @@ interface BuildSchedulingPanelProps {
   frontier: BuildFrontier | null;
   frontierError: string | null;
   refreshToken?: number;
-  // False when the build view's member list is partial (roots + frontier).
-  membershipComplete?: boolean;
   onOpenTask?: (taskId: string) => void;
 }
 
@@ -113,7 +111,6 @@ export function BuildSchedulingPanel({
   frontier,
   frontierError,
   refreshToken = 0,
-  membershipComplete = true,
   onOpenTask,
 }: BuildSchedulingPanelProps) {
   const [open, setOpen] = useState(false);
@@ -228,7 +225,6 @@ export function BuildSchedulingPanel({
             plans={plans}
             error={plansError}
             activePlanComplete={frontier?.plan_complete ?? false}
-            membershipComplete={membershipComplete}
           />
           <h4 className="border-t border-gray-200 pt-3 text-xs font-semibold tracking-wide text-gray-500 uppercase dark:border-gray-700 dark:text-gray-400">
             Scheduling

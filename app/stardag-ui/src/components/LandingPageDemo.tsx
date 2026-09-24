@@ -104,7 +104,6 @@ const JSON_DATA = {
 // Mock plan matching the ML pipeline structure. Node ids stand in for
 // instance ids, as in a real plan graph.
 const MOCK_PLAN: PlanView = {
-  complete: true,
   members: [
     {
       task_id: "dump-1",

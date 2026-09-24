@@ -203,7 +203,7 @@ function BuildViewForIdentity({
 
   const dag = (
     <DagGraph
-      view={view ?? { members: [], edges: [], complete: true }}
+      view={view ?? { members: [], edges: [] }}
       selectedTaskId={selectedTaskId}
       onTaskClick={setSelectedTaskId}
       mutedTaskIds={mutedTaskIds}
@@ -280,7 +280,6 @@ function BuildViewForIdentity({
                     frontier={frontier}
                     frontierError={plan.frontierError}
                     refreshToken={refreshToken}
-                    membershipComplete={view?.complete ?? true}
                     onOpenTask={setSelectedTaskId}
                   />
                   <BuildControlsDialog
@@ -348,7 +347,16 @@ function BuildViewForIdentity({
                 >
                   {showDag && (
                     <div id="build-dag-panel" className="h-full">
-                      {dag}
+                      {plan.planError ? (
+                        <p
+                          role="alert"
+                          className="p-4 text-sm text-red-600 dark:text-red-400"
+                        >
+                          {plan.planError}
+                        </p>
+                      ) : (
+                        dag
+                      )}
                     </div>
                   )}
                 </Panel>
