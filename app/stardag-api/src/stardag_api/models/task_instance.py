@@ -66,7 +66,7 @@ class TaskInstance(EnvironmentScopedMixin, Base):
             ["environment_id", "deployment_id"],
             ["deployment.environment_id", "deployment.id"],
             name="fk_task_instance_deployment",
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
         ),
         ForeignKeyConstraint(
             ["environment_id", "settings_hash"],

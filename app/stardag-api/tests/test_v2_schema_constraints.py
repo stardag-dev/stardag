@@ -11,8 +11,9 @@ constraint, and which is easy to get subtly wrong in DDL.
   task that named one of its plans as claim holder keeps its row — the
   column-list ``ON DELETE SET NULL (col)`` form, which nulls only the
   pointer and not the composite key's other columns (S17).
-- ``deployment`` is ``ON DELETE RESTRICT`` from everywhere, yet deleting a
-  whole environment still works.
+- ``deployment`` is ``ON DELETE NO ACTION`` from everywhere: an explicit
+  delete of a referenced deployment is refused, yet deleting a whole
+  environment around a populated scope still works.
 """
 
 from __future__ import annotations
@@ -135,6 +136,77 @@ async def _claimed_member(session: AsyncSession, env: UUID) -> dict[str, UUID]:
     return ids
 
 
+async def _full_scope(session: AsyncSession, env: UUID) -> dict[str, UUID]:
+    """:func:`_claimed_member`, plus what else a populated scope holds: an
+    upstream instance of a second task, the edge between the two, a second
+    plan (another build) holding the upstream, and a claim's limit key —
+    every row that references the deployment, in every table that does."""
+    ids = await _claimed_member(session, env)
+    more = {k: uuid4() for k in ("build2", "plan2", "task2", "instance2")}
+    ids.update(more)
+    await _exec(
+        session,
+        "INSERT INTO build (id, environment_id, name, root_task_ids, last_active_at)"
+        " VALUES (:build2, :env, 'b2', '[]', now())",
+        env=env,
+        **more,
+    )
+    await _exec(
+        session,
+        "INSERT INTO plan (id, environment_id, build_id, deployment_id,"
+        " settings_hash, generation, activated_at)"
+        " VALUES (:plan2, :env, :build2, :deployment, :hash, 1, now())",
+        env=env,
+        hash=SETTINGS_HASH,
+        **ids,
+    )
+    await _exec(
+        session,
+        "INSERT INTO task (id, environment_id, task_id, task_name)"
+        " VALUES (:task2, :env, :task_id, 'U')",
+        env=env,
+        task_id=str(more["task2"]),
+        **more,
+    )
+    await _exec(
+        session,
+        "INSERT INTO task_instance (id, environment_id, deployment_id,"
+        " settings_hash, instance_hash, task_pk, body, expanded_at)"
+        " VALUES (:instance2, :env, :deployment, :hash, 'u', :task2, '{}', now())",
+        env=env,
+        hash=SETTINGS_HASH,
+        **ids,
+    )
+    await _exec(
+        session,
+        "INSERT INTO task_instance_dependency (environment_id,"
+        " downstream_instance_id, upstream_instance_id, deployment_id,"
+        " settings_hash) VALUES (:env, :instance, :instance2, :deployment, :hash)",
+        env=env,
+        hash=SETTINGS_HASH,
+        **ids,
+    )
+    await _exec(
+        session,
+        "INSERT INTO plan_member (environment_id, plan_id, task_pk, instance_id,"
+        " deployment_id, settings_hash, is_root, admitted_by)"
+        " VALUES (:env, :plan2, :task2, :instance2, :deployment, :hash, true,"
+        " 'root')",
+        env=env,
+        hash=SETTINGS_HASH,
+        **ids,
+    )
+    await _exec(
+        session,
+        "INSERT INTO task_limit_key (id, environment_id, task_pk, key)"
+        " VALUES (:id, :env, :task, 'k')",
+        id=uuid4(),
+        env=env,
+        **ids,
+    )
+    return ids
+
+
 @pytest.fixture
 async def other_environment(async_session: AsyncSession) -> UUID:
     await _exec(
@@ -206,7 +278,11 @@ async def test_deleting_a_build_cascades_its_plans_and_keeps_history(
 async def test_deployment_is_restricted_but_an_environment_can_be_deleted(
     async_session: AsyncSession, other_environment: UUID
 ):
-    ids = await _claimed_member(async_session, other_environment)
+    """An explicit delete of a referenced deployment is refused; deleting
+    the environment around a fully populated scope is not. ``NO ACTION``,
+    not ``RESTRICT``: the check runs at the end of the statement, after the
+    environment's cascade has removed every row that referenced it."""
+    ids = await _full_scope(async_session, other_environment)
     await async_session.commit()
 
     with pytest.raises(IntegrityError, match="fk_(task_instance|plan)_deployment"):
@@ -219,8 +295,21 @@ async def test_deployment_is_restricted_but_an_environment_can_be_deleted(
         async_session, "DELETE FROM environments WHERE id = :id", id=other_environment
     )
     await async_session.commit()
-    remaining = await async_session.scalar(
-        text("SELECT count(*) FROM deployment WHERE environment_id = :env"),
-        {"env": other_environment},
-    )
-    assert remaining == 0
+    for table in (
+        "deployment",
+        "settings",
+        "build",
+        "plan",
+        "plan_member",
+        "task",
+        "task_instance",
+        "task_instance_dependency",
+        "task_limit_key",
+        "execution",
+        "event",
+    ):
+        remaining = await async_session.scalar(
+            text(f"SELECT count(*) FROM {table} WHERE environment_id = :env"),
+            {"env": other_environment},
+        )
+        assert remaining == 0, table

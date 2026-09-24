@@ -5,8 +5,12 @@ deployment is created by ``POST /deployments`` **before** the deploy (the
 server assigns ``generation``) and activated after it succeeded; a
 ``local`` one is looked up or created by ``(environment, kind, code_id)``
 and born activated. "Current" for an app is the **activated row with the
-highest generation**. Referenced ``ON DELETE RESTRICT`` from everywhere, so
-retention of a retired deployment's instances has to be explicit.
+highest generation**. Referenced ``ON DELETE NO ACTION`` from everywhere, so
+retention of a retired deployment's instances has to be explicit. Not
+``RESTRICT``: the refusal of an explicit delete is the same, but ``NO
+ACTION`` is checked at the end of the statement, so deleting an environment
+(whose cascade removes the deployment and its referencing rows together)
+never depends on the order the cascade visits them in.
 """
 
 from __future__ import annotations

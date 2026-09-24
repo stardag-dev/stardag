@@ -373,7 +373,10 @@ are different constructions of one promise).
 
 Edges belong to no plan and are never deleted (retention of instances and
 edges of retired deployments is STA-68's question, unchanged; `deployment`
-is `ON DELETE RESTRICT` from every table, so retention has to be explicit).
+is `ON DELETE NO ACTION` from every table, so retention has to be explicit;
+`NO ACTION` rather than `RESTRICT` because it is checked at the end of the
+statement, so deleting an environment — whose cascade removes the deployment
+and every row referencing it together — never depends on cascade order).
 
 ### `plan` — one request, under one scope
 
