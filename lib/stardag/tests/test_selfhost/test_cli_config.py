@@ -18,6 +18,7 @@ from stardag._cli.selfhost import (  # noqa: E402
     _build_config_env,
     _generate_jwt_keypair,
     _latest_released_server_version,
+    _parse_semver,
     _provided_config_flags,
     _record_deployed_server_version,
     _resolve_keep_warm,
@@ -441,6 +442,49 @@ def test_upgrade_version_rc_default_does_not_beat_newer_final(
     store: dict = {"server_version": "0.6.0"}
     _patch_meta_dict(monkeypatch, store)
     assert _resolve_upgrade_server_version("myapp", None) == "0.6.0"
+
+
+def test_parse_semver_orders_rc_by_number_both_directions():
+    """Two rc's of the same X.Y.Z order by their N, not just "any rc below
+    the final": a regression that treated all rc's of one X.Y.Z as equal
+    (or that got the comparison backwards) would pass the two tests above,
+    which only exercise rc-vs-final."""
+    rc1 = _parse_semver("0.6.0rc1")
+    rc2 = _parse_semver("0.6.0rc2")
+    final = _parse_semver("0.6.0")
+    assert rc1 is not None and rc2 is not None and final is not None
+    assert rc1 < rc2
+    assert rc2 < final
+    # And not just adjacent: a later rc than the recorded one is a real
+    # upgrade, in either direction of comparison.
+    assert not (rc2 < rc1)
+    assert not (rc2 == rc1)
+
+
+def test_upgrade_version_higher_rc_default_beats_lower_recorded_rc(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A deployment recorded on an older rc of the *same* X.Y.Z rolls
+    forward to a newer rc SDK default."""
+    monkeypatch.setattr(
+        "stardag._cli.selfhost.DEFAULT_SERVER_VERSION", "0.6.0rc2", raising=False
+    )
+    store: dict = {"server_version": "0.6.0rc1"}
+    _patch_meta_dict(monkeypatch, store)
+    assert _resolve_upgrade_server_version("myapp", None) == "0.6.0rc2"
+
+
+def test_upgrade_version_lower_rc_default_does_not_beat_higher_recorded_rc(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The reverse: a deployment already on the newer rc is not rolled back
+    to an older rc SDK default."""
+    monkeypatch.setattr(
+        "stardag._cli.selfhost.DEFAULT_SERVER_VERSION", "0.6.0rc1", raising=False
+    )
+    store: dict = {"server_version": "0.6.0rc2"}
+    _patch_meta_dict(monkeypatch, store)
+    assert _resolve_upgrade_server_version("myapp", None) == "0.6.0rc2"
 
 
 def test_generate_jwt_keypair_pem():
