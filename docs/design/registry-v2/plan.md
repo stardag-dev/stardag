@@ -342,6 +342,19 @@ assignee the maintainer.
       table; the Membership column explains its values on hover and the task
       panel header repeats them. Still not rebuilt: task search/explorer (no
       route over `task_instance.body`), claim triage, bulk cancel.
+      Audit follow-up (PR #401): the "no route" claims above are stale for
+      the build failure reason (`BuildResponse.error_message`, now a
+      banner), the claim holder (`claim_plan_id`/`claim_build_id`, named on
+      the task with the release addressed to the holder's plan), a task's
+      executions (`GET /tasks/{id}/executions`), a single deployment
+      (`GET /deployments/{id}`) and the wake-up flag
+      (`GET /builds/{id}/notify`): all served, all read now. The plan-graph
+      404 fallback is deleted. Also fixed: stop-dialog wording per mode, the
+      executor fallback in `stoppable.ts`, stop-list names and safety copy,
+      client-side fan-out batching (server-side grouping and depth are
+      STA-114), fullscreen graph, single-flight refresh, `platform/ui.md`.
+      Not ported: the node artifacts dot and executor tooltip — the graph
+      response carries neither.
 - [x] I10 — tests (merged, PR #389). One registry-live module per `live`
       row of the design's scenario table, each run serially green against a
       provisioned v2 registry; S3 stays `test_rollover`. The scenario table

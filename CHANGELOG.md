@@ -264,6 +264,38 @@ stop --mark-lost` frees a slot held by a gone execution).
 - **New: the deployments page** — every generation per app, current marked.
 - **Removed:** the task explorer and search (search over task parameters
   returns in a later release), claim triage and bulk cancel.
+- **Fixed, from a v1 → v2 audit (#401):**
+  1. The stop dialog says what the printed command does per mode:
+     `--not-in-current-plan` stops orphans and does not cancel the build.
+  2. The stop list reads the executor as the CLI does, falling back to
+     `executor_metadata.kind`.
+  3. The builds list says it is ordered by last activity, not "newest
+     first".
+  4. A failed build's reason (`error_message`) is a banner again, collapsed
+     once the plan's roots have completed.
+  5. The task names the build holding its claim (a link), and a release is
+     addressed to that build's plan, from any view, by any workspace member.
+  6. The status badge and the event log's Build column jump to another
+     build.
+  7. A task's executions across builds, ended ones included, with the Modal
+     call id and identifiers (`GET /tasks/{id}/executions`).
+  8. A deployment past the list's first 500 is read by id
+     (`GET /deployments/{id}`) instead of shown as a bare id.
+  9. The scheduling dialog: status-count chips, "a wake-up is queued"
+     instead of "needs intervention" (`GET /builds/{id}/notify`), a
+     spinner while reading, and no "the next tick completes the build" on a
+     failed or cancelled build.
+  10. The plan graph's "route not served" fallback and its "Partial" note
+      are gone; a 404 is a missing plan.
+  11. The plan graph opens fullscreen (Esc to leave).
+  12. Wide fan-outs collapse into batch nodes (client-side, "Group after",
+      default 5), expandable.
+  13. The stop list shows task names and statuses, v1's safety copy, two
+      distinct no-command messages and a remedy for rows without a call id.
+  14. A direct load of `/<ws>/<env>/limits` lands on the Concurrency page
+      (pinned by a routing test).
+  15. The build view runs one refresh at a time.
+  16. `platform/ui.md` describes the v2 UI.
 
 ## [Unreleased]
 
