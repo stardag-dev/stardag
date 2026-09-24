@@ -86,6 +86,11 @@ async def list_deployments(
     )
 
 
+@router.get("/deployments/{deployment_id}", response_model=DeploymentResponse)
+async def get_deployment(deployment_id: UUID, db: Db, auth: Auth):
+    return await deployments.get_deployment(db, auth.environment_id, deployment_id)
+
+
 @router.get("/settings/{settings_hash}", response_model=SettingsResponse)
 async def get_settings(settings_hash: str, db: Db, auth: Auth):
     return await deployments.get_settings(db, auth.environment_id, settings_hash)

@@ -316,9 +316,16 @@ async def exit_early(
 
 
 def _set_status(
-    build: Build, status: BuildStatus, *, now: datetime, triggered_by: str | None
+    build: Build,
+    status: BuildStatus,
+    *,
+    now: datetime,
+    triggered_by: str | None,
+    error_message: str | None = None,
 ) -> None:
     build.status = status
+    # Only a FAILED build carries a reason (``build.error_message``).
+    build.error_message = error_message if status == BuildStatus.FAILED else None
     build.completed_at = now
     build.last_active_at = now
     build.is_resumed = False
@@ -340,7 +347,9 @@ async def _terminal(
     COMPLETED, FAILED and CANCELLED), then record the build event."""
     released = await release_claims(session, build, reason=status.value, clock=clock)
     at = clock.tick()
-    _set_status(build, status, now=at, triggered_by=triggered_by)
+    _set_status(
+        build, status, now=at, triggered_by=triggered_by, error_message=error_message
+    )
     meta = dict(metadata or {})
     if released:
         meta["released_claims"] = released
@@ -526,6 +535,7 @@ async def resume_build(
             build.status = BuildStatus.RUNNING
             build.completed_at = None
             build.status_triggered_by_user_id = None
+            build.error_message = None
             changed = True
         if executor_metadata is not None:
             build.executor_metadata = executor_metadata

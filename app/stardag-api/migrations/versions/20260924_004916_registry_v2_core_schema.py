@@ -19,7 +19,7 @@ nothing to derive an instance, a plan or a membership from.
 revision (the v2 line is unreleased), so later I0 steps change it here
 rather than stacking revisions on a schema nobody has: step 3c moved the
 wake-up flags off ``build`` onto ``build_wake`` and added the attempt-count
-and quota indexes.
+and quota indexes; I5 added ``build.error_message``.
 
 Mechanics worth knowing:
 
@@ -114,6 +114,7 @@ def upgrade() -> None:
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("status_triggered_by_user_id", sa.String(length=255), nullable=True),
+        sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column(
             "is_resumed", sa.Boolean(), server_default=sa.text("false"), nullable=False
         ),

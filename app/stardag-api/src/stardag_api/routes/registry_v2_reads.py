@@ -1,9 +1,10 @@
-"""``/api/v2`` reads the SDK client calls beyond the frontier — the
-watchdog's build listing, a plan's roots, a task with its instances, the
-event log of a task or a build — and the task-artifact routes.
+"""``/api/v2`` reads beyond the frontier — builds (paged), plans (one, a
+build's, a plan's roots and graph), tasks (one with its instances, paged by
+status), the event log of a task or a build — and the task-artifact routes.
 
 Thin by rule: parse, resolve the environment from the credentials, call
-one service in ``services/reads.py`` or ``services/artifacts.py``.
+one service in ``services/reads.py``, ``services/plan_reads.py`` or
+``services/artifacts.py``.
 """
 
 from __future__ import annotations
@@ -16,25 +17,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
-from stardag_api.models import BuildStatus
-from stardag_api.schemas_v2 import (
-    EventListResponse,
-    EventResponse,
+from stardag_api.models import BuildStatus, TaskStatus
+from stardag_api.schemas_v2 import BuildResponse
+from stardag_api.schemas_v2_reads import (
     ArtifactUploadRequest,
     BuildListResponse,
-    BuildResponse,
+    EventListResponse,
+    EventResponse,
+    PlanDetailResponse,
+    PlanGraphResponse,
+    PlanListResponse,
     PlanRootsResponse,
     TaskArtifactListResponse,
     TaskArtifactResponse,
+    TaskListResponse,
     TaskResponse,
+    TaskSummaryResponse,
 )
-from stardag_api.services import artifacts, reads
+from stardag_api.services import artifacts, plan_reads, reads
 
 router = APIRouter(tags=["registry-v2"])
 
 Db = Annotated[AsyncSession, Depends(get_db)]
 Auth = Annotated[SdkAuth, Depends(require_sdk_auth)]
 Limit = Annotated[int, Query(ge=1, le=reads.MAX_LIST_LIMIT)]
+Cursor = Annotated[str | None, Query(max_length=512)]
 
 
 @router.get("/builds", response_model=BuildListResponse)
@@ -44,20 +51,62 @@ async def list_builds(
     status: BuildStatus | None = None,
     reactive_app_name: Annotated[str | None, Query(max_length=64)] = None,
     limit: Limit = 100,
+    cursor: Cursor = None,
 ):
-    rows = await reads.list_builds(
+    page = await reads.list_builds(
         db,
         auth.environment_id,
         status=status,
         reactive_app_name=reactive_app_name,
         limit=limit,
+        cursor=cursor,
     )
-    return BuildListResponse(builds=[BuildResponse.model_validate(b) for b in rows])
+    return BuildListResponse(
+        builds=[BuildResponse.model_validate(b) for b in page.builds],
+        total=page.total,
+        next_cursor=page.next_cursor,
+    )
+
+
+@router.get("/builds/{build_id}/plans", response_model=PlanListResponse)
+async def build_plans(build_id: UUID, db: Db, auth: Auth):
+    rows = await plan_reads.list_build_plans(db, auth.environment_id, build_id)
+    return PlanListResponse(
+        build_id=build_id,
+        plans=[PlanDetailResponse.model_validate(p) for p in rows],
+    )
+
+
+@router.get("/plans/{plan_id}", response_model=PlanDetailResponse)
+async def get_plan(plan_id: UUID, db: Db, auth: Auth):
+    return await plan_reads.get_plan_detail(db, auth.environment_id, plan_id)
 
 
 @router.get("/plans/{plan_id}/roots", response_model=PlanRootsResponse)
 async def plan_roots(plan_id: UUID, db: Db, auth: Auth):
-    return await reads.plan_roots(db, auth.environment_id, plan_id)
+    return await plan_reads.plan_roots(db, auth.environment_id, plan_id)
+
+
+@router.get("/plans/{plan_id}/graph", response_model=PlanGraphResponse)
+async def plan_graph(plan_id: UUID, db: Db, auth: Auth):
+    return await plan_reads.plan_graph(db, auth.environment_id, plan_id)
+
+
+@router.get("/tasks", response_model=TaskListResponse)
+async def list_tasks(
+    db: Db,
+    auth: Auth,
+    status: TaskStatus | None = None,
+    limit: Limit = 100,
+    cursor: Cursor = None,
+):
+    page = await reads.list_tasks(
+        db, auth.environment_id, status=status, limit=limit, cursor=cursor
+    )
+    return TaskListResponse(
+        tasks=[TaskSummaryResponse.model_validate(t) for t in page.tasks],
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)

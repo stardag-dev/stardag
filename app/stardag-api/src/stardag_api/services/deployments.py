@@ -471,6 +471,28 @@ async def activate_deployment(
         return DeploymentState.of(row, is_current=current == row.id)
 
 
+async def get_deployment(
+    session: AsyncSession, environment_id: UUID, deployment_id: UUID
+) -> DeploymentState:
+    """One deployment of the caller's environment, marked current or not."""
+    row = await session.scalar(
+        select(Deployment).where(
+            Deployment.environment_id == environment_id,
+            Deployment.id == deployment_id,
+        )
+    )
+    if row is None:
+        raise NotFound(
+            "unknown_deployment",
+            f"no deployment {deployment_id}",
+            deployment_id=str(deployment_id),
+        )
+    current = await current_deployment_id(
+        session, environment_id, row.kind, row.app_name
+    )
+    return DeploymentState.of(row, is_current=current == row.id)
+
+
 async def list_deployments(
     session: AsyncSession,
     environment_id: UUID,
