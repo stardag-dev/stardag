@@ -102,12 +102,12 @@ export function ConcurrencyLimits({
       setLimits(fetched);
       setError(null);
     } catch (err) {
-      if (!fresh()) return;
+      if (!fresh() || !stillOn(environmentId)) return;
       setError(
         err instanceof Error ? err.message : "Failed to load concurrency limits",
       );
     } finally {
-      if (fresh()) setLoading(false);
+      if (fresh() && stillOn(environmentId)) setLoading(false);
     }
   }, [environmentId]);
 
