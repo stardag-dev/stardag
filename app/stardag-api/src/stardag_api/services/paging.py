@@ -40,7 +40,10 @@ def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
         ):
             raise ValueError("cursor does not have the [at, id] shape")
         at, row_id = decoded
-        return datetime.fromisoformat(at), UUID(row_id)
+        parsed_at = datetime.fromisoformat(at)
+        if parsed_at.tzinfo is None:
+            raise ValueError("cursor timestamp is naive; expected a timezone offset")
+        return parsed_at, UUID(row_id)
     except (
         binascii.Error,
         ValueError,

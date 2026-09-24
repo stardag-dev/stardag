@@ -66,13 +66,22 @@ class TestInvalidCursor:
         assert exc_info.value.code == "invalid_cursor"
 
     def test_id_not_a_valid_uuid(self):
-        cursor = _b64(["2024-01-01T00:00:00", "not-a-uuid"])
+        cursor = _b64(["2024-01-01T00:00:00+00:00", "not-a-uuid"])
         with pytest.raises(BadRequest) as exc_info:
             decode_cursor(cursor)
         assert exc_info.value.code == "invalid_cursor"
 
     def test_at_not_a_valid_timestamp(self):
         cursor = _b64(["not-a-timestamp", str(uuid4())])
+        with pytest.raises(BadRequest) as exc_info:
+            decode_cursor(cursor)
+        assert exc_info.value.code == "invalid_cursor"
+
+    def test_at_is_a_naive_timestamp(self):
+        """A timestamp with no timezone offset would otherwise reach
+        asyncpg and fail comparison against the ``timestamptz`` sort key
+        instead of decoding to a clean 400."""
+        cursor = _b64(["2024-01-01T00:00:00", str(uuid4())])
         with pytest.raises(BadRequest) as exc_info:
             decode_cursor(cursor)
         assert exc_info.value.code == "invalid_cursor"

@@ -14,6 +14,8 @@ from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.services.transitions import Transition
 from tests.v2_support import Harness, item
@@ -69,6 +71,42 @@ async def test_a_plan_and_a_builds_plans(client: AsyncClient, h: Harness):
 
     assert await _status(client, f"/plans/{uuid4()}") == 404
     assert await _status(client, f"/builds/{uuid4()}/plans") == 404
+
+
+async def test_a_builds_plans_resolves_deployments_in_a_fixed_number_of_queries(
+    client: AsyncClient, h: Harness, async_engine: AsyncEngine
+):
+    """Each plan generation of a rollover names its own deployment, so a
+    build with several plans names several distinct deployments.
+    ``GET /builds/{id}/plans`` must resolve them together, not one
+    ``get_deployment`` round trip per plan — the statement count for a
+    build with many plans must not exceed that for a build with few."""
+
+    async def statement_count(n_replacements: int) -> int:
+        root = item(f"root-{n_replacements}")
+        build, _ = await h.planned([root])
+        for _ in range(n_replacements):
+            await h.plan(build, await h.new_deployment(), [root])
+
+        statements: list[str] = []
+
+        def capture(conn, cursor, statement, *args):  # noqa: ARG001
+            statements.append(statement)
+
+        event.listen(async_engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            response = await client.get(f"/api/v2/builds/{build}/plans")
+        finally:
+            event.remove(async_engine.sync_engine, "before_cursor_execute", capture)
+        assert response.status_code == 200, response.text
+        assert len(response.json()["plans"]) == n_replacements + 1
+        return len(statements)
+
+    few = await statement_count(1)
+    many = await statement_count(5)
+    assert many == few, (
+        f"the query count grew with the number of plans/deployments ({few} -> {many})"
+    )
 
 
 async def test_the_plan_graph_holds_members_and_member_edges(

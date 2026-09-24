@@ -43,7 +43,7 @@ from stardag_api.models import (
     TaskStatus,
 )
 from stardag_api.services.builds import get_build
-from stardag_api.services.deployments import DeploymentState, get_deployment
+from stardag_api.services.deployments import DeploymentState, get_deployments
 from stardag_api.services.frontier import FrontierMember, attempt_counts
 from stardag_api.services.registration import get_plan
 
@@ -101,13 +101,11 @@ async def _details(
     session: AsyncSession, environment_id: UUID, plans: list[Plan]
 ) -> list[PlanDetail]:
     counts = await _counts(session, [p.id for p in plans])
-    deployments: dict[UUID, DeploymentState] = {}
+    deployments = await get_deployments(
+        session, environment_id, [p.deployment_id for p in plans]
+    )
     out = []
     for plan in plans:
-        if plan.deployment_id not in deployments:
-            deployments[plan.deployment_id] = await get_deployment(
-                session, environment_id, plan.deployment_id
-            )
         members, roots, excluded, by_status = counts.get(plan.id, (0, 0, 0, {}))
         out.append(
             PlanDetail(

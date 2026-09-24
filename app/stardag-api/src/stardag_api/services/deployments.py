@@ -493,6 +493,61 @@ async def get_deployment(
     return DeploymentState.of(row, is_current=current == row.id)
 
 
+async def get_deployments(
+    session: AsyncSession, environment_id: UUID, deployment_ids: list[UUID]
+) -> dict[UUID, DeploymentState]:
+    """The named deployments, each marked current or not, in two queries
+    total regardless of how many distinct deployments or apps are named —
+    a caller resolving several deployments (a build's plans) should call
+    this once rather than :func:`get_deployment` per id."""
+    if not deployment_ids:
+        return {}
+    rows = (
+        await session.scalars(
+            select(Deployment).where(
+                Deployment.environment_id == environment_id,
+                Deployment.id.in_(set(deployment_ids)),
+            )
+        )
+    ).all()
+    found = {row.id: row for row in rows}
+    for deployment_id in deployment_ids:
+        if deployment_id not in found:
+            raise NotFound(
+                "unknown_deployment",
+                f"no deployment {deployment_id}",
+                deployment_id=str(deployment_id),
+            )
+    modal_app_names = {row.app_name for row in rows if row.kind is DeploymentKind.MODAL}
+    current_ids: set[UUID] = set()
+    if modal_app_names:
+        current_ids = set(
+            (
+                await session.scalars(
+                    select(Deployment.id)
+                    .distinct(Deployment.kind, Deployment.app_name)
+                    .where(
+                        Deployment.environment_id == environment_id,
+                        Deployment.kind == DeploymentKind.MODAL,
+                        Deployment.app_name.in_(modal_app_names),
+                        Deployment.activated_at.is_not(None),
+                    )
+                    .order_by(
+                        Deployment.kind,
+                        Deployment.app_name,
+                        Deployment.generation.desc(),
+                    )
+                )
+            ).all()
+        )
+    return {
+        deployment_id: DeploymentState.of(
+            found[deployment_id], is_current=deployment_id in current_ids
+        )
+        for deployment_id in deployment_ids
+    }
+
+
 async def list_deployments(
     session: AsyncSession,
     environment_id: UUID,
