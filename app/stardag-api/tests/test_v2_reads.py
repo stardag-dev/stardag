@@ -268,3 +268,83 @@ async def test_artifact_quota_serialises_on_the_task_row_lock(
     refused = await uploading
     assert refused.status_code == 429, refused.text
     assert refused.json()["detail"]["code"] == "artifacts_per_task_limit"
+
+
+@pytest.fixture
+def artifact_quota(monkeypatch: pytest.MonkeyPatch) -> int:
+    monkeypatch.setattr(limits_settings, "max_artifacts_per_environment_24h", 3)
+    return 3
+
+
+def _artifact(name: str) -> dict[str, Any]:
+    return {"type": "json", "name": name, "body": {"x": name}}
+
+
+async def test_the_artifact_quota_counts_inserted_artifacts_per_environment(
+    client: AsyncClient, h: Harness, artifact_quota: int
+):
+    """v1's 24-hour artifact count, per environment over ``task_artifact``:
+    an upload is charged only for the artifacts it inserted (a replaced body
+    is not new), across the environment's tasks; one that would go over is
+    refused 429 ``artifact_creation_limit`` and lands nothing."""
+    t, u = item("T"), item("U")
+    _, plan = await h.planned([t, u], [t, u])
+
+    def path(it: Any) -> str:
+        return f"/api/v2/plans/{plan.id}/members/{it.task_id}/artifacts"
+
+    for it, names in ((t, ["a", "b"]), (t, ["a"]), (u, ["c"])):
+        ok = await client.post(
+            path(it), json={"artifacts": [_artifact(n) for n in names]}
+        )
+        assert ok.status_code == 200, ok.text
+    assert await h.count("task_artifact") == artifact_quota
+
+    over = await client.post(path(u), json={"artifacts": [_artifact("d")]})
+    assert over.status_code == 429, over.text
+    detail = over.json()["detail"]
+    assert detail["code"] == "artifact_creation_limit"
+    assert (detail["limit"], detail["requested"]) == (artifact_quota, 1)
+    assert await h.count("task_artifact") == artifact_quota
+    replaced = await client.post(path(u), json={"artifacts": [_artifact("c")]})
+    assert replaced.status_code == 200, replaced.text
+
+
+async def test_two_concurrent_uploads_cannot_both_pass_the_artifact_quota(
+    client: AsyncClient, h: Harness, async_engine: AsyncEngine, artifact_quota: int
+):
+    """Two sessions on two different tasks, so the task row lock does not
+    order them: one has inserted two artifacts and holds the quota's
+    advisory lock, uncommitted, when the other uploads two more. Each alone
+    is within the quota; together they are over it. The second waits on the
+    per-environment lock, counts the first's rows once they commit, and is
+    refused."""
+    t, u = item("T"), item("U")
+    _, plan = await h.planned([t, u], [t, u])
+    task_pk = (await h.task(t))["id"]
+    async with async_engine.connect() as other:
+        for name in ("a", "b"):
+            await other.execute(
+                text(
+                    "INSERT INTO task_artifact (id, environment_id, task_pk,"
+                    " artifact_type, name, body_json)"
+                    " VALUES (:id, :env, :task_pk, 'json', :name, '{}'::jsonb)"
+                ),
+                {"id": uuid4(), "env": ENV, "task_pk": task_pk, "name": name},
+            )
+        await other.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"quota:task_artifact:{ENV}"},
+        )
+        uploading = asyncio.create_task(
+            client.post(
+                f"/api/v2/plans/{plan.id}/members/{u.task_id}/artifacts",
+                json={"artifacts": [_artifact("c"), _artifact("d")]},
+            )
+        )
+        assert await h.blocked_or_done(uploading)
+        await other.commit()
+    refused = await uploading
+    assert refused.status_code == 429, refused.text
+    assert refused.json()["detail"]["code"] == "artifact_creation_limit"
+    assert await h.count("task_artifact") == 2

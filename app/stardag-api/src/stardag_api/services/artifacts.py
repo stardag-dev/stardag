@@ -8,8 +8,10 @@ task in the caller's environment; the artifacts are then the task's.
 
 v1's semantics are kept: an artifact is unique per ``(task, type, name)``
 and a re-upload replaces its body (an upsert, so a retried upload is a
-no-op in effect). v1's guardrails too: the body-size limit and the
-artifacts-per-task limit (429, as v1), both disabled unless configured.
+no-op in effect). v1's guardrails too: the body-size limit, the
+artifacts-per-task limit (429, as v1), and the 24-hour artifact creation
+quota, per environment (``services/quotas.py``), all disabled unless
+configured.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import func, literal_column, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +36,7 @@ from stardag_api.limits import (
 from stardag_api.models import Task, TaskArtifact
 from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.services.errors import NotFound, TooManyRequests
+from stardag_api.services.quotas import charge_artifacts
 from stardag_api.services.transitions import lock_task, member_task_pk
 from stardag_api.services.tx import transaction
 
@@ -137,12 +140,17 @@ async def upload_artifacts(
                 for a in latest.values()
             ]
         )
-        await session.execute(
-            stmt.on_conflict_do_update(
-                constraint="uq_task_artifact_task_type_name",
-                set_={"body_json": stmt.excluded.body_json},
+        # ``xmax = 0`` holds for a row this statement inserted, not for one
+        # it updated: the quota charges only new artifacts.
+        inserted = (
+            await session.scalars(
+                stmt.on_conflict_do_update(
+                    constraint="uq_task_artifact_task_type_name",
+                    set_={"body_json": stmt.excluded.body_json},
+                ).returning(literal_column("xmax = 0"))
             )
-        )
+        ).all()
+        await charge_artifacts(session, environment_id, sum(inserted), now=now)
         return await _list(session, task_pk, task_id)
 
 

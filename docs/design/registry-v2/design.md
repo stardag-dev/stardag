@@ -521,7 +521,9 @@ order and counts live holders; a full key is 409
 for, so a task that has never held a claim is findable as queued on them
 when a slot frees (it holds no slot: its claim is not live). `distributed_lock` is **retired** (D11). `build_tick_summary`
 unchanged. The 24-hour creation quota counts `task_instance` rows — the
-table a non-significant field can inflate. Deleting a build is refused
+table a non-significant field can inflate — and a second one counts
+`task_artifact` rows (v1's artifact count), both per environment and charged
+only for rows actually inserted. Deleting a build is refused
 (409) while any of its plans holds a live claim **or any of its executions
 has `ended_at IS NULL`**; `stardag builds stop` is how those are ended first
 (it writes `ended_at` with outcome `stopped`, also for a container the

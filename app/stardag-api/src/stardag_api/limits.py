@@ -39,6 +39,9 @@ class LimitsSettings(BaseSettings):
     # rows, the table a non-significant field can inflate. Charged only for
     # rows actually inserted.
     max_task_instances_per_environment_24h: Annotated[int, Field(ge=1)] | None = None
+    # Per-environment 24h creation quota of task_artifact rows (v1's
+    # per-workspace artifact count, re-implemented on the v2 pattern).
+    max_artifacts_per_environment_24h: Annotated[int, Field(ge=1)] | None = None
 
     # Structural limits
     max_dependency_ids_per_task: Annotated[int, Field(ge=1)] | None = None
