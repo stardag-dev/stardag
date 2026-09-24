@@ -91,6 +91,49 @@ async def _hand_off_if_needed(
         )
 
 
+async def _flag_for_the_holder(
+    build_id: UUID, *, registry: RegistryABC, config: TickConfig, summary: TickSummary
+) -> None:
+    """A tick refused the lease hands its reason to the holder, then exits.
+
+    Whatever sent this tick -- a watchdog sweep, a wake-up that raced
+    another -- expected a pass over the frontier. The holder will not make
+    one on its own if it is lingering: it polls the wake-up flag, and a
+    time-based cause (a lapsed claim) sets none. So flag the build: a
+    lingering holder acts on its next poll or in its exit handshake, and a
+    holder mid-frontier acts on its next read, since it clears the flag
+    right before each one.
+
+    ``notify`` reads the lease after the flag is durable. If the holder had
+    already released it -- and so may have run its exit handshake before
+    the flag landed -- nobody will see the flag; spawn a successor, as a
+    worker's notify does, and likewise when the answer is unknown. Best-effort: a failure here leaves the outcome
+    ``lease_held`` and the build to the next wake-up or watchdog period.
+    """
+    try:
+        notified = await registry.build_notify_aio(
+            build_id, can_spawn=config.spawn_tick is not None
+        )
+        # Unknown (``None``) spawns, as in a worker's notify: a redundant
+        # tick costs a container, a skipped one costs the build its progress.
+        if not notified.needs_tick or notified.scheduler_live is True:
+            return
+        if config.spawn_tick is None:
+            return
+        build = await registry.build_get_aio(build_id)
+        if build.reactive_app_name is None:
+            return
+        await asyncio.to_thread(config.spawn_tick, build_id, build.reactive_app_name)
+        summary.successor_spawned += 1
+    except Exception as e:
+        logger.warning(
+            "Tick refused the scheduler lease for build %s could not flag it "
+            "for the holder (left to the next wake-up or the watchdog): %s",
+            build_id,
+            e,
+        )
+
+
 async def _drain(
     build_id: UUID, *, registry: RegistryABC, config: TickConfig, summary: TickSummary
 ) -> list[UUID]:
@@ -371,6 +414,9 @@ async def _tick_body(
         async with lease:
             if not lease.acquired:
                 summary.outcome = "lease_held"
+                await _flag_for_the_holder(
+                    build_id, registry=registry, config=config, summary=summary
+                )
                 return
             acquired = True
             if config.spawn_tick is None and not _warned_missing_spawner:

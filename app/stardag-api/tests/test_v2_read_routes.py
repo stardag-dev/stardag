@@ -229,6 +229,7 @@ async def test_one_deployment(client: AsyncClient, h: Harness):
     read = await _get(client, f"/deployments/{older}")
     assert read["id"] == str(older) and read["kind"] == "modal"
     assert read["is_current"] is False and read["app_name"] == "app"
+    assert "created" not in read  # a read is not a lookup-or-create
     assert (await _get(client, f"/deployments/{newer}"))["is_current"] is True
     assert await _status(client, f"/deployments/{uuid4()}") == 404
 

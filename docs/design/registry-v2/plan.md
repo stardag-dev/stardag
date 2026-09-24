@@ -312,7 +312,10 @@ assignee the maintainer.
       and member counts are known only for the active plan, via the
       frontier), no event read (`tasks show` cannot surface
       `TASK_STRUCTURE_DIVERGED`), no route for a bare observation
-      (`tasks check --report` is refused).
+      (`tasks check --report` is refused). `concurrency-limits` was
+      dropped by omission here (the server routes and client methods
+      existed; only the CLI module was missing) and restored in STA-108
+      (`list [--holders]`, `set`, `delete`, `holders`; no `evict`).
 - [x] I9 — UI (merged, PR #388). Every registry call
       is on `/api/v2`; scope keys, `build_config`, phantoms, external
       blockers and `/locks` are gone. Builds list, the build view over the
@@ -369,7 +372,11 @@ assignee the maintainer.
       timed); S37's missing activation (the real CLI with its activation
       step replaced). S21 and S37 recover through a watchdog sweep, by
       design: a lapse or a re-sent record flags nothing, and a lingering
-      tick polls the flag, not the frontier.
+      tick polls the flag, not the frontier. S21 drives the sweep
+      periodically (one per scheduler-lease TTL, until the takeover is on
+      the ledger), as the watchdog does: a sweep's tick that finds the
+      lease held exits, and one CI run's first sweep landed while the
+      spawning tick still lingered with it.
 
       Harness: `lapse_app` (a third provisioned app, so a sweep reaches only
       its own builds); the rollover app named per scenario by the deploying

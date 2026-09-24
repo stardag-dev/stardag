@@ -86,6 +86,11 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   present** in a warm container, so discovery saw it complete and never
   invalidated it. Each discovery walk begins an observation fence, and a
   mounted-volume hit older than it reloads the volume once per walk.
+- **Fixed: a watchdog sweep landing on a lingering tick was dropped.** A
+  tick refused the scheduler lease now flags the build before exiting
+  `lease_held`, so the holder acts on it (or a successor is spawned if the
+  holder had already left); a lapsed claim no longer waits a full watchdog
+  period for its takeover.
 - **Changed: a driver whose build the registry stopped stops cleanly.**
   When a claiming start is refused `build_not_running` (an operator
   cancelled the build), `build`/`build_aio` and the sequential engines stop
@@ -176,7 +181,7 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
 - **Changed: a refused claim renewal says how the claim ended**
   (`claim_outcome`: `released` when the build stopped, `taken_over`, or
   `null` while merely lapsed).
-- **Changed: deployment listings drop `created`**, which only means
+- **Changed: deployment listings and `GET /deployments/{id}` drop `created`**, which only means
   something on the create and activate responses.
 - **Changed: wake-up flags move to `build_wake`**, so flagging never locks
   the build row a claim holds.
@@ -212,8 +217,15 @@ deployments list`** (`stardag modal deployments` stays as an alias).
 - **Changed: `stardag tasks`** — `show`, new `check` (runs `complete()`
   locally and prints the observation; reports nothing), `retry`, `cancel`,
   new `exclude`. `tasks list` is removed.
-- **Removed: `stardag concurrency-limits`** (the whole group) and
-  `stardag builds cleanup`.
+- **Removed: `stardag builds cleanup`.**
+- **Restored: `stardag concurrency-limits`** (`list [--holders]`, `set`,
+  `delete`, `holders`) — dropped by omission between two v2 work packages
+  (the server routes and client methods already existed); no `evict`, since
+  a v2 slot is released by ending its execution (`stardag builds stop
+--mark-lost` is the recovery path for a holder whose worker is gone).
+  `list`/`holders` carry `in_use` and, with `--holders`, holder detail from
+  one call (`GET /concurrency-limits?include_holders=true`), not one extra
+  request per key as in v1.
 - `stardag modal deploy` records the deployment before the deploy and
   activates it after; a failed create or activation exits non-zero.
 - **Changed: a failed `stardag build` prints its summary.** Build id,

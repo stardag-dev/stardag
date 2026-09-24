@@ -42,6 +42,11 @@ Usage:
     stardag plans show <plan-id>
     stardag deployments list [--app A] [--kind modal|local] [--current]
 
+    stardag concurrency-limits list [--holders]
+    stardag concurrency-limits set <key> <max_concurrent>
+    stardag concurrency-limits delete <key> [--yes]
+    stardag concurrency-limits holders <key> [--limit N]
+
     stardag tasks show <task-id>
     stardag tasks check <task-id> --module <import path>
     stardag tasks retry <task-id> --build <build-id>
@@ -83,6 +88,7 @@ from stardag._cli import (
     deployments,
     environment,
     executions,
+    limits,
     plans,
     tasks,
 )
@@ -104,6 +110,7 @@ app.add_typer(executions.app, name="executions")
 app.add_typer(plans.app, name="plans")
 app.add_typer(deployments.app, name="deployments")
 app.add_typer(tasks.app, name="tasks")
+app.add_typer(limits.app, name="concurrency-limits")
 app.command("build")(build_command)
 
 # Add modal subcommand only if modal is installed

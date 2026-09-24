@@ -460,8 +460,8 @@ shares them): `linger_seconds` (default 120), `poll_interval_seconds` (3),
 never per-trigger.
 
 **Named concurrency limits** are enforced registry-side, across builds.
-Configure caps (`PUT /api/v2/concurrency-limits/gpu {"max_concurrent": 4}`)
-and tag tasks on the app:
+Configure caps (`stardag concurrency-limits set gpu 4`) and tag tasks on
+the app:
 
 ```{.python notest}
 app = sd_modal.StardagApp(
@@ -639,9 +639,9 @@ Two caveats worth designing around:
 
 Named concurrency limits are enforced registry-side in reactive mode —
 across builds, not just within one. Configure caps per environment
-(`PUT /api/v2/concurrency-limits/{key}` with `{"max_concurrent": N}`) and
-tag tasks with keys on the app (deployed configuration, applied
-consistently by every scheduler tick):
+(`stardag concurrency-limits set <key> <max_concurrent>`) and tag tasks
+with keys on the app (deployed configuration, applied consistently by
+every scheduler tick):
 
 ```{.python notest}
 app = sd_modal.StardagApp(

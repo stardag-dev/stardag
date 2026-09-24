@@ -25,6 +25,8 @@ from stardag.build._registration import new_id
 from stardag.registry import (
     BuildInfo,
     BuildNotifyResult,
+    ConcurrencyLimitHolderInfo,
+    ConcurrencyLimitInfo,
     DeploymentInfo,
     ExecutionInfo,
     PlanRoots,
@@ -631,6 +633,49 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
 
     def concurrency_limit_list(self) -> dict[str, int]:
         return dict(sorted(self.limits.items()))
+
+    def concurrency_limit_list_detailed(
+        self, *, include_holders: bool = False
+    ) -> list[ConcurrencyLimitInfo]:
+        """Mirrors the server's ``list_limits``: ``in_use`` from the same
+        ``live()`` definition the claiming start enforces against, holders
+        added only when asked."""
+        in_use_by_key: dict[str, int] = {}
+        holders_by_key: dict[str, list[ConcurrencyLimitHolderInfo]] = {}
+        for task in self.tasks.values():
+            if not self.live(task) or not task.limit_keys:
+                continue
+            for key in task.limit_keys:
+                in_use_by_key[key] = in_use_by_key.get(key, 0) + 1
+            if not include_holders:
+                continue
+            plan = self.plans.get(task.claim_plan_id) if task.claim_plan_id else None
+            if plan is None:
+                continue
+            execution = (
+                self.executions.get(task.execution_id) if task.execution_id else None
+            )
+            holder = ConcurrencyLimitHolderInfo(
+                task_id=task.task_id,
+                task_name=task.task_name,
+                build_id=plan.build_id,
+                plan_id=plan.id,
+                execution_id=task.execution_id,
+                started_at=execution.started_at if execution else None,
+            )
+            for key in task.limit_keys:
+                holders_by_key.setdefault(key, []).append(holder)
+        for holders in holders_by_key.values():
+            holders.sort(key=lambda h: (h.started_at is None, h.started_at, h.task_id))
+        return [
+            ConcurrencyLimitInfo(
+                key=key,
+                max_concurrent=max_concurrent,
+                in_use=in_use_by_key.get(key, 0),
+                holders=holders_by_key.get(key, []) if include_holders else None,
+            )
+            for key, max_concurrent in sorted(self.limits.items())
+        ]
 
     # -- reactive scheduling ---------------------------------------------------------------
 
