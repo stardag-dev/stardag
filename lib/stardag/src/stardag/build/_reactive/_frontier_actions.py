@@ -190,7 +190,12 @@ async def _discovery_job(
     result: PassResult,
     lease_lost: "LeaseLost",
 ) -> None:
-    """Expand one unexpanded member and register it with its closure."""
+    """Expand one unexpanded member and register it with its closure.
+
+    The lease is checked before the walk and again before every write the
+    walk leads to (the registration, an exclusion): discovery runs user
+    code and completion checks, and can outlive the lease.
+    """
     if _stop_for_lost_lease(lease_lost, result):
         return
     try:
@@ -203,13 +208,19 @@ async def _discovery_job(
         # importable here, a requires() that raised, a conflicting or
         # unstable construction). A completion check that raised is an
         # outage and propagates: the next tick tries again.
+        if _stop_for_lost_lease(lease_lost, result):
+            return
         await _exclude(registry, plan_id, member, e, summary)
+        return
+    if _stop_for_lost_lease(lease_lost, result):
         return
     try:
         await register_members_aio(registry, plan_id, walk.items())
     except APIError as e:
         if e.code != "instance_conflict":
             raise
+        if _stop_for_lost_lease(lease_lost, result):
+            return
         await _exclude(registry, plan_id, member, e, summary)
         return
     summary.discovered += 1
@@ -229,8 +240,9 @@ async def _spawn(
 ) -> None:
     """Claim one runnable member, spawn it, record its ref.
 
-    Checks the lease immediately before the claim: once it is lost, no new
-    claim is taken. A claim already granted is carried through its spawn
+    Checks the lease on entry and again immediately before the claim (after
+    the executor-metadata await): once it is lost, no new claim is taken.
+    A claim already granted is carried through its spawn
     and ref — the claim, not the lease, is what makes the task's execution
     exclusive, and abandoning it would strand it until its TTL lapses.
     """
@@ -243,6 +255,8 @@ async def _spawn(
         metadata = await task_executor.get_executor_metadata(task)
     except Exception:
         metadata = None
+    if _stop_for_lost_lease(lease_lost, result):
+        return
     execution_id = new_id()
     try:
         await registry.member_start_aio(

@@ -135,6 +135,21 @@ class TestStaticPhase:
             execution = registry.executions[claim["execution_id"]]
             assert execution.outcome == "completed"
 
+    async def test_the_whole_ledger_lists_ended_executions(
+        self, engine, default_in_memory_fs_target: Target
+    ):
+        """``include_ended`` (the fake follows the server's seam): every
+        execution the build granted, where the default lists none once all
+        have ended."""
+        registry = InMemoryRegistry()
+        leaf, mid, root = _chain()
+        await engine([root], registry=registry)
+        (build_id,) = registry.builds
+        assert registry.build_list_executions(build_id) == []
+        ledger = registry.build_list_executions(build_id, include_ended=True)
+        assert {e.task_id for e in ledger} == {str(t.id) for t in (leaf, mid, root)}
+        assert {e.outcome for e in ledger} == {"completed"}
+
     async def test_a_yield_is_sent_once_with_suspend_false_and_keeps_the_claim(
         self, engine, default_in_memory_fs_target: Target
     ):
@@ -414,6 +429,13 @@ class TestDeployments:
         assert (deployment.kind, deployment.code_id) == ("local", "test-code")
         assert deployment.activated_at is not None
         assert {p.deployment_id for p in registry.plans.values()} == {deployment.id}
+        # Client-minted ids (a uuid7 per lookup-or-create), and the lookup
+        # keeps the first: the second build's minted id was not used.
+        creates = registry.calls_to("deployment_create")
+        assert len(creates) == 2
+        assert all(c["deployment_id"] is not None for c in creates)
+        assert creates[0]["deployment_id"] != creates[1]["deployment_id"]
+        assert deployment.id == creates[0]["deployment_id"]
 
     async def test_a_build_whose_tasks_run_on_an_app_plans_under_its_current_deployment(
         self, default_in_memory_fs_target: Target

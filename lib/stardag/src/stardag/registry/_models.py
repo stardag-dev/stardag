@@ -301,10 +301,12 @@ class TaskInfo(_Response):
     output_uri: str | None = None
     status: str | None = None
     status_at: datetime | None = None
+    #: The latest start (the current execution's).
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
     claim_expires_at: datetime | None = None
+    #: The execution the task's claim names (live or lapsed), if any.
     execution_id: UUID | None = None
     instances: list["TaskInstanceInfo"] = Field(default_factory=list)
 

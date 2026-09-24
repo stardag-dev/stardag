@@ -2368,6 +2368,20 @@ class TestInputConcurrency:
         with pytest.raises(StardagError, match="'worker_default'"):
             self._concurrency(app)
 
+    def test_a_packed_bootstrap_is_refused_at_deploy(self):
+        """The bootstrap walks the DAG under its build's settings
+        (``settings_applied``), so it is held to the same rule."""
+        from stardag.exceptions import StardagError
+
+        with pytest.raises(StardagError, match="'bootstrap'"):
+            self._concurrency(
+                self._app(
+                    bootstrap_settings=FunctionSettings(
+                        image=_make_image(), max_concurrent_inputs=4
+                    )
+                )
+            )
+
     def test_an_explicit_one_is_accepted(self):
         """``max_concurrent_inputs=1`` says what the refusal asks for, and
         the tick's declaration does not reach the sync watchdog."""

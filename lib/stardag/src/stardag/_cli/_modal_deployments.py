@@ -55,13 +55,16 @@ def _create_deployment(
     )
 
 
-def _activate_deployment(registry, deployment_id, app_name: str) -> None:
-    """Mark the deployment live now that the deploy succeeded. A failure
-    exits non-zero: until it lands, no tick of the new code can plan (they
-    exit ``superseded``) and running reactive builds stay on the old code.
+def _activate_deployment(
+    registry, deployment_id, app_name: str, *, modal_app_id: str | None = None
+) -> None:
+    """Mark the deployment live now that the deploy succeeded, recording the
+    Modal app id only the finished deploy knows. A failure exits non-zero:
+    until it lands, no tick of the new code can plan (they exit
+    ``superseded``) and running reactive builds stay on the old code.
     Re-sending is idempotent."""
     try:
-        info = registry.deployment_activate(deployment_id)
+        info = registry.deployment_activate(deployment_id, modal_app_id=modal_app_id)
     except Exception as e:
         error_console.print(
             f"[bold red]Deployed {app_name} but could not activate deployment "

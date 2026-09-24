@@ -235,7 +235,7 @@ def _discovery_failed_req(
 
 
 def _executions_req(
-    build_id: UUID, not_in_current_plan: bool
+    build_id: UUID, not_in_current_plan: bool, include_ended: bool = False
 ) -> Request[list[ExecutionInfo]]:
     def parse(payload: Any) -> list[ExecutionInfo]:
         return [
@@ -247,7 +247,10 @@ def _executions_req(
         "GET",
         f"/builds/{build_id}/executions",
         parse,
-        params={"not_in_current_plan": "true"} if not_in_current_plan else {},
+        params={
+            **({"not_in_current_plan": "true"} if not_in_current_plan else {}),
+            **({"include_ended": "true"} if include_ended else {}),
+        },
         operation=f"List executions of build {build_id}",
     )
 
