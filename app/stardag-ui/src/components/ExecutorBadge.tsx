@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ExecutorMetadata } from "../types/task";
 import { modalAppUrl } from "../utils/modalLinks";
+import { Tooltip } from "./ui/Tooltip";
 
 interface ExecutorBadgeProps {
   executor?: string | null;
@@ -113,12 +114,11 @@ export function BuildExecutorChips({ metadata }: BuildExecutorChipsProps) {
           </span>
         ))}
       {metadata.reactive === true && (
-        <span
-          className="inline-flex items-center rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-800 dark:bg-sky-900/30 dark:text-sky-300"
-          title="Reactive build: scheduled by tick functions, no resident orchestrator"
-        >
-          reactive
-        </span>
+        <Tooltip content="Reactive build: scheduled by tick functions, no resident orchestrator">
+          <span className="inline-flex items-center rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-800 dark:bg-sky-900/30 dark:text-sky-300">
+            reactive
+          </span>
+        </Tooltip>
       )}
     </span>
   );

@@ -183,7 +183,6 @@ export function BuildControlsDialog({
       <ToolbarButton
         label="Build controls"
         hint="Executions to stop, and the build's recorded outcome"
-        align="right"
         onClick={() => setOpen(true)}
       >
         <svg

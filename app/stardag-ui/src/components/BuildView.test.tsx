@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BreadcrumbProvider } from "../context/BreadcrumbContext";
 import type { Build, BuildFrontier, PlanMember } from "../types/task";
@@ -17,13 +17,17 @@ vi.mock("../hooks/useDeployments", () => ({
 // The graph, the task panel and the self-fetching dialogs are not what this
 // file is about, and each drags in a renderer or a request stream.
 vi.mock("./DagGraph", () => ({ DagGraph: () => <div data-testid="dag" /> }));
-vi.mock("./TaskDetail", () => ({ TaskDetail: () => <div data-testid="detail" /> }));
+vi.mock("./TaskDetail", () => ({
+  TaskDetail: () => <div data-testid="detail" />,
+}));
 vi.mock("./BuildControlsDialog", () => ({ BuildControlsDialog: () => null }));
 vi.mock("./BuildInfoDialog", () => ({ BuildInfoDialog: () => null }));
 vi.mock("./BuildSchedulingPanel", () => ({ BuildSchedulingPanel: () => null }));
 
 const reload = vi.hoisted(() => vi.fn(async () => {}));
-const planState = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
+const planState = vi.hoisted(() => ({
+  current: {} as Record<string, unknown>,
+}));
 vi.mock("../hooks/useBuildPlan", () => ({
   useBuildPlan: () => planState.current,
 }));
@@ -209,7 +213,9 @@ describe("BuildView fullscreen graph", () => {
   it("opens the plan graph fullscreen and leaves it on Esc", () => {
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "Fullscreen plan graph" }));
-    const overlay = screen.getByRole("dialog", { name: "Plan graph, fullscreen" });
+    const overlay = screen.getByRole("dialog", {
+      name: "Plan graph, fullscreen",
+    });
     expect(overlay).toContainElement(screen.getByTestId("dag"));
     // Drawn once: the inline graph gives way to the overlay.
     expect(screen.getAllByTestId("dag")).toHaveLength(1);
@@ -227,6 +233,25 @@ describe("BuildView fullscreen graph", () => {
   });
 });
 
+describe("BuildView group-after control", () => {
+  it("sits in the plan graph header, and in the fullscreen header", () => {
+    renderView();
+    const toggle = screen.getByRole("button", { name: "Plan graph" });
+    const header = toggle.parentElement!;
+    expect(within(header).getByLabelText("Group after:")).toHaveValue(5);
+    // Not inside the graph.
+    expect(screen.getByTestId("dag")).not.toContainElement(
+      screen.getByLabelText("Group after:"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Fullscreen plan graph" }));
+    const overlay = screen.getByRole("dialog", {
+      name: "Plan graph, fullscreen",
+    });
+    expect(within(overlay).getByLabelText("Group after:")).toHaveValue(5);
+  });
+});
+
 describe("BuildView missing plan", () => {
   it("says the active plan is missing rather than drawing a partial one", () => {
     setPlan(makeBuild());
@@ -238,6 +263,7 @@ describe("BuildView missing plan", () => {
     renderView();
     expect(screen.getByRole("alert")).toHaveTextContent("plan-1 was not found");
     expect(screen.queryByTestId("dag")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Group after:")).not.toBeInTheDocument();
   });
 });
 

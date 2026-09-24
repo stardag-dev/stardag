@@ -1,5 +1,6 @@
 import type { TaskStatus } from "../types/task";
 import { shortBuildId } from "../utils/ids";
+import { Tooltip } from "./ui/Tooltip";
 
 interface StatusBadgeProps {
   status: TaskStatus;
@@ -91,37 +92,40 @@ export function StatusBadge({
     if (otherHolder && onOpenBuild) onOpenBuild(otherHolder);
   };
   return (
-    <span
-      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${
-        styles[status] ?? statusStyles.pending
-      } ${
-        clickable
-          ? "cursor-pointer hover:ring-2 hover:ring-blue-400 hover:ring-offset-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:ring-offset-gray-800"
-          : ""
-      }`}
-      title={
+    <Tooltip
+      content={
         otherHolder
           ? `${status} under build ${shortBuildId(otherHolder)}${
               clickable ? " (click to view)" : ""
             }`
           : undefined
       }
-      role={clickable ? "button" : undefined}
-      tabIndex={clickable ? 0 : undefined}
-      onClick={clickable ? open : undefined}
-      onKeyDown={
-        clickable
-          ? (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                open(e);
-              }
-            }
-          : undefined
-      }
     >
-      {otherHolder && <ExternalLinkIcon className="h-3 w-3" />}
-      {status}
-    </span>
+      <span
+        className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${
+          styles[status] ?? statusStyles.pending
+        } ${
+          clickable
+            ? "cursor-pointer hover:ring-2 hover:ring-blue-400 hover:ring-offset-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:ring-offset-gray-800"
+            : ""
+        }`}
+        role={clickable ? "button" : undefined}
+        tabIndex={clickable ? 0 : undefined}
+        onClick={clickable ? open : undefined}
+        onKeyDown={
+          clickable
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  open(e);
+                }
+              }
+            : undefined
+        }
+      >
+        {otherHolder && <ExternalLinkIcon className="h-3 w-3" />}
+        {status}
+      </span>
+    </Tooltip>
   );
 }

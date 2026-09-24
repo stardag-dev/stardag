@@ -10,7 +10,8 @@ import { CopyButton } from "./ModalExecution";
 import { TaskClaimPanel } from "./TaskClaimPanel";
 import { TaskEventLog } from "./TaskEventLog";
 import { TaskExecutions } from "./TaskExecutions";
-import { TaskInstances } from "./TaskInstances";
+import { TaskParameters } from "./TaskParameters";
+import { Tooltip } from "./ui/Tooltip";
 
 /** The build a task is opened from, when it is. */
 export interface TaskBuildContext {
@@ -50,7 +51,8 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 }
 
 /**
- * One completion: its status and claim, the instances that realise it,
+ * One completion: its status and claim, its parameters (over the instances
+ * that realise it),
  * every execution of it across builds (`GET /tasks/{id}/executions`,
  * ended ones included), and its artifacts.
  *
@@ -146,28 +148,29 @@ export function TaskDetail({
               {task ? qualifiedName(task.task_namespace, task.task_name) : "Task"}
             </h2>
             {onOpenTaskPage && (
-              <button
-                type="button"
-                onClick={onOpenTaskPage}
-                aria-label="Open task page"
-                title="Open task page"
-                className="flex-shrink-0 rounded p-0.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400"
-              >
-                <svg
-                  aria-hidden="true"
-                  className="h-4 w-4"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
+              <Tooltip content="Open task page">
+                <button
+                  type="button"
+                  onClick={onOpenTaskPage}
+                  aria-label="Open task page"
+                  className="flex-shrink-0 rounded p-0.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400"
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
-                  />
-                </svg>
-              </button>
+                  <svg
+                    aria-hidden="true"
+                    className="h-4 w-4"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
+                    />
+                  </svg>
+                </button>
+              </Tooltip>
             )}
           </div>
           <div className="flex items-center gap-1">
@@ -276,13 +279,11 @@ export function TaskDetail({
             </div>
           )}
 
-          <Section title={`Instances (${task.instances.length})`}>
-            <TaskInstances
-              instances={task.instances}
-              deploymentsById={deploymentsById}
-              planInstanceId={context?.planInstanceId}
-            />
-          </Section>
+          <TaskParameters
+            instances={task.instances}
+            deploymentsById={deploymentsById}
+            planInstanceId={context?.planInstanceId}
+          />
 
           <Section
             title={

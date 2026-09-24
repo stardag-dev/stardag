@@ -3,7 +3,9 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { PlanMember } from "../types/task";
 import type { PlanView } from "../utils/planGraph";
 
-vi.mock("../context/ThemeContext", () => ({ useTheme: () => ({ theme: "light" }) }));
+vi.mock("../context/ThemeContext", () => ({
+  useTheme: () => ({ theme: "light" }),
+}));
 
 import { DagGraph } from "./DagGraph";
 
@@ -48,21 +50,65 @@ function fanOut(n: number): PlanView {
 describe("DagGraph fan-out batching", () => {
   it("draws a wide fan-out as one batch node, expanded by a click", async () => {
     const onTaskClick = vi.fn();
+    const onBatchCountChange = vi.fn();
     const { container } = render(
       <div style={{ width: 800, height: 600 }}>
-        <DagGraph view={fanOut(8)} selectedTaskId={null} onTaskClick={onTaskClick} />
+        <DagGraph
+          view={fanOut(8)}
+          selectedTaskId={null}
+          onTaskClick={onTaskClick}
+          onBatchCountChange={onBatchCountChange}
+        />
       </div>,
     );
     expect(await screen.findByText("×8")).toBeInTheDocument();
-    expect(screen.getByText("(1 group)")).toBeInTheDocument();
-    expect(screen.getByLabelText("Group after:")).toHaveValue(5);
+    // The control lives in the panel header now; the graph reports.
+    expect(screen.queryByLabelText("Group after:")).toBeNull();
+    expect(onBatchCountChange).toHaveBeenLastCalledWith(1);
 
     const batch = container.querySelector('[data-id^="batch:"]') as HTMLElement;
     await act(async () => fireEvent.click(batch));
     expect(screen.queryByText("×8")).not.toBeInTheDocument();
     expect(screen.getAllByText("Shard")).toHaveLength(8);
     expect(onTaskClick).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Regroup" })).toBeInTheDocument();
+    expect(onBatchCountChange).toHaveBeenLastCalledWith(0);
+  });
+
+  it("reports an opened batch through a controlled expansion", async () => {
+    const onExpansionChange = vi.fn();
+    const { container, rerender } = render(
+      <div style={{ width: 800, height: 600 }}>
+        <DagGraph
+          view={fanOut(8)}
+          selectedTaskId={null}
+          onTaskClick={() => {}}
+          groupAfter={5}
+          expansion={{ cap: 5, ids: new Set() }}
+          onExpansionChange={onExpansionChange}
+        />
+      </div>,
+    );
+    await screen.findByText("×8");
+    const batch = container.querySelector('[data-id^="batch:"]') as HTMLElement;
+    await act(async () => fireEvent.click(batch));
+    const next = onExpansionChange.mock.calls[0][0];
+    expect(next.cap).toBe(5);
+    expect([...next.ids]).toEqual([batch.dataset.id]);
+
+    // Opened under another cap: ignored, so the batch is drawn again.
+    rerender(
+      <div style={{ width: 800, height: 600 }}>
+        <DagGraph
+          view={fanOut(8)}
+          selectedTaskId={null}
+          onTaskClick={() => {}}
+          groupAfter={6}
+          expansion={next}
+          onExpansionChange={onExpansionChange}
+        />
+      </div>,
+    );
+    expect(await screen.findByText("×8")).toBeInTheDocument();
   });
 
   it("opens the batch holding the selected task", async () => {

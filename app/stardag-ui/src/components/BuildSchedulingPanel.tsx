@@ -25,6 +25,7 @@ import { TickSummaryTrail } from "./TickSummaryTrail";
 import { ResultBanner } from "./ui/ResultBanner";
 import { Spinner } from "./ui/Spinner";
 import { ToolbarButton } from "./ui/ToolbarButton";
+import { Tooltip } from "./ui/Tooltip";
 
 // Enough ticks to see a repeating outcome without becoming a log viewer.
 const TICK_LIMIT = 20;
@@ -42,12 +43,11 @@ function MemberList({
 }) {
   return (
     <div>
-      <h4
-        className="mb-1 text-xs font-semibold tracking-wide text-gray-500 uppercase dark:text-gray-400"
-        title={help}
-      >
-        {title} ({items.length})
-      </h4>
+      <Tooltip content={help}>
+        <h4 className="mb-1 text-xs font-semibold tracking-wide text-gray-500 uppercase dark:text-gray-400">
+          {title} ({items.length})
+        </h4>
+      </Tooltip>
       {items.length === 0 ? (
         <p className="text-xs text-gray-500 dark:text-gray-400">None.</p>
       ) : (
@@ -322,13 +322,12 @@ function MemberCounts({ plan }: { plan: PlanDetail }) {
         </span>
       ))}
       {plan.excluded_count > 0 && (
-        <span
-          className="inline-flex items-baseline gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
-          title="Given up on: not scheduled, and not gating the build"
-        >
-          <span>excluded</span>
-          <span className="font-medium">{plan.excluded_count}</span>
-        </span>
+        <Tooltip content="Given up on: not scheduled, and not gating the build">
+          <span className="inline-flex items-baseline gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+            <span>excluded</span>
+            <span className="font-medium">{plan.excluded_count}</span>
+          </span>
+        </Tooltip>
       )}
     </div>
   );
@@ -368,12 +367,11 @@ function StateLine({
       )}
       <span>{text}</span>
       {frontier.reactive_app_name && (
-        <span
-          className="rounded bg-indigo-100 px-1.5 py-0.5 text-xs text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-300"
-          title="The reactive app whose scheduler ticks drive this build"
-        >
-          ⚡ {frontier.reactive_app_name}
-        </span>
+        <Tooltip content="The reactive app whose scheduler ticks drive this build">
+          <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-xs text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-300">
+            ⚡ {frontier.reactive_app_name}
+          </span>
+        </Tooltip>
       )}
     </div>
   );
