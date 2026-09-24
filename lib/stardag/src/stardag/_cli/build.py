@@ -9,7 +9,7 @@ the DAG locally and prints what a build would plan, writing nothing.
 
 import asyncio
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, Iterator, Optional
 from uuid import UUID
 
@@ -171,20 +171,49 @@ def build_command(
     with _profile(stardag_profile):
         try:
             checked = _parse_settings(settings)
-            roots = resolve_roots(refs, parse_params(param))
-        except (RefError, SettingsError) as e:
+        except SettingsError as e:
             error_console.print(f"[bold red]Error:[/bold red] {e}")
             raise typer.Exit(1)
 
-        if dry_run:
-            _dry_run(roots, checked, json_output)
-            return
-        if app_ref is not None:
-            _trigger(
-                app_ref, roots, checked, resume_id, reactive, description, json_output
-            )
-        else:
-            _build_here(roots, checked, resume_id, description, json_output)
+        # A root factory (module:attr callable) may read the environment,
+        # so --settings must be installed before resolve_roots imports and
+        # constructs the roots -- not only later, inside the build itself
+        # (sd.build/build_trigger apply it again there; nesting under the
+        # same, already-validated settings is a no-op re-entry, see
+        # resident_settings). A bare resume (no --settings given, checked
+        # is None) has nothing new to apply here, and must not pre-empt the
+        # build's own resolution of the resumed build's stored settings.
+        from stardag.build._settings import resident_settings
+
+        settings_ctx = (
+            resident_settings(checked) if checked is not None else nullcontext()
+        )
+        try:
+            with settings_ctx:
+                try:
+                    roots = resolve_roots(refs, parse_params(param))
+                except RefError as e:
+                    error_console.print(f"[bold red]Error:[/bold red] {e}")
+                    raise typer.Exit(1)
+
+                if dry_run:
+                    _dry_run(roots, checked, json_output)
+                    return
+                if app_ref is not None:
+                    _trigger(
+                        app_ref,
+                        roots,
+                        checked,
+                        resume_id,
+                        reactive,
+                        description,
+                        json_output,
+                    )
+                else:
+                    _build_here(roots, checked, resume_id, description, json_output)
+        except SettingsError as e:
+            error_console.print(f"[bold red]Error:[/bold red] {e}")
+            raise typer.Exit(1)
 
 
 def _build_here(

@@ -274,12 +274,13 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
     def build_list_running(
         self, *, reactive_app_name: str | None = None, limit: int = 100
     ) -> list[UUID]:
-        return [
-            b.id
-            for b in self.builds.values()
-            if b.status == "running"
-            and (reactive_app_name is None or b.reactive_app_name == reactive_app_name)
-        ][:limit]
+        # Delegate to build_list (most-recently-active first, per the
+        # server ordering), as the real client does -- not a fresh scan in
+        # insertion order, which would drift from it.
+        builds = self.build_list(
+            status="running", reactive_app_name=reactive_app_name, limit=limit
+        )
+        return [b.id for b in builds]
 
     def plan_roots_info(self, plan_id: UUID) -> PlanRoots:
         plan = self.plan(plan_id)

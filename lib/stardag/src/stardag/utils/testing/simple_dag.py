@@ -1,3 +1,5 @@
+import os
+
 from stardag import TargetTask, Task, auto_namespace
 from stardag.polymorphic import SubClass
 from stardag.target import LoadableTarget
@@ -45,6 +47,22 @@ def get_simple_dag():
     return RootTask(
         parent_task=ParentTask(param_ab_s=[(1, "a"), (2, "b")]),
     )
+
+
+#: Read by :func:`leaf_from_env`, a root factory (a ``module:attr`` root
+#: reference resolving to a zero-argument callable, per ``resolve_roots``)
+#: used to assert that ``stardag build``/``--dry-run`` install ``--settings``
+#: in the environment *before* resolving roots, not only later inside the
+#: build itself. Deliberately not ``STARDAG_``-prefixed: that prefix is
+#: reserved and refused by ``--settings`` (see ``build/_settings.py``).
+LEAF_FROM_ENV_VAR = "SIMPLE_DAG_LEAF_FROM_ENV_PARAM_B"
+
+
+def leaf_from_env() -> LeafTask:
+    """A root factory that reads :data:`LEAF_FROM_ENV_VAR` from the
+    environment, standing in for a real one that shapes its task graph from
+    a build's ``--settings``."""
+    return LeafTask(param_a=1, param_b=os.environ[LEAF_FROM_ENV_VAR])
 
 
 def get_simple_dag_expected_root_output():

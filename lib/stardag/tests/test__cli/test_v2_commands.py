@@ -54,6 +54,30 @@ class TestBuilds:
         ids = [b["id"] for b in json.loads(result.stdout)["builds"]]
         assert ids == [str(older), str(newer)]
 
+    def test_list_running_orders_by_last_active_at_not_insertion_order(
+        self, fake_registry
+    ):
+        """``build_list_running`` (used by the reactive watchdog, not the
+        CLI) must delegate to ``build_list`` rather than scan
+        ``self.builds`` in insertion order, or it drifts from both the
+        real client (which delegates the same way) and ``builds list``
+        above. Both builds stay "running" throughout, so this also
+        exercises the status filter ``build_list_running`` adds on top of
+        the shared ordering: created in insertion order older-then-newer,
+        the most-recently-active-first order puts `newer` first --
+        insertion order alone gets this backwards."""
+        from datetime import datetime, timedelta, timezone
+
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ticks = iter(t0 + timedelta(seconds=i) for i in range(10))
+        fake_registry.clock = lambda: next(ticks)
+
+        older = fake_registry.build_create(root_task_ids=["a"]).id  # t=0
+        newer = fake_registry.build_create(root_task_ids=["b"]).id  # t=1
+
+        assert fake_registry.build_list_running() == [newer, older]
+        assert fake_registry.build_list_running(limit=1) == [newer]
+
     def test_show_names_the_active_plan_and_counts(self, fake_registry, running_build):
         result = invoke("builds", "show", running_build.build_id, "--json")
         assert result.exit_code == 0, result.output

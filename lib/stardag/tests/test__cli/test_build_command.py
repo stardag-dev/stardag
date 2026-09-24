@@ -70,6 +70,33 @@ class TestDryRun:
         # restored afterward
         assert os.environ.get("STARDAG_PROFILE") is None
 
+    def test_settings_are_applied_before_roots_are_resolved(
+        self, default_in_memory_fs_target
+    ):
+        """--settings must be in the environment while ``resolve_roots``
+        imports and constructs the roots (a root factory may read it), not
+        only later inside the build itself -- for both --dry-run and the
+        real build."""
+        from stardag.utils.testing.simple_dag import LEAF_FROM_ENV_VAR, LeafTask
+
+        result = runner.invoke(
+            cli,
+            [
+                "build",
+                "stardag.utils.testing.simple_dag:leaf_from_env",
+                "--settings",
+                f"{LEAF_FROM_ENV_VAR}=from-settings",
+                "--dry-run",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        expected = LeafTask(param_a=1, param_b="from-settings")
+        assert payload["roots"] == [str(expected.id)]
+        # restored afterward
+        assert os.environ.get(LEAF_FROM_ENV_VAR) is None
+
 
 class TestRefusals:
     def test_reserved_settings_keys_are_refused(self):
