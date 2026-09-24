@@ -54,16 +54,18 @@ print(
 def scenario_image(env: dict[str, str] | None = None) -> modal.Image:
     """The scenario apps' image, optionally with extra environment baked in.
 
-    ``env`` is applied before the local source is added, because Modal
-    refuses a build step after ``add_local_*``. Only the rollover app passes
-    any (see ``rollover_app``); every other app uses ``image`` below.
+    ``env`` is applied to the base image, before anything local is added:
+    Modal refuses a build step after ``add_local_*``, and
+    ``with_stardag_on_image`` adds the local SDK checkout that way. Only the
+    rollover app passes any (see ``rollover_app``); every other app uses
+    ``image`` below.
     """
-    base = sd_modal.with_stardag_on_image(
-        modal.Image.debian_slim(python_version=python_version)
-    )
+    base = modal.Image.debian_slim(python_version=python_version)
     if env:
         base = base.env(env)
-    return base.add_local_python_source("stardag_integration_tests")
+    return sd_modal.with_stardag_on_image(base).add_local_python_source(
+        "stardag_integration_tests"
+    )
 
 
 image = scenario_image()
