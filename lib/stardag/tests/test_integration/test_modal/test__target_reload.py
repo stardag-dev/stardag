@@ -270,3 +270,250 @@ def test_ensure_fresh_volume_aio_works_across_event_loops(
     asyncio.run(_check())
 
     assert fake.aio_reload_count == 2
+
+
+# ---------------------------------------------------------------------------
+# A hit older than the current walk is refreshed (S5).
+# ---------------------------------------------------------------------------
+
+
+def _mounted_target(tmp_path, monkeypatch, fake):
+    """A ModalMountedVolumeFileTarget over ``tmp_path`` as the mount."""
+    from stardag.target import _freshness
+
+    monkeypatch.setattr(modal_target, "_get_volume", lambda _name: fake)
+    monkeypatch.setattr(_freshness, "_fence", 0.0)
+    target = modal_target.ModalMountedVolumeFileTarget.__new__(
+        modal_target.ModalMountedVolumeFileTarget
+    )
+    target._volume_name = "v"
+    target.volume = fake
+    target.local_path = tmp_path / "out.json"
+    return target
+
+
+def test_a_hit_from_before_the_walk_is_refreshed_and_a_deletion_seen(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A warm container's view can still hold a file another process
+    deleted. Once a walk has begun, a hit from an older view is not trusted:
+    the volume is reloaded once, and the deletion the reload brings in is
+    what ``exists`` answers."""
+    from stardag.target._freshness import begin_observation
+
+    output = tmp_path / "out.json"
+    output.write_text("{}")
+    fake = _FakeVolume(sync_reload_side_effect=lambda: output.unlink())
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+
+    # No walk yet: a hit is a hit, no reload (the old behaviour).
+    assert target.exists() is True
+    assert fake.reload_count == 0
+
+    begin_observation()
+    assert target.exists() is False
+    assert fake.reload_count == 1
+
+
+def test_one_reload_per_walk_serves_every_later_hit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    from stardag.target._freshness import begin_observation
+
+    (tmp_path / "out.json").write_text("{}")
+    fake = _FakeVolume()
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+
+    begin_observation()
+    assert target.exists() and target.exists() and target.exists()
+    assert fake.reload_count == 1
+
+    begin_observation()
+    assert target.exists()
+    assert fake.reload_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_stale_hit_is_refreshed_on_the_async_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    from stardag.target._freshness import begin_observation
+
+    output = tmp_path / "out.json"
+    output.write_text("{}")
+    fake = _FakeVolume(aio_reload_side_effect=lambda: output.unlink())
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+
+    begin_observation()
+    assert await target.exists_aio() is False
+    assert fake.aio_reload_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_walk_begins_an_observation(monkeypatch: pytest.MonkeyPatch):
+    """``walk_aio`` sets the fence, so every completion it asks for is
+    answered from a view at least as fresh as the walk."""
+    import stardag as sd
+    from stardag.build._registration import walk_aio
+    from stardag.target import _freshness
+
+    monkeypatch.setattr(_freshness, "_fence", 0.0)
+    before = time.monotonic()
+
+    @sd.task
+    def fence_probe(x: int) -> int:
+        return x
+
+    await walk_aio(fence_probe(x=1), check_stability=False)
+    assert _freshness.observation_fence() >= before
+
+
+# ---------------------------------------------------------------------------
+# A miss always reloads, walk or no walk. An earlier version let a miss
+# trust "a reload already covered this walk's fence"; the fence is
+# process-global and outlives the walk, so a warm worker checking its
+# yielded children read a finished child as missing and suspended again
+# (registry-live, PR #389: test_shared_structure_scope and S24).
+# ---------------------------------------------------------------------------
+
+
+def test_a_miss_after_a_walk_sees_a_write_landed_since(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A walk ran (fence set) and reloaded; another container then writes a
+    child's output. A later miss -- the worker's post-yield completeness
+    check, not part of any walk -- must reload and see it."""
+    from stardag.target._freshness import begin_observation
+
+    child = tmp_path / "child.json"
+    fake = _FakeVolume(sync_reload_side_effect=lambda: None)
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+    target.local_path = child
+
+    begin_observation()
+    assert target.exists() is False  # reload 1; nothing written yet
+    assert fake.reload_count == 1
+
+    # Written by another container; visible here only after a reload.
+    fake._sync_reload_side_effect = lambda: child.write_text("{}")
+    assert target.exists() is True
+    assert fake.reload_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_miss_after_a_walk_sees_a_write_landed_since_async(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    from stardag.target._freshness import begin_observation
+
+    child = tmp_path / "child.json"
+    fake = _FakeVolume()
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+    target.local_path = child
+
+    begin_observation()
+    assert await target.exists_aio() is False
+    fake._aio_reload_side_effect = lambda: child.write_text("{}")
+    assert await target.exists_aio() is True
+    assert fake.aio_reload_count == 2
+
+
+def test_a_miss_before_any_walk_always_reloads(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Outside of any walk (fence still 0), a miss must keep reloading on
+    every call -- unchanged from before the fence existed. Guards against
+    treating the "no walk, never reloaded" default (both 0.0) as already
+    covered."""
+    fake = _FakeVolume()
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+    target.local_path = tmp_path / "missing.json"
+
+    assert target.exists() is False
+    assert fake.reload_count == 1
+
+    assert target.exists() is False
+    assert fake.reload_count == 2
+
+
+# ---------------------------------------------------------------------------
+# The fence assignment is thread-safe and monotonic (Copilot #389).
+# ---------------------------------------------------------------------------
+
+
+def test_begin_observation_is_thread_safe_and_monotonic(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Two walks can begin concurrently on different threads. The older
+    walk's write must not land after the newer one's and move the fence
+    backwards, even though it computed an earlier timestamp."""
+    from stardag.target import _freshness
+
+    monkeypatch.setattr(_freshness, "_fence", 0.0)
+
+    def fake_monotonic() -> float:
+        if threading.current_thread().name == "older":
+            # Delay *after* computing the timestamp but before the older
+            # walk reaches the lock, so the newer walk finishes first.
+            time.sleep(0.2)
+            return 100.0
+        return 200.0
+
+    monkeypatch.setattr(_freshness.time, "monotonic", fake_monotonic)
+
+    results: dict[str, float] = {}
+
+    older = threading.Thread(
+        target=lambda: results.__setitem__("older", _freshness.begin_observation()),
+        name="older",
+    )
+    newer = threading.Thread(
+        target=lambda: results.__setitem__("newer", _freshness.begin_observation()),
+        name="newer",
+    )
+
+    older.start()
+    time.sleep(0.05)  # let the older thread enter its monotonic() delay first
+    newer.start()
+    older.join(timeout=5)
+    newer.join(timeout=5)
+
+    assert results["newer"] == 200.0
+    # The older walk's own return value reflects the monotonic fence at the
+    # time it finished -- i.e. it must observe the newer walk's value, not
+    # its own smaller one.
+    assert results["older"] == 200.0
+    assert _freshness.observation_fence() == 200.0
+
+
+# ---------------------------------------------------------------------------
+# A later walk re-observes completion rather than reusing a prior walk's
+# answer (Copilot #389; S28: a yielded child already COMPLETED whose target
+# is missing).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_walk_with_a_prior_re_observes_a_deleted_target(
+    default_in_memory_fs_target,
+):
+    import stardag as sd
+    from stardag.build._registration import walk_aio
+
+    @sd.task
+    def prior_child(x: int) -> int:
+        return x
+
+    child = prior_child(x=7)
+    child._save(7)
+    first = await walk_aio(child, check_stability=False)
+    assert first.complete[child.id] is True
+
+    # The target goes away between the build's walk and a yield's.
+    default_in_memory_fs_target.clear_targets()
+    second = await walk_aio(child, check_stability=False, prior=first)
+    assert second.complete[child.id] is False, (
+        "The yield's walk reused the prior walk's 'complete' and so could "
+        "never report the target missing."
+    )
+    assert second.observed_at[child.id] > first.observed_at[child.id]

@@ -47,6 +47,7 @@ from stardag._core.instance import (
 )
 from stardag.exceptions import APIError, StardagError
 from stardag.registry import PlanInfo, RegistrationItem, RegistryABC
+from stardag.target._freshness import begin_observation
 
 logger = logging.getLogger(__name__)
 
@@ -222,8 +223,9 @@ async def walk_aio(
         seen: The instances already seen in this build's discovery, shared
             across walks so a later walk (a yield) detects a conflict with an
             earlier one.
-        prior: An earlier walk of this build; its completion and expansion
-            results are reused rather than recomputed.
+        prior: An earlier walk of this build; its expansion results
+            (``requires()``) are reused rather than recomputed. Completion is
+            always re-observed.
         root_path: The construction path of the task that reached ``roots``
             (a yielding parent), for conflict messages.
         check_stability: Run the serialization round trip once per distinct
@@ -237,6 +239,9 @@ async def walk_aio(
     A completion check that raises (the target backend is unreachable)
     propagates as itself: an outage, not a verdict on the task.
     """
+    # Every completion answered below must be at least as fresh as this
+    # walk (see ``stardag.target._freshness``).
+    begin_observation()
     root_list = flatten_task_struct(roots)
     walk = Walk(roots=root_list, seen=seen if seen is not None else SeenInstances())
     lock = asyncio.Lock()
@@ -252,13 +257,14 @@ async def walk_aio(
             visited.add(task.id)
         if first and check_stability:
             check_serialization_stability(task)
-        if prior is not None and task.id in prior.complete:
-            complete = prior.complete[task.id]
-            walk.observed_at[task.id] = prior.observed_at[task.id]
-        else:
-            async with semaphore:
-                complete = await task.complete_aio()
-            walk.observed_at[task.id] = _now()
+        # Completion is observed afresh on every walk, a prior walk's answer
+        # notwithstanding: a target the build saw complete may have been
+        # deleted since, and a yield that re-sent the old answer would keep a
+        # completion the world no longer has (S28). Structure (``deps``) is
+        # reused -- within a scope it is deterministic; completion is not.
+        async with semaphore:
+            complete = await task.complete_aio()
+        walk.observed_at[task.id] = _now()
         walk.complete[task.id] = complete
         if complete and not register_all:
             return
