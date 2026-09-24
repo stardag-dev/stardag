@@ -4,8 +4,10 @@ counts, a build's plans, paged task lists, a task's executions and events,
 tick summaries, a deployment. Split from ``_base.py`` by the module-size rule;
 :class:`RegistryABC` inherits them.
 
-Sync only: no engine reads them. As everywhere on the seam, a double that
-does not implement one raises :class:`NotImplementedError` naming it.
+Sync only: no async caller reads them (the watchdog's
+``build_list_running`` goes through ``build_list``, synchronously). As
+everywhere on the seam, a double that does not implement one raises
+:class:`NotImplementedError` naming it.
 """
 
 from __future__ import annotations
