@@ -123,6 +123,8 @@ class BuildResponse(BaseModel):
     is_resumed: bool
     status_triggered_by_user_id: str | None
     executor_metadata: dict[str, Any] | None
+    reactive_app_name: str | None
+    reactive_tick_kwargs: dict[str, Any] | None
 
 
 class BuildCompleteRequest(BaseModel):
@@ -176,6 +178,73 @@ class PlanResponse(BaseModel):
     sealed_at: datetime | None
     superseded_at: datetime | None
     created: bool
+
+
+# ---------------------------------------------------------------------------
+# Wake-ups, the scheduler lease, reactive meta, tick summaries
+# ---------------------------------------------------------------------------
+
+
+class NotifyResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    build_id: UUID
+    needs_tick: bool
+    #: POST only: a scheduler held the lease once the flag was durable.
+    scheduler_live: bool | None = None
+
+
+class WakeCandidateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    build_id: UUID
+    reactive_app_name: str
+
+
+class WakeCandidatesResponse(BaseModel):
+    builds: list[WakeCandidateResponse]
+
+
+class LeaseResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    build_id: UUID
+    held: bool
+    expires_at: datetime | None = None
+
+
+class ReactiveMetaRequest(BaseModel):
+    """``PUT /builds/{id}/reactive-meta``; ``tick_kwargs`` omitted keeps the
+    stored configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    app_name: str = Field(min_length=1, max_length=64)
+    tick_kwargs: dict[str, Any] | None = None
+
+
+class TickSummaryCreate(BaseModel):
+    """One tick's summary, stored verbatim: SDK-owned and growing, so
+    unknown keys are kept, not rejected."""
+
+    model_config = ConfigDict(extra="allow")
+
+    outcome: str = Field(min_length=1, max_length=32)
+
+
+class TickSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    build_id: UUID
+    outcome: str
+    summary: dict[str, Any]
+    created_at: datetime
+
+
+class TickSummaryListResponse(BaseModel):
+    build_id: UUID
+    summaries: list[TickSummaryResponse]
 
 
 class ResumeResponse(BaseModel):
@@ -250,6 +319,10 @@ class FrontierResponse(BaseModel):
     sealed: bool
     plan_complete: bool
     build_status: BuildStatus | None
+    #: Read by every tick, so wake-ups spawned with only the build id share
+    #: the trigger-time configuration.
+    reactive_app_name: str | None
+    reactive_tick_kwargs: dict[str, Any] | None
     runnable: list[FrontierMemberResponse]
     discovery_jobs: list[FrontierMemberResponse]
     running: list[FrontierMemberResponse]

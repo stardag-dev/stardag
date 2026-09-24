@@ -38,17 +38,10 @@ from stardag_api.models import (
 from stardag_api.models.base import utc_now
 from stardag_api.services.errors import NotFound
 from stardag_api.services.plans import ClosureResult, close_plan
+from stardag_api.services.transition_types import ACTIONABLE_STATUSES
 from stardag_api.services.tx import transaction
 
-#: Statuses a member can be started from (plus RUNNING with a lapsed claim).
-#: FAILED is absent: the fail mode decides (a retry makes it PENDING).
-ACTIONABLE_STATUSES = (
-    TaskStatus.PENDING,
-    TaskStatus.SUSPENDED,
-    TaskStatus.INTERRUPTED,
-    TaskStatus.CANCELLED,
-    TaskStatus.SKIPPED,
-)
+__all__ = ["ACTIONABLE_STATUSES", "Frontier", "FrontierMember", "get_frontier"]
 
 
 @dataclass(frozen=True)
@@ -78,6 +71,8 @@ class Frontier:
     #: The closure step's outcome (a conflict fails the build).
     closure: ClosureResult | None = None
     build_status: BuildStatus | None = None
+    reactive_app_name: str | None = None
+    reactive_tick_kwargs: dict[str, Any] | None = None
 
 
 async def get_frontier(
@@ -113,6 +108,8 @@ async def get_frontier(
                 settings_hash=None,
                 sealed=False,
                 build_status=build.status,
+                reactive_app_name=build.reactive_app_name,
+                reactive_tick_kwargs=build.reactive_tick_kwargs,
             )
         closure = await close_plan(session, environment_id, plan, now=utc_now())
         now = utc_now()
@@ -158,6 +155,8 @@ async def get_frontier(
             plan_complete=plan_complete,
             closure=closure,
             build_status=build.status,
+            reactive_app_name=build.reactive_app_name,
+            reactive_tick_kwargs=build.reactive_tick_kwargs,
         )
 
 

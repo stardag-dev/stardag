@@ -36,10 +36,7 @@ rules, in one place:
 
 from __future__ import annotations
 
-import enum
-from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -50,7 +47,6 @@ from stardag_api.models import (
     ClaimOutcome,
     EventType,
     Execution,
-    ExecutionOutcome,
     Plan,
     PlanMember,
     Task,
@@ -60,143 +56,35 @@ from stardag_api.models import (
 )
 from stardag_api.models.base import utc_now
 from stardag_api.services import event_log
-from stardag_api.services.claim_limits import replace_limit_keys
+from stardag_api.services.claim_limits import full_limits, replace_limit_keys
 from stardag_api.services.errors import (
     BadRequest,
     Conflict,
     NotFound,
     RecordedConflict,
 )
+from stardag_api.services.transition_types import (
+    DEFAULT_CLAIM_TTL_SECONDS,
+    MAX_CLAIM_TTL_SECONDS,
+    REPORTS,
+    Transition,
+    TransitionKind,
+    TransitionOutcome,
+    claim_ttl,
+)
 from stardag_api.services.tx import transaction
+from stardag_api.services.wakeups import flag_after_transition
 
-#: Claim TTL when a claiming start or a renewal names none.
-DEFAULT_CLAIM_TTL_SECONDS = 3600
-#: Upper bound on any requested TTL: nothing is live forever (D11).
-MAX_CLAIM_TTL_SECONDS = 24 * 3600
-
-
-class TransitionKind(str, enum.Enum):
-    START = "start"
-    COMPLETE = "complete"
-    FAIL = "fail"
-    SUSPEND = "suspend"
-    RETRY = "retry"
-    RENEW = "renew"
-    # Written by registration, from a driver's observation of the target.
-    OBSERVE_COMPLETE = "observe_complete"
-    INVALIDATE = "invalidate"
-    # Written by a build's terminal transition (complete / fail / cancel).
-    RELEASE = "release"
-
-
-@dataclass(frozen=True)
-class Transition:
-    kind: TransitionKind
-    execution_id: UUID | None = None
-    claim: bool = False
-    claim_ttl_seconds: int | None = None
-    executor: str | None = None
-    executor_ref: str | None = None
-    executor_metadata: dict[str, Any] | None = None
-    error_message: str | None = None
-    observed_at: datetime | None = None
-    #: A claiming start's concurrency-limit keys, computed by the tick from
-    #: the instance body it is about to run; replace the task's keys.
-    limit_keys: tuple[str, ...] = ()
-    #: Why a claim is released (the build transition that released it).
-    reason: str | None = None
-
-    @classmethod
-    def start(
-        cls,
-        execution_id: UUID,
-        *,
-        claim: bool = True,
-        claim_ttl_seconds: int | None = None,
-        executor: str | None = None,
-        executor_ref: str | None = None,
-        executor_metadata: dict[str, Any] | None = None,
-        limit_keys: Sequence[str] = (),
-    ) -> Transition:
-        return cls(
-            TransitionKind.START,
-            execution_id=execution_id,
-            claim=claim,
-            claim_ttl_seconds=claim_ttl_seconds,
-            executor=executor,
-            executor_ref=executor_ref,
-            executor_metadata=executor_metadata,
-            limit_keys=tuple(limit_keys),
-        )
-
-    @classmethod
-    def complete(cls, execution_id: UUID) -> Transition:
-        return cls(TransitionKind.COMPLETE, execution_id=execution_id)
-
-    @classmethod
-    def fail(cls, execution_id: UUID, error_message: str | None = None) -> Transition:
-        return cls(
-            TransitionKind.FAIL, execution_id=execution_id, error_message=error_message
-        )
-
-    @classmethod
-    def suspend(cls, execution_id: UUID) -> Transition:
-        return cls(TransitionKind.SUSPEND, execution_id=execution_id)
-
-    @classmethod
-    def retry(cls) -> Transition:
-        return cls(TransitionKind.RETRY)
-
-    @classmethod
-    def release(cls, reason: str) -> Transition:
-        return cls(TransitionKind.RELEASE, reason=reason)
-
-    @classmethod
-    def renew(
-        cls, execution_id: UUID, claim_ttl_seconds: int | None = None
-    ) -> Transition:
-        return cls(
-            TransitionKind.RENEW,
-            execution_id=execution_id,
-            claim_ttl_seconds=claim_ttl_seconds,
-        )
-
-
-@dataclass(frozen=True)
-class TransitionOutcome:
-    """What a transition did. ``applied`` is False for a no-op."""
-
-    applied: bool
-    status: TaskStatus
-    execution_id: UUID | None
-    claim_expires_at: datetime | None
-
-
-# A report's event type, the status it moves the task to, and the two ledger
-# outcomes it writes.
-_REPORTS: dict[
-    TransitionKind, tuple[EventType, TaskStatus, ClaimOutcome, ExecutionOutcome]
-] = {
-    TransitionKind.COMPLETE: (
-        EventType.TASK_COMPLETED,
-        TaskStatus.COMPLETED,
-        ClaimOutcome.COMPLETED,
-        ExecutionOutcome.COMPLETED,
-    ),
-    TransitionKind.FAIL: (
-        EventType.TASK_FAILED,
-        TaskStatus.FAILED,
-        ClaimOutcome.FAILED,
-        ExecutionOutcome.FAILED,
-    ),
-    TransitionKind.SUSPEND: (
-        EventType.TASK_SUSPENDED,
-        TaskStatus.SUSPENDED,
-        ClaimOutcome.SUSPENDED,
-        ExecutionOutcome.SUSPENDED,
-    ),
-}
-
+__all__ = [
+    "DEFAULT_CLAIM_TTL_SECONDS",
+    "MAX_CLAIM_TTL_SECONDS",
+    "Transition",
+    "TransitionKind",
+    "TransitionOutcome",
+    "apply_member_transition",
+    "renew_claim",
+    "transition_task",
+]
 
 # ---------------------------------------------------------------------------
 # Route-facing calls: one transaction each
@@ -292,7 +180,9 @@ async def transition_task(
 
     Locks the task row first. Raises :class:`Conflict` for a refusal that
     leaves no trace, :class:`RecordedConflict` for one whose record is in
-    the session.
+    the session. A transition that changes the status flags the other
+    builds it is news for (``wakeups.flag_after_transition``), here, so no
+    path that moves a status can forget to.
     """
     task = await session.scalar(
         select(Task)
@@ -303,10 +193,28 @@ async def transition_task(
     if task is None:
         raise NotFound("unknown_task", f"no task {task_pk}")
     step = _Step(session, environment_id, task, plan_id, transition, now)
-    kind = transition.kind
+    previous = task.status
+    outcome = await _dispatch(step)
+    if task.status != previous:
+        await flag_after_transition(
+            session,
+            environment_id,
+            task.id,
+            previous=previous,
+            current=task.status,
+            source_build_id=await step.build_id(),
+            now=now,
+        )
+    return outcome
+
+
+async def _dispatch(step: _Step) -> TransitionOutcome:
+    kind = step.transition.kind
     if kind is TransitionKind.START:
-        return await (step.claim() if transition.claim else step.self_report_start())
-    if kind in _REPORTS:
+        return await (
+            step.claim() if step.transition.claim else step.self_report_start()
+        )
+    if kind in REPORTS:
         return await step.report()
     if kind is TransitionKind.RETRY:
         return await step.retry()
@@ -319,17 +227,6 @@ async def transition_task(
     if kind is TransitionKind.RELEASE:
         return await step.release()
     raise AssertionError(kind)  # pragma: no cover
-
-
-def _ttl(requested: int | None) -> timedelta:
-    seconds = DEFAULT_CLAIM_TTL_SECONDS if requested is None else requested
-    if not 0 < seconds <= MAX_CLAIM_TTL_SECONDS:
-        raise BadRequest(
-            "invalid_claim_ttl",
-            f"claim_ttl_seconds must be in (0, {MAX_CLAIM_TTL_SECONDS}]",
-            claim_ttl_seconds=seconds,
-        )
-    return timedelta(seconds=seconds)
 
 
 class _Step:
@@ -482,8 +379,32 @@ class _Step:
                 "member_excluded", "the member is excluded", task_id=t.task_id
             )
         await self._check_upstreams(member.instance_id)
+        full = await full_limits(
+            self.session,
+            self.environment_id,
+            t.id,
+            self.transition.limit_keys,
+            now=self.now,
+        )
+        if full:
+            # Record the keys the claim asked for, so the release of a slot
+            # on them wakes this task's builds; the task holds no slot (its
+            # claim is not live), so nothing is occupied.
+            await replace_limit_keys(
+                self.session,
+                self.environment_id,
+                t.id,
+                self.transition.limit_keys,
+                now=self.now,
+            )
+            raise RecordedConflict(
+                "concurrency_limit_reached",
+                "a concurrency limit on the claim's keys is full",
+                task_id=t.task_id,
+                keys=full,
+            )
 
-        ttl = _ttl(self.transition.claim_ttl_seconds)
+        ttl = claim_ttl(self.transition.claim_ttl_seconds)
         taken_over = None
         if t.status == TaskStatus.RUNNING:  # a lapsed claim, taken over
             taken_over = t.execution_id
@@ -617,7 +538,7 @@ class _Step:
     async def report(self) -> TransitionOutcome:
         """complete / fail / suspend, under the authority rule."""
         t, eid = self.task, self.execution_id()
-        event_type, status, claim_outcome, outcome = _REPORTS[self.transition.kind]
+        event_type, status, claim_outcome, outcome = REPORTS[self.transition.kind]
         execution = await self._execution(event_type, eid)
         error = self.transition.error_message
         if execution.ended_at is not None:
@@ -693,7 +614,7 @@ class _Step:
                 "only the execution holding the live claim can renew it",
                 execution_id=str(eid),
             )
-        t.claim_expires_at = self.now + _ttl(self.transition.claim_ttl_seconds)
+        t.claim_expires_at = self.now + claim_ttl(self.transition.claim_ttl_seconds)
         await self.session.flush()
         return self.outcome(applied=True)
 

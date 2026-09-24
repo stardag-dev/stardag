@@ -16,11 +16,16 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import TaskLimitKey
+from stardag_api.models import (
+    EnvironmentConcurrencyLimit,
+    Task,
+    TaskLimitKey,
+    TaskStatus,
+)
 from stardag_api.models.base import generate_uuid7
 
 
@@ -50,3 +55,49 @@ async def replace_limit_keys(
                 ]
             )
         )
+
+
+async def full_limits(
+    session: AsyncSession,
+    environment_id: UUID,
+    task_pk: UUID,
+    keys: Sequence[str],
+    *,
+    now: datetime,
+) -> list[str]:
+    """The keys among ``keys`` whose limit is full without this task.
+
+    The limit rows are locked ``FOR UPDATE`` in key order, so two claims on
+    one key serialise here and the second counts the first's slot. A slot
+    is a limit key joined to a **live** claim on its task; a key with no
+    limit row is unlimited.
+    """
+    if not keys:
+        return []
+    limits = (
+        await session.scalars(
+            select(EnvironmentConcurrencyLimit)
+            .where(
+                EnvironmentConcurrencyLimit.environment_id == environment_id,
+                EnvironmentConcurrencyLimit.key.in_(sorted(set(keys))),
+            )
+            .order_by(EnvironmentConcurrencyLimit.key)
+            .with_for_update()
+        )
+    ).all()
+    full = []
+    for limit in limits:
+        holders = await session.scalar(
+            select(func.count(func.distinct(TaskLimitKey.task_pk)))
+            .join(Task, Task.id == TaskLimitKey.task_pk)
+            .where(
+                TaskLimitKey.environment_id == environment_id,
+                TaskLimitKey.key == limit.key,
+                TaskLimitKey.task_pk != task_pk,
+                Task.status == TaskStatus.RUNNING,
+                Task.claim_expires_at > now,
+            )
+        )
+        if (holders or 0) >= limit.max_concurrent:
+            full.append(limit.key)
+    return full

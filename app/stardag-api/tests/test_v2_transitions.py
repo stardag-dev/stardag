@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 
-from stardag_api.services import transitions
+from stardag_api.services import reactive, transitions
 from stardag_api.services.errors import Conflict, NotFound
 from stardag_api.services.transitions import Transition, TransitionKind
 from tests.v2_support import ENV, Harness, item, observed, task_ids, utcnow
@@ -335,13 +335,20 @@ async def test_limit_keys_are_written_at_claim_and_replaced_on_every_claim(
     assert [r["key"] for r in rows] == ["cpu"]
 
 
-@pytest.mark.xfail(reason="v2: I0 step 3", strict=True)
 async def test_a_transition_flags_the_other_builds_holding_the_task(h: Harness):
     """A status write flags the reactive builds whose active plans hold the
-    task (``plan_member``, ``SKIP LOCKED``): wake-ups arrive in step 3."""
+    task (``plan_member``, ``SKIP LOCKED``); the writing build is not
+    flagged by its own transition. (The relation in detail:
+    ``test_v2_wakeups.py``.)"""
     deployment = await h.new_deployment()
     t = item("T")
-    _, plan_a = await h.planned([t], [t], deployment_id=deployment)
+    build_a, plan_a = await h.planned([t], [t], deployment_id=deployment)
     build_b, _ = await h.planned([t], [t], deployment_id=deployment)
+    for build in (build_a, build_b):
+        async with h.sf() as s:
+            await reactive.set_reactive_meta(
+                s, ENV, build, app_name="app", tick_kwargs=None
+            )
     await h.run(plan_a.id, t)
     assert (await h.build(build_b))["needs_tick_at"] is not None
+    assert (await h.build(build_a))["needs_tick_at"] is None
