@@ -753,7 +753,10 @@ def deploy(
     console.print(f"[green]Deployed {deployment_name}[/green]")
     if registry is not None:
         _activate_deployment(
-            registry, stardag_app_instance.deployment_id, deployment_name
+            registry,
+            stardag_app_instance.deployment_id,
+            deployment_name,
+            modal_app_id=res.app_id,
         )
 
     if stream_logs:

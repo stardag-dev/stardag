@@ -1,6 +1,6 @@
 """``/api/v2`` reads the SDK client calls beyond the frontier — the
-watchdog's build listing, a plan's roots, a task with its instances — and
-the task-artifact routes.
+watchdog's build listing, a plan's roots, a task with its instances, the
+event log of a task or a build — and the task-artifact routes.
 
 Thin by rule: parse, resolve the environment from the credentials, call
 one service in ``services/reads.py`` or ``services/artifacts.py``.
@@ -18,6 +18,8 @@ from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
 from stardag_api.models import BuildStatus
 from stardag_api.schemas_v2 import (
+    EventListResponse,
+    EventResponse,
     ArtifactUploadRequest,
     BuildListResponse,
     BuildResponse,
@@ -93,4 +95,22 @@ async def upload_artifacts(
 async def list_artifacts(task_id: str, db: Db, auth: Auth):
     return _artifact_list(
         await artifacts.list_artifacts(db, auth.environment_id, task_id)
+    )
+
+
+def _event_list(rows: list[reads.EventView]) -> EventListResponse:
+    return EventListResponse(events=[EventResponse.model_validate(r) for r in rows])
+
+
+@router.get("/tasks/{task_id}/events", response_model=EventListResponse)
+async def task_events(task_id: str, db: Db, auth: Auth, limit: Limit = 500):
+    return _event_list(
+        await reads.list_events(db, auth.environment_id, task_id=task_id, limit=limit)
+    )
+
+
+@router.get("/builds/{build_id}/events", response_model=EventListResponse)
+async def build_events(build_id: UUID, db: Db, auth: Auth, limit: Limit = 500):
+    return _event_list(
+        await reads.list_events(db, auth.environment_id, build_id=build_id, limit=limit)
     )

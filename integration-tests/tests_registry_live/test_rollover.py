@@ -1,22 +1,22 @@
 """A running build follows the live deployment.
 
-The rule the whole structure-scope design turned on at the end: a build is
-not bound to the code that planned it. Modal keeps one live deployment per
-app name, and a redeploy sends every *new* spawn to the new code — so the
-first tick that runs on the new deployment must **re-plan** the build under
-its own scope and drive on, not refuse it and leave it stalled.
+A build is not bound to the code that planned it. Modal keeps one live
+deployment per app name, and a redeploy sends every *new* spawn to the new
+code — so the first tick that runs on the new deployment must **re-plan**
+the build under its own deployment and drive on, not refuse it and leave it
+stalled (design.md, "Rollover").
 
 The scenario deploys its own app twice under two code ids, ``A`` and
 ``B`` (``STARDAG_CODE_ID`` in the deploy's environment, the same override a
-CI image uses), triggers a reactive build on ``A`` whose fan-out parent
-has a long pre-yield, and redeploys as ``B`` while the parent is still
-running. What it then asserts is the rollover as the design states it:
+CI image uses; ``stardag modal deploy`` records a deployment for each),
+triggers a reactive build on ``A`` whose fan-out parent has a long
+pre-yield, and redeploys as ``B`` while the parent is still running. What
+it then asserts is the rollover as the design states it:
 
 - the build completes;
-- its scope now names ``B``;
-- the parent's edges under ``A`` are still there — nothing retracts an
-  edge, the rolled-over build simply reads a different scope — and the
-  build's gating read ``B``;
+- its active plan is now under deployment ``B`` (same build id);
+- the parent has an expanded instance under ``B`` -- the new plan
+  registered it in its own scope; the ``A`` instance is not retracted;
 - the registry lists both deployments, ``B`` current.
 
 Every one of those is **durable registry state**, and deliberately so.
@@ -29,7 +29,7 @@ in exactly the same words, so a real regression would have read as the
 known flake. See ``_rollover_reports`` and STA-87.
 
 An old worker's late yield landing in scope ``A`` is the other half of the
-rule (``_runner.worker_scope_key``). It is not forced here: it needs the
+rule (its ``/yield`` names the old plan). It is not forced here: it needs the
 redeploy to land inside the parent's pre-yield window *and* the parent's
 worker to yield before the new tick re-plans, which is a race this tier
 cannot time. The worker side is covered by unit tests
@@ -48,7 +48,6 @@ import sys
 import uuid
 from pathlib import Path
 
-import httpx
 import pytest
 
 from stardag_integration_tests.registry_live._guard import registry_live_guard
@@ -110,25 +109,16 @@ def _deploy(app_name: str, modal_environment: str, code_id: str) -> None:
     )
 
 
-def _edge_scopes_into(deployment: Deployment, task_id: str) -> set[str | None]:
-    """The scopes of the edges the graph shows into ``task_id``.
+def _deployment_ids(app_name: str) -> dict[str, tuple[str, bool]]:
+    """``code_id -> (deployment id, is_current)`` for the app's deployments."""
+    from stardag.registry import registry_provider
 
-    Graph nodes and edges are keyed by the registry's row ids, so the task's
-    deterministic id is resolved through the node list first. The graph
-    follows a node's *provenance* scope — the scope of the build that
-    produced its current status — so after a rollover this is the new
-    scope's view of the task, not every edge ever recorded.
-    """
-    with httpx.Client(timeout=60.0) as client:
-        response = client.post(
-            f"{deployment.api_url.rstrip('/')}/api/v1/tasks/graph",
-            headers={"X-API-Key": deployment.api_key},
-            json={"task_ids": [task_id], "upstream_depth": 1},
+    return {
+        d.code_id: (str(d.id), d.is_current)
+        for d in registry_provider.get().deployment_list(
+            kind="modal", app_name=app_name
         )
-        response.raise_for_status()
-    body = response.json()
-    row_ids = {n["id"] for n in body["nodes"] if n["task_id"] == task_id}
-    return {e["scope_key"] for e in body["edges"] if e["target"] in row_ids}
+    }
 
 
 def _rollover_reports(summaries: list[dict]) -> str:
@@ -182,10 +172,11 @@ def test_a_running_build_rolls_over_to_the_new_deployment(
             timeout=STATUS_TIMEOUT_SECONDS,
         )
         registry = registry_provider.get()
-        scope_a = registry.build_get(build_id).scope_key
-        assert scope_a is not None and scope_a.startswith(code_a), (
-            f"The bootstrap did not plan the build under code A: {scope_a!r}\n"
-            + describe(build_id)
+        deployment_a, _ = _deployment_ids(APP_NAME)[code_a]
+        planned_under = str(registry.build_get_frontier(build_id).deployment_id)
+        assert planned_under == deployment_a, (
+            f"The bootstrap did not plan the build under deployment A "
+            f"({deployment_a}): {planned_under}\n" + describe(build_id)
         )
 
         # New code takes over the app name while the parent runs. Its
@@ -201,18 +192,17 @@ def test_a_running_build_rolls_over_to_the_new_deployment(
         )
 
         # The rollover itself, as registry state: *this* build -- the same
-        # build id, re-planned in place -- is now scoped to code B. Nothing
-        # but a rollover produces that, and no tick has to survive for it
-        # to be true.
+        # build id, re-planned in place -- has its active plan under
+        # deployment B. Nothing but a rollover produces that, and no tick
+        # has to survive for it to be true.
         summaries = tick_summaries(build_id)
-        scope_b = registry.build_get(build_id).scope_key
-        assert scope_b is not None and scope_b.startswith(code_b), (
-            f"The build's scope did not move to code B: {scope_b!r}. The "
-            f"first tick to run on the new deployment should have re-planned "
-            f"it under its own scope.\n"
-            + _rollover_reports(summaries)
-            + "\n"
-            + describe(build_id)
+        deployment_b, _ = _deployment_ids(APP_NAME)[code_b]
+        active_under = str(registry.build_get_frontier(build_id).deployment_id)
+        assert active_under == deployment_b, (
+            f"The build's active plan did not move to deployment B "
+            f"({deployment_b}): {active_under}. The first tick to run on the "
+            f"new deployment should have re-planned it under its own "
+            f"deployment.\n" + _rollover_reports(summaries) + "\n" + describe(build_id)
         )
 
         # The one report this still reads, and the direction matters: a
@@ -224,26 +214,33 @@ def test_a_running_build_rolls_over_to_the_new_deployment(
             "A tick reported that the rollover failed.\n" + describe(build_id)
         )
 
-        # The rollover recorded the parent's edges under B, and that is what
-        # the graph shows for it now: a node's edges follow the scope of the
-        # build that produced its status. That nothing retracted the edges
-        # under A is a registry rule, asserted where the rows are visible
-        # (``test_a_rollover_gates_over_the_new_scope_and_keeps_the_old_edges``
-        # in the API suite); the graph deliberately does not show them here.
-        scopes_into_parent = _edge_scopes_into(deployment, str(parent.id))
-        assert scope_b in scopes_into_parent, (
-            f"The rollover recorded no edges under code B: "
-            f"{scopes_into_parent}\n"
+        # The new plan registered the parent in its own scope: an expanded
+        # instance (its upstreams declared) under deployment B, beside the
+        # one under A, which nothing retracts. The edges themselves have no
+        # read route yet (the graph over instance edges is I4); the instance
+        # is where the scope a build planned under is visible.
+        instances = registry.task_get(str(parent.id)).instances
+        by_deployment = {str(i.deployment_id): i for i in instances}
+        assert deployment_b in by_deployment, (
+            f"The parent has no instance under deployment B: "
+            f"{sorted(by_deployment)}\n"
             + _rollover_reports(summaries)
             + "\n"
             + describe(build_id)
         )
+        assert by_deployment[deployment_b].expanded_at is not None, (
+            "The parent's instance under B was never expanded, so the new "
+            "plan did not discover its upstreams.\n" + describe(build_id)
+        )
+        assert deployment_a in by_deployment, (
+            "The parent's instance under A is gone; nothing retracts an "
+            "instance.\n" + describe(build_id)
+        )
 
         # Both deployments are on record, B current.
-        recorded = registry.deployment_list(app_name=APP_NAME)
-        by_code = {d.code_id: d for d in recorded}
-        assert set(by_code) >= {code_a, code_b}, recorded
-        assert by_code[code_b].current and not by_code[code_a].current, recorded
+        recorded = _deployment_ids(APP_NAME)
+        assert set(recorded) >= {code_a, code_b}, recorded
+        assert recorded[code_b][1] and not recorded[code_a][1], recorded
     finally:
         # Leave nothing warm on an app only this scenario deploys.
         stop_existing_app(APP_NAME, modal_environment)

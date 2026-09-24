@@ -154,7 +154,9 @@ class TestCheckpointOne:
         one) has no opinion."""
 
         class NoExecutionsRead(InMemoryRegistry):
-            def build_list_executions(self, build_id, *, not_in_current_plan=False):
+            def build_list_executions(
+                self, build_id, *, not_in_current_plan=False, include_ended=False
+            ):
                 raise NotImplementedError
 
         planned = plan_and_claim(make_range(limit=3), NoExecutionsRead())

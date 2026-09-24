@@ -57,15 +57,21 @@ class ExecutionState:
     in_current_plan: bool
 
 
-async def list_unended(
+async def list_executions(
     session: AsyncSession,
     environment_id: UUID,
     build_id: UUID,
     *,
     not_in_current_plan: bool = False,
+    include_ended: bool = False,
 ) -> list[ExecutionState]:
     """The build's executions with no end reported, over all its plans,
-    oldest first; ``not_in_current_plan`` keeps the orphans only."""
+    oldest first; ``not_in_current_plan`` keeps the orphans only.
+
+    ``include_ended`` lists the whole ledger instead: every execution the
+    build's plans ever granted, ended or not — the durable record of what
+    was spawned, which a tick's own summary cannot be (a tick can die
+    before it reports)."""
     build = await get_build(session, environment_id, build_id)
     current = await active_plan(session, build.id)
     current_id = current.id if current else None
@@ -73,9 +79,11 @@ async def list_unended(
         select(Execution, Task.task_id)
         .join(Task, Task.id == Execution.task_pk)
         .join(Plan, Plan.id == Execution.plan_id)
-        .where(Plan.build_id == build.id, Execution.ended_at.is_(None))
+        .where(Plan.build_id == build.id)
         .order_by(Execution.started_at, Execution.id)
     )
+    if not include_ended:
+        query = query.where(Execution.ended_at.is_(None))
     if not_in_current_plan and current_id is not None:
         query = query.where(Execution.plan_id != current_id)
     rows = (await session.execute(query)).tuples().all()

@@ -181,6 +181,46 @@ async def test_artifact_guardrails(
     assert big.json()["detail"]["code"] == "artifact_body_size_limit"
 
 
+async def test_the_event_log_of_a_task_and_of_a_build(client: AsyncClient, h: Harness):
+    """``GET /tasks/{id}/events`` and ``GET /builds/{id}/events``: the log,
+    oldest first, attributed to its build, plan and execution; a refused
+    report is listed with ``report_applied`` false (history, not state);
+    an unknown task or build is 404, never an empty list."""
+    t = item("T")
+    build, plan = await h.planned([t], [t], seal=True)
+    execution = await h.run(plan.id, t)
+    # A second terminal report of the same execution: recorded, refused.
+    refused = await client.post(
+        f"/api/v2/plans/{plan.id}/members/{t.task_id}/complete",
+        json={"execution_id": str(execution)},
+    )
+    assert refused.status_code == 409, refused.text
+
+    task_events = (await _get(client, f"/tasks/{t.task_id}/events"))["events"]
+    types = [e["event_type"] for e in task_events]
+    assert types[0] == "task_pending"
+    assert "task_started" in types
+    completed = [e for e in task_events if e["event_type"] == "task_completed"]
+    assert [e["report_applied"] for e in completed] == [True, False]
+    assert {e["execution_id"] for e in completed} == {str(execution)}
+    assert all(e["task_id"] == t.task_id for e in task_events)
+    assert all(e["build_id"] == str(build) for e in task_events)
+    created = [e["created_at"] for e in task_events]
+    assert created == sorted(created)
+
+    await client.post(f"/api/v2/builds/{build}/cancel")
+    build_events = (await _get(client, f"/builds/{build}/events"))["events"]
+    # A build-level event carries no task and no plan, and comes last here.
+    assert build_events[-1]["event_type"] == "build_cancelled"
+    assert build_events[-1]["task_id"] is None
+    assert build_events[-1]["plan_id"] is None
+    assert {e["id"] for e in task_events} <= {e["id"] for e in build_events}
+    assert len((await _get(client, f"/builds/{build}/events", limit=1))["events"]) == 1
+
+    assert (await client.get("/api/v2/tasks/nope/events")).status_code == 404
+    assert (await client.get(f"/api/v2/builds/{uuid4()}/events")).status_code == 404
+
+
 async def test_artifact_quota_serialises_on_the_task_row_lock(
     client: AsyncClient,
     h: Harness,

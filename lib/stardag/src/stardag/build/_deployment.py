@@ -27,6 +27,8 @@ import subprocess
 import uuid
 from uuid import UUID
 
+import uuid6
+
 from stardag.exceptions import StardagError
 from stardag.registry import RegistryABC
 
@@ -132,8 +134,14 @@ async def current_app_deployment_id_aio(registry: RegistryABC, app_name: str) ->
 
 
 async def local_deployment_id_aio(registry: RegistryABC) -> UUID:
-    """Look up or create the local deployment of this process's code id."""
-    row = await registry.deployment_create_aio(kind="local", code_id=code_id())
+    """Look up or create the local deployment of this process's code id.
+
+    The id is client-minted, as every deployment id is (design.md,
+    ``deployment``); the lookup keys on the code id, so an existing row is
+    returned with its own id and a retried create is idempotent."""
+    row = await registry.deployment_create_aio(
+        kind="local", code_id=code_id(), deployment_id=UUID(str(uuid6.uuid7()))
+    )
     return row.id
 
 

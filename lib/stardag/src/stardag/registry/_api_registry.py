@@ -3,10 +3,6 @@
 Each route is described once, as a :class:`~stardag.registry._api_http.Request`
 built by a ``_*_req`` function (:mod:`stardag.registry._api_routes`), and
 exposed as a sync method and an ``_aio`` method that send the same request.
-
-Routes marked **(assumed)** are not served by the registry yet; they are
-coded to the shape ``docs/design/registry-v2/design.md`` implies and listed
-as open server-contract items in the I7 status of ``plan.md``.
 """
 
 from __future__ import annotations
@@ -494,15 +490,18 @@ class APIRegistry(HTTPTransport, RegistryABC):
         return await self.acall(_renew_req(task_id, execution_id, claim_ttl_seconds))
 
     def build_list_executions(
-        self, build_id: UUID, *, not_in_current_plan: bool = False
+        self,
+        build_id: UUID,
+        *,
+        not_in_current_plan: bool = False,
+        include_ended: bool = False,
     ) -> list[ExecutionInfo]:
-        return self.call(_executions_req(build_id, not_in_current_plan))
+        return self.call(_executions_req(build_id, not_in_current_plan, include_ended))
 
     def execution_report_stopped(self, execution_id: UUID) -> TransitionResult:
         return self.call(_stopped_req(execution_id))
 
     def task_get(self, task_id: str) -> TaskInfo:
-        # (assumed) GET /tasks/{task_id}
         return self.call(
             Request(
                 "GET",
@@ -519,7 +518,6 @@ class APIRegistry(HTTPTransport, RegistryABC):
         artifacts: "Sequence[Artifact]",
         execution_id: UUID | None,
     ) -> Request[None]:
-        # (assumed) POST /plans/{plan_id}/members/{task_id}/artifacts
         return Request(
             "POST",
             f"/plans/{plan_id}/members/{task_id}/artifacts",
@@ -589,12 +587,19 @@ class APIRegistry(HTTPTransport, RegistryABC):
             )
         )
 
-    def deployment_activate(self, deployment_id: UUID) -> DeploymentInfo:
+    def deployment_activate(
+        self,
+        deployment_id: UUID,
+        *,
+        modal_app_id: str | None = None,
+        image_id: str | None = None,
+    ) -> DeploymentInfo:
         return self.call(
             Request(
                 "POST",
                 f"/deployments/{deployment_id}/activate",
                 DeploymentInfo.model_validate,
+                json=_drop_none({"modal_app_id": modal_app_id, "image_id": image_id}),
                 operation=f"Activate deployment {deployment_id}",
             )
         )
@@ -624,6 +629,42 @@ class APIRegistry(HTTPTransport, RegistryABC):
 
     async def settings_get_aio(self, settings_hash: str) -> SettingsInfo:
         return await self.acall(_settings_req(settings_hash))
+
+    # -- concurrency limits -------------------------------------------------------
+
+    def concurrency_limit_set(self, key: str, max_concurrent: int) -> None:
+        self.call(
+            Request(
+                "PUT",
+                f"/concurrency-limits/{key}",
+                lambda _payload: None,
+                json={"max_concurrent": max_concurrent},
+                operation=f"Set concurrency limit {key!r}",
+            )
+        )
+
+    def concurrency_limit_delete(self, key: str) -> None:
+        self.call(
+            Request(
+                "DELETE",
+                f"/concurrency-limits/{key}",
+                lambda _payload: None,
+                operation=f"Delete concurrency limit {key!r}",
+            )
+        )
+
+    def concurrency_limit_list(self) -> dict[str, int]:
+        return self.call(
+            Request(
+                "GET",
+                "/concurrency-limits",
+                lambda payload: {
+                    row["key"]: int(row["max_concurrent"])
+                    for row in (payload or {}).get("limits", [])
+                },
+                operation="List concurrency limits",
+            )
+        )
 
     # -- reactive scheduling ---------------------------------------------------------
 
@@ -696,13 +737,15 @@ class APIRegistry(HTTPTransport, RegistryABC):
     ) -> SchedulerLeaseResult:
         return await self.acall(_lease_req("PUT", build_id, owner_id, ttl_seconds))
 
-    def scheduler_lease_release(self, build_id: UUID, *, owner_id: str) -> None:
-        self.call(_lease_req("DELETE", build_id, owner_id))
+    def scheduler_lease_release(
+        self, build_id: UUID, *, owner_id: str
+    ) -> SchedulerLeaseResult:
+        return self.call(_lease_req("DELETE", build_id, owner_id))
 
     async def scheduler_lease_release_aio(
         self, build_id: UUID, *, owner_id: str
-    ) -> None:
-        await self.acall(_lease_req("DELETE", build_id, owner_id))
+    ) -> SchedulerLeaseResult:
+        return await self.acall(_lease_req("DELETE", build_id, owner_id))
 
     def _tick_summary_req(
         self, build_id: UUID, summary: Mapping[str, Any]

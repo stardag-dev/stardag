@@ -527,3 +527,37 @@ async def test_reactive_routes_over_http(client: AsyncClient, h: Harness):
         "outcome": "lingered_out",
         "ticks": 3,
     }
+
+
+async def test_concurrency_limits_are_configured_over_http(
+    client: AsyncClient, h: Harness
+):
+    """``PUT/GET/DELETE /concurrency-limits``: a set is an upsert, the cap
+    it sets is the one the claiming start enforces, a delete lifts it (404
+    ``unknown_limit`` for a key without one)."""
+    put = await client.put("/api/v2/concurrency-limits/gpu", json={"max_concurrent": 3})
+    assert put.status_code == 200 and put.json() == {"key": "gpu", "max_concurrent": 3}
+    put = await client.put("/api/v2/concurrency-limits/gpu", json={"max_concurrent": 1})
+    assert put.json()["max_concurrent"] == 1
+    listed = await client.get("/api/v2/concurrency-limits")
+    assert listed.json() == {"limits": [{"key": "gpu", "max_concurrent": 1}]}
+    bad = await client.put(
+        "/api/v2/concurrency-limits/gpu", json={"max_concurrent": -1}
+    )
+    assert bad.status_code == 422
+
+    t1, t2 = item("T1"), item("T2")
+    _, plan_a = await h.planned([t1], [t1])
+    _, plan_b = await h.planned([t2], [t2])
+    await h.start(plan_a.id, t1, limit_keys=["gpu"])
+    with pytest.raises(Conflict) as exc:
+        await h.start(plan_b.id, t2, limit_keys=["gpu"])
+    assert exc.value.code == "concurrency_limit_reached"
+
+    deleted = await client.delete("/api/v2/concurrency-limits/gpu")
+    assert deleted.status_code == 204
+    await h.start(plan_b.id, t2, limit_keys=["gpu"])  # no cap any more
+    missing = await client.delete("/api/v2/concurrency-limits/gpu")
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "unknown_limit"
+    assert (await client.get("/api/v2/concurrency-limits")).json() == {"limits": []}

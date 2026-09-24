@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Awaitable, Callable
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -85,8 +86,13 @@ def _registry():
     return APIRegistry()
 
 
-def _new_build(registry) -> "object":
-    return registry.build_start(description="STA-17 lease verification")
+def _new_build(registry) -> UUID:
+    """A RUNNING build to hold a lease on. The lease is a build row's own
+    columns, so the build needs no plan; its root id is never planned."""
+    return registry.build_create(
+        root_task_ids=[f"lease-probe-{uuid4().hex}"],
+        description="STA-17 lease verification",
+    ).id
 
 
 async def _wait_for(
@@ -173,7 +179,7 @@ def test_concurrent_acquires_grant_exactly_one() -> None:
         owners = [f"racer-{round_no}-{i}" for i in range(RACERS)]
         results = await asyncio.gather(
             *(
-                registry.build_acquire_scheduler_lease_aio(
+                registry.scheduler_lease_acquire_aio(
                     build_id, owner_id=owner, ttl_seconds=LIVE_TTL_SECONDS
                 )
                 for owner in owners
@@ -194,21 +200,17 @@ def test_concurrent_acquires_grant_exactly_one() -> None:
 
         # Owner checks, against the live row: the loser can neither extend
         # nor clear the winner's lease, and the winner can do both.
-        renewed = await registry.build_renew_scheduler_lease_aio(
+        renewed = await registry.scheduler_lease_renew_aio(
             build_id, owner_id=loser, ttl_seconds=LIVE_TTL_SECONDS
         )
         assert renewed.held is False
-        released = await registry.build_release_scheduler_lease_aio(
-            build_id, owner_id=loser
-        )
+        released = await registry.scheduler_lease_release_aio(build_id, owner_id=loser)
         assert released.held is False
-        renewed = await registry.build_renew_scheduler_lease_aio(
+        renewed = await registry.scheduler_lease_renew_aio(
             build_id, owner_id=winner, ttl_seconds=LIVE_TTL_SECONDS
         )
         assert renewed.held is True
-        released = await registry.build_release_scheduler_lease_aio(
-            build_id, owner_id=winner
-        )
+        released = await registry.scheduler_lease_release_aio(build_id, owner_id=winner)
         assert released.held is True
 
     async def rounds() -> None:
@@ -238,17 +240,17 @@ def test_a_lapsed_lease_is_taken_over_on_the_real_clock() -> None:
 
         # (1) While a lease is live, a competitor is refused -- and with ten
         # minutes on it, that stays true however slow the wire is.
-        live = await registry.build_acquire_scheduler_lease_aio(
+        live = await registry.scheduler_lease_acquire_aio(
             build_id, owner_id="incumbent", ttl_seconds=LIVE_TTL_SECONDS
         )
         assert live.held is True
-        refused = await registry.build_acquire_scheduler_lease_aio(
+        refused = await registry.scheduler_lease_acquire_aio(
             build_id, owner_id="early-bird", ttl_seconds=LIVE_TTL_SECONDS
         )
         assert refused.held is False
         # The denial reports the holder's expiry: same row, same value.
         assert refused.expires_at == live.expires_at
-        released = await registry.build_release_scheduler_lease_aio(
+        released = await registry.scheduler_lease_release_aio(
             build_id, owner_id="incumbent"
         )
         assert released.held is True
@@ -263,13 +265,13 @@ def test_a_lapsed_lease_is_taken_over_on_the_real_clock() -> None:
         # fail only if the server handed a still-live lease to a second
         # owner.
         asked_at = loop.time()
-        first = await registry.build_acquire_scheduler_lease_aio(
+        first = await registry.scheduler_lease_acquire_aio(
             build_id, owner_id="dead-tick", ttl_seconds=MIN_TTL_SECONDS
         )
         assert first.held is True
 
         async def takeover():
-            result = await registry.build_acquire_scheduler_lease_aio(
+            result = await registry.scheduler_lease_acquire_aio(
                 build_id, owner_id="successor", ttl_seconds=LIVE_TTL_SECONDS
             )
             return result if result.held else None
@@ -290,7 +292,7 @@ def test_a_lapsed_lease_is_taken_over_on_the_real_clock() -> None:
         )
 
         # And the dead holder cannot renew its way back in.
-        stale = await registry.build_renew_scheduler_lease_aio(
+        stale = await registry.scheduler_lease_renew_aio(
             build_id, owner_id="dead-tick", ttl_seconds=LIVE_TTL_SECONDS
         )
         assert stale.held is False
@@ -333,13 +335,13 @@ def test_failing_renewals_are_a_blip_and_not_a_lost_lease(monkeypatch) -> None:
     acquire round trip ate.
     """
     # The lease timing knobs are mutable globals, so the patch must land on
-    # the module whose code reads them -- the package deliberately does not
+    # the module whose code reads them (``_lease``) -- the package deliberately does not
     # re-export them, precisely so a patch against it fails loudly here
     # rather than silently patching nothing.
-    from stardag.build._reactive import SchedulerLease, _tick
+    from stardag.build._reactive import SchedulerLease, _lease
 
-    monkeypatch.setattr(_tick, "_LEASE_TTL_SECONDS", LIVE_TTL_SECONDS)
-    monkeypatch.setattr(_tick, "_LEASE_RENEW_INTERVAL_SECONDS", 1.0)
+    monkeypatch.setattr(_lease, "_LEASE_TTL_SECONDS", LIVE_TTL_SECONDS)
+    monkeypatch.setattr(_lease, "_LEASE_RENEW_INTERVAL_SECONDS", 1.0)
 
     registry = _registry()
     build_id = _new_build(registry)
@@ -393,11 +395,11 @@ def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
     lease with ten minutes left, where no amount of load can make the
     answer ambiguous.
     """
-    from stardag.build._reactive import SchedulerLease, _tick
+    from stardag.build._reactive import SchedulerLease, _lease
 
     ttl = MIN_TTL_SECONDS
-    monkeypatch.setattr(_tick, "_LEASE_TTL_SECONDS", ttl)
-    monkeypatch.setattr(_tick, "_LEASE_RENEW_INTERVAL_SECONDS", 1.0)
+    monkeypatch.setattr(_lease, "_LEASE_TTL_SECONDS", ttl)
+    monkeypatch.setattr(_lease, "_LEASE_RENEW_INTERVAL_SECONDS", 1.0)
 
     registry = _registry()
     bystander = _registry()
@@ -451,7 +453,7 @@ def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
                 # a test that asserted the takeover at the instant the
                 # client gave up would be asserting the opposite of it.
                 async def takeover():
-                    result = await bystander.build_acquire_scheduler_lease_aio(
+                    result = await bystander.scheduler_lease_acquire_aio(
                         build_id, owner_id="successor", ttl_seconds=LIVE_TTL_SECONDS
                     )
                     return result if result.held else None
@@ -488,7 +490,7 @@ def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
 
         # (4) __aexit__ released best-effort; owner-checked, so the
         # successor's lease must have survived it.
-        still_held = await bystander.build_renew_scheduler_lease_aio(
+        still_held = await bystander.scheduler_lease_renew_aio(
             build_id, owner_id="successor", ttl_seconds=LIVE_TTL_SECONDS
         )
         assert still_held.held is True, (
