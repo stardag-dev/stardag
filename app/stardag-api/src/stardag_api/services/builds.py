@@ -468,6 +468,7 @@ async def resume_build(
             )
             if plan is not None and plan.superseded_at is not None:
                 await verify_deployment_current(session, environment_id, deployment_id)
+                await _refuse_pending_replacement(session, plan)
                 current = await active_plan(session, build.id)
                 if current is not None:
                     current.superseded_at = now
@@ -502,6 +503,33 @@ async def resume_build(
             build=build,
             plan=PlanState.of(plan) if plan is not None else None,
             changed=changed,
+        )
+
+
+async def _refuse_pending_replacement(session: AsyncSession, plan: Plan) -> None:
+    """The seal's "no higher generation" rule, as it applies to a
+    reactivation: a later request for the build that has not yet been
+    activated (an unsealed replacement, registering) wins over the older
+    plan a resume would bring back — 409 ``plan_superseded``. Plans that
+    were active and have since been superseded or are active now do not
+    count: moving between the build's recorded requests is what a resume
+    is for."""
+    pending = await session.scalar(
+        select(Plan.id)
+        .where(
+            Plan.build_id == plan.build_id,
+            Plan.generation > plan.generation,
+            Plan.activated_at.is_(None),
+        )
+        .limit(1)
+    )
+    if pending is not None:
+        raise Conflict(
+            "plan_superseded",
+            "a later request for this build is being registered; the latest"
+            " request wins",
+            plan_id=str(plan.id),
+            pending_plan_id=str(pending),
         )
 
 

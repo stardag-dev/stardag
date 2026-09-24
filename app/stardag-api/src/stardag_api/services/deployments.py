@@ -12,7 +12,10 @@ See design.md, "The deterministic scope" and the ``deployment`` /
   ``(environment, code_id)``, born activated, ``app_name`` ``"local"``
   unless the driver names one. ``kind`` is part of every lookup, so a local
   code id never collides with a Modal one (S9).
-- **Current** for an app is the activated row with the highest generation.
+- **Current** for an app is the activated **Modal** row with the highest
+  generation. A local deployment is never current and never superseded: it
+  is authoritative for its own plans, so the seal's currency check, resume's
+  reactivation check and rollover apply to ``kind = modal`` only.
 
 Settings are a flat ``str → str`` body stored under the sha256 of its
 canonical JSON; keys starting ``STARDAG_`` or ``MODAL_`` are reserved for
@@ -157,7 +160,10 @@ class DeploymentState:
 async def current_deployment_id(
     session: AsyncSession, environment_id: UUID, kind: DeploymentKind, app_name: str
 ) -> UUID | None:
-    """The activated deployment with the highest generation for the app."""
+    """The activated deployment with the highest generation for the app;
+    None for a local one, which is never current."""
+    if kind is DeploymentKind.LOCAL:
+        return None
     return await session.scalar(
         select(Deployment.id)
         .where(
@@ -175,9 +181,12 @@ async def verify_deployment_current(
     session: AsyncSession, environment_id: UUID, deployment_id: UUID
 ) -> None:
     """409 ``deployment_not_current`` unless the deployment is its app's
-    current one: rollover only moves forward."""
+    current one: rollover only moves forward. A no-op for a local
+    deployment, which is authoritative for its own plans."""
     deployment = await session.get(Deployment, deployment_id)
     assert deployment is not None  # FK
+    if deployment.kind is DeploymentKind.LOCAL:
+        return
     current = await current_deployment_id(
         session, environment_id, deployment.kind, deployment.app_name
     )
@@ -400,6 +409,7 @@ async def list_deployments(
         .distinct(Deployment.kind, Deployment.app_name)
         .where(
             Deployment.environment_id == environment_id,
+            Deployment.kind == DeploymentKind.MODAL,
             Deployment.activated_at.is_not(None),
         )
         .order_by(Deployment.kind, Deployment.app_name, Deployment.generation.desc())

@@ -365,3 +365,49 @@ async def test_build_lifecycle_over_http(client: AsyncClient, h: Harness):
 
     missing = await client.post("/api/v2/builds", json={"root_task_ids": []})
     assert missing.status_code == 422
+
+
+async def test_resume_does_not_reactivate_under_a_pending_replacement(h: Harness):
+    """Reactivation respects the seal's "no higher generation" rule: while
+    a later request for the build is registering (created, never
+    activated), a resume does not bring an older plan back — 409
+    ``plan_superseded``, the latest request wins. Once that replacement is
+    sealed, moving back to a recorded request is what a resume is for."""
+    deployment = await h.new_deployment()
+    root = item("Root")
+    build = await h.new_build([root])
+    p1 = await h.plan(build, deployment, [root])
+    await h.register(p1.id, [root])
+    await h.seal(p1.id)
+    p2 = await h.plan(build, deployment, [root], settings={"S": "2"})
+    await h.register(p2.id, [root])
+    await h.seal(p2.id)
+    p3 = await h.plan(build, deployment, [root], settings={"S": "3"})
+
+    with pytest.raises(Conflict) as exc:
+        await _call(h, builds.resume_build, build, deployment_id=deployment)
+    assert exc.value.code == "plan_superseded"
+    assert (await h.frontier(build)).plan_id == p2.id
+
+    await h.register(p3.id, [root])
+    await h.seal(p3.id)
+    back = await _call(h, builds.resume_build, build, deployment_id=deployment)
+    assert back.plan is not None and back.plan.id == p1.id
+
+
+async def test_a_local_deployment_is_never_superseded(h: Harness):
+    """A local deployment is authoritative for its own plans: a newer local
+    deployment (another commit) does not make an older one's plan
+    unsealable or unresumable — the currency checks are for Modal only."""
+    older = await h.new_deployment(kind="local", app_name="local")
+    await h.new_deployment(kind="local", app_name="local")
+    root = item("Root")
+    build = await h.new_build([root])
+    p1 = await h.plan(build, older, [root])
+    await h.register(p1.id, [root])
+    assert (await h.seal(p1.id)).sealed_at is not None
+    p2 = await h.plan(build, older, [root], settings={"S": "2"})
+    await h.register(p2.id, [root])
+    await h.seal(p2.id)
+    back = await _call(h, builds.resume_build, build, deployment_id=older)
+    assert back.plan is not None and back.plan.id == p1.id

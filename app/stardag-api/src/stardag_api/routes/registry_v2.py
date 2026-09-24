@@ -179,6 +179,44 @@ async def retry(plan_id: UUID, task_id: str, db: Db, auth: Auth):
     return await _transition(db, auth, plan_id, task_id, Transition.retry())
 
 
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/interrupt", response_model=TransitionResponse
+)
+async def interrupt(plan_id: UUID, task_id: str, body: FailRequest, db: Db, auth: Auth):
+    return await _transition(
+        db,
+        auth,
+        plan_id,
+        task_id,
+        Transition.interrupt(body.execution_id, body.error_message),
+    )
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/preempt", response_model=TransitionResponse
+)
+async def preempt(plan_id: UUID, task_id: str, body: ReportRequest, db: Db, auth: Auth):
+    return await _transition(
+        db, auth, plan_id, task_id, Transition.preempt(body.execution_id)
+    )
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/skip", response_model=TransitionResponse
+)
+async def skip(plan_id: UUID, task_id: str, db: Db, auth: Auth):
+    return await _transition(db, auth, plan_id, task_id, Transition.skip())
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/cancel", response_model=TransitionResponse
+)
+async def cancel(plan_id: UUID, task_id: str, db: Db, auth: Auth):
+    """A single task's cancel, by the build holding its claim (via one of its
+    plans); 409 ``not_claim_holder`` otherwise."""
+    return await _transition(db, auth, plan_id, task_id, Transition.cancel())
+
+
 @router.post("/plans/{plan_id}/members/{task_id}/yield", response_model=YieldResponse)
 async def yield_batch(
     plan_id: UUID, task_id: str, body: YieldRequest, db: Db, auth: Auth
