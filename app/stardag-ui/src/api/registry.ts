@@ -27,6 +27,7 @@ import type {
   Task,
   TaskArtifactListResponse,
   TaskEvent,
+  TaskExecutionListResponse,
   TransitionResponse,
 } from "../types/task";
 import { fetchWithAuth } from "./client";
@@ -309,6 +310,29 @@ export function fetchTaskArtifacts(
     url(`/tasks/${taskId}/artifacts`, environmentId),
     "Failed to fetch task artifacts",
   );
+}
+
+/** The server's default page of a task's executions (its cap is 500). */
+export const TASK_EXECUTION_LIMIT = 100;
+
+/**
+ * Every execution of the task, **across builds**, newest first — ended
+ * ones included unless `includeEnded` is false. At most
+ * `TASK_EXECUTION_LIMIT` rows (the route has no cursor).
+ */
+export async function fetchTaskExecutions(
+  taskId: string,
+  environmentId: string,
+  includeEnded = true,
+): Promise<Execution[]> {
+  const data = await getJson<TaskExecutionListResponse>(
+    url(`/tasks/${taskId}/executions`, environmentId, {
+      include_ended: String(includeEnded),
+      limit: String(TASK_EXECUTION_LIMIT),
+    }),
+    "Failed to fetch task executions",
+  );
+  return data.executions;
 }
 
 /** The server's cap on one event read. */

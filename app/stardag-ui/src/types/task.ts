@@ -56,7 +56,10 @@ export type ExecutionOutcome =
   | "suspended"
   | "interrupted"
   | "preempted"
-  | "stopped";
+  | "stopped"
+  // An operator end for an execution that cannot be stopped: no report of
+  // it will ever be applied.
+  | "lost";
 
 // Descriptive metadata about the executor backend that ran an execution or
 // triggered a build. For Modal: {kind: "modal", app_name, workspace,
@@ -365,6 +368,12 @@ export interface Execution {
 
 export interface ExecutionListResponse {
   build_id: string;
+  executions: Execution[];
+}
+
+/** `GET /tasks/{id}/executions`: across builds, newest first. */
+export interface TaskExecutionListResponse {
+  task_id: string;
   executions: Execution[];
 }
 

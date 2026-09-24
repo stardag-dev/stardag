@@ -20,7 +20,7 @@ interface TaskClaimPanelProps {
   // A reset goes through that plan; a release never does (see below).
   buildId?: string;
   planId?: string | null;
-  // The build's execution named by `task.execution_id`, when it has one.
+  // The execution named by `task.execution_id`, from the task's executions.
   currentExecution?: Execution | null;
   onChanged: () => void;
   // Jump to another build (the claim holder); omitted where no navigation
@@ -187,8 +187,8 @@ export function TaskClaimPanel({
               <p>
                 Under{" "}
                 {currentExecution.in_current_plan
-                  ? "this build's active plan"
-                  : "an older plan of this build (an orphan)"}
+                  ? "its build's active plan"
+                  : "an older plan of its build (an orphan)"}
                 .
               </p>
               <ModalExecutionCallRef

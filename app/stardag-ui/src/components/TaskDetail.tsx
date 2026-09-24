@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { fetchBuildExecutions, fetchTask, fetchTaskArtifacts } from "../api/registry";
+import { fetchTask, fetchTaskArtifacts, fetchTaskExecutions } from "../api/registry";
 import { useDeployments } from "../hooks/useDeployments";
 import type { Execution, PlanMember, Task, TaskArtifact } from "../types/task";
 import { qualifiedName } from "../utils/instances";
 import { formatAbsoluteTime } from "../utils/time";
 import { ArtifactList } from "./ArtifactViewer";
-import { ExecutionTable } from "./ExecutionTable";
 import { MembershipFacts } from "./MembershipFacts";
 import { CopyButton } from "./ModalExecution";
 import { TaskClaimPanel } from "./TaskClaimPanel";
 import { TaskEventLog } from "./TaskEventLog";
+import { TaskExecutions } from "./TaskExecutions";
 import { TaskInstances } from "./TaskInstances";
 
 /** The build a task is opened from, when it is. */
@@ -51,11 +51,11 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 /**
  * One completion: its status and claim, the instances that realise it,
- * the viewed build's executions of it, and its artifacts.
+ * every execution of it across builds (`GET /tasks/{id}/executions`,
+ * ended ones included), and its artifacts.
  *
- * Keyed by `task_id`. From a build it also reads that build's executions
- * (the registry lists a build's unended executions only, so ended ones
- * are not shown) and offers the claim remedies through the active plan.
+ * Keyed by `task_id`. From a build it also marks that build's plan
+ * membership and instance, and offers a reset through its active plan.
  */
 export function TaskDetail({
   taskId,
@@ -109,14 +109,10 @@ export function TaskDetail({
     fetchTaskArtifacts(taskId, environmentId)
       .then((r) => fresh() && setArtifacts(r.artifacts))
       .catch(() => fresh() && setArtifacts([]));
-    if (buildId) {
-      fetchBuildExecutions(buildId, environmentId)
-        .then(
-          (rows) => fresh() && setExecutions(rows.filter((e) => e.task_id === taskId)),
-        )
-        .catch(() => fresh() && setExecutions(null));
-    }
-  }, [taskId, environmentId, buildId, refreshToken, nonce]);
+    fetchTaskExecutions(taskId, environmentId)
+      .then((rows) => fresh() && setExecutions(rows))
+      .catch(() => fresh() && setExecutions([]));
+  }, [taskId, environmentId, refreshToken, nonce]);
 
   const handleChanged = useCallback(() => {
     setNonce((n) => n + 1);
@@ -272,17 +268,24 @@ export function TaskDetail({
             />
           </Section>
 
-          {context && (
-            <Section title="Running executions in this build">
-              {executions === null ? (
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  Not available.
-                </p>
-              ) : (
-                <ExecutionTable executions={executions} />
-              )}
-            </Section>
-          )}
+          <Section
+            title={
+              executions === null ? "Executions" : `Executions (${executions.length})`
+            }
+          >
+            {executions === null ? (
+              <p role="status" className="text-xs text-gray-500 dark:text-gray-400">
+                Loading executions…
+              </p>
+            ) : (
+              <TaskExecutions
+                executions={executions}
+                currentBuildId={buildId}
+                currentExecutionId={task.execution_id}
+                onOpenBuild={onOpenBuild}
+              />
+            )}
+          </Section>
 
           {artifacts === null ? (
             <p className="text-sm text-gray-500 dark:text-gray-400">
