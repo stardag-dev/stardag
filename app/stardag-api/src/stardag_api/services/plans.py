@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID
 
 from sqlalchemy import String, Uuid, func, select, text, update
@@ -70,26 +70,21 @@ async def seal_plan(
     conflict the closure finds fails the build (committed) and the seal is
     refused with ``instance_conflict``.
 
-    Idempotent by state: a sealed plan is returned unchanged.
+    Idempotent by state: a sealed plan is returned unchanged — after the
+    closure step, which a retried seal runs too, so a member another plan's
+    expansion made reachable since the seal is admitted (or its conflict
+    fails the build) either way.
     """
     async with transaction(session):
         plan = await get_plan(session, environment_id, plan_id)
         await lock_build(session, environment_id, plan.build_id)
         await session.refresh(plan)
-        if plan.sealed_at is not None:
-            return PlanState.of(plan)
 
         closed = await close_plan(session, environment_id, plan, now=utc_now())
         if closed.build_failed:
-            raise RecordedConflict(
-                "instance_conflict",
-                "the closure step reached a second instance of a member's"
-                " completion; the build is failed",
-                plan_id=str(plan.id),
-                conflicts=[
-                    {"task_id": c.task_id, "fields": c.fields} for c in closed.conflicts
-                ],
-            )
+            refuse_closure_conflict(plan, closed)
+        if plan.sealed_at is not None:
+            return PlanState.of(plan)
         await _verify_registration(session, plan)
         await verify_deployment_current(session, environment_id, plan.deployment_id)
         higher = await session.scalar(
@@ -122,6 +117,20 @@ async def seal_plan(
             plan.activated_at = now
         await session.flush()
         return PlanState.of(plan)
+
+
+def refuse_closure_conflict(plan: Plan, closed: ClosureResult) -> NoReturn:
+    """The refusal of a call whose closure step failed the build: 409
+    ``instance_conflict``, recorded (the ``BUILD_FAILED`` is committed)."""
+    raise RecordedConflict(
+        "instance_conflict",
+        "the closure step reached a second instance of a member's"
+        " completion; the build is failed",
+        plan_id=str(plan.id),
+        conflicts=[
+            {"task_id": c.task_id, "fields": c.fields} for c in closed.conflicts
+        ],
+    )
 
 
 async def _verify_registration(session: AsyncSession, plan: Plan) -> None:

@@ -10,7 +10,8 @@ state) and the ``build`` entity.
   (``FOR NO KEY UPDATE``) first, then task rows in ``task_id`` order.
 - **Idempotent by state**: a transition that finds the build already in the
   requested state returns it and writes no event and no timestamp.
-- **Completion is verified**: ``complete`` recomputes ``plan_complete``
+- **Completion is verified**: ``complete`` runs the closure step (a
+  conflict fails the build, as on ``/seal``), then recomputes ``plan_complete``
   (sealed, every non-excluded member COMPLETED) over the active plan's
   member task rows read ``FOR SHARE`` in ``task_id`` order, which
   serialises with an invalidation's ``FOR NO KEY UPDATE``. ``force``
@@ -187,6 +188,15 @@ async def _verify_plan_complete(
             reason="not_sealed",
             plan_id=str(plan.id) if plan else None,
         )
+    # The closure step first, as ``/seal`` runs it: another plan may have
+    # expanded a shared instance since the seal, and an upstream it reaches
+    # must be a member (so counted) before the predicate is recomputed. A
+    # conflict it finds fails the build (committed) and refuses completion.
+    from stardag_api.services.plans import close_plan, refuse_closure_conflict
+
+    closed = await close_plan(session, build.environment_id, plan, now=utc_now())
+    if closed.build_failed:
+        refuse_closure_conflict(plan, closed)
     rows = (
         await session.execute(
             select(
@@ -350,7 +360,12 @@ async def release_claims(
 ) -> int:
     """Release every claim (live or lapsed) held by any of the build's
     plans, in ``task_id`` order, through ``transition_task()``. Returns how
-    many were released."""
+    many were released.
+
+    The snapshot is the whole set: the caller holds the build row ``FOR NO
+    KEY UPDATE``, and a claiming start takes it ``FOR SHARE`` before its
+    task row, so no claim can be granted through this build between the
+    read and the build's new status committing."""
     held = (
         await session.execute(
             select(Task.id, Task.claim_plan_id)
@@ -571,7 +586,12 @@ async def delete_build(
     its plans holds a live claim or any of its executions has not reported
     its end — ``builds stop`` ends those first, so the ledger is never
     cascaded away under a worker that may still report. Plans, members and
-    executions cascade; events keep their rows with the pointers NULL."""
+    executions cascade; events keep their rows with the pointers NULL.
+
+    The guard holds at the delete: the build row is locked ``FOR NO KEY
+    UPDATE`` first, which a claiming start (``FOR SHARE`` on the build
+    before its task row) waits for, so no execution is created between the
+    check and the cascade."""
     async with transaction(session):
         build = await lock_build(session, environment_id, build_id)
         now = utc_now()
