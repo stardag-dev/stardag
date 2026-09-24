@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BreadcrumbProvider } from "../context/BreadcrumbContext";
 import type { Build, BuildListResponse } from "../types/task";
@@ -10,6 +10,7 @@ vi.mock("../api/registry", () => ({ fetchBuilds: vi.fn() }));
 
 import { fetchBuilds } from "../api/registry";
 import { BuildsList } from "./BuildsList";
+import { tooltipOf } from "../test/tooltip";
 
 const mocked = vi.mocked(fetchBuilds);
 
@@ -78,7 +79,9 @@ describe("BuildsList", () => {
     await screen.findByText("build a");
     const header = screen.getByRole("columnheader", { name: /last active/i });
     expect(header).toHaveAttribute("aria-sort", "descending");
-    expect(header.title).toMatch(/most recent first/);
+    expect(tooltipOf(within(header).getByText("Last active"))).toMatch(
+      /most recent first/,
+    );
     expect(screen.queryByText(/newest/i)).not.toBeInTheDocument();
   });
 
@@ -101,6 +104,24 @@ describe("BuildsList", () => {
       cursor: undefined,
     });
     await waitFor(() => expect(screen.queryByText(/^Page /)).not.toBeInTheDocument());
+  });
+
+  it("never breaks the build slug or its id chip, only between them", async () => {
+    mocked.mockResolvedValueOnce({
+      builds: [
+        build("01a0d3f7-f8c2-7753-be5b-b95e544476c9", { name: "gentle-horizon-67" }),
+      ],
+      total: 1,
+      next_cursor: null,
+    });
+    renderList();
+    const slug = await screen.findByRole("button", { name: "gentle-horizon-67" });
+    // A table column is at least its cells' min-content wide, so nowrap
+    // on each item is what keeps the column from squeezing them.
+    expect(slug.className).toMatch(/whitespace-nowrap/);
+    const chip = screen.getByRole("button", { name: /^Copy build id/ });
+    expect(chip.className).toMatch(/whitespace-nowrap/);
+    expect(slug.parentElement?.className).toMatch(/flex-wrap/);
   });
 });
 

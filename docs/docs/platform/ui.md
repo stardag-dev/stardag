@@ -46,8 +46,8 @@ One build, over its active plan:
 
 - **The plan graph**: the plan's members over their instance edges
   (dynamic edges dashed). Wide fan-outs — more members of one type, at one
-  level, with one status than _Group after_ (default 5) — are drawn as one
-  batch node with a count; click it to expand. The graph can be opened
+  level, with one status than _Group after_ (default 5, in the graph's
+  header) — are drawn as one batch node with a count; click it to expand. The graph can be opened
   fullscreen (Esc to leave), switched between left-to-right and
   top-to-bottom, and rearranged by dragging.
 - **The task table**: every member with its status and plan membership
@@ -90,20 +90,23 @@ Selecting a task opens its detail pane next to the table.
 A task page (`/tasks/<task id>`, or the link icon in a build's detail pane)
 shows one completion:
 
-- **Status and claim**: the global status, and while it runs, whether the
-  claim is live or lapsed, which execution holds it and **which build** —
-  a link to that build. A claim can be released from here, addressed to
-  the build that holds it, by any workspace member; the release is
-  recorded on the task's event log, and it stops nothing — the worker
-  finds out at its next checkpoint. A failed, cancelled or interrupted
+- **Status and claim**: the global status, and while it runs one line —
+  _Claim live until_ or _Claim lapsed at_ a time. **Manage** opens the
+  claim: **which build** holds it (a link to that build), its plan, the
+  execution and its executor ids, and the expiry. A claim can be released
+  from there, addressed to the build that holds it, by any workspace
+  member; the release is recorded on the task's event log, and it stops
+  nothing — the worker finds out at its next checkpoint. A failed, cancelled or interrupted
   task can be reset to pending.
 - **Executions**: every execution of the task across builds, newest first,
   ended ones included — executor, worker, how it ended or what became of
   its claim, its build, and for Modal the call id with a link to the Modal
   dashboard and the full set of Modal identifiers.
-- **Instances**: each construction of the task, under its deployment and
-  settings, with its parameters; parameters that differ between instances
-  are named.
+- **Task Parameters**: the parameters of the instance the viewed plan
+  holds (or the newest). The info icon shows that instance's scope —
+  deployment and settings hash — its hashes and times, and the task's other
+  instances below it, with the parameters they differ in. Fullscreen lists
+  every instance above the parameters of the selected one.
 - **Artifacts** the task produced, and its **output URI**.
 - **See full event log**: the task's append-only history across builds,
   including reports the registry recorded but refused and structure

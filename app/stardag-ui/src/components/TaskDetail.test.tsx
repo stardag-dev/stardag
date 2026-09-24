@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PlanMember, Task } from "../types/task";
+import { tooltipOf } from "../test/tooltip";
 import { MEMBERSHIP_HELP } from "../utils/membership";
 
 vi.mock("../api/registry", () => ({
@@ -84,8 +85,7 @@ describe("TaskDetail", () => {
     );
     await screen.findByRole("heading", { name: /demo\.Train/ });
     const header = screen.getByText("In this plan:").parentElement!;
-    expect(within(header).getByText("closure")).toHaveAttribute(
-      "title",
+    expect(tooltipOf(within(header).getByText("closure"))).toBe(
       MEMBERSHIP_HELP.closure,
     );
   });

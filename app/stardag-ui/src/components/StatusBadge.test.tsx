@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { StatusBadge } from "./StatusBadge";
+import { tooltipOf } from "../test/tooltip";
 
 describe("StatusBadge", () => {
   it("renders pending status", () => {
@@ -39,7 +40,7 @@ describe("StatusBadge claim holder link", () => {
       />,
     );
     const badge = screen.getByRole("button", { name: /running/ });
-    expect(badge).toHaveAttribute("title", expect.stringMatching(/click to view/));
+    expect(tooltipOf(badge)).toMatch(/click to view/);
     fireEvent.click(badge);
     fireEvent.keyDown(badge, { key: "Enter" });
     fireEvent.keyDown(badge, { key: " " });

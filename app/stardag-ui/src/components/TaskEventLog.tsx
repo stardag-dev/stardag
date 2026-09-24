@@ -4,6 +4,7 @@ import type { TaskEvent } from "../types/task";
 import { eventTypeStyle, formatEventType } from "../utils/events";
 import { shortBuildId } from "../utils/ids";
 import { FullscreenModal } from "./FullscreenModal";
+import { Tooltip } from "./ui/Tooltip";
 
 function formatTimestamp(iso: string): string {
   const d = new Date(iso);
@@ -177,12 +178,11 @@ function EventRow({
           {formatEventType(event.event_type)}
         </span>
         {!event.report_applied && (
-          <span
-            className="ml-1.5 rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600 dark:bg-gray-700 dark:text-gray-300"
-            title="Recorded but refused: the report did not change the task's state"
-          >
-            not applied
-          </span>
+          <Tooltip content="Recorded but refused: the report did not change the task's state">
+            <span className="ml-1.5 rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600 dark:bg-gray-700 dark:text-gray-300">
+              not applied
+            </span>
+          </Tooltip>
         )}
       </td>
       <td className="px-4 py-3 font-mono text-sm whitespace-nowrap text-gray-500 dark:text-gray-400">

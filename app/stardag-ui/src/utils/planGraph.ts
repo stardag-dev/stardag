@@ -70,6 +70,20 @@ export function flowModel(view: PlanView): {
 /** v1's default for "group after": more than this many collapse. */
 export const DEFAULT_GROUP_AFTER = 5;
 
+/**
+ * Batches expanded by a click, under the cap they were opened at: a change
+ * of cap regroups, so ids opened under another cap are ignored.
+ */
+export interface BatchExpansion {
+  cap: number;
+  ids: Set<string>;
+}
+
+/** The ids of `expansion` that apply at `cap`, or null. */
+export function expandedAt(expansion: BatchExpansion, cap: number): Set<string> | null {
+  return expansion.cap === cap ? expansion.ids : null;
+}
+
 export interface FlowBatchModel {
   // `batch:<level>:<type>:<status>`.
   id: string;

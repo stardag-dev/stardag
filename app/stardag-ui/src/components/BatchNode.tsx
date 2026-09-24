@@ -1,6 +1,7 @@
 import { Handle, Position } from "@xyflow/react";
 import type { TaskStatus } from "../types/task";
 import { truncateLabel, type LayoutDirection } from "./dagLayout";
+import { Tooltip } from "./ui/Tooltip";
 
 /**
  * A batch of plan members drawn as one node: same type, same level, same
@@ -46,55 +47,58 @@ export function BatchNode({ data }: { data: BatchNodeData }) {
   const isHorizontal = data.direction === "LR";
   const colors = STATUS_COLORS[data.status] ?? STATUS_COLORS.pending;
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      aria-label={`Expand ${data.count} ${data.taskType} (${data.status})`}
-      className={`relative cursor-pointer rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-        data.isMuted ? "opacity-60" : ""
-      }`}
-      title={`${data.count} × ${data.taskType}, ${data.status} — click to expand`}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          e.stopPropagation();
-          data.onExpand?.();
-        }
-      }}
+    <Tooltip
+      content={`${data.count} × ${data.taskType}, ${data.status} — click to expand`}
     >
-      {/* Stacked-card effect */}
       <div
-        className={`absolute top-1 left-1 h-full w-full rounded-lg border-2 opacity-50 ${colors.border} ${colors.bg}`}
-      />
-      <div
-        className={`relative rounded-lg border-2 px-3 py-2 shadow-md ${colors.border} ${colors.bg}`}
+        role="button"
+        tabIndex={0}
+        aria-label={`Expand ${data.count} ${data.taskType} (${data.status})`}
+        className={`relative cursor-pointer rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+          data.isMuted ? "opacity-60" : ""
+        }`}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            e.stopPropagation();
+            data.onExpand?.();
+          }
+        }}
       >
-        <Handle
-          type="target"
-          position={isHorizontal ? Position.Left : Position.Top}
-          className="!bg-gray-400 dark:!bg-gray-500"
+        {/* Stacked-card effect */}
+        <div
+          className={`absolute top-1 left-1 h-full w-full rounded-lg border-2 opacity-50 ${colors.border} ${colors.bg}`}
         />
-        <div className="flex flex-col items-center gap-1">
-          <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
-            {truncateLabel(data.label)}
-          </span>
-          <div className="flex items-center gap-1">
-            <span
-              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${colors.badge}`}
-            >
-              ×{data.count}
+        <div
+          className={`relative rounded-lg border-2 px-3 py-2 shadow-md ${colors.border} ${colors.bg}`}
+        >
+          <Handle
+            type="target"
+            position={isHorizontal ? Position.Left : Position.Top}
+            className="!bg-gray-400 dark:!bg-gray-500"
+          />
+          <div className="flex flex-col items-center gap-1">
+            <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+              {truncateLabel(data.label)}
             </span>
-            <span className="text-[10px] uppercase text-gray-600 dark:text-gray-300">
-              {data.status}
-            </span>
+            <div className="flex items-center gap-1">
+              <span
+                className={`rounded-full px-2 py-0.5 text-xs font-semibold ${colors.badge}`}
+              >
+                ×{data.count}
+              </span>
+              <span className="text-[10px] uppercase text-gray-600 dark:text-gray-300">
+                {data.status}
+              </span>
+            </div>
           </div>
+          <Handle
+            type="source"
+            position={isHorizontal ? Position.Right : Position.Bottom}
+            className="!bg-gray-400 dark:!bg-gray-500"
+          />
         </div>
-        <Handle
-          type="source"
-          position={isHorizontal ? Position.Right : Position.Bottom}
-          className="!bg-gray-400 dark:!bg-gray-500"
-        />
       </div>
-    </div>
+    </Tooltip>
   );
 }

@@ -12,7 +12,11 @@ import { useDeployments } from "../hooks/useDeployments";
 import type { Build, TaskStatus } from "../types/task";
 import { rootsCompleted } from "../utils/builds";
 import { shortTaskId } from "../utils/ids";
-import { DEFAULT_GROUP_AFTER } from "../utils/planGraph";
+import {
+  type BatchExpansion,
+  DEFAULT_GROUP_AFTER,
+  expandedAt,
+} from "../utils/planGraph";
 import { BuildControlsDialog } from "./BuildControlsDialog";
 import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildInfoDialog } from "./BuildInfoDialog";
@@ -24,10 +28,12 @@ import {
   type LayoutDirection,
   type PositionCache,
 } from "./dagLayout";
+import { GroupAfterControl } from "./GroupAfterControl";
 import { MemberTable } from "./MemberTable";
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
 import { ToolbarButton } from "./ui/ToolbarButton";
+import { Tooltip } from "./ui/Tooltip";
 
 interface BuildViewProps {
   buildId: string;
@@ -83,6 +89,11 @@ function BuildViewForIdentity({
   const [dagFullscreen, setDagFullscreen] = useState(false);
   // Shared by the inline and the fullscreen graph.
   const [groupAfter, setGroupAfter] = useState(DEFAULT_GROUP_AFTER);
+  const [expansion, setExpansion] = useState<BatchExpansion>({
+    cap: DEFAULT_GROUP_AFTER,
+    ids: new Set(),
+  });
+  const [batchCount, setBatchCount] = useState(0);
   const [dagDirection, setDagDirection] = useState<LayoutDirection>("LR");
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
   const positionCacheRef = useRef<PositionCache>(createPositionCache());
@@ -253,7 +264,23 @@ function BuildViewForIdentity({
       onDirectionChange={setDagDirection}
       positionCache={positionCacheRef}
       groupAfter={groupAfter}
-      onGroupAfterChange={setGroupAfter}
+      expansion={expansion}
+      onExpansionChange={setExpansion}
+      onBatchCountChange={setBatchCount}
+    />
+  );
+
+  const openedBatches = expandedAt(expansion, groupAfter)?.size ?? 0;
+  const groupControl = (
+    <GroupAfterControl
+      value={groupAfter}
+      onChange={setGroupAfter}
+      batchCount={batchCount}
+      onRegroup={
+        openedBatches > 0
+          ? () => setExpansion({ cap: groupAfter, ids: new Set() })
+          : undefined
+      }
     />
   );
 
@@ -380,28 +407,32 @@ function BuildViewForIdentity({
                   <span className="font-medium">Plan graph</span>
                 </button>
                 {showDag && (
-                  <button
-                    type="button"
-                    onClick={() => setDagFullscreen(true)}
-                    aria-label="Fullscreen plan graph"
-                    title="Fullscreen plan graph"
-                    className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-                  >
-                    <svg
-                      aria-hidden="true"
-                      className="h-4 w-4"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                      strokeWidth={2}
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"
-                      />
-                    </svg>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {!plan.planError && groupControl}
+                    <Tooltip content="Fullscreen plan graph">
+                      <button
+                        type="button"
+                        onClick={() => setDagFullscreen(true)}
+                        aria-label="Fullscreen plan graph"
+                        className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+                      >
+                        <svg
+                          aria-hidden="true"
+                          className="h-4 w-4"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                          strokeWidth={2}
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"
+                          />
+                        </svg>
+                      </button>
+                    </Tooltip>
+                  </div>
                 )}
               </div>
 
@@ -483,31 +514,35 @@ function BuildViewForIdentity({
           className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-900"
         >
           <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
-            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
-              Plan graph
-            </span>
-            <button
-              type="button"
-              onClick={() => setDagFullscreen(false)}
-              aria-label="Exit fullscreen"
-              title="Exit fullscreen (Esc)"
-              className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-            >
-              <svg
-                aria-hidden="true"
-                className="h-5 w-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                strokeWidth={2}
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                Plan graph
+              </span>
+              {!plan.planError && groupControl}
+            </div>
+            <Tooltip content="Exit fullscreen (Esc)">
+              <button
+                type="button"
+                onClick={() => setDagFullscreen(false)}
+                aria-label="Exit fullscreen"
+                className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M6 18L18 6M6 6l12 12"
-                />
-              </svg>
-            </button>
+                <svg
+                  aria-hidden="true"
+                  className="h-5 w-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </button>
+            </Tooltip>
           </div>
           <div className="flex-1">
             {plan.planError ? (
