@@ -329,9 +329,7 @@ class PlansMixin(RegistryState):
                             "plan_incomplete_registration", reason="roots_unexpanded"
                         )
             deployment = self.deployments[plan.deployment_id]
-            current = self.current_deployment(deployment.kind, deployment.app_name)
-            if current is None or current.id != deployment.id:
-                raise refuse("deployment_not_current")
+            self.verify_deployment_current(deployment)
             if any(
                 p.build_id == plan.build_id and p.generation > plan.generation
                 for p in self.plans.values()

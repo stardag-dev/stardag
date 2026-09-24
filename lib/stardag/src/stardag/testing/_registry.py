@@ -27,21 +27,24 @@ from stardag.registry import (
     BuildNotifyResult,
     DeploymentInfo,
     ExecutionInfo,
+    PlanRoots,
     RegistryABC,
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
+    TaskArtifactInfo,
     TaskInfo,
     TaskInstanceInfo,
     TickSummaryRecord,
     TransitionResult,
     WakeCandidate,
 )
-from stardag.registry._models import DeploymentKind
+from stardag.registry._models import DeploymentKind, StopOutcome
 from stardag.testing._registry_exclusion import ExclusionMixin
 from stardag.testing._registry_plans import _outcome, plan_info
 from stardag.testing._registry_state import (
     WAKE_HANDOUT_WINDOW,
+    ArtifactRow,
     BuildRow,
     DeploymentRow,
     Event,
@@ -93,6 +96,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             status=build.status,
             root_task_ids=list(build.root_task_ids),
             created_at=build.created_at,
+            last_active_at=build.last_active_at,
             is_resumed=build.is_resumed,
             executor_metadata=build.executor_metadata,
             reactive_app_name=build.reactive_app_name,
@@ -116,13 +120,15 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         build_id = build_id or new_id()
         if build_id in self.builds:
             return self._info(self.builds[build_id])
+        now = self.now()
         build = BuildRow(
             id=build_id,
             name=name or f"build-{len(self.builds) + 1}",
             root_task_ids=sorted(set(root_task_ids)),
             description=description,
             executor_metadata=executor_metadata,
-            created_at=self.now(),
+            created_at=now,
+            last_active_at=now,
         )
         self.builds[build_id] = build
         self.events.append(Event("BUILD_STARTED", build_id=build_id))
@@ -163,11 +169,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
                 )
                 if plan is not None and plan.superseded_at is not None:
                     deployment = self.deployments[deployment_id]
-                    current = self.current_deployment(
-                        deployment.kind, deployment.app_name
-                    )
-                    if current is None or current.id != deployment_id:
-                        raise refuse("deployment_not_current")
+                    self.verify_deployment_current(deployment)
                     active = self.active_plan(build_id)
                     if active is not None:
                         active.superseded_at = self.now()
@@ -182,6 +184,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
                 build.executor_metadata = executor_metadata
             if changed:
                 build.is_resumed = True
+                build.last_active_at = self.now()
                 self.events.append(Event("BUILD_RESUMED", build_id=build_id))
             return ResumeResult(
                 build=self._info(build),
@@ -197,6 +200,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             return self._info(build)
         build.status = status
         build.error_message = error
+        build.last_active_at = self.now()
         self.release_build_claims(build)
         self.events.append(Event(f"BUILD_{status.upper()}", build_id=build_id))
         return self._info(build)
@@ -235,17 +239,55 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         self._record("build_exit_early", build_id=build_id)
         build = self.build(build_id)
         build.status = "exit_early"
+        build.last_active_at = self.now()
         return self._info(build)
+
+    def build_list(
+        self,
+        *,
+        status: str | None = None,
+        reactive_app_name: str | None = None,
+        limit: int = 100,
+    ) -> list[BuildInfo]:
+        self._record("build_list", status=status, reactive_app_name=reactive_app_name)
+        # Most recently active first, then by id — as the server orders
+        # (``Build.last_active_at.desc(), Build.id.desc()``), not insertion
+        # order.
+        rows = sorted(
+            (
+                b
+                for b in self.builds.values()
+                if (status is None or b.status == status)
+                and (
+                    reactive_app_name is None
+                    or b.reactive_app_name == reactive_app_name
+                )
+            ),
+            key=lambda b: (b.last_active_at, b.id),
+            reverse=True,
+        )
+        return [self._info(b) for b in rows[:limit]]
 
     def build_list_running(
         self, *, reactive_app_name: str | None = None, limit: int = 100
     ) -> list[UUID]:
-        return [
-            b.id
-            for b in self.builds.values()
-            if b.status == "running"
-            and (reactive_app_name is None or b.reactive_app_name == reactive_app_name)
-        ][:limit]
+        # Delegate to build_list (most-recently-active first, per the
+        # server ordering), as the real client does -- not a fresh scan in
+        # insertion order, which would drift from it.
+        builds = self.build_list(
+            status="running", reactive_app_name=reactive_app_name, limit=limit
+        )
+        return [b.id for b in builds]
+
+    def plan_roots_info(self, plan_id: UUID) -> PlanRoots:
+        plan = self.plan(plan_id)
+        return PlanRoots(
+            plan_id=plan.id,
+            build_id=plan.build_id,
+            deployment_id=plan.deployment_id,
+            settings_hash=plan.settings_hash,
+            roots=self.plan_roots(plan_id),
+        )
 
     # -- executions and tasks ------------------------------------------------------------
 
@@ -289,17 +331,31 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         ]
         return [r for r in rows if not (not_in_current_plan and r.in_current_plan)]
 
-    def execution_report_stopped(self, execution_id: UUID) -> TransitionResult:
-        self._record("execution_report_stopped", execution_id=execution_id)
+    def execution_report_stopped(
+        self, execution_id: UUID, *, outcome: StopOutcome = "stopped"
+    ) -> TransitionResult:
+        self._record(
+            "execution_report_stopped", execution_id=execution_id, outcome=outcome
+        )
+        if outcome not in ("stopped", "lost"):
+            raise refuse("invalid_request", f"outcome {outcome!r}", status=422)
         execution = self.executions.get(execution_id)
         if execution is None:
             raise refuse("unknown_execution", status=404)
         task = self.task(execution.task_id)
         if execution.ended_at is None:
             execution.ended_at = self.now()
-            execution.outcome = "stopped"
-        if task.execution_id == execution_id and self.live(task):
-            self.close_claim(task, "stopped")
+            execution.outcome = outcome
+        # The server's rule: the current execution's unreleased claim is
+        # released ``cancelled`` and the task CANCELLED (actionable) — a
+        # revocation is not a result.
+        if (
+            task.execution_id == execution_id
+            and execution.claim_released_at is None
+            and task.status == "running"
+        ):
+            self.close_claim(task, "cancelled")
+            self.move(task, "cancelled")
         return _outcome(task)
 
     def task_get(self, task_id: str) -> TaskInfo:
@@ -334,6 +390,23 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             instances=instances,
         )
 
+    def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
+        self.task(task_id)
+        return [
+            TaskArtifactInfo(
+                id=a.id,
+                task_id=task_id,
+                artifact_type=a.artifact_type,
+                name=a.name,
+                # The HTTP contract normalises a markdown body to
+                # ``{"content": ...}`` (``_artifacts_body`` on upload); a
+                # json artifact's body is already a dict.
+                body={"content": a.body} if a.artifact_type == "markdown" else a.body,
+                created_at=a.created_at,
+            )
+            for a in self.artifacts.get(task_id, [])
+        ]
+
     def task_upload_artifacts(
         self,
         plan_id: UUID,
@@ -348,7 +421,26 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
                 f"task {task_id} is not a member of plan {plan_id}",
                 status=404,
             )
-        self.artifacts.setdefault(task_id, []).extend(artifacts)
+        # Upsert per (type, name), like the server's `on_conflict_do_update`
+        # (services/artifacts.py): a re-upload replaces only `body`, so `id`
+        # and `created_at` are minted once and kept -- not reset on every
+        # upload -- exactly like the real ``TaskArtifact`` row.
+        by_key = {
+            (row.artifact_type, row.name): row
+            for row in self.artifacts.get(task_id, [])
+        }
+        now = self.now()
+        for artifact in artifacts:
+            key = (artifact.type, artifact.name)
+            prior = by_key.get(key)
+            by_key[key] = ArtifactRow(
+                id=prior.id if prior is not None else new_id(),
+                artifact_type=artifact.type,
+                name=artifact.name,
+                body=artifact.body,
+                created_at=prior.created_at if prior is not None else now,
+            )
+        self.artifacts[task_id] = list(by_key.values())
 
     # -- deployments and settings -------------------------------------------------------
 
@@ -447,14 +539,20 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         row = self.deployments.get(deployment_id)
         if row is None:
             raise refuse("unknown_deployment", status=404)
-        # A given value fills a NULL or must match (the server's rule).
-        for column, value in (("modal_app_id", modal_app_id), ("image_id", image_id)):
-            if value is None:
-                continue
-            recorded = getattr(row, column)
-            if recorded is not None and recorded != value:
-                raise refuse("deployment_mismatch", field=column)
-            setattr(row, column, value)
+        # A given value fills a NULL or must match (the server's rule):
+        # 409 `deployment_activation_conflict` with every clashing field,
+        # nothing written (services/deployments.py, activate_deployment).
+        given = {"modal_app_id": modal_app_id, "image_id": image_id}
+        clashing = sorted(
+            column
+            for column, value in given.items()
+            if value is not None and getattr(row, column) not in (None, value)
+        )
+        if clashing:
+            raise refuse("deployment_activation_conflict", fields=clashing)
+        for column, value in given.items():
+            if value is not None:
+                setattr(row, column, value)
         if row.activated_at is None:
             row.activated_at = self.now()
         return self._deployment_info(row)

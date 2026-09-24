@@ -283,7 +283,19 @@ assignee the maintainer.
       route the client calls is served (step 3c, step 4); proven live in I0
       step 4. Left to I8: `builds list/stop/cleanup`, `tasks`,
       `concurrency-limits` as CLI commands.
-- [ ] I8 — CLI
+- [ ] I8 — CLI (in review, draft PR against `v2`). `stardag build`
+      (roots from `module:attr`, `--settings`, `--app`, `--reactive`,
+      `--resume`, `--dry-run`); `builds` list, show, frontier, ticks,
+      stop, cancel, complete and fail, `stop` over the execution ledger with
+      `--not-in-current-plan`; `executions list`; `plans show`;
+      `deployments list` (`stardag modal deployments` is its Modal alias);
+      `tasks show/check/retry/cancel/exclude`. Client reads added:
+      `build_list`, `plan_roots_info`, `task_list_artifacts`, all on served
+      routes. Open server-contract items: no `GET /plans/{id}` (timestamps
+      and member counts are known only for the active plan, via the
+      frontier), no event read (`tasks show` cannot surface
+      `TASK_STRUCTURE_DIVERGED`), no route for a bare observation
+      (`tasks check --report` is refused).
 - [ ] I9 — UI (in review, draft PR #388 against `v2`). Every registry call
       is on `/api/v2`; scope keys, `build_config`, phantoms, external
       blockers and `/locks` are gone. Builds list, the build view over the
@@ -356,7 +368,10 @@ assignee the maintainer.
       deploy. Nothing sleeps; shrinking those windows is the lever.
       The docker-compose e2e tier (`integration-tests/tests`) is re-pointed to v2 in PR #391 (merged).
 
-- [ ] I11 — docs
+- [ ] I11 — docs. Principles and release notes drafted, in review (PR
+      #392): `docs/design/principles.md`, the v2 entries in `CHANGELOG.md`
+      and `RELEASE_NOTES.md`; versioning TODO(Anders). The user docs under
+      `docs/docs/` are the other half, on a separate branch.
 - [ ] I12 — release
 
 ## Delivery steps
