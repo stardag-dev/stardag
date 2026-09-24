@@ -77,7 +77,9 @@ def check_serialization_stability(task: "BaseTask") -> None:
     registering two instances of one construction later).
 
     Raises:
-        UnstableSerializationError: naming the field(s) whose value moved.
+        UnstableSerializationError: naming the field(s) whose value moved, or
+            reporting an ``AliasTask`` payload that registry rehydration
+            would refuse.
     """
     # Local import: rehydrate imports base_task, which imports this module
     # lazily.
@@ -86,6 +88,26 @@ def check_serialization_stability(task: "BaseTask") -> None:
     label = _class_label(task)
     body_json = canonical_instance_body_json(task)
     body = json.loads(body_json)
+
+    # Validate through the same gate as registry rehydration
+    # (task_from_registry_data): an AliasTask body embeds pickled bytes and
+    # is refused there, even though it round-trips fine through the
+    # polymorphic adapter directly (which unpickles it). Without this, such
+    # a body would pass this check and then be un-rehydratable from the
+    # registry.
+    aliased_fields = tuple(_aliased_paths(body))
+    if aliased_fields:
+        raise UnstableSerializationError(
+            f"{label}: the instance body contains an AliasTask payload "
+            f"(field(s) {', '.join(aliased_fields)}) — AliasTask embeds "
+            "pickled bytes, which registry rehydration (task_from_registry_"
+            "data) refuses to unpickle from stored data. Such an instance "
+            "can be registered but never rehydrated back; use a task class "
+            "that does not carry an AliasTask in its body.",
+            task_class=label,
+            fields=aliased_fields,
+        )
+
     try:
         rebuilt = _TASK_ADAPTER.validate_python(
             body, context={CONTEXT_MODE_KEY: "compat"}
@@ -233,6 +255,27 @@ def body_diff(a: Any, b: Any, prefix: str = "") -> list[str]:
         return out
     if type(a) is not type(b) or a != b:
         return [prefix or "<root>"]
+    return []
+
+
+def _aliased_paths(obj: Any, prefix: str = "") -> list[str]:
+    """Dotted paths at which an ``__aliased`` key appears, at any nesting
+    level (mirrors ``rehydrate._contains_aliased``, but reports *where*)."""
+    from stardag._core.rehydrate import _ALIASED_KEY
+
+    if isinstance(obj, dict):
+        out: list[str] = []
+        if _ALIASED_KEY in obj:
+            out.append(prefix or "<root>")
+        for key, value in obj.items():
+            out.extend(_aliased_paths(value, f"{prefix}.{key}" if prefix else str(key)))
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [
+            p
+            for i, value in enumerate(obj)
+            for p in _aliased_paths(value, f"{prefix}[{i}]")
+        ]
     return []
 
 

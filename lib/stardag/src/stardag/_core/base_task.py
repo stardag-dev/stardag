@@ -467,13 +467,27 @@ class BaseTask(
     ) -> "BaseTask":
         """Instantiate the task from the registry.
 
+        Validated in compat mode, same as ``task_from_registry_data``: the
+        recomputed task id is checked against the requested one, so a
+        removed or renamed significant field — dropped by compat mode's
+        lenient rules for non-significant fields — cannot silently return a
+        task with a different completion identity than the one asked for.
+
         Args:
             id: The UUID (or string representation) of the task to load.
             registry: An optional registry instance to use for loading metadata. If not
                 provided, the default registry from `registry_provider` will be used.
         Returns:
-            An AliasTask instance referencing the specified task.
+            The reconstructed task object.
+
+        Raises:
+            TaskRehydrationError: The recomputed task id does not match the
+                requested one.
         """
+        # Local import: rehydrate.py imports base_task at module level, so
+        # this must stay a lazy, in-method import to avoid a circular import
+        # at module load time.
+        from stardag._core.rehydrate import TaskRehydrationError
         from stardag.registry import registry_provider
 
         if isinstance(id, str):
@@ -482,7 +496,16 @@ class BaseTask(
         registry = registry or registry_provider.get()
         metadata = registry.task_get_metadata(id)
 
-        return cls.model_validate(metadata.body, context={CONTEXT_MODE_KEY: "compat"})
+        task = cls.model_validate(metadata.body, context={CONTEXT_MODE_KEY: "compat"})
+        if task.id != metadata.id:
+            raise TaskRehydrationError(
+                f"Rehydrated task id {task.id} does not match the requested "
+                f"id {metadata.id} — a field's serialization is likely not "
+                "losslessly round-trippable, or a significant field the "
+                "class no longer declares was silently dropped by compat "
+                "mode's lenient rules for non-significant fields."
+            )
+        return task
 
 
 def auto_namespace(scope: str):

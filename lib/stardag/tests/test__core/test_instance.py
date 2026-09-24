@@ -383,6 +383,29 @@ class TestStability:
             check_serialization_stability(task)
         assert excinfo.value.fields == ("inner",)
 
+    def test_an_aliastask_body_is_caught_even_though_it_round_trips(
+        self, default_in_memory_fs_target
+    ):
+        """An AliasTask body validates fine straight through the polymorphic
+        adapter (which unpickles its embedded ``loads_type``) and used to
+        pass this check — but ``task_from_registry_data`` refuses any
+        ``__aliased`` payload outright, so such an instance could never
+        actually be rehydrated from the registry. The check must catch it
+        too."""
+        from stardag._core.alias_task import AliasedMetadata, AliasTask
+
+        original = Leaf(key="a")
+        alias = AliasTask[int](
+            aliased=AliasedMetadata(
+                id=original.id,
+                uri="mem://original",
+                body=original.model_dump(),
+            )
+        )
+        with pytest.raises(UnstableSerializationError, match="AliasTask") as excinfo:
+            check_serialization_stability(alias)
+        assert excinfo.value.fields == ("<root>",)
+
 
 # --- conflicts within one discovery pass ----------------------------------
 
