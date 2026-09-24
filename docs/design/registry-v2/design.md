@@ -434,7 +434,11 @@ of the task under any of the build's plans, so a replacement plan does not
 reset the budget) and `interruptions` (those released or ended
 `interrupted`, or ended `preempted`). The tick applies its interruption
 budget to `interruptions` (`TickConfig.max_interruptions`: an INTERRUPTED
-member at the cap is failed with the count, not restarted); it retries
+member at the cap is failed with the count, not restarted), and its
+execution budget to `attempts` when it would take over a lapsed claim
+(`TickConfig.max_executions`, default 20: a RUNNING member with a lapsed
+claim at the cap is failed with the count, not taken over; a first run, an
+INTERRUPTED restart and an operator retry are not gated); it retries
 nothing on `attempts`, since a FAILED member is the fail mode's.
 
 Registering the same instance again is a no-op (`ON CONFLICT DO NOTHING …

@@ -189,7 +189,8 @@ class FrontierMember(_Response):
     is every execution of the task under the build, ``interruptions`` those
     whose claim was released ``interrupted`` or which ended ``interrupted``
     or ``preempted``. The tick applies ``TickConfig.max_interruptions`` to
-    ``interruptions``.
+    ``interruptions``, and ``TickConfig.max_executions`` to ``attempts``
+    when it would take over a lapsed claim.
     """
 
     task_id: str

@@ -312,7 +312,13 @@ assignee the maintainer.
       is taken over, which counts an attempt but not an interruption), and
       a preemption whose restart never arrives (a preempt report is not an
       end, so no execution ever ends `preempted`; the claim lapses the same
-      way). Whether `attempts` should cap those is open. The client reads
+      way). Closed (STA-108, maintainer decision 2026-09-24):
+      `TickConfig.max_executions` (default 20) is applied to `attempts` on
+      a takeover — a RUNNING member with a lapsed claim at the cap is failed
+      the same way (a claim, `TASK_FAILED` naming the count, no spawn);
+      a first run, an INTERRUPTED restart and an operator retry are not
+      gated, so a retry gets one more execution. `max_attempts` keeps
+      meaning spawn tries within one execution. The client reads
       the CLI needed (`plan_get`, `build_list_plans`, `build_list_page`,
       `task_list`, `task_list_executions`, `task_events`,
       `deployment_get`, `error_message`, the claim holder) are added in the

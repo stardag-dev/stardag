@@ -135,8 +135,10 @@ each other and from it:
 
 - **A worker that dies with no restart coming** (OOM, a crash, a timeout
   nothing caught) simply lets its claim lapse, and the next claiming
-  start takes the execution over as a fresh attempt — uncapped, an open
-  design question (`docs/design/registry-v2/plan.md`).
+  start takes the execution over as a fresh attempt — up to
+  `max_executions` (default 20) executions of the task in the build, after
+  which the tick fails it with the count instead, and the build's
+  `fail_mode` applies.
 - **A preemption is not the same.** Modal restarts the execution itself,
   on the same call id, and the worker keeps its claim across the restart
   — see below.

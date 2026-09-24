@@ -7,11 +7,15 @@ interrupted (unit tier, against the in-memory registry).
   ``TickConfig.max_interruptions``, counted by the registry from the
   execution ledger over the build's plans (D9) and served on the frontier.
   At the cap the tick records a failure naming the count instead.
+- A RUNNING member whose claim lapsed without a report is actionable, so
+  the tick takes it over — up to ``TickConfig.max_executions``, counted
+  from the same ledger (``attempts``). At the cap it fails the same way.
 """
 
 from __future__ import annotations
 
 import typing
+from datetime import timedelta
 from uuid import UUID
 
 from stardag import BaseTask, auto_namespace
@@ -75,6 +79,35 @@ class InterruptingExecutor(FakeDetachedExecutor):
             execution_id=execution_id,
             error_message="asked to be resumed near its timeout",
         )
+        self._wake(plan_id)
+        return None
+
+
+class LapsingExecutor(FakeDetachedExecutor):
+    """Every execution records its start, then its worker dies without a
+    report: the claim is granted, never ended, and its expiry passes (moved
+    into the past here instead of waiting out a TTL)."""
+
+    def __init__(self, *, lapse_runs: int | None = None, **kwargs) -> None:
+        super().__init__(workers=True, **kwargs)
+        # None: every run lapses; n: the first n runs do.
+        self.lapse_runs = lapse_runs
+        self.runs = 0
+
+    async def _worker(self, task, execution_id, plan_id, deployment_id, ref):
+        self.runs += 1
+        if self.lapse_runs is not None and self.runs > self.lapse_runs:
+            return await super()._worker(
+                task, execution_id, plan_id, deployment_id, ref
+            )
+        registry = self.registry
+        assert isinstance(registry, InMemoryRegistry) and plan_id is not None
+        await registry.member_start_aio(
+            plan_id, str(task.id), execution_id=execution_id, claim=False
+        )
+        row = registry.tasks[str(task.id)]
+        assert row.execution_id == execution_id
+        row.claim_expires_at = registry.now() - timedelta(seconds=1)
         self._wake(plan_id)
         return None
 
@@ -241,3 +274,160 @@ class TestTheInterruptionBudget:
         assert executor.runs == 1
         assert summary.interruptions_exhausted == 1
         assert registry.status_of(task.id) == "failed"
+
+
+class TestTheExecutionBudget:
+    async def test_a_lapsed_claim_is_taken_over_and_counted(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The fake counts a takeover as the server does: every claiming
+        start is an execution, and the lapsed one is closed ``taken_over``."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"taken-over-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = LapsingExecutor(registry=registry, lapse_runs=2)
+        summary = await _drive(registry, build_id, executor, _config())
+        assert executor.runs == 3
+        assert summary.executions_exhausted == 0
+        assert summary.terminal_status == "completed"
+        assert registry.attempt_counts(build_id, str(task.id)) == (3, 0)
+        outcomes = sorted(
+            str(e.claim_outcome)
+            for e in registry.executions.values()
+            if e.task_id == str(task.id)
+        )
+        assert outcomes.count("taken_over") == 2
+
+    async def test_a_task_whose_claim_lapses_on_every_run_is_bounded(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Without the cap this is taken over forever, one container per
+        claim TTL. With ``max_executions=3`` it runs three times, then the
+        tick records a failure naming the count and the build fails per its
+        fail mode."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"lapses-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = LapsingExecutor(registry=registry)
+        summary = await _drive(registry, build_id, executor, _config(max_executions=3))
+        assert executor.runs == 3
+        assert summary.executions_exhausted == 1
+        assert summary.interruptions_exhausted == 0
+        (fail,) = registry.calls_to("member_fail", task_id=task.id)
+        assert "3 executions in this build" in fail["error_message"]
+        assert "lapsed without a report" in fail["error_message"]
+        assert "max_executions=3" in fail["error_message"]
+        assert registry.status_of(task.id) == "failed"
+        assert any(e.type == "TASK_FAILED" for e in registry.events)
+        assert summary.terminal_status == "failed"
+        assert registry.builds[build_id].status == "failed"
+        # The failure is recorded under a claim (the takeover of the third
+        # execution) and nothing was spawned for it.
+        assert registry.attempt_counts(build_id, str(task.id)) == (4, 0)
+
+    async def test_the_default_budget_is_twenty(
+        self, default_in_memory_fs_target: Target
+    ):
+        assert TickConfig().max_executions == 20
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"default-lapse-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = LapsingExecutor(registry=registry)
+        summary = await _drive(registry, build_id, executor, _config())
+        assert executor.runs == 20
+        assert summary.terminal_status == "failed"
+
+    async def test_without_the_gate_takeovers_do_not_stop(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The gate is what ends the loop: with the budget out of reach, a
+        task lapsing 30 times is taken over 30 times (and the 31st run,
+        which reports, completes it). Without that bound on the executor
+        the test would not terminate."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"ungated-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = LapsingExecutor(registry=registry, lapse_runs=30)
+        summary = await _drive(
+            registry, build_id, executor, _config(max_executions=10_000)
+        )
+        assert executor.runs == 31
+        assert summary.executions_exhausted == 0
+        assert summary.terminal_status == "completed"
+
+    async def test_an_operators_retry_gets_one_more_run(
+        self, default_in_memory_fs_target: Target
+    ):
+        """At the budget the member is FAILED; ``tasks retry`` makes it
+        PENDING, which is not gated even though the ledger already holds
+        more executions than the cap: it runs once more, and a lapse of that
+        run fails it again (the count is over the build)."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"retried-lapse-{new_id()}")
+        build_id = await _plan(registry, [task])
+        plan_id = registry.active_plan(build_id).id  # type: ignore[union-attr]
+        for _ in range(2):
+            execution_id = new_id()
+            registry.member_start(plan_id, str(task.id), execution_id=execution_id)
+            registry.member_fail(plan_id, str(task.id), execution_id=execution_id)
+            registry.member_retry(plan_id, str(task.id))
+        executor = LapsingExecutor(registry=registry)
+        summary = await _drive(registry, build_id, executor, _config(max_executions=2))
+        assert executor.runs == 1
+        assert summary.executions_exhausted == 1
+        assert registry.status_of(task.id) == "failed"
+
+    async def test_a_pending_first_run_is_never_gated(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"first-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        summary = await _drive(registry, build_id, executor, _config(max_executions=0))
+        assert len(executor.spawns) == 1
+        assert summary.terminal_status == "completed"
+
+    async def test_a_spawn_failure_is_still_retried_within_one_execution(
+        self, default_in_memory_fs_target: Target
+    ):
+        """``max_attempts`` keeps its meaning: spawn tries of one claimed
+        execution. A spawn refused on its first try and accepted on its
+        second runs the task, under one execution."""
+
+        class FlakySpawn(FakeDetachedExecutor):
+            def __init__(self, **kwargs) -> None:
+                super().__init__(workers=True, **kwargs)
+                self.tries = 0
+
+            async def submit_detached(self, task, *, execution_id):
+                self.tries += 1
+                if self.tries == 1:
+                    raise RuntimeError("backend refused the spawn for a moment")
+                return await super().submit_detached(task, execution_id=execution_id)
+
+        assert TickConfig().max_attempts == 2
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"flaky-spawn-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = FlakySpawn(registry=registry)
+        summary = await _drive(registry, build_id, executor, _config(max_executions=1))
+        assert executor.tries == 2
+        assert summary.spawn_failed == 0
+        assert summary.terminal_status == "completed"
+        assert registry.attempt_counts(build_id, str(task.id)) == (1, 0)
+
+    async def test_the_interruption_budget_is_unaffected(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Restarting an INTERRUPTED member is not a takeover: a tight
+        execution budget does not gate it, the interruption budget does."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"interrupted-not-lapsed-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = InterruptingExecutor(registry=registry, interrupt_runs=4)
+        summary = await _drive(registry, build_id, executor, _config(max_executions=2))
+        assert executor.runs == 5
+        assert summary.executions_exhausted == 0
+        assert summary.interruptions_exhausted == 0
+        assert summary.terminal_status == "completed"

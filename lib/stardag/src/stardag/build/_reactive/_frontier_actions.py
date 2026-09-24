@@ -19,7 +19,9 @@ of the build's active plan, after the server's closure step:
   An INTERRUPTED member whose ``interruptions`` reached
   ``TickConfig.max_interruptions`` is not spawned: the tick claims it and
   records a failure naming the count (the spawn-failure path, without the
-  spawn), so the build's fail mode decides.
+  spawn), so the build's fail mode decides. A RUNNING member with a lapsed
+  claim whose ``attempts`` reached ``TickConfig.max_executions`` is not
+  taken over, the same way.
 - **running** — under a live claim, whoever holds it. Nothing to do: a
   worker that dies stops reporting and its claim lapses, and a lapsed claim
   is listed as runnable and taken over by the next claiming start.
@@ -358,20 +360,58 @@ def interruptions_exhausted(member: FrontierMember, config: "TickConfig") -> boo
     )
 
 
+def executions_exhausted(member: FrontierMember, config: "TickConfig") -> bool:
+    """Whether a lapsed member has spent its execution budget.
+
+    Only a takeover is gated: a runnable member listed ``running`` is one
+    whose claim lapsed without a report. ``attempts`` counts every
+    execution of the task under the build (the lapsed one included), so
+    with ``max_executions=20`` the twentieth lapse fails it rather than
+    starting a twenty-first. A first run (PENDING, no executions) and an
+    operator's ``retry`` (PENDING again: the ledger is not reset) are not
+    gated, so a retry is honoured with one more execution, and a lapse of
+    that one fails it again, since the count is over the whole build.
+    """
+    return member.status == "running" and member.attempts >= config.max_executions
+
+
+def exhausted_budget(member: FrontierMember, config: "TickConfig") -> str | None:
+    """Which budget a runnable member has spent, if any: the failure
+    message to record instead of running it, else ``None``."""
+    if interruptions_exhausted(member, config):
+        return (
+            f"Interrupted {member.interruptions} times in this build, which "
+            f"reaches TickConfig.max_interruptions={config.max_interruptions}; "
+            "not restarted. `stardag tasks retry` runs it once more; a new "
+            "build starts a new count."
+        )
+    if executions_exhausted(member, config):
+        return (
+            f"{member.attempts} executions in this build, the latest ending "
+            "with its claim lapsed without a report (the worker died, or a "
+            "preemption's restart never came), which reaches "
+            f"TickConfig.max_executions={config.max_executions}; not taken "
+            "over. `stardag tasks retry` runs it once more; a new build "
+            "starts a new count."
+        )
+    return None
+
+
 async def _fail_exhausted(
     member: FrontierMember,
+    message: str,
     *,
     plan_id: UUID,
     registry: RegistryABC,
-    config: "TickConfig",
     summary: "TickSummary",
     result: PassResult,
     lease_lost: "LeaseLost",
 ) -> None:
-    """Fail an interrupted member at its interruption budget instead of
-    restarting it: a claim (the registry fails only the execution holding
-    a task's claim), then its failure with a message naming the count. No
-    container is spawned. The build's fail mode takes it from there."""
+    """Fail a member at a budget instead of running it again: a claim (the
+    registry fails only the execution holding a task's claim; for a lapsed
+    member this claim is the takeover, closing the lapsed execution
+    ``taken_over``), then its failure with ``message``. No container is
+    spawned. The build's fail mode takes it from there."""
     if _stop_for_lost_lease(lease_lost, result):
         return
     execution_id = new_id()
@@ -393,17 +433,14 @@ async def _fail_exhausted(
             return
         raise
     result.acted = True
-    message = (
-        f"Interrupted {member.interruptions} times in this build, which "
-        f"reaches TickConfig.max_interruptions={config.max_interruptions}; "
-        "not restarted. `stardag tasks retry` runs it once more; a new build "
-        "starts a new count."
-    )
     logger.error(f"Task {member.task_id} of plan {plan_id}: {message}")
     await registry.member_fail_aio(
         plan_id, member.task_id, execution_id=execution_id, error_message=message
     )
-    summary.interruptions_exhausted += 1
+    if member.status == "interrupted":
+        summary.interruptions_exhausted += 1
+    else:
+        summary.executions_exhausted += 1
 
 
 async def act_on_frontier(
@@ -466,21 +503,25 @@ async def act_on_frontier(
                 return result
             logger.info(f"Plan {plan_id} not sealable yet: {e}")
 
-    exhausted = [m for m in frontier.runnable if interruptions_exhausted(m, config)]
+    exhausted = [
+        (member, message)
+        for member in frontier.runnable
+        if (message := exhausted_budget(member, config)) is not None
+    ]
     if exhausted:
         await run_bounded(
             [
                 partial(
                     _fail_exhausted,
                     member,
+                    message,
                     plan_id=plan_id,
                     registry=registry,
-                    config=config,
                     summary=summary,
                     result=result,
                     lease_lost=lost,
                 )
-                for member in exhausted
+                for member, message in exhausted
             ],
             semaphore,
         )
@@ -489,7 +530,7 @@ async def act_on_frontier(
 
     loaded: list[tuple[BaseTask, FrontierMember]] = []
     for member in frontier.runnable:
-        if interruptions_exhausted(member, config):
+        if exhausted_budget(member, config) is not None:
             continue
         if _stop_for_lost_lease(lost, result):
             return result
