@@ -35,7 +35,12 @@ from stardag._core.base_task import (
     _has_custom_run_aio,
     flatten_task_struct,
 )
-from stardag.build import FailMode, TaskExecutionError, TaskExecutorABC
+from stardag.build import (
+    ExecutionMode,
+    FailMode,
+    TaskExecutionError,
+    TaskExecutorABC,
+)
 from stardag.build._base import (
     BuildStopped,
     ExecutorDetails,
@@ -195,7 +200,14 @@ class _PrefectTaskRunWrapper:
         """Best-effort, like the resident engine's: a failure to describe
         the executor never fails the claim."""
         if self.task_executor is None:
-            return in_process_executor_details("prefect")
+            # As ``_execute_locally`` runs it: async on the loop, sync in a
+            # thread — the execution modes the concurrent executor records.
+            mode = (
+                ExecutionMode.ASYNC_MAIN_LOOP
+                if _has_custom_run_aio(task)
+                else ExecutionMode.SYNC_THREAD
+            )
+            return in_process_executor_details(mode.value)
         try:
             return await self.task_executor.get_executor_details(task)
         except Exception:

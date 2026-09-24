@@ -58,3 +58,16 @@ async def test_a_stopped_build_is_not_reported_as_a_task_failure(
         await wrapper.run(task)
     assert not registry.called("member_fail")
     assert await session.finish(None) == "cancelled"
+
+
+@pytest.mark.skipif(not prefect_available, reason="Prefect is not installed")
+async def test_local_prefect_executions_record_their_mode(default_in_memory_fs_target):
+    from stardag.integration.prefect._build import _PrefectTaskRunWrapper
+    from stardag.testing import InMemoryRegistry
+    from stardag.build._session import ResidentSession
+    from stardag.utils.testing.helper_tasks import AsyncOnlyTask, SyncOnlyTask
+
+    wrapper = _PrefectTaskRunWrapper(ResidentSession(InMemoryRegistry()))
+    sync = await wrapper._executor_details(SyncOnlyTask(name="s"))
+    asyn = await wrapper._executor_details(AsyncOnlyTask(name="a"))
+    assert (sync.executor, asyn.executor) == ("sync_thread", "async_main_loop")
