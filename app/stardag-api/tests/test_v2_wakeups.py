@@ -251,6 +251,54 @@ async def test_a_lapsed_claim_holds_no_slot(h: Harness):
     await h.start(plan_b.id, t2, limit_keys=["db"])
 
 
+async def test_a_renewal_holds_its_limit_slot_against_a_concurrent_claim(
+    h: Harness,
+):
+    """A renewal locks the task's limit rows (key order, as a claim does)
+    before it extends the expiry. So a claim on the same key arriving after
+    the old expiry, while the renewal is uncommitted, waits for it and then
+    counts the holder live — rather than reading the old expiry, taking the
+    slot, and leaving two live holders of a ``max_concurrent = 1`` key once
+    the renewal commits."""
+    await _sql(
+        h,
+        "INSERT INTO environment_concurrency_limit (id, environment_id, key,"
+        " max_concurrent) VALUES (:id, :env, 'gpu', 1)",
+        id=uuid4(),
+        env=ENV,
+    )
+    t1, t2 = item("T1"), item("T2")
+    _, plan_a = await h.planned([t1], [t1])
+    _, plan_b = await h.planned([t2], [t2])
+    holder = await h.start(plan_a.id, t1, limit_keys=["gpu"])
+    await _sql(
+        h,
+        "UPDATE task SET claim_expires_at = now() + interval '1 second'"
+        " WHERE task_id = :t",
+        t=t1.task_id,
+    )
+    t1_pk = (await h.task(t1))["id"]
+
+    async with h.sf() as renewing:
+        async with renewing.begin():
+            await transitions.transition_task(
+                renewing,
+                ENV,
+                task_pk=t1_pk,
+                plan_id=None,
+                transition=Transition.renew(holder, None),
+                now=utc_now(),
+            )
+            await asyncio.sleep(1.2)  # the old expiry has passed
+            claiming = asyncio.create_task(h.start(plan_b.id, t2, limit_keys=["gpu"]))
+            await asyncio.sleep(0.3)
+            assert not claiming.done(), "the claim must wait for the renewal"
+    with pytest.raises(Conflict) as exc:
+        await asyncio.wait_for(claiming, 10)
+    assert exc.value.code == "concurrency_limit_reached"
+    assert (await h.task(t2))["status"] == "pending"
+
+
 # --------------------------------------------------------------------------
 # notify, wake-candidates
 # --------------------------------------------------------------------------

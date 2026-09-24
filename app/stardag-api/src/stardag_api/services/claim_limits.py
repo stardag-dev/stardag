@@ -101,3 +101,24 @@ async def full_limits(
         if (holders or 0) >= limit.max_concurrent:
             full.append(limit.key)
     return full
+
+
+async def lock_held_limits(
+    session: AsyncSession, environment_id: UUID, task_pk: UUID
+) -> None:
+    """Lock the limit rows of the task's recorded keys ``FOR UPDATE``, in
+    key order — the order a claiming start locks them in (after the task
+    row, as there). A renewal takes them before it extends the expiry, so
+    a claim sharing a key that counted this holder as lapsed has committed
+    first (and the renewal then finds its claim lapsed), or waits for the
+    renewal and counts it live: ``max_concurrent`` is never exceeded."""
+    keys = select(TaskLimitKey.key).where(TaskLimitKey.task_pk == task_pk)
+    await session.execute(
+        select(EnvironmentConcurrencyLimit.id)
+        .where(
+            EnvironmentConcurrencyLimit.environment_id == environment_id,
+            EnvironmentConcurrencyLimit.key.in_(keys),
+        )
+        .order_by(EnvironmentConcurrencyLimit.key)
+        .with_for_update()
+    )

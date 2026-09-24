@@ -272,3 +272,67 @@ async def test_deployments_and_settings_over_http(client: AsyncClient, h: Harnes
     )
     assert reserved.status_code == 400
     assert reserved.json()["detail"]["code"] == "reserved_settings_key"
+
+
+# --------------------------------------------------------------------------
+# Currency checks serialise with activation (the app lock)
+# --------------------------------------------------------------------------
+
+
+def _app_lock_key(app_name: str) -> str:
+    return f"deployment:{ENV}:modal:{app_name}"
+
+
+async def test_a_seal_waits_for_an_activation_in_flight(
+    h: Harness, async_engine: AsyncEngine
+):
+    """D3's activation holds the app lock exclusively until it commits; a
+    seal of a plan under D2 checks currency under the same lock (shared),
+    so it waits, then sees D3 current and is refused — it cannot seal D2's
+    plan after D3's activation committed."""
+    d2 = await h.new_deployment(app_name="svc")
+    d3 = await h.new_deployment(app_name="svc", activated=False)
+    root = item("Root")
+    _, plan = await h.planned([root], [root], deployment_id=d2)
+
+    async with async_engine.connect() as activation:
+        await activation.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": _app_lock_key("svc")},
+        )
+        await activation.execute(
+            text("UPDATE deployment SET activated_at = now() WHERE id = :d"),
+            {"d": d3},
+        )
+        sealing = asyncio.create_task(h.seal(plan.id))
+        await asyncio.sleep(0.3)
+        assert not sealing.done(), "the seal must wait for the activation"
+        await activation.commit()
+
+    with pytest.raises(Conflict) as exc:
+        await asyncio.wait_for(sealing, 10)
+    assert exc.value.code == "deployment_not_current"
+
+
+async def test_an_activation_waits_for_a_currency_check_in_flight(
+    h: Harness, async_engine: AsyncEngine
+):
+    """The other side: activation takes the app lock exclusively, so a
+    seal holding it shared (to its commit) is waited for."""
+    d3 = await h.new_deployment(app_name="svc", activated=False)
+    async with async_engine.connect() as seal:
+        await seal.execute(
+            text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"),
+            {"k": _app_lock_key("svc")},
+        )
+
+        async def activate() -> deployments.DeploymentState:
+            async with h.sf() as s:
+                return await deployments.activate_deployment(s, ENV, d3)
+
+        activating = asyncio.create_task(activate())
+        await asyncio.sleep(0.3)
+        assert not activating.done(), "the activation must wait for the seal"
+        await seal.commit()
+    state = await asyncio.wait_for(activating, 10)
+    assert state.activated_at is not None and state.is_current

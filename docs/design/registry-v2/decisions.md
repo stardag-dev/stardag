@@ -357,3 +357,15 @@ NULL`, where v1 compared it with the status time). The `preempted`
   be missed, which costs one spawned tick that finds the lease held and
   exits, bounded by the hand-out window. The v2 migration is amended in
   place (never deployed).
+- **Currency checks serialise with activation** (a #382 finding, carried):
+  `/activate` locked only its deployment row, so a seal (or resume's
+  reactivation) under D2 could read D2 as current while D3's activation was
+  committing, and seal after it. Both now take the per-`(environment, kind,
+app)` advisory lock that create uses: activation exclusively, the checks
+  shared (they do not wait for each other) and held to their commit.
+- **A renewal locks its limit rows** (a #382 finding, carried):
+  `claim/renew` extended the expiry without the limit rows, so a claim on a
+  shared key could count the holder as lapsed (old expiry), take the slot,
+  and leave two live holders once the renewal committed. The renewal now
+  locks the task's limit rows `FOR UPDATE` in key order (after the task
+  row, as a claim does) and re-reads the clock before extending.

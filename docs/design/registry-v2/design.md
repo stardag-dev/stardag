@@ -835,7 +835,9 @@ If they differ:
    — lookup-or-create; a plan for that scope may already exist and be
    sealed, in which case nothing is discovered — and seals. `/seal`
    re-checks that the plan's deployment is still the app's current one and
-   refuses otherwise, so two ticks under two new deployments cannot leave
+   refuses otherwise (under the app's advisory lock, shared to its commit;
+   create and `/activate` take it exclusively, so a seal and an activation
+   serialise), so two ticks under two new deployments cannot leave
    the build on the older code; the winner's seal supersedes the old plan in
    the same transaction.
 
@@ -929,7 +931,10 @@ from them is renewal, as `POST …/tasks/{task_id}/claim/renew {execution_id}`
 for in-process executions, whose driver is alive to call it; the renewal is
 granted only if that execution holds the live claim, under the same row lock
 a claiming start takes, so a delayed resident process cannot extend a claim
-another execution has taken over.
+another execution has taken over. It also locks the task's limit rows (key
+order, as a claim does) and re-reads the clock before it extends the
+expiry, so a claim sharing a key never counts the holder lapsed and takes
+its slot while the renewal is in flight.
 
 ## Scenario checklist
 
