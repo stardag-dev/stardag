@@ -296,7 +296,20 @@ assignee the maintainer.
       frontier), no event read (`tasks show` cannot surface
       `TASK_STRUCTURE_DIVERGED`), no route for a bare observation
       (`tasks check --report` is refused).
-- [ ] I9 — UI
+- [ ] I9 — UI (in review, draft PR #388 against `v2`). Every registry call
+      is on `/api/v2`; scope keys, `build_config`, phantoms, external
+      blockers and `/locks` are gone. Builds list, the build view over the
+      active plan (plan header, members, DAG over instance edges, frontier,
+      settings and deployment in build info), the stop list over
+      `GET /builds/{id}/executions` with orphans, the task page (claim,
+      instances under their scopes, artifacts) and a deployments page.
+      Coded against one route the registry does not serve, marked
+      **(assumed)** in `api/registry.ts`: `GET /plans/{id}/graph` (members
+      and instance edges); until it lands the view shows roots plus the
+      frontier and says it is partial. Removed for want of a v2 route: task
+      search/explorer, claim triage, bulk cancel, concurrency limits; the
+      build failure reason and the task event log (so
+      `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
 - [ ] I10 — tests
 - [ ] I11 — docs
 - [ ] I12 — release
