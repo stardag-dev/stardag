@@ -288,7 +288,7 @@ function BuildViewForIdentity({
                 </div>
               </div>
 
-              <div className="flex items-center justify-between border-b border-gray-200 px-4 py-1.5 dark:border-gray-700">
+              <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
                 <button
                   onClick={() => {
                     const panel = dagPanelRef.current;
@@ -298,9 +298,26 @@ function BuildViewForIdentity({
                   }}
                   aria-expanded={showDag}
                   aria-controls="build-dag-panel"
-                  className="text-sm font-medium text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
+                  className="flex items-center gap-2 text-sm text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
                 >
-                  {showDag ? "▾" : "▸"} Plan graph
+                  <svg
+                    aria-hidden="true"
+                    data-testid="dag-toggle-chevron"
+                    className={`h-4 w-4 transition-transform ${
+                      showDag ? "rotate-90" : ""
+                    }`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M9 5l7 7-7 7"
+                    />
+                  </svg>
+                  <span className="font-medium">Plan graph</span>
                 </button>
               </div>
 

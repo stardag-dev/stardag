@@ -165,3 +165,17 @@ describe("BuildView layout", () => {
     expect(screen.getByTestId("dag")).toBeInTheDocument();
   });
 });
+
+describe("BuildView plan graph toggle", () => {
+  it("uses v1's rotating chevron as a disclosure control", () => {
+    renderView();
+    const toggle = screen.getByRole("button", { name: "Plan graph" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("dag-toggle-chevron").getAttribute("class")).toContain(
+      "rotate-90",
+    );
+    expect(toggle.textContent).not.toMatch(/[▾▸]/);
+    // Collapsing goes through react-resizable-panels' imperative API,
+    // which jsdom's zero-size layout does not drive; checked in a browser.
+  });
+});
