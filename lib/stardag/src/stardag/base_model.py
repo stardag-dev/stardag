@@ -6,29 +6,35 @@ Implements a base model with advanced polymorphic serialization + validation fea
    - Polymorphic ("registered subclass") validation + "serialize as any" is OPT-IN per field via SubClass[T]
 
 2) Context-based custom serialization + validation modes (mode in context):
-   - mode="hash": drop fields annotated BackwardCompat(default=...) when value == default,
-     and every field whose significance is not "identity"
-   - mode="registry": drop every field with an explicit non-identity
-     significance (a legacy ``hash_exclude=True`` field is kept: it may still
-     be passed at init, so its value must survive a round trip), keep
-     everything else (the payload the registry stores — a pure function of the
-     task id)
-   - mode="compat": if a BackwardCompat field is missing, populate it with the compat
-     default; a non-identity field present in the input is dropped rather than
-     refused (registry data written before significance existed)
+   - mode="hash": the dump the task id is computed from. Drops every field
+     marked ``StardagField(significant=False)``, and a significant field
+     whose value equals its ``compat_default``. Custom serializers may
+     special-case this mode: it is the user's control over completion
+     identity.
+   - mode="registry": the instance body — **every** field, defaults
+     included, nothing dropped. The instance hash is the hash of this dump
+     (see ``stardag._core.instance``); it has no user-facing hash mode.
+   - both modes sort sets at every nesting level (a set inside a list,
+     dict or ``Any`` field too), so a set's per-process iteration order
+     never reaches a hash or a stored body. The order is defined in one
+     place, ``stardag._core.task_id.canonicalize_sets``.
+   - mode="compat": validation of a stored body. A missing field with a
+     ``compat_default`` is populated with it; an unknown key (a field the
+     class no longer declares) is dropped with a warning.
 
 3) Auto-register any child class of MyBase when declared (via __init_subclass__).
 
-4) Three levels of parameter significance (see ``StardagField.significance``):
-   a non-identity field cannot be passed at init and is resolved from the
-   build config instead (see ``stardag.build_config``).
+4) Two kinds of parameter (see ``StardagField.significant``): a significant
+   field is part of the task id — the promise about output — and a
+   non-significant one is not. Both are ordinary fields, passed at init and
+   stored in the instance body, so both are covered by the instance hash.
 """
 
 from __future__ import annotations
 
-import warnings
+import logging
 from dataclasses import dataclass
-from typing import Any, Literal, Type, TypeVar, get_args
+from typing import Any, Literal, Type, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -39,42 +45,42 @@ from pydantic import (
     model_validator,
 )
 from pydantic.fields import FieldInfo
+from typing_extensions import Never
 
-from stardag.build_config import (
-    register_build_config_class,
-    resolve_field_value,
-    task_config_key,
-)
+logger = logging.getLogger(__name__)
 
 SerializationContextMode = Literal["hash", "registry", None]
 ValidationContextMode = Literal["compat", None]
 CONTEXT_MODE_KEY = "mode"
 
-Significance = Literal["identity", "dependencies_only", "execution_only"]
-"""What a parameter is significant *for*.
-
-- ``"identity"`` (the default): the output. Part of the task id and of the
-  registered ``task_data``; passed at init like any parameter.
-- ``"dependencies_only"``: the upstream set — static or dynamic — but not the
-  output. A fan-out partition size. Read from the build config, never passed
-  at init; hashed into the build's structure scope.
-- ``"execution_only"``: neither output nor structure, only how the work is
-  done. A thread count. Read from the build config, never passed at init;
-  not part of any hash.
-
-See ``docs/design/scope-keyed-dependency-structure.md``.
-"""
-
 
 _UNSET = object()
 
+_REMOVED_FIELD_OPTIONS = {
+    "significance": (
+        "StardagField(significance=...) was removed in v2; use "
+        "StardagField(significant=False) for a parameter that is not part of "
+        "the task id (every former dependencies_only / execution_only field), "
+        "and pass it at init like any other parameter."
+    ),
+    "hash_exclude": (
+        "StardagField(hash_exclude=...) was removed in v2; use "
+        "StardagField(significant=False)."
+    ),
+}
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, init=False)
 class StardagField:
-    """Per-field annotation controlling hash-mode serialization and compat
-    validation. Attach via ``Annotated[T, StardagField(...)]``."""
+    """Per-field annotation controlling what a parameter is significant for.
+    Attach via ``Annotated[T, StardagField(...)]``.
 
-    compat_default: Any = _UNSET
+    A task has two identities (see ``BaseTask.id`` and
+    ``BaseTask.instance_hash``): the task id hashes the significant fields,
+    the instance hash hashes all of them.
+    """
+
+    compat_default: Any
     """Backward-compatible default. In compat-validation mode a missing field is
     populated with this value; in hash-mode serialization a field whose value
     equals this is dropped from the hash dump, so adding the field doesn't change
@@ -87,95 +93,59 @@ class StardagField:
     ``(1, 2)``) would fail the serialize-side equality check and silently not be
     dropped.
 
-    Only meaningful on an identity field: a non-identity field's default lives
-    in code, and the code identity already covers it, so combining the two is
-    refused.
+    Only valid on a significant field: a non-significant field is not in the
+    task id, so there is nothing for it to keep stable.
     """
-    hash_exclude: bool = False
-    """Deprecated: use ``significance="execution_only"``.
+    significant: bool
+    """Whether the parameter is part of the task id (default ``True``).
 
-    Drops the field from the hash dump, which is what ``execution_only`` does
-    — with one difference: a field marked this way could be passed at init,
-    and an ``execution_only`` field cannot. The old option keeps working for
-    one release, with a warning; the new levels enforce immediately.
-    """
-    significance: Significance = "identity"
-    """What the parameter is significant for; see :data:`Significance`.
-
-    A ``dependencies_only`` or ``execution_only`` field should carry a
-    default: the build config overrides it, and without one every
-    constructor call would demand a value that only the config may supply.
+    The task id is a promise about **output**: significant parameters, and
+    nothing else, determine what the task produces, so completion and the
+    execution claim are keyed by them. A parameter that changes *how* the
+    work is done or *which upstreams* it has, but never the output — a
+    fan-out partition size, a thread count, an annotation — is
+    ``significant=False``. It is still an ordinary field: passed at init,
+    stored in the instance body, covered by the instance hash, and
+    rehydrated from the body (leniently: a stored value for a field the
+    class no longer has is dropped with a warning; a missing one takes the
+    class default).
     """
 
-    def __post_init__(self) -> None:
-        if self.significance not in get_args(Significance):
-            # A Literal is a hint, not a check; an unchecked typo would read
-            # as non-identity here and as execution-only in the structure
-            # hash, so two different dependency configs could share a scope.
+    def __init__(
+        self,
+        compat_default: Any = _UNSET,
+        *,
+        significant: bool = True,
+        **removed: Never,
+    ) -> None:
+        for name in removed:
+            message = _REMOVED_FIELD_OPTIONS.get(name)
+            if message is not None:
+                raise TypeError(message)
+            raise TypeError(
+                f"StardagField() got an unexpected keyword argument {name!r}"
+            )
+        if not isinstance(significant, bool):
+            # A truthy string would silently read as significant.
+            raise TypeError(
+                f"StardagField(significant=...) must be a bool, got {significant!r}."
+            )
+        if compat_default is not _UNSET and not significant:
             raise ValueError(
-                f"StardagField(significance={self.significance!r}): expected one "
-                f"of {', '.join(repr(v) for v in get_args(Significance))}."
+                "compat_default has no effect on a non-significant field: it "
+                "exists to keep the task id stable when a field is added, and a "
+                "significant=False field is not part of the task id. Drop "
+                "compat_default, or make the field significant."
             )
-        if self.hash_exclude:
-            warnings.warn(
-                "StardagField(hash_exclude=True) is deprecated; use "
-                'StardagField(significance="execution_only") and supply the '
-                "value through the build config instead of at init.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-        if self.compat_default is not _UNSET and self.significance != "identity":
-            raise ValueError(
-                "compat_default has no effect on a non-identity field: its "
-                "default lives in code, which the code identity already covers. "
-                f"Drop compat_default or make the field identity-significant "
-                f"(got significance={self.significance!r})."
-            )
-        if self.hash_exclude and self.significance != "identity":
-            # The two disagree about init: a legacy hash_exclude field may be
-            # passed at init for one release, an explicit non-identity field
-            # may not. One or the other, never both.
-            raise ValueError(
-                "hash_exclude=True is the deprecated spelling of "
-                'significance="execution_only"; combining it with an explicit '
-                f"significance={self.significance!r} is contradictory. Drop "
-                "hash_exclude."
-            )
-
-    @property
-    def is_identity(self) -> bool:
-        """Whether the field is part of the task's identity."""
-        return self.significance == "identity" and not self.hash_exclude
-
-    @property
-    def is_legacy_hash_exclude(self) -> bool:
-        """The deprecated form: ``hash_exclude=True`` with no explicit
-        significance. Dropped from the hash like an ``execution_only`` field,
-        but still accepted at init and kept in the registry payload for one
-        release. Readers should use this and :attr:`is_build_config_field`
-        rather than the raw pair."""
-        return self.hash_exclude and self.significance == "identity"
-
-    @property
-    def is_build_config_field(self) -> bool:
-        """An explicit ``dependencies_only`` / ``execution_only`` field: never
-        passed at init, never hashed, never stored; resolved from the build
-        config."""
-        return self.significance != "identity"
-
-    @property
-    def effective_significance(self) -> Significance:
-        """``significance``, with the deprecated ``hash_exclude`` folded in."""
-        if self.significance != "identity":
-            return self.significance
-        return "execution_only" if self.hash_exclude else "identity"
+        object.__setattr__(self, "compat_default", compat_default)
+        object.__setattr__(self, "significant", significant)
 
 
-def field_significance(field: FieldInfo) -> Significance:
-    """The significance of a pydantic field: from its ``StardagField``
-    annotation, ``"identity"`` when it has none."""
+def is_significant(field: FieldInfo) -> bool:
+    """Whether a pydantic field is part of the task id: from its
+    ``StardagField`` annotation, ``True`` when it has none."""
     meta = _get_annotation(field, StardagField)
-    return meta.effective_significance if meta is not None else "identity"
+    return meta.significant if meta is not None else True
 
 
 class StardagBaseModel(BaseModel):
@@ -184,15 +154,17 @@ class StardagBaseModel(BaseModel):
 
     Implements:
       - Validation with info.context["mode"] == "compat":
-        - defaults for fields marked BackwardCompat(default=...)
-        - non-identity fields present in the input are dropped (old data)
+        - defaults for fields marked ``StardagField(compat_default=...)``
+        - unknown keys are dropped with a warning
       - Serialization with info.context["mode"] == "hash":
-        - dropping of BackwardCompat-default-valued fields on dump
-        - dropping fields whose significance is not "identity"
+        - dropping of compat-default-valued fields on dump
+        - dropping every ``significant=False`` field
+        - sets sorted
       - Serialization with info.context["mode"] == "registry":
-        - dropping fields whose significance is not "identity", nothing else
-      - Non-identity fields are resolved from the build config at validation
-        and refused at init (see ``stardag.build_config``)
+        - every field, sets sorted, nothing dropped
+
+    ``significant`` is read per model, so a nested ``StardagBaseModel``
+    carries it on its own fields; it affects the task id only.
 
     NOTE: This applies to any model inheriting StardagBaseModel.
     """
@@ -206,54 +178,47 @@ class StardagBaseModel(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _check_add_compatibility_defaults(cls, data: Any, info: ValidationInfo) -> Any:
-        """Compat defaults, and the non-identity fields' single mechanism.
+        """Compat mode (a stored body): fill compat defaults, drop unknown keys.
 
-        For every field whose significance is not ``identity``:
-
-        - present in the input under plain init → refused. Passing it is
-          what would let two downstreams build two versions of one upstream
-          under one task id; see ``stardag.build_config``.
-        - present in the input under ``mode="compat"`` (registry data,
-          possibly written before significance existed) → dropped, then
-          resolved like an absent one.
-        - absent → resolved from the installed build config when it names
-          this class and field; otherwise the field's own default applies.
+        Strict for significant fields by way of the task id: a missing one
+        without a ``compat_default`` fails validation, and a value that
+        validates to something else moves the recomputed id, which
+        rehydration checks. Lenient for the rest: a key the class does not
+        declare is dropped with a warning (a non-significant field removed
+        under new code; a removed *significant* field moves the id and is
+        caught there), and a missing non-significant field takes the class
+        default.
         """
         mode: ValidationContextMode = (
             info.context.get(CONTEXT_MODE_KEY) if info.context else None
         )
-        if not isinstance(data, dict):
+        if mode != "compat" or not isinstance(data, dict):
             return data
 
         data = dict(data)
-        non_identity = cls._non_identity_fields()
-        if non_identity:
-            config_key = cls._build_config_key()
-            for name in non_identity:
-                if name in data:
-                    if mode != "compat":
-                        raise ValueError(
-                            f"{cls.__name__}.{name} has significance="
-                            f"{field_significance(cls.model_fields[name])!r} and "
-                            "is read from the build config; it cannot be passed "
-                            "at init. Set it through build_config "
-                            f'({{"{config_key}": {{"{name}": ...}}}}) or a '
-                            "stardag.build_config_scope(...) block."
-                        )
-                    data.pop(name)
-                found, value = resolve_field_value(config_key, name)
-                if found:
-                    data[name] = value
-
-        if mode != "compat":
-            return data
+        if cls.model_config.get("extra") != "allow":
+            known = cls._known_input_keys()
+            unknown = [
+                key
+                for key in data
+                # Discriminators and other framework keys (``__namespace``,
+                # ``__name``, ``__aliased``) are consumed elsewhere.
+                if key not in known and not key.startswith("__")
+            ]
+            if unknown:
+                logger.warning(
+                    "Dropping stored field(s) %s unknown to %s.%s while "
+                    "rehydrating: the class no longer declares them.",
+                    ", ".join(repr(k) for k in unknown),
+                    cls.__module__,
+                    cls.__qualname__,
+                )
+                for key in unknown:
+                    data.pop(key)
 
         for name, field in cls.model_fields.items():
             if name in data:
-                # Value provided, skip
                 continue
-
-            # Value missing, check for compat default
             maybe_stardag_field = _get_annotation(field, StardagField)
             if (
                 maybe_stardag_field is not None
@@ -264,78 +229,20 @@ class StardagBaseModel(BaseModel):
         return data
 
     @classmethod
-    def _non_identity_fields(cls) -> tuple[str, ...]:
-        """Names of the fields whose significance is not ``identity``.
-
-        Cached per class on first use; ``model_fields`` is fixed once the
-        class is built.
-        """
-        cached = cls.__dict__.get("__stardag_non_identity_fields__")
-        if cached is not None:
-            return cached
-        # Build-config fields only, not the legacy ``hash_exclude`` form: a
-        # legacy field is excluded from the hash like an execution_only
-        # field, but it may still be passed at init and is kept in the
-        # registry payload for one release — that is the whole difference
-        # the deprecation note describes.
-        names = tuple(
-            name
-            for name, field in cls.model_fields.items()
-            if (meta := _get_annotation(field, StardagField)) is not None
-            and meta.is_build_config_field
-        )
-        try:
-            setattr(cls, "__stardag_non_identity_fields__", names)
-        except (AttributeError, TypeError):  # pragma: no cover - exotic classes
-            pass
-        return names
-
-    @classmethod
-    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
-        super().__pydantic_init_subclass__(**kwargs)
-        # A class the build config can name has to be findable by that name
-        # when the structure scope is hashed, not only when a field is
-        # resolved. Tasks are found through the task registry; this covers
-        # the rest. See ``stardag.build_config.register_build_config_class``.
-        register_build_config_class(cls)
-
-    @classmethod
-    def _build_config_key(cls) -> str:
-        """The build-config key for this class. A class registered in a
-        polymorphic family uses the namespace and name it was registered
-        under; anything else its ``__namespace__`` (usually unset) and class
-        name — the same shape, and the escape hatch when two plain models
-        would otherwise share a bare name.
-
-        ``__type_id__`` has to be this class's own. It is inherited like any
-        class attribute, and the classes a family does not register — an
-        abstract base, a family root — would otherwise answer with their
-        nearest registered ancestor's key, which belongs to a different
-        class.
-
-        A parameterised generic alias (``Box[int]``) answers with its
-        origin's key. The alias is not indexed — it is not a real class —
-        but it *can* be constructed, and its fields are the origin's, so
-        the key it resolves against has to be the one the origin holds.
-        """
-        origin = cls.__pydantic_generic_metadata__.get("origin")
-        if origin is not None:
-            cls = origin
-        if "__type_id__" in cls.__dict__:
-            get_namespace = getattr(cls, "get_namespace", None)
-            get_name = getattr(cls, "get_name", None)
-            if callable(get_namespace) and callable(get_name):
-                try:
-                    return task_config_key(str(get_namespace()), str(get_name()))
-                except AttributeError:  # pragma: no cover - defensive
-                    pass
-        return task_config_key(
-            str(getattr(cls, "__namespace__", "") or ""), cls.__name__
-        )
+    def _known_input_keys(cls) -> frozenset[str]:
+        """Field names and validation aliases this class accepts."""
+        keys: set[str] = set()
+        for name, field in cls.model_fields.items():
+            keys.add(name)
+            if isinstance(field.alias, str):
+                keys.add(field.alias)
+            if isinstance(field.validation_alias, str):
+                keys.add(field.validation_alias)
+        return frozenset(keys)
 
     @model_serializer(mode="wrap")
     def _wrap_serialize(self, handler, info: SerializationInfo):
-        """If mode="hash", drop fields with BackwardCompat default values."""
+        """Apply the hash / registry serialization modes (see module docs)."""
         data = handler(self)
         data = self._serialize_extra(data, info)
         return self._handle_hash_mode(data, info)
@@ -350,6 +257,8 @@ class StardagBaseModel(BaseModel):
         )
         if mode not in ("hash", "registry") or not isinstance(data, dict):
             return data
+        # Local import: task_id imports this module.
+        from stardag._core.task_id import canonicalize_sets
 
         out: dict[str, Any] = {}
         for name, value in data.items():
@@ -359,18 +268,9 @@ class StardagBaseModel(BaseModel):
                 continue
 
             maybe_stardag_field = _get_annotation(field, StardagField)
-            if maybe_stardag_field is not None:
+            if mode == "hash" and maybe_stardag_field is not None:
                 stardag_field: StardagField = maybe_stardag_field
-                # A build-config field is neither hashed nor stored: it is
-                # not part of what the task promises, and its value comes
-                # from the build config, never from the payload.
-                if stardag_field.is_build_config_field:
-                    continue
-                # The legacy form is dropped from the hash but KEPT in the
-                # registry payload: it may still be passed at init for one
-                # release, so a task registered with a non-default value
-                # must rehydrate with that value, not the default.
-                if stardag_field.is_legacy_hash_exclude and mode == "hash":
+                if not stardag_field.significant:
                     continue
                 # Compare the *raw* Python value (not the already-serialized
                 # `value`) against compat_default. The serialized form differs
@@ -380,16 +280,17 @@ class StardagBaseModel(BaseModel):
                 # those types. Using getattr(self, name) is also symmetric with
                 # _check_add_compatibility_defaults, which injects the raw
                 # compat_default on the validate side. Hash mode only: the
-                # registry payload keeps the value, since it is what a
-                # rehydrated task should carry.
+                # body keeps the value, since it is what a rehydrated task
+                # should carry.
                 if (
-                    mode == "hash"
-                    and stardag_field.compat_default is not _UNSET
+                    stardag_field.compat_default is not _UNSET
                     and getattr(self, name) == stardag_field.compat_default
                 ):
                     continue
 
-            out[name] = value
+            out[name] = canonicalize_sets(
+                getattr(self, name, None), value, info.context
+            )
 
         if mode == "registry":
             return out

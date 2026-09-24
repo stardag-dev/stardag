@@ -84,7 +84,7 @@ class ConfiguredForLocalBootstrap(_sd.Task[int]):
     """A task with a level-2 field (see the local-bootstrap config test)."""
 
     __namespace__ = "test_stardag_app"
-    width: typing.Annotated[int, _sd.StardagField(significance="dependencies_only")] = 2
+    width: typing.Annotated[int, _sd.StardagField(significant=False)] = 2
 
     def run(self):
         return None
@@ -519,7 +519,7 @@ class TestBuilderOrchestration:
         monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
 
         class ConfiguredForBuilderTest(_sd.Task[int]):
-            width: Annotated[int, StardagField(significance="dependencies_only")] = 2
+            width: Annotated[int, StardagField(significant=False)] = 2
 
             def run(self):
                 return None
@@ -565,7 +565,7 @@ class TestBuilderOrchestration:
         monkeypatch.setenv(STARDAG_CODE_ID_ENV, "cafe" * 10)
 
         class ConfiguredForResumeTest(_sd.Task[int]):
-            width: Annotated[int, StardagField(significance="dependencies_only")] = 2
+            width: Annotated[int, StardagField(significant=False)] = 2
 
             def run(self):
                 return None
@@ -1015,7 +1015,7 @@ class TestStardagAppBuildTrigger:
         from stardag.build_config import BuildConfigError, task_config_key
 
         class ConfiguredForTriggerTest(_sd.Task[int]):
-            width: Annotated[int, StardagField(significance="dependencies_only")] = 2
+            width: Annotated[int, StardagField(significant=False)] = 2
 
             def run(self):
                 return None

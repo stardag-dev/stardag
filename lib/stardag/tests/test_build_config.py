@@ -1,13 +1,10 @@
-"""Unit tests for ``stardag.build_config``: the one source of a task's level 2
-and 3 parameters, its installation as a context, the structure-config hash
-that forms the second half of a scope key, and rebinding a task to the
-installed config. Design: ``docs/design/scope-keyed-dependency-structure.md``.
+"""Unit tests for what is left of ``stardag.build_config`` in v2: the
+ContextVar, its JSON coercion, the structure-config hash and the rebind.
 
-The model-side behaviour (a field being resolved from the config, refused at
-init, dropped from payloads) is in ``tests/test_base_model.py``; the code id
-and the scope key are in ``tests/test_build/test_scope.py``; the engines
-installing the context around a build are in
-``tests/test_build/test_build_config_context.py``.
+v2 removed the field semantics this module used to feed
+(``significance=``, values resolved from the config, refusal at init), and
+those tests went with them. The rest go with the module in I7, together with
+the config transport (``docs/design/registry-v2/plan.md``).
 """
 
 from __future__ import annotations
@@ -17,12 +14,10 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 import pytest
-from pydantic import ValidationError, WrapSerializer
+from pydantic import WrapSerializer
 
 import stardag as sd
-from stardag import task_from_registry_data
 from stardag.base_model import CONTEXT_MODE_KEY, StardagField
-from stardag.build import build_sequential
 from stardag.build_config import (
     BuildConfigError,
     UnknownTaskClassError,
@@ -31,12 +26,10 @@ from stardag.build_config import (
     get_build_config,
     jsonable_build_config,
     rebind_to_build_config,
-    resolve_field_value,
     set_build_config,
     structure_config_hash,
     task_config_key,
 )
-from stardag.registry import NoOpRegistry
 from stardag.target import InMemoryTarget
 
 
@@ -55,11 +48,11 @@ class Fanout(sd.Task[int]):
     __version__ = "1"
 
     key: str
-    partition_size: Annotated[int, StardagField(significance="dependencies_only")] = 100
-    threads: Annotated[int, StardagField(significance="execution_only")] = 1
+    partition_size: Annotated[int, StardagField(significant=False)] = 100
+    threads: Annotated[int, StardagField(significant=False)] = 1
     # A float that only counts to one decimal in the hash — the standard
     # hash control, here on a level 2 field.
-    ratio: Annotated[Rounded, StardagField(significance="dependencies_only")] = 0.5
+    ratio: Annotated[Rounded, StardagField(significant=False)] = 0.5
 
     def run(self) -> None:
         self.target().save(self.partition_size)
@@ -72,7 +65,7 @@ class Other(sd.Task[int]):
     __namespace__ = "bc_tests"
 
     key: str
-    width: Annotated[int, StardagField(significance="dependencies_only")] = 2
+    width: Annotated[int, StardagField(significant=False)] = 2
 
     def run(self) -> None:
         return None
@@ -92,7 +85,7 @@ class RootNs(sd.Task[int]):
     """A class in the root namespace: its config key is its bare name."""
 
     key: str
-    width: Annotated[int, StardagField(significance="dependencies_only")] = 3
+    width: Annotated[int, StardagField(significant=False)] = 3
 
     def run(self) -> None:
         return None
@@ -108,32 +101,8 @@ class Outer(sd.Task[int]):
         return None
 
 
-class ParserOptions(sd.StardagBaseModel):
-    """A nested config object — not a task, and named by the build config in
-    its own right. Guard-rail caps and worker counts live on objects like
-    this as often as on the task holding them."""
-
-    pattern: str
-    chunk: Annotated[int, StardagField(significance="dependencies_only")] = 10
-    max_workers: Annotated[int, StardagField(significance="execution_only")] = 4
-
-
-class Parse(sd.Task[int]):
-    """Its only parameter is the nested config object."""
-
-    __namespace__ = "bc_tests"
-    options: ParserOptions
-
-    def run(self) -> None:
-        self.target().save(self.options.max_workers)
-
-    def target(self) -> InMemoryTarget[int]:  # type: ignore[override]
-        return InMemoryTarget(key=str(self.id))
-
-
 KEY = "bc_tests.Fanout"
 OTHER = "bc_tests.Other"
-OPTIONS = "ParserOptions"
 
 
 class TestTaskConfigKey:
@@ -205,35 +174,11 @@ class TestBuildConfigContext:
         assert get_build_config() is None
 
 
-class TestResolveFieldValue:
-    def test_nothing_without_a_config(self):
-        assert resolve_field_value(KEY, "threads") == (False, None)
-
-    def test_nothing_for_an_unknown_class_or_field(self):
-        with build_config_scope({KEY: {"threads": 2}}):
-            assert resolve_field_value(OTHER, "width") == (False, None)
-            assert resolve_field_value(KEY, "partition_size") == (False, None)
-
-    def test_a_present_value_is_found(self):
-        with build_config_scope({KEY: {"threads": 2}}):
-            assert resolve_field_value(KEY, "threads") == (True, 2)
-
-    @pytest.mark.parametrize("value", [0, "", False, None])
-    def test_a_falsy_value_is_still_found(self, value):
-        with build_config_scope({KEY: {"threads": value}}):
-            assert resolve_field_value(KEY, "threads") == (True, value)
-
-
 class TestStructureConfigHash:
     def test_empty_and_none_hash_alike(self):
         assert structure_config_hash(None) == structure_config_hash({})
 
-    def test_execution_only_overrides_do_not_change_the_hash(self):
-        assert structure_config_hash({KEY: {"threads": 16}}) == structure_config_hash(
-            None
-        )
-
-    def test_dependencies_only_overrides_change_the_hash(self):
+    def test_non_significant_overrides_change_the_hash(self):
         assert structure_config_hash(
             {KEY: {"partition_size": 250}}
         ) != structure_config_hash(None)
@@ -255,12 +200,12 @@ class TestStructureConfigHash:
             None
         )
 
-    def test_unknown_class_field_and_identity_fields_are_refused(self):
+    def test_unknown_class_field_and_significant_fields_are_refused(self):
         with pytest.raises(BuildConfigError, match="not registered"):
             structure_config_hash({"bc_tests.Nope": {"x": 1}})
         with pytest.raises(BuildConfigError, match="no such field"):
             structure_config_hash({KEY: {"nope": 1}})
-        with pytest.raises(BuildConfigError, match="identity"):
+        with pytest.raises(BuildConfigError, match="significant"):
             structure_config_hash({KEY: {"key": "b"}})
         with pytest.raises(BuildConfigError, match="not a valid"):
             structure_config_hash({KEY: {"partition_size": "many"}})
@@ -278,9 +223,7 @@ class TestStructureConfigHash:
     def test_a_coerced_value_equal_to_the_default_is_dropped(self):
         assert canonical_structure_config({KEY: {"partition_size": "100"}}) == {}
 
-    def test_an_invalid_execution_only_value_is_refused(self):
-        """Level 3 never reaches the hash, but a misspelled or mistyped
-        override is still a mistake the trigger should hear about."""
+    def test_an_invalid_value_is_refused(self):
         with pytest.raises(BuildConfigError, match="not a valid"):
             canonical_structure_config({KEY: {"threads": "many"}})
 
@@ -308,14 +251,6 @@ class TestStructureConfigHash:
 
 
 class TestRebindToBuildConfig:
-    def test_re_resolves_from_the_installed_config(self):
-        task = Fanout(key="a")
-        with build_config_scope({KEY: {"partition_size": 3}}):
-            rebound = rebind_to_build_config(task)
-        assert isinstance(rebound, Fanout)
-        assert rebound.partition_size == 3
-        assert rebound.id == task.id
-
     def test_a_class_without_config_fields_rebinds_to_an_equal_object(self):
         task = Plain(key="p")
         with build_config_scope({KEY: {"partition_size": 3}}):
@@ -323,26 +258,13 @@ class TestRebindToBuildConfig:
         assert rebound == task
         assert rebound.id == task.id
 
-    def test_a_nested_task_is_re_resolved_too(self):
-        """Only identity data survives the dump, so the nested task's level 2
-        value comes from the config installed *here*, not from wherever the
-        outer object was built."""
-        outer = Outer(inner=Fanout(key="a"))
-        assert outer.inner.partition_size == 100
-        with build_config_scope({KEY: {"partition_size": 3}}):
-            rebound = rebind_to_build_config(outer)
-        assert isinstance(rebound, Outer)
-        assert rebound.inner.partition_size == 3
-        assert rebound.id == outer.id
-        assert rebound.inner.id == outer.inner.id
-
 
 class Dated(sd.Task[int]):
     __namespace__ = "bc_tests"
 
     key: str
-    since: Annotated[datetime, StardagField(significance="dependencies_only")] = (
-        datetime(2026, 1, 1, tzinfo=timezone.utc)
+    since: Annotated[datetime, StardagField(significant=False)] = datetime(
+        2026, 1, 1, tzinfo=timezone.utc
     )
 
     def run(self) -> None:
@@ -372,11 +294,6 @@ class TestJsonableBuildConfig:
         assert jsonable_build_config(None) is None
         assert jsonable_build_config({}) == {}
 
-    def test_the_json_form_resolves_back_to_the_field_type(self):
-        at = datetime(2026, 3, 4, 5, 6, tzinfo=timezone.utc)
-        with build_config_scope(jsonable_build_config({DATED: {"since": at}})):
-            assert Dated(key="a").since == at
-
     def test_the_json_form_hashes_like_the_python_form(self):
         at = datetime(2026, 3, 4, 5, 6, tzinfo=timezone.utc)
         raw = {DATED: {"since": at}}
@@ -388,70 +305,3 @@ class TestJsonableBuildConfig:
     def test_a_value_with_no_json_form_is_a_config_error(self):
         with pytest.raises(BuildConfigError, match="no JSON form"):
             jsonable_build_config({DATED: {"since": object()}})
-
-
-class TestNonTaskModelKeys:
-    """A ``StardagBaseModel`` that is not a task may declare level 2 and 3
-    fields too, and the build config names it by the same kind of key. The
-    validation side always worked; before the class was registered, the
-    *hash* side rejected the key, so the feature worked in a test and failed
-    in a build (STA-77)."""
-
-    def test_the_whole_path_holds_for_a_nested_model(self, default_in_memory_fs_target):
-        # 1. the field cannot be passed at init, and the error names a key...
-        with pytest.raises(ValidationError) as excinfo:
-            ParserOptions(pattern="*.log", max_workers=8)
-        assert '{"ParserOptions": {"max_workers": ...}}' in str(excinfo.value)
-
-        # 2. ...that resolves at validation...
-        with build_config_scope({OPTIONS: {"max_workers": 8}}):
-            assert ParserOptions(pattern="*.log").max_workers == 8
-
-        # 3. ...and that the structure scope can be hashed from.
-        assert canonical_structure_config({OPTIONS: {"max_workers": 8}}) == {}
-        assert structure_config_hash({OPTIONS: {"max_workers": 8}}) is not None
-
-        # 4. So a build carrying it runs, and the task reads the value.
-        task = Parse(options=ParserOptions(pattern="*.log"))
-        build_sequential(
-            [task],
-            registry=NoOpRegistry(),
-            build_config={OPTIONS: {"max_workers": 8}},
-        )
-        assert task.target().load() == 8
-
-    def test_dependencies_only_moves_the_hash_and_execution_only_does_not(self):
-        assert structure_config_hash({OPTIONS: {"max_workers": 8}}) == (
-            structure_config_hash(None)
-        )
-        assert structure_config_hash({OPTIONS: {"chunk": 50}}) != (
-            structure_config_hash(None)
-        )
-        assert canonical_structure_config({OPTIONS: {"chunk": 50}}) == {
-            OPTIONS: {"chunk": 50}
-        }
-        # The same per-class rules as a task: an override equal to the
-        # default is a no-op, and the other errors are unchanged.
-        assert canonical_structure_config({OPTIONS: {"chunk": 10}}) == {}
-        with pytest.raises(BuildConfigError, match="no such field"):
-            canonical_structure_config({OPTIONS: {"nope": 1}})
-        with pytest.raises(BuildConfigError, match="identity"):
-            canonical_structure_config({OPTIONS: {"pattern": "*.txt"}})
-
-    def test_a_still_unknown_key_names_both_kinds_of_class(self):
-        with pytest.raises(UnknownTaskClassError, match="nor as a model"):
-            canonical_structure_config({"NoSuchThing": {"x": 1}})
-
-    def test_a_rehydrated_task_reads_the_configured_nested_value(self):
-        """The registry stores identity data only, so the nested model's
-        level 3 value is not in the payload: it comes from the config
-        installed where the task is rebuilt."""
-        task = Parse(options=ParserOptions(pattern="*.log"))
-        data = task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
-        assert "max_workers" not in data["options"]
-
-        with build_config_scope({OPTIONS: {"max_workers": 8}}):
-            rebuilt = task_from_registry_data(data, expected_task_id=task.id)
-        assert isinstance(rebuilt, Parse)
-        assert rebuilt.options.max_workers == 8
-        assert rebuilt.id == task.id

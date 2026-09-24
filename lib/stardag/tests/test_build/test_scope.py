@@ -38,8 +38,8 @@ class Fanout(sd.Task[int]):
     __version__ = "1"
 
     key: str
-    partition_size: Annotated[int, StardagField(significance="dependencies_only")] = 100
-    threads: Annotated[int, StardagField(significance="execution_only")] = 1
+    partition_size: Annotated[int, StardagField(significant=False)] = 100
+    threads: Annotated[int, StardagField(significant=False)] = 1
 
     def run(self) -> None:
         self.target().save(self.partition_size)
@@ -156,6 +156,7 @@ class _Recording(NoOpRegistry):
 
 
 class TestBuildPassesItsScope:
+    @pytest.mark.xfail(reason="v2: I7", strict=True)
     async def test_build_aio_starts_the_build_with_scope_and_config(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -184,6 +185,7 @@ class TestBuildPassesItsScope:
         assert Fanout(key="build-me").target().load() == 250
         _reset_for_tests()
 
+    @pytest.mark.xfail(reason="v2: I7", strict=True)
     async def test_the_config_is_stored_in_its_json_form(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -195,9 +197,9 @@ class TestBuildPassesItsScope:
             __namespace__ = "scope_tests"
 
             key: str
-            since: Annotated[
-                datetime, StardagField(significance="dependencies_only")
-            ] = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            since: Annotated[datetime, StardagField(significant=False)] = datetime(
+                2026, 1, 1, tzinfo=timezone.utc
+            )
 
             def run(self) -> None:
                 self.target().save(self.since.year)
@@ -250,6 +252,7 @@ class TestBuildPassesItsScope:
             )
         _reset_for_tests()
 
+    @pytest.mark.xfail(reason="v2: I7", strict=True)
     def test_build_sequential_passes_scope_too(self, monkeypatch: pytest.MonkeyPatch):
         _reset_for_tests()
         monkeypatch.setenv(STARDAG_CODE_ID_ENV, "codeSEQ")

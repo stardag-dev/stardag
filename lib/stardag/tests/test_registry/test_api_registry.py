@@ -181,6 +181,9 @@ class TestAPIRegistryGzipsWireFormat:
             def model_dump(self, mode="json", **kwargs):
                 return self._td
 
+            def instance_body(self):
+                return self._td
+
             def requires(self):
                 return ()
 

@@ -198,6 +198,7 @@ class TestWorkerBuildConfig:
     has to accept both kinds of key or the two halves diverge again.
     """
 
+    @pytest.mark.xfail(reason="v2: I7", strict=True)
     def test_a_non_task_key_is_installed_and_resolves(self):
         import json
         from typing import Annotated
@@ -208,9 +209,7 @@ class TestWorkerBuildConfig:
         from stardag.integration.modal._runner import _build_config_from_env
 
         class WorkerOptions(sd.StardagBaseModel):
-            max_workers: Annotated[
-                int, sd.StardagField(significance="execution_only")
-            ] = 4
+            max_workers: Annotated[int, sd.StardagField(significant=False)] = 4
 
         config = {"WorkerOptions": {"max_workers": 8}}
         decoded = _build_config_from_env({STARDAG_BUILD_CONFIG_ENV: json.dumps(config)})
