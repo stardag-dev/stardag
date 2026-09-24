@@ -34,6 +34,8 @@ interface TaskDetailProps {
   onChanged?: () => void;
   // A refresh of the parent, which re-reads this task too.
   refreshToken?: number;
+  // Jump to another build (the claim holder, an execution's build).
+  onOpenBuild?: (buildId: string) => void;
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -63,6 +65,7 @@ export function TaskDetail({
   onOpenTaskPage,
   onChanged,
   refreshToken = 0,
+  onOpenBuild,
 }: TaskDetailProps) {
   const [task, setTask] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -215,6 +218,7 @@ export function TaskDetail({
               planId={context?.planId}
               currentExecution={current}
               onChanged={handleChanged}
+              onOpenBuild={onOpenBuild}
             />
           </Section>
 

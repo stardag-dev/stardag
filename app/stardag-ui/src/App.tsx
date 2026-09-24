@@ -144,6 +144,7 @@ interface BuildPageProps extends SidebarStateProps {
   onNavigate: (item: NavItem) => void;
   onBack: () => void;
   onOpenTask: (taskId: string) => void;
+  onSelectBuild: (buildId: string) => void;
 }
 
 function BuildPage({
@@ -151,6 +152,7 @@ function BuildPage({
   onNavigate,
   onBack,
   onOpenTask,
+  onSelectBuild,
   sidebarCollapsed,
   onToggleSidebar,
 }: BuildPageProps) {
@@ -161,7 +163,12 @@ function BuildPage({
       sidebarCollapsed={sidebarCollapsed}
       onToggleSidebar={onToggleSidebar}
     >
-      <BuildView buildId={buildId} onBack={onBack} onOpenTask={onOpenTask} />
+      <BuildView
+        buildId={buildId}
+        onBack={onBack}
+        onOpenTask={onOpenTask}
+        onOpenBuild={onSelectBuild}
+      />
     </MainLayout>
   );
 }
@@ -171,12 +178,14 @@ interface TaskPageRouteProps extends SidebarStateProps {
   taskId: string | null;
   onNavigate: (item: NavItem) => void;
   onOpenTask: (taskId: string) => void;
+  onSelectBuild: (buildId: string) => void;
 }
 
 function TaskPageRoute({
   taskId,
   onNavigate,
   onOpenTask,
+  onSelectBuild,
   sidebarCollapsed,
   onToggleSidebar,
 }: TaskPageRouteProps) {
@@ -187,7 +196,7 @@ function TaskPageRoute({
       sidebarCollapsed={sidebarCollapsed}
       onToggleSidebar={onToggleSidebar}
     >
-      <TaskPage taskId={taskId} onOpenTask={onOpenTask} />
+      <TaskPage taskId={taskId} onOpenTask={onOpenTask} onOpenBuild={onSelectBuild} />
     </MainLayout>
   );
 }
@@ -745,6 +754,7 @@ function Router() {
             taskId={selectedTaskId}
             onNavigate={handleNavigation}
             onOpenTask={handleOpenTask}
+            onSelectBuild={handleSelectBuild}
             sidebarCollapsed={sidebarCollapsed}
             onToggleSidebar={handleToggleSidebar}
           />
@@ -778,6 +788,7 @@ function Router() {
               onNavigate={handleNavigation}
               onBack={handleBackFromBuild}
               onOpenTask={handleOpenTask}
+              onSelectBuild={handleSelectBuild}
               sidebarCollapsed={sidebarCollapsed}
               onToggleSidebar={handleToggleSidebar}
             />

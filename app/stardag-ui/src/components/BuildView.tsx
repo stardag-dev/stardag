@@ -32,6 +32,8 @@ interface BuildViewProps {
   buildId: string;
   onBack: () => void;
   onOpenTask?: (taskId: string) => void;
+  // Jump to another build: a claim holder, an execution's build.
+  onOpenBuild?: (buildId: string) => void;
 }
 
 const PAGE_SIZE = 20;
@@ -61,6 +63,7 @@ function BuildViewForIdentity({
   buildId,
   onBack,
   onOpenTask,
+  onOpenBuild,
   environmentId,
 }: BuildViewProps & { environmentId: string | undefined }) {
   const { setItems: setBreadcrumb } = useBreadcrumb();
@@ -383,6 +386,7 @@ function BuildViewForIdentity({
                       }
                       onChanged={refresh}
                       refreshToken={refreshToken}
+                      onOpenBuild={onOpenBuild}
                     />
                   </div>
                 </div>

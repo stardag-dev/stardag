@@ -8,6 +8,7 @@ interface TaskPageProps {
   // Null on `/tasks`: the lookup form.
   taskId: string | null;
   onOpenTask: (taskId: string) => void;
+  onOpenBuild?: (buildId: string) => void;
 }
 
 /**
@@ -16,7 +17,7 @@ interface TaskPageProps {
  * over them yet, so tasks are reached from a build's plan, a pasted id, or
  * a link; the explorer returns with that route.
  */
-export function TaskPage({ taskId, onOpenTask }: TaskPageProps) {
+export function TaskPage({ taskId, onOpenTask, onOpenBuild }: TaskPageProps) {
   const { activeEnvironment } = useEnvironment();
   const { setItems: setBreadcrumb } = useBreadcrumb();
   const [input, setInput] = useState("");
@@ -43,7 +44,11 @@ export function TaskPage({ taskId, onOpenTask }: TaskPageProps) {
   if (taskId) {
     return (
       <div className="mx-auto h-full max-w-4xl">
-        <TaskDetail taskId={taskId} environmentId={activeEnvironment.id} />
+        <TaskDetail
+          taskId={taskId}
+          environmentId={activeEnvironment.id}
+          onOpenBuild={onOpenBuild}
+        />
       </div>
     );
   }
