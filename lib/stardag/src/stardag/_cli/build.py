@@ -186,15 +186,18 @@ def build_command(
         # A root factory (module:attr callable) may read the environment,
         # so the build's settings must be installed before resolve_roots
         # imports and constructs the roots -- not only later, inside the
-        # build itself (sd.build/build_trigger apply them again there;
-        # nesting under the same, already-validated settings is a no-op
-        # re-entry, see resident_settings). Explicit --settings always
-        # wins. A bare resume (no --settings given, checked is None) has
-        # nothing new to validate, but still needs its *stored* settings
-        # installed now -- resolved from the registry the same way
-        # sd.build/build_trigger resolve them later -- or a root factory
-        # that reads the environment would construct roots under the
-        # ambient environment instead of the resumed build's own.
+        # build itself. That later install (sd.build/build_trigger, via
+        # resident_settings) is a *separate* entry for the build's own
+        # duration, not a nested one -- see the settings_ctx block below,
+        # which exits before dispatch for exactly this reason. Explicit
+        # --settings always wins. A bare resume (no --settings given,
+        # checked is None) has nothing new to validate, but still needs
+        # its *stored* settings resolved and installed now, as `to_install`
+        # -- passed on to sd.build/build_trigger so they install the same,
+        # already-resolved settings instead of reading them a second time
+        # -- or a root factory that reads the environment would construct
+        # roots under the ambient environment instead of the resumed
+        # build's own.
         from stardag.build._settings import resident_settings
 
         to_install = checked
@@ -225,18 +228,26 @@ def build_command(
                 if dry_run:
                     _dry_run(roots, to_install, json_output)
                     return
-                if app_ref is not None:
-                    _trigger(
-                        app_ref,
-                        roots,
-                        checked,
-                        resume_id,
-                        reactive,
-                        description,
-                        json_output,
-                    )
-                else:
-                    _build_here(roots, checked, resume_id, description, json_output)
+            # The context above is held only for root resolution and the
+            # dry-run walk. sd.build/build_trigger install `to_install`
+            # themselves for the build's own duration (resident_settings),
+            # so holding this process's settings open through the dispatch
+            # would make a real build enter that context a second time --
+            # nested, and re-resolved from the registry on a bare resume,
+            # which a settings change landing between the two reads could
+            # turn into a spurious "different settings" refusal.
+            if app_ref is not None:
+                _trigger(
+                    app_ref,
+                    roots,
+                    to_install,
+                    resume_id,
+                    reactive,
+                    description,
+                    json_output,
+                )
+            else:
+                _build_here(roots, to_install, resume_id, description, json_output)
         except SettingsError as e:
             error_console.print(f"[bold red]Error:[/bold red] {e}")
             raise typer.Exit(1)

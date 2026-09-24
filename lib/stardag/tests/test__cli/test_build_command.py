@@ -157,6 +157,88 @@ class TestDryRun:
         assert os.environ.get(LEAF_FROM_ENV_VAR) is None
 
 
+class TestRealBuild:
+    """Non-dry-run: ``sd.build`` actually runs. The CLI's own
+    ``resident_settings`` context (installed for ``resolve_roots``) must
+    not still be open when ``sd.build`` starts -- it installs ``to_install``
+    again itself, for the build's own duration."""
+
+    def test_real_build_with_explicit_settings_completes(
+        self, default_in_memory_fs_target, fake_registry
+    ):
+        from stardag.registry import registry_provider
+
+        with registry_provider.override(fake_registry):
+            result = runner.invoke(
+                cli,
+                [
+                    "build",
+                    "stardag.utils.testing.simple_dag:leaf_from_env",
+                    "--settings",
+                    "SIMPLE_DAG_LEAF_FROM_ENV_PARAM_B=explicit",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert "1 succeeded" in result.output
+        assert os.environ.get("SIMPLE_DAG_LEAF_FROM_ENV_PARAM_B") is None
+
+    def test_bare_resume_does_not_re_resolve_settings_a_second_time(
+        self, default_in_memory_fs_target, fake_registry, monkeypatch
+    ):
+        """A bare ``--resume`` installs the resumed build's stored settings
+        once (for ``resolve_roots``) and must hand that same value to
+        ``sd.build`` rather than leaving it to resolve them again from the
+        registry. A second, independent read could in principle answer
+        differently -- e.g. another trigger landing between the two -- and
+        the old code held the CLI's own ``resident_settings`` context open
+        through the dispatch, so that later, different read collided with
+        it and refused the build with ``SettingsError`` before a single
+        task ran. Simulate the race by making the registry's settings
+        lookup answer differently on this second read; only the buggy path
+        reaches it a second time at all."""
+        from stardag.build._registration import register_plan_aio, walk_aio
+        from stardag.registry import registry_provider
+        from stardag.registry._models import SettingsInfo
+        from stardag.utils.testing.simple_dag import LEAF_FROM_ENV_VAR, LeafTask
+
+        registry = fake_registry
+        monkeypatch.setenv(LEAF_FROM_ENV_VAR, "from-stored")
+        root = LeafTask(param_a=1, param_b="from-stored")
+        build_id = registry.build_create(root_task_ids=[str(root.id)]).id
+        deployment_id = registry.add_deployment()
+        walk = asyncio.run(walk_aio([root]))
+        asyncio.run(
+            register_plan_aio(
+                registry,
+                build_id,
+                walk,
+                deployment_id=deployment_id,
+                settings={LEAF_FROM_ENV_VAR: "from-stored"},
+            )
+        )
+        monkeypatch.delenv(LEAF_FROM_ENV_VAR, raising=False)
+
+        async def changed_settings_get_aio(settings_hash: str) -> SettingsInfo:
+            return SettingsInfo(
+                hash=settings_hash, body={LEAF_FROM_ENV_VAR: "changed-in-between"}
+            )
+
+        monkeypatch.setattr(registry, "settings_get_aio", changed_settings_get_aio)
+
+        with registry_provider.override(registry):
+            result = runner.invoke(
+                cli,
+                [
+                    "build",
+                    "stardag.utils.testing.simple_dag:leaf_from_env",
+                    "--resume",
+                    str(build_id),
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert "1 succeeded" in result.output
+
+
 class TestRefusals:
     def test_reserved_settings_keys_are_refused(self):
         result = runner.invoke(
