@@ -299,21 +299,38 @@ assignee the maintainer.
       route the client calls is served (step 3c, step 4); proven live in I0
       step 4. Left to I8: `builds list/stop/cleanup`, `tasks`,
       `concurrency-limits` as CLI commands.
-- [ ] I8 — CLI (in review, PR #387 against `v2`). Of the server gaps its
-      PR lists, `GET /plans/{id}` is served by I5 (#390), as is the `lost`
-      outcome its stop filter sends; the event read was already served
-      (#386); the bare-observation route is not, by decision (D7).
-- [x] I9 — UI (merged, PR #388). Every registry call is on `/api/v2`; scope
-      keys, `build_config`, phantoms, external blockers and `/locks` are
-      gone. Builds list, the build view over the active plan, the stop list
-      over `GET /builds/{id}/executions` with orphans, the task page and a
-      deployments page. The server gaps it listed — `GET /plans/{id}/graph`,
-      the build failure reason (`error_message`), `GET /tasks?status=`,
-      executions per task — are served by I5 (#390); the task event log was
-      already served (#386). Removed for want of a v2 route: task search,
-      claim triage, bulk cancel, concurrency-limits admin.
-- [ ] I10 — tests. docker-compose e2e tier re-pointed to v2 (STA-110, PR #391 merged).
-- [ ] I11 — docs
+- [x] I8 — CLI (merged, PR #387). `stardag build`
+      (roots from `module:attr`, `--settings`, `--app`, `--reactive`,
+      `--resume`, `--dry-run`); `builds` list, show, frontier, ticks,
+      stop, cancel, complete and fail, `stop` over the execution ledger with
+      `--not-in-current-plan`; `executions list`; `plans show`;
+      `deployments list` (`stardag modal deployments` is its Modal alias);
+      `tasks show/check/retry/cancel/exclude`. Client reads added:
+      `build_list`, `plan_roots_info`, `task_list_artifacts`, all on served
+      routes. Server-contract items served by I5 (#390): `GET /plans/{id}`, the event read, outcome `lost`; still not served by decision (D7): a route for a bare observation. Original notes: no `GET /plans/{id}` (timestamps
+      and member counts are known only for the active plan, via the
+      frontier), no event read (`tasks show` cannot surface
+      `TASK_STRUCTURE_DIVERGED`), no route for a bare observation
+      (`tasks check --report` is refused).
+- [ ] I9 — UI (in review, draft PR #388 against `v2`). Every registry call
+      is on `/api/v2`; scope keys, `build_config`, phantoms, external
+      blockers and `/locks` are gone. Builds list, the build view over the
+      active plan (plan header, members, DAG over instance edges, frontier,
+      settings and deployment in build info), the stop list over
+      `GET /builds/{id}/executions` with orphans, the task page (claim,
+      instances under their scopes, artifacts) and a deployments page.
+      Coded against one route the registry does not serve, marked
+      **(assumed)** in `api/registry.ts`: `GET /plans/{id}/graph` (members
+      and instance edges); until it lands the view shows roots plus the
+      frontier and says it is partial. Removed for want of a v2 route: task
+      search/explorer, claim triage, bulk cancel, concurrency limits; the
+      build failure reason and the task event log (so
+      `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
+- [ ] I10 — tests. docker-compose e2e tier re-pointed to v2 (STA-110).
+- [ ] I11 — docs. Principles and release notes drafted, in review (PR
+      #392): `docs/design/principles.md`, the v2 entries in `CHANGELOG.md`
+      and `RELEASE_NOTES.md`; versioning TODO(Anders). The user docs under
+      `docs/docs/` are the other half, on a separate branch.
 - [ ] I12 — release
 
 ## Delivery steps

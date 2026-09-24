@@ -6,6 +6,217 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v2 line (version TBD) — Every fact gets its own home
+
+> **TODO(Anders):** the SDK and server version numbers, and the release
+> date. Nothing below depends on which major is chosen.
+
+### What changed, and why
+
+v1 kept a task's identity and its state on one row. Everything that went
+wrong in reactive scheduling over the last releases traced back to that
+row: non-identity parameters were frozen at their first registration, so
+they moved into a per-build config that then had to be carried into every
+process of the build; dependency edges were keyed by a scope string that
+joined to nothing; "the tasks of this build" was a scan of the event log
+that five places read five ways; and registration and claim arbitration
+locked the same row. Each fix was sound and each one added a seam.
+
+v2 gives each of those facts its own home:
+
+- a **task** is a completion — the promise its task id makes, its status
+  and its claim — and holds no parameters;
+- a **task instance** is a task as constructed under a scope, with its full
+  parameter body and its dependency edges;
+- a **plan** is one build's request under one scope, with an explicit
+  membership;
+- a **deployment** is one `stardag modal deploy` (or one local code id);
+- an **execution** is one claim granted, recorded at both of its ends.
+
+The scope is `(deployment, settings)`: the pair under which a task's
+structure is deterministic. The claim is still the only thing builds
+coordinate on, completion is still global, and the registry still follows
+the target rather than anyone's say-so. What goes away is the machinery
+that stood in for these relations: the build config and its transport,
+scope-key strings, phantom tasks, the lock table and the version gate.
+
+The principles this rests on, with the limits each one accepts, are in
+`docs/design/principles.md`; the design is
+`docs/design/registry-v2/design.md`.
+
+It is a new line, not an upgrade in place. SDK, server, CLI and UI change
+together, and there is no compatibility with v1 in either direction.
+
+### What changes for you
+
+**One flag instead of significance levels.** A parameter either is part of
+the task id or is not:
+
+```python
+from typing import Annotated
+
+import stardag as sd
+
+
+class Train(sd.Task[str]):
+    dataset: str
+    epochs: int = 10
+    # Not part of the task id; stored with the instance, passable at init.
+    num_workers: Annotated[int, sd.StardagField(significant=False)] = 4
+```
+
+`StardagField(significance=...)` and `StardagField(hash_exclude=...)` raise
+`TypeError` naming the replacement. Use `significant=False` for anything
+that was `dependencies_only`, `execution_only` or excluded from the hash.
+`compat_default` works as before, on significant fields.
+
+A non-significant field is an ordinary parameter now. It is passed at init,
+stored on the task instance and rehydrated from it; the v1 rule that levels
+2 and 3 came only from the build config is gone with the build config.
+
+**Settings instead of the build config.** Build-wide values a task reads
+but that do not change its output — a thread count, a feature flag — are
+passed as `settings`, a flat mapping of environment variables applied in
+every process of the build:
+
+```python
+sd.build(root, settings={"MYAPP_THREADS": "8"})
+app.build_trigger(root, settings={"MYAPP_THREADS": "8"})
+```
+
+```bash
+stardag build mypkg.dags:root --settings MYAPP_THREADS=8
+```
+
+Read them at run time through a pydantic-settings class, not at import
+time: a warm container imports before it knows its build. The contract is
+the one the task id already states: **settings may change which upstreams
+a task has and how it runs, never what it writes.** Completion is global,
+so a setting that changed output would let one build reuse another's
+different result; anything that affects output is a significant parameter.
+Keys starting `STARDAG_` or `MODAL_` are refused, and settings are not for
+credentials. `build_config`, `sd.build_config_scope`, `sd.get_build_config`
+and `sd.set_build_config` are removed.
+
+A process holds one settings owner. Concurrent `sd.build()` calls share it
+when their settings are equal; a resident build under different settings,
+or a tick, worker or bootstrap's scoped settings crossing a resident
+owner in either direction, raises `SettingsError`. Deployed ticks,
+workers and the bootstrap run one input per container, and `stardag
+modal deploy` refuses a `max_concurrent_inputs` above one on them.
+
+**Two errors at the trigger, where v1 found the problem later.** Each
+distinct instance is round-tripped once at registration; a field whose
+serialization is not a fixed point (an unsorted set, a naive vs aware
+datetime, `-0.0`, a numpy scalar) raises `UnstableSerializationError`
+naming it. You can run the same check in a test with
+`sd.check_serialization_stability(task)`. Two different constructions of
+one task id in one build raise `InstanceConflictError`, with both
+construction paths: a build is one request, and one plan holds one instance
+per completion.
+
+**Deployments are the scope.** `stardag modal deploy` now mints a
+deployment id, `STARDAG_DEPLOYMENT_ID`, bakes it into the app, and records
+the deployment with the registry before the deploy and activates it after.
+A running reactive build follows the app's current deployment: the first
+tick on new code re-plans it, and a tick on old code exits `superseded`. A
+redeploy of unchanged code is a new deployment too, so running builds
+re-plan and a task that had yielded can re-run its pre-yield work.
+
+A local `sd.build()` plans under a local deployment keyed by its code id —
+`STARDAG_CODE_ID` if set, else a clean git commit, else a fresh id — so
+local builds at the same clean commit share structure and a dirty tree never
+does. A hybrid build whose tasks run on a Modal app plans under that app's
+current deployment; keeping your local code in step with it is on you, as it
+was with v1's clean-tree sharing.
+
+**The CLI.** `stardag build <module:attr>` triggers a build from the
+command line. `stardag builds stop` works over the execution ledger:
+`--not-in-current-plan` lists the executions a rollover left running under
+an old plan, and `--mark-lost` ends in the ledger an execution that cannot
+be stopped. New: `stardag executions list`, `stardag plans show`, `stardag
+deployments list`, `stardag tasks check` (runs `complete()` locally and
+prints the observation). Removed: `stardag concurrency-limits`, `stardag
+builds cleanup` and `stardag tasks list`.
+
+**Nothing marks a task incomplete by fiat.** The only way out of COMPLETED
+is a build observing the target missing. To re-run a task, delete its
+target and trigger a build; to change what it produces, change its task id
+(bump `__version__` or add a significant parameter), which re-keys its
+downstreams on its own.
+
+**Custom registries and executors.** `RegistryABC` and `APIRegistry` are
+rewritten around plans, members, seal and yield, on `/api/v2`.
+`RegistryTooOldError`, `SDKVersionUnsupportedError`, `ScopeMismatchError`
+and `BuildConfigMismatchError` are removed. A custom registry needs
+rewriting against the new ABC; `stardag.testing.InMemoryRegistry` is the
+reference that follows the server's seams.
+
+### Migration
+
+There is none, by design.
+
+- **An existing registry starts empty on v2.** Point v2 at a new database,
+  or run the migration on the existing one: it **drops the v1 core tables**
+  (builds, tasks, events, dependencies, artifacts, limit keys, tick
+  summaries, locks, deployments and concurrency limits) and creates the v2
+  ones. Concurrency limits are among them: set them again after the
+  upgrade (`PUT /api/v2/concurrency-limits/{key}`). Users, workspaces,
+  environments, members, invites, API keys and target roots are
+  untouched. Downgrade is not supported. Targets are not touched either,
+  so the first v2 build of an existing DAG observes its complete tasks and
+  does not re-run them.
+- **Upgrade the SDK and the server together.** A v1 SDK cannot talk to a v2
+  registry, and a v2 SDK against a v1 registry fails on its first call:
+  the routes it calls do not exist there. Finish or cancel running v1 builds
+  first; they cannot be resumed on v2.
+- **Redeploy every Modal app** with the v2 `stardag modal deploy`, so each
+  has a recorded, activated deployment. A tick whose deployment the
+  registry does not know cannot create a plan.
+- **Change your code**: `significance=` and `hash_exclude=` to
+  `significant=False`; build-config fields and `build_config_scope` blocks
+  to `settings`, read through a settings class; v1 CLI invocations to their
+  v2 commands (above).
+
+### Operators
+
+- **PostgreSQL 15 or newer.** The schema uses the column-list `ON DELETE
+SET NULL (col)` form. SQLite is not supported, and the API suite runs on
+  Postgres.
+- **The creation quotas are per environment.** The v2 routes read
+  `LIMITS_MAX_TASK_INSTANCES_PER_ENVIRONMENT_24H` (task instance rows, the
+  table a non-significant parameter can inflate; 429
+  `creation_quota_exceeded`) and `LIMITS_MAX_ARTIFACTS_PER_ENVIRONMENT_24H`
+  (429 `artifact_creation_limit`), both charged only for rows a request
+  actually inserted, so a retried request is never refused. The four
+  per-workspace settings, `LIMITS_MAX_{BUILDS,TASKS,EVENTS,ARTIFACTS}_PER_WORKSPACE_24H`,
+  are not read by v2: a deployment that sets them sets the two
+  per-environment ones instead. `LIMITS_MAX_REQUESTS_PER_MINUTE` applies to
+  every v2 write route (429 `rate_limited` with `Retry-After`).
+- **`stardag modal deploy` creates before and activates after.** The
+  deployment row is created before the Modal deploy, which fixes its
+  generation, and activated once the deploy succeeded; a failed create or
+  activation exits non-zero. If the activation never lands, every tick of
+  the new code exits `superseded` and the app's reactive builds stall until
+  it does: `stardag deployments list` shows the row as not activated, and
+  a fresh `stardag modal deploy` records and activates a new deployment.
+- **`stardag builds stop` is the hard stop**, and nothing else stops a
+  container. It lists a build's unended executions from the ledger, stops
+  the Modal calls it can identify, reports each one stopped, and cancels
+  the build unless `--no-cancel`. `--mark-lost` ends the executions it
+  cannot stop with outcome `lost`: their claims are released and any later
+  report from them is refused, so use it only when the container is known
+  gone or no longer matters.
+- **Deleting a build is refused** while it holds a live claim or has an
+  unended execution; stop it first.
+- **The registry-live test tier is one run per Modal workspace.** In CI its
+  job sits in a single concurrency group with a constant name, queued and
+  never cancelled, because one run peaks at 45–65 containers against a
+  100-container workspace limit. Run single scenarios locally against your
+  own stack and leave the full tier to CI.
+
+---
+
 ## Unreleased
 
 ### A late restart can no longer evict the build that took its task over
