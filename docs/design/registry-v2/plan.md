@@ -283,7 +283,19 @@ assignee the maintainer.
       route the client calls is served (step 3c, step 4); proven live in I0
       step 4. Left to I8: `builds list/stop/cleanup`, `tasks`,
       `concurrency-limits` as CLI commands.
-- [ ] I8 — CLI
+- [ ] I8 — CLI (in review, draft PR against `v2`). `stardag build`
+      (roots from `module:attr`, `--settings`, `--app`, `--reactive`,
+      `--resume`, `--dry-run`); `builds` list, show, frontier, ticks,
+      stop, cancel, complete and fail, `stop` over the execution ledger with
+      `--not-in-current-plan`; `executions list`; `plans show`;
+      `deployments list` (`stardag modal deployments` is its Modal alias);
+      `tasks show/check/retry/cancel/exclude`. Client reads added:
+      `build_list`, `plan_roots_info`, `task_list_artifacts`, all on served
+      routes. Open server-contract items: no `GET /plans/{id}` (timestamps
+      and member counts are known only for the active plan, via the
+      frontier), no event read (`tasks show` cannot surface
+      `TASK_STRUCTURE_DIVERGED`), no route for a bare observation
+      (`tasks check --report` is refused).
 - [ ] I9 — UI (in review, draft PR #388 against `v2`). Every registry call
       is on `/api/v2`; scope keys, `build_config`, phantoms, external
       blockers and `/locks` are gone. Builds list, the build view over the

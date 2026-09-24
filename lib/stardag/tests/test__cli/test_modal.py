@@ -144,3 +144,19 @@ class TestDeploymentsListing:
         assert result.exit_code == 0, result.output
         assert "No registry configured; no deployments to list." in result.output
         assert "Deployments" not in result.output
+
+    def test_without_a_registry_json_still_emits_a_json_document(self):
+        """``--json`` keeps its contract even with no registry configured:
+        stdout carries exactly ``{"deployments": []}``, and the notice moves
+        to stderr instead of corrupting stdout with prose."""
+        import json
+
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        with registry_provider.override(NoOpRegistry()):
+            result = CliRunner(env={"COLUMNS": "240"}).invoke(
+                app, ["deployments", "--json"]
+            )
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout) == {"deployments": []}
+        assert "No registry configured" in result.stderr

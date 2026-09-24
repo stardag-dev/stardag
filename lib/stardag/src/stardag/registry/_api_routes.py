@@ -19,13 +19,15 @@ from stardag.registry._models import (
     DeploymentKind,
     ExclusionResult,
     ExecutionInfo,
-    FrontierMember,
     MembersResult,
     PlanInfo,
+    PlanRoots,
     RegistrationItem,
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
+    StopOutcome,
+    TaskArtifactInfo,
     TransitionResult,
     WakeCandidate,
     YieldResult,
@@ -130,18 +132,19 @@ def _frontier_req(build_id: UUID) -> Request[BuildFrontier]:
     )
 
 
-def _list_running_req(reactive_app_name: str | None, limit: int) -> Request[list[UUID]]:
-    params = {"status": "running", "limit": str(limit)}
+def _build_list_req(
+    status: str | None, reactive_app_name: str | None, limit: int
+) -> Request[list[BuildInfo]]:
+    params = {"limit": str(limit)}
+    if status is not None:
+        params["status"] = status
     if reactive_app_name is not None:
         params["reactive_app_name"] = reactive_app_name
 
-    def parse(payload: Any) -> list[UUID]:
-        builds = (payload or {}).get("builds", [])
-        return [UUID(str(b["id"])) for b in builds]
+    def parse(payload: Any) -> list[BuildInfo]:
+        return [BuildInfo.model_validate(b) for b in (payload or {}).get("builds", [])]
 
-    return Request(
-        "GET", "/builds", parse, params=params, operation="List running builds"
-    )
+    return Request("GET", "/builds", parse, params=params, operation="List builds")
 
 
 def _plan_create_req(
@@ -186,14 +189,12 @@ def _seal_req(plan_id: UUID) -> Request[PlanInfo]:
     )
 
 
-def _plan_roots_req(plan_id: UUID) -> Request[list[FrontierMember]]:
-    def parse(payload: Any) -> list[FrontierMember]:
-        return [
-            FrontierMember.model_validate(r) for r in (payload or {}).get("roots", [])
-        ]
-
+def _plan_roots_req(plan_id: UUID) -> Request[PlanRoots]:
     return Request(
-        "GET", f"/plans/{plan_id}/roots", parse, operation=f"Roots of plan {plan_id}"
+        "GET",
+        f"/plans/{plan_id}/roots",
+        PlanRoots.model_validate,
+        operation=f"Roots of plan {plan_id}",
     )
 
 
@@ -254,13 +255,28 @@ def _executions_req(
     )
 
 
-def _stopped_req(execution_id: UUID) -> Request[TransitionResult]:
+def _task_artifacts_req(task_id: str) -> Request[list[TaskArtifactInfo]]:
+    def parse(payload: Any) -> list[TaskArtifactInfo]:
+        return [
+            TaskArtifactInfo.model_validate(a)
+            for a in (payload or {}).get("artifacts", [])
+        ]
+
+    return Request(
+        "GET",
+        f"/tasks/{task_id}/artifacts",
+        parse,
+        operation=f"List artifacts of task {task_id}",
+    )
+
+
+def _stopped_req(execution_id: UUID, outcome: StopOutcome) -> Request[TransitionResult]:
     return Request(
         "POST",
         f"/executions/{execution_id}/stopped",
         TransitionResult.model_validate,
-        json={"outcome": "stopped"},
-        operation=f"Report execution {execution_id} stopped",
+        json={"outcome": outcome},
+        operation=f"Report execution {execution_id} {outcome}",
     )
 
 

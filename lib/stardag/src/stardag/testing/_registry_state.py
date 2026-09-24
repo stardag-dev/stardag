@@ -68,6 +68,11 @@ class BuildRow:
     is_resumed: bool = False
     error_message: str | None = None
     created_at: datetime | None = None
+    #: Bumped on build-level lifecycle events only (created, resumed,
+    #: completed/failed/cancelled/exit-early) — mirrors the server's
+    #: ``Build.last_active_at`` (models/build.py), which "GET /builds"
+    #: orders by, most recently active first.
+    last_active_at: datetime | None = None
 
 
 @dataclass
@@ -156,6 +161,21 @@ class ExecutionRow:
 
 
 @dataclass
+class ArtifactRow:
+    """One stored artifact, minted like the server's ``TaskArtifact`` row
+    (``services/artifacts.py``): ``id``/``created_at`` are assigned once,
+    on first upload of a ``(task, type, name)``, and survive a re-upload
+    that only replaces ``body`` -- the server's upsert only touches
+    ``body_json`` on conflict."""
+
+    id: UUID
+    artifact_type: str
+    name: str
+    body: Any
+    created_at: datetime
+
+
+@dataclass
 class Event:
     type: str
     task_id: str | None = None
@@ -184,7 +204,7 @@ class RegistryState:
         self.limits: dict[str, int] = {}
         self.events: list[Event] = []
         self.tick_summaries: dict[UUID, list[dict[str, Any]]] = {}
-        self.artifacts: dict[str, list[Any]] = {}
+        self.artifacts: dict[str, list[ArtifactRow]] = {}
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def now(self) -> datetime:
@@ -283,12 +303,27 @@ class RegistryState:
         )
 
     def current_deployment(self, kind: str, app_name: str) -> DeploymentRow | None:
+        """Mirrors the server's ``current_deployment_id``: a local
+        deployment is never current, no matter its activation state."""
+        if kind == "local":
+            return None
         rows = [
             d
             for d in self.deployments.values()
             if d.kind == kind and d.app_name == app_name and d.activated_at is not None
         ]
         return max(rows, key=lambda d: d.generation) if rows else None
+
+    def verify_deployment_current(self, deployment: DeploymentRow) -> None:
+        """Mirrors the server's ``verify_deployment_current``: a no-op for
+        a local deployment, which is authoritative for its own plans;
+        otherwise 409 ``deployment_not_current`` unless it is its app's
+        current (highest-generation, activated) row."""
+        if deployment.kind == "local":
+            return
+        current = self.current_deployment(deployment.kind, deployment.app_name)
+        if current is None or current.id != deployment.id:
+            raise refuse("deployment_not_current")
 
     # -- the ledger and wake-ups ----------------------------------------------------
 
