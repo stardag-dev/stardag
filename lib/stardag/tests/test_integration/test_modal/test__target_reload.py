@@ -369,63 +369,53 @@ async def test_a_walk_begins_an_observation(monkeypatch: pytest.MonkeyPatch):
 
 
 # ---------------------------------------------------------------------------
-# A miss must not force a second reload once the walk is already covered
-# (Copilot #389: the async path reloaded twice in one walk).
+# A miss always reloads, walk or no walk. An earlier version let a miss
+# trust "a reload already covered this walk's fence"; the fence is
+# process-global and outlives the walk, so a warm worker checking its
+# yielded children read a finished child as missing and suspended again
+# (registry-live, PR #389: test_shared_structure_scope and S24).
 # ---------------------------------------------------------------------------
 
 
-def test_one_reload_per_walk_also_serves_a_later_miss(
+def test_a_miss_after_a_walk_sees_a_write_landed_since(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):
-    """After a stale hit forces the walk's one reload, a later miss on the
-    same volume (a different target) must trust it rather than reloading
-    again."""
+    """A walk ran (fence set) and reloaded; another container then writes a
+    child's output. A later miss -- the worker's post-yield completeness
+    check, not part of any walk -- must reload and see it."""
     from stardag.target._freshness import begin_observation
 
-    hit_path = tmp_path / "hit.json"
-    hit_path.write_text("{}")
-    fake = _FakeVolume()
-
-    target_hit = _mounted_target(tmp_path, monkeypatch, fake)
-    target_hit.local_path = hit_path
-    target_miss = _mounted_target(tmp_path, monkeypatch, fake)
-    target_miss.local_path = tmp_path / "miss.json"
+    child = tmp_path / "child.json"
+    fake = _FakeVolume(sync_reload_side_effect=lambda: None)
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+    target.local_path = child
 
     begin_observation()
-
-    # Stale hit: not yet reloaded this walk -> the walk's one reload.
-    assert target_hit.exists() is True
+    assert target.exists() is False  # reload 1; nothing written yet
     assert fake.reload_count == 1
 
-    # A later miss is already covered by that reload -- no second one.
-    assert target_miss.exists() is False
-    assert fake.reload_count == 1
+    # Written by another container; visible here only after a reload.
+    fake._sync_reload_side_effect = lambda: child.write_text("{}")
+    assert target.exists() is True
+    assert fake.reload_count == 2
 
 
 @pytest.mark.asyncio
-async def test_one_reload_per_walk_also_serves_a_later_miss_async(
+async def test_a_miss_after_a_walk_sees_a_write_landed_since_async(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Async equivalent: this is the exact scenario Copilot flagged on
-    ``exists_aio``'s miss branch."""
     from stardag.target._freshness import begin_observation
 
-    hit_path = tmp_path / "hit.json"
-    hit_path.write_text("{}")
+    child = tmp_path / "child.json"
     fake = _FakeVolume()
-
-    target_hit = _mounted_target(tmp_path, monkeypatch, fake)
-    target_hit.local_path = hit_path
-    target_miss = _mounted_target(tmp_path, monkeypatch, fake)
-    target_miss.local_path = tmp_path / "miss.json"
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+    target.local_path = child
 
     begin_observation()
-
-    assert await target_hit.exists_aio() is True
-    assert fake.aio_reload_count == 1
-
-    assert await target_miss.exists_aio() is False
-    assert fake.aio_reload_count == 1
+    assert await target.exists_aio() is False
+    fake._aio_reload_side_effect = lambda: child.write_text("{}")
+    assert await target.exists_aio() is True
+    assert fake.aio_reload_count == 2
 
 
 def test_a_miss_before_any_walk_always_reloads(
@@ -494,3 +484,36 @@ def test_begin_observation_is_thread_safe_and_monotonic(
     # its own smaller one.
     assert results["older"] == 200.0
     assert _freshness.observation_fence() == 200.0
+
+
+# ---------------------------------------------------------------------------
+# A later walk re-observes completion rather than reusing a prior walk's
+# answer (Copilot #389; S28: a yielded child already COMPLETED whose target
+# is missing).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_walk_with_a_prior_re_observes_a_deleted_target(
+    default_in_memory_fs_target,
+):
+    import stardag as sd
+    from stardag.build._registration import walk_aio
+
+    @sd.task
+    def prior_child(x: int) -> int:
+        return x
+
+    child = prior_child(x=7)
+    child._save(7)
+    first = await walk_aio(child, check_stability=False)
+    assert first.complete[child.id] is True
+
+    # The target goes away between the build's walk and a yield's.
+    default_in_memory_fs_target.clear_targets()
+    second = await walk_aio(child, check_stability=False, prior=first)
+    assert second.complete[child.id] is False, (
+        "The yield's walk reused the prior walk's 'complete' and so could "
+        "never report the target missing."
+    )
+    assert second.observed_at[child.id] > first.observed_at[child.id]
