@@ -246,4 +246,17 @@ describe("TaskDetail", () => {
     expect(await screen.findByText("Executions (0)")).toBeInTheDocument();
     expect(screen.getByText(/No execution recorded/)).toBeInTheDocument();
   });
+
+  it("says the executions could not be read rather than that there are none", async () => {
+    vi.mocked(fetchTaskExecutions).mockRejectedValueOnce(new Error("503"));
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    expect(
+      await screen.findByText(/Could not read this task.s executions: 503/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No execution recorded/)).not.toBeInTheDocument();
+    vi.mocked(fetchTaskExecutions).mockResolvedValue([]);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText(/No execution recorded/)).toBeInTheDocument();
+    expect(screen.queryByText(/Could not read/)).not.toBeInTheDocument();
+  });
 });

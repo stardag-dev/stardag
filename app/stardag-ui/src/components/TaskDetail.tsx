@@ -71,6 +71,7 @@ export function TaskDetail({
   const [error, setError] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState<TaskArtifact[] | null>(null);
   const [executions, setExecutions] = useState<Execution[] | null>(null);
+  const [executionsError, setExecutionsError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   const { byId: deploymentsById } = useDeployments(
     environmentId,
@@ -93,6 +94,7 @@ export function TaskDetail({
     setError(null);
     setArtifacts(null);
     setExecutions(null);
+    setExecutionsError(null);
   }
 
   useEffect(() => {
@@ -113,8 +115,19 @@ export function TaskDetail({
       .then((r) => fresh() && setArtifacts(r.artifacts))
       .catch(() => fresh() && setArtifacts([]));
     fetchTaskExecutions(taskId, environmentId)
-      .then((rows) => fresh() && setExecutions(rows))
-      .catch(() => fresh() && setExecutions([]));
+      .then((rows) => {
+        if (!fresh()) return;
+        setExecutions(rows);
+        setExecutionsError(null);
+      })
+      .catch((err: unknown) => {
+        if (!fresh()) return;
+        // An outage is not "no build has claimed this task": keep the last
+        // good list, if any, and say the read failed.
+        setExecutionsError(
+          err instanceof Error ? err.message : "Failed to read executions",
+        );
+      });
   }, [taskId, environmentId, refreshToken, nonce]);
 
   const handleChanged = useCallback(() => {
@@ -276,10 +289,24 @@ export function TaskDetail({
               executions === null ? "Executions" : `Executions (${executions.length})`
             }
           >
-            {executions === null ? (
-              <p role="status" className="text-xs text-gray-500 dark:text-gray-400">
-                Loading executions…
+            {executionsError && (
+              <p role="alert" className="mb-1 text-xs text-red-600 dark:text-red-400">
+                Could not read this task&rsquo;s executions: {executionsError}{" "}
+                <button
+                  type="button"
+                  onClick={() => setNonce((n) => n + 1)}
+                  className="font-medium underline hover:no-underline"
+                >
+                  Retry
+                </button>
               </p>
+            )}
+            {executions === null ? (
+              !executionsError && (
+                <p role="status" className="text-xs text-gray-500 dark:text-gray-400">
+                  Loading executions…
+                </p>
+              )
             ) : (
               <TaskExecutions
                 executions={executions}
