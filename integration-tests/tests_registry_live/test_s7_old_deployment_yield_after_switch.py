@@ -80,7 +80,7 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 900
 
 
-def test_s7_an_old_deployments_yield_lands_and_the_parent_restarts_on_new_code(
+def test_s7_an_old_deployment_yield_lands_and_the_parent_restarts_on_new_code(
     deployment: Deployment,
 ) -> None:
     from stardag.registry import registry_provider

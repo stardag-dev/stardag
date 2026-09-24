@@ -293,12 +293,28 @@ class ModalMountedVolumeFileTarget(LocalFileTarget):
         fence = observation_fence()
         return _volume_last_reload_issued.get(self._volume_name, 0.0) >= fence
 
+    def _miss_already_covered_by_walk(self) -> bool:
+        """Whether an actual reload already satisfies the current walk's
+        fence, so a miss need not force another one.
+
+        Unlike ``_hit_is_fresh``, this must not treat "no walk, never
+        reloaded" (both default to 0.0) as already covered -- a miss
+        outside a walk always reloads, exactly as before the fence existed.
+        """
+        fence = observation_fence()
+        if not fence:
+            return False
+        issued = _volume_last_reload_issued.get(self._volume_name)
+        return issued is not None and issued >= fence
+
     def exists(self) -> bool:
         if self.path.exists():
             if self._hit_is_fresh():
                 return True
             _ensure_fresh_volume(self._volume_name, since=observation_fence())
             return self.path.exists()
+        if self._miss_already_covered_by_walk():
+            return False
         _ensure_fresh_volume(self._volume_name)
         return self.path.exists()
 
@@ -308,6 +324,8 @@ class ModalMountedVolumeFileTarget(LocalFileTarget):
                 return True
             await _ensure_fresh_volume_aio(self._volume_name, since=observation_fence())
             return self.path.exists()
+        if self._miss_already_covered_by_walk():
+            return False
         await _ensure_fresh_volume_aio(self._volume_name)
         return self.path.exists()
 

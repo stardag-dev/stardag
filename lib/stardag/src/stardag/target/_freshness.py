@@ -12,22 +12,36 @@ view older than the walk itself.
 cached view compares its last refresh against ``observation_fence()`` and
 refreshes once before answering. Before any walk the fence is 0, so nothing
 changes for code that never walks.
+
+Two walks can start concurrently on different threads, so the assignment is
+guarded by a lock and is monotonic: the fence only ever moves forward, so an
+older walk's ``begin_observation()`` completing after a newer one's can never
+push it backwards and weaken the freshness bar the newer walk relies on.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 
 _fence = 0.0
+_fence_lock = threading.Lock()
 
 
 def begin_observation() -> float:
-    """Mark the start of an observation; returns the fence (monotonic)."""
+    """Mark the start of an observation; returns the fence (monotonic).
+
+    Thread-safe and monotonic: the fence never moves backwards, even if an
+    older walk's call races a newer one's and lands after it.
+    """
     global _fence
-    _fence = time.monotonic()
-    return _fence
+    now = time.monotonic()
+    with _fence_lock:
+        _fence = max(_fence, now)
+        return _fence
 
 
 def observation_fence() -> float:
     """The latest ``begin_observation()`` time in this process (0 if none)."""
-    return _fence
+    with _fence_lock:
+        return _fence

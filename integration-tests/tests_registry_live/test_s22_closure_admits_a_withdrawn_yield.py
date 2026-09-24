@@ -64,7 +64,7 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
-def test_s22_closure_admits_a_cancelled_builds_yield(deployment: Deployment) -> None:
+def test_s22_closure_admits_a_cancelled_build_yield(deployment: Deployment) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (

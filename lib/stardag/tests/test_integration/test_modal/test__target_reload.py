@@ -366,3 +366,131 @@ async def test_a_walk_begins_an_observation(monkeypatch: pytest.MonkeyPatch):
 
     await walk_aio(fence_probe(x=1), check_stability=False)
     assert _freshness.observation_fence() >= before
+
+
+# ---------------------------------------------------------------------------
+# A miss must not force a second reload once the walk is already covered
+# (Copilot #389: the async path reloaded twice in one walk).
+# ---------------------------------------------------------------------------
+
+
+def test_one_reload_per_walk_also_serves_a_later_miss(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """After a stale hit forces the walk's one reload, a later miss on the
+    same volume (a different target) must trust it rather than reloading
+    again."""
+    from stardag.target._freshness import begin_observation
+
+    hit_path = tmp_path / "hit.json"
+    hit_path.write_text("{}")
+    fake = _FakeVolume()
+
+    target_hit = _mounted_target(tmp_path, monkeypatch, fake)
+    target_hit.local_path = hit_path
+    target_miss = _mounted_target(tmp_path, monkeypatch, fake)
+    target_miss.local_path = tmp_path / "miss.json"
+
+    begin_observation()
+
+    # Stale hit: not yet reloaded this walk -> the walk's one reload.
+    assert target_hit.exists() is True
+    assert fake.reload_count == 1
+
+    # A later miss is already covered by that reload -- no second one.
+    assert target_miss.exists() is False
+    assert fake.reload_count == 1
+
+
+@pytest.mark.asyncio
+async def test_one_reload_per_walk_also_serves_a_later_miss_async(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Async equivalent: this is the exact scenario Copilot flagged on
+    ``exists_aio``'s miss branch."""
+    from stardag.target._freshness import begin_observation
+
+    hit_path = tmp_path / "hit.json"
+    hit_path.write_text("{}")
+    fake = _FakeVolume()
+
+    target_hit = _mounted_target(tmp_path, monkeypatch, fake)
+    target_hit.local_path = hit_path
+    target_miss = _mounted_target(tmp_path, monkeypatch, fake)
+    target_miss.local_path = tmp_path / "miss.json"
+
+    begin_observation()
+
+    assert await target_hit.exists_aio() is True
+    assert fake.aio_reload_count == 1
+
+    assert await target_miss.exists_aio() is False
+    assert fake.aio_reload_count == 1
+
+
+def test_a_miss_before_any_walk_always_reloads(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Outside of any walk (fence still 0), a miss must keep reloading on
+    every call -- unchanged from before the fence existed. Guards against
+    treating the "no walk, never reloaded" default (both 0.0) as already
+    covered."""
+    fake = _FakeVolume()
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+    target.local_path = tmp_path / "missing.json"
+
+    assert target.exists() is False
+    assert fake.reload_count == 1
+
+    assert target.exists() is False
+    assert fake.reload_count == 2
+
+
+# ---------------------------------------------------------------------------
+# The fence assignment is thread-safe and monotonic (Copilot #389).
+# ---------------------------------------------------------------------------
+
+
+def test_begin_observation_is_thread_safe_and_monotonic(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Two walks can begin concurrently on different threads. The older
+    walk's write must not land after the newer one's and move the fence
+    backwards, even though it computed an earlier timestamp."""
+    from stardag.target import _freshness
+
+    monkeypatch.setattr(_freshness, "_fence", 0.0)
+
+    def fake_monotonic() -> float:
+        if threading.current_thread().name == "older":
+            # Delay *after* computing the timestamp but before the older
+            # walk reaches the lock, so the newer walk finishes first.
+            time.sleep(0.2)
+            return 100.0
+        return 200.0
+
+    monkeypatch.setattr(_freshness.time, "monotonic", fake_monotonic)
+
+    results: dict[str, float] = {}
+
+    older = threading.Thread(
+        target=lambda: results.__setitem__("older", _freshness.begin_observation()),
+        name="older",
+    )
+    newer = threading.Thread(
+        target=lambda: results.__setitem__("newer", _freshness.begin_observation()),
+        name="newer",
+    )
+
+    older.start()
+    time.sleep(0.05)  # let the older thread enter its monotonic() delay first
+    newer.start()
+    older.join(timeout=5)
+    newer.join(timeout=5)
+
+    assert results["newer"] == 200.0
+    # The older walk's own return value reflects the monotonic fence at the
+    # time it finished -- i.e. it must observe the newer walk's value, not
+    # its own smaller one.
+    assert results["older"] == 200.0
+    assert _freshness.observation_fence() == 200.0
