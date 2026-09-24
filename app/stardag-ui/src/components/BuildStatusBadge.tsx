@@ -1,3 +1,5 @@
+import { Tooltip } from "./ui/Tooltip";
+
 const STATUS_STYLES: Record<string, string> = {
   completed: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-400",
   failed: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-400",
@@ -33,11 +35,12 @@ export function BuildStatusBadge({
       : undefined;
 
   return (
-    <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${style}`}
-      title={title}
-    >
-      {label}
-    </span>
+    <Tooltip content={title}>
+      <span
+        className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${style}`}
+      >
+        {label}
+      </span>
+    </Tooltip>
   );
 }

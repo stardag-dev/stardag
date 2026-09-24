@@ -6,6 +6,7 @@ import { notStoppableReason, workerOf } from "../utils/stoppable";
 import { formatAbsoluteTime, formatDuration } from "../utils/time";
 import { StatusBadge } from "./StatusBadge";
 import { Checkbox } from "./ui/Checkbox";
+import { Tooltip } from "./ui/Tooltip";
 
 /** What the build's plan says about a task: its name and global status. */
 export interface ExecutionTaskInfo {
@@ -33,12 +34,11 @@ function OrphanBadge({ execution }: { execution: Execution }) {
     return <span className="text-gray-500 dark:text-gray-400">current</span>;
   }
   return (
-    <span
-      title="Orphaned: its plan is not the build's active plan. It started under code or settings the build has since rolled over from."
-      className="rounded bg-amber-100 px-1.5 py-0.5 font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
-    >
-      orphan
-    </span>
+    <Tooltip content="Orphaned: its plan is not the build's active plan. It started under code or settings the build has since rolled over from.">
+      <span className="rounded bg-amber-100 px-1.5 py-0.5 font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+        orphan
+      </span>
+    </Tooltip>
   );
 }
 
@@ -53,18 +53,22 @@ function ClaimCell({ execution }: { execution: Execution }) {
   }
   if (!execution.claim_outcome) return <span>holds the claim</span>;
   return (
-    <span
-      title={`Claim closed ${formatAbsoluteTime(
+    <Tooltip
+      content={`Claim closed ${formatAbsoluteTime(
         execution.claim_released_at,
       )}; no end reported by the execution itself`}
-      className={
-        execution.claim_outcome === "taken_over" || execution.claim_outcome === "lapsed"
-          ? "text-amber-800 dark:text-amber-300"
-          : undefined
-      }
     >
-      claim {execution.claim_outcome.replace("_", " ")}
-    </span>
+      <span
+        className={
+          execution.claim_outcome === "taken_over" ||
+          execution.claim_outcome === "lapsed"
+            ? "text-amber-800 dark:text-amber-300"
+            : undefined
+        }
+      >
+        claim {execution.claim_outcome.replace("_", " ")}
+      </span>
+    </Tooltip>
   );
 }
 
@@ -177,22 +181,22 @@ export function ExecutionTable({
                 </td>
                 <td className="py-1 pr-2">
                   {!execution.executor_ref ? (
-                    <span
-                      className="text-[11px] text-amber-800 dark:text-amber-300"
-                      title={notStoppableReason(execution) ?? undefined}
-                    >
-                      not recorded yet
-                    </span>
+                    <Tooltip content={notStoppableReason(execution) ?? undefined}>
+                      <span className="text-[11px] text-amber-800 dark:text-amber-300">
+                        not recorded yet
+                      </span>
+                    </Tooltip>
                   ) : callUrl ? (
-                    <a
-                      href={callUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      title="Open this call in the Modal dashboard"
-                      className="font-mono text-[11px] text-blue-700 hover:underline dark:text-blue-300"
-                    >
-                      {execution.executor_ref}
-                    </a>
+                    <Tooltip content="Open this call in the Modal dashboard">
+                      <a
+                        href={callUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-mono text-[11px] text-blue-700 hover:underline dark:text-blue-300"
+                      >
+                        {execution.executor_ref}
+                      </a>
+                    </Tooltip>
                   ) : (
                     <code className="font-mono text-[11px]">
                       {execution.executor_ref}

@@ -2,6 +2,7 @@ import type { PlanDetail } from "../types/task";
 import { deploymentLabel } from "../utils/deployments";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 import { Spinner } from "./ui/Spinner";
+import { Tooltip } from "./ui/Tooltip";
 
 interface BuildPlansProps {
   // Null while the first read is in flight.
@@ -32,15 +33,17 @@ function Stamp({
   help: string;
 }) {
   return (
-    <div title={help}>
-      <dt className="text-gray-500 dark:text-gray-400">{label}</dt>
-      <dd
-        className="text-gray-800 dark:text-gray-200"
-        title={at ? formatAbsoluteTime(at) : undefined}
-      >
-        {at ? formatRelativeTime(at) : "—"}
-      </dd>
-    </div>
+    <Tooltip content={help}>
+      <div>
+        <dt className="text-gray-500 dark:text-gray-400">{label}</dt>
+        <dd
+          className="text-gray-800 dark:text-gray-200"
+          title={at ? formatAbsoluteTime(at) : undefined}
+        >
+          {at ? formatRelativeTime(at) : "—"}
+        </dd>
+      </div>
+    </Tooltip>
   );
 }
 
@@ -97,14 +100,13 @@ export function BuildPlans({ plans, error, activePlanComplete }: BuildPlansProps
                   settings {plan.settings_hash.slice(0, 8)}
                 </Chip>
                 {plan.is_active && activePlanComplete && <Chip>plan complete</Chip>}
-                <span
-                  className="ml-auto text-gray-500 dark:text-gray-400"
-                  title="Members: roots, and those given up on (excluded)"
-                >
-                  {plan.member_count} member{plan.member_count === 1 ? "" : "s"},{" "}
-                  {plan.root_count} root{plan.root_count === 1 ? "" : "s"}
-                  {plan.excluded_count > 0 ? `, ${plan.excluded_count} excluded` : ""}
-                </span>
+                <Tooltip content="Members: roots, and those given up on (excluded)">
+                  <span className="ml-auto text-gray-500 dark:text-gray-400">
+                    {plan.member_count} member{plan.member_count === 1 ? "" : "s"},{" "}
+                    {plan.root_count} root{plan.root_count === 1 ? "" : "s"}
+                    {plan.excluded_count > 0 ? `, ${plan.excluded_count} excluded` : ""}
+                  </span>
+                </Tooltip>
               </div>
               <dl className="mt-1.5 grid grid-cols-3 gap-2">
                 <Stamp

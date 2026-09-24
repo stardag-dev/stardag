@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { BuildTickSummary } from "../types/task";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
+import { Tooltip } from "./ui/Tooltip";
 
 // What each tick outcome means, in the words an operator needs. Unknown
 // outcomes (a newer SDK) fall through to the raw value with no gloss —
@@ -167,16 +168,14 @@ function SummaryChips({ entries }: { entries: Entry[] }) {
   return (
     <div className="flex flex-wrap gap-1">
       {entries.map((entry) => (
-        <span
-          key={entry.key}
-          title={entry.help ?? `${entry.key}: ${entry.value}`}
-          className="inline-flex items-baseline gap-1 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700 dark:bg-gray-700 dark:text-gray-200"
-        >
-          <span>{entry.label}</span>
-          <span className="font-medium text-gray-900 dark:text-gray-100">
-            {entry.value}
+        <Tooltip key={entry.key} content={entry.help ?? `${entry.key}: ${entry.value}`}>
+          <span className="inline-flex items-baseline gap-1 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700 dark:bg-gray-700 dark:text-gray-200">
+            <span>{entry.label}</span>
+            <span className="font-medium text-gray-900 dark:text-gray-100">
+              {entry.value}
+            </span>
           </span>
-        </span>
+        </Tooltip>
       ))}
     </div>
   );
@@ -185,14 +184,17 @@ function SummaryChips({ entries }: { entries: Entry[] }) {
 function OutcomeBadge({ outcome }: { outcome: string }) {
   const known = OUTCOMES[outcome];
   return (
-    <span
-      title={known?.help ?? `Tick outcome reported by the scheduler: ${outcome}`}
-      className={`inline-flex flex-shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ${
-        known?.tone ?? "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300"
-      }`}
+    <Tooltip
+      content={known?.help ?? `Tick outcome reported by the scheduler: ${outcome}`}
     >
-      {known?.label ?? humanise(outcome)}
-    </span>
+      <span
+        className={`inline-flex flex-shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+          known?.tone ?? "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300"
+        }`}
+      >
+        {known?.label ?? humanise(outcome)}
+      </span>
+    </Tooltip>
   );
 }
 
@@ -255,12 +257,11 @@ function SummaryRow({ group }: { group: TickGroup }) {
     <li className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1">
       <OutcomeBadge outcome={group.outcome} />
       {group.count > 1 && (
-        <span
-          className="text-xs font-medium text-gray-700 dark:text-gray-300"
-          title={`${group.count} consecutive ticks reported this`}
-        >
-          ×{group.count}
-        </span>
+        <Tooltip content={`${group.count} consecutive ticks reported this`}>
+          <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
+            ×{group.count}
+          </span>
+        </Tooltip>
       )}
       <span
         className="text-xs text-gray-500 dark:text-gray-400"

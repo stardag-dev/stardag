@@ -1,7 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { PlanMember } from "../types/task";
 import { MEMBERSHIP_COLUMN_HELP, MEMBERSHIP_HELP } from "../utils/membership";
+import { tooltipOf } from "../test/tooltip";
 import { MemberTable } from "./MemberTable";
 
 const members: PlanMember[] = [
@@ -48,19 +49,19 @@ describe("MemberTable", () => {
       />,
     );
     const header = screen.getByRole("columnheader", { name: /Membership/ });
-    expect(header).toHaveAttribute("title", MEMBERSHIP_COLUMN_HELP);
-    expect(screen.getByText("root")).toHaveAttribute("title", MEMBERSHIP_HELP.root);
-    expect(screen.getByText("dynamic")).toHaveAttribute(
-      "title",
-      MEMBERSHIP_HELP.dynamic,
+    // The shared tooltip, not a native title, and no help cursor.
+    expect(header).not.toHaveAttribute("title");
+    expect(header.className).not.toMatch(/cursor-help/);
+    expect(tooltipOf(within(header).getByText("Membership"))).toBe(
+      MEMBERSHIP_COLUMN_HELP,
     );
-    expect(screen.getByText("excluded (operator)")).toHaveAttribute(
-      "title",
+    expect(tooltipOf(screen.getByText("root"))).toBe(MEMBERSHIP_HELP.root);
+    expect(tooltipOf(screen.getByText("dynamic"))).toBe(MEMBERSHIP_HELP.dynamic);
+    expect(tooltipOf(screen.getByText("excluded (operator)"))).toBe(
       `${MEMBERSHIP_HELP.excluded} Reason: by an operator.`,
     );
-    expect(screen.getByText("1 attempt")).toHaveAttribute(
-      "title",
-      MEMBERSHIP_HELP.attempts,
-    );
+    expect(tooltipOf(screen.getByText("1 attempt"))).toBe(MEMBERSHIP_HELP.attempts);
+    expect(screen.getByText("root")).not.toHaveAttribute("title");
+    expect(screen.getByText("root").className).not.toMatch(/cursor-help/);
   });
 });

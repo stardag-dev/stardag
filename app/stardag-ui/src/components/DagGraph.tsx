@@ -8,7 +8,6 @@ import {
   type EdgeProps,
   type EdgeTypes,
   getBezierPath,
-  Panel,
   useNodesState,
   useEdgesState,
   type NodeTypes,
@@ -19,13 +18,14 @@ import Dagre from "@dagrejs/dagre";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
 import {
+  type BatchExpansion,
   DEFAULT_GROUP_AFTER,
+  expandedAt,
   flowModel,
   groupFlowModel,
   type PlanView,
 } from "../utils/planGraph";
 import { BatchNode, type BatchNodeData } from "./BatchNode";
-import { GroupAfterControl } from "./GroupAfterControl";
 import { LayoutToggle } from "./LayoutToggle";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
 import {
@@ -48,10 +48,16 @@ interface DagGraphProps {
   direction?: LayoutDirection;
   onDirectionChange?: (direction: LayoutDirection) => void;
   positionCache?: React.MutableRefObject<PositionCache>;
-  // "Group after" (v1's per-type cap); controlled when both are given, so
-  // the inline and the fullscreen graph share it.
+  // "Group after" (v1's per-type cap). Its control lives in the graph
+  // panel's header (see `GroupAfterControl`), as v1's did.
   groupAfter?: number;
-  onGroupAfterChange?: (value: number) => void;
+  // The batches opened by a click; controlled when both are given, so the
+  // inline and the fullscreen graph share them and the header can offer
+  // "Regroup".
+  expansion?: BatchExpansion;
+  onExpansionChange?: (expansion: BatchExpansion) => void;
+  // Told how many batches are drawn, for the header's summary.
+  onBatchCountChange?: (count: number) => void;
 }
 
 const nodeTypes: NodeTypes = { taskNode: TaskNode, batchNode: BatchNode };
@@ -143,7 +149,10 @@ function layout(
   const heightOf = (node: TaskNodeType) =>
     node.type === "batchNode" ? BATCH_NODE_HEIGHT : NODE_HEIGHT;
   for (const node of nodes) {
-    g.setNode(node.id, { width: nodeWidth(node.data.label), height: heightOf(node) });
+    g.setNode(node.id, {
+      width: nodeWidth(node.data.label),
+      height: heightOf(node),
+    });
   }
   for (const edge of edges) g.setEdge(edge.source, edge.target);
   Dagre.layout(g);
@@ -169,8 +178,10 @@ export function DagGraph({
   direction: controlledDirection,
   onDirectionChange: controlledOnDirectionChange,
   positionCache: externalPositionCache,
-  groupAfter: controlledGroupAfter,
-  onGroupAfterChange,
+  groupAfter = DEFAULT_GROUP_AFTER,
+  expansion: controlledExpansion,
+  onExpansionChange,
+  onBatchCountChange,
 }: DagGraphProps) {
   const { theme } = useTheme();
   const isControlled =
@@ -184,26 +195,23 @@ export function DagGraph({
   const localPositionCacheRef = useRef<PositionCache>(createPositionCache());
   const positionCacheRef = externalPositionCache ?? localPositionCacheRef;
 
-  const [localGroupAfter, setLocalGroupAfter] = useState(DEFAULT_GROUP_AFTER);
-  const groupAfter =
-    controlledGroupAfter !== undefined && onGroupAfterChange
-      ? controlledGroupAfter
-      : localGroupAfter;
-  const setGroupAfter = onGroupAfterChange ?? setLocalGroupAfter;
-  // Batches expanded by a click; reset when the cap changes.
-  const [expanded, setExpanded] = useState<{ cap: number; ids: Set<string> }>({
+  const [localExpansion, setLocalExpansion] = useState<BatchExpansion>({
     cap: groupAfter,
     ids: new Set(),
   });
-  const expandedIds = expanded.cap === groupAfter ? expanded.ids : null;
+  const expansionControlled =
+    controlledExpansion !== undefined && onExpansionChange !== undefined;
+  const expansion = expansionControlled ? controlledExpansion : localExpansion;
+  const setExpansion = expansionControlled ? onExpansionChange : setLocalExpansion;
+  const expandedIds = expandedAt(expansion, groupAfter);
 
   const expand = useCallback(
     (batchId: string) =>
-      setExpanded((previous) => ({
+      setExpansion({
         cap: groupAfter,
-        ids: new Set([...(previous.cap === groupAfter ? previous.ids : []), batchId]),
-      })),
-    [groupAfter],
+        ids: new Set([...(expandedAt(expansion, groupAfter) ?? []), batchId]),
+      }),
+    [groupAfter, expansion, setExpansion],
   );
 
   const model = useMemo(() => flowModel(view), [view]);
@@ -218,6 +226,11 @@ export function DagGraph({
     ids.add(holding.id);
     return groupFlowModel(model, groupAfter, ids);
   }, [model, groupAfter, expandedIds, selectedTaskId]);
+
+  const batchCount = grouped.batches.length;
+  useEffect(() => {
+    onBatchCountChange?.(batchCount);
+  }, [batchCount, onBatchCountChange]);
 
   const { layoutedNodes, layoutedEdges } = useMemo(() => {
     const statusById = new Map<string, string>(
@@ -273,7 +286,10 @@ export function DagGraph({
       ),
       ...(e.isDynamic ? { type: "dynamicEdge" } : {}),
     }));
-    return { layoutedNodes: layout(nodes, edges, direction), layoutedEdges: edges };
+    return {
+      layoutedNodes: layout(nodes, edges, direction),
+      layoutedEdges: edges,
+    };
   }, [model, grouped, mutedTaskIds, theme, direction, expand]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
@@ -286,7 +302,11 @@ export function DagGraph({
       layoutedNodes.map((node) => {
         const cached = cache.get(node.id);
         if (!cached) cache.set(node.id, { ...node.position });
-        return { ...node, position: cached ?? node.position, data: { ...node.data } };
+        return {
+          ...node,
+          position: cached ?? node.position,
+          data: { ...node.data },
+        };
       }),
     );
     setEdges([...layoutedEdges]);
@@ -331,7 +351,9 @@ export function DagGraph({
       onNodesChange(changes);
       for (const change of changes) {
         if (change.type === "position" && change.position && !change.dragging) {
-          positionCacheRef.current[direction].set(change.id, { ...change.position });
+          positionCacheRef.current[direction].set(change.id, {
+            ...change.position,
+          });
         }
       }
     },
@@ -377,24 +399,6 @@ export function DagGraph({
           onDirectionChange={handleDirectionChange}
           onResetLayout={handleResetLayout}
         />
-        <Panel position="top-left">
-          <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-white px-2 py-1 shadow-sm dark:border-gray-700 dark:bg-gray-800">
-            <GroupAfterControl
-              value={groupAfter}
-              onChange={setGroupAfter}
-              batchCount={grouped.batches.length}
-            />
-            {expandedIds && expandedIds.size > 0 && (
-              <button
-                type="button"
-                onClick={() => setExpanded({ cap: groupAfter, ids: new Set() })}
-                className="text-xs text-blue-600 hover:underline dark:text-blue-400"
-              >
-                Regroup
-              </button>
-            )}
-          </div>
-        </Panel>
       </ReactFlow>
     </div>
   );

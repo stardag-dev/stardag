@@ -4,6 +4,7 @@ import { qualifiedName } from "../utils/instances";
 import { MEMBERSHIP_COLUMN_HELP } from "../utils/membership";
 import { MembershipFacts } from "./MembershipFacts";
 import { StatusBadge } from "./StatusBadge";
+import { Tooltip } from "./ui/Tooltip";
 
 interface MemberTableProps {
   members: PlanMember[];
@@ -43,8 +44,12 @@ export function MemberTable({
             <tr>
               <th className={HEADER}>Task</th>
               <th className={HEADER}>Status</th>
-              <th className={`${HEADER} cursor-help`} title={MEMBERSHIP_COLUMN_HELP}>
-                Membership<span aria-hidden="true"> ⓘ</span>
+              <th className={HEADER}>
+                <Tooltip content={MEMBERSHIP_COLUMN_HELP}>
+                  <span>
+                    Membership<span aria-hidden="true"> ⓘ</span>
+                  </span>
+                </Tooltip>
               </th>
             </tr>
           </thead>

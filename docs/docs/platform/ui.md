@@ -46,8 +46,8 @@ One build, over its active plan:
 
 - **The plan graph**: the plan's members over their instance edges
   (dynamic edges dashed). Wide fan-outs — more members of one type, at one
-  level, with one status than _Group after_ (default 5) — are drawn as one
-  batch node with a count; click it to expand. The graph can be opened
+  level, with one status than _Group after_ (default 5, in the graph's
+  header) — are drawn as one batch node with a count; click it to expand. The graph can be opened
   fullscreen (Esc to leave), switched between left-to-right and
   top-to-bottom, and rearranged by dragging.
 - **The task table**: every member with its status and plan membership
