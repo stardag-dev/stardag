@@ -6,10 +6,11 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## v2 line (version TBD) — Every fact gets its own home
+## v0.27.0 (registry v2) — Every fact gets its own home
 
-> **TODO(Anders):** the SDK and server version numbers, and the release
-> date. Nothing below depends on which major is chosen.
+> **TODO(Anders):** the release date. Versions: SDK `0.27.0`, server
+> `server-v0.6.0` — the next minors, not a new major; **breaking** all the
+> same, see below.
 
 ### What changed, and why
 
@@ -220,7 +221,9 @@ SET NULL (col)` form. SQLite is not supported, and the API suite runs on
 
 ---
 
-## Unreleased
+## v0.26.0 — The worker carries its identity, and nothing automatic stops a container
+
+**Paired with `server-v0.5.0`, and the last release of the v1 line**; v2 follows as the next minor, a breaking release with its own migration notes. The server image also carries what v0.25.0's notes deferred to "the next server image": the `Stop running tasks` panel and the server half of the idempotent claim.
 
 ### A late restart can no longer evict the build that took its task over
 
@@ -428,11 +431,11 @@ its running tasks claimed and their concurrency-limit slots occupied until
 the claims expire. That is worse than either version alone.
 
 **Self-hosters: `DEFAULT_SERVER_VERSION` moves with this.** `stardag
-self-host up` pins the server image this SDK is tested against, and that
-pin is bumped in the release PR once `server-v0.5.0` exists. Until then a
-`self-host up` from `main` deploys the older server, which is the pairing
-described above — so use `--server-version` if you are running from
-`main` rather than from the tag.
+self-host up` pins the server image this SDK is tested against, and from
+this tag that pin is `server-v0.5.0`, so `self-host up` deploys the
+matching server. Running the SDK from `main` against an older self-hosted
+server is the pairing described above; pass `--server-version` or upgrade
+the server first.
 
 #### A build going terminal releases its claims — cancel and fail alike
 

@@ -6,10 +6,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased — v2 line]
 
-> **TODO(Anders):** the version numbers (SDK and server image) and the
-> release date replace this heading's placeholder. The `[Unreleased]` entry
-> below is v1-line work; whether it ships as a last v1 release first or
-> folds into this line is also yours to decide. #387 (CLI), #389 (live
+> **TODO(Anders):** the release date replaces this heading's placeholder;
+> the versions are the next minors, SDK `0.27.0` and server `0.6.0` (no new
+> major: the project is pre-1.0 and promises no compatibility yet). The v1
+> line ended with 0.26.0 below. #387 (CLI), #389 (live
 > scenarios) and #390 (server reads, `lost`, artifact quota) were open when
 > this entry was drafted: re-check their items against what merged.
 
@@ -350,7 +350,17 @@ stop --mark-lost` frees a slot held by a gone execution).
   15. The build view runs one refresh at a time.
   16. `platform/ui.md` describes the v2 UI.
 
-## [Unreleased]
+## [0.26.0] — 2026-09-24
+
+**Released together with `server-v0.5.0`, server first.** Unlike 0.25.0,
+this pairing is not optional: a 0.26.0 SDK against `server-v0.4.0` no
+longer drains cancels itself while that server releases claims on neither
+`/cancel` nor `/fail`, so a terminal build would hold its tasks' claims and
+their concurrency-limit slots until expiry. `server-v0.5.0` also carries the
+`### Registry API` and `### UI` entries listed under 0.25.0 below, which
+were merged then but shipped with no image: the idempotent claim's server
+half and the `Stop running tasks` panel. This is the last release of the
+v1 line; v2 follows as the next minor, a breaking one.
 
 ### SDK
 
