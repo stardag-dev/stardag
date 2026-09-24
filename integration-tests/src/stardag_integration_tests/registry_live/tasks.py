@@ -14,9 +14,22 @@ how a scenario silently stops testing anything.
 
 from __future__ import annotations
 
+import os
 from typing import Annotated
 
 import stardag as sd
+
+# The setting ``ScopedUpstreams`` reads its structure from. Named here so the
+# scenario that sets it and the task that reads it cannot drift apart.
+SCOPED_UPSTREAMS_SETTING = "REGISTRY_LIVE_UPSTREAMS"
+
+# Baked into a rollover app's image at deploy time (see ``rollover_app``) and
+# read once, at import, by ``RolloverRoot``: the harness's stand-in for "the
+# new deployment's code changed the root's identity". Unset everywhere else,
+# the test process included, so every other deploy and every trigger sees
+# the original class.
+ROOT_VARIANT_ENV = "REGISTRY_LIVE_ROOT_VARIANT"
+_ROOT_VARIANT = os.environ.get(ROOT_VARIANT_ENV, "")
 
 
 @sd.task(name="Range")
@@ -398,3 +411,125 @@ class WorkerFanIn(sd.Task[int]):
 
     def run(self):
         self._save(sum(len(upstream.load()) for upstream in self.requires()))
+
+
+class ScopedUpstreams(sd.Task[list[int]]):
+    """A task whose *structure* comes from the build's settings.
+
+    ``requires()`` reads ``SCOPED_UPSTREAMS_SETTING`` -- the one route by
+    which an environment variable may reach structure (design.md, "What
+    carries over": structure may depend on the environment only through the
+    deployment and ``settings``, both in the scope). So two builds that set
+    it differently plan this one completion under two scopes with two
+    upstream sets, which is S1.
+
+    The output must not depend on it, and does not: the task-id promise is
+    that output is a function of the significant parameters alone, and
+    completion is global, so a result that varied with the setting would let
+    one build reuse another's different answer.
+
+    ``label`` is non-significant, so two builds may construct the same
+    completion with different bodies: it is what makes "whichever claims it
+    first runs *its* instance body" observable on the ledger.
+
+    ``seconds`` keeps it RUNNING long enough for the second build to
+    register against it mid-flight.
+    """
+
+    salt: str
+    seconds: int = 60
+    label: Annotated[str, sd.StardagField(significant=False)] = ""
+
+    def requires(self):
+        width = int(os.environ.get(SCOPED_UPSTREAMS_SETTING, "1"))
+        return [get_range(limit=index, salt=self.salt) for index in range(width)]
+
+    def run(self):
+        import time
+
+        time.sleep(self.seconds)
+        self._save([0])
+
+
+class DiesOnce(sd.Task[list[int]]):
+    """A worker that dies without reporting, once (S21).
+
+    The first execution of this task shortens its own claim and then exits
+    the container hard -- ``os._exit``, so no ``finally``, no reporter, no
+    failure report: the shape of an OOM kill. Every later execution runs
+    normally.
+
+    **Shortening the claim is the only synthesised part**, and it goes
+    through the real route. A detached claim's TTL is the worker's timeout
+    plus a 15-minute grace (``stardag.build._claims``), because the backend
+    kills an execution before its claim lapses -- correct, and far longer
+    than a scenario can wait. ``claim_renew`` sets the expiry to now plus
+    the requested TTL for the holder of the live claim, so the dying worker
+    renews itself down to ``lapse_seconds`` and the lapse the design is
+    about arrives in seconds rather than in half an hour. Nothing after
+    that is arranged: the lapse, the takeover and the second execution are
+    the registry's and the tick's own.
+
+    "First" is read off the registry, not off local state, because a
+    container has none that survives it: an execution whose build ledger
+    holds no other execution of this task is the first.
+    """
+
+    salt: str
+    lapse_seconds: int = 20
+
+    def requires(self):
+        return get_range(limit=2, salt=self.salt)
+
+    def run(self):
+        import sys
+        from uuid import UUID
+
+        from stardag.registry import registry_provider
+
+        registry = registry_provider.get()
+        execution_id = UUID(os.environ["STARDAG_EXECUTION_ID"])
+        build_id = UUID(os.environ["STARDAG_BUILD_ID"])
+        mine = [
+            e
+            for e in registry.build_list_executions(build_id, include_ended=True)
+            if e.task_id == str(self.id)
+        ]
+        if len(mine) <= 1:
+            try:
+                registry.claim_renew(
+                    str(self.id),
+                    execution_id=execution_id,
+                    claim_ttl_seconds=self.lapse_seconds,
+                )
+            finally:
+                print(
+                    f"[registry-live] DiesOnce {self.id}: exiting hard, unreported",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                os._exit(137)
+        self._save(self.requires().load())
+
+
+class RolloverRoot(sd.Task[list[int]]):
+    """A root whose identity a new deployment can change (S20).
+
+    Under ``REGISTRY_LIVE_ROOT_VARIANT=renamed`` -- set only in the image of
+    the rollover app's *second* deploy -- the class gains a significant field
+    with a default. A body registered under the first deploy lacks it, so it
+    rehydrates with the default and the recomputed task id differs from the
+    build's ``root_task_ids``: "new code changed what the build asked for",
+    which a rollover must refuse rather than silently re-plan.
+    """
+
+    salt: str
+    seconds: int = 60
+    if _ROOT_VARIANT == "renamed":
+        revision: int = 2
+
+    def requires(self):
+        return slow(values=get_range(limit=2, salt=self.salt), seconds=self.seconds)
+
+    def run(self):
+        self._save(self.requires().load())
