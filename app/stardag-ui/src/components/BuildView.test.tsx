@@ -145,6 +145,31 @@ describe("BuildView auto-refresh", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  it("runs one refresh at a time", async () => {
+    // The first read never answers, so it stays in flight.
+    reload.mockImplementationOnce(() => new Promise(() => {}));
+    renderView();
+    const button = screen.getByRole("button", { name: "Refresh" });
+    fireEvent.click(button);
+    act(() => vi.advanceTimersByTime(300));
+    expect(reload).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(button);
+    act(() => vi.advanceTimersByTime(300));
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not stack auto-refreshes on an unanswered read", () => {
+    reload.mockImplementation(() => new Promise(() => {}));
+    renderView();
+    const button = screen.getByRole("button", { name: "Refresh" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    act(() => vi.advanceTimersByTime(20000));
+    expect(reload).toHaveBeenCalledTimes(1);
+    reload.mockImplementation(async () => {});
+  });
+
   it("does not offer auto-refresh for a build that is not running", () => {
     setPlan(makeBuild({ status: "completed" }));
     renderView();

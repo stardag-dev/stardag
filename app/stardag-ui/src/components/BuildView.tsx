@@ -90,10 +90,28 @@ function BuildViewForIdentity({
   const requestedKey = `${environmentId ?? ""}:${buildId}`;
   const { build, frontier, view, reload, setBuild } = plan;
 
-  const refresh = useCallback(async () => {
+  // A refresh after something changed (a remedy on a task): always runs,
+  // superseding any read in flight, which may predate the change.
+  const refreshNow = useCallback(async () => {
     setRefreshToken((t) => t + 1);
     await reload();
   }, [reload]);
+
+  // The button's and the 5-second interval's refresh: single-flight
+  // (v1's guard), so a slow registry does not get a new read stacked on
+  // the unanswered one every five seconds. On a ref, not state: the ref
+  // is the fact. The view remounts on a change of build or environment,
+  // so the marker never outlives its identity.
+  const refreshInFlightRef = useRef(false);
+  const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    try {
+      await refreshNow();
+    } finally {
+      refreshInFlightRef.current = false;
+    }
+  }, [refreshNow]);
 
   // Auto-refreshing a build that has stopped is pointless: the interval
   // declines to run, and the control is switched off (adjusted during
@@ -445,7 +463,7 @@ function BuildViewForIdentity({
                       onOpenTaskPage={
                         onOpenTask ? () => onOpenTask(selectedTaskId) : undefined
                       }
-                      onChanged={refresh}
+                      onChanged={refreshNow}
                       refreshToken={refreshToken}
                       onOpenBuild={onOpenBuild}
                     />
