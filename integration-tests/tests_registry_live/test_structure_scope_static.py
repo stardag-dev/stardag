@@ -47,6 +47,9 @@ registry_live_guard()
 pytestmark = [
     pytest.mark.registry_live,
     pytest.mark.timeout(900),
+    pytest.mark.skip(
+        reason="v2: dies with build_config; replaced by S8/S22/S24 in I10"
+    ),
 ]
 
 # Long enough for the first build to be cancelled while its upstream is

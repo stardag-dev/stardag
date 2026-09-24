@@ -37,6 +37,7 @@ from stardag import (
     BaseTask,
     flatten_task_struct,
 )
+from stardag._core.instance import SeenInstances, extend_path
 from stardag._core.base_task import (
     _has_custom_run,
     _has_custom_run_aio,
@@ -278,6 +279,14 @@ def _check_for_deadlock(
             )
 
 
+def _parent_path(seen: SeenInstances, parent: BaseTask | None) -> str | None:
+    """The construction path of ``parent`` (its first), for a task its run
+    reached at runtime; None for no parent."""
+    if parent is None:
+        return None
+    return seen.path_of(parent.id) or extend_path(None, parent)
+
+
 @installs_build_config
 def build_sequential(
     tasks: Sequence[BaseTask] | BaseTask,
@@ -373,6 +382,8 @@ def build_sequential(
     # task absent from it was pruned at (complete): it declares nothing,
     # and its ``requires()`` is never evaluated for the registry's sake.
     declared_deps: dict[UUID, list[BaseTask]] = {}
+    # One instance per task id per build (v2 design, "Two hashes, one flag").
+    seen_instances = SeenInstances()
 
     # Start or resume build *before* discovery so we have a build_id to
     # register tasks against.
@@ -476,13 +487,17 @@ def build_sequential(
             for t in chunk:
                 registered_tasks.add(t.id)
 
-    def discover(task: BaseTask) -> None:
+    def discover(task: BaseTask, parent_path: str | None = None) -> None:
         """Recursively discover tasks, stopping at already-complete tasks.
 
         Discovery only collects into ``pending_registrations`` (post-order
         — deps first, parents last). The actual bulk-register call fires
         via ``flush_pending_registrations()`` after the walk.
+        ``parent_path`` is the construction path of the task that reached
+        this one (None for a root), for ``InstanceConflictError``.
         """
+        path = extend_path(parent_path, task)
+        seen_instances.observe(task, path)
         if task.id in all_tasks:
             return
         all_tasks[task.id] = task
@@ -506,7 +521,7 @@ def build_sequential(
         static_deps = flatten_task_struct(task.requires())
         declared_deps[task.id] = static_deps
         for dep in static_deps:
-            discover(dep)
+            discover(dep, path)
 
         # All deps are registered. Append self after children — preserves
         # post-order within the subtree.
@@ -545,15 +560,15 @@ def build_sequential(
                     on_registry_failure,
                 )
 
-    def runtime_discover(task: BaseTask) -> None:
+    def runtime_discover(task: BaseTask, parent: BaseTask | None = None) -> None:
         """``discover()`` wrapper used after the initial registration pass.
 
         Walks ``discover()`` (collecting newly-found tasks into
         ``pending_registrations``), bulk-registers them, then sends
         task_complete for any previously-completed tasks the walk
-        surfaced.
+        surfaced. ``parent`` is the task whose run reached ``task``.
         """
-        discover(task)
+        discover(task, _parent_path(seen_instances, parent))
         flush_pending_registrations()
         mark_pending_previously_completed()
 
@@ -747,7 +762,7 @@ def _run_task_sequential(
     build_id: UUID,
     registry: RegistryABC,
     dual_run_default: Literal["sync", "async"],
-    discover: Callable[[BaseTask], None],
+    discover: Callable[[BaseTask, BaseTask | None], None],
     register_task_once: Callable[[BaseTask], None],
     task_count: TaskCount | None = None,
     on_registry_failure: OnRegistryFailure = "raise",
@@ -766,7 +781,7 @@ def _run_task_sequential(
     #   task_register + task_complete pair (they missed the initial bulk
     #   registration because they were only found at runtime).
     for static_dep in flatten_task_struct(task.requires()):
-        discover(static_dep)
+        discover(static_dep, task)
         if static_dep.id not in completion_cache:
             _run_task_sequential(
                 static_dep,
@@ -832,7 +847,7 @@ def _run_task_sequential(
                 # and _reconcile_dependency_edges doesn't have to
                 # phantom-create anything.
                 for dep in dynamic_deps:
-                    discover(dep)
+                    discover(dep, task)
 
                     if dep.id not in completion_cache:
                         _run_task_sequential(
@@ -986,6 +1001,8 @@ async def build_sequential_aio(
     pending_registrations: list[BaseTask] = []
     # See the sync engine: the declaration per expanded task.
     declared_deps: dict[UUID, list[BaseTask]] = {}
+    # One instance per task id per build (v2 design, "Two hashes, one flag").
+    seen_instances = SeenInstances()
 
     # Start or resume build *before* discovery so we have a build_id to
     # register tasks against.
@@ -1083,13 +1100,17 @@ async def build_sequential_aio(
             for t in chunk:
                 registered_tasks.add(t.id)
 
-    async def discover(task: BaseTask) -> None:
+    async def discover(task: BaseTask, parent_path: str | None = None) -> None:
         """Recursively discover tasks, stopping at already-complete tasks.
 
         Discovery only collects into ``pending_registrations`` in
         post-order (deps first, parents last). The bulk-register call
         fires via ``flush_pending_registrations_aio()`` after the walk.
+        ``parent_path`` is the construction path of the task that reached
+        this one (None for a root), for ``InstanceConflictError``.
         """
+        path = extend_path(parent_path, task)
+        seen_instances.observe(task, path)
         if task.id in all_tasks:
             return
         all_tasks[task.id] = task
@@ -1113,7 +1134,7 @@ async def build_sequential_aio(
         static_deps = flatten_task_struct(task.requires())
         declared_deps[task.id] = static_deps
         for dep in static_deps:
-            await discover(dep)
+            await discover(dep, path)
 
         # Append self after children — preserves post-order within subtree.
         pending_registrations.append(task)
@@ -1148,15 +1169,17 @@ async def build_sequential_aio(
                     on_registry_failure,
                 )
 
-    async def runtime_discover_aio(task: BaseTask) -> None:
+    async def runtime_discover_aio(
+        task: BaseTask, parent: BaseTask | None = None
+    ) -> None:
         """``discover()`` wrapper used after the initial registration pass.
 
         Walks ``discover()`` (collecting newly-found tasks into
         ``pending_registrations``), bulk-registers them, then sends
         task_complete for any previously-completed tasks the walk
-        surfaced.
+        surfaced. ``parent`` is the task whose run reached ``task``.
         """
-        await discover(task)
+        await discover(task, _parent_path(seen_instances, parent))
         await flush_pending_registrations_aio()
         await mark_pending_previously_completed_aio()
 
@@ -1372,7 +1395,7 @@ async def _run_task_sequential_aio(
     build_id: UUID,
     registry: RegistryABC,
     sync_run_default: Literal["thread", "blocking"],
-    discover: Callable[[BaseTask], Awaitable[None]],
+    discover: Callable[[BaseTask, BaseTask | None], Awaitable[None]],
     register_task_once_aio: Callable[[BaseTask], Awaitable[None]],
     task_count: TaskCount | None = None,
     on_registry_failure: OnRegistryFailure = "raise",
@@ -1382,7 +1405,7 @@ async def _run_task_sequential_aio(
     # Ensure static requires() are complete before running this task — see the
     # matching comment and issue #118 reference in _run_task_sequential.
     for static_dep in flatten_task_struct(task.requires()):
-        await discover(static_dep)
+        await discover(static_dep, task)
         if static_dep.id not in completion_cache:
             await _run_task_sequential_aio(
                 static_dep,
@@ -1445,7 +1468,7 @@ async def _run_task_sequential_aio(
         # the API by the time we record the edge below — no phantom
         # creation in _reconcile_dependency_edges.
         for dep in dynamic_deps:
-            await discover(dep)
+            await discover(dep, task)
 
             if dep.id not in completion_cache:
                 await _run_task_sequential_aio(

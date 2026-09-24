@@ -623,12 +623,9 @@ def plan_rehydration(
     """Decide, per task, whether a scheduler tick could rebuild it.
 
     The self-check reconstructs the task from exactly the payload that
-    registration stores — the **registry-mode** dump, identity parameters
-    only (see ``_get_task_data_for_registration``) — so it is a faithful
-    dry run of what a scheduler tick will do. Dumping in any other mode
-    would check a payload the registry does not hold: a full dump carries
-    the ``dependencies_only`` / ``execution_only`` values this process
-    resolved, which the tick reads from the build config instead.
+    registration stores — the instance body, ``task.instance_body()`` (see
+    ``_get_task_data_for_registration``) — so it is a faithful dry run of
+    what a scheduler tick will do.
 
     ``AliasTask`` payloads fail the check by construction (rehydration
     refuses ``__aliased`` data, whose pickled ``loads_type`` would be an
@@ -636,8 +633,6 @@ def plan_rehydration(
     generated and otherwise non-importable classes, and any field whose
     serialization does not round-trip to the same id.
     """
-    from stardag.base_model import CONTEXT_MODE_KEY
-
     reconstructable: list[BaseTask] = []
     unreconstructable: list[tuple[BaseTask, str]] = []
     for task in tasks:
@@ -652,10 +647,7 @@ def plan_rehydration(
             unreconstructable.append((task, _UNCOVERED_REASON))
             continue
         try:
-            task_from_registry_data(
-                task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"}),
-                expected_task_id=task.id,
-            )
+            task_from_registry_data(task.instance_body(), expected_task_id=task.id)
         except Exception as e:
             unreconstructable.append((task, f"registry-data round-trip failed ({e})"))
             continue

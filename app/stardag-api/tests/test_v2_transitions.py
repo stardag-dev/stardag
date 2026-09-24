@@ -8,9 +8,12 @@ id and the rule that decides it.
 from __future__ import annotations
 
 import asyncio
+import re
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.services import reactive, transitions
 from stardag_api.services.errors import Conflict, NotFound
@@ -225,6 +228,36 @@ async def test_claim_refusals(h: Harness):
     assert missing.value.code == "not_a_member"
 
 
+async def test_a_claiming_start_refuses_a_status_outside_actionable(h: Harness):
+    """A claiming start is decided by ACTIONABLE, not only by COMPLETED and
+    a live claim: a FAILED task is 409 ``task_not_actionable`` (the fail
+    mode decides, through ``retry``), writes nothing, and is startable
+    again once a retry makes it PENDING."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    first = await h.start(plan.id, t)
+    await h.transition(plan.id, t, Transition.fail(first, "boom"))
+    events_before = len(await h.events(t))
+
+    with pytest.raises(Conflict) as exc:
+        await h.start(plan.id, t)
+    assert exc.value.code == "task_not_actionable"
+    assert exc.value.detail["status"] == "failed"
+    assert (await h.task(t))["status"] == "failed"
+    assert len(await h.events(t)) == events_before
+
+    await h.transition(plan.id, t, Transition.retry())
+    await h.start(plan.id, t)
+    assert (await h.task(t))["status"] == "running"
+
+    done = item("Done")
+    _, plan = await h.planned([done], [done])
+    await h.run(plan.id, done)
+    with pytest.raises(Conflict) as exc:
+        await h.start(plan.id, done)
+    assert exc.value.code == "task_already_completed"
+
+
 async def test_non_claiming_start_is_the_holders_self_report(h: Harness):
     """A non-claiming start names the claim's execution and records the
     executor details the claim could not know (the spawn came after); one
@@ -352,3 +385,46 @@ async def test_a_transition_flags_the_other_builds_holding_the_task(h: Harness):
     await h.run(plan_a.id, t)
     assert (await h.build(build_b))["needs_tick_at"] is not None
     assert (await h.build(build_a))["needs_tick_at"] is None
+
+
+async def test_s21_race_two_starts_on_a_lapsed_claim_grant_exactly_one(
+    h: Harness, async_engine: AsyncEngine
+):
+    """S21-race — two claiming starts race on one lapsed claim: the task row
+    lock is ``FOR NO KEY UPDATE`` (not ``FOR KEY SHARE``, which two starts
+    could hold at once), so the second waits for the first to commit, sees
+    its live claim, and is 409 ``task_already_running``."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    dead = await h.start(plan.id, t)
+    await h.lapse_claim(t)
+
+    statements: list[str] = []
+
+    def capture(conn, cursor, statement, *args):  # noqa: ARG001
+        statements.append(statement)
+
+    event.listen(async_engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        results = await asyncio.gather(
+            *(h.start(plan.id, t) for _ in range(4)), return_exceptions=True
+        )
+    finally:
+        event.remove(async_engine.sync_engine, "before_cursor_execute", capture)
+
+    granted = [r for r in results if not isinstance(r, BaseException)]
+    refused = [r for r in results if isinstance(r, BaseException)]
+    assert len(granted) == 1
+    assert {r.code for r in refused if isinstance(r, Conflict)} == {
+        "task_already_running"
+    }
+    assert len(refused) == 3
+    task = await h.task(t)
+    assert task["execution_id"] == granted[0]
+    assert (await h.execution(dead))["claim_outcome"] == "taken_over"
+
+    task_locks = [
+        s for s in statements if re.search(r"\bFROM task\b(?!_)", s) and " FOR " in s
+    ]
+    assert task_locks and all("FOR NO KEY UPDATE" in s for s in task_locks)
+    assert not [s for s in task_locks if "FOR KEY SHARE" in s]

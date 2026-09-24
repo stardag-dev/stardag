@@ -65,7 +65,14 @@ def differing_fields(a: Mapping[str, Any], b: Mapping[str, Any]) -> list[str]:
 
 
 def _sorted_items(items: Iterable[RegistrationItem]) -> list[RegistrationItem]:
-    """De-duplicated by instance hash, ordered by ``(task_id, instance_hash)``."""
+    """De-duplicated by instance hash, ordered by ``(task_id, instance_hash)``.
+
+    Only an exact repeat is de-duplicated. The driver de-duplicates by
+    instance, so two differing items under one hash are a client bug:
+    another body is ``instance_body_conflict`` (409), and any other
+    difference — another ``declared_upstreams`` above all, whose edges
+    keeping the first would silently drop — is 400 ``duplicate_item``.
+    """
     by_hash: dict[str, RegistrationItem] = {}
     for it in items:
         seen = by_hash.get(it.instance_hash)
@@ -77,7 +84,29 @@ def _sorted_items(items: Iterable[RegistrationItem]) -> list[RegistrationItem]:
                 "one chunk carries two bodies under one instance hash",
                 instance_hash=it.instance_hash,
             )
+        elif fields := _item_differences(seen, it):
+            raise BadRequest(
+                "duplicate_item",
+                f"one chunk carries instance {it.instance_hash} twice, with"
+                f" different {', '.join(fields)}; send each instance once",
+                instance_hash=it.instance_hash,
+                fields=fields,
+            )
     return sorted(by_hash.values(), key=lambda it: (it.task_id, it.instance_hash))
+
+
+def _item_differences(a: RegistrationItem, b: RegistrationItem) -> list[str]:
+    """Fields two items under one instance hash disagree on; upstreams are
+    compared as sets (their order carries nothing). ``observed_at`` is not
+    compared: two looks at one target a moment apart are one observation."""
+
+    def norm(it: RegistrationItem) -> dict[str, Any]:
+        d = it.model_dump(exclude={"observed_at"})
+        ups = d["declared_upstreams"]
+        d["declared_upstreams"] = None if ups is None else sorted(set(ups))
+        return d
+
+    return differing_fields(norm(a), norm(b))
 
 
 def _instance_conflict(
@@ -129,6 +158,7 @@ async def register_items(
 
     await _insert_tasks(session, environment_id, chunk)
     await _insert_instances(session, environment_id, chunk)
+    await _check_sealed(session, chunk)
     admitted = await _admit_items(session, environment_id, chunk, as_roots=as_roots)
     edges_created, diverged, closure_admitted = await _insert_edges(
         session, environment_id, chunk
@@ -301,6 +331,78 @@ async def _insert_instances(
             chunk.pre_expanded.add(instance_id)
         elif it.declared_upstreams is not None:
             chunk.to_expand.append(instance_id)
+
+
+async def _check_sealed(session: AsyncSession, chunk: _Chunk) -> None:
+    """A sealed plan takes no new static structure (409 ``plan_sealed``).
+
+    Its request is fully stated, so after the seal this route accepts only:
+
+    - **re-delivery**: an item the plan already holds under the same
+      instance is a no-op for membership (its observation still applies —
+      a resume re-observes a sealed plan's targets through here);
+    - **a discovery job's result**: the first expansion of a member admitted
+      unexpanded (a COMPLETED root later invalidated, a closure admission),
+      with the items it reaches over ``declared_upstreams`` in this chunk.
+      design.md ("The runnable rule") routes discovery through this route,
+      and a sealed plan can have discovery jobs.
+
+    Anything else — a member the plan does not hold and no discovery
+    expansion reaches — is refused, as is new edges on an instance that was
+    already expanded (checked in :func:`_insert_edges`). The other post-seal
+    writers are closure admission and ``/yield``, by design.
+    """
+    plan = chunk.plan
+    if plan.sealed_at is None:
+        return
+    held = dict(
+        (
+            await session.execute(
+                select(PlanMember.task_pk, PlanMember.instance_id).where(
+                    PlanMember.plan_id == plan.id,
+                    PlanMember.task_pk.in_(set(chunk.task_pk.values())),
+                )
+            )
+        )
+        .tuples()
+        .all()
+    )
+    to_expand = set(chunk.to_expand)
+    by_hash = {it.instance_hash: it for it in chunk.items}
+
+    def is_held(it: RegistrationItem) -> bool:
+        return (
+            held.get(chunk.task_pk[it.task_id]) == chunk.instance_id[it.instance_hash]
+        )
+
+    reached: set[str] = set()
+    stack = [
+        it.instance_hash
+        for it in chunk.items
+        if is_held(it) and chunk.instance_id[it.instance_hash] in to_expand
+    ]
+    while stack:
+        h = stack.pop()
+        if h in reached:
+            continue
+        reached.add(h)
+        for up in by_hash[h].declared_upstreams or ():
+            if up in by_hash:
+                stack.append(up)
+    refused = sorted(
+        it.task_id
+        for it in chunk.items
+        # Another instance of a held completion is instance_conflict's.
+        if chunk.task_pk[it.task_id] not in held and it.instance_hash not in reached
+    )
+    if refused:
+        raise Conflict(
+            "plan_sealed",
+            "the plan is sealed: its request is fully stated, and only a"
+            " re-delivery or a discovery job's result may still land",
+            plan_id=str(plan.id),
+            task_ids=refused,
+        )
 
 
 async def _admit_items(
@@ -508,6 +610,14 @@ async def _insert_edges(
         if down in chunk.pre_expanded:
             grown.setdefault(down, []).append(up)
     by_instance = {chunk.instance_id[it.instance_hash]: it for it in declared}
+    if grown and plan.sealed_at is not None:
+        raise Conflict(
+            "plan_sealed",
+            "the plan is sealed: an already-expanded instance cannot gain"
+            " edges through it",
+            plan_id=str(plan.id),
+            task_ids=sorted(by_instance[d].task_id for d in grown),
+        )
     for down, ups in sorted(grown.items()):
         it = by_instance[down]
         chunk.events.append(

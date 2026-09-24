@@ -51,7 +51,8 @@ from stardag._core.task import Task, get_default_relpath
 from stardag._core.validate import LoadValidator
 from stardag._core.task_loads import TaskLoads
 from stardag._version import __version__
-from stardag.base_model import Significance, StardagBaseModel, StardagField
+from stardag._core.instance import check_serialization_stability
+from stardag.base_model import StardagBaseModel, StardagField
 from stardag.build_config import (
     BuildConfigError,
     UnknownTaskClassError,
@@ -67,11 +68,13 @@ from stardag.exceptions import (
     AuthenticationError,
     AuthorizationError,
     ExecutionCancelled,
+    InstanceConflictError,
     RegistryTooOldError,
     SDKVersionUnsupportedError,
     StardagError,
     ResumableInterruption,
     TokenExpiredError,
+    UnstableSerializationError,
 )
 from stardag.polymorphic import (
     NakedPolymorphicFieldError,
@@ -93,7 +96,6 @@ from stardag.target import (
 __all__ = [
     "BuildConfigError",
     "UnknownTaskClassError",
-    "Significance",
     "build_config_scope",
     "get_build_config",
     "set_build_config",
@@ -129,6 +131,9 @@ __all__ = [
     "Polymorphic",
     "registry_provider",
     "ExecutionCancelled",
+    "InstanceConflictError",
+    "UnstableSerializationError",
+    "check_serialization_stability",
     "ResumableInterruption",
     "RegistryTooOldError",
     "SDKVersionUnsupportedError",

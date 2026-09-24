@@ -132,6 +132,51 @@ class ExecutionCancelled(StardagError):
     """
 
 
+class UnstableSerializationError(StardagError):
+    """A task object's instance body is not a fixed point of its own round
+    trip: ``dump(validate(dump(x))) != dump(x)``, or the rehydrated task
+    object has a different task id, or the body is not JSON at all (a
+    ``NaN``).
+
+    The instance hash is the hash of the body, so a body that moves when
+    re-read would register one instance from the trigger and a different
+    one from any process that rehydrates it. Raised at registration, before
+    anything is sent, naming the field(s) whose value moved as dotted paths
+    (``inner.when``) in :attr:`fields`.
+    """
+
+    def __init__(self, message: str, *, task_class: str, fields: tuple[str, ...]):
+        super().__init__(message)
+        self.task_class = task_class
+        self.fields = fields
+
+
+class InstanceConflictError(StardagError):
+    """Two constructions of one task id with different instance hashes in one
+    discovery pass: two ways of asking for one completion in one plan, of
+    which a plan may hold only one.
+
+    Typically two downstreams passing different values of a
+    ``significant=False`` parameter to one upstream. :attr:`fields` names
+    the fields that differ between the two instance bodies (dotted paths);
+    :attr:`paths` holds how each construction was reached, where the
+    discovery walk knows it.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        task_id: str,
+        fields: tuple[str, ...],
+        paths: tuple[str | None, str | None] = (None, None),
+    ):
+        super().__init__(message)
+        self.task_id = task_id
+        self.fields = fields
+        self.paths = paths
+
+
 class APIError(StardagError):
     """Error communicating with the Stardag API.
 

@@ -135,12 +135,12 @@ async def test_s18_an_excluded_root_is_never_forced_complete(h: Harness):
 async def test_an_excluded_member_does_not_gate_completion(h: Harness):
     leaf = item("Leaf")
     root = item("Root", upstreams=[leaf])
-    build, plan = await h.planned([root], [leaf, root], seal=True)
+    extra = item("Extra")
+    # Registered before the seal: a sealed plan takes no new member.
+    build, plan = await h.planned([root], [leaf, root, extra], seal=True)
+    await _exclude(h, plan.id, extra)
     await h.run(plan.id, leaf)
     await h.run(plan.id, root)
-    extra = item("Extra")
-    await h.register(plan.id, [extra])
-    await _exclude(h, plan.id, extra)
     assert (await _call(h, builds.complete_build, build)).status == "completed"
 
 

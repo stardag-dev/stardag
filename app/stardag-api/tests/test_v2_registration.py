@@ -590,3 +590,123 @@ async def test_seal_refuses_when_its_closure_step_finds_a_conflict(h: Harness):
         await h.seal(plan.id)
     assert exc.value.code == "instance_conflict"
     assert (await h.build(build))["status"] == "failed"
+
+
+# --------------------------------------------------------------------------
+# A sealed plan: re-delivery and discovery only
+# --------------------------------------------------------------------------
+
+
+async def test_a_sealed_plan_refuses_new_members_and_new_edges(h: Harness):
+    """After ``/seal`` the request is fully stated: an exact re-delivery is
+    a no-op, a member the plan does not hold is 409 ``plan_sealed``, and so
+    is a new edge on an instance the plan already expanded. Nothing of a
+    refused chunk lands."""
+    a, c = item("A"), item("C")
+    root = item("R", upstreams=[a])
+    _, plan = await h.planned([root], [a, c, root], seal=True)
+
+    again = await h.register(plan.id, [a, c, root])
+    assert again == type(again)()  # every count zero
+
+    b = item("B")
+    with pytest.raises(Conflict) as exc:
+        await h.register(plan.id, [b])
+    assert exc.value.code == "plan_sealed"
+    assert exc.value.detail["task_ids"] == [b.task_id]
+    assert await h.task_count(b) == 0
+
+    grown = item("R", upstreams=[a, c])
+    assert grown.instance_hash == root.instance_hash
+    with pytest.raises(Conflict) as exc:
+        await h.register(plan.id, [grown])
+    assert exc.value.code == "plan_sealed"
+    assert set(await h.members(plan.id)) == {a.task_id, c.task_id, root.task_id}
+
+
+async def test_a_sealed_plan_takes_a_discovery_jobs_result(h: Harness):
+    """A root admitted unexpanded because its target existed, invalidated
+    after the seal, is a discovery job; its expansion lands through the
+    same route on the sealed plan, with the new upstreams it reaches."""
+    u = item("U")
+    root = item("R", upstreams=[u])
+    build, plan = await h.planned([root], [observed(unexpanded(root), True)], seal=True)
+    await h.register(plan.id, [observed(unexpanded(root), False)])
+    assert root.task_id in task_ids((await h.frontier(build)).discovery_jobs)
+
+    result = await h.register(plan.id, [u, root])
+    assert result.members_admitted == 1 and result.edges_created == 1
+    frontier = await h.frontier(build)
+    assert task_ids(frontier.runnable) == {u.task_id}
+    assert frontier.discovery_jobs == []
+
+
+async def test_a_seal_committing_while_a_chunk_is_in_flight_is_seen(
+    h: Harness, async_engine: AsyncEngine
+):
+    """``/seal`` and a member chunk synchronise on the build row: the seal
+    holds it ``FOR NO KEY UPDATE``, the chunk takes it ``FOR SHARE`` and
+    re-reads the plan under it. A seal that commits after the chunk read
+    the plan (unsealed) and before the chunk's lock is seen: a new member
+    is 409 ``plan_sealed`` and nothing of the chunk lands."""
+    build, plan = await h.planned([item("R", upstreams=[])], [item("R", upstreams=[])])
+    b = item("B")
+
+    async with async_engine.connect() as sealer:
+        # A seal in flight: the build lock held, sealed_at written, not yet
+        # committed — the chunk's plain read of the plan still sees NULL.
+        await sealer.execute(
+            text("SELECT 1 FROM build WHERE id = :b FOR NO KEY UPDATE"),
+            {"b": build},
+        )
+        await sealer.execute(
+            text("UPDATE plan SET sealed_at = now() WHERE id = :p"), {"p": plan.id}
+        )
+        registering = asyncio.create_task(h.register(plan.id, [b]))
+        await asyncio.sleep(0.3)
+        assert not registering.done(), "the chunk must wait for the seal"
+        await sealer.commit()
+
+    with pytest.raises(Conflict) as exc:
+        await registering
+    assert exc.value.code == "plan_sealed"
+    assert exc.value.detail["task_ids"] == [b.task_id]
+    assert await h.task_count(b) == 0
+
+
+async def test_concurrent_chunks_share_the_build_lock(
+    h: Harness, async_engine: AsyncEngine
+):
+    """A chunk's build lock is ``FOR SHARE``: another transaction holding
+    it in the same mode does not block a chunk (chunks into one build run
+    concurrently), where a seal's ``FOR NO KEY UPDATE`` would."""
+    build, plan = await h.planned([item("R", upstreams=[item("A")])])
+    async with async_engine.connect() as other:
+        await other.execute(
+            text("SELECT 1 FROM build WHERE id = :b FOR SHARE"), {"b": build}
+        )
+        result = await asyncio.wait_for(h.register(plan.id, [item("A")]), 5)
+        assert result.members_admitted == 1
+        await other.rollback()
+
+
+async def test_a_chunk_carrying_one_instance_twice_must_agree(h: Harness):
+    """The driver de-duplicates by instance: an exact repeat in one chunk is
+    de-duplicated, and a repeat with other ``declared_upstreams`` is 400
+    ``duplicate_item`` naming the instance, rather than silently keeping
+    the first declaration's edges."""
+    u1, u2 = item("U1"), item("U2")
+    t = item("T", upstreams=[u1])
+    other = item("T", upstreams=[u1, u2])
+    assert other.instance_hash == t.instance_hash
+    _, plan = await h.planned([item("R", upstreams=[t])])
+
+    with pytest.raises(BadRequest) as exc:
+        await h.register(plan.id, [u1, u2, t, other])
+    assert exc.value.code == "duplicate_item"
+    assert exc.value.detail["instance_hash"] == t.instance_hash
+    assert exc.value.detail["fields"] == ["declared_upstreams"]
+    assert await h.task_count(t) == 0
+
+    result = await h.register(plan.id, [u1, t, t])
+    assert result.instances_created == 2
