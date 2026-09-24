@@ -298,6 +298,16 @@ class FrontierMemberResponse(BaseModel):
     body: dict[str, Any]
 
 
+class FrontierItemResponse(FrontierMemberResponse):
+    """A runnable or running member, with the counts the tick applies its
+    retry and interruption budgets to: executions of the task under any of
+    the build's plans, and those that ended interrupted or preempted
+    (counted from the ledger, D9)."""
+
+    attempts: int
+    interruptions: int
+
+
 class ClosureConflictResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -329,9 +339,9 @@ class FrontierResponse(BaseModel):
     #: the trigger-time configuration.
     reactive_app_name: str | None
     reactive_tick_kwargs: dict[str, Any] | None
-    runnable: list[FrontierMemberResponse]
+    runnable: list[FrontierItemResponse]
     discovery_jobs: list[FrontierMemberResponse]
-    running: list[FrontierMemberResponse]
+    running: list[FrontierItemResponse]
     closure: ClosureResponse | None
 
 

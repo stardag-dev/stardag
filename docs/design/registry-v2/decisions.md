@@ -369,3 +369,11 @@ app)` advisory lock that create uses: activation exclusively, the checks
   and leave two live holders once the renewal committed. The renewal now
   locks the task's limit rows `FOR UPDATE` in key order (after the task
   row, as a claim does) and re-reads the clock before extending.
+- **Attempt counts on the frontier.** `runnable` and `running` items carry
+  `attempts` and `interruptions`, counted per request from the ledger (D9)
+  over **all** of the build's plans: a rollover to a new plan is the same
+  request, and resetting the budget there would let a deploy loop a
+  failing task forever. Another build's executions of the same task are
+  not counted (its budget is its own). Discovery jobs carry none. The
+  quota count's `task_instance (environment_id, created_at)` index, noted
+  missing in step 3b, now exists.

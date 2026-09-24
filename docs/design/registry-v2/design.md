@@ -414,7 +414,12 @@ alongside it. Reactivating an old scope on resume flips the timestamps.
 | `excluded_at`, `excluded_reason`           | `excluded_reason` ∈ `operator \| discovery_failed \| upstream_excluded`, set together with `excluded_at` (CHECK). "Given up on" (STA-104): not scheduled, does not gate the build's completion; exclusion **cascades to the member's downstream closure within the plan** (like skip-blocked, otherwise a downstream is neither runnable nor excluded) and **an excluded root fails the build** (the request cannot be met) |
 
 No counters: attempts and interruptions are counted from `execution` rows
-over the build's plans.
+over the build's plans (index `execution (task_pk, plan_id)`). The frontier
+carries them on its `runnable` and `running` items — `attempts` (executions
+of the task under any of the build's plans, so a replacement plan does not
+reset the budget) and `interruptions` (those released or ended
+`interrupted`, or ended `preempted`) — for the tick's retry and
+interruption budgets.
 
 Registering the same instance again is a no-op (`ON CONFLICT DO NOTHING …
 RETURNING`, STA-48's pattern; the event write is gated on the `RETURNING`,

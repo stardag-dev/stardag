@@ -84,6 +84,9 @@ class Execution(EnvironmentScopedMixin, Base):
         ),
         Index("ix_execution_plan_instance", "plan_id", "instance_id"),
         Index("ix_execution_task_started", "task_pk", "started_at"),
+        # The frontier's attempt counts: a task's executions under the
+        # build's plans.
+        Index("ix_execution_task_plan", "task_pk", "plan_id"),
         # What ``builds stop`` and the build-delete guard look for.
         Index(
             "ix_execution_unended",

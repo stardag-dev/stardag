@@ -522,6 +522,12 @@ def upgrade() -> None:
         ["deployment_id", "settings_hash", "task_pk"],
         unique=False,
     )
+    op.create_index(
+        "ix_task_instance_environment_created",
+        "task_instance",
+        ["environment_id", "created_at"],
+        unique=False,
+    )
     op.create_table(
         "task_limit_key",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -799,6 +805,12 @@ def upgrade() -> None:
         "ix_execution_task_started",
         "execution",
         ["task_pk", "started_at"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_execution_task_plan",
+        "execution",
+        ["task_pk", "plan_id"],
         unique=False,
     )
     op.create_index(
