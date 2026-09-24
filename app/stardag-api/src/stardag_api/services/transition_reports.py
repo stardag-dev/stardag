@@ -215,19 +215,23 @@ class ReportSteps(StepBase):
         return self.outcome(applied=True)
 
     async def stop(self) -> TransitionOutcome:
-        """An operator stopped the execution (``builds stop``), or the
-        backend reports its container gone: the ledger end ``ended_at``,
-        ``outcome = stopped``. Idempotent: an execution that already ended
-        is left as it ended. If it still holds the task's claim (live or
-        lapsed), nothing will ever report for it, so the claim is released
-        too — ``claim_outcome = cancelled``, the task CANCELLED, which is
-        ACTIONABLE for every build holding it."""
+        """An operator end: the CLI stopped the execution (``builds stop``)
+        or the backend reports its container gone (``outcome = stopped``),
+        or the execution cannot be stopped and the operator gives up on it
+        (``outcome = lost``). Writes the ledger end ``ended_at``; idempotent:
+        an execution that already ended is left as it ended. If it still
+        holds the task's claim (live or lapsed), nothing it reports will be
+        applied, so the claim is released too — ``claim_outcome =
+        cancelled``, the task CANCELLED, which is ACTIONABLE for every build
+        holding it. A later report from it is late (recorded, refused
+        ``execution_already_ended``)."""
         t, eid = self.task, self.execution_id()
         execution = await self.named_execution(EventType.TASK_CANCELLED, eid)
         if execution.ended_at is not None:
             return self.outcome(applied=False)
+        outcome = self.transition.outcome or ExecutionOutcome.STOPPED
         execution.ended_at = self.now
-        execution.outcome = ExecutionOutcome.STOPPED
+        execution.outcome = outcome
         holds = t.execution_id == eid and execution.claim_released_at is None
         if holds:
             assert t.status == TaskStatus.RUNNING, t.status
@@ -237,7 +241,7 @@ class ReportSteps(StepBase):
             EventType.TASK_CANCELLED,
             execution_id=eid,
             report_applied=holds,
-            metadata={"stopped": True},
+            metadata={"stopped": True, "outcome": outcome.value},
         )
         await self.session.flush()
         return self.outcome(applied=True)

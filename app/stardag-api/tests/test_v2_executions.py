@@ -281,3 +281,49 @@ async def test_the_whole_ledger_over_http(client: AsyncClient, h: Harness):
     assert set(by_id) == {str(done), str(live)}
     assert by_id[str(done)]["outcome"] == "completed"
     assert by_id[str(live)]["ended_at"] is None
+
+
+async def test_a_lost_execution_is_ended_its_claim_released_and_its_report_late(
+    client: AsyncClient, h: Harness
+):
+    """``/executions/{id}/stopped {outcome: "lost"}``: an operator end for an
+    execution that cannot be stopped. The claim is handled as for
+    ``stopped`` (released ``cancelled``, the task CANCELLED and runnable
+    again); the ledger records ``lost``; a report the execution sends later
+    is late — recorded with ``report_applied`` false, refused, and the task
+    unchanged."""
+    t = item("T")
+    build, plan = await h.planned([t], [t], seal=True)
+    execution = await h.start(plan.id, t)
+    lost = await client.post(
+        f"/api/v2/executions/{execution}/stopped", json={"outcome": "lost"}
+    )
+    assert lost.status_code == 200, lost.text
+    assert lost.json()["status"] == "cancelled"
+    ledger = await h.execution(execution)
+    assert (ledger["outcome"], ledger["claim_outcome"]) == ("lost", "cancelled")
+    assert ledger["ended_at"] is not None
+    assert await _unended(h, build) == []
+    assert t.task_id in {m.task_id for m in (await h.frontier(build)).runnable}
+
+    late = await client.post(
+        f"/api/v2/plans/{plan.id}/members/{t.task_id}/complete",
+        json={"execution_id": str(execution)},
+    )
+    assert late.status_code == 409
+    assert late.json()["detail"]["code"] == "execution_already_ended"
+    assert (await h.task(t))["status"] == "cancelled"
+    refused = await h.events(t, types=["task_completed"])
+    assert [e["report_applied"] for e in refused] == [False]
+    assert (await h.execution(execution))["outcome"] == "lost"
+
+    # Idempotent, whichever operator end comes second.
+    again = await client.post(
+        f"/api/v2/executions/{execution}/stopped", json={"outcome": "stopped"}
+    )
+    assert again.status_code == 200 and again.json()["applied"] is False
+    assert (await h.execution(execution))["outcome"] == "lost"
+    bad = await client.post(
+        f"/api/v2/executions/{execution}/stopped", json={"outcome": "completed"}
+    )
+    assert bad.status_code == 422

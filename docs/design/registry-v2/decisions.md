@@ -396,3 +396,28 @@ app)` advisory lock that create uses: activation exclusively, the checks
   not counted (its budget is its own). Discovery jobs carry none. The
   quota count's `task_instance (environment_id, created_at)` index, noted
   missing in step 3b, now exists.
+
+## Implementation notes, I5 (2026-09-24)
+
+- **An operator end has two outcomes, `stopped` and `lost`** (the I8
+  decision: the CLI's `builds stop` gives up on an execution it cannot
+  stop). `POST /executions/{id}/stopped {outcome: "lost"}` is handled
+  exactly as `stopped` — the ledger end, and if the execution still holds
+  the task's claim, the claim released `cancelled` with the task CANCELLED
+  — and records `outcome = lost`, so the ledger says the container may
+  still be running. A later report from it is late: `ended_at` is set, so it
+  is recorded (`report_applied = false`) and refused
+  `execution_already_ended`, the task untouched. The v2 migration gains the
+  enum label in place (never deployed).
+- **The 24-hour artifact quota is carried over, per environment.** v1
+  counted `task_artifacts` per workspace through a cached estimate; v2
+  counts `task_artifact` rows per environment
+  (`LIMITS_MAX_ARTIFACTS_PER_ENVIRONMENT_24H`) on the instance quota's
+  pattern: charged after the upsert for the rows it inserted (`xmax = 0` on
+  `RETURNING`, so a replaced body is not new), under a per-environment
+  advisory lock held to commit, 429 `artifact_creation_limit`. The lock is
+  taken after the task row lock and nobody holding it waits on a task row,
+  so the two cannot deadlock. v1's four per-workspace settings
+  (`LIMITS_MAX_{BUILDS,TASKS,EVENTS,ARTIFACTS}_PER_WORKSPACE_24H`) are not
+  read by the v2 routes; a deployment that sets them sets the two
+  per-environment ones instead (I12's runbook).

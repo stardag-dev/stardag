@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import Select, and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -43,6 +43,7 @@ from stardag_api.services.tx import transaction
 class ExecutionState:
     id: UUID
     task_id: str
+    build_id: UUID
     plan_id: UUID
     instance_id: UUID
     executor: str | None
@@ -53,8 +54,46 @@ class ExecutionState:
     claim_outcome: ClaimOutcome | None
     ended_at: datetime | None
     outcome: ExecutionOutcome | None
-    #: The execution's plan is the build's active plan (False = an orphan).
+    #: The execution's plan is its build's active plan (False = an orphan).
     in_current_plan: bool
+
+
+def _ledger_query() -> Select[tuple[Execution, str, UUID, bool]]:
+    """The ledger rows with the task id, the build, and whether the plan is
+    its build's active one."""
+    return (
+        select(
+            Execution,
+            Task.task_id,
+            Plan.build_id,
+            and_(Plan.activated_at.is_not(None), Plan.superseded_at.is_(None)),
+        )
+        .join(Task, Task.id == Execution.task_pk)
+        .join(Plan, Plan.id == Execution.plan_id)
+    )
+
+
+async def _states(session: AsyncSession, query: Select) -> list[ExecutionState]:
+    rows = (await session.execute(query)).tuples().all()
+    return [
+        ExecutionState(
+            id=e.id,
+            task_id=task_id,
+            build_id=build_id,
+            plan_id=e.plan_id,
+            instance_id=e.instance_id,
+            executor=e.executor,
+            executor_ref=e.executor_ref,
+            executor_metadata=e.executor_metadata,
+            started_at=e.started_at,
+            claim_released_at=e.claim_released_at,
+            claim_outcome=e.claim_outcome,
+            ended_at=e.ended_at,
+            outcome=e.outcome,
+            in_current_plan=bool(active),
+        )
+        for e, task_id, build_id, active in rows
+    ]
 
 
 async def list_executions(
@@ -74,46 +113,59 @@ async def list_executions(
     before it reports)."""
     build = await get_build(session, environment_id, build_id)
     current = await active_plan(session, build.id)
-    current_id = current.id if current else None
     query = (
-        select(Execution, Task.task_id)
-        .join(Task, Task.id == Execution.task_pk)
-        .join(Plan, Plan.id == Execution.plan_id)
+        _ledger_query()
         .where(Plan.build_id == build.id)
         .order_by(Execution.started_at, Execution.id)
     )
     if not include_ended:
         query = query.where(Execution.ended_at.is_(None))
-    if not_in_current_plan and current_id is not None:
-        query = query.where(Execution.plan_id != current_id)
-    rows = (await session.execute(query)).tuples().all()
-    return [
-        ExecutionState(
-            id=e.id,
-            task_id=task_id,
-            plan_id=e.plan_id,
-            instance_id=e.instance_id,
-            executor=e.executor,
-            executor_ref=e.executor_ref,
-            executor_metadata=e.executor_metadata,
-            started_at=e.started_at,
-            claim_released_at=e.claim_released_at,
-            claim_outcome=e.claim_outcome,
-            ended_at=e.ended_at,
-            outcome=e.outcome,
-            in_current_plan=e.plan_id == current_id,
+    if not_in_current_plan and current is not None:
+        query = query.where(Execution.plan_id != current.id)
+    return await _states(session, query)
+
+
+async def list_task_executions(
+    session: AsyncSession,
+    environment_id: UUID,
+    task_id: str,
+    *,
+    include_ended: bool = True,
+    limit: int = 100,
+) -> list[ExecutionState]:
+    """Every execution of one completion, across builds, newest first (at
+    most ``limit``; ``ix_execution_task_started``). ``include_ended=False``
+    keeps those with no end reported."""
+    task_pk = await session.scalar(
+        select(Task.id).where(
+            Task.environment_id == environment_id, Task.task_id == task_id
         )
-        for e, task_id in rows
-    ]
+    )
+    if task_pk is None:
+        raise NotFound("unknown_task", f"no task {task_id}", task_id=task_id)
+    query = (
+        _ledger_query()
+        .where(Execution.task_pk == task_pk)
+        .order_by(Execution.started_at.desc(), Execution.id.desc())
+        .limit(limit)
+    )
+    if not include_ended:
+        query = query.where(Execution.ended_at.is_(None))
+    return await _states(session, query)
 
 
 async def report_stopped(
-    session: AsyncSession, environment_id: UUID, execution_id: UUID
+    session: AsyncSession,
+    environment_id: UUID,
+    execution_id: UUID,
+    *,
+    outcome: ExecutionOutcome = ExecutionOutcome.STOPPED,
 ) -> TransitionOutcome:
-    """Record that the operator stopped the execution (``outcome =
-    stopped``), through ``transition_task()``: the ledger end, and — if it
-    still holds the task's claim — the claim's release (the task
-    CANCELLED). Idempotent: an ended execution is left as it ended.
+    """Record an operator end of the execution — ``stopped`` (the CLI
+    stopped it) or ``lost`` (it cannot be stopped; the operator gives up on
+    it) — through ``transition_task()``: the ledger end, and — if it still
+    holds the task's claim — the claim's release (the task CANCELLED).
+    Idempotent: an ended execution is left as it ended.
 
     Only the execution's task and plan keys — which never change — are read
     before ``transition_task()`` locks the task row; the execution itself
@@ -139,6 +191,6 @@ async def report_stopped(
             environment_id,
             task_pk=keys.task_pk,
             plan_id=keys.plan_id,
-            transition=Transition.stop(execution_id),
+            transition=Transition.stop(execution_id, outcome),
             now=utc_now(),
         )
