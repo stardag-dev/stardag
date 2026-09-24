@@ -80,17 +80,26 @@ async def test_a_spawn_failure_fails_the_claimed_execution(
 class _RefusesRefStart(InMemoryRegistry):
     """The claim moves on while the spawn is in flight."""
 
+    code = "execution_not_current"
+
     def member_start(self, plan_id, task_id, **kwargs):
         if not kwargs.get("claim", True):
             self._record("member_start", plan_id=plan_id, task_id=task_id, **kwargs)
-            raise refuse("execution_not_current")
+            raise refuse(self.code)
         return super().member_start(plan_id, task_id, **kwargs)
 
 
+@pytest.mark.parametrize(
+    "code", ["execution_not_current", "not_claim_holder", "unknown_execution"]
+)
 async def test_an_orphaned_spawn_is_stopped_and_nothing_is_reported(
-    default_in_memory_fs_target: Target,
+    code: str, default_in_memory_fs_target: Target
 ):
+    """``not_claim_holder`` (the claim is held through another plan) and
+    ``unknown_execution`` are "this execution is over" like
+    ``execution_not_current``: the spawned container is an orphan."""
     registry = _RefusesRefStart()
+    registry.code = code
     registry.add_deployment(app_name="app")
     task = SyncOnlyTask(name=f"orphan-{new_id()}")
     executor = _executor()

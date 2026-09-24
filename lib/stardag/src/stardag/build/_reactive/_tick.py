@@ -230,8 +230,12 @@ class _Driver:
             return None
         return frontier
 
-    async def one_pass(self) -> tuple[bool, bool]:
-        """Read and act once. Returns ``(stop, acted)``."""
+    async def one_pass(self, lease: SchedulerLease) -> tuple[bool, bool]:
+        """Read and act once. Returns ``(stop, acted)``.
+
+        The lease is checked before every action of the pass, not only
+        before it: a pass can outlive a lost renewal, and a second tick may
+        then hold the lease (see :func:`act_on_frontier`)."""
         self.summary.iterations += 1
         frontier = await self._read()
         if frontier.reactive_app_name is None:
@@ -266,9 +270,13 @@ class _Driver:
                     task_executor=self.executor,
                     config=self.config,
                     summary=self.summary,
+                    lease_lost=lambda: lease.lost,
                 )
         finally:
             current_build_context_var.reset(token)
+        if result.lease_lost:
+            self.summary.outcome = "lease_lost"
+            return True, result.acted
         if result.superseded:
             self.summary.outcome = "superseded"
             return True, result.acted
@@ -303,7 +311,7 @@ class _Driver:
             if lease.lost:
                 self.summary.outcome = "lease_lost"
                 return
-            stop, acted = await self.one_pass()
+            stop, acted = await self.one_pass(lease)
             if stop:
                 return
             if acted:

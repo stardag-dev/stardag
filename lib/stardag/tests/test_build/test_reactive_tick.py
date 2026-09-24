@@ -298,13 +298,20 @@ class TestRefusals:
         assert summary.terminal_status == "failed"
         assert registry.builds[build_id].status == "failed"
 
+    @pytest.mark.parametrize(
+        "code", ["execution_not_current", "not_claim_holder", "unknown_execution"]
+    )
     async def test_an_orphaned_spawn_is_stopped(
-        self, default_in_memory_fs_target: Target
+        self, code: str, default_in_memory_fs_target: Target
     ):
+        """Every "this execution is over" refusal of the ref record — the
+        claim moved to another execution or another plan, or the ledger has
+        no such execution — stops the container just spawned."""
+
         class RefusesRefStart(InMemoryRegistry):
             def member_start(self, plan_id, task_id, **kwargs):
                 if not kwargs.get("claim", True):
-                    raise refuse("execution_not_current")
+                    raise refuse(code)
                 return super().member_start(plan_id, task_id, **kwargs)
 
         registry = RefusesRefStart()
@@ -445,6 +452,45 @@ class TestLeaseAndHandshake:
         )
         assert (neighbour, "other-app") in spawned
         assert summary.neighbour_ticks_spawned >= 1
+
+    async def test_a_lease_lost_mid_pass_stops_claiming(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The lease is checked before every claim, not only before the
+        pass: once a renewal is lost mid-pass, another tick may hold it, so
+        this pass claims nothing further and exits ``lease_lost``."""
+        from stardag.build._reactive._lease import SchedulerLease
+
+        registry = InMemoryRegistry()
+        tasks = [SyncOnlyTask(name=f"wide-{i}-{new_id()}") for i in range(4)]
+        build_id, _ = await _plan(registry, list(tasks))
+
+        class LosesLeaseOnFirstSpawn(FakeDetachedExecutor):
+            async def submit_detached(self, task, *, execution_id):
+                handle = await super().submit_detached(task, execution_id=execution_id)
+                # The background renewal is refused while the pass runs.
+                for lease in leases:
+                    lease._lost = True
+                return handle
+
+        leases: list[SchedulerLease] = []
+        original_aenter = SchedulerLease.__aenter__
+
+        async def recording_aenter(self):
+            leases.append(self)
+            return await original_aenter(self)
+
+        config = TickConfig(
+            linger_seconds=0, poll_interval_seconds=0.01, max_concurrent_actions=1
+        )
+        executor = LosesLeaseOnFirstSpawn(registry=registry)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(SchedulerLease, "__aenter__", recording_aenter)
+            summary = await _tick(registry, build_id, executor, config)
+        assert summary.outcome == "lease_lost"
+        claims = [c for c in registry.calls_to("member_start") if c["claim"]]
+        assert len(claims) == 1
+        assert summary.spawned == 1
 
 
 class TestRollover:

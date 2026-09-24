@@ -289,34 +289,41 @@ class _ResidentEngine:
     async def submit(
         self, task: BaseTask
     ) -> TaskExecutionError | TaskStruct | _NotRun | None:
-        """Claim (unless this execution already holds the claim across an
-        in-process yield), then execute."""
+        """Take a local slot, then claim (unless this execution already holds
+        the claim across an in-process yield), then execute.
+
+        The claim is taken *inside* the slot, immediately before the
+        execution starts, so its TTL never runs down while the task queues
+        behind ``max_concurrent_tasks`` or a named limit: a claim is only
+        ever held by an execution that is starting or running (D11). An
+        in-process execution's renewal starts right after its claim.
+        """
         state = self.states[task.id]
         detached = self.executor.supports_detached(task)
-        if state.execution_id is None:
-            state.waiting_on_claim = True
-            try:
-                outcome = await self.session.claim(
-                    task,
-                    claim_ttl_seconds=(
-                        claim_ttl_seconds(task, self.executor)
-                        if detached
-                        else self.session.claim_config.in_process_ttl_seconds
-                    ),
-                    executor_metadata=await self._metadata(task),
-                )
-            finally:
-                state.waiting_on_claim = False
-            if outcome.kind == "completed":
-                return _NotRun(completed=True)
-            if outcome.kind != "granted":
-                return _NotRun(completed=False, error=RuntimeError(outcome.message))
-            state.execution_id = outcome.execution_id
         async with contextlib.AsyncExitStack() as stack:
             try:
                 await stack.enter_async_context(self.limiter.slot(task))
             except Exception as e:
                 return _error(e)
+            if state.execution_id is None:
+                state.waiting_on_claim = True
+                try:
+                    outcome = await self.session.claim(
+                        task,
+                        claim_ttl_seconds=(
+                            claim_ttl_seconds(task, self.executor)
+                            if detached
+                            else self.session.claim_config.in_process_ttl_seconds
+                        ),
+                        executor_metadata=await self._metadata(task),
+                    )
+                finally:
+                    state.waiting_on_claim = False
+                if outcome.kind == "completed":
+                    return _NotRun(completed=True)
+                if outcome.kind != "granted":
+                    return _NotRun(completed=False, error=RuntimeError(outcome.message))
+                state.execution_id = outcome.execution_id
             if detached:
                 return await self._run_detached(task, state)
             renewal = self.renewals.get(task.id)

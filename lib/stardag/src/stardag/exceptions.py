@@ -87,10 +87,12 @@ def execution_not_wanted(error: "APIError") -> bool:
     """
     if error.status_code != 409:
         return False
-    return error.code in _EXECUTION_OVER_CODES
+    return error.code in EXECUTION_OVER_CODES
 
 
-_EXECUTION_OVER_CODES = frozenset(
+#: The refusal codes :func:`execution_not_wanted` reads as "this execution
+#: is over".
+EXECUTION_OVER_CODES = frozenset(
     {
         "execution_not_current",
         "execution_superseded",

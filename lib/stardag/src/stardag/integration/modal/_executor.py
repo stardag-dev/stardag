@@ -54,6 +54,17 @@ from stardag.integration.modal._selector import (
 logger = logging.getLogger(__name__)
 
 
+#: Framework-owned identifiers a worker reports through: never forwarded
+#: from a selector's env, only written from the build context.
+_FRAMEWORK_IDENTIFIER_ENVS = (
+    STARDAG_DEPLOYMENT_ID_ENV,
+    STARDAG_BUILD_ID_ENV,
+    STARDAG_PLAN_ID_ENV,
+    STARDAG_EXECUTION_ID_ENV,
+    STARDAG_CLAIM_TTL_SECONDS_ENV,
+)
+
+
 class ModalTaskExecutor(TaskExecutorABC):
     """Task executor that sends tasks to Modal for remote execution.
 
@@ -305,8 +316,10 @@ class ModalTaskExecutor(TaskExecutorABC):
         the execution id the reports name, the claim TTL, the app name and
         the Modal coordinates — so neither a selector (user code) nor
         settings can redirect a worker's reports. ``STARDAG_DEPLOYMENT_ID``
-        is never forwarded (it is the container's, baked by the deploy) and
-        is removed from the selector's env.
+        is never forwarded (it is the container's, baked by the deploy), and
+        every framework identifier is removed from the selector's env
+        first, so one the context cannot supply (no plan, no execution, no
+        context) is left unset, never selector-chosen.
         ``STARDAG_WORKER_REPORTS_LIFECYCLE`` is likewise framework-owned:
         it is always forced to this engine's own ``reports_lifecycle(task)``
         value, never left at whatever a selector's env happened to carry —
@@ -320,7 +333,12 @@ class ModalTaskExecutor(TaskExecutorABC):
         worker_function = self._get_worker_function(worker_name)
         executor_metadata = await self._metadata_for_worker(worker_name)
         env: dict[str, str] = dict(selector_env or {})
-        env.pop(STARDAG_DEPLOYMENT_ID_ENV, None)
+        # The framework's identifiers are never taken from a selector: they
+        # are removed here and written below only from the build context, so
+        # a context without a plan (a registry failure degraded to ``warn``)
+        # or no context at all leaves them unset rather than selector-chosen.
+        for key in _FRAMEWORK_IDENTIFIER_ENVS:
+            env.pop(key, None)
         context = get_current_build_context()
         if context is None:
             return worker_function, env or None, executor_metadata
@@ -334,10 +352,13 @@ class ModalTaskExecutor(TaskExecutorABC):
         # have set for this framework-owned var, so a stale "0" cannot
         # silently suppress the worker's reports (see the docstring).
         env.pop(STARDAG_WORKER_REPORTS_LIFECYCLE_ENV, None)
+        # The execution id is only meaningful under the plan the worker
+        # reports through: without a plan (a registration failure degraded
+        # to ``warn``) neither is sent, and neither was left from a selector.
         if context.plan_id is not None:
             env[STARDAG_PLAN_ID_ENV] = str(context.plan_id)
-        if execution_id is not None:
-            env[STARDAG_EXECUTION_ID_ENV] = str(execution_id)
+            if execution_id is not None:
+                env[STARDAG_EXECUTION_ID_ENV] = str(execution_id)
         ttl_seconds = claim_ttl_seconds(task, self)
         if ttl_seconds is not None:
             env[STARDAG_CLAIM_TTL_SECONDS_ENV] = str(ttl_seconds)

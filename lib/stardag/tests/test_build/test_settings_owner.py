@@ -15,7 +15,12 @@ from uuid import uuid4
 
 import pytest
 
-from stardag.build._settings import SettingsError, settings_applied, settings_owner
+from stardag.build._settings import (
+    SettingsError,
+    resident_settings,
+    settings_applied,
+    settings_owner,
+)
 
 KEY = "SD_TEST_SETTINGS_OWNER_KEY"
 
@@ -121,3 +126,38 @@ def test_threads_are_refused_too():
         release.set()
         holder.join()
     assert outcome == ["refused"]
+
+
+def test_a_scoped_block_is_refused_while_a_resident_build_holds_the_process():
+    """One owner token for both kinds: a local reactive bootstrap or tick
+    cannot install its build's settings under a running resident build."""
+    with resident_settings({KEY: "resident"}):
+        with pytest.raises(SettingsError, match="resident sd.build"):
+            with settings_applied({KEY: "tick"}, owner=uuid4()):
+                pass  # pragma: no cover
+        assert os.environ[KEY] == "resident"
+    assert KEY not in os.environ
+
+
+def test_a_resident_build_is_refused_while_a_scoped_block_holds_the_process():
+    build = uuid4()
+    with settings_applied({KEY: "tick"}, owner=build):
+        with pytest.raises(SettingsError, match=str(build)):
+            with resident_settings({KEY: "resident"}):
+                pass  # pragma: no cover
+        assert os.environ[KEY] == "tick"
+    assert KEY not in os.environ
+
+
+def test_resident_builds_with_equal_settings_share_the_process():
+    with resident_settings({KEY: "a"}):
+        with resident_settings({KEY: "a"}):
+            assert os.environ[KEY] == "a"
+        assert os.environ[KEY] == "a"
+        with pytest.raises(SettingsError, match="different settings"):
+            with resident_settings({KEY: "b"}):
+                pass  # pragma: no cover
+    assert KEY not in os.environ
+    # Free again for a scoped block.
+    with settings_applied({KEY: "c"}, owner=uuid4()):
+        assert os.environ[KEY] == "c"

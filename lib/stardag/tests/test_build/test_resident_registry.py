@@ -355,6 +355,41 @@ class TestClaims:
         assert renewals, "the claim was never renewed"
         assert {r["execution_id"] for r in renewals} == {claim["execution_id"]}
 
+    async def test_a_task_queued_behind_the_local_limit_holds_no_claim(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The claim is taken inside the local slot: a task waiting behind
+        ``max_concurrent_tasks`` has not claimed yet, so its TTL cannot run
+        down in the queue (and no renewal is needed to cover the wait)."""
+        from stardag.build import ConcurrencyConfig
+
+        events: list[str] = []
+
+        class Recording(InMemoryRegistry):
+            def member_start(self, plan_id, task_id, **kwargs):
+                if kwargs.get("claim", True):
+                    events.append("claim")
+                return super().member_start(plan_id, task_id, **kwargs)
+
+        class Runs(Task[str]):
+            name: str
+
+            async def run_aio(self):
+                events.append("run")
+                await asyncio.sleep(0.02)
+                events.append("done")
+                self._save("ok")
+
+        registry = Recording()
+        summary = await build_aio(
+            [Runs(name=f"queued-{i}-{new_id()}") for i in range(3)],
+            registry=registry,
+            concurrency_config=ConcurrencyConfig(max_concurrent_tasks=1),
+        )
+        assert summary.status == BuildExitStatus.SUCCESS
+        # Each claim is taken only once the previous run has left the slot.
+        assert events == ["claim", "run", "done"] * 3
+
     async def test_limit_keys_travel_on_the_claim(
         self, default_in_memory_fs_target: Target
     ):
