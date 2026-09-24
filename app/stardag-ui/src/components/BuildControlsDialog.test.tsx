@@ -19,6 +19,7 @@ function execution(id: string, taskId: string, inCurrentPlan: boolean): Executio
   return {
     id,
     task_id: taskId,
+    build_id: BUILD,
     plan_id: inCurrentPlan ? "p-2" : "p-1",
     instance_id: `i-${id}`,
     executor: "modal",

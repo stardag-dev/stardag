@@ -87,6 +87,13 @@ export function MemberTable({
                     member.excluded_at
                       ? `excluded (${member.excluded_reason?.replace("_", " ") ?? "?"})`
                       : null,
+                    member.attempts > 0
+                      ? `${member.attempts} attempt${member.attempts === 1 ? "" : "s"}${
+                          member.interruptions > 0
+                            ? `, ${member.interruptions} interrupted`
+                            : ""
+                        }`
+                      : null,
                   ]
                     .filter(Boolean)
                     .join(" · ") || "—"}

@@ -66,6 +66,22 @@ export function TaskDetail({
   const epochRef = useRef(0);
   const buildId = context?.buildId;
 
+  // Reset on identity change only — never on a same-task refresh
+  // (refreshToken/nonce) — so a remedy can never be issued against the
+  // previous task's now-stale state while the new task is still loading.
+  // Adjusting state during render (rather than in an effect) is the
+  // pattern React recommends for "reset state when a prop changes": it
+  // avoids an extra commit with the stale task still in state.
+  const identity = `${taskId}\u0000${environmentId}`;
+  const [prevIdentity, setPrevIdentity] = useState(identity);
+  if (identity !== prevIdentity) {
+    setPrevIdentity(identity);
+    setTask(null);
+    setError(null);
+    setArtifacts(null);
+    setExecutions(null);
+  }
+
   useEffect(() => {
     const epoch = ++epochRef.current;
     const fresh = () => epochRef.current === epoch;

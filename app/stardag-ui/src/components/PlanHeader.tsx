@@ -43,7 +43,9 @@ export function PlanHeader({ frontier, deployment, complete }: PlanHeaderProps) 
           {deployment
             ? deploymentLabel(deployment)
             : `deployment ${frontier.deployment_id?.slice(0, 8)}`}
-          {deployment && !deployment.is_current ? " (not current)" : ""}
+          {deployment && deployment.kind !== "local" && !deployment.is_current
+            ? " (not current)"
+            : ""}
         </Chip>
         <Chip title={frontier.settings_hash ?? undefined}>
           settings {frontier.settings_hash?.slice(0, 8)}

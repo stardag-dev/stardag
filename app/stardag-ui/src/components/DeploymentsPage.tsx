@@ -135,7 +135,8 @@ export function DeploymentsPage() {
         <>
           {deployments.length === DEPLOYMENT_LIST_LIMIT && (
             <p className="text-xs text-amber-800 dark:text-amber-300">
-              Showing the newest {DEPLOYMENT_LIST_LIMIT}; older generations are not
+              Showing the first {DEPLOYMENT_LIST_LIMIT} deployment rows, ordered by app
+              — not necessarily the newest; some apps or older generations may not be
               listed.
             </p>
           )}

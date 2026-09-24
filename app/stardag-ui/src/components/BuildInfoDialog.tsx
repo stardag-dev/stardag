@@ -97,6 +97,13 @@ export function BuildInfoDialog({
             <CopyChip label={build.id} value={build.id} title="Build id" />
           </Field>
           {build.description && <Field label="Description">{build.description}</Field>}
+          {build.status === "failed" && build.error_message && (
+            <Field label="Error" hint="The last BUILD_FAILED event's message.">
+              <pre className="w-full overflow-auto whitespace-pre-wrap text-red-700 dark:text-red-400">
+                {build.error_message}
+              </pre>
+            </Field>
+          )}
           <ExecutorField build={build} />
           <DeploymentField frontier={frontier} deployment={deployment} />
           <SettingsField
@@ -260,9 +267,11 @@ function DeploymentField({
     <Field
       label="Deployment"
       hint={
-        deployment.is_current
-          ? "The app's current deployment."
-          : "Not the app's current deployment: the build's next tick rolls it over."
+        deployment.kind === "local"
+          ? "A local deployment: authoritative for its own plans, never superseded."
+          : deployment.is_current
+            ? "The app's current deployment."
+            : "Not the app's current deployment: the build's next tick rolls it over."
       }
     >
       <span className="font-medium">{deploymentLabel(deployment)}</span>

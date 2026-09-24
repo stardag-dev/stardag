@@ -10,6 +10,7 @@ vi.mock("../api/registry", () => ({ fetchDeployments: vi.fn() }));
 
 import { fetchDeployments } from "../api/registry";
 import { DeploymentsPage } from "./DeploymentsPage";
+import { DEPLOYMENT_LIST_LIMIT } from "../hooks/useDeployments";
 
 function deployment(overrides: Partial<Deployment>): Deployment {
   return {
@@ -53,5 +54,28 @@ describe("DeploymentsPage", () => {
     expect(within(card).getByText("ap-123")).toBeInTheDocument();
     const rows = within(card).getAllByRole("row").slice(1);
     expect(rows.map((r) => r.textContent?.slice(0, 1))).toEqual(["3", "2", "1"]);
+  });
+
+  it("states the cap honestly instead of claiming 'newest' when it is hit", async () => {
+    // The registry orders `GET /deployments` by (kind, app_name,
+    // generation DESC) before applying the limit, so hitting the cap does
+    // not mean "the newest N" — it can drop whole apps ordered later.
+    vi.mocked(fetchDeployments).mockResolvedValue(
+      Array.from({ length: DEPLOYMENT_LIST_LIMIT }, (_, i) =>
+        deployment({ id: `d${i}`, generation: i + 1 }),
+      ),
+    );
+    render(
+      <BreadcrumbProvider>
+        <DeploymentsPage />
+      </BreadcrumbProvider>,
+    );
+    await screen.findByRole("heading", { name: "etl" });
+    expect(screen.queryByText(/^Showing the newest/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `Showing the first ${DEPLOYMENT_LIST_LIMIT} deployment rows, ordered by app — not necessarily the newest; some apps or older generations may not be listed.`,
+      ),
+    ).toBeInTheDocument();
   });
 });

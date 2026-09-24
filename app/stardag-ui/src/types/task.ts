@@ -96,10 +96,17 @@ export interface Build {
   // The app whose ticks drive this build; null for a resident build.
   reactive_app_name: string | null;
   reactive_tick_kwargs: Record<string, unknown> | null;
+  // Why the build is FAILED (its last BUILD_FAILED's message); null for
+  // any other status.
+  error_message: string | null;
 }
 
 export interface BuildListResponse {
   builds: Build[];
+  // Matching the filters, over every page.
+  total: number;
+  // Pass back as `cursor` for the next page; null on the last one.
+  next_cursor: string | null;
 }
 
 // ---- The frontier: what a scheduler tick sees of the active plan ----
@@ -161,20 +168,24 @@ export interface PlanRoots {
   roots: FrontierMember[];
 }
 
-// ---- Plan membership and edges (assumed: not served yet) ----
+// ---- Plan membership and edges (assumed: not served on this branch yet) ----
 
 export type AdmittedBy = "root" | "static" | "dynamic" | "closure";
 export type ExclusionReason = "operator" | "discovery_failed" | "upstream_excluded";
 
 /**
  * One member of a plan, as `GET /plans/{plan_id}/graph` is assumed to
- * return it. **Assumed**: the registry does not serve this route yet (see
- * `api/registry.ts`, `fetchPlanGraph`); the fields are `plan_member`'s
- * columns joined to the task's identity and global status.
+ * return it. **Assumed**: this branch's registry does not serve the route
+ * yet (see `api/registry.ts`, `fetchPlanGraph`); the shape mirrors
+ * `PlanGraphMemberResponse` (`schemas_v2_reads.py`, STA-106) —
+ * `plan_member`'s columns joined to the task's identity and global status,
+ * plus the attempt/interruption counts the frontier already carries for a
+ * runnable member.
  */
 export interface PlanMember {
   task_id: string;
   instance_id: string;
+  instance_hash: string;
   task_namespace: string;
   task_name: string;
   status: TaskStatus;
@@ -182,6 +193,10 @@ export interface PlanMember {
   admitted_by: AdmittedBy | null;
   excluded_at: string | null;
   excluded_reason: ExclusionReason | null;
+  // Executions of the task under any of the build's plans, and those of
+  // them that ended interrupted or preempted (as on the frontier).
+  attempts: number;
+  interruptions: number;
 }
 
 /** An instance edge, `task_instance_dependency` (assumed route). */
@@ -193,6 +208,9 @@ export interface PlanEdge {
 
 export interface PlanGraph {
   plan_id: string;
+  build_id: string;
+  deployment_id: string;
+  settings_hash: string;
   members: PlanMember[];
   edges: PlanEdge[];
 }
@@ -257,6 +275,10 @@ export interface Task {
   error_message: string | null;
   // The claim: live while status is running and this is in the future.
   claim_expires_at: string | null;
+  // The claim's holder while RUNNING (live or lapsed): the plan it was
+  // granted through, and that plan's build.
+  claim_plan_id: string | null;
+  claim_build_id: string | null;
   // The current execution (the claim's, while running).
   execution_id: string | null;
   instances: TaskInstance[];
@@ -267,6 +289,7 @@ export interface Task {
 export interface Execution {
   id: string;
   task_id: string;
+  build_id: string;
   plan_id: string;
   instance_id: string;
   executor: string | null;

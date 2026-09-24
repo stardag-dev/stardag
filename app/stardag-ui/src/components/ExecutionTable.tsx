@@ -1,6 +1,6 @@
 import type { Execution } from "../types/task";
 import { shortTaskId } from "../utils/ids";
-import { modalFunctionCallUrl } from "../utils/modalLinks";
+import { modalFunctionCallUrl, modalFunctionUrl } from "../utils/modalLinks";
 import { notStoppableReason, workerOf } from "../utils/stoppable";
 import { formatAbsoluteTime, formatDuration } from "../utils/time";
 import { Checkbox } from "./ui/Checkbox";
@@ -94,10 +94,17 @@ export function ExecutionTable({
         </thead>
         <tbody>
           {drawn.map((execution) => {
-            const callUrl = modalFunctionCallUrl(
-              execution.executor_metadata,
-              execution.executor_ref,
-            );
+            // modalFunctionCallUrl falls back to the coarser app page when
+            // function_id is missing (other callers rely on that shared
+            // fallback), but a link rendered here as the call ref itself
+            // must never resolve to the app page instead — so gate on the
+            // function being addressable, same as ModalExecutionCallRef.
+            const callUrl = modalFunctionUrl(execution.executor_metadata)
+              ? modalFunctionCallUrl(
+                  execution.executor_metadata,
+                  execution.executor_ref,
+                )
+              : null;
             return (
               <tr
                 key={execution.id}

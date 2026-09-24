@@ -17,6 +17,7 @@ function execution(overrides: Partial<Execution> = {}): Execution {
   return {
     id: "e-1",
     task_id: "t-1",
+    build_id: BUILD,
     plan_id: "p-1",
     instance_id: "i-1",
     executor: "modal",

@@ -68,10 +68,14 @@ describe("flowModel", () => {
   it("keys nodes by instance id and drops edges leaving the plan", () => {
     const view = fullPlanView({
       plan_id: "p",
+      build_id: "b",
+      deployment_id: "d",
+      settings_hash: "s",
       members: [
         {
           task_id: "A",
           instance_id: "i-a",
+          instance_hash: "h-a",
           task_namespace: "demo",
           task_name: "Load",
           status: "completed",
@@ -79,10 +83,13 @@ describe("flowModel", () => {
           admitted_by: "static",
           excluded_at: null,
           excluded_reason: null,
+          attempts: 1,
+          interruptions: 0,
         },
         {
           task_id: "B",
           instance_id: "i-b",
+          instance_hash: "h-b",
           task_namespace: "demo",
           task_name: "Train",
           status: "pending",
@@ -90,6 +97,8 @@ describe("flowModel", () => {
           admitted_by: "root",
           excluded_at: "2026-09-24T00:00:00Z",
           excluded_reason: "operator",
+          attempts: 0,
+          interruptions: 0,
         },
       ],
       edges: [

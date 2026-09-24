@@ -11,6 +11,7 @@
 
 import type {
   BuildFrontier,
+  FrontierItem,
   FrontierMember,
   PlanEdge,
   PlanGraph,
@@ -26,11 +27,15 @@ export interface PlanView {
   complete: boolean;
 }
 
-function memberFromFrontier(item: FrontierMember): PlanMember {
+function memberFromFrontier(item: FrontierMember | FrontierItem): PlanMember {
   const { namespace, name } = identityOf(item.body);
+  // Roots and discovery jobs are plain FrontierMembers, with no attempt
+  // count; runnable and running items are FrontierItems and carry one.
+  const counted = "attempts" in item;
   return {
     task_id: item.task_id,
     instance_id: item.instance_id,
+    instance_hash: item.instance_hash,
     task_namespace: namespace,
     task_name: name,
     status: item.status,
@@ -38,6 +43,8 @@ function memberFromFrontier(item: FrontierMember): PlanMember {
     admitted_by: item.is_root ? "root" : null,
     excluded_at: null,
     excluded_reason: null,
+    attempts: counted ? item.attempts : 0,
+    interruptions: counted ? item.interruptions : 0,
   };
 }
 
