@@ -48,6 +48,7 @@ from stardag.registry._models import (
     BuildFrontier,
     BuildInfo,
     BuildNotifyResult,
+    ConcurrencyLimitInfo,
     DeploymentInfo,
     DeploymentKind,
     ExclusionResult,
@@ -687,6 +688,22 @@ class APIRegistry(HTTPTransport, RegistryABC):
                     for row in (payload or {}).get("limits", [])
                 },
                 operation="List concurrency limits",
+            )
+        )
+
+    def concurrency_limit_list_detailed(
+        self, *, include_holders: bool = False
+    ) -> list[ConcurrencyLimitInfo]:
+        return self.call(
+            Request(
+                "GET",
+                "/concurrency-limits",
+                lambda payload: [
+                    ConcurrencyLimitInfo.model_validate(row)
+                    for row in (payload or {}).get("limits", [])
+                ],
+                params={"include_holders": "true"} if include_holders else {},
+                operation="List concurrency limits (detailed)",
             )
         )
 

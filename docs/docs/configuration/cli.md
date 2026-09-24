@@ -590,6 +590,51 @@ deployments`.
   `--reason`. The task's global status is untouched, so other builds
   holding it are unaffected; an excluded root fails the build.
 
+## Concurrency Limit Commands
+
+Named concurrency limits cap how many tasks tagged with a given key may run
+concurrently across all builds in an environment. The SDK tags tasks with keys;
+the cap lives server-side in the registry and is enforced atomically when a task
+starts. Manage them with `stardag concurrency-limits` (or in the registry UI:
+workspace admin → Concurrency Limits).
+
+=== "Active venv"
+
+    ```sh
+    stardag concurrency-limits list [--holders]
+    stardag concurrency-limits set <key> <max_concurrent>
+    stardag concurrency-limits delete <key> [--yes]
+    stardag concurrency-limits holders <key> [--limit N]
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run stardag concurrency-limits list [--holders]
+    uv run stardag concurrency-limits set <key> <max_concurrent>
+    uv run stardag concurrency-limits delete <key> [--yes]
+    uv run stardag concurrency-limits holders <key> [--limit N]
+    ```
+
+All commands accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
+profile / environment other than the active one.
+
+- `list` — show each key, its `max_concurrent` and how many slots are
+  currently `in_use` (`--holders` adds a table of each key's current
+  holders, from the same call — no extra request per key).
+- `set` — create or update a limit (upsert; `max_concurrent` must be ≥ 0;
+  `0` blocks the key entirely).
+- `delete` — remove a limit so the key becomes unlimited.
+- `holders` — list the tasks currently holding slots of a key (a live
+  claim), oldest-running first, with task id/name, build and execution.
+  A key with no configured limit is not listed here — configure one first.
+
+There is no `evict`. A v2 slot is released by ending the execution that
+holds it: for a holder whose worker is gone, `stardag builds stop
+--mark-lost` is the recovery path, not a concurrency-limits command.
+
+See `stardag concurrency-limits --help` for full options.
+
 ## Environment Variables
 
 All CLI behavior can be overridden with environment variables:

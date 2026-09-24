@@ -134,7 +134,7 @@ GET  /api/v2/deployments                     # List deployments (?app_name=, ?cu
 GET  /api/v2/settings/{settings_hash}        # Read a stored settings body
 PUT  /api/v2/concurrency-limits/{key}        # Create or replace a named limit
 DELETE /api/v2/concurrency-limits/{key}      # Remove a named limit
-GET  /api/v2/concurrency-limits              # List named limits
+GET  /api/v2/concurrency-limits              # List named limits (?include_holders=true adds current holders)
 ```
 
 ### Builds (`/api/v2`)

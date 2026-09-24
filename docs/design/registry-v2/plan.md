@@ -312,7 +312,10 @@ assignee the maintainer.
       and member counts are known only for the active plan, via the
       frontier), no event read (`tasks show` cannot surface
       `TASK_STRUCTURE_DIVERGED`), no route for a bare observation
-      (`tasks check --report` is refused).
+      (`tasks check --report` is refused). `concurrency-limits` was
+      dropped by omission here (the server routes and client methods
+      existed; only the CLI module was missing) and restored in STA-108
+      (`list [--holders]`, `set`, `delete`, `holders`; no `evict`).
 - [x] I9 — UI (merged, PR #388). Every registry call
       is on `/api/v2`; scope keys, `build_config`, phantoms, external
       blockers and `/locks` are gone. Builds list, the build view over the

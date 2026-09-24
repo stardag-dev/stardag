@@ -368,6 +368,32 @@ class SettingsInfo(_Response):
 
 
 # -----------------------------------------------------------------------------
+# Concurrency limits
+# -----------------------------------------------------------------------------
+
+
+class ConcurrencyLimitHolderInfo(_Response):
+    """A task currently occupying a slot of a limit key (a live claim)."""
+
+    task_id: str
+    task_name: str
+    build_id: UUID
+    plan_id: UUID
+    execution_id: UUID | None = None
+    started_at: datetime | None = None
+
+
+class ConcurrencyLimitInfo(_Response):
+    """One named limit: the cap, how many slots are occupied, and — with
+    ``include_holders``, from ``concurrency_limit_list`` — by what."""
+
+    key: str
+    max_concurrent: int
+    in_use: int = 0
+    holders: list[ConcurrencyLimitHolderInfo] | None = None
+
+
+# -----------------------------------------------------------------------------
 # Reactive scheduling
 # -----------------------------------------------------------------------------
 
