@@ -1,81 +1,73 @@
-"""Task registry module for stardag.
+"""The task registry (v2).
 
-This module provides registry implementations for tracking task execution.
-The main classes are:
+- :class:`RegistryABC`: the interface every engine and integration uses.
+- :class:`APIRegistry`: its implementation over the ``/api/v2`` HTTP API.
+- :class:`NoOpRegistry`: the default when no registry is configured; the
+  engines make no registry call against it.
+- :data:`registry_provider`: the configured registry for this process.
 
-- RegistryABC: Abstract base class defining the registry interface
-- APIRegistry: Registry that communicates with the stardag-api service
-- NoOpRegistry: A do-nothing registry (default when unconfigured)
-- registry_provider: Resource provider for getting the configured registry
-- RegistryGlobalConcurrencyLockManager: GlobalConcurrencyLockManager using Registry API
-- RegistryLockHandle: LockHandle implementation with automatic TTL renewal
+The response and registration models are re-exported here; see
+:mod:`stardag.registry._models` for the vocabulary (an *instance* is a
+registry row under a scope; the Python object is a *task object*).
 """
 
 from stardag.registry._api_registry import APIRegistry
 from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
 from stardag.registry._base import (
-    BuildCancelResult,
-    BuildFailResult,
-    BuildFrontier,
-    BuildInfo,
-    DERIVE_DEPENDENCIES,
-    DeploymentInfo,
-    BuildListPage,
-    BuildNotifyResult,
-    SchedulerLeaseResult,
-    WakeCandidate,
-    BuildSummary,
-    BulkCancelBuildRef,
-    BulkCancelResult,
-    ExecutionStatus,
-    FrontierExternalBlocker,
-    FrontierTaskRef,
     NoOpRegistry,
-    RegisteredTaskInfo,
-    StartClaimResult,
     RegistryABC,
-    TaskListPage,
-    TaskSummary,
-    TickSummaryRecord,
     get_git_commit_hash,
     init_registry,
+    is_noop_registry,
     registry_provider,
 )
-from stardag.registry._lock import (
-    RegistryGlobalConcurrencyLockManager,
-    RegistryLockHandle,
+from stardag.registry._models import (
+    BuildFrontier,
+    BuildInfo,
+    BuildNotifyResult,
+    DeploymentInfo,
+    ExclusionResult,
+    ExecutionInfo,
+    FrontierMember,
+    MembersResult,
+    PlanInfo,
+    RegistrationItem,
+    ResumeResult,
+    SchedulerLeaseResult,
+    SettingsInfo,
+    TaskInfo,
+    TickSummaryRecord,
+    TransitionResult,
+    WakeCandidate,
+    YieldResult,
 )
 
 __all__ = [
     "APIRegistry",
-    "BuildCancelResult",
-    "BuildFailResult",
     "BuildFrontier",
     "BuildInfo",
-    "DERIVE_DEPENDENCIES",
-    "DeploymentInfo",
-    "BuildListPage",
     "BuildNotifyResult",
-    "SchedulerLeaseResult",
-    "WakeCandidate",
-    "BuildSummary",
-    "BulkCancelBuildRef",
-    "BulkCancelResult",
-    "FrontierExternalBlocker",
-    "FrontierTaskRef",
+    "DeploymentInfo",
+    "ExclusionResult",
+    "ExecutionInfo",
+    "FrontierMember",
+    "MembersResult",
     "NoOpRegistry",
-    "RegisteredTaskInfo",
-    "ExecutionStatus",
-    "StartClaimResult",
+    "PlanInfo",
+    "RegistrationItem",
     "RegistryABC",
-    "RegistryGlobalConcurrencyLockManager",
-    "RegistryLockHandle",
+    "ResumeResult",
+    "SchedulerLeaseResult",
+    "SettingsInfo",
     "StardagAPIKeyAuth",
     "StardagTokenAuth",
-    "TaskListPage",
-    "TaskSummary",
+    "TaskInfo",
     "TickSummaryRecord",
+    "TransitionResult",
+    "WakeCandidate",
+    "YieldResult",
     "get_git_commit_hash",
     "init_registry",
+    "is_noop_registry",
     "registry_provider",
 ]

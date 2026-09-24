@@ -467,6 +467,10 @@ class BaseTask(
     ) -> "BaseTask":
         """Instantiate the task from the registry.
 
+        Reads an instance body of the task (a task id may have several
+        instances — constructions under different scopes — and any of them
+        rehydrates into this completion).
+
         Validated in compat mode, same as ``task_from_registry_data``: the
         recomputed task id is checked against the requested one, so a
         removed or renamed significant field — dropped by compat mode's
@@ -494,13 +498,17 @@ class BaseTask(
             id = UUID(id)
 
         registry = registry or registry_provider.get()
-        metadata = registry.task_get_metadata(id)
+        info = registry.task_get(id)
+        if info.body is None:
+            raise TaskRehydrationError(
+                f"The registry holds no instance body for task {id}."
+            )
 
-        task = cls.model_validate(metadata.body, context={CONTEXT_MODE_KEY: "compat"})
-        if task.id != metadata.id:
+        task = cls.model_validate(info.body, context={CONTEXT_MODE_KEY: "compat"})
+        if task.id != id:
             raise TaskRehydrationError(
                 f"Rehydrated task id {task.id} does not match the requested "
-                f"id {metadata.id} — a field's serialization is likely not "
+                f"id {id} — a field's serialization is likely not "
                 "losslessly round-trippable, or a significant field the "
                 "class no longer declares was silently dropped by compat "
                 "mode's lenient rules for non-significant fields."

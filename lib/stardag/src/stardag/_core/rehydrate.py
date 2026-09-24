@@ -85,7 +85,7 @@ def task_from_registry_data(
     """Reconstruct a task object from an instance body.
 
     The body is the payload stored at registration for one instance (also
-    available as ``TaskMetadata.body`` from ``task_get_metadata``):
+    served on the frontier for every member the tick acts on):
     ``task.instance_body()``, including the polymorphic discriminator keys.
     Validated in compat mode: strict for significant fields through the
     task id check, lenient for non-significant ones (an unknown key is

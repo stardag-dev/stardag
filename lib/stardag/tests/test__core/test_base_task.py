@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime
 from typing import Annotated, Type
 from unittest.mock import Mock
 from uuid import uuid4
@@ -21,7 +20,7 @@ from stardag._core.task import Task
 from stardag._core.task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, SubClass, TypeId
-from stardag.registry._base import RegistryABC, TaskMetadata
+from stardag.registry import RegistryABC, TaskInfo
 from stardag.target._in_memory import InMemoryTarget
 from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
 from stardag.utils.testing.namepace import (
@@ -607,18 +606,14 @@ def test_from_registry(default_in_memory_fs_target):
     task.run()
 
     mock_registry = Mock(spec=RegistryABC)
-    mock_registry.task_get_metadata.return_value = TaskMetadata(
-        id=task.id,
-        body=task.model_dump(),
-        name=task.get_name(),
-        namespace=task.get_namespace(),
+    mock_registry.task_get.return_value = TaskInfo(
+        task_id=str(task.id),
+        task_namespace=task.get_namespace(),
+        task_name=task.get_name(),
         version=task.version,
         output_uri=task.target().uri,
         status="completed",
-        registered_at=datetime.now(),
-        started_at=datetime.now(),
-        completed_at=datetime.now(),
-        error_message=None,
+        body=task.instance_body(),
     )
     loaded_task = MockTask.from_registry(id=task.id, registry=mock_registry)
     assert loaded_task == task
@@ -649,18 +644,14 @@ def test_from_registry_rejects_a_body_whose_recomputed_id_moves(
     assert stale_id != task.id
 
     mock_registry = Mock(spec=RegistryABC)
-    mock_registry.task_get_metadata.return_value = TaskMetadata(
-        id=stale_id,
-        body=task.model_dump(),
-        name=task.get_name(),
-        namespace=task.get_namespace(),
+    mock_registry.task_get.return_value = TaskInfo(
+        task_id=str(stale_id),
+        task_namespace=task.get_namespace(),
+        task_name=task.get_name(),
         version=task.version,
         output_uri=None,
         status="completed",
-        registered_at=datetime.now(),
-        started_at=datetime.now(),
-        completed_at=datetime.now(),
-        error_message=None,
+        body=task.instance_body(),
     )
     with pytest.raises(TaskRehydrationError, match="does not match"):
         MockTask.from_registry(id=stale_id, registry=mock_registry)
