@@ -17,7 +17,12 @@ describe("claimState", () => {
   });
 
   it("holds none for any status but running, suspended included", () => {
-    for (const status of ["suspended", "interrupted", "pending", "completed"] as const) {
+    for (const status of [
+      "suspended",
+      "interrupted",
+      "pending",
+      "completed",
+    ] as const) {
       expect(
         claimState({ status, claim_expires_at: "2026-09-24T12:05:00Z" }, NOW),
       ).toBe("none");

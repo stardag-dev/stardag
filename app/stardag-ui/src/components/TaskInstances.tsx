@@ -30,7 +30,9 @@ export function TaskInstances({
     [instances],
   );
   if (instances.length === 0) {
-    return <p className="text-sm text-gray-500 dark:text-gray-400">No instance recorded.</p>;
+    return (
+      <p className="text-sm text-gray-500 dark:text-gray-400">No instance recorded.</p>
+    );
   }
   return (
     <div className="space-y-2">
@@ -73,8 +75,13 @@ function InstanceCard({
     <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-gray-200 bg-gray-50 px-3 py-1.5 text-xs dark:border-gray-700 dark:bg-gray-800">
         <span className="text-gray-500 dark:text-gray-400">Scope</span>
-        <span className="font-medium text-gray-800 dark:text-gray-200" title={instance.deployment_id}>
-          {deployment ? deploymentLabel(deployment) : instance.deployment_id.slice(0, 8)}
+        <span
+          className="font-medium text-gray-800 dark:text-gray-200"
+          title={instance.deployment_id}
+        >
+          {deployment
+            ? deploymentLabel(deployment)
+            : instance.deployment_id.slice(0, 8)}
         </span>
         <span className="text-gray-500 dark:text-gray-400">settings</span>
         <code className="font-mono" title={instance.settings_hash}>
@@ -118,7 +125,11 @@ function InstanceCard({
           View fullscreen
         </button>
       </div>
-      <FullscreenModal isOpen={full} onClose={() => setFull(false)} title="Instance parameters">
+      <FullscreenModal
+        isOpen={full}
+        onClose={() => setFull(false)}
+        title="Instance parameters"
+      >
         <pre className="overflow-auto rounded-md bg-gray-50 p-3 text-sm text-gray-800 dark:bg-gray-900 dark:text-gray-200">
           {json}
         </pre>

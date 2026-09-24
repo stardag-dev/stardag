@@ -59,9 +59,7 @@ function MemberList({
               {"attempts" in item && (
                 <span className="text-gray-600 dark:text-gray-400">
                   {item.attempts} attempt{item.attempts === 1 ? "" : "s"}
-                  {item.interruptions > 0
-                    ? `, ${item.interruptions} interrupted`
-                    : ""}
+                  {item.interruptions > 0 ? `, ${item.interruptions} interrupted` : ""}
                 </span>
               )}
             </li>
@@ -100,7 +98,7 @@ export function BuildSchedulingPanel({
 }: BuildSchedulingPanelProps) {
   const [open, setOpen] = useState(false);
   const [summaries, setSummaries] = useState<BuildTickSummary[]>([]);
-  const [ticksLoading, setTicksLoading] = useState(false);
+  const [ticksRead, setTicksRead] = useState(false);
   const [ticksError, setTicksError] = useState<string | null>(null);
   const epochRef = useRef(0);
 
@@ -108,7 +106,6 @@ export function BuildSchedulingPanel({
     if (!open) return;
     const epoch = ++epochRef.current;
     const fresh = () => epochRef.current === epoch;
-    setTicksLoading(true);
     fetchBuildTickSummaries(buildId, environmentId, TICK_LIMIT)
       .then((data) => {
         if (!fresh()) return;
@@ -117,16 +114,19 @@ export function BuildSchedulingPanel({
       })
       .catch((err: unknown) => {
         if (!fresh()) return;
-        setTicksError(err instanceof Error ? err.message : "Failed to load tick history");
+        setTicksError(
+          err instanceof Error ? err.message : "Failed to load tick history",
+        );
       })
       .finally(() => {
-        if (fresh()) setTicksLoading(false);
+        if (fresh()) setTicksRead(true);
       });
   }, [open, buildId, environmentId, refreshToken]);
 
   const state = schedulingState(frontier, buildStatus);
   const conflicts = frontier?.closure?.conflicts ?? [];
-  const unhealthy = frontierError !== null || state === "stalled" || conflicts.length > 0;
+  const unhealthy =
+    frontierError !== null || state === "stalled" || conflicts.length > 0;
 
   return (
     <>
@@ -165,7 +165,12 @@ export function BuildSchedulingPanel({
         </svg>
       </ToolbarButton>
 
-      <Modal isOpen={open} onClose={() => setOpen(false)} title="Scheduling" maxWidthClass="max-w-3xl">
+      <Modal
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        title="Scheduling"
+        maxWidthClass="max-w-3xl"
+      >
         <div className="max-h-[70vh] space-y-3 overflow-y-auto">
           {frontierError && (
             <ResultBanner tone="warning">
@@ -189,11 +194,14 @@ export function BuildSchedulingPanel({
               <StateLine state={state} frontier={frontier} />
               {conflicts.length > 0 && (
                 <ResultBanner tone="error">
-                  {conflicts.length} closure conflict{conflicts.length === 1 ? "" : "s"}:
-                  another instance of a member&rsquo;s completion reached this plan with
-                  different parameters (
+                  {conflicts.length} closure conflict{conflicts.length === 1 ? "" : "s"}
+                  : another instance of a member&rsquo;s completion reached this plan
+                  with different parameters (
                   {conflicts
-                    .map((c) => `${c.task_id.slice(0, 8)}: ${c.fields.join(", ") || "body"}`)
+                    .map(
+                      (c) =>
+                        `${c.task_id.slice(0, 8)}: ${c.fields.join(", ") || "body"}`,
+                    )
                     .join("; ")}
                   ).{frontier.closure?.build_failed ? " The build was failed." : ""}
                 </ResultBanner>
@@ -225,7 +233,7 @@ export function BuildSchedulingPanel({
               </h4>
               <TickSummaryTrail
                 summaries={summaries}
-                loading={ticksLoading && summaries.length === 0}
+                loading={!ticksRead}
                 unavailable={false}
                 error={ticksError}
               />
@@ -237,7 +245,13 @@ export function BuildSchedulingPanel({
   );
 }
 
-function StateLine({ state, frontier }: { state: SchedulingState; frontier: BuildFrontier }) {
+function StateLine({
+  state,
+  frontier,
+}: {
+  state: SchedulingState;
+  frontier: BuildFrontier;
+}) {
   const text =
     state === "complete"
       ? "Every member of the active plan is satisfied; the next tick completes the build."
@@ -246,10 +260,12 @@ function StateLine({ state, frontier }: { state: SchedulingState; frontier: Buil
           ? "Nothing runnable, running or awaiting discovery, and the plan is not complete — needs intervention."
           : "Nothing runnable, running or awaiting discovery, and this build is not reactively scheduled."
         : state === "settled"
-          ? `Nothing is runnable or running; the build is ${frontier.build_status ?? "not running"}.`
+          ? `Nothing is runnable or running; the build is ${
+              frontier.build_status ?? "not running"
+            }.`
           : frontier.sealed
-          ? "Progressing."
-          : "Progressing. The plan is not sealed yet: its static phase is still being stated.";
+            ? "Progressing."
+            : "Progressing. The plan is not sealed yet: its static phase is still being stated.";
   return (
     <div className="flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
       {state === "stalled" && (

@@ -178,7 +178,9 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
               {filtersActive ? "No builds match these filters" : "No builds yet"}
             </p>
             {!filtersActive && (
-              <p className="mt-1 text-sm">Run a build with the Stardag SDK to see it here</p>
+              <p className="mt-1 text-sm">
+                Run a build with the Stardag SDK to see it here
+              </p>
             )}
           </div>
         ) : (

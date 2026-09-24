@@ -104,7 +104,8 @@ export function flowModel(view: PlanView): {
   const ids = new Set(nodes.map((node) => node.id));
   const edges = view.edges
     .filter(
-      (edge) => ids.has(edge.upstream_instance_id) && ids.has(edge.downstream_instance_id),
+      (edge) =>
+        ids.has(edge.upstream_instance_id) && ids.has(edge.downstream_instance_id),
     )
     .map((edge) => ({
       id: `${edge.upstream_instance_id}-${edge.downstream_instance_id}`,

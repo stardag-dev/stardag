@@ -78,8 +78,14 @@ describe("matchesFilters", () => {
 describe("stopCommand", () => {
   it("carries the orphan flag and the narrowing flags", () => {
     expect(
-      stopCommand(BUILD, { notInCurrentPlan: true, worker: "gpu", olderThanSeconds: 7200 }),
-    ).toBe(`stardag builds stop ${BUILD} --not-in-current-plan --worker gpu --older-than 2h`);
+      stopCommand(BUILD, {
+        notInCurrentPlan: true,
+        worker: "gpu",
+        olderThanSeconds: 7200,
+      }),
+    ).toBe(
+      `stardag builds stop ${BUILD} --not-in-current-plan --worker gpu --older-than 2h`,
+    );
   });
 
   it("names ticked tasks exactly and nothing else", () => {

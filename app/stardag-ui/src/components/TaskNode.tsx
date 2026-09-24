@@ -37,9 +37,13 @@ export function TaskNode({ data }: { data: TaskNodeData }) {
       className={`relative rounded-lg border-2 px-3 py-2 shadow-md transition-all ${
         statusBorderColors[data.status]
       } ${data.excluded ? "border-dashed" : ""} ${
-        data.isMuted ? "bg-gray-100 opacity-60 dark:bg-gray-800/50" : "bg-white dark:bg-gray-800"
+        data.isMuted
+          ? "bg-gray-100 opacity-60 dark:bg-gray-800/50"
+          : "bg-white dark:bg-gray-800"
       } ${
-        data.isSelected ? "ring-2 ring-blue-500 ring-offset-2 dark:ring-offset-gray-900" : ""
+        data.isSelected
+          ? "ring-2 ring-blue-500 ring-offset-2 dark:ring-offset-gray-900"
+          : ""
       }`}
       title={data.excluded ? `${data.label} — excluded from this plan` : data.label}
     >

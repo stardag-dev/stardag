@@ -26,7 +26,8 @@ import type { Execution } from "../types/task";
 /** The only executor the CLI can stop. Others are listed, never acted on. */
 export const MODAL_EXECUTOR = "modal";
 
-export const NO_REF_YET = "no call id recorded yet — it was claimed but not yet spawned";
+export const NO_REF_YET =
+  "no call id recorded yet — it was claimed but not yet spawned";
 
 export const NO_EXECUTOR =
   "no executor recorded — it runs in the build's own process, or its " +
@@ -36,7 +37,8 @@ export const NO_EXECUTOR =
 export function notStoppableReason(execution: Execution): string | null {
   const executor = execution.executor || execution.executor_metadata?.kind || "";
   if (!executor) return NO_EXECUTOR;
-  if (executor !== MODAL_EXECUTOR) return `stardag cannot stop a '${executor}' execution`;
+  if (executor !== MODAL_EXECUTOR)
+    return `stardag cannot stop a '${executor}' execution`;
   if (!execution.executor_ref) return NO_REF_YET;
   return null;
 }

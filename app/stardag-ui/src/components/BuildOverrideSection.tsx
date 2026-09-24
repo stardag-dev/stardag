@@ -7,29 +7,33 @@ import { ResultBanner } from "./ui/ResultBanner";
 
 type OverrideAction = "complete" | "fail" | "cancel";
 
-const ACTIONS: { action: OverrideAction; label: string; dot: string; effect: string }[] =
-  [
-    {
-      action: "complete",
-      label: "Mark completed",
-      dot: "bg-green-500",
-      effect:
-        "Records completion and releases the build's claims. Refused while the " +
-        "active plan has outstanding members, unless forced.",
-    },
-    {
-      action: "fail",
-      label: "Mark failed",
-      dot: "bg-red-500",
-      effect: "Records failure and releases the build's claims.",
-    },
-    {
-      action: "cancel",
-      label: "Cancel build",
-      dot: "bg-gray-500",
-      effect: "Releases the build's claims; other builds may take its tasks over.",
-    },
-  ];
+const ACTIONS: {
+  action: OverrideAction;
+  label: string;
+  dot: string;
+  effect: string;
+}[] = [
+  {
+    action: "complete",
+    label: "Mark completed",
+    dot: "bg-green-500",
+    effect:
+      "Records completion and releases the build's claims. Refused while the " +
+      "active plan has outstanding members, unless forced.",
+  },
+  {
+    action: "fail",
+    label: "Mark failed",
+    dot: "bg-red-500",
+    effect: "Records failure and releases the build's claims.",
+  },
+  {
+    action: "cancel",
+    label: "Cancel build",
+    dot: "bg-gray-500",
+    effect: "Releases the build's claims; other builds may take its tasks over.",
+  },
+];
 
 interface BuildOverrideSectionProps {
   buildId: string;
@@ -101,7 +105,10 @@ export function BuildOverrideSection({
 
   return (
     <section aria-labelledby={headingId} className="space-y-2">
-      <h3 id={headingId} className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+      <h3
+        id={headingId}
+        className="text-sm font-semibold text-gray-900 dark:text-gray-100"
+      >
         Record an outcome instead
       </h3>
       <p className="text-xs text-gray-600 dark:text-gray-400">

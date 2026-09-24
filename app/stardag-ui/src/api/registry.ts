@@ -81,7 +81,11 @@ async function getJson<T>(requestUrl: string, what: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function postJson<T>(requestUrl: string, what: string, body?: unknown): Promise<T> {
+async function postJson<T>(
+  requestUrl: string,
+  what: string,
+  body?: unknown,
+): Promise<T> {
   const response = await fetchWithAuth(requestUrl, {
     method: "POST",
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -188,9 +192,13 @@ export function failBuild(
   environmentId: string,
   errorMessage?: string,
 ): Promise<Build> {
-  return postJson(url(`/builds/${buildId}/fail`, environmentId), "Failed to fail build", {
-    error_message: errorMessage ?? null,
-  });
+  return postJson(
+    url(`/builds/${buildId}/fail`, environmentId),
+    "Failed to fail build",
+    {
+      error_message: errorMessage ?? null,
+    },
+  );
 }
 
 /** Cancel: release the claims the build's plans hold. Stops nothing. */
@@ -203,7 +211,10 @@ export function cancelBuild(buildId: string, environmentId: string): Promise<Bui
 
 // ---- Plans ----
 
-export function fetchPlanRoots(planId: string, environmentId: string): Promise<PlanRoots> {
+export function fetchPlanRoots(
+  planId: string,
+  environmentId: string,
+): Promise<PlanRoots> {
   return getJson(
     url(`/plans/${planId}/roots`, environmentId),
     "Failed to fetch plan roots",
@@ -296,7 +307,10 @@ export async function fetchDeployments(
   return data.deployments;
 }
 
-export function fetchSettings(settingsHash: string, environmentId: string): Promise<Settings> {
+export function fetchSettings(
+  settingsHash: string,
+  environmentId: string,
+): Promise<Settings> {
   return getJson(
     url(`/settings/${settingsHash}`, environmentId),
     "Failed to fetch settings",

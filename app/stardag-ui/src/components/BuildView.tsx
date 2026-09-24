@@ -16,7 +16,11 @@ import { BuildInfoDialog } from "./BuildInfoDialog";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { DagGraph } from "./DagGraph";
-import { createPositionCache, type LayoutDirection, type PositionCache } from "./dagLayout";
+import {
+  createPositionCache,
+  type LayoutDirection,
+  type PositionCache,
+} from "./dagLayout";
 import { MemberTable } from "./MemberTable";
 import { PlanHeader } from "./PlanHeader";
 import { TaskDetail } from "./TaskDetail";
@@ -37,9 +41,25 @@ const PAGE_SIZE = 20;
  * task's detail. The toolbar opens the build's info, scheduling state and
  * controls (stop list and overrides).
  */
-export function BuildView({ buildId, onBack, onOpenTask }: BuildViewProps) {
+export function BuildView(props: BuildViewProps) {
   const { activeEnvironment } = useEnvironment();
-  const environmentId = activeEnvironment?.id;
+  // Keyed on environment and build: a change of either remounts the view,
+  // so no selection, filter or layout survives into the other identity.
+  return (
+    <BuildViewForIdentity
+      key={`${activeEnvironment?.id ?? ""}:${props.buildId}`}
+      environmentId={activeEnvironment?.id}
+      {...props}
+    />
+  );
+}
+
+function BuildViewForIdentity({
+  buildId,
+  onBack,
+  onOpenTask,
+  environmentId,
+}: BuildViewProps & { environmentId: string | undefined }) {
   const { setItems: setBreadcrumb } = useBreadcrumb();
   const plan = useBuildPlan(buildId, environmentId);
   const { byId: deploymentsById } = useDeployments(environmentId);
@@ -57,15 +77,6 @@ export function BuildView({ buildId, onBack, onOpenTask }: BuildViewProps) {
 
   const requestedKey = `${environmentId ?? ""}:${buildId}`;
   const { build, frontier, view, reload, setBuild } = plan;
-
-  // A change of build or environment invalidates the selection and filters.
-  useEffect(() => {
-    setSelectedTaskId(null);
-    setNameFilter("");
-    setStatusFilter("");
-    setPage(1);
-    positionCacheRef.current = createPositionCache();
-  }, [buildId, environmentId]);
 
   const refresh = useCallback(async () => {
     setRefreshToken((t) => t + 1);
@@ -111,7 +122,8 @@ export function BuildView({ buildId, onBack, onOpenTask }: BuildViewProps) {
     () =>
       members.filter(
         (m) =>
-          (!nameFilter || m.task_name.toLowerCase().includes(nameFilter.toLowerCase())) &&
+          (!nameFilter ||
+            m.task_name.toLowerCase().includes(nameFilter.toLowerCase())) &&
           (!statusFilter || m.status === statusFilter),
       ),
     [members, nameFilter, statusFilter],
@@ -124,7 +136,7 @@ export function BuildView({ buildId, onBack, onOpenTask }: BuildViewProps) {
 
   const selectedMember = members.find((m) => m.task_id === selectedTaskId) ?? null;
   const deployment = frontier?.deployment_id
-    ? (deploymentsById.get(frontier.deployment_id) ?? null)
+    ? deploymentsById.get(frontier.deployment_id) ?? null
     : null;
 
   if (plan.loading && plan.loadedKey !== requestedKey) {
@@ -186,13 +198,17 @@ export function BuildView({ buildId, onBack, onOpenTask }: BuildViewProps) {
                   <ToolbarButton
                     label="Refresh"
                     hint={
-                      autoRefresh ? "Refreshing every 5 seconds" : "Re-read the build and its plan"
+                      autoRefresh
+                        ? "Refreshing every 5 seconds"
+                        : "Re-read the build and its plan"
                     }
                     onClick={refresh}
                   >
                     <svg
                       aria-hidden="true"
-                      className={`h-4 w-4 ${plan.loading || autoRefresh ? "animate-spin" : ""}`}
+                      className={`h-4 w-4 ${
+                        plan.loading || autoRefresh ? "animate-spin" : ""
+                      }`}
                       fill="none"
                       stroke="currentColor"
                       strokeWidth={2}

@@ -54,7 +54,9 @@ describe("partialPlanView", () => {
     );
     expect(view.complete).toBe(false);
     expect(view.edges).toEqual([]);
-    expect(view.members.map((m) => [m.instance_id, m.task_name, m.admitted_by])).toEqual([
+    expect(
+      view.members.map((m) => [m.instance_id, m.task_name, m.admitted_by]),
+    ).toEqual([
       ["i-a", "TaskA", "root"],
       ["i-b", "TaskB", null],
       ["i-c", "TaskC", null],
@@ -91,8 +93,16 @@ describe("flowModel", () => {
         },
       ],
       edges: [
-        { upstream_instance_id: "i-a", downstream_instance_id: "i-b", is_dynamic: true },
-        { upstream_instance_id: "i-x", downstream_instance_id: "i-b", is_dynamic: false },
+        {
+          upstream_instance_id: "i-a",
+          downstream_instance_id: "i-b",
+          is_dynamic: true,
+        },
+        {
+          upstream_instance_id: "i-x",
+          downstream_instance_id: "i-b",
+          is_dynamic: false,
+        },
       ],
     });
     const { nodes, edges } = flowModel(view);

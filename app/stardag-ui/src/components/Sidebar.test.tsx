@@ -3,16 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
 
 describe("Sidebar", () => {
-  it("labels the concurrency nav item 'Concurrency' (single-line, see #174)", () => {
+  it("offers deployments and no concurrency admin (no v2 route)", () => {
     render(<Sidebar activeItem="builds" onNavigate={vi.fn()} />);
-    expect(screen.getByText("Concurrency")).toBeInTheDocument();
-    // The old two-word label wrapped and center-aligned; it must be gone.
-    expect(screen.queryByText("Concurrency Limits")).not.toBeInTheDocument();
+    expect(screen.getByText("Deployments")).toBeInTheDocument();
+    expect(screen.queryByText("Concurrency")).not.toBeInTheDocument();
   });
 
   it("renders each nav label left-aligned with no-wrap truncation", () => {
     render(<Sidebar activeItem="builds" onNavigate={vi.fn()} />);
-    for (const label of ["Builds", "Task Explorer", "Concurrency", "Settings"]) {
+    for (const label of ["Builds", "Tasks", "Deployments", "Settings"]) {
       const span = screen.getByText(label);
       expect(span.className).toContain("truncate");
       expect(span.className).toContain("text-left");
@@ -23,7 +22,7 @@ describe("Sidebar", () => {
     // With single-line `truncate`, an ellipsized label must still be
     // readable on hover — so every item carries `title={label}` (see #174).
     render(<Sidebar activeItem="builds" onNavigate={vi.fn()} />);
-    for (const label of ["Builds", "Task Explorer", "Concurrency", "Settings"]) {
+    for (const label of ["Builds", "Tasks", "Deployments", "Settings"]) {
       const button = screen.getByRole("button", { name: label });
       expect(button).toHaveAttribute("title", label);
     }
@@ -31,6 +30,6 @@ describe("Sidebar", () => {
 
   it("hides labels when collapsed", () => {
     render(<Sidebar activeItem="builds" onNavigate={vi.fn()} collapsed />);
-    expect(screen.queryByText("Concurrency")).not.toBeInTheDocument();
+    expect(screen.queryByText("Deployments")).not.toBeInTheDocument();
   });
 });

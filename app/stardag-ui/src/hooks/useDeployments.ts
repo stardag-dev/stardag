@@ -17,13 +17,12 @@ export function useDeployments(environmentId: string | undefined): {
   error: string | null;
 } {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!environmentId) return;
     let stale = false;
-    setLoading(true);
     fetchDeployments(environmentId, { limit: DEPLOYMENT_LIST_LIMIT })
       .then((rows) => {
         if (stale) return;
@@ -36,7 +35,7 @@ export function useDeployments(environmentId: string | undefined): {
         setError(err instanceof Error ? err.message : "Failed to load deployments");
       })
       .finally(() => {
-        if (!stale) setLoading(false);
+        if (!stale) setLoadedFor(environmentId);
       });
     return () => {
       stale = true;
@@ -44,5 +43,5 @@ export function useDeployments(environmentId: string | undefined): {
   }, [environmentId]);
 
   const byId = useMemo(() => new Map(deployments.map((d) => [d.id, d])), [deployments]);
-  return { deployments, byId, loading, error };
+  return { deployments, byId, loading: loadedFor !== environmentId, error };
 }

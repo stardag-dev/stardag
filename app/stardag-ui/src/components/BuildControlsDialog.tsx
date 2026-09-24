@@ -175,7 +175,11 @@ export function BuildControlsDialog({
           strokeWidth={2}
           viewBox="0 0 24 24"
         >
-          <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+          />
           <path strokeLinecap="round" strokeLinejoin="round" d="M9 9h6v6H9z" />
         </svg>
       </ToolbarButton>
@@ -190,7 +194,9 @@ export function BuildControlsDialog({
           Stop what is running
         </h3>
         {error ? (
-          <ResultBanner tone="error">Could not read this build&rsquo;s executions: {error}</ResultBanner>
+          <ResultBanner tone="error">
+            Could not read this build&rsquo;s executions: {error}
+          </ResultBanner>
         ) : executions === null ? (
           <p role="status" className="text-xs text-gray-600 dark:text-gray-400">
             Reading this build&rsquo;s executions…
@@ -206,7 +212,9 @@ export function BuildControlsDialog({
               The command ends the listed Modal calls from your credentials, records
               them stopped, then cancels the build.
               {orphanCount > 0 &&
-                ` ${orphanCount} ${orphanCount === 1 ? "is an orphan" : "are orphans"}: started under a plan the build has since rolled over from.`}
+                ` ${orphanCount} ${
+                  orphanCount === 1 ? "is an orphan" : "are orphans"
+                }: started under a plan the build has since rolled over from.`}
             </p>
             <div className="flex flex-wrap items-center gap-3 text-xs">
               <Checkbox
@@ -218,7 +226,11 @@ export function BuildControlsDialog({
               {workers.length > 1 && (
                 <label className="flex items-center gap-1">
                   <span className="text-gray-600 dark:text-gray-400">Worker</span>
-                  <select value={worker} onChange={(e) => setWorker(e.target.value)} className={SELECT_CLASS}>
+                  <select
+                    value={worker}
+                    onChange={(e) => setWorker(e.target.value)}
+                    className={SELECT_CLASS}
+                  >
                     <option value="">all</option>
                     {workers.map((name) => (
                       <option key={name} value={name}>
@@ -231,7 +243,11 @@ export function BuildControlsDialog({
               {executors.length > 1 && (
                 <label className="flex items-center gap-1">
                   <span className="text-gray-600 dark:text-gray-400">Executor</span>
-                  <select value={executor} onChange={(e) => setExecutor(e.target.value)} className={SELECT_CLASS}>
+                  <select
+                    value={executor}
+                    onChange={(e) => setExecutor(e.target.value)}
+                    className={SELECT_CLASS}
+                  >
                     <option value="">all</option>
                     {executors.map((name) => (
                       <option key={name} value={name}>
@@ -275,8 +291,8 @@ export function BuildControlsDialog({
 
             {unreachable > 0 && (
               <p className="text-xs text-gray-600 dark:text-gray-400">
-                {unreachable} run on an executor stardag cannot stop; ending those is that
-                backend&rsquo;s own business.
+                {unreachable} run on an executor stardag cannot stop; ending those is
+                that backend&rsquo;s own business.
               </p>
             )}
 
@@ -301,7 +317,8 @@ export function BuildControlsDialog({
                   </button>
                 </div>
                 <p className="text-xs text-gray-600 dark:text-gray-400">
-                  Add <code>--dry-run</code> to see its own list before anything happens.
+                  Add <code>--dry-run</code> to see its own list before anything
+                  happens.
                 </p>
               </div>
             )}
@@ -330,7 +347,11 @@ export function BuildControlsDialog({
           />
         )}
         {statusNotice && (
-          <ResultBanner tone="success" className="mt-3" onDismiss={() => setStatusNotice(null)}>
+          <ResultBanner
+            tone="success"
+            className="mt-3"
+            onDismiss={() => setStatusNotice(null)}
+          >
             {statusNotice} Nothing running was stopped.
           </ResultBanner>
         )}

@@ -49,7 +49,9 @@ export function memberLabel(taskId: string, body: Record<string, unknown>): stri
  * nested task.
  */
 export function parametersOf(body: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(body).filter(([key]) => !key.startsWith("__")));
+  return Object.fromEntries(
+    Object.entries(body).filter(([key]) => !key.startsWith("__")),
+  );
 }
 
 function canonical(value: unknown): string {
@@ -58,7 +60,9 @@ function canonical(value: unknown): string {
     const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
       a < b ? -1 : a > b ? 1 : 0,
     );
-    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(",")}}`;
+    return `{${entries
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value);
 }

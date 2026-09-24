@@ -42,7 +42,9 @@ function ClaimCell({ execution }: { execution: Execution }) {
   if (!execution.claim_outcome) return <span>holds the claim</span>;
   return (
     <span
-      title={`Claim closed ${formatAbsoluteTime(execution.claim_released_at)}; no end reported by the execution itself`}
+      title={`Claim closed ${formatAbsoluteTime(
+        execution.claim_released_at,
+      )}; no end reported by the execution itself`}
       className={
         execution.claim_outcome === "taken_over" || execution.claim_outcome === "lapsed"
           ? "text-amber-800 dark:text-amber-300"
@@ -153,7 +155,9 @@ export function ExecutionTable({
                       {execution.executor_ref}
                     </a>
                   ) : (
-                    <code className="font-mono text-[11px]">{execution.executor_ref}</code>
+                    <code className="font-mono text-[11px]">
+                      {execution.executor_ref}
+                    </code>
                   )}
                 </td>
                 <td

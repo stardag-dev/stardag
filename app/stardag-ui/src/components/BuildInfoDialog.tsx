@@ -45,7 +45,9 @@ export function BuildInfoDialog({
       })
       .catch((err: unknown) => {
         if (stale) return;
-        setSettingsError(err instanceof Error ? err.message : "Failed to read settings");
+        setSettingsError(
+          err instanceof Error ? err.message : "Failed to read settings",
+        );
       });
     return () => {
       stale = true;
@@ -75,13 +77,23 @@ export function BuildInfoDialog({
         </svg>
       </ToolbarButton>
 
-      <Modal isOpen={open} onClose={() => setOpen(false)} title="Build info" maxWidthClass="max-w-2xl">
+      <Modal
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        title="Build info"
+        maxWidthClass="max-w-2xl"
+      >
         <div className="max-h-[70vh] space-y-0 overflow-y-auto">
           <Field label="Name">
-            <span className="font-medium text-gray-900 dark:text-gray-100">{build.name}</span>
+            <span className="font-medium text-gray-900 dark:text-gray-100">
+              {build.name}
+            </span>
             <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
           </Field>
-          <Field label="Build id" hint="What every CLI command against this build takes">
+          <Field
+            label="Build id"
+            hint="What every CLI command against this build takes"
+          >
             <CopyChip label={build.id} value={build.id} title="Build id" />
           </Field>
           {build.description && <Field label="Description">{build.description}</Field>}
@@ -92,20 +104,27 @@ export function BuildInfoDialog({
             settings={settings && settings.hash === settingsHash ? settings : null}
             error={settingsError}
           />
-          <Field label="Roots" hint="The request, at completion-id level; stable across rollover">
+          <Field
+            label="Roots"
+            hint="The request, at completion-id level; stable across rollover"
+          >
             <span>
-              {build.root_task_ids.length} task{build.root_task_ids.length === 1 ? "" : "s"}
+              {build.root_task_ids.length} task
+              {build.root_task_ids.length === 1 ? "" : "s"}
             </span>
           </Field>
           <Field label="Created">{formatAbsoluteTime(build.created_at)}</Field>
-          {build.started_at && <Field label="Started">{formatAbsoluteTime(build.started_at)}</Field>}
-          {build.completed_at && <Field label="Ended">{formatAbsoluteTime(build.completed_at)}</Field>}
+          {build.started_at && (
+            <Field label="Started">{formatAbsoluteTime(build.started_at)}</Field>
+          )}
+          {build.completed_at && (
+            <Field label="Ended">{formatAbsoluteTime(build.completed_at)}</Field>
+          )}
         </div>
       </Modal>
     </>
   );
 }
-
 
 /**
  * One fact: a muted label, then the value.
@@ -272,10 +291,16 @@ function SettingsField({
   const keys = settings ? Object.keys(settings.body).length : null;
   return (
     <Field
-      label={keys === null ? "Settings" : `Settings — ${keys} key${keys === 1 ? "" : "s"}`}
+      label={
+        keys === null ? "Settings" : `Settings — ${keys} key${keys === 1 ? "" : "s"}`
+      }
       hint="Part of the plan's scope: two plans under different settings share no instances."
     >
-      <CopyChip label={settingsHash.slice(0, 16)} value={settingsHash} title="Settings hash" />
+      <CopyChip
+        label={settingsHash.slice(0, 16)}
+        value={settingsHash}
+        title="Settings hash"
+      />
       {error ? (
         <span className="text-xs text-red-600 dark:text-red-400">{error}</span>
       ) : settings === null ? (

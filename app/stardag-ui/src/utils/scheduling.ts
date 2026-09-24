@@ -1,6 +1,11 @@
 import type { BuildFrontier, BuildStatus } from "../types/task";
 
-export type SchedulingState = "unknown" | "complete" | "progressing" | "stalled" | "settled";
+export type SchedulingState =
+  | "unknown"
+  | "complete"
+  | "progressing"
+  | "stalled"
+  | "settled";
 
 /**
  * What the frontier says about progress.

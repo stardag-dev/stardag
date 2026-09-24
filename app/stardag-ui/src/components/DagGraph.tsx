@@ -101,7 +101,12 @@ function DynamicEdge(props: EdgeProps) {
         strokeWidth={12}
         pointerEvents="stroke"
       />
-      <BaseEdge id={id} path={edgePath} style={props.style} markerEnd={props.markerEnd} />
+      <BaseEdge
+        id={id}
+        path={edgePath}
+        style={props.style}
+        markerEnd={props.markerEnd}
+      />
     </g>
   );
 }
@@ -189,7 +194,11 @@ export function DagGraph({
       source: e.source,
       target: e.target,
       animated: statusById.get(e.target) === "running",
-      style: edgeStyle(mutedIds.has(e.source) || mutedIds.has(e.target), theme, e.isDynamic),
+      style: edgeStyle(
+        mutedIds.has(e.source) || mutedIds.has(e.target),
+        theme,
+        e.isDynamic,
+      ),
       ...(e.isDynamic ? { type: "dynamicEdge" } : {}),
     }));
     return { layoutedNodes: layout(nodes, edges, direction), layoutedEdges: edges };

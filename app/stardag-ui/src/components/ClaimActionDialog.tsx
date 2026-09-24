@@ -67,9 +67,9 @@ export function ClaimActionDialog({
         <>
           <p className="text-sm text-gray-600 dark:text-gray-400">
             Cancels {target} as build{" "}
-            <code className="text-xs">{shortBuildId(buildId)}</code>, releasing its claim
-            so the build retries it on its next tick. Only the build holding the claim
-            can do this.
+            <code className="text-xs">{shortBuildId(buildId)}</code>, releasing its
+            claim so the build retries it on its next tick. Only the build holding the
+            claim can do this.
           </p>
           <p className="text-sm text-gray-600 dark:text-gray-400">
             It stops nothing: if the worker is still running, it finds out at its next

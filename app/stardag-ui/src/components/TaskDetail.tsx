@@ -33,7 +33,9 @@ interface TaskDetailProps {
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div>
-      <h3 className="mb-1 text-sm font-medium text-gray-500 dark:text-gray-400">{title}</h3>
+      <h3 className="mb-1 text-sm font-medium text-gray-500 dark:text-gray-400">
+        {title}
+      </h3>
       {children}
     </div>
   );
@@ -67,9 +69,12 @@ export function TaskDetail({
   useEffect(() => {
     const epoch = ++epochRef.current;
     const fresh = () => epochRef.current === epoch;
-    setError(null);
     fetchTask(taskId, environmentId)
-      .then((t) => fresh() && setTask(t))
+      .then((t) => {
+        if (!fresh()) return;
+        setTask(t);
+        setError(null);
+      })
       .catch((err: unknown) => {
         if (!fresh()) return;
         setTask(null);
@@ -80,7 +85,9 @@ export function TaskDetail({
       .catch(() => fresh() && setArtifacts([]));
     if (buildId) {
       fetchBuildExecutions(buildId, environmentId)
-        .then((rows) => fresh() && setExecutions(rows.filter((e) => e.task_id === taskId)))
+        .then(
+          (rows) => fresh() && setExecutions(rows.filter((e) => e.task_id === taskId)),
+        )
         .catch(() => fresh() && setExecutions(null));
     }
   }, [taskId, environmentId, buildId, refreshToken, nonce]);
@@ -100,13 +107,18 @@ export function TaskDetail({
             {task ? qualifiedName(task.task_namespace, task.task_name) : "Task"}
           </h2>
           <div className="flex items-center gap-1">
-            <p className="truncate font-mono text-sm text-gray-500 dark:text-gray-400" title={taskId}>
+            <p
+              className="truncate font-mono text-sm text-gray-500 dark:text-gray-400"
+              title={taskId}
+            >
               {taskId}
             </p>
             <CopyButton text={taskId} />
           </div>
           {task?.version && (
-            <p className="text-sm text-gray-500 dark:text-gray-400">Version {task.version}</p>
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              Version {task.version}
+            </p>
           )}
         </div>
         {onClose && (
@@ -115,8 +127,18 @@ export function TaskDetail({
             className="ml-2 text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
           >
             <span className="sr-only">Close</span>
-            <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            <svg
+              className="h-6 w-6"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth="1.5"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M6 18L18 6M6 6l12 12"
+              />
             </svg>
           </button>
         )}
@@ -152,7 +174,10 @@ export function TaskDetail({
           {task.output_uri && (
             <Section title="Output URI">
               <div className="flex items-center gap-1">
-                <p className="truncate font-mono text-sm text-gray-900 dark:text-gray-100" title={task.output_uri}>
+                <p
+                  className="truncate font-mono text-sm text-gray-900 dark:text-gray-100"
+                  title={task.output_uri}
+                >
                   {task.output_uri}
                 </p>
                 <CopyButton text={task.output_uri} className="flex-shrink-0" />
@@ -166,7 +191,9 @@ export function TaskDetail({
                 <Section title="Started">{formatAbsoluteTime(task.started_at)}</Section>
               )}
               {task.completed_at && (
-                <Section title="Completed">{formatAbsoluteTime(task.completed_at)}</Section>
+                <Section title="Completed">
+                  {formatAbsoluteTime(task.completed_at)}
+                </Section>
               )}
             </div>
           )}
@@ -182,7 +209,9 @@ export function TaskDetail({
           {context && (
             <Section title="Running executions in this build">
               {executions === null ? (
-                <p className="text-xs text-gray-500 dark:text-gray-400">Not available.</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Not available.
+                </p>
               ) : (
                 <ExecutionTable executions={executions} />
               )}
@@ -190,7 +219,9 @@ export function TaskDetail({
           )}
 
           {artifacts === null ? (
-            <p className="text-sm text-gray-500 dark:text-gray-400">Loading artifacts…</p>
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              Loading artifacts…
+            </p>
           ) : (
             <ArtifactList artifacts={artifacts} />
           )}

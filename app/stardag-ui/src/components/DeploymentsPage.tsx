@@ -8,18 +8,12 @@ import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 import { CopyChip } from "./ui/CopyChip";
 import { ResultBanner } from "./ui/ResultBanner";
 
-/** A Modal app's dashboard link from its app id, when the id is known. */
-function modalAppIdUrl(modalAppId: string | null): string | null {
-  return modalAppId ? `https://modal.com/id/${modalAppId}` : null;
-}
-
 function Time({ at }: { at: string | null }) {
   if (!at) return <span className="text-gray-400">—</span>;
   return <span title={formatAbsoluteTime(at)}>{formatRelativeTime(at)}</span>;
 }
 
 function GenerationRow({ deployment }: { deployment: Deployment }) {
-  const appUrl = modalAppIdUrl(deployment.modal_app_id);
   return (
     <tr className={deployment.is_current ? "bg-green-50/60 dark:bg-green-950/20" : ""}>
       <td className="px-3 py-1.5 font-mono text-xs">
@@ -31,7 +25,11 @@ function GenerationRow({ deployment }: { deployment: Deployment }) {
         )}
       </td>
       <td className="px-3 py-1.5">
-        <CopyChip label={deployment.code_id} value={deployment.code_id} title="Code id" />
+        <CopyChip
+          label={deployment.code_id}
+          value={deployment.code_id}
+          title="Code id"
+        />
       </td>
       <td className="px-3 py-1.5 text-xs text-gray-600 dark:text-gray-400">
         <Time at={deployment.deployed_at} />
@@ -50,18 +48,11 @@ function GenerationRow({ deployment }: { deployment: Deployment }) {
       </td>
       <td className="px-3 py-1.5 text-xs">
         {deployment.modal_app_id ? (
-          appUrl ? (
-            <a
-              href={appUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-mono text-blue-700 hover:underline dark:text-blue-300"
-            >
-              {deployment.modal_app_id}
-            </a>
-          ) : (
-            <code>{deployment.modal_app_id}</code>
-          )
+          <CopyChip
+            label={deployment.modal_app_id}
+            value={deployment.modal_app_id}
+            title="Modal app id"
+          />
         ) : (
           <span className="text-gray-400">—</span>
         )}

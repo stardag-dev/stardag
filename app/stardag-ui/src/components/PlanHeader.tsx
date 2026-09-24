@@ -36,15 +36,21 @@ export function PlanHeader({ frontier, deployment, complete }: PlanHeaderProps) 
   return (
     <div className="space-y-1 border-b border-gray-200 px-4 py-1.5 dark:border-gray-700">
       <div className="flex flex-wrap items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
-        <span className="font-medium text-gray-700 dark:text-gray-300">Active plan</span>
+        <span className="font-medium text-gray-700 dark:text-gray-300">
+          Active plan
+        </span>
         <Chip title={frontier.deployment_id ?? undefined}>
-          {deployment ? deploymentLabel(deployment) : `deployment ${frontier.deployment_id?.slice(0, 8)}`}
+          {deployment
+            ? deploymentLabel(deployment)
+            : `deployment ${frontier.deployment_id?.slice(0, 8)}`}
           {deployment && !deployment.is_current ? " (not current)" : ""}
         </Chip>
         <Chip title={frontier.settings_hash ?? undefined}>
           settings {frontier.settings_hash?.slice(0, 8)}
         </Chip>
-        <Chip title="Activated plans are the build's one active request">activated</Chip>
+        <Chip title="Activated plans are the build's one active request">
+          activated
+        </Chip>
         <Chip
           title={
             frontier.sealed
