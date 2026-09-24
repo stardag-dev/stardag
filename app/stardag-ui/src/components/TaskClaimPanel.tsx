@@ -101,7 +101,12 @@ export function TaskClaimPanel({
   return (
     <div className="space-y-1.5">
       <div className="flex flex-wrap items-center gap-2">
-        <StatusBadge status={task.status} />
+        <StatusBadge
+          status={task.status}
+          holderBuildId={holderBuildId}
+          currentBuildId={buildId}
+          onOpenBuild={onOpenBuild}
+        />
         {task.status_at && (
           <span
             className="text-xs text-gray-500 dark:text-gray-400"

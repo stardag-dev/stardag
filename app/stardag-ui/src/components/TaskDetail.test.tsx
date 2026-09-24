@@ -146,4 +146,29 @@ describe("TaskDetail", () => {
       JSON.stringify({ added: ["x"] }, null, 2),
     );
   });
+
+  it("jumps to an event's build from the event log's Build column", async () => {
+    const BUILD = "01a0c5c3-f18e-7d22-bcaf-add71bd0287c";
+    vi.mocked(fetchTaskEvents).mockResolvedValue([
+      {
+        id: "e1",
+        event_type: "task_started",
+        created_at: "2026-09-24T00:00:00Z",
+        build_id: BUILD,
+        plan_id: "p",
+        execution_id: null,
+        task_id: TASK_ID,
+        report_applied: true,
+        error_message: null,
+        event_metadata: null,
+      },
+    ]);
+    const onOpenBuild = vi.fn();
+    render(
+      <TaskDetail taskId={TASK_ID} environmentId="env-1" onOpenBuild={onOpenBuild} />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "See full event log" }));
+    fireEvent.click(await screen.findByRole("button", { name: "…1bd0287c" }));
+    expect(onOpenBuild).toHaveBeenCalledWith(BUILD);
+  });
 });

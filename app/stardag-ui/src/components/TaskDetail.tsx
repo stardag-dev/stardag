@@ -234,6 +234,7 @@ export function TaskDetail({
             taskId={task.task_id}
             taskLabel={qualifiedName(task.task_namespace, task.task_name)}
             environmentId={environmentId}
+            onOpenBuild={onOpenBuild}
           />
 
           {task.output_uri && (
