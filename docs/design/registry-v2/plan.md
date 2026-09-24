@@ -354,6 +354,7 @@ assignee the maintainer.
       ~14 min. The long poles are S7 and
       `test_rollover`, each paying several pre-yield windows sized to a
       deploy. Nothing sleeps; shrinking those windows is the lever.
+      The docker-compose e2e tier (`integration-tests/tests`) is re-pointed to v2 in PR #391 (merged).
 
 - [ ] I11 — docs
 - [ ] I12 — release
