@@ -270,3 +270,99 @@ def test_ensure_fresh_volume_aio_works_across_event_loops(
     asyncio.run(_check())
 
     assert fake.aio_reload_count == 2
+
+
+# ---------------------------------------------------------------------------
+# A hit older than the current walk is refreshed (S5).
+# ---------------------------------------------------------------------------
+
+
+def _mounted_target(tmp_path, monkeypatch, fake):
+    """A ModalMountedVolumeFileTarget over ``tmp_path`` as the mount."""
+    from stardag.target import _freshness
+
+    monkeypatch.setattr(modal_target, "_get_volume", lambda _name: fake)
+    monkeypatch.setattr(_freshness, "_fence", 0.0)
+    target = modal_target.ModalMountedVolumeFileTarget.__new__(
+        modal_target.ModalMountedVolumeFileTarget
+    )
+    target._volume_name = "v"
+    target.volume = fake
+    target.local_path = tmp_path / "out.json"
+    return target
+
+
+def test_a_hit_from_before_the_walk_is_refreshed_and_a_deletion_seen(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A warm container's view can still hold a file another process
+    deleted. Once a walk has begun, a hit from an older view is not trusted:
+    the volume is reloaded once, and the deletion the reload brings in is
+    what ``exists`` answers."""
+    from stardag.target._freshness import begin_observation
+
+    output = tmp_path / "out.json"
+    output.write_text("{}")
+    fake = _FakeVolume(sync_reload_side_effect=lambda: output.unlink())
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+
+    # No walk yet: a hit is a hit, no reload (the old behaviour).
+    assert target.exists() is True
+    assert fake.reload_count == 0
+
+    begin_observation()
+    assert target.exists() is False
+    assert fake.reload_count == 1
+
+
+def test_one_reload_per_walk_serves_every_later_hit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    from stardag.target._freshness import begin_observation
+
+    (tmp_path / "out.json").write_text("{}")
+    fake = _FakeVolume()
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+
+    begin_observation()
+    assert target.exists() and target.exists() and target.exists()
+    assert fake.reload_count == 1
+
+    begin_observation()
+    assert target.exists()
+    assert fake.reload_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_stale_hit_is_refreshed_on_the_async_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    from stardag.target._freshness import begin_observation
+
+    output = tmp_path / "out.json"
+    output.write_text("{}")
+    fake = _FakeVolume(aio_reload_side_effect=lambda: output.unlink())
+    target = _mounted_target(tmp_path, monkeypatch, fake)
+
+    begin_observation()
+    assert await target.exists_aio() is False
+    assert fake.aio_reload_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_walk_begins_an_observation(monkeypatch: pytest.MonkeyPatch):
+    """``walk_aio`` sets the fence, so every completion it asks for is
+    answered from a view at least as fresh as the walk."""
+    import stardag as sd
+    from stardag.build._registration import walk_aio
+    from stardag.target import _freshness
+
+    monkeypatch.setattr(_freshness, "_fence", 0.0)
+    before = time.monotonic()
+
+    @sd.task
+    def fence_probe(x: int) -> int:
+        return x
+
+    await walk_aio(fence_probe(x=1), check_stability=False)
+    assert _freshness.observation_fence() >= before
