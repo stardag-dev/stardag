@@ -9,14 +9,17 @@ The shapes are the client's (``registry/_api_registry.py`` on the SDK side):
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.config import limits_settings
-from tests.v2_support import Harness, item
+from tests.v2_support import ENV, Harness, item
 
 
 @pytest.fixture
@@ -216,3 +219,52 @@ async def test_the_event_log_of_a_task_and_of_a_build(client: AsyncClient, h: Ha
 
     assert (await client.get("/api/v2/tasks/nope/events")).status_code == 404
     assert (await client.get(f"/api/v2/builds/{uuid4()}/events")).status_code == 404
+
+
+async def test_artifact_quota_serialises_on_the_task_row_lock(
+    client: AsyncClient,
+    h: Harness,
+    async_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Two uploads of different ``(type, name)`` pairs must not both pass
+    the per-task quota from an unlocked count and together exceed it: the
+    upload takes the task row lock (``FOR NO KEY UPDATE``) before counting,
+    so a concurrent uncommitted upload is waited for, not raced."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    path = f"/api/v2/plans/{plan.id}/members/{t.task_id}/artifacts"
+    monkeypatch.setattr(limits_settings, "max_artifacts_per_task", 2)
+
+    def art(name: str) -> dict[str, Any]:
+        return {"type": "json", "name": name, "body": {"x": "y"}}
+
+    task_pk = (await h.task(t))["id"]
+    async with async_engine.connect() as other:
+        # Session A: an in-flight upload of one artifact, not yet committed.
+        await other.execute(
+            text("SELECT id FROM task WHERE id = :id FOR NO KEY UPDATE"),
+            {"id": task_pk},
+        )
+        await other.execute(
+            text(
+                "INSERT INTO task_artifact (id, environment_id, task_pk,"
+                " artifact_type, name, body_json)"
+                " VALUES (:id, :env, :task_pk, 'json', 'a', '{}'::jsonb)"
+            ),
+            {"id": uuid4(), "env": ENV, "task_pk": task_pk},
+        )
+
+        # Session B: two more artifacts, which combined with A's uncommitted
+        # one exceed the quota of 2 — but an unlocked count reads 0 for A's
+        # row and would wrongly let both through.
+        uploading = asyncio.create_task(
+            client.post(path, json={"artifacts": [art("b"), art("c")]})
+        )
+        await asyncio.sleep(0.3)
+        assert not uploading.done(), "must wait on session A's task row lock"
+        await other.commit()
+
+    refused = await uploading
+    assert refused.status_code == 429, refused.text
+    assert refused.json()["detail"]["code"] == "artifacts_per_task_limit"

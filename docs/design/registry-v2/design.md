@@ -269,7 +269,10 @@ and workers run one input per container and scale by containers (a declared
 `max_concurrent_inputs` above one on them is refused at deploy), and
 `settings_applied` refuses a second build entering while another build's
 settings are installed, so a misconfiguration fails loudly rather than
-running under the wrong build's values. The cost is more containers — a
+running under the wrong build's values. The scoped blocks and a resident
+driver hold one process-wide owner token, so a resident `sd.build()` and a
+local reactive bootstrap or tick in one process cannot both install
+settings (the refusal names the owner). The cost is more containers — a
 lingering tick holds one of its own — accepted. The
 docs say "read at run time, not import time", because warm containers import
 before they know the build. Two names it is deliberately not: `env_overrides`,

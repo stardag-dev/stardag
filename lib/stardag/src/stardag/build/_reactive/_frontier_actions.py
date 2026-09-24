@@ -41,7 +41,7 @@ from stardag.build._registration import (
     walk_aio,
 )
 from stardag.build._task_modules import import_failure_note
-from stardag.exceptions import APIError, StardagError
+from stardag.exceptions import APIError, StardagError, execution_not_wanted
 from stardag.registry import BuildFrontier, FrontierMember, RegistryABC
 
 if typing.TYPE_CHECKING:
@@ -59,8 +59,6 @@ _CLAIM_DENIED_CODES = frozenset(
         "execution_superseded",
     }
 )
-# A report refused because the claim moved on from the execution.
-_NOT_CURRENT_CODES = frozenset({"execution_not_current", "execution_superseded"})
 
 # --- The per-pass spawn cap ------------------------------------------------
 # A tick lives in a container with a finite life, so the cap is a duration
@@ -85,6 +83,9 @@ class PassResult:
     # A claim was refused ``plan_superseded``: a newer request replaced this
     # tick's plan, so the tick stops.
     superseded: bool = False
+    # The scheduler lease was lost during the pass: another tick may be
+    # driving the build, so nothing further was claimed or registered.
+    lease_lost: bool = False
     spawned: list[str] = field(default_factory=list)
 
 
@@ -137,6 +138,20 @@ def spawn_cap(
     )
 
 
+LeaseLost = typing.Callable[[], bool]
+
+
+def _never_lost() -> bool:
+    return False
+
+
+def _stop_for_lost_lease(lease_lost: LeaseLost, result: PassResult) -> bool:
+    if result.lease_lost or lease_lost():
+        result.lease_lost = True
+        return True
+    return False
+
+
 def rehydrate(member: FrontierMember) -> BaseTask:
     """The task object of a member, from its instance body — the only way a
     tick gets one. Strict on the task id (a significant field this code
@@ -172,8 +187,12 @@ async def _discovery_job(
     registry: RegistryABC,
     config: "TickConfig",
     summary: "TickSummary",
+    result: PassResult,
+    lease_lost: "LeaseLost",
 ) -> None:
     """Expand one unexpanded member and register it with its closure."""
+    if _stop_for_lost_lease(lease_lost, result):
+        return
     try:
         task = rehydrate(member)
         walk = await walk_aio(
@@ -206,8 +225,17 @@ async def _spawn(
     config: "TickConfig",
     summary: "TickSummary",
     result: PassResult,
+    lease_lost: "LeaseLost",
 ) -> None:
-    """Claim one runnable member, spawn it, record its ref."""
+    """Claim one runnable member, spawn it, record its ref.
+
+    Checks the lease immediately before the claim: once it is lost, no new
+    claim is taken. A claim already granted is carried through its spawn
+    and ref — the claim, not the lease, is what makes the task's execution
+    exclusive, and abandoning it would strand it until its TTL lapses.
+    """
+    if _stop_for_lost_lease(lease_lost, result):
+        return
     limit_keys = (
         list(config.limit_key_selector(task)) if config.limit_key_selector else []
     )
@@ -271,10 +299,12 @@ async def _spawn(
             executor_metadata=handle.executor_metadata,
         )
     except APIError as e:
-        if e.code not in _NOT_CURRENT_CODES:
+        if not execution_not_wanted(e):
             raise
-        # The claim moved on while the spawn was in flight: this container
-        # is an orphan nothing else can find. Stop it.
+        # This execution is over before its ref was recorded — the claim
+        # moved on (to another execution, or to another plan:
+        # ``not_claim_holder``), or the ledger has no such execution: this
+        # container is an orphan nothing else can find. Stop it.
         logger.warning(
             f"Task {member.task_id} stopped being this execution's during its "
             f"spawn ({e.code}); stopping {handle.ref!r}."
@@ -296,10 +326,19 @@ async def act_on_frontier(
     task_executor: TaskExecutorABC,
     config: "TickConfig",
     summary: "TickSummary",
+    lease_lost: "LeaseLost | None" = None,
 ) -> PassResult:
     """One pass: discovery jobs, then (if the plan still stands) claims and
     spawns of the runnable members, each phase bounded by
-    ``max_concurrent_actions``. See the module docstring."""
+    ``max_concurrent_actions``. See the module docstring.
+
+    ``lease_lost`` is the scheduler lease's loss signal, read before every
+    action (a discovery job's registration, the seal, each claim): the
+    lease is single-flight for ticks, and a renewal that fails or is
+    refused mid-pass means another tick may already be acting. The pass
+    then stops and returns ``lease_lost``.
+    """
+    lost: LeaseLost = lease_lost or _never_lost
     assert frontier.plan_id is not None
     plan_id = frontier.plan_id
     result = PassResult()
@@ -315,16 +354,22 @@ async def act_on_frontier(
                     registry=registry,
                     config=config,
                     summary=summary,
+                    result=result,
+                    lease_lost=lost,
                 )
                 for member in frontier.discovery_jobs
             ],
             semaphore,
         )
         result.acted = True
+        if result.lease_lost:
+            return result
     elif not frontier.sealed:
         # Nothing left to expand, and the plan is not sealed: the driver
         # that registered it stopped before its seal. Seal it (the seal
         # verifies the static phase; a refusal leaves it to the next pass).
+        if _stop_for_lost_lease(lost, result):
+            return result
         try:
             await registry.plan_seal_aio(plan_id)
             result.acted = True
@@ -336,6 +381,8 @@ async def act_on_frontier(
 
     loaded: list[tuple[BaseTask, FrontierMember]] = []
     for member in frontier.runnable:
+        if _stop_for_lost_lease(lost, result):
+            return result
         try:
             loaded.append((rehydrate(member), member))
         except TaskRehydrationError as e:
@@ -360,6 +407,7 @@ async def act_on_frontier(
                 config=config,
                 summary=summary,
                 result=result,
+                lease_lost=lost,
             )
             for task, member in loaded
         ],

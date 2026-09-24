@@ -47,7 +47,7 @@ from stardag.build._registration import (
     register_plan_aio,
     send_yield_aio,
 )
-from stardag.exceptions import APIError
+from stardag.exceptions import EXECUTION_OVER_CODES, APIError
 from stardag.registry import RegistryABC, is_noop_registry
 
 logger = logging.getLogger(__name__)
@@ -55,10 +55,10 @@ logger = logging.getLogger(__name__)
 LimitKeySelector = Callable[[BaseTask], Sequence[str]]
 
 #: Refusals of a report that say the execution is already over — its claim
-#: moved on, or its end was already recorded. Nothing for the engine to do.
-_LATE_REPORT_CODES = frozenset(
-    {"execution_not_current", "execution_already_ended", "unknown_execution"}
-)
+#: moved on (to another execution, or to another plan: ``not_claim_holder``),
+#: the ledger has no such execution, or its end was already recorded.
+#: Nothing for the engine to do; a detached ref refused this way is an orphan.
+_LATE_REPORT_CODES = EXECUTION_OVER_CODES | {"execution_already_ended"}
 
 #: Claim refusals that mean "someone else, wait": another execution holds
 #: the claim, an upstream is not COMPLETED in the registry yet, or a

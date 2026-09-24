@@ -345,6 +345,44 @@ class TestWorkerEnv:
         assert STARDAG_WORKER_REPORTS_LIFECYCLE_ENV not in env
         assert STARDAG_PLAN_ID_ENV in env
 
+    async def test_a_context_without_a_plan_never_forwards_selector_ids(self):
+        """A build context with no plan (a registration failure degraded to
+        ``warn``): the plan and execution ids are not the context's to give,
+        and a selector's values for them are removed, not forwarded — the
+        worker must not report through a selector-chosen plan/execution."""
+        from stardag.integration.modal._metadata import (
+            STARDAG_BUILD_ID_ENV,
+            STARDAG_CLAIM_TTL_SECONDS_ENV,
+            STARDAG_EXECUTION_ID_ENV,
+            STARDAG_PLAN_ID_ENV,
+        )
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        hijack = {
+            STARDAG_PLAN_ID_ENV: "hijacked",
+            STARDAG_EXECUTION_ID_ENV: "hijacked",
+            STARDAG_CLAIM_TTL_SECONDS_ENV: "1",
+        }
+        executor = ModalTaskExecutor(
+            modal_app_name="test-app",
+            worker_selector=lambda task: ("default", dict(hijack)),
+        )
+        executor._worker_functions["default"] = worker  # pyright: ignore[reportArgumentType]
+        build_id = uuid4()
+        with _in_build(build_id=build_id):
+            await executor.submit_detached(_make_task(), execution_id=uuid4())
+        _, env = worker.spawn_calls[-1]
+        assert env is not None
+        assert env[STARDAG_BUILD_ID_ENV] == str(build_id)
+        assert STARDAG_PLAN_ID_ENV not in env
+        assert STARDAG_EXECUTION_ID_ENV not in env
+        assert env.get(STARDAG_CLAIM_TTL_SECONDS_ENV) != "1"
+
+        # No context at all: the selector's framework ids are removed too.
+        await executor.submit_detached(_make_task(), execution_id=uuid4())
+        _, env = worker.spawn_calls[-1]
+        assert env is None or not (set(hijack) & set(env))
+
     async def test_outside_a_build_only_the_selector_env_is_sent(self):
         from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
 

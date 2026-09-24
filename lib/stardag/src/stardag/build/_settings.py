@@ -29,6 +29,8 @@ Mechanics:
   the run; a resident driver applies them for the whole build with
   :func:`resident_settings`, which refuses a second concurrent build in the
   same process under different settings (the environment is per process).
+  Both hold one process-wide owner token, so a resident build and a scoped
+  block (a local reactive bootstrap or tick) never both install settings.
 - **A process applying a build's settings serves one build at a time.**
   The deployed tick and worker functions run one input per container and
   scale by containers (refused at deploy otherwise), and
@@ -132,12 +134,42 @@ async def resolve_settings_aio(
     return validate_settings((await registry.settings_get_aio(settings_hash)).body)
 
 
+# One owner token for the whole process, shared by both ways of installing
+# a build's settings: a scoped block (``settings_applied``/``settings_owner``
+# — a tick's pass, a bootstrap, a worker's run) holds it for one build id; a
+# resident ``sd.build()`` (``resident_settings``) holds it for its whole
+# duration. Whichever holds it, the other kind is refused, so a resident
+# build and a reactive bootstrap/tick in one process can never both install
+# settings.
 _owner_lock = threading.Lock()
-# The build whose settings are installed in this process by
-# ``settings_applied``/``settings_owner``, and how many (nested) blocks of it
-# are open. ``None`` when no build owns the environment.
+
+
+class _ResidentOwner:
+    """The owner token of the resident builds running in this process.
+
+    Resident builds share it when their settings are equal (the variables
+    are set by the first to enter and restored by the last to leave); the
+    build id is not known yet when a resident build applies its settings.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.count = 0
+        self.restore: dict[str, str | None] = {k: os.environ.get(k) for k in settings}
+
+    def __str__(self) -> str:
+        return "a resident sd.build()"
+
+
+# The owner whose settings are installed in this process: a build id (a
+# scoped block, with ``_installed_depth`` nested blocks open), a
+# ``_ResidentOwner``, or ``None`` when no build owns the environment.
 _installed_owner: object | None = None
 _installed_depth = 0
+
+
+def _describe(owner: object) -> str:
+    return str(owner) if isinstance(owner, _ResidentOwner) else f"build {owner}"
 
 
 @contextlib.contextmanager
@@ -147,22 +179,25 @@ def settings_owner(owner: object) -> typing.Iterator[None]:
     Settings are process-global environment variables (D4), so a process
     that applies a build's settings serves one build at a time. Re-entering
     for the same owner nests; entering for a different owner while one is
-    installed is refused, rather than letting either build run under the
-    other's values (or have its values removed by the other's restore).
+    installed — another build's scoped block, or a resident ``sd.build()`` —
+    is refused, rather than letting either build run under the other's
+    values (or have its values removed by the other's restore).
 
     Raises:
-        SettingsError: Another build's settings are installed in this
-            process.
+        SettingsError: Another owner's settings are installed in this
+            process (the message names it).
     """
     global _installed_owner, _installed_depth
     with _owner_lock:
-        if _installed_owner is not None and _installed_owner != owner:
+        if _installed_owner is not None and (
+            isinstance(_installed_owner, _ResidentOwner) or _installed_owner != owner
+        ):
             raise SettingsError(
-                f"Build {owner} cannot apply its settings: build "
-                f"{_installed_owner}'s settings are already installed in this "
-                "process. Settings are environment variables, so a process "
-                "applying them serves one build at a time; deployed ticks and "
-                "workers must run one input per container "
+                f"Build {owner} cannot apply its settings: "
+                f"{_describe(_installed_owner)}'s settings are already installed "
+                "in this process. Settings are environment variables, so a "
+                "process applying them serves one build at a time; deployed "
+                "ticks and workers must run one input per container "
                 "(max_concurrent_inputs=1) and scale by containers."
             )
         _installed_owner = owner
@@ -185,18 +220,11 @@ def settings_applied(
     build ``owner``.
 
     Raises:
-        SettingsError: Another build's settings are installed in this
+        SettingsError: Another owner's settings are installed in this
             process (see :func:`settings_owner`).
     """
     with settings_owner(owner), temp_env_vars(dict(settings or {})):
         yield
-
-
-_resident_lock = threading.Lock()
-# The settings every running resident build in this process was started
-# with (all equal), and the environment values they replaced.
-_resident_active: list[Settings] = []
-_resident_restore: dict[str, str | None] = {}
 
 
 @contextlib.contextmanager
@@ -207,35 +235,49 @@ def resident_settings(settings: Mapping[str, str] | None) -> typing.Iterator[Non
     in one process can only share it if they agree: a second one with
     *different* settings is refused rather than silently changing the
     first build's environment under it. The variables are set by the first
-    build to enter and restored by the last to leave.
+    build to enter and restored by the last to leave. A resident build is
+    also refused while a scoped block (a local reactive bootstrap or tick)
+    holds the process's settings, and holds them against one — the same
+    owner token (see :func:`settings_owner`).
 
     Raises:
         SettingsError: Another resident build in this process is running
-            under different settings.
+            under different settings, or another build's scoped settings
+            are installed (the message names it).
     """
+    global _installed_owner
     wanted = dict(settings or {})
-    with _resident_lock:
-        if any(active != wanted for active in _resident_active):
+    with _owner_lock:
+        installed = _installed_owner
+        if installed is not None and not isinstance(installed, _ResidentOwner):
+            raise SettingsError(
+                f"sd.build() cannot apply its settings: {_describe(installed)}'s "
+                "settings are already installed in this process. Settings are "
+                "environment variables, so a process applying them serves one "
+                "build at a time; run them one after the other, or in separate "
+                "processes."
+            )
+        if installed is not None and installed.settings != wanted:
             raise SettingsError(
                 "Another sd.build() in this process is running under different "
                 "settings; settings are environment variables, so two "
                 "concurrent builds in one process cannot use different ones. "
                 "Run them one after the other, or in separate processes."
             )
-        if not _resident_active:
-            _resident_restore.clear()
-            _resident_restore.update({k: os.environ.get(k) for k in wanted})
+        if installed is None:
+            installed = _ResidentOwner(wanted)
             os.environ.update(wanted)
-        _resident_active.append(wanted)
+            _installed_owner = installed
+        installed.count += 1
     try:
         yield
     finally:
-        with _resident_lock:
-            _resident_active.remove(wanted)
-            if not _resident_active:
-                for key, value in _resident_restore.items():
+        with _owner_lock:
+            installed.count -= 1
+            if installed.count == 0:
+                for key, value in installed.restore.items():
                     if value is None:
                         os.environ.pop(key, None)
                     else:
                         os.environ[key] = value
-                _resident_restore.clear()
+                _installed_owner = None
