@@ -419,6 +419,18 @@ class TestTheEnd:
 
 
 class TestLeaseAndHandshake:
+    async def test_a_release_reports_whether_the_caller_held_the_lease(self):
+        """The fake follows the server: an owner-checked release answers
+        ``held`` -- a stranger's release clears nothing and says so."""
+        registry = InMemoryRegistry()
+        build_id = registry.build_create(root_task_ids=["t"]).id
+        registry.scheduler_lease_acquire(build_id, owner_id="a", ttl_seconds=60)
+        assert registry.scheduler_lease_release(build_id, owner_id="b").held is False
+        assert registry.scheduler_lease_renew(
+            build_id, owner_id="a", ttl_seconds=60
+        ).held
+        assert registry.scheduler_lease_release(build_id, owner_id="a").held is True
+
     async def test_a_held_lease_is_a_no_op(self, default_in_memory_fs_target: Target):
         registry = InMemoryRegistry()
         build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"l-{new_id()}")])
@@ -518,6 +530,98 @@ class TestLeaseAndHandshake:
         claims = [c for c in registry.calls_to("member_start") if c["claim"]]
         assert len(claims) == 1
         assert summary.spawned == 1
+
+    @staticmethod
+    def _recording_leases(mp: pytest.MonkeyPatch) -> list:
+        """Every lease a tick takes, so a test can lose it mid-action."""
+        from stardag.build._reactive._lease import SchedulerLease
+
+        leases: list[SchedulerLease] = []
+        original_aenter = SchedulerLease.__aenter__
+
+        async def recording_aenter(self):
+            leases.append(self)
+            return await original_aenter(self)
+
+        mp.setattr(SchedulerLease, "__aenter__", recording_aenter)
+        return leases
+
+    async def test_a_lease_lost_during_the_metadata_await_takes_no_claim(
+        self, default_in_memory_fs_target: Target, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Re-checked after ``get_executor_metadata()``: an await between
+        the entry check and the claim can outlive the lease."""
+        registry = InMemoryRegistry()
+        (task,) = [SyncOnlyTask(name=f"one-{new_id()}")]
+        build_id, _ = await _plan(registry, [task])
+        leases = self._recording_leases(monkeypatch)
+
+        class LosesLeaseInMetadata(FakeDetachedExecutor):
+            async def get_executor_metadata(self, task):
+                for lease in leases:
+                    lease._lost = True
+                return None
+
+        summary = await _tick(
+            registry, build_id, LosesLeaseInMetadata(registry=registry)
+        )
+        assert summary.outcome == "lease_lost"
+        assert not [c for c in registry.calls_to("member_start") if c["claim"]]
+
+    async def test_a_lease_lost_during_discovery_registers_nothing(
+        self, default_in_memory_fs_target: Target, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Re-checked before ``register_members_aio``: discovery runs user
+        code and completion checks, and can outlive the lease."""
+        from stardag.build._reactive import _frontier_actions
+
+        registry = InMemoryRegistry()
+        _, _, root = _chain()
+        build_id, _ = await _plan(registry, [root], expand=False)
+        leases = self._recording_leases(monkeypatch)
+        original_walk = _frontier_actions.walk_aio
+
+        async def outliving_walk(*args, **kwargs):
+            walk = await original_walk(*args, **kwargs)
+            for lease in leases:
+                lease._lost = True
+            return walk
+
+        monkeypatch.setattr(_frontier_actions, "walk_aio", outliving_walk)
+        registered = len(registry.calls_to("plan_register_members"))
+        summary = await _tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry)
+        )
+        assert summary.outcome == "lease_lost"
+        assert summary.discovered == 0
+        assert len(registry.calls_to("plan_register_members")) == registered
+
+    async def test_a_lease_lost_during_a_failing_discovery_excludes_nothing(
+        self, default_in_memory_fs_target: Target, monkeypatch: pytest.MonkeyPatch
+    ):
+        """And before an exclusion: a discovery that failed after the lease
+        was lost is left to the tick that holds it."""
+        from stardag.build._reactive import _frontier_actions
+        from stardag.exceptions import StardagError
+
+        registry = InMemoryRegistry()
+        _, _, root = _chain()
+        build_id, _ = await _plan(registry, [root], expand=False)
+        leases = self._recording_leases(monkeypatch)
+
+        async def failing_walk(*args, **kwargs):
+            for lease in leases:
+                lease._lost = True
+            raise StardagError("cannot state this member")
+
+        monkeypatch.setattr(_frontier_actions, "walk_aio", failing_walk)
+        summary = await _tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry)
+        )
+        assert summary.outcome == "lease_lost"
+        assert summary.excluded == 0
+        assert not registry.called("member_discovery_failed")
+        assert not registry.called("member_exclude")
 
 
 class TestRollover:

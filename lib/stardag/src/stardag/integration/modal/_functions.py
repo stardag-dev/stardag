@@ -66,7 +66,8 @@ if typing.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # How many scheduler ticks one container serves at once: **one**, and the
-# same for every worker function (``one_build_per_process`` below).
+# same for the bootstrap and every worker function
+# (``one_build_per_process`` below).
 #
 # **Why.** A tick and a worker apply their build's ``settings`` as
 # process-global environment variables (D4), across the whole pass or run;
@@ -90,9 +91,9 @@ def _refuse_packed_settings_function(
     name: str, concurrency: InputConcurrency | None
 ) -> None:
     """Refuse input concurrency above one on a function that applies a
-    build's settings (the tick and every worker): the deploy fails here, in
-    the setting name the app wrote, instead of the first two overlapping
-    builds failing at run time."""
+    build's settings (the tick, the bootstrap and every worker): the deploy
+    fails here, in the setting name the app wrote, instead of the first two
+    overlapping builds failing at run time."""
     if concurrency is None or concurrency.get("max_inputs", 1) <= 1:
         return
     raise StardagError(
@@ -480,9 +481,14 @@ def _register_functions(
         # back to the caller as the Modal return value.
         return result.summary
 
-    register("bootstrap", self._bootstrap_settings or self._builder_settings)(
-        _modal_bootstrap
-    )
+    # The bootstrap walks the DAG under ``settings_applied(...)`` as well,
+    # so it is held to the same one-build-per-process rule as the tick and
+    # the workers.
+    register(
+        "bootstrap",
+        self._bootstrap_settings or self._builder_settings,
+        one_build_per_process=True,
+    )(_modal_bootstrap)
     function_names.append("bootstrap")
 
     # Always deployed, scheduled only when a period is set. The sweep is

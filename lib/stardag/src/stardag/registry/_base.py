@@ -663,13 +663,17 @@ class RegistryABC:
             build_id, owner_id=owner_id, ttl_seconds=ttl_seconds
         )
 
-    def scheduler_lease_release(self, build_id: UUID, *, owner_id: str) -> None:
+    def scheduler_lease_release(
+        self, build_id: UUID, *, owner_id: str
+    ) -> SchedulerLeaseResult:
+        """Drop the lease if ``owner_id`` still holds it; ``held`` reports
+        whether it did (a lost tick cannot clear its successor's lease)."""
         raise _missing(self, "scheduler_lease_release")
 
     async def scheduler_lease_release_aio(
         self, build_id: UUID, *, owner_id: str
-    ) -> None:
-        self.scheduler_lease_release(build_id, owner_id=owner_id)
+    ) -> SchedulerLeaseResult:
+        return self.scheduler_lease_release(build_id, owner_id=owner_id)
 
     def build_report_tick_summary(
         self, build_id: UUID, summary: Mapping[str, Any]

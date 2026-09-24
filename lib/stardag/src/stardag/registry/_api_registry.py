@@ -730,13 +730,15 @@ class APIRegistry(HTTPTransport, RegistryABC):
     ) -> SchedulerLeaseResult:
         return await self.acall(_lease_req("PUT", build_id, owner_id, ttl_seconds))
 
-    def scheduler_lease_release(self, build_id: UUID, *, owner_id: str) -> None:
-        self.call(_lease_req("DELETE", build_id, owner_id))
+    def scheduler_lease_release(
+        self, build_id: UUID, *, owner_id: str
+    ) -> SchedulerLeaseResult:
+        return self.call(_lease_req("DELETE", build_id, owner_id))
 
     async def scheduler_lease_release_aio(
         self, build_id: UUID, *, owner_id: str
-    ) -> None:
-        await self.acall(_lease_req("DELETE", build_id, owner_id))
+    ) -> SchedulerLeaseResult:
+        return await self.acall(_lease_req("DELETE", build_id, owner_id))
 
     def _tick_summary_req(
         self, build_id: UUID, summary: Mapping[str, Any]

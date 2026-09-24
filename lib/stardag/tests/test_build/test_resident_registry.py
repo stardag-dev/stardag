@@ -429,6 +429,13 @@ class TestDeployments:
         assert (deployment.kind, deployment.code_id) == ("local", "test-code")
         assert deployment.activated_at is not None
         assert {p.deployment_id for p in registry.plans.values()} == {deployment.id}
+        # Client-minted ids (a uuid7 per lookup-or-create), and the lookup
+        # keeps the first: the second build's minted id was not used.
+        creates = registry.calls_to("deployment_create")
+        assert len(creates) == 2
+        assert all(c["deployment_id"] is not None for c in creates)
+        assert creates[0]["deployment_id"] != creates[1]["deployment_id"]
+        assert deployment.id == creates[0]["deployment_id"]
 
     async def test_a_build_whose_tasks_run_on_an_app_plans_under_its_current_deployment(
         self, default_in_memory_fs_target: Target

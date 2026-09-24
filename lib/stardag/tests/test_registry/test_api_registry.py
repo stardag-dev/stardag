@@ -368,6 +368,7 @@ class TestRoutes:
         recorder = _Recorder(
             {
                 ("POST", lease): {"build_id": str(build_id), "held": True},
+                ("DELETE", lease): {"build_id": str(build_id), "held": False},
                 ("POST", notify): {
                     "build_id": str(build_id),
                     "needs_tick": True,
@@ -383,6 +384,9 @@ class TestRoutes:
             "owner_id": "o",
             "ttl_seconds": "60",
         }
+        # The release answers whether the caller held it (the server's
+        # LeaseResponse): a lost tick's release is visibly a no-op.
+        assert registry.scheduler_lease_release(build_id, owner_id="o").held is False
         assert registry.build_notify(build_id, can_spawn=False).scheduler_live is True
         assert recorder.requests[-1].url.params["can_spawn"] == "false"
 

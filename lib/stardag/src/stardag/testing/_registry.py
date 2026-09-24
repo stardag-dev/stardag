@@ -582,11 +582,15 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         build.lease_expires_at = self.now() + timedelta(seconds=ttl_seconds)
         return SchedulerLeaseResult(held=True, expires_at=build.lease_expires_at)
 
-    def scheduler_lease_release(self, build_id: UUID, *, owner_id: str) -> None:
+    def scheduler_lease_release(
+        self, build_id: UUID, *, owner_id: str
+    ) -> SchedulerLeaseResult:
         build = self.build(build_id)
-        if build.lease_owner == owner_id:
-            build.lease_owner = None
-            build.lease_expires_at = None
+        if build.lease_owner != owner_id:
+            return SchedulerLeaseResult(held=False)
+        build.lease_owner = None
+        build.lease_expires_at = None
+        return SchedulerLeaseResult(held=True)
 
     def build_report_tick_summary(
         self, build_id: UUID, summary: Mapping[str, Any]
