@@ -4,7 +4,7 @@ import { fetchServerVersion } from "../api/version";
 /**
  * Small muted footer line showing the server release version.
  *
- * Fetches GET /api/v1/version lazily on mount and renders nothing while
+ * Fetches GET /api/v2/version lazily on mount and renders nothing while
  * loading or when the fetch fails - it must never break the page it sits on.
  */
 export function ServerVersionFooter() {

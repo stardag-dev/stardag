@@ -22,6 +22,7 @@ from stardag_api.schemas_v2 import (
     ConcurrencyLimitSet,
     DeploymentActivate,
     DeploymentCreate,
+    DeploymentInfo,
     DeploymentListResponse,
     DeploymentResponse,
     SettingsResponse,
@@ -79,11 +80,11 @@ async def list_deployments(
         limit=limit,
     )
     return DeploymentListResponse(
-        deployments=[DeploymentResponse.model_validate(r) for r in rows]
+        deployments=[DeploymentInfo.model_validate(r) for r in rows]
     )
 
 
-@router.get("/deployments/{deployment_id}", response_model=DeploymentResponse)
+@router.get("/deployments/{deployment_id}", response_model=DeploymentInfo)
 async def get_deployment(deployment_id: UUID, db: Db, auth: Auth):
     return await deployments.get_deployment(db, auth.environment_id, deployment_id)
 

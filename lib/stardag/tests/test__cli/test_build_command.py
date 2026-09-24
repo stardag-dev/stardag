@@ -182,6 +182,42 @@ class TestRealBuild:
         assert "1 succeeded" in result.output
         assert os.environ.get("SIMPLE_DAG_LEAF_FROM_ENV_PARAM_B") is None
 
+    @pytest.mark.parametrize("json_output", [False, True])
+    def test_a_failed_build_prints_its_summary_not_a_traceback(
+        self, default_in_memory_fs_target, fake_registry, json_output
+    ):
+        """Fail-fast (the default) used to raise the task's exception as a
+        raw traceback, with no build id and nothing on stdout for --json.
+        The failure path prints the success path's summary: build id,
+        status, the failed task and its error, exit code 1."""
+        from stardag.registry import registry_provider
+        from stardag.utils.testing.helper_tasks import FailingTask
+
+        task = FailingTask(error_message="disk full")
+        args = [
+            "build",
+            "stardag.utils.testing.helper_tasks:FailingTask",
+            "--param",
+            'error_message="disk full"',
+        ]
+        with registry_provider.override(fake_registry):
+            result = runner.invoke(cli, args + (["--json"] if json_output else []))
+        assert result.exit_code == 1, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Traceback" not in result.output
+        (build_id,) = fake_registry.builds
+        assert fake_registry.builds[build_id].status == "failed"
+        if json_output:
+            payload = json.loads(result.stdout)
+            assert payload["build_id"] == str(build_id)
+            assert payload["status"] == "failure"
+            assert payload["failed_task"]["task_id"] == str(task.id)
+            assert payload["error"] == "ValueError: disk full"
+        else:
+            assert f"Build {build_id}: failure" in result.output
+            assert str(task.id) in result.output
+            assert "ValueError: disk full" in result.output
+
     def test_bare_resume_does_not_re_resolve_settings_a_second_time(
         self, default_in_memory_fs_target, fake_registry, monkeypatch
     ):

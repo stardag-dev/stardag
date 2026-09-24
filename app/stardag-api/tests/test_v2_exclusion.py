@@ -13,7 +13,7 @@ import pytest
 from httpx import AsyncClient
 
 from stardag_api.models import ExclusionReason
-from stardag_api.services import builds
+from stardag_api.services import builds, exclusion
 from stardag_api.services.errors import Conflict
 from stardag_api.services.transitions import (
     Transition,
@@ -71,6 +71,24 @@ async def test_skip_blocked_walks_instance_edges_within_the_plan(h: Harness):
     }
 
 
+async def test_skip_blocked_is_a_no_op_on_a_cancelled_build(h: Harness):
+    """A cancel releases the build's claims, leaving those tasks CANCELLED;
+    a late skip-blocked from a driver that raced the cancel must not read
+    them as failures and skip their downstream: a build that did not fail
+    has no failure to propagate."""
+    leaf = item("Leaf")
+    root = item("Root", upstreams=[leaf])
+    build, plan = await h.planned([root], [leaf, root], seal=True)
+    await h.start(plan.id, leaf)
+    async with h.sf() as s:
+        await builds.cancel_build(s, ENV, build)
+    assert (await h.task(leaf))["status"] == "cancelled"
+    async with h.sf() as s:
+        result = await exclusion.skip_blocked(s, ENV, build)
+    assert result.skipped == []
+    assert (await h.task(root))["status"] == "pending"
+
+
 async def test_s18_an_operator_exclusion_cascades_and_leaves_the_global_status(
     h: Harness,
 ):
@@ -94,7 +112,8 @@ async def test_s18_an_operator_exclusion_cascades_and_leaves_the_global_status(
 
     result = await h.exclude(plan.id, bad)
     assert result.excluded == [bad.task_id, *sorted([mid.task_id, root.task_id])]
-    assert result.build_failed  # the cascade reached the root
+    assert result.roots_excluded == [root.task_id]  # the cascade reached it
+    assert result.build_failed
     members = await h.members(plan.id)
     assert members[bad.task_id]["excluded_reason"] == "operator"
     assert members[mid.task_id]["excluded_reason"] == "upstream_excluded"
@@ -106,7 +125,10 @@ async def test_s18_an_operator_exclusion_cascades_and_leaves_the_global_status(
     assert len(events) == 3
 
     again = await h.exclude(plan.id, bad)
-    assert again.excluded == [] and again.build_failed
+    # A re-delivery excludes nothing, so it reached no root and failed
+    # nothing: the result describes this call, not the plan.
+    assert again.excluded == [] and again.roots_excluded == []
+    assert not again.build_failed
     assert len(await h.events(types=["task_excluded"], plan_id=plan.id)) == 3
 
 
@@ -134,10 +156,40 @@ async def test_s18_an_excluded_root_fails_the_build(h: Harness):
     root = item("Root")
     build, plan = await h.planned([root], [root], seal=True)
     result = await h.exclude(plan.id, root)
-    assert result.build_failed
+    assert result.build_failed and result.roots_excluded == [root.task_id]
     assert (await h.build(build))["status"] == "failed"
     (failed,) = await h.events(build_id=build, types=["build_failed"])
     assert failed["event_metadata"]["reason"] == "root_excluded"
+
+
+async def test_a_later_exclusion_reports_only_what_it_did(h: Harness):
+    """Once a root is excluded (the build FAILED), excluding a completed
+    leaf off every root's path cascades nowhere: the result names no root
+    and says it failed nothing, and no second ``build_failed`` is written."""
+    leaf, bad = item("Leaf"), item("Bad")
+    root = item("Root", upstreams=[bad])
+    build, plan = await h.planned([root], [observed(leaf, True), bad, root], seal=True)
+    first = await h.exclude(plan.id, bad)
+    assert first.roots_excluded == [root.task_id] and first.build_failed
+
+    later = await h.exclude(plan.id, leaf)
+    assert later.excluded == [leaf.task_id]
+    assert later.roots_excluded == [] and not later.build_failed
+    assert len(await h.events(build_id=build, types=["build_failed"])) == 1
+
+
+async def test_a_root_exclusion_leaves_a_terminal_build_as_it_is(h: Harness):
+    """A terminal build status is sticky: an exclusion that reaches a root
+    of a CANCELLED build records the exclusion and says which root it
+    reached, but does not move the build to FAILED."""
+    root = item("Root")
+    build, plan = await h.planned([root], [root], seal=True)
+    async with h.sf() as s:
+        await builds.cancel_build(s, ENV, build)
+    result = await h.exclude(plan.id, root)
+    assert result.roots_excluded == [root.task_id] and not result.build_failed
+    assert (await h.build(build))["status"] == "cancelled"
+    assert await h.events(build_id=build, types=["build_failed"]) == []
 
 
 async def test_s34_a_failed_discovery_job_excludes_the_member(h: Harness):
@@ -251,3 +303,4 @@ async def test_skip_blocked_and_exclusion_over_http(client: AsyncClient, h: Harn
         json={"error": "ImportError"},
     )
     assert failed.status_code == 200 and not failed.json()["build_failed"]
+    assert failed.json()["roots_excluded"] == []

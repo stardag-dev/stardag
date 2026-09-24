@@ -6,7 +6,7 @@ built web UI from one process/origin (no CORS, no UI API-URL config):
 - ``mount_ui(app, ui_dist_dir)`` mounts the UI dist directory with an
   SPA fallback (unknown paths serve ``index.html`` so client-side routes
   work on hard reloads). Mounts are matched *after* routes, so
-  ``/api/v1/*``, ``/health`` and ``/.well-known/jwks.json`` keep working.
+  ``/api/v1/*``, ``/api/v2/*``, ``/health`` and ``/.well-known/jwks.json`` keep working.
 - ``create_app(ui_dist_dir)`` returns the API app with the UI mounted
   when the directory exists (API-only otherwise).
 - ``app`` is a module-level ASGI app configured from the

@@ -10,6 +10,13 @@ state) and the ``build`` entity.
   (``FOR NO KEY UPDATE``) first, then task rows in ``task_id`` order.
 - **Idempotent by state**: a transition that finds the build already in the
   requested state returns it and writes no event and no timestamp.
+- **A terminal status is sticky**: a build COMPLETED, FAILED or CANCELLED
+  refuses any other lifecycle transition (``complete``, ``fail``, ``cancel``,
+  ``exit-early``) with 409 ``build_terminal``, and the attempt is recorded as
+  its build event with ``report_applied = false`` — the authority rule task
+  reports follow, applied to the build. ``resume`` is the way out of a
+  terminal status. Server-side failures (a closure conflict, an excluded
+  root) leave a terminal build as it is.
 - **Completion is verified**: ``complete`` runs the closure step (a
   conflict fails the build, as on ``/seal``), then recomputes ``plan_complete``
   (sealed, every non-excluded member COMPLETED) over the active plan's
@@ -51,7 +58,7 @@ from stardag_api.services.deployments import (
     validate_settings,
     verify_deployment_current,
 )
-from stardag_api.services.errors import Conflict, NotFound
+from stardag_api.services.errors import Conflict, NotFound, RecordedConflict
 from stardag_api.services.event_log import EventClock
 from stardag_api.services.registration import PlanState, lock_build
 from stardag_api.services.slug import generate_build_slug
@@ -63,6 +70,11 @@ if TYPE_CHECKING:
 
 #: How many outstanding task ids a ``plan_incomplete`` refusal names.
 _MAX_NAMED = 50
+
+#: Statuses no later lifecycle report moves a build out of (``resume`` does).
+TERMINAL_STATUSES = frozenset(
+    {BuildStatus.COMPLETED, BuildStatus.FAILED, BuildStatus.CANCELLED}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +177,9 @@ async def complete_build(
         build = await lock_build(session, environment_id, build_id)
         if build.status == BuildStatus.COMPLETED:
             return build
+        await _refuse_if_terminal(
+            session, build, EventType.BUILD_COMPLETED, triggered_by=triggered_by
+        )
         outstanding = await _verify_plan_complete(session, build, force=force)
         now = utc_now()
         await _terminal(
@@ -252,6 +267,13 @@ async def fail_build(
         build = await lock_build(session, environment_id, build_id)
         if build.status == BuildStatus.FAILED:
             return build
+        await _refuse_if_terminal(
+            session,
+            build,
+            EventType.BUILD_FAILED,
+            triggered_by=triggered_by,
+            error_message=error_message,
+        )
         await _terminal(
             session,
             build,
@@ -277,6 +299,9 @@ async def cancel_build(
         build = await lock_build(session, environment_id, build_id)
         if build.status == BuildStatus.CANCELLED:
             return build
+        await _refuse_if_terminal(
+            session, build, EventType.BUILD_CANCELLED, triggered_by=triggered_by
+        )
         await _terminal(
             session,
             build,
@@ -298,6 +323,9 @@ async def exit_early(
         build = await lock_build(session, environment_id, build_id)
         if build.status == BuildStatus.EXIT_EARLY:
             return build
+        await _refuse_if_terminal(
+            session, build, EventType.BUILD_EXIT_EARLY, triggered_by=None
+        )
         now = utc_now()
         _set_status(build, BuildStatus.EXIT_EARLY, now=now, triggered_by=None)
         await event_log.append(
@@ -313,6 +341,47 @@ async def exit_early(
         )
         await session.flush()
         return build
+
+
+async def _refuse_if_terminal(
+    session: AsyncSession,
+    build: Build,
+    attempted: EventType,
+    *,
+    triggered_by: str | None,
+    error_message: str | None = None,
+) -> None:
+    """Refuse a lifecycle transition out of a terminal status (409
+    ``build_terminal``), recording the attempt as its build event with
+    ``report_applied = false``; the record commits with the refusal. A
+    no-op for a build that is not terminal."""
+    if build.status not in TERMINAL_STATUSES:
+        return
+    await event_log.append(
+        session,
+        [
+            event_log.event_row(
+                build.environment_id,
+                attempted,
+                at=utc_now(),
+                build_id=build.id,
+                report_applied=False,
+                error_message=error_message,
+                metadata={
+                    "refused": "build_terminal",
+                    "build_status": build.status.value,
+                    **({"triggered_by": triggered_by} if triggered_by else {}),
+                },
+            )
+        ],
+    )
+    raise RecordedConflict(
+        "build_terminal",
+        f"the build is {build.status.value.upper()}; a terminal status is"
+        " sticky (resume the build to run it again)",
+        build_id=str(build.id),
+        build_status=build.status.value,
+    )
 
 
 def _set_status(
@@ -409,13 +478,14 @@ async def fail_locked_build(
     at: datetime,
     error_message: str,
     metadata: dict[str, Any],
-) -> None:
+) -> bool:
     """``BUILD_FAILED`` for a build the caller has locked, inside its
-    transaction (a no-op on a build already FAILED): releases the build's
-    claims like any fail. For server-side failures — a closure conflict,
-    an excluded root."""
-    if build.status == BuildStatus.FAILED:
-        return
+    transaction: releases the build's claims like any fail. For server-side
+    failures — a closure conflict, an excluded root. A no-op on a build
+    already terminal (a terminal status is sticky, and a server-side failure
+    refuses nobody). Returns whether this call failed the build."""
+    if build.status in TERMINAL_STATUSES:
+        return False
     await _terminal(
         session,
         build,
@@ -426,6 +496,7 @@ async def fail_locked_build(
         error_message=error_message,
         metadata=metadata,
     )
+    return True
 
 
 async def fail_build_for_conflicts(
@@ -437,10 +508,11 @@ async def fail_build_for_conflicts(
     at: datetime,
 ) -> bool:
     """Fail the build over closure conflicts (``BUILD_FAILED``), once,
-    inside the caller's transaction. Returns True when the build is failed
-    (now or already)."""
+    inside the caller's transaction. Returns True: the conflicts refuse the
+    caller whether the build is failed now or was already terminal (then it
+    is left as it is — a terminal status is sticky)."""
     build = await lock_build(session, environment_id, plan.build_id)
-    if build.status == BuildStatus.FAILED:
+    if build.status in TERMINAL_STATUSES:
         return True
     message = "instance_conflict: " + "; ".join(
         f"plan {plan.id} holds instance {c.member_instance_id} of task"

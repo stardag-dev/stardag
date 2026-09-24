@@ -18,6 +18,12 @@ in this one order — v1 had them in different orders"):
 4. :meth:`finish` completes or fails the build; the registry releases the
    claims its plans hold.
 
+A build the registry has stopped — an operator's ``cancel``, or any other
+terminal status — refuses the next claiming start ``build_not_running``
+(:meth:`claim` answers ``build_stopped``), and refuses a later lifecycle
+report ``build_terminal`` (:meth:`finish` returns the status it found): a
+terminal build status is sticky, and the engine stops without writing one.
+
 Without a registry (:class:`~stardag.registry.NoOpRegistry`) the session is
 disabled: no build, no plan, no claims, and every method is a no-op (D11).
 """
@@ -36,7 +42,9 @@ from stardag._core.base_task import BaseTask
 from stardag.build._base import (
     ClaimConfig,
     DetachedHandle,
+    ExecutorDetails,
     OnRegistryFailure,
+    describe_task,
     handle_registry_error,
 )
 from stardag.build._deployment import resolve_deployment_id_aio
@@ -74,12 +82,13 @@ class ClaimOutcome:
 
     ``kind``: ``granted`` (``execution_id`` holds the claim),
     ``completed`` (the task is complete — nothing to run), ``timeout`` (the
-    claim stayed held elsewhere past ``ClaimConfig.wait_timeout_seconds``)
-    or ``refused`` (a refusal that cannot be waited out, ``message`` says
-    which).
+    claim stayed held elsewhere past ``ClaimConfig.wait_timeout_seconds``),
+    ``build_stopped`` (the build is no longer RUNNING: it hands out no more
+    work, and the engine stops) or ``refused`` (a refusal that cannot be
+    waited out, ``message`` says which).
     """
 
-    kind: typing.Literal["granted", "completed", "timeout", "refused"]
+    kind: typing.Literal["granted", "completed", "timeout", "build_stopped", "refused"]
     execution_id: UUID | None = None
     message: str | None = None
 
@@ -180,27 +189,48 @@ class ResidentSession:
             return
         self.plan_id = plan.id
 
-    async def finish(self, error: BaseException | None) -> None:
-        """Complete the build, or fail it with ``error``. The registry
-        releases the claims of the build's plans either way."""
-        if not self.enabled or self.build_id is None:
-            return
-        if error is None:
-            await self.registry.build_complete_aio(self.build_id)
-        else:
-            await self.registry.build_fail_aio(
-                self.build_id, f"{type(error).__name__}: {error}"
-            )
+    async def finish(
+        self, error: BaseException | None, message: str | None = None
+    ) -> str | None:
+        """Complete the build, or fail it with ``message`` (default: the
+        error's type and text). The registry releases the claims of the
+        build's plans either way.
 
-    async def skip_blocked(self) -> None:
-        """Mark members blocked by a failure SKIPPED (cosmetic, best-effort:
-        the build is already failing)."""
+        Returns None, or — when the registry refused because the build is
+        already terminal (``build_terminal``: cancelled by an operator, or
+        ended by another hand) — the status it found, which stands."""
         if not self.enabled or self.build_id is None:
-            return
+            return None
         try:
-            await self.registry.build_skip_blocked_aio(self.build_id)
+            if error is None:
+                await self.registry.build_complete_aio(self.build_id)
+            else:
+                await self.registry.build_fail_aio(
+                    self.build_id, message or f"{type(error).__name__}: {error}"
+                )
+        except APIError as e:
+            if e.code != "build_terminal":
+                raise
+            status = str((e.payload or {}).get("build_status") or "terminal")
+            logger.warning(
+                f"Build {self.build_id} is already {status}; its status stands "
+                "(the registry recorded this build's own report, not applied)."
+            )
+            return status
+        return None
+
+    async def skip_blocked(self) -> list[str] | None:
+        """Mark members blocked by a failure SKIPPED (best-effort: the build
+        is already failing). Returns the task ids the registry skipped —
+        the plan's own count of what the failure blocks — or None when
+        there is no registry or the call failed."""
+        if not self.enabled or self.build_id is None:
+            return None
+        try:
+            return list(await self.registry.build_skip_blocked_aio(self.build_id))
         except Exception as e:
             logger.warning(f"Could not mark blocked members skipped: {e}")
+            return None
 
     # -- claims -----------------------------------------------------------------
 
@@ -214,7 +244,7 @@ class ResidentSession:
         task: BaseTask,
         *,
         claim_ttl_seconds: int | None,
-        executor_metadata: dict[str, typing.Any] | None,
+        executor: ExecutorDetails | None = None,
     ) -> ClaimOutcome:
         """Claim ``task`` for a new execution, waiting out another holder.
 
@@ -232,6 +262,7 @@ class ResidentSession:
             return ClaimOutcome("granted", execution_id=new_id())
         assert self.plan_id is not None
         config = self.claim_config
+        details = executor or ExecutorDetails()
         execution_id = new_id()
         limit_keys = self.limit_keys(task)
         loop = asyncio.get_running_loop()
@@ -246,7 +277,9 @@ class ResidentSession:
                     execution_id=execution_id,
                     claim=True,
                     claim_ttl_seconds=claim_ttl_seconds,
-                    executor_metadata=executor_metadata,
+                    executor=details.executor,
+                    executor_ref=details.executor_ref,
+                    executor_metadata=details.executor_metadata,
                     limit_keys=limit_keys,
                 )
                 return ClaimOutcome("granted", execution_id=execution_id)
@@ -264,6 +297,15 @@ class ResidentSession:
                 if code == "execution_superseded":
                     execution_id = new_id()
                     continue
+                if code == "build_not_running":
+                    status = (e.payload or {}).get("build_status") or "gone"
+                    return ClaimOutcome(
+                        "build_stopped",
+                        message=(
+                            f"Build {self.build_id} is no longer running "
+                            f"({status}); it hands out no more work."
+                        ),
+                    )
                 if code not in _WAIT_CODES:
                     return ClaimOutcome("refused", message=str(e))
                 waited_reason = code
@@ -405,13 +447,43 @@ class ResidentSession:
         )
 
 
+def failure_message(
+    failed: typing.Sequence[tuple[BaseTask, BaseException]],
+    blocked: int | None,
+) -> str:
+    """The one-line reason a build writes on ``/fail`` for task failures:
+    the first failed task (name and id) and its error, how many other tasks
+    failed, and how many members the registry found blocked by them."""
+    task, error = failed[0]
+    text = " ".join(str(error).split()) or type(error).__name__
+    message = f"Task {describe_task(task)} failed: {type(error).__name__}: {text}"
+    if len(failed) > 1:
+        message += f" (and {len(failed) - 1} more failed task(s))"
+    if blocked is not None:
+        message += f"; {blocked} downstream member(s) blocked"
+    return message
+
+
+def _lost_claim_reason(error: APIError) -> str:
+    """Why a renewal was refused, from the claim's recorded outcome."""
+    outcome = (error.payload or {}).get("claim_outcome")
+    if outcome == "released":
+        return "the build is no longer running, and released its claims"
+    if outcome == "taken_over":
+        return "it lapsed and another execution took it over"
+    if outcome:
+        return f"the claim ended ({outcome})"
+    return "it lapsed"
+
+
 class ClaimRenewal:
     """Renews an in-process execution's claim while it runs (D11).
 
     An async context manager: the loop runs for the block and is cancelled
-    on exit. A refused renewal means another execution took the claim over
-    (this one's lapsed): logged loudly, and the execution's own reports
-    will be recorded as late.
+    on exit. A refused renewal means the claim is no longer this
+    execution's — its build released it, or it lapsed (and another execution
+    may have taken it over): logged with the reason the registry recorded,
+    and the execution's own reports will be recorded as late.
     """
 
     def __init__(
@@ -439,8 +511,8 @@ class ClaimRenewal:
             except APIError as e:
                 if e.code == "claim_not_held":
                     logger.warning(
-                        f"The claim on task {self._task.id} was taken over by "
-                        "another execution (this one's lapsed); its reports "
+                        f"The claim on task {self._task.id} is no longer this "
+                        f"execution's: {_lost_claim_reason(e)}; its reports "
                         "will be recorded as late."
                     )
                     return

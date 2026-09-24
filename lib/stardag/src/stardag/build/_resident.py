@@ -29,9 +29,11 @@ from stardag._core.instance import extend_path
 from stardag.build._base import (
     BuildContext,
     BuildExitStatus,
+    BuildStopped,
     BuildSummary,
     ClaimConfig,
     DetachedHandle,
+    ExecutorDetails,
     FailMode,
     OnRegistryFailure,
     TaskCount,
@@ -48,7 +50,12 @@ from stardag.build._concurrency import (
     build_concurrency_limiter,
 )
 from stardag.build._registration import Walk, walk_aio, yield_batches
-from stardag.build._session import ClaimRenewal, LimitKeySelector, ResidentSession
+from stardag.build._session import (
+    ClaimRenewal,
+    LimitKeySelector,
+    ResidentSession,
+    failure_message,
+)
 from stardag.build._settings import (
     SettingsError,
     resident_settings,
@@ -72,10 +79,12 @@ class _Skipped(Exception):
 @dataclass(frozen=True)
 class _NotRun:
     """A submission that did not execute the task: the claim found it
-    complete (``completed``), or could not be won (``error``)."""
+    complete (``completed``), could not be won (``error``), or found the
+    build no longer RUNNING (``stopped``, the reason)."""
 
     completed: bool
     error: BaseException | None = None
+    stopped: str | None = None
 
 
 def _error(e: BaseException) -> TaskExecutionError:
@@ -109,6 +118,7 @@ async def build_aio(
     settings: dict[str, str] | None = None,
     limit_key_selector: LimitKeySelector | None = None,
     description: str | None = None,
+    raise_on_failure: bool = True,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -145,9 +155,15 @@ async def build_aio(
         limit_key_selector: The registry concurrency-limit keys a task runs
             under, sent with its claim.
         description: A description for a new build.
+        raise_on_failure: In ``FAIL_FAST`` mode, re-raise the failure's
+            exception (default). False returns the ``FAILURE`` summary
+            instead — build id, failed task, error — after the build has
+            stopped at the first failure the same way.
 
     Returns:
-        BuildSummary with status, task counts and build id.
+        BuildSummary with status, task counts and build id. ``STOPPED``
+        when the registry stopped the build (an operator cancelled it):
+        the engine then stops without writing a build status.
     """
     roots = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
     for index, task in enumerate(roots):
@@ -182,6 +198,7 @@ async def build_aio(
             max_concurrent_discover=max_concurrent_discover,
             register_all=register_all,
             limiter=build_concurrency_limiter(concurrency_config, concurrency_limiter),
+            raise_on_failure=raise_on_failure,
         )
         return await engine.run(
             resume_build_id=resume_build_id, description=description
@@ -207,6 +224,7 @@ class _ResidentEngine:
         max_concurrent_discover: int,
         register_all: bool,
         limiter: ConcurrencyLimiter,
+        raise_on_failure: bool = True,
     ) -> None:
         self.roots = roots
         self.executor = task_executor
@@ -221,7 +239,13 @@ class _ResidentEngine:
         self.executing: set[UUID] = set()
         self.pending: dict[UUID, asyncio.Task] = {}
         self.renewals: dict[UUID, ClaimRenewal] = {}
+        self.raise_on_failure = raise_on_failure
+        # The first failure, and every task failure in order (the build's
+        # failure message names the first).
         self.error: BaseException | None = None
+        self.failures: list[tuple[BaseTask, BaseException]] = []
+        # Why the registry stopped handing out work, once it has.
+        self.stopped: str | None = None
         self.fail_fast_triggered = False
         self._last_drain = float("-inf")
 
@@ -279,12 +303,12 @@ class _ResidentEngine:
 
     # -- execution ----------------------------------------------------------------
 
-    async def _metadata(self, task: BaseTask) -> dict | None:
+    async def _details(self, task: BaseTask) -> ExecutorDetails:
         try:
-            return await self.executor.get_executor_metadata(task)
+            return await self.executor.get_executor_details(task)
         except Exception:
-            logger.debug(f"Executor metadata failed for {task.id}", exc_info=True)
-            return None
+            logger.debug(f"Executor details failed for {task.id}", exc_info=True)
+            return ExecutorDetails()
 
     async def submit(
         self, task: BaseTask
@@ -315,12 +339,14 @@ class _ResidentEngine:
                             if detached
                             else self.session.claim_config.in_process_ttl_seconds
                         ),
-                        executor_metadata=await self._metadata(task),
+                        executor=await self._details(task),
                     )
                 finally:
                     state.waiting_on_claim = False
                 if outcome.kind == "completed":
                     return _NotRun(completed=True)
+                if outcome.kind == "build_stopped":
+                    return _NotRun(completed=False, stopped=outcome.message)
                 if outcome.kind != "granted":
                     return _NotRun(completed=False, error=RuntimeError(outcome.message))
                 state.execution_id = outcome.execution_id
@@ -372,7 +398,9 @@ class _ResidentEngine:
     ) -> None:
         state.exception = failure
         self.count.failed += 1
-        self.error = failure
+        if self.error is None:
+            self.error = failure
+        self.failures.append((state.task, failure))
         if self.fail_mode == FailMode.FAIL_FAST:
             self.fail_fast_triggered = True
 
@@ -389,6 +417,10 @@ class _ResidentEngine:
             if result.completed:
                 state.completed = True
                 self.count.previously_completed += 1
+            elif result.stopped is not None:
+                # Not the task's failure: the build stopped handing out work.
+                # The task stays as it is; the loop winds down.
+                self.stopped = self.stopped or result.stopped
             else:
                 assert result.error is not None
                 self._record_failure(state, result.error)
@@ -459,9 +491,12 @@ class _ResidentEngine:
 
     # -- failure handling ------------------------------------------------------------
 
-    async def cancel_in_flight(self) -> None:
-        """Stop the still-running executions after a FAIL_FAST failure. The
-        build's failure releases their claims server-side."""
+    async def cancel_in_flight(
+        self, reason: str = "Cancelled by build engine in FAIL_FAST mode"
+    ) -> None:
+        """Stop the still-running executions after a FAIL_FAST failure, or
+        once the build has stopped. The build's terminal transition releases
+        their claims server-side."""
         if not self.pending:
             return
         snapshot = dict(self.pending)
@@ -489,9 +524,7 @@ class _ResidentEngine:
             state = self.states[task_id]
             state.execution_id = None
             if state.exception is None:
-                state.exception = asyncio.CancelledError(
-                    "Cancelled by build engine in FAIL_FAST mode"
-                )
+                state.exception = asyncio.CancelledError(reason)
             self.count.cancelled += 1
 
     def mark_skipped(self) -> None:
@@ -555,11 +588,12 @@ class _ResidentEngine:
                     await self._loop()
                 finally:
                     await self.executor.teardown()
-                if self.error is not None and self.fail_mode == FailMode.FAIL_FAST:
-                    raise self.error
-                # Completion is verified by the registry (the plan sealed, every
-                # member COMPLETED); a refusal fails the build below.
-                await self._finish(self.error)
+                if self.stopped is None:
+                    if self.error is not None and self.fail_mode == FailMode.FAIL_FAST:
+                        raise self.error
+                    # Completion is verified by the registry (the plan sealed,
+                    # every member COMPLETED); a refusal fails the build below.
+                    await self._finish(self.error)
             except Exception as e:
                 try:
                     await self.cancel_in_flight()
@@ -567,9 +601,13 @@ class _ResidentEngine:
                 except Exception as cleanup_err:
                     logger.warning(f"Error during build cleanup: {cleanup_err}")
                 await self._fail_best_effort(e)
-                if self.fail_mode == FailMode.FAIL_FAST:
+                if self.stopped is not None:
+                    return self._stopped_summary()
+                if self.fail_mode == FailMode.FAIL_FAST and self.raise_on_failure:
                     raise
                 return self._summary(BuildExitStatus.FAILURE, e)
+            if self.stopped is not None:
+                return self._stopped_summary()
             return self._summary(
                 BuildExitStatus.SUCCESS
                 if self.error is None
@@ -584,10 +622,22 @@ class _ResidentEngine:
 
     async def _finish(self, error: BaseException | None) -> None:
         """Complete the build, or fail it with ``error`` (skipping the
-        members a failure blocks first)."""
+        members a failure blocks first). A task failure's message names the
+        first failed task and the members the registry found blocked. A
+        build the registry already holds terminal is left as it is, and the
+        engine reports it ``STOPPED``."""
+        message = None
         if error is not None:
-            await self.session.skip_blocked()
-        await self.session.finish(error)
+            skipped = await self.session.skip_blocked()
+            if any(error is failure for _, failure in self.failures):
+                message = failure_message(
+                    self.failures, None if skipped is None else len(skipped)
+                )
+        status = await self.session.finish(error, message)
+        if status is not None:
+            self.stopped = (
+                f"Build {self.session.build_id} is already {status}; its status stands."
+            )
 
     async def _fail_best_effort(self, error: BaseException) -> None:
         try:
@@ -602,12 +652,18 @@ class _ResidentEngine:
     def _summary(
         self, status: BuildExitStatus, error: BaseException | None
     ) -> BuildSummary:
+        failed = next((t for t, f in self.failures if f is error), None)
         return BuildSummary(
             status=status,
             task_count=self.count,
             build_id=self.session.build_id,
             error=error,
+            failed_task=failed,
         )
+
+    def _stopped_summary(self) -> BuildSummary:
+        assert self.stopped is not None
+        return self._summary(BuildExitStatus.STOPPED, BuildStopped(self.stopped))
 
     async def _loop(self) -> None:
         while True:
@@ -616,17 +672,15 @@ class _ResidentEngine:
             for task in self.find_ready():
                 self.pending[task.id] = asyncio.create_task(self.submit(task))
             if not self.pending:
-                blocked = [
+                if self.stopped is not None:
+                    break
+                # Skip what a failure blocks (transitively) first: only a
+                # task still neither done nor blocked is stuck.
+                self.mark_skipped()
+                stuck = [
                     s
                     for s in self.states.values()
                     if not s.completed and s.exception is None
-                ]
-                stuck = [
-                    s
-                    for s in blocked
-                    if not any(
-                        self.states[d.id].exception is not None for d in s.all_deps
-                    )
                 ]
                 if stuck:
                     raise RuntimeError(
@@ -647,8 +701,15 @@ class _ResidentEngine:
                     result = _error(e)
                 await self.process_result(self.states[task_id].task, result)
             await self.drain_neighbours()
+            if self.stopped is not None:
+                break
             if self.fail_fast_triggered and self.fail_mode == FailMode.FAIL_FAST:
                 break
+        if self.stopped is not None:
+            # The registry released the build's claims; what still runs here
+            # is work nobody is waiting for.
+            await self.cancel_in_flight(f"Stopped: {self.stopped}")
+            return
         if self.fail_fast_triggered and self.fail_mode == FailMode.FAIL_FAST:
             await self.cancel_in_flight()
         self.mark_skipped()

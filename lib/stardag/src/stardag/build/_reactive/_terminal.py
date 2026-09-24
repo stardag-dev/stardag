@@ -53,6 +53,8 @@ async def handle_terminal(
         try:
             await registry.build_complete_aio(build_id)
         except APIError as e:
+            if e.code == "build_terminal":
+                return _already_terminal(build_id, e)
             if e.code != "plan_incomplete":
                 raise
             logger.info(f"Build {build_id} not complete after all: {e}")
@@ -76,7 +78,12 @@ async def handle_terminal(
             "Re-trigger the build to finish its registration."
         )
     logger.error(f"Failing build {build_id}: {reason}")
-    await registry.build_fail_aio(build_id, reason)
+    try:
+        await registry.build_fail_aio(build_id, reason)
+    except APIError as e:
+        if e.code != "build_terminal":
+            raise
+        return _already_terminal(build_id, e)
     try:
         skipped = await registry.build_skip_blocked_aio(build_id)
         summary.skipped += len(skipped)
@@ -85,3 +92,12 @@ async def handle_terminal(
         # loudly rather than failing the tick.
         logger.error(f"Failed to skip blocked members of build {build_id}: {e}")
     return "failed"
+
+
+def _already_terminal(build_id: UUID, error: APIError) -> str:
+    """The build went terminal after the frontier was read (an operator's
+    cancel): a terminal status is sticky, so the tick's own report was
+    recorded, not applied, and the status it found is the one that stands."""
+    status = str((error.payload or {}).get("build_status") or "cancelled")
+    logger.info(f"Build {build_id} is already {status}; its status stands.")
+    return status

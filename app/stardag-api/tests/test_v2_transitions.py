@@ -17,7 +17,7 @@ from httpx import AsyncClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from stardag_api.services import reactive, transitions
+from stardag_api.services import builds, reactive, transitions
 from stardag_api.services.errors import Conflict, NotFound
 from stardag_api.services.transitions import Transition, TransitionKind
 from tests.v2_support import ENV, Harness, item, observed, task_ids, utcnow
@@ -202,6 +202,21 @@ async def test_renewal_only_for_the_live_holder(h: Harness):
     with pytest.raises(Conflict) as exc:
         await h.renew(t, holder)
     assert exc.value.code == "claim_not_held"
+    assert exc.value.detail["claim_outcome"] is None  # lapsed, not yet moved
+
+
+async def test_a_renewal_refused_after_a_build_release_says_so(h: Harness):
+    """A resident driver renewing after an operator ``cancel`` learns its
+    claim was ``released`` (its build stopped), not taken over."""
+    t = item("T")
+    build, plan = await h.planned([t], [t])
+    holder = await h.start(plan.id, t, claim_ttl_seconds=60)
+    async with h.sf() as s:
+        await builds.cancel_build(s, ENV, build)
+    with pytest.raises(Conflict) as exc:
+        await h.renew(t, holder)
+    assert exc.value.code == "claim_not_held"
+    assert exc.value.detail["claim_outcome"] == "released"
 
 
 async def test_one_terminal_report_per_execution(h: Harness):

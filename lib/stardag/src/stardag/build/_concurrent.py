@@ -37,10 +37,12 @@ from stardag._core.base_task import (
 from stardag.build._base import (
     BuildSummary,
     ClaimConfig,
+    ExecutorDetails,
     FailMode,
     OnRegistryFailure,
     TaskExecutionError,
     TaskExecutorABC,
+    in_process_executor_details,
 )
 from stardag.build._concurrency import (
     ConcurrencyConfig,
@@ -281,6 +283,11 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         self._suspended_generators.clear()
         self._pending_reexecution.clear()
 
+    async def get_executor_details(self, task: BaseTask) -> ExecutorDetails:
+        """This process, and the execution mode ``task`` runs in (the pool
+        a process-mode task lands in is not known before it runs)."""
+        return in_process_executor_details(self.execution_mode_selector(task).value)
+
     async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
         """Execute a task and return result.
 
@@ -486,6 +493,7 @@ def build(
     settings: dict[str, str] | None = None,
     limit_key_selector: LimitKeySelector | None = None,
     description: str | None = None,
+    raise_on_failure: bool = True,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
@@ -514,6 +522,7 @@ def build(
                 settings=settings,
                 limit_key_selector=limit_key_selector,
                 description=description,
+                raise_on_failure=raise_on_failure,
             )
         )
     except RuntimeError as e:

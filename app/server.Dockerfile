@@ -46,7 +46,7 @@ COPY --from=ui-build /build/stardag-ui/dist /opt/stardag/ui
 ENV STARDAG_UI_DIST=/opt/stardag/ui
 
 # Server release version, injected by CI from the `server-vX.Y.Z` tag;
-# surfaced at GET /api/v1/version.
+# surfaced at GET /api/v2/version.
 ARG STARDAG_SERVER_VERSION=dev
 ENV STARDAG_SERVER_VERSION=${STARDAG_SERVER_VERSION}
 

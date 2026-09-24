@@ -1,5 +1,5 @@
 // Server version API (unauthenticated endpoint)
-import { API_V1 } from "./config";
+import { API_V2 } from "./config";
 
 export interface ServerVersion {
   /**
@@ -10,17 +10,10 @@ export interface ServerVersion {
   server_version: string;
   /** Installed stardag-api package version. */
   api_version: string;
-  /**
-   * Oldest stardag SDK this server accepts, or `null` when it accepts every
-   * version (the default). Published here so the SDK, the docs and support
-   * read one number from one place — including a client that was just
-   * refused, since this endpoint is never gated on SDK version.
-   */
-  minimum_sdk_version: string | null;
 }
 
 export async function fetchServerVersion(): Promise<ServerVersion> {
-  const response = await fetch(`${API_V1}/version`);
+  const response = await fetch(`${API_V2}/version`);
   if (!response.ok) {
     throw new Error(`Failed to fetch server version: ${response.statusText}`);
   }

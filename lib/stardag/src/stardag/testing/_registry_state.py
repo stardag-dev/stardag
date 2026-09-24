@@ -27,6 +27,8 @@ CLOCK_SKEW_TOLERANCE = timedelta(seconds=5)
 # How long a preempted execution's claim stays live for the restart.
 PREEMPT_GRACE = timedelta(seconds=120)
 WAKE_HANDOUT_WINDOW = timedelta(seconds=120)
+#: Build statuses no later lifecycle report moves a build out of.
+TERMINAL_BUILD_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
 def refuse(

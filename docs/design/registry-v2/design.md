@@ -793,10 +793,12 @@ as v1, over instance edges within the plan; exclusion propagates the same
 way.
 
 **Build status** stays a stored column driven by build events, as in v1
-(terminal states keep v1's "last event wins": a `fail` after `complete`
-moves the build to FAILED, and a repeat of the current state is a no-op —
-a documented carry-over, not a new rule), and
-the server does not flip it inside task transactions (that would lock every
+(a repeat of the current state is a no-op), except that a terminal build
+status is sticky; later lifecycle reports are recorded, not applied: a
+`complete`, `fail`, `cancel` or `exit-early` against a COMPLETED, FAILED or
+CANCELLED build is 409 `build_terminal`, recorded with `report_applied =
+false`, and `resume` is the way out. The
+server does not flip it inside task transactions (that would lock every
 build holding the task on each completion, the inversion `_flag_builds`
 avoids with `SKIP LOCKED`). What changes is that completion is **verified**:
 the frontier response carries `plan_complete` (= sealed, and every

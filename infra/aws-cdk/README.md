@@ -59,7 +59,7 @@ The `deploy-all.sh` script handles this automatically.
 
 `deploy-api.sh` stamps a server version into the locally-built API image via
 the `STARDAG_SERVER_VERSION` build arg, so the deployment reports a truthful
-version at `GET /api/v1/version` instead of the `"dev"` default.
+version at `GET /api/v2/version` instead of the `"dev"` default.
 
 The version is resolved in this order:
 
