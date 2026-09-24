@@ -36,7 +36,11 @@ from stardag._core.base_task import (
     flatten_task_struct,
 )
 from stardag.build import FailMode, TaskExecutionError, TaskExecutorABC
-from stardag.build._base import BuildStopped, in_process_executor_details
+from stardag.build._base import (
+    BuildStopped,
+    ExecutorDetails,
+    in_process_executor_details,
+)
 from stardag.build._registration import walk_aio, yield_batches
 from stardag.build._session import ResidentSession
 from stardag.exceptions import APIError
@@ -125,11 +129,7 @@ class _PrefectTaskRunWrapper:
         outcome = await self.session.claim(
             task,
             claim_ttl_seconds=self.session.claim_config.in_process_ttl_seconds,
-            executor=(
-                await self.task_executor.get_executor_details(task)
-                if self.task_executor is not None
-                else in_process_executor_details("prefect")
-            ),
+            executor=await self._executor_details(task),
         )
         if outcome.kind == "completed":
             return None
@@ -190,6 +190,17 @@ class _PrefectTaskRunWrapper:
             await self.session.fail(task, execution_id, str(e))
             # Re-raised in every fail mode, so Prefect marks the task failed.
             raise
+
+    async def _executor_details(self, task: BaseTask) -> ExecutorDetails:
+        """Best-effort, like the resident engine's: a failure to describe
+        the executor never fails the claim."""
+        if self.task_executor is None:
+            return in_process_executor_details("prefect")
+        try:
+            return await self.task_executor.get_executor_details(task)
+        except Exception:
+            logger.debug(f"Executor details failed for {task.id}", exc_info=True)
+            return ExecutorDetails()
 
     async def _stop_renewal(self, task: BaseTask) -> None:
         renewal = self.renewals.pop(task.id, None)
