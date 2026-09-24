@@ -17,9 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
+from stardag_api.models import ExclusionReason
 from stardag_api.schemas_v2 import (
     BuildCreate,
     BuildResponse,
+    DiscoveryFailedRequest,
+    ExcludeRequest,
+    ExclusionResponse,
+    SkipBlockedResponse,
     FailRequest,
     FrontierResponse,
     MembersRequest,
@@ -38,6 +43,7 @@ from stardag_api.routes.registry_v2_scope import router as scope_router
 from stardag_api.routes.registry_v2_wakeups import router as wakeups_router
 from stardag_api.services import (
     builds,
+    exclusion,
     frontier,
     plans,
     registration,
@@ -90,6 +96,11 @@ async def create_plan(build_id: UUID, body: PlanCreate, db: Db, auth: Auth):
 @router.get("/builds/{build_id}/frontier", response_model=FrontierResponse)
 async def get_frontier(build_id: UUID, db: Db, auth: Auth):
     return await frontier.get_frontier(db, auth.environment_id, build_id)
+
+
+@router.post("/builds/{build_id}/skip-blocked", response_model=SkipBlockedResponse)
+async def skip_blocked(build_id: UUID, db: Db, auth: Auth):
+    return await exclusion.skip_blocked(db, auth.environment_id, build_id)
 
 
 # -- plans ------------------------------------------------------------------------
@@ -232,6 +243,43 @@ async def yield_batch(
         items=body.items,
         yielded=body.yielded,
         suspend=body.suspend,
+    )
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/exclude", response_model=ExclusionResponse
+)
+async def exclude(
+    plan_id: UUID,
+    task_id: str,
+    db: Db,
+    auth: Auth,
+    body: ExcludeRequest | None = None,
+):
+    return await exclusion.exclude_member(
+        db,
+        auth.environment_id,
+        plan_id=plan_id,
+        task_id=task_id,
+        reason=ExclusionReason.OPERATOR,
+        note=body.reason if body else None,
+    )
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/discovery-failed",
+    response_model=ExclusionResponse,
+)
+async def discovery_failed(
+    plan_id: UUID, task_id: str, body: DiscoveryFailedRequest, db: Db, auth: Auth
+):
+    return await exclusion.exclude_member(
+        db,
+        auth.environment_id,
+        plan_id=plan_id,
+        task_id=task_id,
+        reason=ExclusionReason.DISCOVERY_FAILED,
+        error_message=body.error,
     )
 
 

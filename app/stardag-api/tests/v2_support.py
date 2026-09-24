@@ -21,7 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stardag_api.schemas_v2 import RegistrationItem
 from stardag_api.services import frontier as frontier_service
-from stardag_api.services import plans, registration, transitions, yields
+from stardag_api.models import ExclusionReason
+from stardag_api.services import exclusion, plans, registration, transitions, yields
 from stardag_api.services.transitions import Transition
 from tests.conftest import DEFAULT_ENVIRONMENT_ID
 
@@ -253,6 +254,28 @@ class Harness:
                     y.instance_hash for y in (items if yielded is None else yielded)
                 ],
                 suspend=suspend,
+            )
+
+    async def skip_blocked(self, build_id: UUID) -> exclusion.SkipBlockedResult:
+        async with self.sf() as s:
+            return await exclusion.skip_blocked(s, ENV, build_id)
+
+    async def exclude(
+        self,
+        plan_id: UUID,
+        it: RegistrationItem,
+        *,
+        reason: ExclusionReason = ExclusionReason.OPERATOR,
+        error_message: str | None = None,
+    ) -> exclusion.ExclusionResult:
+        async with self.sf() as s:
+            return await exclusion.exclude_member(
+                s,
+                ENV,
+                plan_id=plan_id,
+                task_id=it.task_id,
+                reason=reason,
+                error_message=error_message,
             )
 
     # -- the one-root-plan shortcut -------------------------------------------

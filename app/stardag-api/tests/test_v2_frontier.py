@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import pytest
 
-from stardag_api.services import frontier as frontier_service
 from tests.v2_support import Harness, item, observed, task_ids, unexpanded
 
 
@@ -121,26 +120,3 @@ async def test_closure_conflict_fails_the_build_naming_both_members(h: Harness):
     for instance in (conflict.member_instance_id, conflict.other_instance_id):
         assert str(instance) in failed["error_message"]
     assert plan_a.id  # the plan stays; the build failed
-
-
-@pytest.mark.xfail(reason="v2: I3", strict=True)
-async def test_skip_blocked_over_instance_edges(h: Harness):
-    """Blocked-by-failure propagation over instance edges within the plan
-    (design.md, "The runnable rule"): lands with I3."""
-    leaf = item("Leaf")
-    root = item("Root", upstreams=[leaf])
-    _, plan = await h.planned([root], [leaf, root])
-    skip_blocked = getattr(frontier_service, "skip_blocked")
-    await skip_blocked(plan.id)
-
-
-@pytest.mark.xfail(reason="v2: I3", strict=True)
-async def test_exclusion_cascades_to_the_downstream_closure(h: Harness):
-    """An excluded member's downstream closure within the plan is excluded
-    (``upstream_excluded``) and an excluded root fails the build (S18,
-    S34): lands with I3."""
-    leaf = item("Leaf")
-    root = item("Root", upstreams=[leaf])
-    _, plan = await h.planned([root], [leaf, root])
-    exclude_member = getattr(frontier_service, "exclude_member")
-    await exclude_member(plan.id, leaf.task_id)

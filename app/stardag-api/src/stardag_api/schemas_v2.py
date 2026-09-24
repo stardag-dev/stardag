@@ -420,3 +420,41 @@ class YieldResponse(BaseModel):
     claim_expires_at: datetime | None
     #: True when this delivery found the batch already applied.
     replayed: bool
+
+
+# ---------------------------------------------------------------------------
+# Skip-blocked and exclusion
+# ---------------------------------------------------------------------------
+
+
+class SkipBlockedResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    plan_id: UUID | None
+    skipped: list[str]
+
+
+class ExcludeRequest(BaseModel):
+    """An operator gives up on a member (STA-104)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Why, in the operator's words; recorded on the ``TASK_EXCLUDED`` event.
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class DiscoveryFailedRequest(BaseModel):
+    """A discovery job failed: the class could not be imported, or
+    ``requires()`` raised."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error: str = Field(min_length=1)
+
+
+class ExclusionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    plan_id: UUID
+    excluded: list[str]
+    build_failed: bool

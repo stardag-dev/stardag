@@ -373,6 +373,32 @@ async def release_claims(
     return released
 
 
+async def fail_locked_build(
+    session: AsyncSession,
+    build: Build,
+    *,
+    at: datetime,
+    error_message: str,
+    metadata: dict[str, Any],
+) -> None:
+    """``BUILD_FAILED`` for a build the caller has locked, inside its
+    transaction (a no-op on a build already FAILED): releases the build's
+    claims like any fail. For server-side failures — a closure conflict,
+    an excluded root."""
+    if build.status == BuildStatus.FAILED:
+        return
+    await _terminal(
+        session,
+        build,
+        BuildStatus.FAILED,
+        EventType.BUILD_FAILED,
+        clock=EventClock(at),
+        triggered_by=None,
+        error_message=error_message,
+        metadata=metadata,
+    )
+
+
 async def fail_build_for_conflicts(
     session: AsyncSession,
     environment_id: UUID,
