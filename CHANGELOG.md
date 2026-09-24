@@ -138,8 +138,9 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   within the plan, and an excluded root fails the build.
 - **Changed: wake-up flags move to `build_wake`**, so flagging never locks
   the build row a claim holds.
-- **New: read routes.** `GET /builds` (status and app filters, cursor
-  paging), `GET /plans/{id}`, `GET /builds/{id}/plans`, `GET
+- **New: read routes.** `GET /builds` (status, app and idle filters,
+  cursor paging, a total; `idle_for_seconds` keeps running builds with no
+  lifecycle change for that long and refuses any other status, as in v1), `GET /plans/{id}`, `GET /builds/{id}/plans`, `GET
 /plans/{id}/graph`, `GET /plans/{id}/roots`, `GET /tasks` and `GET
 /tasks/{id}` (with its instances, claim plan and build), `GET
 /tasks/{id}/executions`, `GET /tasks/{id}/events`, `GET
@@ -186,18 +187,30 @@ deployments list`** (`stardag modal deployments` stays as an alias).
 
 - **Changed: every call is on `/api/v2`.** Scope keys, `build_config`,
   phantom tasks, external blockers and lock views are gone.
-- **Changed: the build view follows the active plan** — plan header
-  (deployment, generation, settings, sealed), members, the DAG over instance
-  edges (dynamic edges dashed, excluded members muted), the frontier with
-  attempt counts, settings and deployment in the build info, and the stop
-  list over the ledger with orphans marked.
+- **Changed: the build view follows the active plan** — members, the DAG
+  over instance edges (dynamic edges dashed, excluded members muted), the
+  frontier with attempt counts, settings and deployment in the build info,
+  and the stop list over the ledger with orphans marked. The build's plans
+  (deployment, generation, settings, activated/sealed/superseded, the
+  active one marked) are in the **"Plans and scheduling"** dialog, not
+  stacked above the DAG. The task table's **Membership** column (root,
+  static, dynamic, closure, excluded, attempts) explains each value on
+  hover, and the task panel's header shows the same facts.
+- **Restored from v1:** builds-list pagination with the total, the "Idle
+  for" filter, double-click-to-toggle auto-refresh, the plan graph's
+  collapse chevron, the task panel's link icon to the task page, the
+  expand-to-fullscreen icons on an instance and its parameters, "See full
+  event log" (over `GET /tasks/{id}/events`, where
+  `TASK_STRUCTURE_DIVERGED` is now visible), and the **Concurrency Limits**
+  page (holders from `include_holders=true`; no evict — `stardag builds
+stop --mark-lost` frees a slot held by a gone execution).
 - **New: the task page** (`/tasks/:task_id`) — status, the claim (live or
   lapsed, current execution), remedies through the viewed build's plan, the
   task's instances under their scopes with the parameters they differ in,
   executions and artifacts.
 - **New: the deployments page** — every generation per app, current marked.
-- **Removed:** the task explorer and search, claim triage, bulk cancel and
-  the concurrency-limits admin page.
+- **Removed:** the task explorer and search (search over task parameters
+  returns in a later release), claim triage and bulk cancel.
 
 ## [Unreleased]
 

@@ -328,6 +328,20 @@ assignee the maintainer.
       search/explorer, claim triage, bulk cancel, concurrency limits; the
       build failure reason and the task event log (so
       `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
+      Follow-up (maintainer feedback against the v1 UI, this PR): restored
+      builds-list pagination over the cursor and `total`, the "Idle for"
+      filter (the one server change: `GET /builds?idle_for_seconds=`,
+      running builds whose `last_active_at` is at least that old — a
+      lifecycle-only timestamp, so not v1's composed activity), double-click
+      auto-refresh, v1's plan-graph chevron, the task panel's link icon and
+      fullscreen icons, "See full event log" over `GET /tasks/{id}/events`
+      (so `TASK_STRUCTURE_DIVERGED` is readable) and the Concurrency Limits
+      page over the v2 routes, without evict. The active-plan row moved into
+      the scheduling dialog, now "Plans and scheduling" over
+      `GET /builds/{id}/plans`, so nothing sits above the DAG and the task
+      table; the Membership column explains its values on hover and the task
+      panel header repeats them. Still not rebuilt: task search/explorer (no
+      route over `task_instance.body`), claim triage, bulk cancel.
 - [x] I10 — tests (merged, PR #389). One registry-live module per `live`
       row of the design's scenario table, each run serially green against a
       provisioned v2 registry; S3 stays `test_rollover`. The scenario table
