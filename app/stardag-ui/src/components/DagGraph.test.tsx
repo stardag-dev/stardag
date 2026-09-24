@@ -74,4 +74,19 @@ describe("DagGraph fan-out batching", () => {
     expect(await screen.findAllByText("Shard")).toHaveLength(8);
     expect(screen.queryByText("×8")).not.toBeInTheDocument();
   });
+
+  it("expands a batch from the keyboard", async () => {
+    render(
+      <div style={{ width: 800, height: 600 }}>
+        <DagGraph view={fanOut(8)} selectedTaskId={null} onTaskClick={() => {}} />
+      </div>,
+    );
+    // React Flow hides nodes until measured, which jsdom never does.
+    const batch = await screen.findByRole("button", {
+      name: "Expand 8 demo.Shard (completed)",
+      hidden: true,
+    });
+    await act(async () => fireEvent.keyDown(batch, { key: "Enter" }));
+    expect(screen.getAllByText("Shard")).toHaveLength(8);
+  });
 });

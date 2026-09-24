@@ -15,6 +15,8 @@ export interface BatchNodeData extends Record<string, unknown> {
   // Every member filtered out by the table's filters.
   isMuted: boolean;
   direction: LayoutDirection;
+  // Expand the batch into its members (click, Enter or Space).
+  onExpand?: () => void;
 }
 
 const STATUS_COLORS: Record<string, { bg: string; border: string; badge: string }> = {
@@ -45,8 +47,20 @@ export function BatchNode({ data }: { data: BatchNodeData }) {
   const colors = STATUS_COLORS[data.status] ?? STATUS_COLORS.pending;
   return (
     <div
-      className={`relative cursor-pointer ${data.isMuted ? "opacity-60" : ""}`}
+      role="button"
+      tabIndex={0}
+      aria-label={`Expand ${data.count} ${data.taskType} (${data.status})`}
+      className={`relative cursor-pointer rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+        data.isMuted ? "opacity-60" : ""
+      }`}
       title={`${data.count} × ${data.taskType}, ${data.status} — click to expand`}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          e.stopPropagation();
+          data.onExpand?.();
+        }
+      }}
     >
       {/* Stacked-card effect */}
       <div

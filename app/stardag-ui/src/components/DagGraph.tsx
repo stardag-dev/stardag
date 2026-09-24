@@ -197,6 +197,15 @@ export function DagGraph({
   });
   const expandedIds = expanded.cap === groupAfter ? expanded.ids : null;
 
+  const expand = useCallback(
+    (batchId: string) =>
+      setExpanded((previous) => ({
+        cap: groupAfter,
+        ids: new Set([...(previous.cap === groupAfter ? previous.ids : []), batchId]),
+      })),
+    [groupAfter],
+  );
+
   const model = useMemo(() => flowModel(view), [view]);
   const grouped = useMemo(() => {
     const ids = new Set(expandedIds ?? []);
@@ -234,6 +243,7 @@ export function DagGraph({
         status: b.status,
         isMuted: mutedIds.has(b.id),
         direction,
+        onExpand: () => expand(b.id),
       },
     }));
     const nodes: TaskNodeType[] = grouped.nodes.map((n) => ({
@@ -264,7 +274,7 @@ export function DagGraph({
       ...(e.isDynamic ? { type: "dynamicEdge" } : {}),
     }));
     return { layoutedNodes: layout(nodes, edges, direction), layoutedEdges: edges };
-  }, [model, grouped, mutedTaskIds, theme, direction]);
+  }, [model, grouped, mutedTaskIds, theme, direction, expand]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(layoutedEdges);
@@ -347,10 +357,7 @@ export function DagGraph({
         onEdgesChange={onEdgesChange}
         onNodeClick={(_, node) => {
           if (node.type === "batchNode") {
-            setExpanded({
-              cap: groupAfter,
-              ids: new Set([...(expandedIds ?? []), node.id]),
-            });
+            expand(node.id);
           } else {
             onTaskClick((node.data as TaskNodeData).taskId);
           }
