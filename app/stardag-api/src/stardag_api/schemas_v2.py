@@ -378,3 +378,45 @@ class TransitionResponse(BaseModel):
     status: TaskStatus
     execution_id: UUID | None
     claim_expires_at: datetime | None
+
+
+# ---------------------------------------------------------------------------
+# The dynamic phase
+# ---------------------------------------------------------------------------
+
+
+class YieldRequest(BaseModel):
+    """``POST /plans/{plan_id}/members/{task_id}/yield``: one yield batch.
+
+    ``items`` are the yielded children and their static closure, in
+    post-order, exactly as a static chunk; ``yielded`` names the children
+    (by instance hash, each one of ``items``) the parent gets a dynamic
+    edge to. ``batch_id`` is client-minted: a retried batch is replayed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: UUID
+    deployment_id: UUID
+    batch_id: UUID
+    items: list[RegistrationItem] = Field(min_length=1, max_length=1000)
+    yielded: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        min_length=1
+    )
+    #: The reactive worker suspends (its container exits); the resident
+    #: engine keeps the claim while its generator waits.
+    suspend: bool
+
+
+class YieldResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    members: MembersResponse
+    dynamic_edges_created: int
+    #: The parent's state once the batch applied (or when it first applied,
+    #: for a replay).
+    status: TaskStatus
+    execution_id: UUID | None
+    claim_expires_at: datetime | None
+    #: True when this delivery found the batch already applied.
+    replayed: bool

@@ -1,14 +1,14 @@
 """One chunk of registration: the per-item steps, in one transaction.
 
 The body of every registration route (``create_plan``'s roots, ``POST
-/plans/{id}/members``, and from step 3 ``/yield``), and of the closure
-step's admission. See ``registration.py`` for the locking rules and
+/plans/{id}/members`` and ``/yield``), and of the closure step's
+admission. See ``registration.py`` for the locking rules and
 design.md, "Registration", for the steps.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -121,7 +121,14 @@ async def register_items(
     *,
     as_roots: bool,
     now: datetime,
+    dynamic: Collection[str] = (),
 ) -> MembersResult:
+    """Register one chunk into ``plan`` inside the caller's transaction.
+
+    ``dynamic`` names the instance hashes a yield admits as its children
+    (``admitted_by = dynamic``); the rest of a yield's items are its
+    children's static closure.
+    """
     _check_clock_skew(items, now)
     chunk = _Chunk(plan=plan, items=_sorted_items(items), clock=EventClock(now))
     if not chunk.items:
@@ -129,7 +136,9 @@ async def register_items(
 
     await _insert_tasks(session, environment_id, chunk)
     await _insert_instances(session, environment_id, chunk)
-    admitted = await _admit_items(session, environment_id, chunk, as_roots=as_roots)
+    admitted = await _admit_items(
+        session, environment_id, chunk, as_roots=as_roots, dynamic=dynamic
+    )
     edges_created, diverged, closure_admitted = await _insert_edges(
         session, environment_id, chunk
     )
@@ -304,7 +313,12 @@ async def _insert_instances(
 
 
 async def _admit_items(
-    session: AsyncSession, environment_id: UUID, chunk: _Chunk, *, as_roots: bool
+    session: AsyncSession,
+    environment_id: UUID,
+    chunk: _Chunk,
+    *,
+    as_roots: bool,
+    dynamic: Collection[str],
 ) -> int:
     """``plan_member`` insert-if-absent for the chunk's own items."""
     admitted_by = AdmittedBy.ROOT if as_roots else AdmittedBy.STATIC
@@ -326,6 +340,7 @@ async def _admit_items(
         clock=chunk.clock,
         tasks_created=chunk.tasks_created,
         is_root=as_roots,
+        dynamic_instances={chunk.instance_id[h] for h in dynamic},
     )
     chunk.events.extend(events)
     return count
@@ -341,13 +356,20 @@ async def admit_members(
     clock: EventClock,
     tasks_created: Iterable[str] = (),
     is_root: bool = False,
+    dynamic_instances: Collection[UUID] = (),
 ) -> tuple[int, list[dict[str, Any]]]:
     """Insert members ``(task_id, task_pk, instance_id, body)``, in ``task_id``
-    order; a completion the plan holds under another instance is 409
-    ``instance_conflict``. Queues TASK_PENDING / TASK_REFERENCED for every
-    member actually inserted. Returns how many were, and those events."""
+    order, in one statement; a completion the plan holds under another
+    instance is 409 ``instance_conflict``. Rows whose instance is in
+    ``dynamic_instances`` are admitted ``dynamic`` (a yield's children).
+    Queues TASK_PENDING / TASK_REFERENCED for every member actually
+    inserted. Returns how many were, and those events."""
     if not rows:
         return 0, []
+
+    def admitted(instance_id: UUID) -> AdmittedBy:
+        return AdmittedBy.DYNAMIC if instance_id in dynamic_instances else admitted_by
+
     created = set(tasks_created)
     ordered = sorted(rows, key=lambda r: r[0])
     # Keyed by (task, instance): two instances of one completion in one
@@ -366,7 +388,7 @@ async def admit_members(
                             "deployment_id": plan.deployment_id,
                             "settings_hash": plan.settings_hash,
                             "is_root": is_root,
-                            "admitted_by": admitted_by,
+                            "admitted_by": admitted(instance_id),
                             "created_at": clock.now,
                         }
                         for _, task_pk, instance_id, _ in ordered
@@ -424,7 +446,7 @@ async def admit_members(
                     build_id=plan.build_id,
                     task_pk=task_pk,
                     plan_id=plan.id,
-                    metadata={"admitted_by": admitted_by.value},
+                    metadata={"admitted_by": admitted(instance_id).value},
                 )
             )
     return len(inserted), events

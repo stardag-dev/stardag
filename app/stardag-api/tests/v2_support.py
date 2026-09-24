@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stardag_api.schemas_v2 import RegistrationItem
 from stardag_api.services import frontier as frontier_service
-from stardag_api.services import plans, registration, transitions
+from stardag_api.services import plans, registration, transitions, yields
 from stardag_api.services.transitions import Transition
 from tests.conftest import DEFAULT_ENVIRONMENT_ID
 
@@ -218,6 +218,41 @@ class Harness:
         async with self.sf() as s:
             return await transitions.renew_claim(
                 s, ENV, task_id=it.task_id, execution_id=execution_id
+            )
+
+    async def yield_(
+        self,
+        plan_id: UUID,
+        parent: RegistrationItem,
+        execution_id: UUID,
+        items: Sequence[RegistrationItem],
+        yielded: Sequence[RegistrationItem] | None = None,
+        *,
+        suspend: bool = True,
+        batch_id: UUID | None = None,
+        deployment_id: UUID | None = None,
+    ) -> yields.YieldResult:
+        """One ``/yield`` batch of ``parent``; ``yielded`` defaults to every
+        item, and ``deployment_id`` to the plan's."""
+        async with self.sf() as s:
+            if deployment_id is None:
+                deployment_id = (
+                    await registration.get_plan(s, ENV, plan_id)
+                ).deployment_id
+        async with self.sf() as s:
+            return await yields.yield_batch(
+                s,
+                ENV,
+                plan_id=plan_id,
+                task_id=parent.task_id,
+                execution_id=execution_id,
+                deployment_id=deployment_id,
+                batch_id=batch_id or uuid4(),
+                items=items,
+                yielded=[
+                    y.instance_hash for y in (items if yielded is None else yielded)
+                ],
+                suspend=suspend,
             )
 
     # -- the one-root-plan shortcut -------------------------------------------

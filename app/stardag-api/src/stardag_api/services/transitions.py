@@ -82,6 +82,8 @@ __all__ = [
     "TransitionKind",
     "TransitionOutcome",
     "apply_member_transition",
+    "lock_task",
+    "member_task_pk",
     "renew_claim",
     "transition_task",
 ]
@@ -104,22 +106,7 @@ async def apply_member_transition(
     A recorded refusal (:class:`RecordedConflict`) is committed, then raised.
     """
     async with transaction(session):
-        task_pk = await session.scalar(
-            select(PlanMember.task_pk)
-            .join(Task, Task.id == PlanMember.task_pk)
-            .where(
-                PlanMember.environment_id == environment_id,
-                PlanMember.plan_id == plan_id,
-                Task.task_id == task_id,
-            )
-        )
-        if task_pk is None:
-            raise NotFound(
-                "not_a_member",
-                f"task {task_id} is not a member of plan {plan_id}",
-                task_id=task_id,
-                plan_id=str(plan_id),
-            )
+        task_pk = await member_task_pk(session, environment_id, plan_id, task_id)
         return await transition_task(
             session,
             environment_id,
@@ -128,6 +115,45 @@ async def apply_member_transition(
             transition=transition,
             now=utc_now(),
         )
+
+
+async def member_task_pk(
+    session: AsyncSession, environment_id: UUID, plan_id: UUID, task_id: str
+) -> UUID:
+    """The task pk of ``task_id`` as a member of ``plan_id`` (404
+    ``not_a_member`` otherwise)."""
+    task_pk = await session.scalar(
+        select(PlanMember.task_pk)
+        .join(Task, Task.id == PlanMember.task_pk)
+        .where(
+            PlanMember.environment_id == environment_id,
+            PlanMember.plan_id == plan_id,
+            Task.task_id == task_id,
+        )
+    )
+    if task_pk is None:
+        raise NotFound(
+            "not_a_member",
+            f"task {task_id} is not a member of plan {plan_id}",
+            task_id=task_id,
+            plan_id=str(plan_id),
+        )
+    return task_pk
+
+
+async def lock_task(session: AsyncSession, environment_id: UUID, task_pk: UUID) -> Task:
+    """The task row, locked ``FOR NO KEY UPDATE`` (never ``FOR UPDATE``: that
+    would conflict with the FK key-share locks of every insert referencing
+    it, STA-51) and re-read."""
+    task = await session.scalar(
+        select(Task)
+        .where(Task.environment_id == environment_id, Task.id == task_pk)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
+    if task is None:
+        raise NotFound("unknown_task", f"no task {task_pk}")
+    return task
 
 
 async def renew_claim(
@@ -184,14 +210,7 @@ async def transition_task(
     builds it is news for (``wakeups.flag_after_transition``), here, so no
     path that moves a status can forget to.
     """
-    task = await session.scalar(
-        select(Task)
-        .where(Task.environment_id == environment_id, Task.id == task_pk)
-        .with_for_update(key_share=True)
-        .execution_options(populate_existing=True)
-    )
-    if task is None:
-        raise NotFound("unknown_task", f"no task {task_pk}")
+    task = await lock_task(session, environment_id, task_pk)
     step = _Step(session, environment_id, task, plan_id, transition, now)
     previous = task.status
     outcome = await _dispatch(step)

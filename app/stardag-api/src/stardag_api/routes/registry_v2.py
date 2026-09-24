@@ -30,11 +30,20 @@ from stardag_api.schemas_v2 import (
     ReportRequest,
     StartRequest,
     TransitionResponse,
+    YieldRequest,
+    YieldResponse,
 )
 from stardag_api.routes.registry_v2_builds import router as builds_router
 from stardag_api.routes.registry_v2_scope import router as scope_router
 from stardag_api.routes.registry_v2_wakeups import router as wakeups_router
-from stardag_api.services import builds, frontier, plans, registration, transitions
+from stardag_api.services import (
+    builds,
+    frontier,
+    plans,
+    registration,
+    transitions,
+    yields,
+)
 from stardag_api.services.transitions import Transition
 
 router = APIRouter(tags=["registry-v2"])
@@ -168,6 +177,24 @@ async def suspend(plan_id: UUID, task_id: str, body: ReportRequest, db: Db, auth
 )
 async def retry(plan_id: UUID, task_id: str, db: Db, auth: Auth):
     return await _transition(db, auth, plan_id, task_id, Transition.retry())
+
+
+@router.post("/plans/{plan_id}/members/{task_id}/yield", response_model=YieldResponse)
+async def yield_batch(
+    plan_id: UUID, task_id: str, body: YieldRequest, db: Db, auth: Auth
+):
+    return await yields.yield_batch(
+        db,
+        auth.environment_id,
+        plan_id=plan_id,
+        task_id=task_id,
+        execution_id=body.execution_id,
+        deployment_id=body.deployment_id,
+        batch_id=body.batch_id,
+        items=body.items,
+        yielded=body.yielded,
+        suspend=body.suspend,
+    )
 
 
 # -- claims -------------------------------------------------------------------------
