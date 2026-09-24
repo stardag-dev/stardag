@@ -68,7 +68,9 @@ function BuildViewForIdentity({
 }: BuildViewProps & { environmentId: string | undefined }) {
   const { setItems: setBreadcrumb } = useBreadcrumb();
   const plan = useBuildPlan(buildId, environmentId);
-  const { byId: deploymentsById } = useDeployments(environmentId);
+  const { byId: deploymentsById } = useDeployments(environmentId, [
+    plan.frontier?.deployment_id,
+  ]);
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [nameFilter, setNameFilter] = useState("");

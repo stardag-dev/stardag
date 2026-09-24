@@ -380,6 +380,17 @@ export async function fetchDeployments(
   return data.deployments;
 }
 
+/** One deployment by id — for one the list's first page does not hold. */
+export function fetchDeployment(
+  deploymentId: string,
+  environmentId: string,
+): Promise<Deployment> {
+  return getJson(
+    url(`/deployments/${deploymentId}`, environmentId),
+    "Failed to fetch deployment",
+  );
+}
+
 export function fetchSettings(
   settingsHash: string,
   environmentId: string,

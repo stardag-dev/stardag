@@ -11,6 +11,9 @@ vi.mock("../api/registry", () => ({
   fetchTaskExecutions: vi.fn(async () => []),
   TASK_EXECUTION_LIMIT: 100,
   fetchDeployments: vi.fn(async () => []),
+  fetchDeployment: vi.fn(async () => {
+    throw new Error("404");
+  }),
 }));
 vi.mock("./TaskClaimPanel", () => ({ TaskClaimPanel: () => null }));
 

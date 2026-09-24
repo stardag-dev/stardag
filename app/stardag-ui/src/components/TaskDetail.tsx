@@ -72,7 +72,10 @@ export function TaskDetail({
   const [artifacts, setArtifacts] = useState<TaskArtifact[] | null>(null);
   const [executions, setExecutions] = useState<Execution[] | null>(null);
   const [nonce, setNonce] = useState(0);
-  const { byId: deploymentsById } = useDeployments(environmentId);
+  const { byId: deploymentsById } = useDeployments(
+    environmentId,
+    task?.instances.map((instance) => instance.deployment_id) ?? [],
+  );
   const epochRef = useRef(0);
   const buildId = context?.buildId;
 
