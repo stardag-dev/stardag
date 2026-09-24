@@ -34,7 +34,7 @@ from stardag_api.limits import (
 from stardag_api.models import Task, TaskArtifact
 from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.services.errors import NotFound, TooManyRequests
-from stardag_api.services.transitions import member_task_pk
+from stardag_api.services.transitions import lock_task, member_task_pk
 from stardag_api.services.tx import transaction
 
 
@@ -91,6 +91,13 @@ async def upload_artifacts(
         task_pk = await member_task_pk(session, environment_id, plan_id, task_id)
         if not latest:
             return await _list(session, task_pk, task_id)
+        # Lock the task row (``FOR NO KEY UPDATE``, the mode every transition
+        # takes; this route locks nothing before it) so the quota check below
+        # sees every concurrent upload's committed rows rather than racing an
+        # unlocked count — two uploads of different (type, name) pairs could
+        # otherwise both read the count before either inserts and both pass,
+        # together exceeding the limit.
+        await lock_task(session, environment_id, task_pk)
         if limits_settings.max_artifacts_per_task is not None:
             existing = await session.scalar(
                 select(func.count())
