@@ -5,9 +5,12 @@
 # UI separately, e.g. from S3/CDN).
 #
 # A `server-vX.Y.ZrcN` tag also runs this pipeline, for a release candidate.
-# It publishes only `:X.Y.ZrcN` — never `:latest`, so an rc is never what a
-# plain `stardag self-host up` pulls — and its GitHub Release is marked
-# pre-release.
+# It publishes only `:X.Y.ZrcN` — an rc never replaces the mutable `:latest`
+# tag — and its GitHub Release is marked pre-release. That is distinct from
+# what `stardag self-host up`/`upgrade` deploys by default (their own
+# `DEFAULT_SERVER_VERSION` pin, which an SDK release cut during a
+# pre-release window may intentionally point at the rc); see DEV_README.md
+# "Pre-release".
 #
 # The server is versioned independently of the SDK (`v*` tags — see
 # publish.yml). The single image definition lives in app/server.Dockerfile.
