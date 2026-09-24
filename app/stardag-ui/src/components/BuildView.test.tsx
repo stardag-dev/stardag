@@ -166,6 +166,19 @@ describe("BuildView layout", () => {
   });
 });
 
+describe("BuildView failure reason", () => {
+  it("shows why a failed build failed, above the DAG", () => {
+    setPlan(makeBuild({ status: "failed", error_message: "Root failed: boom" }));
+    renderView();
+    expect(screen.getByRole("alert")).toHaveTextContent("Root failed: boom");
+  });
+
+  it("shows no reason for a build that is not failed", () => {
+    renderView();
+    expect(screen.queryByText("Why this build failed")).not.toBeInTheDocument();
+  });
+});
+
 describe("BuildView plan graph toggle", () => {
   it("uses v1's rotating chevron as a disclosure control", () => {
     renderView();

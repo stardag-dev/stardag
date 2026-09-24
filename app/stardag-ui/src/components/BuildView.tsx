@@ -10,8 +10,10 @@ import { useEnvironment } from "../context/EnvironmentContext";
 import { useBuildPlan } from "../hooks/useBuildPlan";
 import { useDeployments } from "../hooks/useDeployments";
 import type { Build, TaskStatus } from "../types/task";
+import { rootsCompleted } from "../utils/builds";
 import { shortTaskId } from "../utils/ids";
 import { BuildControlsDialog } from "./BuildControlsDialog";
+import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildInfoDialog } from "./BuildInfoDialog";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
 import { BuildStatusBadge } from "./BuildStatusBadge";
@@ -287,6 +289,15 @@ function BuildViewForIdentity({
                   />
                 </div>
               </div>
+
+              {/* Why it failed, kept on screen: the scheduling dialog goes
+                  quiet on a failed build. See BuildFailureReason. */}
+              <BuildFailureReason
+                status={build.status}
+                message={build.error_message}
+                failedAt={build.completed_at}
+                superseded={rootsCompleted(members)}
+              />
 
               <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
                 <button
