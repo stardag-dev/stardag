@@ -20,6 +20,11 @@ Mechanics:
   worker selector's per-task env over the deployment's env; the framework's
   identifiers (``STARDAG_PLAN_ID``, ``STARDAG_EXECUTION_ID``, ...) are
   written last by the executor and win over all three.
+- A **bare resume** -- ``settings`` omitted (``None``) with a build to
+  resume -- reuses the settings of the build's active plan
+  (:func:`resolve_settings`), as a bare re-trigger reads the stored config;
+  only an explicit ``settings={}`` means "no settings" (a new plan when the
+  active one had some, S14).
 - Workers and ticks apply them in a scoped :func:`settings_applied` around
   the run; a resident driver applies them for the whole build with
   :func:`resident_settings`, which refuses a second concurrent build in the
@@ -35,6 +40,11 @@ import typing
 from collections.abc import Mapping
 
 from stardag.exceptions import StardagError
+
+if typing.TYPE_CHECKING:
+    from uuid import UUID
+
+    from stardag.registry import RegistryABC
 from stardag.utils.env import temp_env_vars
 
 RESERVED_SETTINGS_PREFIXES = ("STARDAG_", "MODAL_")
@@ -71,6 +81,48 @@ def validate_settings(settings: Mapping[str, object] | None) -> Settings:
             )
         checked[key] = value
     return checked
+
+
+def _stored_needed(
+    registry: "RegistryABC", build_id: "UUID | None", settings: object
+) -> bool:
+    from stardag.registry import is_noop_registry
+
+    return settings is None and build_id is not None and not is_noop_registry(registry)
+
+
+def resolve_settings(
+    registry: "RegistryABC",
+    build_id: "UUID | None",
+    settings: Mapping[str, object] | None,
+) -> Settings:
+    """The settings a build runs under: ``settings`` validated, or -- for a
+    bare resume (``settings is None`` with ``build_id``) -- the settings of
+    the build's active plan, read from the registry (the frontier's
+    ``settings_hash``, then ``GET /settings/{hash}``). A build with no plan
+    yet resolves to ``{}``."""
+    if not _stored_needed(registry, build_id, settings):
+        return validate_settings(settings)
+    assert build_id is not None
+    settings_hash = registry.build_get_frontier(build_id).settings_hash
+    if not settings_hash:
+        return {}
+    return validate_settings(registry.settings_get(settings_hash).body)
+
+
+async def resolve_settings_aio(
+    registry: "RegistryABC",
+    build_id: "UUID | None",
+    settings: Mapping[str, object] | None,
+) -> Settings:
+    """Async :func:`resolve_settings`."""
+    if not _stored_needed(registry, build_id, settings):
+        return validate_settings(settings)
+    assert build_id is not None
+    settings_hash = (await registry.build_get_frontier_aio(build_id)).settings_hash
+    if not settings_hash:
+        return {}
+    return validate_settings((await registry.settings_get_aio(settings_hash)).body)
 
 
 @contextlib.contextmanager

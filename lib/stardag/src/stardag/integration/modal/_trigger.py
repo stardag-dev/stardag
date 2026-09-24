@@ -23,7 +23,7 @@ import modal
 
 from stardag import BaseTask
 from stardag.build._registration import new_id
-from stardag.build._settings import validate_settings
+from stardag.build._settings import resolve_settings, validate_settings
 from stardag.build._task_modules import TaskModulesError
 from stardag.integration.modal._bootstrap import (
     ReactiveDiscovery,
@@ -154,7 +154,9 @@ class _Triggering:
                 build (bootstrap, ticks, workers, the resident driver). They
                 are the second half of the build's scope: they may change
                 structure and execution, never output. ``STARDAG_*`` and
-                ``MODAL_*`` keys are refused.
+                ``MODAL_*`` keys are refused. Omitted on a re-trigger
+                (``build_id``), the build's active plan's settings are
+                reused; ``{}`` explicitly means none.
 
         Returns:
             BuildTriggerResult with the build id and the spawned call.
@@ -200,6 +202,13 @@ class _Triggering:
                 "build without local registry credentials."
             )
         task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
+        # A bare re-trigger runs under the settings its build already has
+        # (the active plan's), not under none; ``settings={}`` says "none"
+        # explicitly. Without a registry here, the driver resolves it.
+        settings_known = settings is not None
+        if build_id is not None and settings is None and not is_noop_registry(registry):
+            checked_settings = resolve_settings(registry, build_id, None)
+            settings_known = True
         executor_metadata = self._build_executor_metadata(reactive=reactive)
         if build_id is None:
             build_id = registry.build_create(
@@ -225,7 +234,7 @@ class _Triggering:
                 settings=checked_settings,
             )
         merged_kwargs["resume_build_id"] = build_id
-        if checked_settings:
+        if settings_known:
             merged_kwargs["settings"] = checked_settings
         build_function = modal.Function.from_name(app_name=self.name, name="build")
         function_call = build_function.spawn(

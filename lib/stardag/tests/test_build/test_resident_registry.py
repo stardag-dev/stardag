@@ -530,3 +530,49 @@ async def test_the_stability_check_runs_only_when_something_is_registered(
         _, _, root = _chain()
         await engine([root], registry=InMemoryRegistry())
         assert check.call_count == 3
+
+
+@ENGINES
+@pytest.mark.parametrize(
+    "given,expected",
+    [(None, {"MY_FEATURE_FLAG": "on"}), ({}, None)],
+    ids=["bare-reuses-stored", "explicit-empty"],
+)
+async def test_a_bare_resume_reuses_the_active_plans_settings(
+    engine, given, expected, default_in_memory_fs_target: Target
+):
+    """``settings`` omitted on a resume means the build's own settings (its
+    active plan's, read from the registry), so a bare resume stays in its
+    scope; an explicit ``{}`` means none, and plans a new scope (S14)."""
+    seen: list[str | None] = []
+
+    class ReadsFlag(Task[str]):
+        name: str
+
+        def run(self):
+            seen.append(os.environ.get("MY_FEATURE_FLAG"))
+            self._save("ok")
+
+    registry = InMemoryRegistry()
+    first = ReadsFlag(name=f"first-{new_id()}")
+    summary = await engine(
+        [first], registry=registry, settings={"MY_FEATURE_FLAG": "on"}
+    )
+    assert summary.build_id is not None
+    first_plan = registry.active_plan(summary.build_id)
+    assert first_plan is not None
+    await engine(
+        [ReadsFlag(name=first.name)],
+        registry=registry,
+        resume_build_id=summary.build_id,
+        settings=given,
+    )
+    active = registry.active_plan(summary.build_id)
+    assert active is not None
+    assert seen == ["on"]  # the first run; the resume found it complete
+    if expected is None:
+        assert active.id != first_plan.id
+        assert registry.settings[active.settings_hash] == {}
+    else:
+        assert active.id == first_plan.id
+        assert registry.settings[active.settings_hash] == expected

@@ -49,7 +49,11 @@ from stardag.build._concurrency import (
 )
 from stardag.build._registration import Walk, walk_aio, yield_batches
 from stardag.build._session import ClaimRenewal, LimitKeySelector, ResidentSession
-from stardag.build._settings import resident_settings, validate_settings
+from stardag.build._settings import (
+    SettingsError,
+    resident_settings,
+    resolve_settings_aio,
+)
 from stardag.build._wakeups import drain_wake_candidates
 from stardag.exceptions import ExecutionCancelled
 from stardag.registry import RegistryABC, registry_provider
@@ -134,6 +138,8 @@ async def build_aio(
         claim_config: How claims are waited on and renewed.
         settings: Environment variables applied for the build's duration
             (the scope's second half; ``STARDAG_*`` / ``MODAL_*`` refused).
+            Omitted on a resume, the build's active plan's settings are
+            reused; ``{}`` explicitly means none.
             Two concurrent builds in one process with different settings
             are refused.
         limit_key_selector: The registry concurrency-limit keys a task runs
@@ -149,14 +155,25 @@ async def build_aio(
             raise ValueError(
                 f"Invalid task at index {index}: {task} (must be BaseTask)"
             )
-    checked_settings = validate_settings(settings)
+    registry = registry if registry is not None else registry_provider.get()
+    try:
+        checked_settings = await resolve_settings_aio(
+            registry, resume_build_id, settings
+        )
+    except SettingsError:
+        raise
+    except Exception as e:
+        handle_registry_error(
+            e, "Could not read the resumed build's settings", on_registry_failure
+        )
+        checked_settings = {}
     with resident_settings(checked_settings):
         engine = _ResidentEngine(
             roots,
             task_executor=task_executor or _default_executor(),
             fail_mode=fail_mode,
             session=ResidentSession(
-                registry if registry is not None else registry_provider.get(),
+                registry,
                 on_registry_failure=on_registry_failure,
                 claim_config=claim_config,
                 settings=checked_settings,

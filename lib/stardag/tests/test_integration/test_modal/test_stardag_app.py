@@ -762,8 +762,52 @@ class TestStardagAppBuildTrigger:
         (resume,) = registry.calls_to("build_resume")
         assert resume["deployment_id"] is None
         assert len(registry.calls_to("build_create")) == 1
+        # A bare re-trigger of a build with no plan yet: no settings.
         assert modal_function_stub["kwargs"]["build_kwargs"] == {
-            "resume_build_id": build_id
+            "resume_build_id": build_id,
+            "settings": {},
+        }
+
+    @pytest.mark.parametrize(
+        "given,expected",
+        [(None, {"MY_FLAG": "on"}), ({}, {}), ({"OTHER": "x"}, {"OTHER": "x"})],
+        ids=["bare-reuses-stored", "explicit-empty", "explicit-other"],
+    )
+    def test_a_bare_retrigger_reuses_the_active_plans_settings(
+        self, modal_function_stub, given, expected
+    ):
+        """Omitted settings on a re-trigger mean the build's own (its active
+        plan's), as a bare re-trigger read the stored config in v1; only an
+        explicit ``{}`` means none."""
+        from datetime import datetime, timezone
+
+        from stardag.build._registration import new_id, registration_item
+        from stardag.testing import InMemoryRegistry
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        registry = InMemoryRegistry()
+        root = SyncOnlyTask(name=f"stored-settings-{new_id()}")
+        build_id = registry.build_create(root_task_ids=[str(root.id)]).id
+        registry.plan_create(
+            build_id,
+            plan_id=new_id(),
+            deployment_id=registry.add_deployment(app_name=app.name),
+            settings={"MY_FLAG": "on"},
+            roots=[
+                registration_item(
+                    root,
+                    declared_upstreams=None,
+                    observed_complete=False,
+                    observed_at=datetime.now(timezone.utc),
+                )
+            ],
+        )
+        with registry_provider.override(registry):
+            app.build_trigger(root, build_id=build_id, settings=given)
+        assert modal_function_stub["kwargs"]["build_kwargs"] == {
+            "resume_build_id": build_id,
+            "settings": expected,
         }
 
     def test_settings_are_forwarded_to_the_builder(self, modal_function_stub):

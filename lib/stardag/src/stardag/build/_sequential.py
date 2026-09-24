@@ -46,7 +46,12 @@ from stardag.build._base import (
 )
 from stardag.build._registration import Walk, walk_aio, yield_batches
 from stardag.build._session import LimitKeySelector, ResidentSession
-from stardag.build._settings import resident_settings, validate_settings
+from stardag.build._settings import (
+    SettingsError,
+    resident_settings,
+    resolve_settings,
+    resolve_settings_aio,
+)
 from stardag.registry import RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
@@ -402,7 +407,16 @@ def build_sequential(
     :func:`build_sequential_aio` for the other arguments.
     """
     roots = _roots(tasks)
-    checked = validate_settings(settings)
+    registry = registry if registry is not None else registry_provider.get()
+    try:
+        checked = resolve_settings(registry, resume_build_id, settings)
+    except SettingsError:
+        raise
+    except Exception as e:
+        handle_registry_error(
+            e, "Could not read the resumed build's settings", on_registry_failure
+        )
+        checked = {}
     caller = _CallerThread()
     engine = _SequentialEngine(
         roots,
@@ -470,13 +484,24 @@ async def build_sequential_aio(
         on_registry_failure: ``"raise"`` or ``"warn"`` (outages only).
         claim_config: Claim waiting and renewal.
         settings: Environment variables applied for the build's duration.
+            Omitted on a resume, the build's active plan's settings are
+            reused; ``{}`` explicitly means none.
         limit_key_selector: Registry concurrency-limit keys per task, sent
             with its claim.
         description: A description for a new build.
         max_concurrent_discover: Completion checks in flight while walking.
     """
     roots = _roots(tasks)
-    checked = validate_settings(settings)
+    registry = registry if registry is not None else registry_provider.get()
+    try:
+        checked = await resolve_settings_aio(registry, resume_build_id, settings)
+    except SettingsError:
+        raise
+    except Exception as e:
+        handle_registry_error(
+            e, "Could not read the resumed build's settings", on_registry_failure
+        )
+        checked = {}
     engine = _SequentialEngine(
         roots,
         session=_session(
