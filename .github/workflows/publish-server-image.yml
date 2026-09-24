@@ -66,9 +66,11 @@ jobs:
       # so the package must be switched to public — see "Releasing the
       # Server" in DEV_README.md for the step.
       #
-      # `latest` is omitted for an rc (`is_prerelease`) so a pre-release
-      # never becomes what a plain `stardag self-host up` pulls. The
-      # conditional expression yields an empty line in that case, which
+      # `latest` is omitted for an rc (`is_prerelease`), so it never becomes
+      # what a consumer of the mutable `latest` tag pulls (that is separate
+      # from `DEFAULT_SERVER_VERSION`, which a pinned SDK may intentionally
+      # point at the rc — see the top-of-file comment). The conditional
+      # expression yields an empty line in that case, which
       # docker/build-push-action's multi-line `tags` input ignores.
       - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
