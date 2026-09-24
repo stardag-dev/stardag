@@ -205,7 +205,13 @@ row has no deploy step to wait for, so lookup-or-create returns it **already
 activated** (`activated_at` set in the same insert, `generation` assigned as
 for any row); the two-step create/activate is for Modal deployments only.
 A `local` row's `app_name` is `"local"` unless the driver names an app, so
-its generations are ordered like any app's.
+its generations are ordered like any app's; a lookup naming another app for
+a recorded code id is 409 `local_deployment_conflict`. Generation assignment
+is serialised per `(environment, kind, app_name)` (a transaction-scoped
+advisory lock, since the row may not exist yet), and `deployed_at` is the
+registry's clock. `GET /deployments` marks each row current or not
+(`?current=true` keeps one per app), which is how a hybrid driver finds the
+app's current deployment.
 
 **A driver that is not the deployment.** A hybrid `sd.build()` whose tasks
 run on a Modal app, and `reactive_discovery="local"`, plan under **the
@@ -240,7 +246,9 @@ The contract, which the user docs state next to `significant`: settings
 output is a significant parameter. Completion is global, so a value here
 that changed output would let one build reuse another's different result.
 
-Mechanics. When a key appears in several places, settings win over the
+Mechanics. The registry validates the body too (a flat `str → str`
+mapping; `STARDAG_*` / `MODAL_*` keys are 400 `reserved_settings_key`), and
+serves it at `GET /settings/{hash}`. When a key appears in several places, settings win over the
 worker selector's per-task env, which wins over the deployment's env. Keys
 starting `STARDAG_` or `MODAL_` are refused at the trigger, and the
 framework's own identifiers (`STARDAG_PLAN_ID`, `STARDAG_DEPLOYMENT_ID`,
@@ -284,17 +292,17 @@ implied in all of them.
 
 Replaces v1 `tasks`. Holds no parameters.
 
-| Column                                                     | Notes                                                                                                                                                                                                                                                                                   |
-| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id` PK                                                    |                                                                                                                                                                                                                                                                                         |
-| `task_id`                                                  | completion hash; `UNIQUE (environment_id, task_id)`                                                                                                                                                                                                                                     |
-| `task_namespace`, `task_name`, `version`, `output_uri`     | identity-level, part of the hash / derived from it                                                                                                                                                                                                                                      |
-| `status`                                                   | `PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, SKIPPED, SUSPENDED, INTERRUPTED` — a native enum or a CHECK; v1's `UNREGISTERED` phantom status is gone                                                                                                                                |
-| `status_at`, `started_at`, `completed_at`, `error_message` | as v1 `latest_*`                                                                                                                                                                                                                                                                        |
-| `claim_expires_at`                                         | CHECK: NOT NULL whenever `status = RUNNING`. The claim is **live** when `status = RUNNING AND claim_expires_at > now()`; RUNNING with a past expiry is a **lapsed** claim, which the next claiming start takes over. Every execution has a finite expiry (D11); nothing is live forever |
-| `claim_plan_id`, SET NULL                                  | the holder; implies the build, and via `plan_member` the instance body that is running. Composite FK `(claim_plan_id, id)` → `plan_member (plan_id, task_pk)`, its primary key, so a claim can only name a plan that holds this task                                                    |
-| `execution_id`, SET NULL                                   | current execution, minted by the client before the claim (STA-50 rule unchanged); executor details are read from the execution row, not copied. Composite FK `(id, execution_id)` → `execution (task_pk, id)`                                                                           |
-| `preempted_at`                                             | as v1 (`waiting_for_lock` goes with the lock table)                                                                                                                                                                                                                                     |
+| Column                                                     | Notes                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id` PK                                                    |                                                                                                                                                                                                                                                                                                                                                          |
+| `task_id`                                                  | completion hash; `UNIQUE (environment_id, task_id)`                                                                                                                                                                                                                                                                                                      |
+| `task_namespace`, `task_name`, `version`, `output_uri`     | identity-level, part of the hash / derived from it                                                                                                                                                                                                                                                                                                       |
+| `status`                                                   | `PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, SKIPPED, SUSPENDED, INTERRUPTED` — a native enum or a CHECK; v1's `UNREGISTERED` phantom status is gone                                                                                                                                                                                                 |
+| `status_at`, `started_at`, `completed_at`, `error_message` | as v1 `latest_*`                                                                                                                                                                                                                                                                                                                                         |
+| `claim_expires_at`                                         | CHECK: NOT NULL whenever `status = RUNNING`. The claim is **live** when `status = RUNNING AND claim_expires_at > now()`; RUNNING with a past expiry is a **lapsed** claim, which the next claiming start takes over. Every execution has a finite expiry (D11); nothing is live forever: the default TTL is 3600 s and a requested one is capped at 24 h |
+| `claim_plan_id`, SET NULL                                  | the holder; implies the build, and via `plan_member` the instance body that is running. Composite FK `(claim_plan_id, id)` → `plan_member (plan_id, task_pk)`, its primary key, so a claim can only name a plan that holds this task                                                                                                                     |
+| `execution_id`, SET NULL                                   | current execution, minted by the client before the claim (STA-50 rule unchanged); executor details are read from the execution row, not copied. Composite FK `(id, execution_id)` → `execution (task_pk, id)`                                                                                                                                            |
+| `preempted_at`                                             | as v1 (`waiting_for_lock` goes with the lock table)                                                                                                                                                                                                                                                                                                      |
 
 Indexes: `(environment_id, status, status_at)`, `(environment_id,
 task_name)`, `(claim_plan_id) WHERE status = 'RUNNING'`.
@@ -303,7 +311,9 @@ Claim arbitration locks this row with `FOR NO KEY UPDATE` (not `FOR
 UPDATE`): every insert into `task_instance`, `plan_member`, `execution` and
 `event` takes a `FOR KEY SHARE` on the referenced `task` row through its FK,
 and `FOR UPDATE` conflicts with that while `FOR NO KEY UPDATE` does not —
-STA-51's finding, applied. Registration never locks `task` explicitly.
+STA-51's finding, applied. Registration locks `task` only through
+`transition_task()`, when an item's observation changes a status: `FOR NO
+KEY UPDATE`, in `task_id` order (the chunk's order).
 
 Dropped from v1: `task_data`, `is_phantom`, `latest_status_scope_key`,
 `latest_commit_hash`, `latest_status_event_id`, `latest_status_build_id`
@@ -363,7 +373,10 @@ are different constructions of one promise).
 
 Edges belong to no plan and are never deleted (retention of instances and
 edges of retired deployments is STA-68's question, unchanged; `deployment`
-is `ON DELETE RESTRICT` from every table, so retention has to be explicit).
+is `ON DELETE NO ACTION` from every table, so retention has to be explicit;
+`NO ACTION` rather than `RESTRICT` because it is checked at the end of the
+statement, so deleting an environment — whose cascade removes the deployment
+and every row referencing it together — never depends on cascade order).
 
 ### `plan` — one request, under one scope
 
@@ -463,7 +476,13 @@ table, plus `TASK_INVALIDATED`, `TASK_EXCLUDED`, `TASK_OBSERVED_COMPLETE`,
 `task_limit_key.task_pk` → `task`, written **at claim time from the claiming
 instance** and replaced on every claim (limit-key selection may read
 non-significant fields, so it is per instance; a slot is a limit key plus a
-live claim). `distributed_lock` is **retired** (D11). `build_tick_summary`
+live claim). The tick computes the keys from the instance body and sends
+them **with the claiming start** (`limit_keys` on the start request, not on
+the registration item). The claim locks the limit rows `FOR UPDATE` in key
+order and counts live holders; a full key is 409
+`concurrency_limit_reached`, and that refusal also writes the keys it asked
+for, so a task that has never held a claim is findable as queued on them
+when a slot frees (it holds no slot: its claim is not live). `distributed_lock` is **retired** (D11). `build_tick_summary`
 unchanged. The 24-hour creation quota counts `task_instance` rows — the
 table a non-significant field can inflate. Deleting a build is refused
 (409) while any of its plans holds a live claim **or any of its executions
@@ -480,7 +499,8 @@ CONFLICT DO NOTHING … RETURNING`; the only contended rows are `task` (claim
 arbitration), locked in `task_id` order, and never in the same transaction as
 instance/edge/membership inserts except through the FK `KEY SHARE` locks
 STA-51 documented — the registration transaction takes no `FOR UPDATE` on
-`task` at all. Every composite FK in this design has its **scope** columns
+`task` at all, and a `FOR NO KEY UPDATE` only where an observation changes a
+status (in `task_id` order, through `transition_task()`). Every composite FK in this design has its **scope** columns
 (`environment_id` and the keys it scopes) NOT NULL, because a PostgreSQL
 composite FK does not check a row in which any referencing column is NULL.
 The pointer columns on `task` (`claim_plan_id`, `execution_id`) and on
@@ -499,12 +519,12 @@ timestamp. Only a transition that changes the state writes.
   instance_hash, body,
   declared_upstreams: [instance_hash, ...] | null,   -- null = not expanded (pruned)
   observed_complete: true | false,                    -- the driver checked the target
-  observed_at,                                        -- when it checked (driver clock)
-  limit_keys: [...] | null }
+  observed_at }                                       -- when it checked (driver clock)
 ```
 
 Upstreams are named by `instance_hash`, never by `task_id`, because a scope
-may hold several instances of one completion.
+may hold several instances of one completion. Limit keys are not part of the
+item: they are per claim, and travel on the claiming start.
 
 **Static phase.** The driver (bootstrap, resident engine, or a rollover tick)
 walks the DAG from the root instances under its scope. The walk stops at
@@ -533,15 +553,18 @@ POST /plans/{plan_id}/members   (chunk, ≤1000 items, post-order, sorted within
                      yet a member (admitted_by = closure; 409 instance_conflict if the plan
                      holds another instance of that task). An already-expanded instance whose
                      declared set differs from its recorded static edges gets the new edges
-                     appended and a TASK_STRUCTURE_DIVERGED event: edges only grow, and a
-                     within-scope divergence is a contract breach that over-gates (v1's rule)
+                     appended and a TASK_STRUCTURE_DIVERGED event — only when new static
+                     edges actually land, so a re-sent or subset declaration records nothing:
+                     edges only grow, and a within-scope divergence is a contract breach that
+                     over-gates (v1's rule)
      expanded_at     set when declared_upstreams is a list (possibly empty); untouched when null
      plan_member     insert-if-absent by (plan_id, task_pk); 409 instance_conflict otherwise
      status          observed_complete = true and no live claim -> COMPLETED (TASK_OBSERVED_COMPLETE);
                      if the task was RUNNING with a lapsed claim, that claim is closed on the ledger
                      first (claim_outcome = lapsed) — whatever moves a task off RUNNING closes the
                      current execution's claim, always, in transition_task();
-                     observed_complete = false and status COMPLETED -> PENDING (TASK_INVALIDATED)
+                     observed_complete = false and status COMPLETED -> PENDING (TASK_INVALIDATED;
+                     task.completed_at is cleared, as the completion is withdrawn)
                      -- in this transaction, so no downstream in a later chunk can run against
                      -- a status the driver has already seen to be false; and only if the
                      -- task's status_at (for an invalidation: task.completed_at, the timestamp of
@@ -556,7 +579,11 @@ POST /plans/{plan_id}/members   (chunk, ≤1000 items, post-order, sorted within
                      -- output (see decisions.md, Copilot round 2)
      event           TASK_PENDING (new task) or TASK_REFERENCED, gated on the member insert
 POST /plans/{plan_id}/seal
-  -> verifies: every root member is expanded or COMPLETED (a root whose target already existed
+  -> first runs the closure step (below), in the seal's transaction: an edge another plan added
+     from a shared instance to an instance this plan does not hold is admitted rather than
+     failing a correct seal; a conflict the closure finds fails the build and refuses the seal
+     (409 instance_conflict, the build failure committed)
+  -> then verifies: every root member is expanded or COMPLETED (a root whose target already existed
      is admitted unexpanded and stays so until an invalidation makes it a discovery job);
      every edge from a member has its upstream as a member (closure holds); plan.deployment_id
      is still the app's current deployment
@@ -703,10 +730,14 @@ and its execution id; it is refused with 409 `build_not_running` if the
 plan's build is not RUNNING (the frontier of such a build lists no runnable
 members and no discovery jobs), and with 409 `plan_superseded` if the plan is
 not active — after first checking whether the same execution already holds
-the claim, so a retried granted start is a no-op, not a loss — and it
-**re-checks the runnable predicate inside its own transaction** (all
-upstream tasks COMPLETED, read under the task row lock), refusing 409
-`upstream_incomplete` otherwise. The frontier is a hint; the claim is the
+the claim, so a retried granted start is a no-op, not a loss — with 409
+`member_excluded` for an excluded member, with 409 `task_not_actionable` for
+a status outside ACTIONABLE (FAILED in particular: the fail mode decides, and
+only `retry` moves it back to PENDING), and it **re-checks the runnable
+predicate inside its own transaction** (the instance expanded, all upstream
+tasks COMPLETED, read under the task row lock), refusing 409
+`upstream_incomplete` otherwise — with `reason: not_expanded` for an
+unexpanded member, whose upstreams are not yet known. The frontier is a hint; the claim is the
 decision. This closes the window where a tick reads a downstream as runnable,
 an observation then invalidates its upstream, and the tick claims the
 downstream against a target that no longer exists (S39).
@@ -720,8 +751,8 @@ the server does not flip it inside task transactions (that would lock every
 build holding the task on each completion, the inversion `_flag_builds`
 avoids with `SKIP LOCKED`). What changes is that completion is **verified**:
 the frontier response carries `plan_complete` (= sealed, and every
-non-excluded member COMPLETED) as a diagnostic, and `/complete` **recomputes
-the same predicate in its own transaction** and is refused with 409
+non-excluded member COMPLETED) as a diagnostic, and `/complete` runs the
+closure step, then **recomputes the same predicate in its own transaction** and is refused with 409
 `plan_incomplete` unless it holds or `force` is set (the operator override
 that v1's unchecked `/complete` was; `force` overrides outstanding members,
 **never a missing seal and never an excluded root** — an unsealed plan is a
@@ -729,11 +760,24 @@ request not yet fully stated, an excluded root is a request that cannot be
 met, and the way out of either is `fail` or `cancel`). To be atomic with a
 concurrent observation, `/complete` reads the active plan's member task rows
 `FOR SHARE` in `task_id` order inside its transaction, which serialises with
-the `FOR NO KEY UPDATE` an invalidation takes. `complete`, `fail` and `cancel` release
-the claims held by the build's plans, in one server-side place — v1 released
-on two of three; `exit-early` releases nothing: a resident build's in-flight
-tasks keep reporting, and if the process is gone their claims lapse like any
-other worker's.
+the `FOR NO KEY UPDATE` an invalidation takes (the refusal names its
+`reason`: `not_sealed`, `root_excluded` or `members_incomplete`). `complete`,
+`fail` and `cancel` release the claims held by **any** of the build's plans,
+superseded ones included, in one server-side place — v1 released on two of
+three — through `transition_task()`: `claim_outcome = released`, and the task
+goes **CANCELLED** whichever terminal transition it was, because the build
+stopped wanting it, which is not a result ("revocation is not a result":
+CANCELLED is ACTIONABLE, so any other build holding the task runs it). The
+execution's `ended_at` is untouched — the container may run on — and its
+report is late from then on. `exit-early` releases nothing: a resident
+build's in-flight tasks keep reporting, and if the process is gone their
+claims lapse like any other worker's. A claiming start takes the build row
+`FOR SHARE` before its task row, which is what makes terminal transitions and
+deletes (`FOR NO KEY UPDATE` on the build) a synchronisation point for claims:
+a start in flight is waited for, and a start arriving after one reads the new
+status and is refused with `build_not_running`. A plan's roots are the build's request:
+`POST /builds` records `root_task_ids` (required, non-empty) and `create_plan`
+refuses roots whose task ids are not exactly those (400 `root_mismatch`).
 
 A build is **resumable** when a plan can be created or reactivated under the
 caller's scope. An existing sealed plan is reused **without re-evaluating
@@ -742,6 +786,12 @@ walks the members' targets and sends `observed_complete` for each, and
 requests the retries its fail mode allows (v1's `retry_failed`), so a
 FAILED member is reset and a vanished output is invalidated on resume. An
 unsealed plan is completed by re-sending; none means discovery runs.
+`POST /builds/{id}/resume {deployment_id, settings}` makes the build RUNNING
+(`BUILD_RESUMED`) and looks the plan up by the caller's scope: the active one
+is reused; one that was active before and has since been superseded is
+reactivated (the active plan superseded, in one transaction, after the same
+deployment-currency check a seal makes); an unsealed replacement is left to
+its seal; none is returned as none, and the driver creates it.
 
 ## Rollover
 
@@ -802,16 +852,24 @@ generator `run` and will restart under the new code.
   build's active plan (409 `plan_superseded` otherwise). A superseded tick
   therefore cannot start new work.
 - Every report (complete, fail, suspend, interrupt, preempt, skip, yield)
-  names its `execution_id`; it changes the task's status only if that is
-  `task.execution_id` and the claim is live. A **late report** — one naming an
-  execution whose `claim_released_at` is already set because the claim
-  lapsed, was taken over or was released by a build transition — writes that
-  execution's ledger end (`ended_at`, `outcome`) and is recorded as an event
-  with `report_applied = false`; it never touches `task`. Anything else
+  names its `execution_id`; it changes the task's status when that is
+  `task.execution_id`, **whether or not the claim has lapsed**: a lapsed
+  claim still names its execution until a claiming start takes it over, so
+  a worker finishing seconds after expiry keeps its completion (the target
+  exists). A **late report** — one naming an execution whose
+  `claim_released_at` is already set because the claim was taken over,
+  closed by an observation (`lapsed`) or released by a build transition —
+  writes that execution's ledger end (`ended_at`, `outcome`) and is recorded
+  as an event with `report_applied = false`; it never touches `task`. Anything else
   (unknown execution, second terminal report) is recorded and refused. One
   `transition_task()` implements this for every event type — v1 guarded four
   of eight routes, and the lock-release route committed a completion before
   its ownership check.
+- A report on the current execution, and the holder's self-report start,
+  come through the plan the claim was granted through: under any other plan
+  (`task.claim_plan_id` differs from the route's `plan_id`) they are 409
+  `not_claim_holder` and leave no trace — no ledger end, no event — so the
+  execution's one terminal report is not spent by a mis-routed call.
 - Completion from any plan is completion for all; the new plan never waits
   on the old plan's _plan_, only on the task's global status.
 
@@ -821,7 +879,15 @@ Unchanged in mechanism, re-keyed: "builds holding a task" is `plan_member`
 of active plans (not "any event in the build"); flagging on every transition
 (still `SKIP LOCKED`) and on limit-slot release, `wake-candidates`, the
 scheduler lease (its own columns on `build`, no longer on the lock table)
-and the watchdog carry over. Concurrency slots are `task_limit_key` rows
+and the watchdog carry over. Concretely: every status change made by
+`transition_task()` sets `needs_tick_at` on the other RUNNING reactive
+builds whose active plan has a non-excluded member for the task (build rows
+`FOR NO KEY UPDATE SKIP LOCKED`, ordered by id); a move out of RUNNING also
+flags those whose active plan has an actionable member with a
+`task_limit_key` on one of the task's keys. `POST /builds/{id}/notify` flags
+the caller's RUNNING build and reads the lease after the flag's commit;
+`POST /builds/wake-candidates` hands out at most 20 flagged builds with no
+live lease, not handed out within 120 s, oldest flag first. Concurrency slots are `task_limit_key` rows
 joined to a live claim. The `distributed_lock` table and `/locks` routes are
 retired: the claim is the only mutual exclusion (D11); the one thing kept
 from them is renewal, as `POST …/tasks/{task_id}/claim/renew {execution_id}`

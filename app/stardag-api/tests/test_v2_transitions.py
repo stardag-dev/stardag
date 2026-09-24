@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from stardag_api.services import transitions
+from stardag_api.services import reactive, transitions
 from stardag_api.services.errors import Conflict, NotFound
 from stardag_api.services.transitions import Transition, TransitionKind
 from tests.v2_support import ENV, Harness, item, observed, task_ids, utcnow
@@ -33,9 +33,9 @@ async def test_s36_retried_granted_start_after_a_seal_is_a_no_op(h: Harness):
     ``plan_superseded``. The ordering of the two checks decides it; a
     different execution through the superseded plan is refused."""
     deployment = await h.new_deployment()
-    build = await h.new_build()
     t, w = item("T"), item("W")
     root = item("Root", upstreams=[t, w])
+    build = await h.new_build([root])
     p1 = await h.plan(build, deployment, [root])
     await h.register(p1.id, [t, w, root])
     await h.seal(p1.id)
@@ -72,9 +72,10 @@ async def test_s39_claim_rechecks_upstreams_under_the_row_lock(h: Harness):
 
 async def test_s19_stale_report_is_recorded_and_refused(h: Harness):
     """S19 — a stale worker's ``/complete`` for a task another build now
-    runs: applied only if its ``execution_id`` is current and the claim
-    live; otherwise its ledger end is written, the report recorded with
-    ``report_applied = false``, and refused (409)."""
+    runs: applied only if its ``execution_id`` is current and its claim not
+    yet released; otherwise its ledger end is written, the report recorded
+    with ``report_applied = false``, and refused (409). Here the stale
+    execution's lapsed claim was taken over, which is what makes it late."""
     deployment = await h.new_deployment()
     t = item("T")
     _, plan_a = await h.planned([t], [t], deployment_id=deployment)
@@ -227,6 +228,46 @@ async def test_claim_refusals(h: Harness):
     assert missing.value.code == "not_a_member"
 
 
+async def test_a_report_comes_through_the_plan_holding_the_claim(h: Harness):
+    """A task shared by two builds, claimed through plan A: its execution's
+    report, and its self-report start, under plan B are 409
+    ``not_claim_holder`` — lapsed or not — and leave no trace (the task
+    RUNNING, the execution not ended, no event), so the same report through
+    plan A still applies."""
+    deployment = await h.new_deployment()
+    t = item("T")
+    _, plan_a = await h.planned([t], [t], deployment_id=deployment)
+    _, plan_b = await h.planned([t], [t], deployment_id=deployment)
+    execution = await h.start(plan_a.id, t)
+    events_before = len(await h.events(t))
+
+    for transition in (
+        Transition.start(execution, claim=False, executor="x"),
+        Transition.complete(execution),
+    ):
+        with pytest.raises(Conflict) as exc:
+            await h.transition(plan_b.id, t, transition)
+        assert exc.value.code == "not_claim_holder"
+        assert exc.value.detail["claim_plan_id"] == str(plan_a.id)
+    await h.lapse_claim(t)
+    for transition in (
+        # The self-report start decides the plan before the live-claim
+        # refusal: a lapsed, unreleased claim still names its execution.
+        Transition.start(execution, claim=False, executor="x"),
+        Transition.fail(execution, "boom"),
+    ):
+        with pytest.raises(Conflict) as exc:
+            await h.transition(plan_b.id, t, transition)
+        assert exc.value.code == "not_claim_holder"
+
+    assert (await h.task(t))["status"] == "running"
+    assert (await h.execution(execution))["ended_at"] is None
+    assert len(await h.events(t)) == events_before
+
+    outcome = await h.transition(plan_a.id, t, Transition.complete(execution))
+    assert outcome.applied and outcome.status.value == "completed"
+
+
 async def test_a_claiming_start_refuses_a_status_outside_actionable(h: Harness):
     """A claiming start is decided by ACTIONABLE, not only by COMPLETED and
     a live claim: a FAILED task is 409 ``task_not_actionable`` (the fail
@@ -325,16 +366,65 @@ async def test_observed_completion_closes_a_lapsed_claim_and_spares_a_live_one(
     assert ledger["claim_outcome"] == "lapsed" and ledger["ended_at"] is None
 
 
-@pytest.mark.xfail(reason="v2: I0 step 3", strict=True)
+async def test_report_after_the_claim_lapsed_but_before_takeover_is_applied(
+    h: Harness,
+):
+    """The authority rule keys on the execution, not on the clock: a worker
+    whose claim lapsed seconds before it reports completion still names the
+    task's current execution (nothing has taken the claim over), so its
+    completion is applied — the target exists, discarding it would cost a
+    re-run for nothing. The ledger closes as ``completed``, not ``lapsed``."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    await h.lapse_claim(t)
+    outcome = await h.transition(plan.id, t, Transition.complete(execution))
+    assert outcome.applied and outcome.status == "completed"
+    ledger = await h.execution(execution)
+    assert (ledger["claim_outcome"], ledger["outcome"]) == ("completed", "completed")
+    assert all(e["report_applied"] for e in await h.events(t))
+
+
+async def test_limit_keys_are_written_at_claim_and_replaced_on_every_claim(
+    h: Harness,
+):
+    """Limit keys travel with the claiming start (the tick computes them
+    from the instance body) and replace the task's keys on every claim."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    await h.start(plan.id, t, limit_keys=["gpu", "db", "gpu"])
+    rows = await h._rows(
+        "SELECT key FROM task_limit_key WHERE task_pk = :t ORDER BY key",
+        t=(await h.task(t))["id"],
+    )
+    assert [r["key"] for r in rows] == ["db", "gpu"]
+
+    await h.lapse_claim(t)
+    await h.start(plan.id, t, limit_keys=["cpu"])
+    rows = await h._rows(
+        "SELECT key FROM task_limit_key WHERE task_pk = :t",
+        t=(await h.task(t))["id"],
+    )
+    assert [r["key"] for r in rows] == ["cpu"]
+
+
 async def test_a_transition_flags_the_other_builds_holding_the_task(h: Harness):
     """A status write flags the reactive builds whose active plans hold the
-    task (``plan_member``, ``SKIP LOCKED``): wake-ups arrive in step 3."""
+    task (``plan_member``, ``SKIP LOCKED``); the writing build is not
+    flagged by its own transition. (The relation in detail:
+    ``test_v2_wakeups.py``.)"""
     deployment = await h.new_deployment()
     t = item("T")
-    _, plan_a = await h.planned([t], [t], deployment_id=deployment)
+    build_a, plan_a = await h.planned([t], [t], deployment_id=deployment)
     build_b, _ = await h.planned([t], [t], deployment_id=deployment)
+    for build in (build_a, build_b):
+        async with h.sf() as s:
+            await reactive.set_reactive_meta(
+                s, ENV, build, app_name="app", tick_kwargs=None
+            )
     await h.run(plan_a.id, t)
     assert (await h.build(build_b))["needs_tick_at"] is not None
+    assert (await h.build(build_a))["needs_tick_at"] is None
 
 
 async def test_s21_race_two_starts_on_a_lapsed_claim_grant_exactly_one(

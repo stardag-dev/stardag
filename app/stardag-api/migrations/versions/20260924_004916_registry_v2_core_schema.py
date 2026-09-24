@@ -364,7 +364,7 @@ def upgrade() -> None:
             ["environment_id", "deployment_id"],
             ["deployment.environment_id", "deployment.id"],
             name="fk_plan_deployment",
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
         ),
         sa.ForeignKeyConstraint(
             ["environment_id", "settings_hash"],
@@ -449,7 +449,7 @@ def upgrade() -> None:
             ["environment_id", "deployment_id"],
             ["deployment.environment_id", "deployment.id"],
             name="fk_task_instance_deployment",
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
         ),
         sa.ForeignKeyConstraint(
             ["environment_id", "settings_hash"],

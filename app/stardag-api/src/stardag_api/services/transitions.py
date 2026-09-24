@@ -7,8 +7,11 @@ design.md, "The runnable rule", "Claim × plan invariants" and the
 
 Every transition first locks the ``task`` row ``FOR NO KEY UPDATE`` — not
 ``FOR UPDATE``, which would conflict with the ``FOR KEY SHARE`` every
-insert referencing the task takes through its foreign key (STA-51). The
-rules, in one place:
+insert referencing the task takes through its foreign key (STA-51). A
+claiming start takes its build row ``FOR SHARE`` before that (lock order
+build → task), so a terminal build transition or a delete — ``FOR NO KEY
+UPDATE`` on the build — is a synchronisation point for claims. The rules,
+in one place:
 
 - **The claim.** Live when ``status = RUNNING AND claim_expires_at > now``.
   A claiming start names its plan and a client-minted execution id; the same
@@ -21,10 +24,19 @@ rules, in one place:
   an upstream not COMPLETED — re-read under a share lock, so an invalidation
   in flight is waited for — 409 ``upstream_incomplete`` (S39). A lapsed claim
   is taken over (``claim_outcome = taken_over``, S21).
-- **Authority.** A report changes status only if it names the task's current
-  execution and the claim is live. Otherwise it writes that execution's
-  ledger end, is recorded with ``report_applied = false`` and refused
-  (S19). One terminal report per execution (S35).
+- **Authority.** A report changes status when it names the task's current
+  execution (``task.execution_id``) whose claim has not been released —
+  **whether or not the claim has lapsed**: a lapsed claim still names its
+  execution until a claiming start takes it over, and a worker finishing
+  seconds after expiry must not have a real completion discarded. Only
+  once the claim is released (taken over, closed by an observation, or
+  released by a build transition — ``execution.claim_released_at`` set) is
+  a report *late*: it writes that execution's ledger end, is recorded with
+  ``report_applied = false`` and refused (S19). One terminal report per
+  execution (S35). A report — and the holder's self-report start — on the
+  current execution comes through the plan the claim was granted through
+  (``task.claim_plan_id``); under any other plan it is 409
+  ``not_claim_holder``, with no trace.
 - **The ledger's two ends.** Every move off RUNNING closes the current
   execution's claim (``claim_released_at``/``claim_outcome``, the server's
   end); ``ended_at``/``outcome`` are written only by the execution's own
@@ -33,9 +45,7 @@ rules, in one place:
 
 from __future__ import annotations
 
-import enum
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -48,7 +58,6 @@ from stardag_api.models import (
     ClaimOutcome,
     EventType,
     Execution,
-    ExecutionOutcome,
     Plan,
     PlanMember,
     Task,
@@ -58,140 +67,37 @@ from stardag_api.models import (
 )
 from stardag_api.models.base import utc_now
 from stardag_api.services import event_log
+from stardag_api.services.claim_limits import full_limits, replace_limit_keys
 from stardag_api.services.errors import (
     BadRequest,
     Conflict,
     NotFound,
     RecordedConflict,
 )
-from stardag_api.services.tx import transaction
-
-#: Statuses a member can be started from (plus RUNNING with a lapsed claim).
-#: FAILED is absent: the fail mode decides (a retry makes it PENDING). The
-#: frontier lists by it and a claiming start refuses by it.
-ACTIONABLE_STATUSES = (
-    TaskStatus.PENDING,
-    TaskStatus.SUSPENDED,
-    TaskStatus.INTERRUPTED,
-    TaskStatus.CANCELLED,
-    TaskStatus.SKIPPED,
+from stardag_api.services.transition_types import (
+    ACTIONABLE_STATUSES,
+    DEFAULT_CLAIM_TTL_SECONDS,
+    MAX_CLAIM_TTL_SECONDS,
+    REPORTS,
+    Transition,
+    TransitionKind,
+    TransitionOutcome,
+    claim_ttl,
 )
+from stardag_api.services.tx import transaction
+from stardag_api.services.wakeups import flag_after_transition
 
-#: Claim TTL when a claiming start or a renewal names none.
-DEFAULT_CLAIM_TTL_SECONDS = 3600
-#: Upper bound on any requested TTL: nothing is live forever (D11).
-MAX_CLAIM_TTL_SECONDS = 24 * 3600
-
-
-class TransitionKind(str, enum.Enum):
-    START = "start"
-    COMPLETE = "complete"
-    FAIL = "fail"
-    SUSPEND = "suspend"
-    RETRY = "retry"
-    RENEW = "renew"
-    # Written by registration, from a driver's observation of the target.
-    OBSERVE_COMPLETE = "observe_complete"
-    INVALIDATE = "invalidate"
-
-
-@dataclass(frozen=True)
-class Transition:
-    kind: TransitionKind
-    execution_id: UUID | None = None
-    claim: bool = False
-    claim_ttl_seconds: int | None = None
-    executor: str | None = None
-    executor_ref: str | None = None
-    executor_metadata: dict[str, Any] | None = None
-    error_message: str | None = None
-    observed_at: datetime | None = None
-
-    @classmethod
-    def start(
-        cls,
-        execution_id: UUID,
-        *,
-        claim: bool = True,
-        claim_ttl_seconds: int | None = None,
-        executor: str | None = None,
-        executor_ref: str | None = None,
-        executor_metadata: dict[str, Any] | None = None,
-    ) -> Transition:
-        return cls(
-            TransitionKind.START,
-            execution_id=execution_id,
-            claim=claim,
-            claim_ttl_seconds=claim_ttl_seconds,
-            executor=executor,
-            executor_ref=executor_ref,
-            executor_metadata=executor_metadata,
-        )
-
-    @classmethod
-    def complete(cls, execution_id: UUID) -> Transition:
-        return cls(TransitionKind.COMPLETE, execution_id=execution_id)
-
-    @classmethod
-    def fail(cls, execution_id: UUID, error_message: str | None = None) -> Transition:
-        return cls(
-            TransitionKind.FAIL, execution_id=execution_id, error_message=error_message
-        )
-
-    @classmethod
-    def suspend(cls, execution_id: UUID) -> Transition:
-        return cls(TransitionKind.SUSPEND, execution_id=execution_id)
-
-    @classmethod
-    def retry(cls) -> Transition:
-        return cls(TransitionKind.RETRY)
-
-    @classmethod
-    def renew(
-        cls, execution_id: UUID, claim_ttl_seconds: int | None = None
-    ) -> Transition:
-        return cls(
-            TransitionKind.RENEW,
-            execution_id=execution_id,
-            claim_ttl_seconds=claim_ttl_seconds,
-        )
-
-
-@dataclass(frozen=True)
-class TransitionOutcome:
-    """What a transition did. ``applied`` is False for a no-op."""
-
-    applied: bool
-    status: TaskStatus
-    execution_id: UUID | None
-    claim_expires_at: datetime | None
-
-
-# A report's event type, the status it moves the task to, and the two ledger
-# outcomes it writes.
-_REPORTS: dict[
-    TransitionKind, tuple[EventType, TaskStatus, ClaimOutcome, ExecutionOutcome]
-] = {
-    TransitionKind.COMPLETE: (
-        EventType.TASK_COMPLETED,
-        TaskStatus.COMPLETED,
-        ClaimOutcome.COMPLETED,
-        ExecutionOutcome.COMPLETED,
-    ),
-    TransitionKind.FAIL: (
-        EventType.TASK_FAILED,
-        TaskStatus.FAILED,
-        ClaimOutcome.FAILED,
-        ExecutionOutcome.FAILED,
-    ),
-    TransitionKind.SUSPEND: (
-        EventType.TASK_SUSPENDED,
-        TaskStatus.SUSPENDED,
-        ClaimOutcome.SUSPENDED,
-        ExecutionOutcome.SUSPENDED,
-    ),
-}
-
+__all__ = [
+    "ACTIONABLE_STATUSES",
+    "DEFAULT_CLAIM_TTL_SECONDS",
+    "MAX_CLAIM_TTL_SECONDS",
+    "Transition",
+    "TransitionKind",
+    "TransitionOutcome",
+    "apply_member_transition",
+    "renew_claim",
+    "transition_task",
+]
 
 # ---------------------------------------------------------------------------
 # Route-facing calls: one transaction each
@@ -287,8 +193,13 @@ async def transition_task(
 
     Locks the task row first. Raises :class:`Conflict` for a refusal that
     leaves no trace, :class:`RecordedConflict` for one whose record is in
-    the session.
+    the session. A transition that changes the status flags the other
+    builds it is news for (``wakeups.flag_after_transition``), here, so no
+    path that moves a status can forget to.
     """
+    if transition.kind is TransitionKind.START and transition.claim:
+        assert plan_id is not None, "a claiming start names its plan"
+        await _share_build(session, plan_id)
     task = await session.scalar(
         select(Task)
         .where(Task.environment_id == environment_id, Task.id == task_pk)
@@ -298,10 +209,52 @@ async def transition_task(
     if task is None:
         raise NotFound("unknown_task", f"no task {task_pk}")
     step = _Step(session, environment_id, task, plan_id, transition, now)
-    kind = transition.kind
+    previous = task.status
+    outcome = await _dispatch(step)
+    if task.status != previous:
+        await flag_after_transition(
+            session,
+            environment_id,
+            task.id,
+            previous=previous,
+            current=task.status,
+            source_build_id=await step.build_id(),
+            now=now,
+        )
+    return outcome
+
+
+async def _share_build(session: AsyncSession, plan_id: UUID) -> None:
+    """A claiming start takes its build row ``FOR SHARE`` before the task
+    row. Terminal transitions and deletes hold the build ``FOR NO KEY
+    UPDATE`` while they release the build's claims or check for live work,
+    so a claim waits for them and then reads the build's new status
+    (``build_not_running``): their snapshot of the build's claims is then
+    the whole set. Claims do not wait for each other."""
+    build_id = await session.scalar(select(Plan.build_id).where(Plan.id == plan_id))
+    locked = (
+        None
+        if build_id is None
+        else await session.scalar(
+            select(Build.id).where(Build.id == build_id).with_for_update(read=True)
+        )
+    )
+    if locked is None:
+        raise Conflict(
+            "build_not_running",
+            "the plan's build no longer exists; it hands out no more work",
+            build_id=str(build_id) if build_id else None,
+            build_status=None,
+        )
+
+
+async def _dispatch(step: _Step) -> TransitionOutcome:
+    kind = step.transition.kind
     if kind is TransitionKind.START:
-        return await (step.claim() if transition.claim else step.self_report_start())
-    if kind in _REPORTS:
+        return await (
+            step.claim() if step.transition.claim else step.self_report_start()
+        )
+    if kind in REPORTS:
         return await step.report()
     if kind is TransitionKind.RETRY:
         return await step.retry()
@@ -311,18 +264,9 @@ async def transition_task(
         return await step.observe_complete()
     if kind is TransitionKind.INVALIDATE:
         return await step.invalidate()
+    if kind is TransitionKind.RELEASE:
+        return await step.release()
     raise AssertionError(kind)  # pragma: no cover
-
-
-def _ttl(requested: int | None) -> timedelta:
-    seconds = DEFAULT_CLAIM_TTL_SECONDS if requested is None else requested
-    if not 0 < seconds <= MAX_CLAIM_TTL_SECONDS:
-        raise BadRequest(
-            "invalid_claim_ttl",
-            f"claim_ttl_seconds must be in (0, {MAX_CLAIM_TTL_SECONDS}]",
-            claim_ttl_seconds=seconds,
-        )
-    return timedelta(seconds=seconds)
 
 
 class _Step:
@@ -474,11 +418,11 @@ class _Step:
                 "the plan is not the build's active plan",
                 plan_id=str(plan.id),
             )
-        # A plain read, not a lock: the build row is locked before task rows
-        # elsewhere (plan creation observing its roots), so locking it here,
-        # after the task row, could deadlock. A start racing the build's end
-        # is left to that end, which releases the claims held by the build's
-        # plans (design.md, "The runnable rule"; the build lifecycle routes).
+        # A plain read under the build row's share lock, which
+        # transition_task() took before the task row (build → task order):
+        # a terminal transition or a delete in flight was waited for, so
+        # its status is the one read here, and a claim it has not seen
+        # cannot be granted behind it (design.md, "The runnable rule").
         build_status = await self.session.scalar(
             select(Build.status).where(Build.id == plan.build_id)
         )
@@ -500,8 +444,32 @@ class _Step:
                 "member_excluded", "the member is excluded", task_id=t.task_id
             )
         await self._check_upstreams(member.instance_id)
+        full = await full_limits(
+            self.session,
+            self.environment_id,
+            t.id,
+            self.transition.limit_keys,
+            now=self.now,
+        )
+        if full:
+            # Record the keys the claim asked for, so the release of a slot
+            # on them wakes this task's builds; the task holds no slot (its
+            # claim is not live), so nothing is occupied.
+            await replace_limit_keys(
+                self.session,
+                self.environment_id,
+                t.id,
+                self.transition.limit_keys,
+                now=self.now,
+            )
+            raise RecordedConflict(
+                "concurrency_limit_reached",
+                "a concurrency limit on the claim's keys is full",
+                task_id=t.task_id,
+                keys=full,
+            )
 
-        ttl = _ttl(self.transition.claim_ttl_seconds)
+        ttl = claim_ttl(self.transition.claim_ttl_seconds)
         taken_over = None
         if t.status == TaskStatus.RUNNING:  # a lapsed claim, taken over
             taken_over = t.execution_id
@@ -529,6 +497,13 @@ class _Step:
         t.claim_expires_at = expires_at
         t.error_message = None
         t.preempted_at = None
+        await replace_limit_keys(
+            self.session,
+            self.environment_id,
+            t.id,
+            self.transition.limit_keys,
+            now=self.now,
+        )
         await self.record(
             EventType.TASK_STARTED,
             execution_id=eid,
@@ -585,6 +560,11 @@ class _Step:
         with the executor details the claim could not know."""
         t, eid = self.task, self.execution_id()
         execution = await self._execution(EventType.TASK_STARTED, eid)
+        if t.execution_id == eid and execution.claim_released_at is None:
+            # The current, unreleased execution — its claim lapsed or not —
+            # under the wrong plan is a trace-free refusal, decided before
+            # the live-claim one (as a report decides it).
+            self.check_claim_plan(eid)
         if t.execution_id != eid or not self.live or execution.ended_at is not None:
             await self.record(
                 EventType.TASK_STARTED,
@@ -607,6 +587,24 @@ class _Step:
         await self.session.flush()
         return self.outcome(applied=True)
 
+    def check_claim_plan(self, eid: UUID) -> None:
+        """A holder's report comes through the plan its claim was granted
+        through: a report naming the current execution under another plan
+        (``task.claim_plan_id`` differs from the route's) is 409
+        ``not_claim_holder``, and leaves no trace — the execution may still
+        report its end through its own plan."""
+        t = self.task
+        if t.claim_plan_id != self.plan_id:
+            raise Conflict(
+                "not_claim_holder",
+                "the task's claim is held through another plan; its execution"
+                " reports through that plan",
+                task_id=t.task_id,
+                execution_id=str(eid),
+                plan_id=str(self.plan_id) if self.plan_id else None,
+                claim_plan_id=str(t.claim_plan_id) if t.claim_plan_id else None,
+            )
+
     async def _execution(self, event_type: EventType, eid: UUID) -> Execution:
         """The named execution of this task, or a recorded refusal."""
         execution = await self.session.get(Execution, eid)
@@ -628,7 +626,7 @@ class _Step:
     async def report(self) -> TransitionOutcome:
         """complete / fail / suspend, under the authority rule."""
         t, eid = self.task, self.execution_id()
-        event_type, status, claim_outcome, outcome = _REPORTS[self.transition.kind]
+        event_type, status, claim_outcome, outcome = REPORTS[self.transition.kind]
         execution = await self._execution(event_type, eid)
         error = self.transition.error_message
         if execution.ended_at is not None:
@@ -641,20 +639,31 @@ class _Step:
                 execution_id=str(eid),
                 outcome=execution.outcome.value if execution.outcome else None,
             )
+        current = t.execution_id == eid and execution.claim_released_at is None
+        if current:
+            # Before the ledger end: a report under the wrong plan must not
+            # spend the execution's one terminal report.
+            self.check_claim_plan(eid)
         # The execution's own end, whether or not it may still move the task.
         execution.ended_at = self.now
         execution.outcome = outcome
-        if t.execution_id != eid or not self.live:
+        # Current and not yet released — a lapsed claim included: it names
+        # this execution until a claiming start takes it over.
+        if not current:
             await self.record(
                 event_type, execution_id=eid, report_applied=False, error_message=error
             )
             await self.session.flush()
             raise RecordedConflict(
                 "execution_not_current",
-                "the execution does not hold the task's live claim; its end is"
-                " recorded and the task is unchanged",
+                "the execution's claim has been released (taken over, closed or"
+                " released by its build); its end is recorded and the task is"
+                " unchanged",
                 execution_id=str(eid),
             )
+        # An unreleased claim of the current execution is RUNNING: every
+        # move off RUNNING releases it.
+        assert t.status == TaskStatus.RUNNING, t.status
         await self.close_claim(claim_outcome)
         self.move(status)
         if status == TaskStatus.COMPLETED:
@@ -698,7 +707,29 @@ class _Step:
                 "only the execution holding the live claim can renew it",
                 execution_id=str(eid),
             )
-        t.claim_expires_at = self.now + _ttl(self.transition.claim_ttl_seconds)
+        t.claim_expires_at = self.now + claim_ttl(self.transition.claim_ttl_seconds)
+        await self.session.flush()
+        return self.outcome(applied=True)
+
+    async def release(self) -> TransitionOutcome:
+        """A build's terminal transition releases the claim its plan holds
+        (``claim_outcome = released``): the task goes CANCELLED — the build
+        stopped wanting it, which is not a result, so CANCELLED is
+        ACTIONABLE for every other build ("revocation is not a result").
+        A no-op unless ``plan_id`` holds the task's claim, live or lapsed.
+        The execution is not touched: it may still be running, and its
+        report, now late, is recorded and refused."""
+        t = self.task
+        if t.status != TaskStatus.RUNNING or t.claim_plan_id != self.plan_id:
+            return self.outcome(applied=False)
+        execution_id = t.execution_id
+        await self.close_claim(ClaimOutcome.RELEASED)
+        self.move(TaskStatus.CANCELLED)
+        await self.record(
+            EventType.TASK_CANCELLED,
+            execution_id=execution_id,
+            metadata={"released_by": self.transition.reason},
+        )
         await self.session.flush()
         return self.outcome(applied=True)
 

@@ -105,7 +105,7 @@ async def test_static_path_over_http(client: AsyncClient, h: Harness):
 async def test_refusals_carry_their_status_and_code(client: AsyncClient, h: Harness):
     deployment = await h.new_deployment()
     t = item("T")
-    build = await _post(client, "/builds", {})
+    build = await _post(client, "/builds", {"root_task_ids": [t.task_id]})
     plan = await _post(
         client,
         f"/builds/{build['id']}/plans",
@@ -149,7 +149,7 @@ async def test_the_environment_comes_from_the_credentials(
     client: AsyncClient, as_environment_b, h: Harness
 ):
     """A build is invisible from another environment, by construction."""
-    build = await _post(client, "/builds", {})
+    build = await _post(client, "/builds", {"root_task_ids": ["r"]})
     with as_environment_b():
         response = await client.get(f"/api/v2/builds/{build['id']}/frontier")
     assert response.status_code == 404
