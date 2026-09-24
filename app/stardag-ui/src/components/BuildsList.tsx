@@ -12,6 +12,7 @@ import {
 } from "../utils/time";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { CopyChip } from "./ui/CopyChip";
+import { Tooltip } from "./ui/Tooltip";
 import { ResultBanner } from "./ui/ResultBanner";
 
 interface BuildsListProps {
@@ -295,19 +296,24 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
                     // The server's order (`last_active_at desc`), which is
                     // the one this column shows: not creation order.
                     aria-sort={h === "Last active" ? "descending" : undefined}
-                    title={
-                      h === "Last active"
-                        ? `${SORT_EXPLAINER} ${LAST_ACTIVE_EXPLAINER}`
-                        : undefined
-                    }
                     className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400"
                   >
-                    {h}
-                    {h === "Last active" && (
-                      <span aria-hidden="true" className="ml-1">
-                        ↓
+                    <Tooltip
+                      content={
+                        h === "Last active"
+                          ? `${SORT_EXPLAINER} ${LAST_ACTIVE_EXPLAINER}`
+                          : undefined
+                      }
+                    >
+                      <span>
+                        {h}
+                        {h === "Last active" && (
+                          <span aria-hidden="true" className="ml-1">
+                            ↓
+                          </span>
+                        )}
                       </span>
-                    )}
+                    </Tooltip>
                   </th>
                 ))}
               </tr>
@@ -376,11 +382,18 @@ function BuildRow({
               e.stopPropagation();
               onOpen(build.id);
             }}
-            className="rounded text-left font-medium text-gray-900 hover:text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-100 dark:hover:text-blue-400"
+            // Never broken, not even at the slug's hyphens: the column is at
+            // least as wide as the longest slug, and wraps only between items.
+            className="rounded text-left font-medium whitespace-nowrap text-gray-900 hover:text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-100 dark:hover:text-blue-400"
           >
             {build.name}
           </button>
-          <CopyChip label={shortBuildId(build.id)} value={build.id} title="Build id" />
+          <CopyChip
+            label={shortBuildId(build.id)}
+            value={build.id}
+            title="Build id"
+            className="whitespace-nowrap"
+          />
           {build.reactive_app_name && (
             <button
               type="button"
