@@ -26,7 +26,9 @@ def test_server_image_ref():
 
 
 def test_default_server_version_is_semver():
-    assert re.fullmatch(r"\d+\.\d+\.\d+", DEFAULT_SERVER_VERSION)
+    # Also allows a release-candidate suffix (e.g. "0.6.0rc1"), pinning
+    # self-host to a v2 pre-release image while the line is still in flight.
+    assert re.fullmatch(r"\d+\.\d+\.\d+(rc\d+)?", DEFAULT_SERVER_VERSION)
 
 
 def test_resolve_default_is_prebuilt_at_default_version():

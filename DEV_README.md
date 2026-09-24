@@ -897,6 +897,41 @@ CI (`.github/workflows/publish-server-image.yml`) then:
    as `stardag-ui-dist-X.Y.Z.tar.gz` (for deployments that serve the UI
    separately, e.g. from S3/CDN).
 
+### Pre-release
+
+Both `publish.yml` (SDK) and `publish-server-image.yml` (server image) also
+trigger on a release-candidate tag: `vX.Y.ZrcN` and `server-vX.Y.ZrcN`. Use
+one to get a build in front of a consumer before the final cut — e.g. to
+verify a v2-line pre-release end to end before committing to `X.Y.Z`:
+
+```bash
+# Server first, same order as a final release:
+git tag server-vX.Y.ZrcN && git push origin server-vX.Y.ZrcN
+git tag vX.Y.ZrcN && git push origin vX.Y.ZrcN
+```
+
+- **The server image publishes only `:X.Y.ZrcN`** — an rc never moves the
+  mutable `:latest` tag, so `--server-version latest` (and
+  `_latest_released_server_version`, the resolver behind it) never
+  resolves to one. That is a separate question from what a plain
+  `stardag self-host up`/`upgrade` deploys: those follow
+  `DEFAULT_SERVER_VERSION` (or the recorded deployment), and an SDK
+  release cut during this pre-release window intentionally points that
+  constant at the matching `X.Y.ZrcN` — see the comment above it. To
+  target the rc from a different SDK, pass it explicitly:
+  `stardag self-host up --server-version X.Y.ZrcN`.
+- **The SDK publishes to PyPI as a pre-release.** A plain `pip install
+stardag` still resolves to the last final release; a consumer gets the
+  rc only by pinning it exactly (`pip install stardag==X.Y.ZrcN`) or
+  passing `--pre`.
+- **Both GitHub Releases are marked pre-release**, so neither shows as the
+  repo's "Latest release", and `_latest_released_server_version` (the
+  `--server-version latest` resolver) skips them.
+- `DEFAULT_SERVER_VERSION`
+  (`lib/stardag/src/stardag/selfhost/_modal_app.py`) may point at an rc
+  while a release line is still in flight — see the comment above the
+  constant for when it moves to the final `X.Y.Z`.
+
 ### First release only: make the GHCR package public
 
 The first push creates the `stardag-server` GHCR package with **private**

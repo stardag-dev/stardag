@@ -65,16 +65,14 @@ SERVER_IMAGE_REPO = "ghcr.io/stardag-dev/stardag-server"
 # — bumping it earlier points `self-host up` at an image that has not been
 # published.
 #
-# **From STA-81 on, this pin is load-bearing rather than advisory.** It
-# used to be safe to lag: an older server simply ignored what it did not
-# understand and the newer feature lay inert. It no longer is. A current
-# SDK does not drain cancels, and a server predating STA-81 does not
-# release claims on `/cancel` or `/fail` — so the pair leaves a terminal
-# build holding its tasks' claims and their concurrency-limit slots until
-# they expire, which is worse than either version alone. That is why the
-# release order is server image first, and why this constant must move
-# with it.
-DEFAULT_SERVER_VERSION = "0.5.0"
+# While the v2 line is still in flight, this pins the matching v2 image —
+# a release candidate (`server-vX.Y.ZrcN`) is a valid pin, same as a final
+# `server-vX.Y.Z`. The final cut of this release moves it to "0.6.0" once
+# `server-v0.6.0` ships. (v0.26.0/server-v0.5.0 was the last release of the
+# v1 line; the STA-81 load-bearing-pin note that used to live here was
+# about that line's cancel-draining pairing and no longer applies once the
+# pin is on the v2 side.)
+DEFAULT_SERVER_VERSION = "0.6.0rc1"
 
 # Minimum client interpreter for from-source image builds (stardag-api's
 # requires-python; the image gets the client's version via add_python).
