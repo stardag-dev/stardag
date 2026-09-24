@@ -22,7 +22,6 @@ import {
   type PositionCache,
 } from "./dagLayout";
 import { MemberTable } from "./MemberTable";
-import { PlanHeader } from "./PlanHeader";
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
 import { ToolbarButton } from "./ui/ToolbarButton";
@@ -274,6 +273,7 @@ function BuildViewForIdentity({
                     frontier={frontier}
                     frontierError={plan.frontierError}
                     refreshToken={refreshToken}
+                    membershipComplete={view?.complete ?? true}
                     onOpenTask={setSelectedTaskId}
                   />
                   <BuildControlsDialog
@@ -287,12 +287,6 @@ function BuildViewForIdentity({
                   />
                 </div>
               </div>
-
-              <PlanHeader
-                frontier={frontier}
-                deployment={deployment}
-                complete={view?.complete ?? true}
-              />
 
               <div className="flex items-center justify-between border-b border-gray-200 px-4 py-1.5 dark:border-gray-700">
                 <button

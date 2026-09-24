@@ -168,6 +168,40 @@ export interface PlanRoots {
   roots: FrontierMember[];
 }
 
+/**
+ * One of a build's plans, as `GET /builds/{id}/plans` lists them (newest
+ * generation first): lifecycle, scope with its deployment, member counts.
+ */
+export interface PlanDetail {
+  id: string;
+  build_id: string;
+  deployment_id: string;
+  deployment: Deployment;
+  settings_hash: string;
+  // Server-assigned per build, monotonic.
+  generation: number;
+  created_at: string;
+  // The build's active plan from here (the first on create, a
+  // replacement on seal).
+  activated_at: string | null;
+  // The static phase is fully stated and verified.
+  sealed_at: string | null;
+  // Set when a replacement plan activated.
+  superseded_at: string | null;
+  is_active: boolean;
+  member_count: number;
+  root_count: number;
+  // Given-up members; counted apart from `member_counts`.
+  excluded_count: number;
+  // Non-excluded members by their task's global status.
+  member_counts: Partial<Record<TaskStatus, number>>;
+}
+
+export interface PlanListResponse {
+  build_id: string;
+  plans: PlanDetail[];
+}
+
 // ---- Plan membership and edges (assumed: not served on this branch yet) ----
 
 export type AdmittedBy = "root" | "static" | "dynamic" | "closure";

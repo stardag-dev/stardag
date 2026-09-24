@@ -154,3 +154,14 @@ describe("BuildView auto-refresh", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("BuildView layout", () => {
+  it("stacks nothing about the plan above the DAG and the task table", () => {
+    renderView();
+    // The plan's scope and lifecycle live in the "Plans and scheduling"
+    // dialog (mocked here), not in the main column.
+    expect(screen.queryByText("Active plan")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^settings /)).not.toBeInTheDocument();
+    expect(screen.getByTestId("dag")).toBeInTheDocument();
+  });
+});

@@ -16,7 +16,9 @@ import type {
   DeploymentListResponse,
   Execution,
   ExecutionListResponse,
+  PlanDetail,
   PlanGraph,
+  PlanListResponse,
   PlanRoots,
   Settings,
   Task,
@@ -221,6 +223,18 @@ export function cancelBuild(buildId: string, environmentId: string): Promise<Bui
 }
 
 // ---- Plans ----
+
+/** Every plan of the build, newest generation first, the active one marked. */
+export async function fetchBuildPlans(
+  buildId: string,
+  environmentId: string,
+): Promise<PlanDetail[]> {
+  const data = await getJson<PlanListResponse>(
+    url(`/builds/${buildId}/plans`, environmentId),
+    "Failed to fetch plans",
+  );
+  return data.plans;
+}
 
 export function fetchPlanRoots(
   planId: string,
