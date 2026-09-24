@@ -8,7 +8,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from stardag.registry import ExclusionResult
-from stardag.testing._registry_state import RegistryState
+from stardag.testing._registry_state import TERMINAL_BUILD_STATUSES, RegistryState
 
 
 class ExclusionMixin(RegistryState):
@@ -31,6 +31,9 @@ class ExclusionMixin(RegistryState):
     ) -> ExclusionResult:
         plan = self.plan(plan_id)
         members = self.members.get(plan_id, {})
+        if self.member(plan_id, task_id).excluded_reason is not None:
+            # Idempotent by state, as on the server: nothing written.
+            return ExclusionResult(plan_id=plan_id)
         excluded = {self.member(plan_id, task_id).instance_id}
         members[task_id].excluded_reason = reason
         excluded_ids = [task_id]
@@ -45,16 +48,20 @@ class ExclusionMixin(RegistryState):
                     excluded.add(member.instance_id)
                     excluded_ids.append(member.task_id)
                     changed = True
+        roots_excluded = sorted(t for t in excluded_ids if members[t].is_root)
         build_failed = False
-        if any(m.is_root and m.excluded_reason for m in members.values()):
+        if roots_excluded:
             build = self.builds[plan.build_id]
-            if build.status == "running":
+            if build.status not in TERMINAL_BUILD_STATUSES:
                 build.status = "failed"
                 build.error_message = f"a root was excluded: {message}"
                 self.release_build_claims(build)
                 build_failed = True
         return ExclusionResult(
-            plan_id=plan_id, excluded=excluded_ids, build_failed=build_failed
+            plan_id=plan_id,
+            excluded=excluded_ids,
+            roots_excluded=roots_excluded,
+            build_failed=build_failed,
         )
 
     def build_skip_blocked(self, build_id: UUID) -> list[str]:

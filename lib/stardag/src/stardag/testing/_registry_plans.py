@@ -490,6 +490,9 @@ class PlansMixin(RegistryState):
                 raise refuse("execution_superseded")
             if not plan.active:
                 raise refuse("plan_superseded")
+            build_status = self.builds[plan.build_id].status
+            if build_status != "running":
+                raise refuse("build_not_running", build_status=build_status)
             if member.excluded_reason is not None:
                 raise refuse("member_excluded")
             instance = self.instances[member.instance_id]
@@ -743,6 +746,10 @@ class PlansMixin(RegistryState):
         )
         task = self.task(task_id)
         if task.execution_id != execution_id or not self.live(task):
-            raise refuse("claim_not_held")
+            execution = self.executions.get(execution_id)
+            raise refuse(
+                "claim_not_held",
+                claim_outcome=execution.claim_outcome if execution else None,
+            )
         task.claim_expires_at = self.now() + self._ttl(claim_ttl_seconds)
         return _outcome(task)

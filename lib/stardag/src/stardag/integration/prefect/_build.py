@@ -36,6 +36,7 @@ from stardag._core.base_task import (
     flatten_task_struct,
 )
 from stardag.build import FailMode, TaskExecutionError, TaskExecutorABC
+from stardag.build._base import in_process_executor_details
 from stardag.build._registration import walk_aio, yield_batches
 from stardag.build._session import ResidentSession
 from stardag.exceptions import APIError
@@ -124,7 +125,11 @@ class _PrefectTaskRunWrapper:
         outcome = await self.session.claim(
             task,
             claim_ttl_seconds=self.session.claim_config.in_process_ttl_seconds,
-            executor_metadata=None,
+            executor=(
+                await self.task_executor.get_executor_details(task)
+                if self.task_executor is not None
+                else in_process_executor_details("prefect")
+            ),
         )
         if outcome.kind == "completed":
             return None

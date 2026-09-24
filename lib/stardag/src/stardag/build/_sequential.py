@@ -36,6 +36,7 @@ from stardag._core.instance import extend_path
 from stardag.build._base import (
     BuildContext,
     BuildExitStatus,
+    BuildStopped,
     BuildSummary,
     ClaimConfig,
     FailMode,
@@ -43,9 +44,10 @@ from stardag.build._base import (
     TaskCount,
     current_build_context_var,
     handle_registry_error,
+    in_process_executor_details,
 )
 from stardag.build._registration import Walk, walk_aio, yield_batches
-from stardag.build._session import LimitKeySelector, ResidentSession
+from stardag.build._session import LimitKeySelector, ResidentSession, failure_message
 from stardag.build._settings import (
     SettingsError,
     resident_settings,
@@ -57,6 +59,11 @@ from stardag.registry import RegistryABC, registry_provider
 logger = logging.getLogger(__name__)
 
 _DONE = object()
+
+
+class _Stopped(Exception):
+    """The registry stopped handing the build work (``build_not_running``);
+    unwinds the recursion without reporting any task failed."""
 
 
 class _Runner(typing.Protocol):
@@ -171,8 +178,14 @@ class _SequentialEngine:
         fail_mode: FailMode,
         register_all: bool,
         max_concurrent_discover: int,
+        raise_on_failure: bool = True,
     ) -> None:
         self.roots = roots
+        self.raise_on_failure = raise_on_failure
+        # Every task failure in order (the deepest first: the one that
+        # raised), and why the registry stopped the build, once it has.
+        self.failures: list[tuple[BaseTask, BaseException]] = []
+        self.stopped: str | None = None
         self.session = session
         self.runner = runner
         self.fail_mode = fail_mode
@@ -212,13 +225,32 @@ class _SequentialEngine:
                 return task
         return None
 
+    def _blocked(self) -> set[UUID]:
+        """Tasks downstream of a failure, transitively."""
+        blocked: set[UUID] = set()
+        changed = True
+        while changed:
+            changed = False
+            for t in self.tasks.values():
+                if t.id in blocked or t.id in self.completed or t.id in self.failed:
+                    continue
+                if any(d.id in self.failed or d.id in blocked for d in self._deps(t)):
+                    blocked.add(t.id)
+                    changed = True
+        return blocked
+
+    def _note_failure(self, task: BaseTask, error: BaseException) -> None:
+        if not any(f is error for _, f in self.failures):
+            self.failures.append((task, error))
+
     def _check_deadlock(self) -> None:
+        blocked = self._blocked()
         stuck = [
             t
             for t in self.tasks.values()
             if t.id not in self.completed
             and t.id not in self.failed
-            and not any(d.id in self.failed for d in self._deps(t))
+            and t.id not in blocked
         ]
         if stuck:
             raise RuntimeError(
@@ -250,14 +282,18 @@ class _SequentialEngine:
         outcome = await self.session.claim(
             task,
             claim_ttl_seconds=self.session.claim_config.in_process_ttl_seconds,
-            executor_metadata=None,
+            executor=in_process_executor_details("sequential"),
         )
         if outcome.kind == "completed":
             self.completed.add(task.id)
             self.count.previously_completed += 1
             return
+        if outcome.kind == "build_stopped":
+            raise _Stopped(outcome.message)
         if outcome.kind != "granted":
-            raise RuntimeError(outcome.message)
+            error = RuntimeError(outcome.message)
+            self._note_failure(task, error)
+            raise error
         execution_id = outcome.execution_id
         try:
             async with self.session.renewal(task, execution_id):
@@ -269,7 +305,10 @@ class _SequentialEngine:
                     for dep in deps:
                         if dep.id not in self.completed:
                             await self._execute(dep)
+        except _Stopped:
+            raise
         except BaseException as e:
+            self._note_failure(task, e)
             await self.session.fail(task, execution_id, f"{type(e).__name__}: {e}")
             raise
         await self.session.complete(task, execution_id)
@@ -307,33 +346,53 @@ class _SequentialEngine:
             while (task := self._find_ready()) is not None:
                 try:
                     await self._execute(task)
+                except _Stopped as e:
+                    self.stopped = str(e)
+                    break
                 except Exception as e:
                     self.failed.add(task.id)
                     self.count.failed += 1
-                    error = e
+                    error = error or e
                     if self.fail_mode == FailMode.FAIL_FAST:
                         raise
-            self._check_deadlock()
-            # Completion is verified by the registry; a refusal fails the
-            # build below.
-            await self._finish(error)
+            if self.stopped is None:
+                self._check_deadlock()
+                # Completion is verified by the registry; a refusal fails
+                # the build below.
+                await self._finish(error)
         except Exception as e:
             await self._fail_best_effort(e)
-            if self.fail_mode == FailMode.FAIL_FAST:
+            if self.stopped is not None:
+                return self._stopped_summary()
+            if self.fail_mode == FailMode.FAIL_FAST and self.raise_on_failure:
                 raise
             return self._summary(BuildExitStatus.FAILURE, e)
         finally:
             if token is not None:
                 current_build_context_var.reset(token)
+        if self.stopped is not None:
+            return self._stopped_summary()
         return self._summary(
             BuildExitStatus.SUCCESS if error is None else BuildExitStatus.FAILURE,
             error,
         )
 
     async def _finish(self, error: BaseException | None) -> None:
+        """Complete, or fail with a message naming the first failed task
+        and the members the registry found blocked; a build the registry
+        already holds terminal is left as it is (``STOPPED``)."""
+        message = None
         if error is not None:
-            await self.session.skip_blocked()
-        await self.session.finish(error)
+            skipped = await self.session.skip_blocked()
+            if self.failures:
+                message = failure_message(
+                    self.failures, None if skipped is None else len(skipped)
+                )
+        status = await self.session.finish(error, message)
+        if status is not None:
+            self.stopped = (
+                f"Build {self.session.build_id} is already {status}; its status stands."
+            )
 
     async def _fail_best_effort(self, error: BaseException) -> None:
         try:
@@ -353,7 +412,12 @@ class _SequentialEngine:
             task_count=self.count,
             build_id=self.session.build_id,
             error=error,
+            failed_task=self.failures[0][0] if self.failures and error else None,
         )
+
+    def _stopped_summary(self) -> BuildSummary:
+        assert self.stopped is not None
+        return self._summary(BuildExitStatus.STOPPED, BuildStopped(self.stopped))
 
 
 def _roots(tasks: Sequence[BaseTask] | BaseTask) -> list[BaseTask]:
@@ -398,6 +462,7 @@ def build_sequential(
     limit_key_selector: LimitKeySelector | None = None,
     description: str | None = None,
     max_concurrent_discover: int = 16,
+    raise_on_failure: bool = True,
 ) -> BuildSummary:
     """Build tasks sequentially, from synchronous code (for debugging).
 
@@ -431,6 +496,7 @@ def build_sequential(
         fail_mode=fail_mode,
         register_all=register_all,
         max_concurrent_discover=max_concurrent_discover,
+        raise_on_failure=raise_on_failure,
     )
     with resident_settings(checked):
         loop = asyncio.new_event_loop()
@@ -468,6 +534,7 @@ async def build_sequential_aio(
     limit_key_selector: LimitKeySelector | None = None,
     description: str | None = None,
     max_concurrent_discover: int = 16,
+    raise_on_failure: bool = True,
 ) -> BuildSummary:
     """Build tasks sequentially from async code (for debugging).
 
@@ -490,6 +557,8 @@ async def build_sequential_aio(
             with its claim.
         description: A description for a new build.
         max_concurrent_discover: Completion checks in flight while walking.
+        raise_on_failure: In ``FAIL_FAST`` mode, re-raise the failure's
+            exception (default); False returns the ``FAILURE`` summary.
     """
     roots = _roots(tasks)
     registry = registry if registry is not None else registry_provider.get()
@@ -515,6 +584,7 @@ async def build_sequential_aio(
         fail_mode=fail_mode,
         register_all=register_all,
         max_concurrent_discover=max_concurrent_discover,
+        raise_on_failure=raise_on_failure,
     )
     with resident_settings(checked):
         return await engine.run(

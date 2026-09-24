@@ -43,6 +43,7 @@ from stardag.registry._models import DeploymentKind, StopOutcome
 from stardag.testing._registry_exclusion import ExclusionMixin
 from stardag.testing._registry_plans import _outcome, plan_info
 from stardag.testing._registry_state import (
+    TERMINAL_BUILD_STATUSES,
     WAKE_HANDOUT_WINDOW,
     ArtifactRow,
     BuildRow,
@@ -192,12 +193,32 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
                 changed=changed,
             )
 
+    def _refuse_if_terminal(self, build: BuildRow, event_type: str) -> None:
+        """A terminal build status is sticky: another lifecycle transition
+        is recorded (``applied=False``) and refused ``build_terminal``."""
+        if build.status in TERMINAL_BUILD_STATUSES:
+            self.events.append(
+                Event(
+                    event_type,
+                    build_id=build.id,
+                    applied=False,
+                    detail={"refused": "build_terminal"},
+                )
+            )
+            raise refuse(
+                "build_terminal",
+                f"the build is {build.status.upper()}",
+                build_id=str(build.id),
+                build_status=build.status,
+            )
+
     def _terminal(
         self, build_id: UUID, status: str, error: str | None = None
     ) -> BuildInfo:
         build = self.build(build_id)
         if build.status == status:
             return self._info(build)
+        self._refuse_if_terminal(build, f"BUILD_{status.upper()}")
         build.status = status
         build.error_message = error
         build.last_active_at = self.now()
@@ -210,6 +231,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         build = self.build(build_id)
         if build.status == "completed":
             return self._info(build)
+        self._refuse_if_terminal(build, "BUILD_COMPLETED")
         plan = self.active_plan(build_id)
         if plan is None or plan.sealed_at is None:
             raise refuse("plan_incomplete", reason="not_sealed")
@@ -238,6 +260,9 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
     def build_exit_early(self, build_id: UUID) -> BuildInfo:
         self._record("build_exit_early", build_id=build_id)
         build = self.build(build_id)
+        if build.status == "exit_early":
+            return self._info(build)
+        self._refuse_if_terminal(build, "BUILD_EXIT_EARLY")
         build.status = "exit_early"
         build.last_active_at = self.now()
         return self._info(build)

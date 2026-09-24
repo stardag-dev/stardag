@@ -86,6 +86,28 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   present** in a warm container, so discovery saw it complete and never
   invalidated it. Each discovery walk begins an observation fence, and a
   mounted-volume hit older than it reloads the volume once per walk.
+- **Changed: a driver whose build the registry stopped stops cleanly.**
+  When a claiming start is refused `build_not_running` (an operator
+  cancelled the build), `build`/`build_aio` and the sequential engines stop
+  — in-flight work cancelled, no member skipped, no `build_failed` written —
+  and return a new `BuildExitStatus.STOPPED` summary carrying a
+  `BuildStopped` error; a lifecycle report refused `build_terminal` does the
+  same. A refused claim renewal now says whether the build released the
+  claim or another execution took it over.
+- **Changed: a failed build's reason names the failed task.** The message
+  written on `/fail` reads
+  `Task <name> (<id>) failed: <error>; N downstream member(s) blocked`,
+  N being what the registry skipped, instead of a `Deadlock: …` line with a
+  wrong count (continue mode now skips transitively blocked tasks before
+  checking for a deadlock). `BuildSummary.failed_task` names the task.
+- **New: `raise_on_failure=False`** on the four build functions returns the
+  `FAILURE` summary in fail-fast mode instead of raising the task's
+  exception.
+- **New: in-process executions record their executor.** The claiming start
+  of a thread-, process-, async- or sequential-mode execution sets
+  `executor` (the mode), `executor_ref` (`hostname:pid`) and
+  `executor_metadata` (host, pid, Python version) on the execution row, as
+  Modal executions record their call (`TaskExecutorABC.get_executor_details`).
 
 ### Server
 
@@ -189,6 +211,12 @@ deployments list`** (`stardag modal deployments` stays as an alias).
   `stardag builds cleanup`.
 - `stardag modal deploy` records the deployment before the deploy and
   activates it after; a failed create or activation exits non-zero.
+- **Changed: a failed `stardag build` prints its summary.** Build id,
+  status, the failed task and its error, in text and in `--json`, with exit
+  code 1 — not the task's raw traceback (also for a `stopped` build).
+- **Changed: `stardag tasks exclude` reports what that call did** — which
+  roots it reached and whether it failed the build — instead of repeating
+  "a root was excluded" once any root had been.
 
 ### UI
 

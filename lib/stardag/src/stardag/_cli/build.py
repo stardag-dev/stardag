@@ -260,15 +260,26 @@ def _build_here(
     description: str | None,
     json_output: bool,
 ) -> None:
+    """Run the build here and print its summary — the same shape for a
+    success, a failure and a build the registry stopped (exit code 1 for
+    the last two). A task's failure is reported by its message; the
+    traceback goes to the log, not the terminal."""
     import stardag as sd
+    from stardag.build import BuildExitStatus
+    from stardag.build._base import describe_task
 
     summary = sd.build(
         roots,
         settings=settings,
         resume_build_id=resume_id,
         description=description,
+        raise_on_failure=False,
     )
     counts = summary.task_count
+    failed = summary.failed_task
+    error = (
+        f"{type(summary.error).__name__}: {summary.error}" if summary.error else None
+    )
     payload = {
         "build_id": str(summary.build_id) if summary.build_id else None,
         "status": str(summary.status),
@@ -280,7 +291,15 @@ def _build_here(
             "cancelled": counts.cancelled,
             "skipped": counts.skipped,
         },
-        "error": str(summary.error) if summary.error else None,
+        "failed_task": (
+            {
+                "task_id": str(failed.id),
+                "task": f"{failed.get_namespace()}.{failed.get_name()}".lstrip("."),
+            }
+            if failed is not None
+            else None
+        ),
+        "error": error,
     }
     if json_output:
         emit_json(payload)
@@ -291,9 +310,13 @@ def _build_here(
             f"{counts.previously_completed} already complete, "
             f"{counts.skipped} skipped."
         )
-    if summary.status == "failure":
-        if summary.error and not json_output:
-            error_console.print(f"[bold red]Error:[/bold red] {summary.error}")
+        if failed is not None:
+            error_console.print(
+                f"[bold red]Failed task:[/bold red] {describe_task(failed)}"
+            )
+        if error:
+            error_console.print(f"[bold red]Error:[/bold red] {error}")
+    if summary.status in (BuildExitStatus.FAILURE, BuildExitStatus.STOPPED):
         raise typer.Exit(1)
 
 
