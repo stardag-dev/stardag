@@ -211,7 +211,7 @@ def run_reactive_bootstrap(
     BUILD_FAILED belongs to the caller, which knows whether *it* put the
     build into RUNNING.
     """
-    with settings_applied(settings):
+    with settings_applied(settings, owner=build_id):
         if task_module_patterns:
             import_task_modules(expand_task_module_patterns(task_module_patterns))
         walk = asyncio.run(

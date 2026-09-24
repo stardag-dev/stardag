@@ -29,6 +29,13 @@ Mechanics:
   the run; a resident driver applies them for the whole build with
   :func:`resident_settings`, which refuses a second concurrent build in the
   same process under different settings (the environment is per process).
+- **A process applying a build's settings serves one build at a time.**
+  The deployed tick and worker functions run one input per container and
+  scale by containers (refused at deploy otherwise), and
+  :func:`settings_applied` / :func:`settings_owner` refuse a second build
+  entering while another build's settings are installed, so a
+  misconfiguration fails loudly instead of running under the wrong
+  build's values.
 """
 
 from __future__ import annotations
@@ -125,11 +132,63 @@ async def resolve_settings_aio(
     return validate_settings((await registry.settings_get_aio(settings_hash)).body)
 
 
+_owner_lock = threading.Lock()
+# The build whose settings are installed in this process by
+# ``settings_applied``/``settings_owner``, and how many (nested) blocks of it
+# are open. ``None`` when no build owns the environment.
+_installed_owner: object | None = None
+_installed_depth = 0
+
+
 @contextlib.contextmanager
-def settings_applied(settings: Mapping[str, str] | None) -> typing.Iterator[None]:
+def settings_owner(owner: object) -> typing.Iterator[None]:
+    """Hold this process's settings for ``owner`` (a build id) for the block.
+
+    Settings are process-global environment variables (D4), so a process
+    that applies a build's settings serves one build at a time. Re-entering
+    for the same owner nests; entering for a different owner while one is
+    installed is refused, rather than letting either build run under the
+    other's values (or have its values removed by the other's restore).
+
+    Raises:
+        SettingsError: Another build's settings are installed in this
+            process.
+    """
+    global _installed_owner, _installed_depth
+    with _owner_lock:
+        if _installed_owner is not None and _installed_owner != owner:
+            raise SettingsError(
+                f"Build {owner} cannot apply its settings: build "
+                f"{_installed_owner}'s settings are already installed in this "
+                "process. Settings are environment variables, so a process "
+                "applying them serves one build at a time; deployed ticks and "
+                "workers must run one input per container "
+                "(max_concurrent_inputs=1) and scale by containers."
+            )
+        _installed_owner = owner
+        _installed_depth += 1
+    try:
+        yield
+    finally:
+        with _owner_lock:
+            _installed_depth -= 1
+            if _installed_depth == 0:
+                _installed_owner = None
+
+
+@contextlib.contextmanager
+def settings_applied(
+    settings: Mapping[str, str] | None, *, owner: object
+) -> typing.Iterator[None]:
     """Apply ``settings`` as environment variables for the block, restoring
-    the previous values after (a tick's pass, a worker's run)."""
-    with temp_env_vars(dict(settings or {})):
+    the previous values after (a tick's pass, a worker's run), on behalf of
+    build ``owner``.
+
+    Raises:
+        SettingsError: Another build's settings are installed in this
+            process (see :func:`settings_owner`).
+    """
+    with settings_owner(owner), temp_env_vars(dict(settings or {})):
         yield
 
 

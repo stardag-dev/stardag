@@ -262,9 +262,10 @@ async def _run_deployed_tick_aio(
     ``{"outcome": ...}`` for the two cases that stop before the lease — a
     build that is not reactively scheduled, and one owned by another app.
 
-    **A coroutine awaited by the deployed wrapper**: ticks share a container
-    (``_TICK_CONCURRENCY``), and they are safe to share because they share
-    its event loop and so the process-wide ``APIRegistry``'s async client.
+    **A coroutine awaited by the deployed wrapper**, on the container's one
+    event loop and so the process-wide ``APIRegistry``'s async client. A
+    container serves one tick at a time (``_TICK_CONCURRENCY``): the tick
+    applies its build's settings, which are per process.
 
     The tick compares the active plan's deployment with its own
     ``STARDAG_DEPLOYMENT_ID``; on a difference it rolls the build over (see
@@ -357,7 +358,8 @@ async def _run_deployed_tick_aio(
         deployment_id=own,
         roll_over=_roll_over if own is not None else None,
     )
-    # The container id is in the line because ticks share containers.
+    # The container id is in the line so a tick can be matched to its
+    # container's logs.
     logger.info(
         f"Tick for build {build_id} (container "
         f"{os.environ.get('MODAL_TASK_ID', 'unknown')}): {summary}"

@@ -9,6 +9,7 @@ Every wrapper opens with the app's ``container_setup``.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import logging
@@ -47,8 +48,10 @@ from stardag.integration.modal._tick import (
     _TickDeployment,
 )
 from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
+from stardag.build._settings import settings_owner
 from stardag.exceptions import StardagError
 from stardag.integration.modal._metadata import (
+    STARDAG_BUILD_ID_ENV,
     STARDAG_MODAL_WORKSPACE_ENV,
     _get_modal_workspace,
 )
@@ -62,36 +65,43 @@ if typing.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# How many scheduler ticks one container may serve at once, unless the app
-# says otherwise via ``tick_settings``.
+# How many scheduler ticks one container serves at once: **one**, and the
+# same for every worker function (``one_build_per_process`` below).
 #
-# **Why the tick and nothing else.** A tick is almost entirely I/O wait: it
-# reads the frontier, spawns, and then polls on a sleep until its linger
-# deadline. One container per tick is therefore close to the worst possible
-# packing — and the linger that makes reactive scheduling efficient (one
-# resident scheduler driving level after level, instead of a cold start per
-# level) is precisely what keeps those containers alive. Sharing makes the
-# linger nearly free. No other function in the app has that shape: workers
-# run user code and may be CPU- or GPU-bound, the builder runs a whole
-# build, and the bootstrap walks a DAG.
+# **Why.** A tick and a worker apply their build's ``settings`` as
+# process-global environment variables (D4), across the whole pass or run;
+# a tick awaits inside that block. Two inputs sharing a container can
+# therefore interleave, and one build's ``requires()``, selectors or task
+# code would then read another build's values -- or lose its own to the
+# other's restore. So a process applying settings serves one build at a
+# time: deployed ticks and workers run one input per container and scale by
+# containers. The cost is more containers (a lingering tick holds one of
+# its own), accepted; ``settings_applied`` refuses an interleaving at run
+# time as the backstop (design.md, "The deterministic scope"; decisions.md,
+# implementation notes I7).
 #
-# **Not ``tick_watchdog``**, even though it shares ``tick_settings``. It is
-# a separate Modal function with its own containers and receives one input
-# per ``watchdog_period_minutes``, so concurrency would change nothing in
-# the steady state; and it is a ``def``, which Modal would serve on
-# threads — the exact hazard ``_modal_tick`` is async to avoid.
-#
-# **Why 10, and why bounded at all.** Concurrency is not free per tick: each
-# holds up to ``TickConfig.max_concurrent_actions`` in-flight registry
-# calls, and a share of one HTTP connection pool (see
-# ``APIRegistry``'s async limits, sized against this number). Ten is enough
-# that the linger stops driving container count at the scale reactive builds
-# actually run at, and small enough that one container's loss is bounded.
-#
-# ``target_inputs`` is deliberately unset: it would have Modal provision a
-# further container rather than pack up to the max, which is the opposite of
-# the point here.
-_TICK_CONCURRENCY: InputConcurrency = {"max_inputs": 10}
+# The tick was packed ten to a container before settings existed, which is
+# why it still passes a default here rather than none: the value is the
+# decision, stated where the next reader looks for it.
+_TICK_CONCURRENCY: InputConcurrency = {"max_inputs": 1}
+
+
+def _refuse_packed_settings_function(
+    name: str, concurrency: InputConcurrency | None
+) -> None:
+    """Refuse input concurrency above one on a function that applies a
+    build's settings (the tick and every worker): the deploy fails here, in
+    the setting name the app wrote, instead of the first two overlapping
+    builds failing at run time."""
+    if concurrency is None or concurrency.get("max_inputs", 1) <= 1:
+        return
+    raise StardagError(
+        f"FunctionSettings for {name!r} sets max_concurrent_inputs="
+        f"{concurrency['max_inputs']}. {name!r} applies its build's settings "
+        "as process-wide environment variables, so a container serves one "
+        "build at a time: leave max_concurrent_inputs unset (or 1) and scale "
+        "with containers (max_containers)."
+    )
 
 
 def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
@@ -264,6 +274,7 @@ def _register_functions(
         *,
         default_concurrency: InputConcurrency | None = None,
         never_concurrent: bool = False,
+        one_build_per_process: bool = False,
         **extra: typing.Any,
     ):
         """Register one function on the Modal app under ``name``.
@@ -279,6 +290,10 @@ def _register_functions(
         one ``tick_settings``, so an app that packs its tick would
         otherwise pack a sync watchdog too — onto Modal's *threads*,
         which is the hazard the async tick exists to avoid.
+
+        ``one_build_per_process`` refuses a declared concurrency above one
+        (see ``_TICK_CONCURRENCY``): the function applies a build's
+        settings, which are per process.
         """
         prepared = _prepare_function_settings(
             settings,
@@ -294,6 +309,8 @@ def _register_functions(
         concurrency = (
             None if never_concurrent else prepared.concurrency or default_concurrency
         )
+        if one_build_per_process:
+            _refuse_packed_settings_function(name, concurrency)
         if concurrency is None:
             return decorate
 
@@ -348,18 +365,26 @@ def _register_functions(
         # dynamic deps were just constructed by user code, so their
         # classes are registered by definition.
         set_declared_task_module_patterns(task_module_patterns)
-        if run_fn_accepts_env:
-            run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)
-            return run_fn_with_env(task, env_overrides=env_overrides)
-        with temp_env_vars(env_overrides or {}):
-            return run_fn(task)
+        # The build's settings ride in ``env_overrides``: hold the process
+        # for that build while they are applied (one build per process).
+        build_id = (env_overrides or {}).get(STARDAG_BUILD_ID_ENV)
+        with (
+            settings_owner(build_id)
+            if build_id is not None
+            else contextlib.nullcontext()
+        ):
+            if run_fn_accepts_env:
+                run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)
+                return run_fn_with_env(task, env_overrides=env_overrides)
+            with temp_env_vars(env_overrides or {}):
+                return run_fn(task)
 
     register("build", self._builder_settings)(_modal_build)
     function_names = ["build"]
 
     for worker_name, settings in self._worker_settings.items():
         func_name = f"worker_{worker_name}"
-        register(func_name, settings)(_modal_run)
+        register(func_name, settings, one_build_per_process=True)(_modal_run)
         function_names.append(func_name)
 
     # Reactive scheduler tick (see stardag.build.run_tick_aio). Spawned
@@ -406,7 +431,12 @@ def _register_functions(
     # not given; the api-key secret is in extra_secrets so they get
     # registry credentials regardless of which settings apply.
     tick_settings = self._tick_settings or self._builder_settings
-    register("tick", tick_settings, default_concurrency=_TICK_CONCURRENCY)(_modal_tick)
+    register(
+        "tick",
+        tick_settings,
+        default_concurrency=_TICK_CONCURRENCY,
+        one_build_per_process=True,
+    )(_modal_tick)
     function_names.append("tick")
 
     # Reactive bootstrap (see run_reactive_bootstrap). Spawned by

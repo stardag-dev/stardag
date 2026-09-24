@@ -2264,19 +2264,18 @@ class TestContainerSetup:
 
 
 class TestInputConcurrency:
-    """Which deployed functions may serve several inputs per container.
+    """Which deployed functions may serve several inputs per container:
+    none that apply a build's settings.
 
-    The tick and nothing else. It is almost entirely I/O wait — read the
-    frontier, spawn, then poll on a sleep until its linger deadline — so a
-    container per tick is close to the worst packing available, and the
-    linger that makes reactive scheduling efficient is what keeps those
-    containers alive. Nothing else in the app has that shape.
+    Settings are process-global environment variables (D4), so a process
+    applying them serves one build at a time: the tick and every worker run
+    one input per container and scale by containers, and a declared
+    ``max_concurrent_inputs`` above one on them is refused at deploy.
 
-    The two halves are one decision: Modal serves concurrent inputs to an
-    ``async def`` as tasks on one event loop and to a ``def`` on threads,
-    and threaded ticks would thrash the process-wide registry's per-loop
-    HTTP client (see ``TestAsyncClientUnderConcurrentCallers`` in the
-    registry tests). So "async" and "concurrent" are asserted together.
+    The tick stays ``async`` regardless: Modal would serve a ``def`` on
+    threads if packing ever came back, and threaded ticks would thrash the
+    process-wide registry's per-loop HTTP client (see
+    ``TestAsyncClientUnderConcurrentCallers`` in the registry tests).
     """
 
     @staticmethod
@@ -2312,17 +2311,15 @@ class TestInputConcurrency:
             name for name, fn in registered.items() if inspect.iscoroutinefunction(fn)
         ] == ["tick"]
 
-    def test_the_tick_gets_a_default(self):
-        assert self._concurrency(self._app())["tick"] == {"max_inputs": 10}
+    def test_the_tick_serves_one_input_per_container(self):
+        assert self._concurrency(self._app())["tick"] == {"max_inputs": 1}
 
-    def test_nothing_else_does(self):
-        """Workers run user code and may be CPU- or GPU-bound; the builder
-        runs a whole build; the bootstrap walks a DAG. And the watchdog —
-        which shares ``tick_settings`` — is a separate function with its own
-        containers that receives one input per period, so packing it would
-        change nothing while quietly opting a ``def`` into threading."""
+    def test_nothing_else_is_wrapped(self):
+        """Workers get Modal's default (one input per container); the
+        builder runs a whole build; the bootstrap walks a DAG; the watchdog
+        is a sync ``def`` sharing ``tick_settings``."""
         concurrency = self._concurrency(self._app())
-        assert concurrency.pop("tick") is not None
+        assert concurrency.pop("tick") == {"max_inputs": 1}
         assert set(concurrency) == {
             "build",
             "worker_default",
@@ -2332,23 +2329,70 @@ class TestInputConcurrency:
         }
         assert all(value is None for value in concurrency.values())
 
-    def test_tick_settings_override_the_default(self):
-        concurrency = self._concurrency(
-            self._app(
-                tick_settings=FunctionSettings(
-                    image=_make_image(),
-                    max_concurrent_inputs=32,
-                    target_concurrent_inputs=24,
+    @pytest.mark.parametrize(
+        "declared",
+        [
+            {"max_concurrent_inputs": 32, "target_concurrent_inputs": 24},
+            {"max_concurrent_inputs": 2},
+            # The legacy spelling someone would reach for from Modal's
+            # pre-1.0 docs is refused just the same.
+            {"allow_concurrent_inputs": 3},
+        ],
+    )
+    def test_a_packed_tick_is_refused_at_deploy(self, declared):
+        """The tick applies its build's settings; two builds sharing its
+        container would read each other's values."""
+        from stardag.exceptions import StardagError
+
+        with pytest.raises(StardagError, match="one build at a time"):
+            self._concurrency(
+                self._app(
+                    tick_settings=FunctionSettings(image=_make_image(), **declared)
                 )
             )
+
+    def test_a_packed_worker_is_refused_at_deploy(self):
+        """A worker runs under its build's settings too (they ride in its
+        ``env_overrides``), and Modal packs a sync ``def`` onto threads."""
+        from stardag.exceptions import StardagError
+
+        app = StardagApp(
+            "test-concurrency",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                "default": FunctionSettings(
+                    image=_make_image(), max_concurrent_inputs=5
+                )
+            },
         )
-        assert concurrency["tick"] == {"max_inputs": 32, "target_inputs": 24}
+        with pytest.raises(StardagError, match="'worker_default'"):
+            self._concurrency(app)
+
+    def test_an_explicit_one_is_accepted(self):
+        """``max_concurrent_inputs=1`` says what the refusal asks for, and
+        the tick's declaration does not reach the sync watchdog."""
+        app = StardagApp(
+            "test-concurrency",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                "default": FunctionSettings(
+                    image=_make_image(), max_concurrent_inputs=1
+                )
+            },
+            tick_settings=FunctionSettings(
+                image=_make_image(), max_concurrent_inputs=1
+            ),
+            watchdog_period_minutes=5,
+        )
+        concurrency = self._concurrency(app)
+        assert concurrency["tick"] == {"max_inputs": 1}
+        assert concurrency["worker_default"] == {"max_inputs": 1}
+        assert concurrency["tick_watchdog"] is None
 
     def test_a_target_without_a_max_fails_the_deploy_here(self):
         """Not by merging stardag's own ceiling underneath — that would
-        invent a limit nobody asked for, and could still sit below the
-        target. Modal refuses the function either way; this refuses it
-        first, in the setting names the app actually wrote."""
+        invent a limit nobody asked for. Modal refuses the function either
+        way; this refuses it first, in the setting names the app wrote."""
         from stardag.exceptions import StardagError
 
         with pytest.raises(StardagError, match="without max_concurrent_inputs"):
@@ -2360,58 +2404,30 @@ class TestInputConcurrency:
                 )
             )
 
-    def test_the_legacy_spelling_also_overrides_it(self):
-        """``allow_concurrent_inputs`` is the name someone would reach for
-        from Modal's pre-1.0 docs, and it never worked here — it raised."""
-        concurrency = self._concurrency(
-            self._app(
-                tick_settings=FunctionSettings(
-                    image=_make_image(), allow_concurrent_inputs=3
-                )
-            )
-        )
-        assert concurrency["tick"] == {"max_inputs": 3}
+    def test_a_worker_refuses_to_run_under_another_builds_settings(self):
+        """The run-time backstop: a worker input arriving while another
+        build's settings are installed in the process fails loudly."""
+        from stardag.build._settings import SettingsError, settings_owner
 
-    def test_a_packed_tick_does_not_drag_the_watchdog_with_it(self):
-        """``tick`` and ``tick_watchdog`` are registered from one
-        ``tick_settings``, so "no default for the watchdog" is not enough —
-        a declared value would reach it too. The watchdog is sync, so that
-        is Modal's *threaded* concurrency, which is the whole hazard the
-        tick is a coroutine to avoid; and Modal accepts a sync ``def`` with
-        ``@modal.concurrent`` and a ``schedule`` without complaint, so
-        nothing downstream would catch it."""
-        concurrency = self._concurrency(
-            self._app(
-                tick_settings=FunctionSettings(
-                    image=_make_image(), max_concurrent_inputs=32
+        registered = _finalize_capturing_functions(self._app())
+        other, mine = uuid4(), uuid4()
+        with settings_owner(other):
+            with pytest.raises(SettingsError, match="already installed"):
+                registered["worker_default"](
+                    "task", env_overrides={"STARDAG_BUILD_ID": str(mine)}
                 )
-            )
-        )
-        assert concurrency["tick"] == {"max_inputs": 32}
-        assert concurrency["tick_watchdog"] is None
-
-    def test_a_worker_may_opt_in_explicitly(self):
-        """Stardag has no opinion for workers; an app that knows its own
-        run function is I/O-bound is entitled to one."""
-        app = StardagApp(
-            "test-concurrency",
-            builder_settings=FunctionSettings(image=_make_image()),
-            worker_settings={
-                "default": FunctionSettings(
-                    image=_make_image(), max_concurrent_inputs=5
-                )
-            },
-        )
-        assert self._concurrency(app)["worker_default"] == {"max_inputs": 5}
 
 
 class TestConcurrentTicksInOneContainer:
     """Two ticks genuinely overlapping in one process, which is the only
     condition under which any of this is observable.
 
-    ``TestInputConcurrency`` pins that the tick is async and asks for
-    concurrency; this pins that two of them actually running at once stay
-    out of each other's way. Every hazard here is silent until it happens:
+    A deployed container serves one tick at a time now (the settings rule,
+    ``TestInputConcurrency``), and ``settings_applied`` refuses an overlap
+    once settings are applied. These stub the tick body below that point
+    and keep pinning that the pre-settings wrapper -- registry singleton,
+    HTTP client, build context -- would not be what breaks if ticks were
+    ever packed again. Every hazard here is silent until it happens:
     a shared registry singleton, a shared HTTP client, a ``ContextVar``
     holding "the build this code is running for".
     """

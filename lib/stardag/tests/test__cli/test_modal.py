@@ -127,3 +127,14 @@ class TestDeploymentsListing:
         assert "current" in result.output
         (listed,) = registry.calls_to("deployment_list")
         assert listed["app_name"] == "myapp"
+
+    def test_without_a_registry_it_returns_with_the_notice(self):
+        """Through ``_deployment_registry()``, like ``modal deploy``: the
+        no-op registry has no ``deployment_list`` to call."""
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        with registry_provider.override(NoOpRegistry()):
+            result = CliRunner(env={"COLUMNS": "240"}).invoke(app, ["deployments"])
+        assert result.exit_code == 0, result.output
+        assert "No registry configured; no deployments to list." in result.output
+        assert "Deployments" not in result.output

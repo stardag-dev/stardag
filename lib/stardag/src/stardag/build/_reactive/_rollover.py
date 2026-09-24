@@ -108,7 +108,7 @@ async def roll_over_aio(
     build = await registry.build_get_aio(build_id)
     settings = (await registry.settings_get_aio(frontier.settings_hash)).body
     roots_members = await registry.plan_roots_aio(frontier.plan_id)
-    with settings_applied(settings):
+    with settings_applied(settings, owner=build_id):
         try:
             roots: list[BaseTask] = [
                 task_from_registry_data(m.body) for m in roots_members

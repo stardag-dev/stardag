@@ -14,14 +14,15 @@ console = Console()
 error_console = Console(stderr=True)
 
 
-def _deployment_registry():
+def _deployment_registry(consequence: str = "deployment not recorded"):
     """The configured registry, or None (with a notice) when there is none
-    to record the deployment in."""
+    to record the deployment in -- or, for ``stardag modal deployments``,
+    to list from."""
     from stardag.registry import is_noop_registry, registry_provider
 
     registry = registry_provider.get()
     if is_noop_registry(registry):
-        console.print("[dim]No registry configured; deployment not recorded.[/dim]")
+        console.print(f"[dim]No registry configured; {consequence}.[/dim]")
         return None
     return registry
 
@@ -92,11 +93,10 @@ def deployments(
     """
     from rich.table import Table
 
-    from stardag.registry import registry_provider
-
-    rows = registry_provider.get().deployment_list(
-        kind="modal", app_name=app_name, current=current
-    )
+    registry = _deployment_registry("no deployments to list")
+    if registry is None:
+        return
+    rows = registry.deployment_list(kind="modal", app_name=app_name, current=current)
     table = Table(title="Deployments")
     for col in ("App", "Deployment", "Gen", "Code id", "Deployed", "Activated", ""):
         table.add_column(col)

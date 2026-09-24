@@ -237,3 +237,22 @@ lifecycle and wake-ups needed. The design now says what the code does.
 - The `plan_incomplete` refusal carries a `reason` (`not_sealed`,
   `root_excluded`, `members_incomplete`); `root_task_ids` is required at
   `POST /builds` and checked at `create_plan` (400 `root_mismatch`).
+
+## Implementation notes, I7 (2026-09-24)
+
+- **A process applying settings serves one build at a time** (coordinator,
+  from Copilot on PR #384). Settings are process-global environment
+  variables by design (D4), and a tick awaits inside the block that applies
+  them; the deployed tick was packed ten inputs to a container, so two
+  builds could interleave and read each other's values, or lose their own
+  to the other's restore. Rather than replace environment variables with a
+  task-local context (which the pydantic-settings pattern cannot read), the
+  deployed tick and every worker function run one input per container and
+  scale by containers; a declared `max_concurrent_inputs` above one on them
+  is refused at deploy. `settings_applied` additionally holds a
+  process-level owner token (the build id) and raises `SettingsError` when
+  another build's settings are installed, as does the worker wrapper for
+  the build named in its `env_overrides`; equal or empty settings do not
+  make an overlap safe, so the guard keys on the build, not the values.
+  The cost is more containers — a lingering tick now holds one of its own
+  — accepted.

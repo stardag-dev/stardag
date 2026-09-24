@@ -259,7 +259,7 @@ class _Driver:
             )
         )
         try:
-            with settings_applied(settings):
+            with settings_applied(settings, owner=self.build_id):
                 result = await act_on_frontier(
                     frontier,
                     registry=self.registry,
