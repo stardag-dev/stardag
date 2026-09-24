@@ -18,9 +18,15 @@ Locking, which is what makes concurrent registration safe (S16):
   unique-index waits.
 - ``task`` is never locked here except through ``transition_task()`` when
   an observation changes a status, which takes ``FOR NO KEY UPDATE`` in
-  ``task_id`` order. Plan creation and sealing serialise per build on the
-  ``build`` row (``FOR NO KEY UPDATE``, which does not block the FK key-share
-  locks of event inserts).
+  ``task_id`` order.
+- **The build row is locked first**, before any plan or task row, by every
+  registration transaction (lock order: build → plan → task rows in
+  ``task_id`` order). Plan creation, sealing and the closure step take it
+  ``FOR NO KEY UPDATE`` and so serialise per build; a member chunk takes it
+  ``FOR SHARE``, so chunks run concurrently with each other but not with a
+  seal, and re-reads the plan under it — a seal committing while the chunk
+  is in flight is seen, not raced. Neither mode blocks the ``FOR KEY SHARE``
+  that event inserts take through their FK.
 """
 
 from __future__ import annotations
@@ -133,14 +139,24 @@ async def get_plan(session: AsyncSession, environment_id: UUID, plan_id: UUID) -
 
 
 async def lock_build(
-    session: AsyncSession, environment_id: UUID, build_id: UUID
+    session: AsyncSession, environment_id: UUID, build_id: UUID, *, shared: bool = False
 ) -> Build:
-    """The build row, locked ``FOR NO KEY UPDATE``: serialises plan creation
-    and sealing per build without blocking event inserts' FK checks."""
+    """The build row, locked before any plan or task row.
+
+    ``FOR NO KEY UPDATE`` by default: serialises plan creation, sealing and
+    the closure step per build. ``shared=True`` takes ``FOR SHARE``, which a
+    member chunk uses: chunks do not wait for each other, but do wait for a
+    seal (and a seal for them). Neither blocks event inserts' FK checks
+    (``FOR KEY SHARE``). A shared holder must never upgrade: two of them
+    would deadlock.
+    """
+    stmt = select(Build).where(
+        Build.environment_id == environment_id, Build.id == build_id
+    )
     build = await session.scalar(
-        select(Build)
-        .where(Build.environment_id == environment_id, Build.id == build_id)
-        .with_for_update(key_share=True)
+        stmt.with_for_update(read=True)
+        if shared
+        else stmt.with_for_update(key_share=True)
     )
     if build is None:
         raise NotFound("unknown_build", f"no build {build_id}", build_id=str(build_id))
@@ -306,6 +322,11 @@ async def register_members(
         )
     async with transaction(session):
         plan = await get_plan(session, environment_id, plan_id)
+        # Synchronise with /seal: the plan was read before the lock, so a
+        # seal may have committed since; re-read it under the lock, which a
+        # seal in flight holds exclusively, before the sealed check.
+        await lock_build(session, environment_id, plan.build_id, shared=True)
+        await session.refresh(plan)
         return await register_items(
             session, environment_id, plan, items, as_roots=False, now=utc_now()
         )

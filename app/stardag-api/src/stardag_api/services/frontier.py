@@ -32,7 +32,6 @@ from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
-    Build,
     BuildStatus,
     Plan,
     PlanMember,
@@ -42,19 +41,12 @@ from stardag_api.models import (
     TaskStatus,
 )
 from stardag_api.models.base import utc_now
-from stardag_api.services.errors import NotFound
 from stardag_api.services.plans import ClosureResult, close_plan
+from stardag_api.services.registration import lock_build
+from stardag_api.services.transitions import ACTIONABLE_STATUSES
 from stardag_api.services.tx import transaction
 
-#: Statuses a member can be started from (plus RUNNING with a lapsed claim).
-#: FAILED is absent: the fail mode decides (a retry makes it PENDING).
-ACTIONABLE_STATUSES = (
-    TaskStatus.PENDING,
-    TaskStatus.SUSPENDED,
-    TaskStatus.INTERRUPTED,
-    TaskStatus.CANCELLED,
-    TaskStatus.SKIPPED,
-)
+__all__ = ["ACTIONABLE_STATUSES", "Frontier", "FrontierMember", "get_frontier"]
 
 
 @dataclass(frozen=True)
@@ -95,15 +87,10 @@ async def get_frontier(
     a closure conflict) commit with the read.
     """
     async with transaction(session):
-        build = await session.scalar(
-            select(Build).where(
-                Build.environment_id == environment_id, Build.id == build_id
-            )
-        )
-        if build is None:
-            raise NotFound(
-                "unknown_build", f"no build {build_id}", build_id=str(build_id)
-            )
+        # The build row first (lock order: build → plan → task rows), in
+        # the mode the closure step needs, before choosing the active plan:
+        # a seal holding it may be switching which plan that is.
+        build = await lock_build(session, environment_id, build_id)
         plan = await session.scalar(
             select(Plan).where(
                 Plan.build_id == build_id,

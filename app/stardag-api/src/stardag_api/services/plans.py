@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
     AdmittedBy,
-    Build,
     BuildStatus,
     Deployment,
     EventType,
@@ -234,7 +233,16 @@ async def closure(
 async def close_plan(
     session: AsyncSession, environment_id: UUID, plan: Plan, *, now: datetime
 ) -> ClosureResult:
-    """:func:`closure` inside the caller's transaction."""
+    """:func:`closure` inside the caller's transaction.
+
+    Takes the build row lock (``FOR NO KEY UPDATE``, as plan creation and
+    sealing do) before reading or admitting anything, so the lock order is
+    the registration one — build, then plan, then task rows. Admitting
+    first and locking the build only to fail it over a conflict would hold
+    ``plan_member`` inserts while waiting for a lock that a plan retry
+    holds while it waits on those same rows.
+    """
+    await lock_build(session, environment_id, plan.build_id)
     reached = (await session.execute(_REACHABLE_NON_MEMBERS, {"plan": plan.id})).all()
     if not reached:
         return ClosureResult(admitted=0)
@@ -310,14 +318,11 @@ async def fail_build_for_conflicts(
 
     Build lifecycle routes arrive in step 3; this is the one build
     transition the static path itself needs. Returns True when the build is
-    failed (now or already, by this cause).
+    failed (now or already, by this cause). The caller already holds the
+    build row lock (:func:`close_plan` takes it first); this re-read under
+    the same mode is a no-op for locking.
     """
-    build = await session.scalar(
-        select(Build)
-        .where(Build.environment_id == environment_id, Build.id == plan.build_id)
-        .with_for_update(key_share=True)
-    )
-    assert build is not None  # FK
+    build = await lock_build(session, environment_id, plan.build_id)
     if build.status == BuildStatus.FAILED:
         return True
     message = "instance_conflict: " + "; ".join(

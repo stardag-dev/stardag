@@ -7,11 +7,17 @@ pins where the scenario table has one.
 
 from __future__ import annotations
 
+import asyncio
+import re
+
 import pytest
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.models import BuildStatus
 from stardag_api.services import frontier as frontier_service
 from stardag_api.services.errors import Conflict
+from stardag_api.services.frontier import Frontier
 from tests.v2_support import Harness, item, observed, task_ids, unexpanded
 
 
@@ -123,6 +129,106 @@ async def test_closure_conflict_fails_the_build_naming_both_members(h: Harness):
     for instance in (conflict.member_instance_id, conflict.other_instance_id):
         assert str(instance) in failed["error_message"]
     assert plan_a.id  # the plan stays; the build failed
+
+
+async def _closure_conflict_setup(h: Harness):
+    """Plan A holds U1; plan B, in A's scope, expands X (a member of A)
+    with an edge to U2 of the same completion and to a fresh V. A's closure
+    step then admits V and finds U1/U2 in conflict."""
+    deployment = await h.new_deployment()
+    u1 = item("U", extra={"mode": "fast"})
+    u2 = item("U", extra={"mode": "slow"})
+    v = item("V")
+    x = item("X", upstreams=[u2, v])
+    build_a, plan_a = await h.planned(
+        [item("RA", upstreams=[x])],
+        [u1, observed(unexpanded(x), True)],
+        deployment_id=deployment,
+    )
+    await h.planned([item("RB", upstreams=[x])], [u2, v, x], deployment_id=deployment)
+    return build_a, plan_a, v
+
+
+@pytest.mark.parametrize("via", ["closure", "frontier"])
+async def test_closure_locks_the_build_before_it_admits(
+    h: Harness, async_engine: AsyncEngine, via: str
+):
+    """Lock order build → plan → task rows holds for the closure step too:
+    it takes the build row ``FOR NO KEY UPDATE`` (as plan creation and
+    sealing do) before reading or admitting anything. Admitting first and
+    locking the build only to fail it over a conflict would hold
+    ``plan_member`` inserts while waiting on a plan retry that holds the
+    build lock and waits on those inserts: a deadlock.
+
+    Pinned two ways: another session holding the build lock (a plan retry
+    in flight) stops the closure before any admission — it waits, then
+    finishes, admitting V and failing the build; and the build lock is the
+    closure's first locking or writing statement."""
+    build_a, plan_a, v = await _closure_conflict_setup(h)
+
+    statements: list[str] = []
+
+    def capture(conn, cursor, statement, *args):  # noqa: ARG001
+        statements.append(statement)
+
+    async with async_engine.connect() as retry:
+        await retry.execute(
+            text("SELECT 1 FROM build WHERE id = :b FOR NO KEY UPDATE"),
+            {"b": build_a},
+        )
+        event.listen(async_engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            call = h.closure(plan_a.id) if via == "closure" else h.frontier(build_a)
+            closing = asyncio.create_task(call)
+            await asyncio.sleep(0.3)
+            assert not closing.done(), "the closure must wait for the build lock"
+            assert not [
+                s
+                for s in statements
+                if s.lstrip().upper().startswith(("INSERT", "UPDATE"))
+            ], "nothing may be admitted before the build lock is held"
+            await retry.commit()
+            result = await asyncio.wait_for(closing, 10)
+        finally:
+            event.remove(async_engine.sync_engine, "before_cursor_execute", capture)
+
+    closure = result.closure if isinstance(result, Frontier) else result
+    assert closure is not None and closure.build_failed
+    assert closure.admitted == 1
+    assert (await h.members(plan_a.id))[v.task_id]["admitted_by"] == "closure"
+    assert (await h.build(build_a))["status"] == "failed"
+
+    ordered = [
+        s
+        for s in statements
+        if re.search(r"\bFOR (NO KEY UPDATE|SHARE|KEY SHARE|UPDATE)\b", s)
+        or s.lstrip().upper().startswith(("INSERT", "UPDATE"))
+    ]
+    assert re.search(r"\bFROM build\b", ordered[0]), ordered[0]
+    assert "FOR NO KEY UPDATE" in ordered[0]
+    assert not [s for s in statements if re.search(r"\bFOR UPDATE\b", s)]
+
+
+async def test_closure_and_a_plan_retry_do_not_deadlock(h: Harness):
+    """Two sessions: a plan retry (``create_plan`` re-sent for the same
+    scope) and a closure step that finds a conflict, interleaved many times
+    over one build. Both lock the build row first, so they serialise:
+    every call returns, and the closure's verdict stands."""
+    build_a, plan_a, _ = await _closure_conflict_setup(h)
+    roots = [item("RA", upstreams=[])]  # same instance: upstreams are not body
+
+    async def retry():
+        return await h.plan(build_a, plan_a.deployment_id, roots, plan_id=plan_a.id)
+
+    outcomes = await asyncio.wait_for(
+        asyncio.gather(
+            *[f() for _ in range(5) for f in (retry, lambda: h.closure(plan_a.id))],
+            return_exceptions=True,
+        ),
+        30,
+    )
+    assert not [o for o in outcomes if isinstance(o, BaseException)], outcomes
+    assert (await h.build(build_a))["status"] == "failed"
 
 
 @pytest.mark.xfail(reason="v2: I3", strict=True)

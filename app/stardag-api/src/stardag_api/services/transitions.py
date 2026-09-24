@@ -14,7 +14,9 @@ rules, in one place:
   A claiming start names its plan and a client-minted execution id; the same
   execution retrying a granted start is a no-op, checked *before* the plan
   (S36); otherwise COMPLETED is 409 ``task_already_completed``, a live claim
-  409 ``task_already_running``, an inactive plan 409 ``plan_superseded``, a
+  409 ``task_already_running``, any other status outside ACTIONABLE (FAILED:
+  the fail mode decides, through ``retry``) 409 ``task_not_actionable``, an
+  inactive plan 409 ``plan_superseded``, a
   build that is not RUNNING 409 ``build_not_running``, and
   an upstream not COMPLETED — re-read under a share lock, so an invalidation
   in flight is waited for — 409 ``upstream_incomplete`` (S39). A lapsed claim
@@ -63,6 +65,17 @@ from stardag_api.services.errors import (
     RecordedConflict,
 )
 from stardag_api.services.tx import transaction
+
+#: Statuses a member can be started from (plus RUNNING with a lapsed claim).
+#: FAILED is absent: the fail mode decides (a retry makes it PENDING). The
+#: frontier lists by it and a claiming start refuses by it.
+ACTIONABLE_STATUSES = (
+    TaskStatus.PENDING,
+    TaskStatus.SUSPENDED,
+    TaskStatus.INTERRUPTED,
+    TaskStatus.CANCELLED,
+    TaskStatus.SKIPPED,
+)
 
 #: Claim TTL when a claiming start or a renewal names none.
 DEFAULT_CLAIM_TTL_SECONDS = 3600
@@ -435,6 +448,16 @@ class _Step:
                 "task_already_running",
                 "another execution holds a live claim on the task",
                 task_id=t.task_id,
+            )
+        # A lapsed RUNNING claim is taken over below; anything else outside
+        # ACTIONABLE (FAILED) is not a claiming start's to decide.
+        if t.status != TaskStatus.RUNNING and t.status not in ACTIONABLE_STATUSES:
+            raise Conflict(
+                "task_not_actionable",
+                f"the task is {t.status.value.upper()}; it is started again"
+                " only after a retry",
+                task_id=t.task_id,
+                status=t.status.value,
             )
         if await self.session.get(Execution, eid) is not None:
             raise Conflict(

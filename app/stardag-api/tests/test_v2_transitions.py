@@ -227,6 +227,36 @@ async def test_claim_refusals(h: Harness):
     assert missing.value.code == "not_a_member"
 
 
+async def test_a_claiming_start_refuses_a_status_outside_actionable(h: Harness):
+    """A claiming start is decided by ACTIONABLE, not only by COMPLETED and
+    a live claim: a FAILED task is 409 ``task_not_actionable`` (the fail
+    mode decides, through ``retry``), writes nothing, and is startable
+    again once a retry makes it PENDING."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    first = await h.start(plan.id, t)
+    await h.transition(plan.id, t, Transition.fail(first, "boom"))
+    events_before = len(await h.events(t))
+
+    with pytest.raises(Conflict) as exc:
+        await h.start(plan.id, t)
+    assert exc.value.code == "task_not_actionable"
+    assert exc.value.detail["status"] == "failed"
+    assert (await h.task(t))["status"] == "failed"
+    assert len(await h.events(t)) == events_before
+
+    await h.transition(plan.id, t, Transition.retry())
+    await h.start(plan.id, t)
+    assert (await h.task(t))["status"] == "running"
+
+    done = item("Done")
+    _, plan = await h.planned([done], [done])
+    await h.run(plan.id, done)
+    with pytest.raises(Conflict) as exc:
+        await h.start(plan.id, done)
+    assert exc.value.code == "task_already_completed"
+
+
 async def test_non_claiming_start_is_the_holders_self_report(h: Harness):
     """A non-claiming start names the claim's execution and records the
     executor details the claim could not know (the spawn came after); one

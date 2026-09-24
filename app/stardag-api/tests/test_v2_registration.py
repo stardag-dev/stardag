@@ -626,6 +626,55 @@ async def test_a_sealed_plan_takes_a_discovery_jobs_result(h: Harness):
     assert frontier.discovery_jobs == []
 
 
+async def test_a_seal_committing_while_a_chunk_is_in_flight_is_seen(
+    h: Harness, async_engine: AsyncEngine
+):
+    """``/seal`` and a member chunk synchronise on the build row: the seal
+    holds it ``FOR NO KEY UPDATE``, the chunk takes it ``FOR SHARE`` and
+    re-reads the plan under it. A seal that commits after the chunk read
+    the plan (unsealed) and before the chunk's lock is seen: a new member
+    is 409 ``plan_sealed`` and nothing of the chunk lands."""
+    build, plan = await h.planned([item("R", upstreams=[])], [item("R", upstreams=[])])
+    b = item("B")
+
+    async with async_engine.connect() as sealer:
+        # A seal in flight: the build lock held, sealed_at written, not yet
+        # committed — the chunk's plain read of the plan still sees NULL.
+        await sealer.execute(
+            text("SELECT 1 FROM build WHERE id = :b FOR NO KEY UPDATE"),
+            {"b": build},
+        )
+        await sealer.execute(
+            text("UPDATE plan SET sealed_at = now() WHERE id = :p"), {"p": plan.id}
+        )
+        registering = asyncio.create_task(h.register(plan.id, [b]))
+        await asyncio.sleep(0.3)
+        assert not registering.done(), "the chunk must wait for the seal"
+        await sealer.commit()
+
+    with pytest.raises(Conflict) as exc:
+        await registering
+    assert exc.value.code == "plan_sealed"
+    assert exc.value.detail["task_ids"] == [b.task_id]
+    assert await h.task_count(b) == 0
+
+
+async def test_concurrent_chunks_share_the_build_lock(
+    h: Harness, async_engine: AsyncEngine
+):
+    """A chunk's build lock is ``FOR SHARE``: another transaction holding
+    it in the same mode does not block a chunk (chunks into one build run
+    concurrently), where a seal's ``FOR NO KEY UPDATE`` would."""
+    build, plan = await h.planned([item("R", upstreams=[item("A")])])
+    async with async_engine.connect() as other:
+        await other.execute(
+            text("SELECT 1 FROM build WHERE id = :b FOR SHARE"), {"b": build}
+        )
+        result = await asyncio.wait_for(h.register(plan.id, [item("A")]), 5)
+        assert result.members_admitted == 1
+        await other.rollback()
+
+
 async def test_a_chunk_carrying_one_instance_twice_must_agree(h: Harness):
     """The driver de-duplicates by instance: an exact repeat in one chunk is
     de-duplicated, and a repeat with other ``declared_upstreams`` is 400
