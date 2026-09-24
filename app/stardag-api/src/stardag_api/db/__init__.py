@@ -18,11 +18,6 @@ _engine_kwargs: dict[str, object] = {
     "pool_recycle": 1800,
 }
 
-# SQLite (used by the in-memory test DB) doesn't support these pool settings;
-# pass them only for real DB backends.
-if settings.effective_database_url.startswith("sqlite"):
-    _engine_kwargs = {}
-
 # Transaction-mode poolers (PgBouncer, Neon's pooled endpoint) hand
 # consecutive statements to different backend sessions, so asyncpg's
 # named-prepared-statement caching breaks. Disable both asyncpg's own cache

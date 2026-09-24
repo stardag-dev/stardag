@@ -169,3 +169,71 @@ unexpanded members' targets before sealing; `force` never overrides an
 excluded root. On the FK column order: PostgreSQL matches referenced columns
 to a unique constraint as a set, so the original text was creatable, but
 writing it in key order costs nothing and removes the doubt.
+
+## Implementation notes, I0 step 1 (2026-09-24)
+
+Corrections the schema work made to `design.md`, none of them a change of
+decision; the design now says what the migration does.
+
+- `event.build_id`: no CHECK tying it to the event type. `build_id`,
+  `plan_id` and `execution_id` are nullable pointers,
+  `ON DELETE SET NULL (col)` and `DEFERRABLE INITIALLY DEFERRED`: a build
+  delete reaches one event row along three paths, and an immediate check fails on an
+  execution already deleted whose own SET NULL has not run yet. The one
+  CHECK kept is that a build-level event carries no `plan_id`.
+- "Every composite-FK column NOT NULL" becomes "every composite-FK _scope_
+  column NOT NULL": the pointer columns on `task` and `event` are nullable,
+  and Postgres skipping the check when they are NULL is the intended "no
+  claim".
+- PostgreSQL 15 or newer is a requirement, for the column-list
+  `SET NULL (col)` form.
+- `excluded_reason` is `operator | discovery_failed | upstream_excluded`.
+- `TASK_WAITING_FOR_LOCK` is removed with the lock table.
+- A `local` deployment's `app_name` is `"local"` unless the driver names an
+  app.
+
+## Implementation notes, I0 step 3a (2026-09-24)
+
+Two decisions taken by the coordinator, and the readings the build
+lifecycle and wake-ups needed. The design now says what the code does.
+
+- **Authority keys on the execution, not the clock.** A report is applied
+  when it names `task.execution_id` and that execution's claim has not
+  been released, whether or not it has lapsed; only a released claim
+  (taken over, closed by an observation, released by a build) makes a
+  report late. Step 2 read "and the claim is live" strictly and refused a
+  worker that finished seconds after expiry with `execution_not_current`,
+  discarding a real completion whose target exists: the next observation
+  would have marked it COMPLETED anyway, but only after a tick re-claimed
+  and possibly re-ran it. A lapsed claim names its execution until a
+  claiming start takes it over, so nothing else can be current.
+- **`/seal` runs the closure step first.** Edges belong to the instance,
+  which scope-mate plans share; another plan's expansion can add an edge
+  from one of this plan's members to an instance it does not hold. Step 2's
+  seal refused that with `closure_open`, making a correct seal fail on
+  another plan's timing. The closure is the mechanism for exactly this, so
+  the seal runs it and then verifies; a conflict it finds fails the build.
+- From step 2's readings, now stated: registration locks `task` only when
+  an observation changes a status; a claiming start refuses an unexpanded
+  member (`upstream_incomplete`, `not_expanded`) and an excluded one
+  (`member_excluded`); `task_identity_conflict` covers `output_uri`;
+  `TASK_STRUCTURE_DIVERGED` only when new static edges land; invalidation
+  clears `task.completed_at`; the default claim TTL is 3600 s, capped at
+  24 h.
+- **`limit_keys` move to the claiming start** (coordinator): the tick
+  computes them from the instance body and sends them with the claim. The
+  consequence the design did not spell out: a task that has never held a
+  claim has no `task_limit_key` rows, so "builds with members queued on the
+  same keys" found nothing for it. The reading taken: a claim refused with
+  `concurrency_limit_reached` writes the keys it asked for (the refusal is
+  recorded, like a late report). It occupies no slot — its claim is not
+  live — and makes the queued task findable when a slot frees. To confirm.
+- **A build release sets the task CANCELLED**, for `complete` and `fail` as
+  well as `cancel`: in every case the build stopped wanting the task, and
+  "revocation is not a result" (v1 rule 36) makes CANCELLED actionable for
+  every other build holding it. `ended_at` stays NULL; the worker's report
+  is late from then on, and a vanished-then-produced target is picked up by
+  the next observation.
+- The `plan_incomplete` refusal carries a `reason` (`not_sealed`,
+  `root_excluded`, `members_incomplete`); `root_task_ids` is required at
+  `POST /builds` and checked at `create_plan` (400 `root_mismatch`).

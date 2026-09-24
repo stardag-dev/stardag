@@ -1,209 +1,128 @@
-"""End-to-end tests for the gzip request-body middleware.
+"""Tests for the gzip request-body middleware.
 
 The SDK gzips request bodies above ~1KB on bulk-register paths;
 ``GZipRequestMiddleware`` decompresses them transparently before route
-handlers see the body. These tests verify the round-trip via the test
-client, plus the pass-through and error paths.
+handlers see the body. The middleware is route-agnostic, so it is tested
+on a minimal echo app rather than on a registration route: what it
+promises is that a handler sees the same bytes with or without
+``Content-Encoding: gzip``, and that bad or oversized gzip is refused
+before any handler runs.
 """
 
 from __future__ import annotations
 
 import gzip
 import json
+import os
 
 import pytest
-from httpx import AsyncClient
+from fastapi import FastAPI, Request
+from httpx import ASGITransport, AsyncClient
+
+from stardag_api.middleware import GZipRequestMiddleware
 
 
 def _gzip_json(body: dict) -> bytes:
     return gzip.compress(json.dumps(body, separators=(",", ":")).encode())
 
 
-@pytest.mark.asyncio
-async def test_gzipped_bulk_register_round_trips(client: AsyncClient):
-    """A gzipped bulk-register POST is decompressed server-side and
-    handled identically to a non-gzipped POST: same response body, same
-    Task rows persisted."""
-    response = await client.post("/api/v1/builds", json={})
-    build_id = response.json()["id"]
+@pytest.fixture
+async def echo_client():
+    """A client for an app whose one route echoes the JSON body it parsed."""
+    app = FastAPI()
 
-    payload = {
-        "tasks": [
-            {
-                "task_id": f"gzip-task-{i}",
-                "task_namespace": "",
-                "task_name": "GzipTask",
-                "task_data": {"i": i},
-            }
-            for i in range(5)
-        ]
-    }
+    @app.post("/echo")
+    async def echo(request: Request) -> dict:
+        return {"received": await request.json()}
 
-    response = await client.post(
-        f"/api/v1/builds/{build_id}/tasks/bulk",
+    app.add_middleware(GZipRequestMiddleware)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        yield client
+
+
+async def test_gzipped_body_round_trips(echo_client: AsyncClient):
+    """A gzipped POST reaches the handler as the JSON it was compressed from."""
+    payload = {"tasks": [{"task_id": f"gzip-task-{i}", "i": i} for i in range(5)]}
+    response = await echo_client.post(
+        "/echo",
         content=_gzip_json(payload),
-        headers={
-            "Content-Type": "application/json",
-            "Content-Encoding": "gzip",
-        },
+        headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
     )
-    assert response.status_code == 201
-    returned_ids = [t["task_id"] for t in response.json()["tasks"]]
-    assert returned_ids == [f"gzip-task-{i}" for i in range(5)]
-
-    # The list endpoint sees the rows that the gzip request created.
-    listed = (await client.get(f"/api/v1/builds/{build_id}/tasks")).json()
-    assert {t["task_id"] for t in listed} == set(returned_ids)
+    assert response.status_code == 200
+    assert response.json()["received"] == payload
 
 
-@pytest.mark.asyncio
-async def test_non_gzipped_request_is_pass_through(client: AsyncClient):
-    """Requests without ``Content-Encoding: gzip`` go through the
-    middleware untouched. This is the path old SDKs take, and also the
-    path direct ``curl`` users take."""
-    response = await client.post("/api/v1/builds", json={})
-    build_id = response.json()["id"]
-
-    response = await client.post(
-        f"/api/v1/builds/{build_id}/tasks",
-        json={
-            "task_id": "no-encoding-task",
-            "task_namespace": "",
-            "task_name": "Plain",
-            "task_data": {},
-        },
-    )
-    assert response.status_code == 201
-    assert response.json()["task_id"] == "no-encoding-task"
+async def test_non_gzipped_request_is_pass_through(echo_client: AsyncClient):
+    """Requests without ``Content-Encoding: gzip`` go through untouched —
+    the path direct ``curl`` users take."""
+    response = await echo_client.post("/echo", json={"task_id": "plain"})
+    assert response.status_code == 200
+    assert response.json()["received"] == {"task_id": "plain"}
 
 
-@pytest.mark.asyncio
-async def test_unknown_content_encoding_passes_through(client: AsyncClient):
-    """Only ``Content-Encoding: gzip`` triggers decompression. An
-    unknown encoding header is treated as no encoding (the route handler
-    receives the body as-is, which would normally be a JSON parse — same
-    pre-existing behaviour as before the middleware was added)."""
-    response = await client.post("/api/v1/builds", json={})
-    build_id = response.json()["id"]
-
-    body = {
-        "task_id": "br-task",
-        "task_namespace": "",
-        "task_name": "BrTask",
-        "task_data": {},
-    }
-    response = await client.post(
-        f"/api/v1/builds/{build_id}/tasks",
+async def test_unknown_content_encoding_passes_through(echo_client: AsyncClient):
+    """Only ``Content-Encoding: gzip`` triggers decompression: an unknown
+    encoding header is treated as no encoding, so a plain JSON body with a
+    ``br`` header still parses. The middleware refuses only *gzipped*
+    bodies it cannot handle; it does not second-guess other encodings."""
+    body = {"task_id": "br-task"}
+    response = await echo_client.post(
+        "/echo",
         content=json.dumps(body).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "Content-Encoding": "br",  # Brotli, not supported.
-        },
+        headers={"Content-Type": "application/json", "Content-Encoding": "br"},
     )
-    # Body was plain JSON, so the handler should still parse it
-    # successfully — the middleware's only job is to reject *gzipped*
-    # bodies it can't handle, not to second-guess unknown encodings.
-    assert response.status_code == 201
-    assert response.json()["task_id"] == "br-task"
+    assert response.status_code == 200
+    assert response.json()["received"] == body
 
 
-@pytest.mark.asyncio
-async def test_malformed_gzip_returns_400(client: AsyncClient):
-    """Body claims gzip but isn't valid gzip data → 400 with a clear
-    detail. Important so a buggy client doesn't get a confusing
-    downstream "JSON parse failed" or 500."""
-    response = await client.post("/api/v1/builds", json={})
-    build_id = response.json()["id"]
-
-    response = await client.post(
-        f"/api/v1/builds/{build_id}/tasks/bulk",
+async def test_malformed_gzip_returns_400(echo_client: AsyncClient):
+    """Body claims gzip but isn't valid gzip data → 400 with a clear detail,
+    not a confusing downstream "JSON parse failed" or 500."""
+    response = await echo_client.post(
+        "/echo",
         content=b"this is not gzip data",
-        headers={
-            "Content-Type": "application/json",
-            "Content-Encoding": "gzip",
-        },
+        headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
     )
     assert response.status_code == 400
     assert "gzip" in response.json()["detail"].lower()
 
 
-@pytest.mark.asyncio
-async def test_gzip_bomb_aborts_with_413(client: AsyncClient, monkeypatch):
-    """Streaming decompression must abort the moment the decompressed
-    output crosses the cap — without first allocating the full output.
-    A small compressed body that inflates to >cap returns 413."""
+async def test_gzip_bomb_aborts_with_413(echo_client: AsyncClient, monkeypatch):
+    """Streaming decompression aborts the moment the decompressed output
+    crosses the cap, without first allocating the full output."""
     from stardag_api.middleware import gzip_request as gzip_mw
 
-    # Lower the cap so the test stays fast and obvious.
     monkeypatch.setattr(gzip_mw, "_MAX_DECOMPRESSED_BYTES", 1024)
-
-    # 100 KB of zeros compresses to ~100 bytes — small compressed,
-    # 100× the configured decompressed cap.
+    # 100 KB of zeros compresses to ~100 bytes: 100× the configured cap.
     bomb = gzip.compress(b"\x00" * (100 * 1024))
     assert len(bomb) < 1024, "bomb should be small compressed"
 
-    response = await client.post(
-        "/api/v1/builds",
+    response = await echo_client.post(
+        "/echo",
         content=bomb,
-        headers={
-            "Content-Type": "application/json",
-            "Content-Encoding": "gzip",
-        },
+        headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
     )
     assert response.status_code == 413
     assert "decompressed" in response.json()["detail"].lower()
 
 
-@pytest.mark.asyncio
-async def test_oversized_compressed_body_rejected(client: AsyncClient, monkeypatch):
-    """If the compressed input itself exceeds the cap we reject before
-    spending CPU on decompression. First line of defence."""
+async def test_oversized_compressed_body_rejected(
+    echo_client: AsyncClient, monkeypatch
+):
+    """A compressed input over the cap is refused before any decompression."""
     from stardag_api.middleware import gzip_request as gzip_mw
 
     monkeypatch.setattr(gzip_mw, "_MAX_COMPRESSED_BYTES", 256)
-
-    # gzip.compress on random-ish bytes won't compress well; we just
-    # need the *compressed* output to exceed 256 B. Use repeated random
-    # garbage that gzip can't deflate efficiently.
-    import os
-
-    body = os.urandom(2048)  # ~2 KB; gzip overhead keeps it >256 B.
-    payload = gzip.compress(body)
+    # Random bytes don't deflate, so the compressed payload stays > 256 B.
+    payload = gzip.compress(os.urandom(2048))
     assert len(payload) > 256
 
-    response = await client.post(
-        "/api/v1/builds",
+    response = await echo_client.post(
+        "/echo",
         content=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Content-Encoding": "gzip",
-        },
+        headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
     )
     assert response.status_code == 413
     assert "compressed" in response.json()["detail"].lower()
-
-
-@pytest.mark.asyncio
-async def test_gzipped_single_task_register(client: AsyncClient):
-    """Even single-task POST works under gzip — the middleware doesn't
-    care which route the request is for, just whether the body is
-    gzipped. Demonstrates the middleware isn't bulk-endpoint-specific."""
-    response = await client.post("/api/v1/builds", json={})
-    build_id = response.json()["id"]
-
-    body = {
-        "task_id": "gzipped-single",
-        "task_namespace": "",
-        "task_name": "Single",
-        "task_data": {"some": "data"},
-    }
-    response = await client.post(
-        f"/api/v1/builds/{build_id}/tasks",
-        content=_gzip_json(body),
-        headers={
-            "Content-Type": "application/json",
-            "Content-Encoding": "gzip",
-        },
-    )
-    assert response.status_code == 201
-    assert response.json()["task_id"] == "gzipped-single"

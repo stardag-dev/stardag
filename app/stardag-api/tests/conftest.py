@@ -1,21 +1,59 @@
-"""Test fixtures for stardag-api."""
+"""Test fixtures for stardag-api.
+
+**The API suite runs against Postgres, always** (engineering rule 5 of the
+v2 line: SQLite-only behaviour is not evidence). There is no SQLite
+fallback: the v2 schema uses native enums, JSONB and composite foreign keys
+with column-list ``ON DELETE SET NULL``, none of which SQLite has, and a
+test that passed on a different database would say nothing about this one.
+
+Where the database comes from:
+
+- ``STARDAG_API_TEST_DATABASE_URL`` if set (CI sets it), else
+- :data:`DEFAULT_TEST_DATABASE_URL`, the repository's ``docker compose``
+  Postgres (``docker compose up -d db`` from the repository root), in a
+  database of its own that is created on first use.
+
+Once per session the database's ``public`` schema is dropped and the whole
+Alembic chain is applied to it (``upgrade head``), so every run exercises
+the migrations, not ``metadata.create_all``. Each test then starts from
+empty tables plus the seeded defaults (``TRUNCATE`` is cheap; re-migrating
+per test is not). A test that needs no database requests none of these
+fixtures and runs without Postgres; one that does fails the session with a
+message saying how to provide it, rather than skipping.
+"""
 
 import asyncio
+import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from uuid import UUID
 
 import pytest
+from alembic import command
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from stardag_api.db import get_db
 from stardag_api.main import app
 from stardag_api.models import Base
 
-# Use in-memory SQLite for tests
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+# The docker-compose Postgres (superuser ``stardag``), in a database of its
+# own so the suite never touches the development ``stardag`` database.
+DEFAULT_TEST_DATABASE_URL = (
+    "postgresql+asyncpg://stardag:stardag@localhost:5432/stardag_api_test"
+)
+
+
+def test_database_url() -> str:
+    """The Postgres URL the suite runs against."""
+    return os.environ.get("STARDAG_API_TEST_DATABASE_URL") or DEFAULT_TEST_DATABASE_URL
+
+
+# Not a test, despite the name pytest would otherwise collect it by.
+test_database_url.__test__ = False  # type: ignore[attr-defined]
 
 
 def get_alembic_config(connection_url: str | None = None) -> Config:
@@ -83,19 +121,78 @@ async def seed_defaults(session: AsyncSession):
     await session.commit()
 
 
-@pytest.fixture
-async def async_engine():
-    """Create a test database engine with schema initialized.
+async def _ensure_database(url: str) -> None:
+    """Create the test database if it does not exist yet.
 
-    For SQLite tests, we use Base.metadata.create_all() since the SQL migrations
-    are PostgreSQL-specific. In CI/integration tests against PostgreSQL, alembic
-    migrations should be used instead.
+    Needs a role allowed to create databases (the compose superuser is);
+    CI creates its database up front, so this is a no-op there.
     """
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    target = make_url(url)
+    maintenance = create_async_engine(
+        target.set(database="postgres"), isolation_level="AUTOCOMMIT"
+    )
+    try:
+        async with maintenance.connect() as conn:
+            exists = await conn.scalar(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": target.database},
+            )
+            if not exists:
+                await conn.execute(text(f'CREATE DATABASE "{target.database}"'))
+    finally:
+        await maintenance.dispose()
 
-    # Seed defaults
+
+async def _reset_schema(url: str) -> None:
+    """Drop and recreate ``public``, so the migration chain starts empty.
+
+    A downgrade-to-base would not do: the v2 migration has no downgrade,
+    and the initial one does not drop its enum types.
+    """
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def migrated_database_url() -> str:
+    """A Postgres database migrated to head from empty, once per session.
+
+    Synchronous on purpose: Alembic's ``env.py`` drives its async runner
+    with ``asyncio.run``, which cannot be nested in a running event loop.
+    """
+    url = test_database_url()
+    try:
+        asyncio.run(_ensure_database(url))
+        asyncio.run(_reset_schema(url))
+    except (OSError, ConnectionError) as exc:  # refused, unresolvable, ...
+        pytest.exit(
+            "The stardag-api suite needs Postgres and none is reachable at "
+            f"{make_url(url).render_as_string(hide_password=True)} ({exc}).\n"
+            "Start the compose one with `docker compose up -d db` from the "
+            "repository root, or point STARDAG_API_TEST_DATABASE_URL at a "
+            "Postgres you can create a database in.",
+            returncode=2,
+        )
+    command.upgrade(get_alembic_config(url), "head")
+    return url
+
+
+async def _truncate_all(engine) -> None:
+    tables = ", ".join(f'"{t.name}"' for t in Base.metadata.sorted_tables)
+    async with engine.begin() as conn:
+        await conn.execute(text(f"TRUNCATE {tables} CASCADE"))
+
+
+@pytest.fixture
+async def async_engine(migrated_database_url: str):
+    """An engine on the migrated test database: empty tables plus defaults."""
+    engine = create_async_engine(migrated_database_url, echo=False)
+    await _truncate_all(engine)
     async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
     async with async_session_maker() as session:
         await seed_defaults(session)
@@ -214,150 +311,6 @@ def clear_limits_caches():
     _rate_limiter.clear()
     _entity_cache.clear()
     _validation_cache.clear()
-
-
-# PostgreSQL test fixtures for integration testing with real migrations
-
-
-@pytest.fixture
-async def pg_engine():
-    """Create a PostgreSQL test database engine with alembic migrations applied.
-
-    Requires STARDAG_API_TEST_DATABASE_URL to be set, e.g.::
-
-        STARDAG_API_TEST_DATABASE_URL=postgresql+asyncpg://... pytest
-
-    Alembic's ``env.py`` calls ``asyncio.run(...)`` to drive the async
-    migration runner, which would deadlock if called directly from inside
-    this async fixture's event loop. We dispatch the alembic CLI via
-    ``asyncio.to_thread`` so it runs on a worker thread that has no event
-    loop of its own. This way the fixture genuinely exercises the migration
-    chain on every test run — a model change without a matching migration
-    will fail the fixture rather than silently passing.
-
-    The schema is reset by ``DROP SCHEMA public CASCADE; CREATE SCHEMA public``
-    before alembic runs, rather than by ``alembic downgrade base``: the
-    initial migration's autogenerated downgrade doesn't drop the enum
-    types it created, so a downgrade-then-upgrade cycle would fail on the
-    second run with ``type "workspacerole" already exists``. The schema
-    nuke is idempotent and dialect-correct.
-    """
-    import os
-
-    from alembic import command
-    from sqlalchemy import text
-
-    pg_url = os.environ.get("STARDAG_API_TEST_DATABASE_URL")
-    if not pg_url:
-        pytest.skip("PostgreSQL test database URL not configured")
-
-    # Reset schema via asyncpg (sync drivers like psycopg2 aren't installed
-    # in the test deps; the API is asyncpg-only). engine.begin() is required
-    # so the DDL actually commits — bare connect()+execute()+commit() with
-    # asyncpg's autocommit semantics didn't reliably persist the DROP.
-    reset_engine = create_async_engine(pg_url, echo=False)
-    try:
-        async with reset_engine.begin() as conn:
-            await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
-            await conn.execute(text("CREATE SCHEMA public"))
-    finally:
-        await reset_engine.dispose()
-
-    # Run alembic in a worker thread — env.py uses asyncio.run internally,
-    # which would deadlock if invoked from this fixture's event loop.
-    alembic_cfg = get_alembic_config(pg_url)
-    await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
-
-    engine = create_async_engine(pg_url, echo=False)
-
-    # Seed defaults so tests share the SQLite fixture's mental model.
-    async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
-    async with async_session_maker() as session:
-        await seed_defaults(session)
-
-    yield engine
-
-    await engine.dispose()
-
-
-@pytest.fixture
-async def pg_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
-    """Postgres session paired with the pg_engine fixture."""
-    async_session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
-    async with async_session_maker() as session:
-        yield session
-
-
-@pytest.fixture
-async def pg_client(pg_engine) -> AsyncGenerator[AsyncClient, None]:
-    """HTTP client backed by Postgres (Postgres-equivalent of ``client``).
-
-    Uses the same auth overrides as ``client`` so SDK / UI routes that
-    require authentication can be exercised against a real Postgres for
-    cases that depend on dialect-specific SQL (UUID casts, JSONB operators,
-    FOR UPDATE locks).
-    """
-    from stardag_api.auth import (
-        SdkAuth,
-        get_current_user,
-        get_current_user_flexible,
-        get_workspace_id_from_token,
-        require_sdk_auth,
-    )
-    from stardag_api.models import Environment, User
-
-    async_session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
-
-    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
-        async with async_session_maker() as session:
-            yield session
-
-    mock_environment = Environment(
-        id=DEFAULT_ENVIRONMENT_ID,
-        workspace_id=DEFAULT_WORKSPACE_ID,
-        name="Default Environment",
-        slug="default",
-    )
-    mock_user = User(
-        id=DEFAULT_USER_ID,
-        external_id="default-local-user",
-        email="default@localhost",
-        display_name="Default User",
-    )
-    mock_sdk_auth = SdkAuth(
-        environment=mock_environment,
-        workspace_id=DEFAULT_WORKSPACE_ID,
-        user=mock_user,
-    )
-
-    async def override_require_sdk_auth() -> SdkAuth:
-        return mock_sdk_auth
-
-    async def override_get_current_user() -> User:
-        return mock_user
-
-    async def override_get_current_user_flexible() -> User:
-        return mock_user
-
-    async def override_get_workspace_id_from_token() -> UUID:
-        return DEFAULT_WORKSPACE_ID
-
-    app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[require_sdk_auth] = override_require_sdk_auth
-    app.dependency_overrides[get_current_user] = override_get_current_user
-    app.dependency_overrides[get_current_user_flexible] = (
-        override_get_current_user_flexible
-    )
-    app.dependency_overrides[get_workspace_id_from_token] = (
-        override_get_workspace_id_from_token
-    )
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        yield ac
-
-    app.dependency_overrides.clear()
 
 
 # Alternate-identity fixtures. Every write endpoint has two boundaries worth
@@ -494,3 +447,14 @@ async def role_auth_switcher(async_engine):
             app.dependency_overrides[require_sdk_auth] = previous
 
     return {"member": lambda: _as(member_auth), "api_key": lambda: _as(api_key_auth)}
+
+
+@pytest.fixture
+def session_factory(async_engine) -> async_sessionmaker[AsyncSession]:
+    """A session factory on the migrated test database.
+
+    The v2 services commit their own transaction, so a test opens a fresh
+    session per call — and two of them when it needs two concurrent
+    transactions.
+    """
+    return async_sessionmaker(async_engine, expire_on_commit=False)

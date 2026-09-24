@@ -73,9 +73,15 @@ jobs:
       - name: Test with tox
         run: tox
 
+  # The stardag-api suite runs against Postgres only (tests/conftest.py), so
+  # it has this job to itself rather than a slot in test-python's tox run.
   test-python-pg:
-    name: Test Python (stardag-api on Postgres)
+    name: Test Python (stardag-api on Postgres, ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     services:
       postgres:
         image: postgres:16-alpine
@@ -96,7 +102,7 @@ jobs:
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Apply init.sql to create stardag_admin / service / readonly roles
         env:
           PGPASSWORD: stardag
@@ -111,12 +117,12 @@ jobs:
         run: pip install tox
       - name: Run stardag-api tests against Postgres
         env:
-          # The pg_engine fixture skips silently when this is unset;
-          # setting it makes the migration-applied PG-only tests
-          # (test_dependency_reconciliation.py, test_status_denormalisation.py)
-          # actually fire on every PR.
+          # As the migration role (stardag_admin, not a superuser), in a
+          # database created for it above. tox passes this through
+          # (passenv); the suite fails rather than skips without Postgres.
           STARDAG_API_TEST_DATABASE_URL: postgresql+asyncpg://stardag_admin:stardag_admin@localhost:5432/stardag_test
-        run: tox -e stardag-api-py312
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: tox -e "stardag-api-py${PYTHON_VERSION//./}"
 
   test-frontend:
     name: Test Frontend
