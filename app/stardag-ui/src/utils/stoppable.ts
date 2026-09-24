@@ -157,8 +157,9 @@ export function stopCommand(buildId: string, filters: StopFilters): string {
       );
     }
     for (const taskId of filters.taskIds) parts.push(`--task-id ${taskId}`);
-    return parts.join(" ");
   }
+  // Conjunctive with --task-id, as `_stop.Filters.matches` is: a ticked
+  // task with several executions is narrowed to the rows on screen.
   if (filters.worker) parts.push(`--worker ${filters.worker}`);
   if (filters.executor) parts.push(`--executor ${filters.executor}`);
   if (filters.olderThanSeconds) {

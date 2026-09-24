@@ -223,6 +223,25 @@ describe("BuildControlsDialog stop list", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the filters on the command when rows are ticked", async () => {
+    // One task, two executions on different workers: --task-id alone would
+    // also stop the one the worker filter hides.
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-aaaaaaaa", true, {
+        executor_metadata: { kind: "modal", function_name: "worker_cpu" },
+      }),
+    ]);
+    const user = userEvent.setup();
+    renderDialog();
+    await open(user);
+    await user.selectOptions(await screen.findByLabelText("Worker"), "gpu");
+    await user.click(screen.getByLabelText("Include demo.GrindBeans"));
+    expect(command()).toHaveTextContent(
+      `stardag builds stop ${BUILD} --task-id task-aaaaaaaa --worker gpu`,
+    );
+  });
+
   it("offers no command when the ticked rows are filtered away", async () => {
     vi.mocked(fetchBuildExecutions).mockResolvedValue([
       execution("e1", "task-aaaaaaaa", true),

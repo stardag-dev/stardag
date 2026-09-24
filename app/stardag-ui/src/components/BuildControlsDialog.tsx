@@ -124,7 +124,9 @@ export function BuildControlsDialog({
     ? narrowed
     : chosen.length
       ? {
-          notInCurrentPlan: narrowed.notInCurrentPlan,
+          // The filters stay on the command: `--task-id` alone would also
+          // select a ticked task's executions the filters hid.
+          ...narrowed,
           taskIds: [...new Set(chosen.map((e) => e.task_id))],
         }
       : null;

@@ -92,9 +92,9 @@ describe("stopCommand", () => {
     );
   });
 
-  it("names ticked tasks exactly and nothing else", () => {
+  it("keeps the active filters alongside ticked tasks (conjunctive, as the CLI)", () => {
     expect(stopCommand(BUILD, { taskIds: ["t-1", "t-2"], worker: "gpu" })).toBe(
-      `stardag builds stop ${BUILD} --task-id t-1 --task-id t-2`,
+      `stardag builds stop ${BUILD} --task-id t-1 --task-id t-2 --worker gpu`,
     );
   });
 
