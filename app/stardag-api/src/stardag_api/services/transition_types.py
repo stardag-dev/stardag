@@ -31,6 +31,10 @@ ACTIONABLE_STATUSES = (
 DEFAULT_CLAIM_TTL_SECONDS = 3600
 #: Upper bound on any requested TTL: nothing is live forever (D11).
 MAX_CLAIM_TTL_SECONDS = 24 * 3600
+#: What a preemption leaves of a claim: the platform restarts the same
+#: execution, and a restart that has not reported within this window did not
+#: arrive (v1's ``preempt_restart_grace_seconds``, STA-44).
+PREEMPT_RESTART_GRACE = timedelta(seconds=900)
 
 
 class TransitionKind(str, enum.Enum):
@@ -38,7 +42,15 @@ class TransitionKind(str, enum.Enum):
     COMPLETE = "complete"
     FAIL = "fail"
     SUSPEND = "suspend"
+    INTERRUPT = "interrupt"
+    # Status-neutral: the platform restarts the same execution.
+    PREEMPT = "preempt"
     RETRY = "retry"
+    # Scheduling decisions that name no execution.
+    SKIP = "skip"
+    CANCEL = "cancel"
+    # An operator (``builds stop``) reports it ended an execution.
+    STOP = "stop"
     RENEW = "renew"
     # Written by registration, from a driver's observation of the target.
     OBSERVE_COMPLETE = "observe_complete"
@@ -61,7 +73,8 @@ class Transition:
     #: A claiming start's concurrency-limit keys, computed by the tick from
     #: the instance body it is about to run; replace the task's keys.
     limit_keys: tuple[str, ...] = ()
-    #: Why a claim is released (the build transition that released it).
+    #: Why a claim is released (the build transition that released it), or
+    #: why a member is skipped.
     reason: str | None = None
 
     @classmethod
@@ -102,8 +115,34 @@ class Transition:
         return cls(TransitionKind.SUSPEND, execution_id=execution_id)
 
     @classmethod
+    def interrupt(
+        cls, execution_id: UUID, error_message: str | None = None
+    ) -> Transition:
+        return cls(
+            TransitionKind.INTERRUPT,
+            execution_id=execution_id,
+            error_message=error_message,
+        )
+
+    @classmethod
+    def preempt(cls, execution_id: UUID) -> Transition:
+        return cls(TransitionKind.PREEMPT, execution_id=execution_id)
+
+    @classmethod
     def retry(cls) -> Transition:
         return cls(TransitionKind.RETRY)
+
+    @classmethod
+    def skip(cls, reason: str | None = None) -> Transition:
+        return cls(TransitionKind.SKIP, reason=reason)
+
+    @classmethod
+    def cancel(cls) -> Transition:
+        return cls(TransitionKind.CANCEL)
+
+    @classmethod
+    def stop(cls, execution_id: UUID) -> Transition:
+        return cls(TransitionKind.STOP, execution_id=execution_id)
 
     @classmethod
     def release(cls, reason: str) -> Transition:
@@ -152,6 +191,12 @@ REPORTS: dict[
         TaskStatus.SUSPENDED,
         ClaimOutcome.SUSPENDED,
         ExecutionOutcome.SUSPENDED,
+    ),
+    TransitionKind.INTERRUPT: (
+        EventType.TASK_INTERRUPTED,
+        TaskStatus.INTERRUPTED,
+        ClaimOutcome.INTERRUPTED,
+        ExecutionOutcome.INTERRUPTED,
     ),
 }
 

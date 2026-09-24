@@ -9,12 +9,18 @@ route converts and does nothing else.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from stardag_api.models.enums import BuildStatus, DeploymentKind, TaskStatus
+from stardag_api.models.enums import (
+    BuildStatus,
+    ClaimOutcome,
+    DeploymentKind,
+    ExecutionOutcome,
+    TaskStatus,
+)
 
 
 class RegistrationItem(BaseModel):
@@ -378,3 +384,120 @@ class TransitionResponse(BaseModel):
     status: TaskStatus
     execution_id: UUID | None
     claim_expires_at: datetime | None
+
+
+# ---------------------------------------------------------------------------
+# The dynamic phase
+# ---------------------------------------------------------------------------
+
+
+class YieldRequest(BaseModel):
+    """``POST /plans/{plan_id}/members/{task_id}/yield``: one yield batch.
+
+    ``items`` are the yielded children and their static closure, in
+    post-order, exactly as a static chunk; ``yielded`` names the children
+    (by instance hash, each one of ``items``) the parent gets a dynamic
+    edge to. ``batch_id`` is client-minted: a retried batch is replayed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: UUID
+    deployment_id: UUID
+    batch_id: UUID
+    items: list[RegistrationItem] = Field(min_length=1, max_length=1000)
+    yielded: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        min_length=1
+    )
+    #: The reactive worker suspends (its container exits); the resident
+    #: engine keeps the claim while its generator waits.
+    suspend: bool
+
+
+class YieldResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    members: MembersResponse
+    dynamic_edges_created: int
+    #: The parent's state once the batch applied (or when it first applied,
+    #: for a replay).
+    status: TaskStatus
+    execution_id: UUID | None
+    claim_expires_at: datetime | None
+    #: True when this delivery found the batch already applied.
+    replayed: bool
+
+
+# ---------------------------------------------------------------------------
+# Skip-blocked and exclusion
+# ---------------------------------------------------------------------------
+
+
+class SkipBlockedResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    plan_id: UUID | None
+    skipped: list[str]
+
+
+class ExcludeRequest(BaseModel):
+    """An operator gives up on a member (STA-104)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Why, in the operator's words; recorded on the ``TASK_EXCLUDED`` event.
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class DiscoveryFailedRequest(BaseModel):
+    """A discovery job failed: the class could not be imported, or
+    ``requires()`` raised."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error: str = Field(min_length=1)
+
+
+class ExclusionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    plan_id: UUID
+    excluded: list[str]
+    build_failed: bool
+
+
+# ---------------------------------------------------------------------------
+# Executions: builds stop and orphans
+# ---------------------------------------------------------------------------
+
+
+class ExecutionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    task_id: str
+    plan_id: UUID
+    instance_id: UUID
+    executor: str | None
+    executor_ref: str | None
+    executor_metadata: dict[str, Any] | None
+    started_at: datetime
+    claim_released_at: datetime | None
+    claim_outcome: ClaimOutcome | None
+    ended_at: datetime | None
+    outcome: ExecutionOutcome | None
+    #: False for an orphan: its plan is not the build's active plan.
+    in_current_plan: bool
+
+
+class ExecutionListResponse(BaseModel):
+    build_id: UUID
+    executions: list[ExecutionResponse]
+
+
+class StoppedRequest(BaseModel):
+    """What ``builds stop`` reports having stopped."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["stopped"] = "stopped"

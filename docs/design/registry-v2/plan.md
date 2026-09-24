@@ -215,11 +215,13 @@ assignee the maintainer.
       static path, server side, under `/api/v2`) done, PR #380; step 3a
       (build lifecycle, deployments, settings, wake-ups, notify, scheduler
       lease, reactive meta, tick summaries; the authority refinement and
-      closure-first seal) done, PR #382; step 3b (`/yield`, the remaining
-      transitions, skip-blocked, the exclusion cascade, `builds stop` and
-      orphans) pending; step 4 (worker path; live scenario) pending.
-      (skipped so far: skip-blocked and the exclusion cascade,
-      `xfail("v2: I3")`)
+      closure-first seal) done, PR #382; step 3b (`/yield`; interrupt,
+      preempt, skip, a single task's cancel; skip-blocked and the exclusion
+      cascade, discovery failure as exclusion; `builds stop`, orphans, the
+      rate limit and the creation quota at the v2 route boundary; the
+      coordinator's rulings of 2026-09-24) done, PR #383, no `xfail` left
+      on the server side; step 4 (SDK v2 client, reactive worker path, fake
+      registry, `test_reactive_e2e`) pending.
 - [ ] I1 — v2 schema
 - [ ] I2 — Registration service
 - [ ] I3 — Frontier and transitions

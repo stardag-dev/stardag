@@ -96,7 +96,9 @@ async def test_s9_local_and_modal_deployments_never_collide(h: Harness):
     local = await _create(h, kind=LOCAL, app_name=None, code_id="sha1")
     assert local.id != modal.id and local.created
     assert (local.kind, local.app_name) == (LOCAL, "local")
-    assert local.activated_at is not None and local.is_current
+    # Born activated, and never current: a local deployment is
+    # authoritative for its own plans, never superseded by another.
+    assert local.activated_at is not None and not local.is_current
     assert local.generation == 1
 
     again = await _create(h, kind=LOCAL, app_name=None, code_id="sha1")
@@ -104,7 +106,7 @@ async def test_s9_local_and_modal_deployments_never_collide(h: Harness):
 
     other = await _create(h, kind=LOCAL, app_name=None, code_id="sha2")
     assert other.generation == 2
-    assert await _current(h, "local") == [other.id]
+    assert await _current(h, "local") == []
     assert await _current(h, "svc") == []  # the Modal one is not activated
 
     with pytest.raises(Conflict) as exc:
