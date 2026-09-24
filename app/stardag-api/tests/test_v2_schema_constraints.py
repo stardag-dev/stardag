@@ -26,10 +26,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from stardag_api.services.deployments import EMPTY_SETTINGS_HASH
 from tests.conftest import DEFAULT_ENVIRONMENT_ID, DEFAULT_WORKSPACE_ID
 
 OTHER_ENVIRONMENT_ID = UUID("00000000-0000-0000-0000-0000000000e2")
-SETTINGS_HASH = "0" * 64
+SETTINGS_HASH = EMPTY_SETTINGS_HASH
 
 
 async def _exec(session: AsyncSession, sql: str, **params) -> None:

@@ -133,7 +133,7 @@ async def list_builds(
 class InstanceView:
     id: UUID
     deployment_id: UUID
-    settings_hash: str
+    settings_hash: UUID
     instance_hash: str
     body: dict[str, Any]
     expanded_at: datetime | None

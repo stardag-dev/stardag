@@ -8,7 +8,7 @@ constraint that decides it.
 from __future__ import annotations
 
 import asyncio
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from httpx import AsyncClient
@@ -258,8 +258,29 @@ async def test_deployments_and_settings_over_http(client: AsyncClient, h: Harnes
         },
     )
     shash = plan.json()["settings_hash"]
+    # The registry keys the body itself: uuid5 of its canonical JSON.
+    assert shash == str(deployments.settings_hash({"THREADS": "2"}))
     settings = await client.get(f"/api/v2/settings/{shash}")
     assert settings.json() == {"hash": shash, "body": {"THREADS": "2"}}
+    malformed = await client.get("/api/v2/settings/not-a-uuid")
+    assert malformed.status_code == 422
+    # A client cannot name the key a body is stored under: the request
+    # carries the body only, and a hash field is refused outright.
+    keyed = await client.post(
+        f"/api/v2/builds/{build.json()['id']}/plans",
+        json={
+            "plan_id": str(uuid4()),
+            "deployment_id": deployment_id,
+            "settings": {"THREADS": "3"},
+            "settings_hash": shash,
+            "roots": [
+                root.model_copy(update={"declared_upstreams": None}).model_dump(
+                    mode="json"
+                )
+            ],
+        },
+    )
+    assert keyed.status_code == 422
     reserved = await client.post(
         f"/api/v2/builds/{build.json()['id']}/plans",
         json={
@@ -275,6 +296,20 @@ async def test_deployments_and_settings_over_http(client: AsyncClient, h: Harnes
     )
     assert reserved.status_code == 400
     assert reserved.json()["detail"]["code"] == "reserved_settings_key"
+
+
+def test_settings_hash_is_uuid5_over_canonical_json():
+    """Pinned here and in the SDK (``test_settings_hash.py``): the two
+    compute the same value, and neither may drift."""
+    namespace = UUID("d9bc3c1c-6c3b-534d-be75-aaa4c8d71c59")
+    assert deployments.SETTINGS_HASH_NAMESPACE == namespace
+    assert deployments.settings_hash({}) == deployments.EMPTY_SETTINGS_HASH
+    assert deployments.EMPTY_SETTINGS_HASH == UUID(
+        "11406eac-39d0-5b1b-9423-cfb4a1454543"
+    )
+    assert deployments.settings_hash({"B": "2", "A": "é"}) == uuid5(
+        namespace, '{"A":"é","B":"2"}'
+    )
 
 
 # --------------------------------------------------------------------------

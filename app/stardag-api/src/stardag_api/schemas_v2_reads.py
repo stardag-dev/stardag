@@ -46,7 +46,7 @@ class PlanRootsResponse(BaseModel):
     plan_id: UUID
     build_id: UUID
     deployment_id: UUID
-    settings_hash: str
+    settings_hash: UUID
     roots: list[FrontierMemberResponse]
 
 
@@ -59,7 +59,7 @@ class PlanDetailResponse(BaseModel):
     build_id: UUID
     deployment_id: UUID
     deployment: DeploymentInfo
-    settings_hash: str
+    settings_hash: UUID
     generation: int
     created_at: datetime
     activated_at: datetime | None
@@ -115,7 +115,7 @@ class PlanGraphResponse(BaseModel):
     plan_id: UUID
     build_id: UUID
     deployment_id: UUID
-    settings_hash: str
+    settings_hash: UUID
     members: list[PlanGraphMemberResponse]
     edges: list[PlanGraphEdgeResponse]
 
@@ -132,7 +132,7 @@ class TaskInstanceResponse(BaseModel):
 
     id: UUID
     deployment_id: UUID
-    settings_hash: str
+    settings_hash: UUID
     instance_hash: str
     body: dict[str, Any]
     expanded_at: datetime | None

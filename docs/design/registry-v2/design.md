@@ -236,10 +236,16 @@ responsibility on the user, stated in the docs.
 every process of the build (bootstrap, tick, worker, resident driver), chosen
 per trigger (`build_trigger(settings=...)`), per `sd.build(settings=...)` or
 on the command line (`--settings KEY=VALUE`, repeatable). Its body is stored
-in the registry under a content hash (sha256 of canonical JSON — sorted keys,
-compact separators, UTF-8 — stable across code versions, unlike the task
-hashes; the empty settings hash as `{}` and are created lazily by the first plan
-that needs them). They are for build-wide behaviour a user chooses not to put
+in the registry under a content hash: a UUID5, like the task id and the
+instance hash, over the canonical JSON (sorted keys, compact separators,
+UTF-8), in a fixed namespace of its own
+(`uuid5(<default task-id namespace>, "stardag.settings_hash.v1")`, never an
+overridden task namespace, since the registry computes it). It is stable
+across code versions, unlike the task hashes, and the registry computes it
+from the posted body: a client never sends one, so none can store a body
+under a key it does not match. The empty settings hash as `{}` to the
+well-known `11406eac-39d0-5b1b-9423-cfb4a1454543` and are created lazily by
+the first plan that needs them. They are for build-wide behaviour a user chooses not to put
 in task parameters (a global thread count, a feature flag), and the intended
 way to read them is the pydantic-settings pattern: the user declares a
 `BaseSettings` subclass and stardag sets the variables it reads. **Never
@@ -356,7 +362,7 @@ Index `(environment_id, kind, app_name, generation DESC)`; unique
 
 | Column       | Notes                                                                                                                                                                  |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hash`       | sha256 hex of canonical JSON; PK with `environment_id`                                                                                                                 |
+| `hash` UUID  | UUID5 of canonical JSON, computed by the registry; PK with `environment_id`                                                                                            |
 | `body` JSONB | flat `dict[str, str]`; the empty settings hash as `{}` and are created by the same lookup-or-create as any other, so a fresh registry has no rows until its first plan |
 
 ### `task_instance` — a task as constructed under a scope

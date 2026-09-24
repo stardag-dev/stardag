@@ -8,8 +8,6 @@ with its edges, ``plan``, ``plan_member`` and the ``execution`` ledger.
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -47,10 +45,12 @@ def refuse(
 
 
 def settings_hash(body: Mapping[str, str]) -> str:
-    canonical = json.dumps(
-        dict(body), sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    """The wire form (a UUID string) of the SDK's
+    :func:`~stardag.build._settings.settings_hash`, which the registry
+    computes the same way."""
+    from stardag.build._settings import settings_hash as _settings_hash
+
+    return str(_settings_hash(body))
 
 
 @dataclass

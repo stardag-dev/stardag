@@ -305,11 +305,7 @@ function SettingsField({
       }
       hint="Part of the plan's scope: two plans under different settings share no instances."
     >
-      <CopyChip
-        label={settingsHash.slice(0, 16)}
-        value={settingsHash}
-        title="Settings hash"
-      />
+      <CopyChip label={settingsHash} value={settingsHash} title="Settings hash" />
       {error ? (
         <span className="text-xs text-red-600 dark:text-red-400">{error}</span>
       ) : settings === null ? (

@@ -80,7 +80,7 @@ class Frontier:
     #: The active plan, or None when the build has none yet.
     plan_id: UUID | None
     deployment_id: UUID | None
-    settings_hash: str | None
+    settings_hash: UUID | None
     sealed: bool
     runnable: list[FrontierMember] = field(default_factory=list)
     discovery_jobs: list[FrontierMember] = field(default_factory=list)

@@ -43,22 +43,35 @@ Mechanics:
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import threading
 import typing
 from collections.abc import Mapping
+from uuid import UUID, uuid5
 
 from stardag.exceptions import StardagError
 
 if typing.TYPE_CHECKING:
-    from uuid import UUID
-
     from stardag.registry import RegistryABC
 from stardag.utils.env import temp_env_vars
 
 RESERVED_SETTINGS_PREFIXES = ("STARDAG_", "MODAL_")
 
 Settings = dict[str, str]
+
+#: The uuid5 namespace of settings hashes. Never change this value: it keys
+#: every stored settings body. It is ``uuid5(<default task-id namespace>,
+#: "stardag.settings_hash.v1")``, written out rather than derived from
+#: ``task_uuid5_namespace_provider``, because the *registry* computes the
+#: hash from the posted body and cannot see a client-side override of the
+#: task namespace. Being distinct from the task-id and instance-hash
+#: namespaces, a settings hash never coincides with either for the same
+#: JSON.
+SETTINGS_HASH_NAMESPACE = UUID("d9bc3c1c-6c3b-534d-be75-aaa4c8d71c59")
+
+#: The settings hash of the empty settings ``{}``.
+EMPTY_SETTINGS_HASH = UUID("11406eac-39d0-5b1b-9423-cfb4a1454543")
 
 
 class SettingsError(StardagError, ValueError):
@@ -90,6 +103,23 @@ def validate_settings(settings: Mapping[str, object] | None) -> Settings:
             )
         checked[key] = value
     return checked
+
+
+def settings_hash(settings: Mapping[str, str]) -> UUID:
+    """The key a settings body is stored under: uuid5, like every other
+    identity in the registry, over the body's canonical JSON (sorted keys,
+    compact separators, non-ASCII kept, hashed as UTF-8) in
+    :data:`SETTINGS_HASH_NAMESPACE`.
+
+    The registry computes it from the posted body — a client never sends
+    one — so this is the SDK's copy, for the in-memory registry and for
+    tests. The empty settings ``{}`` hash to :data:`EMPTY_SETTINGS_HASH`
+    (``11406eac-39d0-5b1b-9423-cfb4a1454543``).
+    """
+    canonical = json.dumps(
+        dict(settings), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return uuid5(SETTINGS_HASH_NAMESPACE, canonical)
 
 
 def _stored_needed(

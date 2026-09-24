@@ -171,7 +171,7 @@ def plans_list(
             str(p.generation),
             _lifecycle(p),
             str(p.deployment_id),
-            p.settings_hash[:12],
+            str(p.settings_hash),
             f"{p.member_count}: {_counts(p)}",
         )
     console.print(table)

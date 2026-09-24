@@ -18,7 +18,6 @@ from sqlalchemy import (
     Index,
     Integer,
     PrimaryKeyConstraint,
-    String,
     UniqueConstraint,
     Uuid,
     false,
@@ -87,7 +86,7 @@ class Plan(EnvironmentScopedMixin, Base):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     build_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     deployment_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
-    settings_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    settings_hash: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     # Server-assigned per build at create, monotonic. /seal activates a plan
     # only if no higher-generation plan exists for the build.
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -168,7 +167,7 @@ class PlanMember(EnvironmentScopedMixin, Base):
     task_pk: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     instance_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     deployment_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
-    settings_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    settings_hash: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     # The build's request, as instances of this plan.
     is_root: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()

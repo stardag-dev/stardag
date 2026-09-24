@@ -20,7 +20,7 @@ function instance(id: string, log: string, hash: string): TaskInstance {
   return {
     id,
     deployment_id: "dep-1",
-    settings_hash: "a".repeat(64),
+    settings_hash: "11406eac-39d0-5b1b-9423-cfb4a1454543",
     instance_hash: hash,
     body: { __namespace: "demo", __name: "Train", epochs: 3, log },
     expanded_at: "2026-09-24T00:00:02Z",

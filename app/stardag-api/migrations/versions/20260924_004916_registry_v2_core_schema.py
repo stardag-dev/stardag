@@ -256,7 +256,7 @@ def upgrade() -> None:
     )
     op.create_table(
         "settings",
-        sa.Column("hash", sa.String(length=64), nullable=False),
+        sa.Column("hash", sa.Uuid(), nullable=False),
         sa.Column("body", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("environment_id", sa.Uuid(), nullable=False),
         sa.Column(
@@ -378,7 +378,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("build_id", sa.Uuid(), nullable=False),
         sa.Column("deployment_id", sa.Uuid(), nullable=False),
-        sa.Column("settings_hash", sa.String(length=64), nullable=False),
+        sa.Column("settings_hash", sa.Uuid(), nullable=False),
         sa.Column("generation", sa.Integer(), nullable=False),
         sa.Column("activated_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("sealed_at", sa.DateTime(timezone=True), nullable=True),
@@ -469,7 +469,7 @@ def upgrade() -> None:
         "task_instance",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("deployment_id", sa.Uuid(), nullable=False),
-        sa.Column("settings_hash", sa.String(length=64), nullable=False),
+        sa.Column("settings_hash", sa.Uuid(), nullable=False),
         sa.Column("instance_hash", sa.String(length=64), nullable=False),
         sa.Column("task_pk", sa.Uuid(), nullable=False),
         sa.Column("body", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -566,7 +566,7 @@ def upgrade() -> None:
         sa.Column("task_pk", sa.Uuid(), nullable=False),
         sa.Column("instance_id", sa.Uuid(), nullable=False),
         sa.Column("deployment_id", sa.Uuid(), nullable=False),
-        sa.Column("settings_hash", sa.String(length=64), nullable=False),
+        sa.Column("settings_hash", sa.Uuid(), nullable=False),
         sa.Column(
             "is_root", sa.Boolean(), server_default=sa.text("false"), nullable=False
         ),
@@ -651,7 +651,7 @@ def upgrade() -> None:
         sa.Column("downstream_instance_id", sa.Uuid(), nullable=False),
         sa.Column("upstream_instance_id", sa.Uuid(), nullable=False),
         sa.Column("deployment_id", sa.Uuid(), nullable=False),
-        sa.Column("settings_hash", sa.String(length=64), nullable=False),
+        sa.Column("settings_hash", sa.Uuid(), nullable=False),
         sa.Column(
             "is_dynamic", sa.Boolean(), server_default=sa.text("false"), nullable=False
         ),

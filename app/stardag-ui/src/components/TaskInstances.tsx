@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { Deployment, TaskInstance } from "../types/task";
 import { deploymentLabel } from "../utils/deployments";
+import { shortHash } from "../utils/ids";
 import { differingParameters, parametersOf } from "../utils/instances";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 import { ExpandButton } from "./ArtifactViewer";
@@ -94,11 +95,11 @@ function InstanceCard({
         </span>
         <span className="text-gray-500 dark:text-gray-400">settings</span>
         <code className="font-mono" title={instance.settings_hash}>
-          {instance.settings_hash.slice(0, 12)}
+          {shortHash(instance.settings_hash)}
         </code>
         <span className="text-gray-500 dark:text-gray-400">instance hash</span>
         <code className="font-mono" title={instance.instance_hash}>
-          {instance.instance_hash.slice(0, 12)}
+          {shortHash(instance.instance_hash)}
         </code>
         {inPlan && (
           <span className="rounded bg-blue-100 px-1.5 py-0.5 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">

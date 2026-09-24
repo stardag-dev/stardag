@@ -1,5 +1,6 @@
 import type { PlanDetail } from "../types/task";
 import { deploymentLabel } from "../utils/deployments";
+import { shortHash } from "../utils/ids";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 import { Spinner } from "./ui/Spinner";
 
@@ -93,8 +94,9 @@ export function BuildPlans({ plans, error, activePlanComplete }: BuildPlansProps
                     ? " (not current)"
                     : ""}
                 </Chip>
-                <Chip title={plan.settings_hash}>
-                  settings {plan.settings_hash.slice(0, 8)}
+                <Chip title={`Settings ${plan.settings_hash}`}>
+                  settings{" "}
+                  <code className="font-mono">{shortHash(plan.settings_hash)}</code>
                 </Chip>
                 {plan.is_active && activePlanComplete && <Chip>plan complete</Chip>}
                 <span

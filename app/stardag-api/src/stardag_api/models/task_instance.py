@@ -91,7 +91,7 @@ class TaskInstance(EnvironmentScopedMixin, Base):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=generate_uuid7)
     # The scope.
     deployment_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
-    settings_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    settings_hash: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     # Hash of the canonical body (all parameters), computed by the SDK.
     instance_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     # The completion this instance realises.
@@ -158,7 +158,7 @@ class TaskInstanceDependency(EnvironmentScopedMixin, Base):
     downstream_instance_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     upstream_instance_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     deployment_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
-    settings_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    settings_hash: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     # Set at first insert (a yielded edge), never changed.
     is_dynamic: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
