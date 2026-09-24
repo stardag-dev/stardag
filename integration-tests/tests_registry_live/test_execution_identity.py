@@ -115,20 +115,25 @@ def test_a_retried_claim_is_granted_to_the_attempt_that_won_it() -> None:
     build = registry.build_create(
         root_task_ids=[task_id], description="STA-50 retried claim"
     )
-    item = registration_item(
-        task,
-        declared_upstreams=[],
-        observed_complete=False,
-        observed_at=datetime.now(timezone.utc),
-    )
+    observed_at = datetime.now(timezone.utc)
+
+    def _item(declared_upstreams):
+        return registration_item(
+            task,
+            declared_upstreams=declared_upstreams,
+            observed_complete=False,
+            observed_at=observed_at,
+        )
+
+    # Roots are admitted unexpanded; the walk's chunk expands them.
     plan = registry.plan_create(
         build.id,
         plan_id=new_id(),
         deployment_id=asyncio.run(local_deployment_id_aio(registry)),
         settings={},
-        roots=[item],
+        roots=[_item(None)],
     )
-    registry.plan_register_members(plan.id, [item])
+    registry.plan_register_members(plan.id, [_item([])])
     registry.plan_seal(plan.id)
     execution_id = uuid.uuid4()
 
