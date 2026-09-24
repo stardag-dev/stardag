@@ -741,10 +741,12 @@ similar are **not** covered by it at all:
 - **A worker that died with no restart coming** (OOM, a crash, a
   network partition, or a timeout nothing caught). Its claim simply
   lapses on its TTL, and the next claiming start takes the execution
-  over as a fresh attempt — uncapped; whether it should be is an open
-  question (`docs/design/registry-v2/plan.md`). This is **not** the same
-  as a preemption, which keeps its claim across Modal's own restart on
-  the same call id — see [Preemption and
+  over as a fresh attempt. That loop is bounded by
+  `TickConfig.max_executions` (default 20): once the member has that many
+  executions under the build's plans, the tick fails it instead of taking
+  the claim over again, and the build's fail mode applies. This is **not**
+  the same as a preemption, which keeps its claim across Modal's own
+  restart on the same call id — see [Preemption and
   timeouts](#preemption-and-timeouts).
 - **A task that raises inside the container.** The worker self-reports
   the failure, and the tick never retries a `FAILED` task automatically
