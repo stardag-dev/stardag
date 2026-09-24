@@ -30,6 +30,12 @@ import typer
 from rich.console import Console
 
 from stardag._cli._helpers import get_authenticated_client
+from stardag._cli._modal_deployments import (
+    _activate_deployment,
+    _create_deployment,
+    _deployment_registry,
+    deployments,
+)
 from stardag._cli.credentials import (
     list_registries,
     resolve_environment_slug_to_id,
@@ -554,94 +560,7 @@ def _report_task_modules(
             )
 
 
-def _record_deployment(
-    stardag_app_instance: StardagApp, app_name: str, *, modal_app_id: str | None
-) -> None:
-    """Record in the registry that this code id now runs as ``app_name``.
-
-    One row per deploy, exactly Modal's notion of a deployment: the newest
-    row for an app is the current one, and it is what a scheduler tick
-    consults before rolling a running build over to its code. That makes
-    the record load-bearing, not bookkeeping: a live deployment the
-    registry does not know about is one no build will follow — a tick that
-    finds no current record for its app refuses to roll over (see
-    ``_roll_over_build_aio``), so the build stays on the code that planned
-    it until the record exists. A recording failure is therefore reported
-    as an error and fails the command, with the remedy: re-run the deploy,
-    which is idempotent on Modal's side and records the same code id.
-
-    Without a registry configured there is nothing to record into and no
-    reactive build that could depend on it, so that case is a notice, not
-    an error.
-    """
-    from stardag.registry import NoOpRegistry, registry_provider
-
-    registry = registry_provider.get()
-    if type(registry) is NoOpRegistry:
-        console.print("[dim]No registry configured; deployment not recorded.[/dim]")
-        return
-    try:
-        info = registry.deployment_record(
-            app_name=app_name,
-            code_id=stardag_app_instance.code_id,
-            modal_app_id=modal_app_id,
-        )
-    except Exception as e:
-        error_console.print(
-            f"[bold red]Deployed {app_name} (code "
-            f"{stardag_app_instance.code_id[:12]}) but could not record it in "
-            f"the registry:[/bold red] {type(e).__name__}: {e}\n"
-            "The deployment is live, but running reactive builds will not roll "
-            "over to it until it is recorded — their scheduler ticks refuse a "
-            "rollover to code the registry has no current deployment for. "
-            "Re-run `stardag modal deploy` once the registry is reachable; the "
-            "deploy is idempotent and records the same code id."
-        )
-        raise typer.Exit(1)
-    if info is None:
-        # The RegistryABC default: a registry that does not keep deployment
-        # records. Not a failure of this deploy, but a fact about the
-        # registry the operator should see, since no build will roll over
-        # to this code without a record.
-        console.print(
-            f"[yellow]Deployed {app_name} (code "
-            f"{stardag_app_instance.code_id[:12]}), but this registry does "
-            "not record deployments; running reactive builds will not roll "
-            "over to it.[/yellow]"
-        )
-        return
-    console.print(
-        f"[cyan]Recorded deployment[/cyan] {info.app_name} (code {info.code_id[:12]})"
-    )
-
-
-@app.command("deployments")
-def deployments(
-    app_name: Optional[str] = typer.Option(None, "--app", help="Only this app."),
-) -> None:
-    """List the deployments recorded in the registry, newest first.
-
-    A deployment is one code version of one app, recorded by ``stardag modal
-    deploy``; the newest per app is the one every new spawn lands on, and
-    running builds roll over to it at their next scheduler tick.
-    """
-    from rich.table import Table
-
-    from stardag.registry import registry_provider
-
-    rows = registry_provider.get().deployment_list(app_name=app_name)
-    table = Table(title="Deployments")
-    for col in ("App", "Code id", "Deployed", "Modal app id", ""):
-        table.add_column(col)
-    for d in rows:
-        table.add_row(
-            d.app_name,
-            d.code_id[:12],
-            d.deployed_at.isoformat(timespec="seconds") if d.deployed_at else "-",
-            f"[dim]{d.modal_app_id}[/dim]" if d.modal_app_id else "-",
-            "[green]current[/green]" if d.current else "",
-        )
-    console.print(table)
+app.command("deployments")(deployments)
 
 
 @app.command("deploy")
@@ -750,6 +669,23 @@ def deploy(
     # Find the StardagApp
     stardag_app_instance = _find_stardag_app(module, object_path)
 
+    # Determine deployment name
+    deployment_name = name or stardag_app_instance.modal_app.name or ""
+    if not deployment_name:
+        error_console.print(
+            "[bold red]Deployment name required.[/bold red]\n"
+            "Either supply --name on the command line or set a name on the StardagApp:\n"
+            '  stardag_app = StardagApp("my-app-name", ...)'
+        )
+        raise typer.Exit(1)
+
+    # The deployment is recorded BEFORE the deploy, under an id minted here
+    # and baked into every function (STARDAG_DEPLOYMENT_ID), and activated
+    # after it succeeded.
+    registry = _deployment_registry()
+    if registry is not None:
+        _create_deployment(registry, stardag_app_instance, deployment_name)
+
     # Check if already finalized (e.g., legacy usage)
     if stardag_app_instance.is_finalized:
         console.print(
@@ -803,41 +739,22 @@ def deploy(
             stardag_app_instance, finalize_result, check=check_task_modules
         )
 
-    # Get the underlying Modal app
-    modal_app = stardag_app_instance.modal_app
-
-    # Determine deployment name
-    deployment_name = name or modal_app.name or ""
-    if not deployment_name:
-        error_console.print(
-            "[bold red]Deployment name required.[/bold red]\n"
-            "Either supply --name on the command line or set a name on the StardagApp:\n"
-            '  stardag_app = StardagApp("my-app-name", ...)'
-        )
-        raise typer.Exit(1)
-
     # Deploy the app. Modal's own deployment tag carries the code id unless
     # the caller chose one, so `modal app history` shows the same identity
     # the registry records.
     with enable_output():
         res = deploy_app(
-            modal_app,
+            stardag_app_instance.modal_app,
             name=deployment_name,
             environment_name=env or "",
             tag=tag or stardag_app_instance.code_id,
         )
 
     console.print(f"[green]Deployed {deployment_name}[/green]")
-
-    # Record the deployment in the registry: which code version now runs
-    # as this app. Load-bearing for rollover (a tick only follows a code
-    # the registry knows is current), so a failure fails the command; a
-    # deploy without any registry configured still deploys.
-    _record_deployment(
-        stardag_app_instance,
-        deployment_name,
-        modal_app_id=getattr(res, "app_id", None),
-    )
+    if registry is not None:
+        _activate_deployment(
+            registry, stardag_app_instance.deployment_id, deployment_name
+        )
 
     if stream_logs:
         # stream_app_logs is wrapped with @synchronizer.create_blocking, making it sync
