@@ -97,6 +97,11 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   member is still never retried by the tick (the fail mode decides);
   `max_attempts` still covers only a failed spawn. Also accepted in
   `tick_kwargs`.
+- **New: `TickConfig.max_executions` (default 20).** A RUNNING member whose
+  claim lapsed without a report (a worker that died, a preemption whose
+  restart never came) was taken over forever, one container per claim TTL;
+  at `attempts >= max_executions` the tick now fails it the same way, with
+  the count, instead. Also accepted in `tick_kwargs`.
 - **New: client reads on routes the server already served.**
   `RegistryABC.plan_get` (`GET /plans/{id}`), `build_list_plans`,
   `build_list_page` (cursor paging with `total` and `next_cursor`),

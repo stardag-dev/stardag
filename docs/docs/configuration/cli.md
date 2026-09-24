@@ -503,7 +503,8 @@ Runnable and running members carry their `Attempts` and `Interruptions`
 in this build, counted by the registry from the execution ledger over all
 of the build's plans. A member whose interruptions reach
 `TickConfig.max_interruptions` (default 20) is failed by the next tick
-rather than restarted.
+rather than restarted, and a member whose claim lapsed with its attempts at
+`TickConfig.max_executions` (default 20) is failed rather than taken over.
 
 Above the lists, the summary also shows:
 

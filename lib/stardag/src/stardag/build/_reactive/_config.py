@@ -51,6 +51,22 @@ class TickConfig:
     # 20 resumes of a long training run is a plausible afternoon, 20
     # identical timeouts of a hung task a clear signal and a bounded bill.
     max_interruptions: int = 20
+    # How many executions a task may have within this build before the
+    # tick stops taking over its lapsed claim. A RUNNING member whose claim
+    # lapsed (its worker died without reporting, or a preemption's restart
+    # never came) is actionable and taken over by the next claiming start,
+    # so without a cap a task whose every execution dies silently would
+    # burn one container per claim TTL forever. Counted by the registry
+    # from the execution ledger over all of the build's plans (the
+    # frontier's ``attempts``, design.md D9: every execution, whatever
+    # ended it). At the cap the tick does not take the member over: it
+    # records a TASK_FAILED naming the count, and the build's fail mode
+    # applies. Only a takeover is gated — a first run, a restart of an
+    # INTERRUPTED member (``max_interruptions`` owns that) and an operator's
+    # ``retry`` (which makes the member PENDING) are not — so a retry gets
+    # one more execution, and a lapse of that one fails it again. Separate
+    # from ``max_attempts``, which counts spawn tries within one execution.
+    max_executions: int = 20
     # In-flight bound for the pass's per-task work (claims, spawns, ref
     # records, discovery jobs' registrations).
     max_concurrent_actions: int = DEFAULT_MAX_CONCURRENCY
@@ -99,6 +115,9 @@ class TickSummary:
     # Interrupted members this tick failed instead of restarting, because
     # their interruptions reached max_interruptions.
     interruptions_exhausted: int = 0
+    # Lapsed members this tick failed instead of taking over, because their
+    # executions reached max_executions.
+    executions_exhausted: int = 0
     # Discovery jobs this tick completed (an unexpanded member expanded and
     # registered with its closure).
     discovered: int = 0

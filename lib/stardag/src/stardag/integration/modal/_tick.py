@@ -66,6 +66,9 @@ _TICK_KWARGS_ALLOWED = (
     # How many interruptions a task may have in the build before the tick
     # fails it instead of restarting it.
     "max_interruptions",
+    # How many executions a task may have in the build before the tick
+    # fails it instead of taking over its lapsed claim.
+    "max_executions",
     # Completion checks in flight while a discovery job walks: a property
     # of the target backend this build's tasks write to.
     "max_concurrent_discover",

@@ -454,7 +454,8 @@ setting it alone is refused at deploy.
 **Per-build knobs** (`tick_kwargs`, persisted with the build so every tick
 shares them): `linger_seconds` (default 120), `poll_interval_seconds` (3),
 `fail_mode`, `max_attempts` (2), `max_interruptions` (20),
-`max_concurrent_actions` (50), `max_spawns_per_tick` (derived). Callables —
+`max_executions` (20), `max_concurrent_actions` (50),
+`max_spawns_per_tick` (derived). Callables —
 `worker_selector`, `limit_key_selector` — are deployed-app configuration,
 never per-trigger.
 
@@ -740,10 +741,12 @@ similar are **not** covered by it at all:
 - **A worker that died with no restart coming** (OOM, a crash, a
   network partition, or a timeout nothing caught). Its claim simply
   lapses on its TTL, and the next claiming start takes the execution
-  over as a fresh attempt — uncapped; whether it should be is an open
-  question (`docs/design/registry-v2/plan.md`). This is **not** the same
-  as a preemption, which keeps its claim across Modal's own restart on
-  the same call id — see [Preemption and
+  over as a fresh attempt. That loop is bounded by
+  `TickConfig.max_executions` (default 20): once the member has that many
+  executions under the build's plans, the tick fails it instead of taking
+  the claim over again, and the build's fail mode applies. This is **not**
+  the same as a preemption, which keeps its claim across Modal's own
+  restart on the same call id — see [Preemption and
   timeouts](#preemption-and-timeouts).
 - **A task that raises inside the container.** The worker self-reports
   the failure, and the tick never retries a `FAILED` task automatically
@@ -1036,8 +1039,9 @@ the claim's TTL (the executor's own `timeout` plus a fixed grace) is what a
 later tick waits out before treating the execution as lapsed and taking it
 over as a fresh attempt. `max_attempts` covers only a spawn that fails
 before any container starts (see "Task retries" above); a lapsed-claim
-takeover like this one is not bounded by it, or by anything else today —
-an open question, tracked in `docs/design/registry-v2/plan.md`.
+takeover like this one is bounded instead by `TickConfig.max_executions`
+(default 20): once the task has had that many executions in the build, the
+next lapse fails it with the count rather than starting another.
 
 There is no separate probe or report-grace knob to raise here. The claim's
 built-in grace is generous specifically so an `except` block that is still
@@ -1081,6 +1085,7 @@ failures and fail the build for the one reason it was built to survive.
 | `FunctionSettings(nonpreemptible=)` | opts out of reclamation entirely (3× CPU/memory price; no GPU)  |
 | `TickConfig.max_attempts`           | a claimed execution's spawn failing before any container starts |
 | `TickConfig.max_interruptions`      | how many times a task may ask to be resumed                     |
+| `TickConfig.max_executions`         | executions in the build before a lapsed claim is not taken over |
 
 They **multiply**, which is easy to miss: a worker with `retries=3` running
 a task allowed 20 interruptions can consume up to 80 container attempts.
