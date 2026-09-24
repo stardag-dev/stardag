@@ -132,21 +132,6 @@ def _frontier_req(build_id: UUID) -> Request[BuildFrontier]:
     )
 
 
-def _build_list_req(
-    status: str | None, reactive_app_name: str | None, limit: int
-) -> Request[list[BuildInfo]]:
-    params = {"limit": str(limit)}
-    if status is not None:
-        params["status"] = status
-    if reactive_app_name is not None:
-        params["reactive_app_name"] = reactive_app_name
-
-    def parse(payload: Any) -> list[BuildInfo]:
-        return [BuildInfo.model_validate(b) for b in (payload or {}).get("builds", [])]
-
-    return Request("GET", "/builds", parse, params=params, operation="List builds")
-
-
 def _plan_create_req(
     build_id: UUID,
     plan_id: UUID,

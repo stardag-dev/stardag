@@ -96,6 +96,14 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   member is still never retried by the tick (the fail mode decides);
   `max_attempts` still covers only a failed spawn. Also accepted in
   `tick_kwargs`.
+- **New: client reads on routes the server already served.**
+  `RegistryABC.plan_get` (`GET /plans/{id}`), `build_list_plans`,
+  `build_list_page` (cursor paging with `total` and `next_cursor`),
+  `task_list` (`GET /tasks`, status filter and paging),
+  `task_list_executions` (`include_ended`), `task_events` and
+  `deployment_get`; `BuildInfo.error_message`, `TaskInfo.claim_plan_id` /
+  `claim_build_id` and `ExecutionInfo.build_id`. The in-memory registry
+  serves them with the server's shapes and orderings.
 - **Fixed: a watchdog sweep landing on a lingering tick was dropped.** A
   tick refused the scheduler lease now flags the build before exiting
   `lease_held`, so the holder acts on it (or a successor is spawned if the

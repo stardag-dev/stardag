@@ -44,13 +44,13 @@ from stardag.registry import (
 from stardag.registry._models import DeploymentKind, StopOutcome
 from stardag.testing._registry_exclusion import ExclusionMixin
 from stardag.testing._registry_plans import _outcome, plan_info
+from stardag.testing._registry_reads import ReadsMixin
 from stardag.testing._registry_state import (
     WAKE_HANDOUT_WINDOW,
     ArtifactRow,
     BuildRow,
     DeploymentRow,
     Event,
-    ExecutionRow,
     refuse,
     settings_hash,
 )
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from stardag.artifact import Artifact
 
 
-class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
+class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
     """See the module docstring."""
 
     # -- setup helpers for tests ----------------------------------------------------
@@ -89,21 +89,6 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         return self.task(str(task_id)).status
 
     # -- builds ------------------------------------------------------------------------
-
-    def _info(self, build: BuildRow) -> BuildInfo:
-        return BuildInfo(
-            id=build.id,
-            name=build.name,
-            description=build.description,
-            status=build.status,
-            root_task_ids=list(build.root_task_ids),
-            created_at=build.created_at,
-            last_active_at=build.last_active_at,
-            is_resumed=build.is_resumed,
-            executor_metadata=build.executor_metadata,
-            reactive_app_name=build.reactive_app_name,
-            reactive_tick_kwargs=build.reactive_tick_kwargs,
-        )
 
     def build_create(
         self,
@@ -244,43 +229,6 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         build.last_active_at = self.now()
         return self._info(build)
 
-    def build_list(
-        self,
-        *,
-        status: str | None = None,
-        reactive_app_name: str | None = None,
-        limit: int = 100,
-    ) -> list[BuildInfo]:
-        self._record("build_list", status=status, reactive_app_name=reactive_app_name)
-        # Most recently active first, then by id — as the server orders
-        # (``Build.last_active_at.desc(), Build.id.desc()``), not insertion
-        # order.
-        rows = sorted(
-            (
-                b
-                for b in self.builds.values()
-                if (status is None or b.status == status)
-                and (
-                    reactive_app_name is None
-                    or b.reactive_app_name == reactive_app_name
-                )
-            ),
-            key=lambda b: (b.last_active_at, b.id),
-            reverse=True,
-        )
-        return [self._info(b) for b in rows[:limit]]
-
-    def build_list_running(
-        self, *, reactive_app_name: str | None = None, limit: int = 100
-    ) -> list[UUID]:
-        # Delegate to build_list (most-recently-active first, per the
-        # server ordering), as the real client does -- not a fresh scan in
-        # insertion order, which would drift from it.
-        builds = self.build_list(
-            status="running", reactive_app_name=reactive_app_name, limit=limit
-        )
-        return [b.id for b in builds]
-
     def plan_roots_info(self, plan_id: UUID) -> PlanRoots:
         plan = self.plan(plan_id)
         return PlanRoots(
@@ -292,24 +240,6 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         )
 
     # -- executions and tasks ------------------------------------------------------------
-
-    def _execution_info(self, execution: ExecutionRow) -> ExecutionInfo:
-        build_id = self.plans[execution.plan_id].build_id
-        active = self.active_plan(build_id)
-        return ExecutionInfo(
-            id=execution.id,
-            task_id=execution.task_id,
-            plan_id=execution.plan_id,
-            executor=execution.executor,
-            executor_ref=execution.executor_ref,
-            executor_metadata=execution.executor_metadata,
-            in_current_plan=active is not None and active.id == execution.plan_id,
-            started_at=execution.started_at,
-            claim_released_at=execution.claim_released_at,
-            claim_outcome=execution.claim_outcome,
-            ended_at=execution.ended_at,
-            outcome=execution.outcome,
-        )
 
     def build_list_executions(
         self,
@@ -375,22 +305,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             if i.task_id == task.task_id
         ]
         instances.reverse()
-        current = self.executions.get(task.execution_id) if task.execution_id else None
-        return TaskInfo(
-            task_id=task.task_id,
-            task_namespace=task.task_namespace,
-            task_name=task.task_name,
-            version=task.version,
-            output_uri=task.output_uri,
-            status=task.status,
-            status_at=task.status_at,
-            started_at=current.started_at if current else None,
-            completed_at=task.completed_at,
-            error_message=task.error_message,
-            claim_expires_at=task.claim_expires_at,
-            execution_id=task.execution_id,
-            instances=instances,
-        )
+        return self._task_summary(task, instances=instances)
 
     def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
         self.task(task_id)

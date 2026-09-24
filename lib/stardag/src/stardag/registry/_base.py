@@ -28,6 +28,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from stardag.registry._base_reads import RegistryReadsABC, _missing
 from stardag.registry._models import (
     BuildFrontier,
     BuildInfo,
@@ -48,7 +49,6 @@ from stardag.registry._models import (
     StopOutcome,
     TaskArtifactInfo,
     TaskInfo,
-    TickSummaryRecord,
     TransitionResult,
     WakeCandidate,
     YieldResult,
@@ -59,12 +59,10 @@ if TYPE_CHECKING:
     from stardag.artifact import Artifact
 
 
-def _missing(registry: object, method: str) -> NotImplementedError:
-    return NotImplementedError(f"{type(registry).__name__} does not implement {method}")
-
-
-class RegistryABC:
-    """The v2 registry client interface. See the module docstring."""
+class RegistryABC(RegistryReadsABC):
+    """The v2 registry client interface. See the module docstring. The
+    inspecting reads (a plan, paged lists, a task's executions and events,
+    a deployment) are in :class:`~stardag.registry._base_reads.RegistryReadsABC`."""
 
     # -- builds ---------------------------------------------------------------
 
@@ -164,17 +162,6 @@ class RegistryABC:
 
     async def build_exit_early_aio(self, build_id: UUID) -> BuildInfo:
         return self.build_exit_early(build_id)
-
-    def build_list(
-        self,
-        *,
-        status: str | None = None,
-        reactive_app_name: str | None = None,
-        limit: int = 100,
-    ) -> list[BuildInfo]:
-        """``GET /builds``: builds, most recently active first, optionally
-        by status and by reactive app."""
-        raise _missing(self, "build_list")
 
     def build_list_running(
         self, *, reactive_app_name: str | None = None, limit: int = 100
@@ -731,11 +718,6 @@ class RegistryABC:
         self, build_id: UUID, summary: Mapping[str, Any]
     ) -> None:
         self.build_report_tick_summary(build_id, summary)
-
-    def build_list_tick_summaries(
-        self, build_id: UUID, *, limit: int = 20
-    ) -> list[TickSummaryRecord]:
-        raise _missing(self, "build_list_tick_summaries")
 
     # -- lifecycle ---------------------------------------------------------------
 
