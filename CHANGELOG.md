@@ -205,12 +205,17 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   the build row a claim holds.
 - **New: read routes.** `GET /builds` (status, app and idle filters,
   cursor paging, a total; `idle_for_seconds` keeps running builds with no
-  lifecycle change for that long and refuses any other status, as in v1), `GET /plans/{id}`, `GET /builds/{id}/plans`, `GET
+  task or lifecycle activity for that long and refuses any other status, as
+  in v1), `GET /plans/{id}`, `GET /builds/{id}/plans`, `GET
 /plans/{id}/graph`, `GET /plans/{id}/roots`, `GET /tasks` and `GET
 /tasks/{id}` (with its instances, claim plan and build), `GET
 /tasks/{id}/executions`, `GET /tasks/{id}/events`, `GET
 /builds/{id}/events`, `GET /deployments/{id}`, artifacts through the
   member, `PUT/GET/DELETE /concurrency-limits/{key}`.
+- **Changed: `last_active_at` moves on task activity, as it did in v1**, not
+  only on build create/resume/finish: every status change of a task a
+  RUNNING build's active plan holds bumps that build's `last_active_at`
+  too (best-effort, `SKIP LOCKED` — a locked build just misses the bump).
 - **Changed: guardrails.** The rate limit applies to every v2 write route.
   The 24-hour creation quotas are per environment and charged only for rows
   a request inserted: `LIMITS_MAX_TASK_INSTANCES_PER_ENVIRONMENT_24H` (429

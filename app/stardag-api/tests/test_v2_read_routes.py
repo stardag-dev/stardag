@@ -337,3 +337,30 @@ async def test_build_list_idle_filter(client: AsyncClient, h: Harness):
     assert refused.status_code == 400
     assert refused.json()["detail"]["code"] == "idle_requires_running"
     assert await _status(client, "/builds", idle_for_seconds=59) == 422
+
+
+async def test_build_list_idle_filter_reflects_task_activity(
+    client: AsyncClient, h: Harness
+):
+    """``last_active_at`` moves on task activity too, as in v1: a build
+    that only looks idle by lifecycle-change staleness drops out of the
+    filter once a task it holds transitions."""
+    t = item("T")
+    build, plan = await h.planned([t], [t])
+    async with h.sf() as s:
+        await s.execute(
+            text(
+                "UPDATE build SET last_active_at = now() - interval '2 hours'"
+                " WHERE id = :b"
+            ),
+            {"b": build},
+        )
+        await s.commit()
+
+    idle = await _get(client, "/builds", idle_for_seconds=3600)
+    assert str(build) in {b["id"] for b in idle["builds"]}
+
+    await h.start(plan.id, t)
+
+    idle_after = await _get(client, "/builds", idle_for_seconds=3600)
+    assert str(build) not in {b["id"] for b in idle_after["builds"]}

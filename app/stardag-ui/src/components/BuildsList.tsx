@@ -49,8 +49,8 @@ const STATUS_WITH_IDLE_HINT =
   "with Running (or All). A build that finished isn’t idle.";
 
 const LAST_ACTIVE_EXPLAINER =
-  "The build's last lifecycle change: created, resumed or finished. Task " +
-  "activity does not move it, so a long-running busy build also reads as idle.";
+  "The build's last task or lifecycle activity: created, resumed, " +
+  "finished, or a status change of a task it holds.";
 
 const SORT_EXPLAINER = "Sorted by last active, most recent first.";
 
