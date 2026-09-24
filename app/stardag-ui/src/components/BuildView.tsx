@@ -79,6 +79,7 @@ function BuildViewForIdentity({
   const [refreshToken, setRefreshToken] = useState(0);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [showDag, setShowDag] = useState(true);
+  const [dagFullscreen, setDagFullscreen] = useState(false);
   const [dagDirection, setDagDirection] = useState<LayoutDirection>("LR");
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
   const positionCacheRef = useRef<PositionCache>(createPositionCache());
@@ -130,6 +131,16 @@ function BuildViewForIdentity({
       else void refresh();
     }, DOUBLE_CLICK_MS);
   }, [autoRefresh, canAutoRefresh, refresh]);
+
+  // Esc leaves the fullscreen graph (v1's overlay).
+  useEffect(() => {
+    if (!dagFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDagFullscreen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [dagFullscreen]);
 
   const handleBuildChanged = useCallback(
     (updated: Build) => {
@@ -334,6 +345,30 @@ function BuildViewForIdentity({
                   </svg>
                   <span className="font-medium">Plan graph</span>
                 </button>
+                {showDag && (
+                  <button
+                    type="button"
+                    onClick={() => setDagFullscreen(true)}
+                    aria-label="Fullscreen plan graph"
+                    title="Fullscreen plan graph"
+                    className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      className="h-4 w-4"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"
+                      />
+                    </svg>
+                  </button>
+                )}
               </div>
 
               <PanelGroup direction="vertical" className="flex-1">
@@ -345,7 +380,7 @@ function BuildViewForIdentity({
                   onCollapse={() => setShowDag(false)}
                   onExpand={() => setShowDag(true)}
                 >
-                  {showDag && (
+                  {showDag && !dagFullscreen && (
                     <div id="build-dag-panel" className="h-full">
                       {plan.planError ? (
                         <p
@@ -405,6 +440,52 @@ function BuildViewForIdentity({
           )}
         </PanelGroup>
       </div>
+
+      {dagFullscreen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Plan graph, fullscreen"
+          className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-900"
+        >
+          <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              Plan graph
+            </span>
+            <button
+              type="button"
+              onClick={() => setDagFullscreen(false)}
+              aria-label="Exit fullscreen"
+              title="Exit fullscreen (Esc)"
+              className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+            >
+              <svg
+                aria-hidden="true"
+                className="h-5 w-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          </div>
+          <div className="flex-1">
+            {plan.planError ? (
+              <p role="alert" className="p-4 text-sm text-red-600 dark:text-red-400">
+                {plan.planError}
+              </p>
+            ) : (
+              dag
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -180,6 +180,28 @@ describe("BuildView failure reason", () => {
   });
 });
 
+describe("BuildView fullscreen graph", () => {
+  it("opens the plan graph fullscreen and leaves it on Esc", () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Fullscreen plan graph" }));
+    const overlay = screen.getByRole("dialog", { name: "Plan graph, fullscreen" });
+    expect(overlay).toContainElement(screen.getByTestId("dag"));
+    // Drawn once: the inline graph gives way to the overlay.
+    expect(screen.getAllByTestId("dag")).toHaveLength(1);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByTestId("dag")).toBeInTheDocument();
+  });
+
+  it("leaves fullscreen from its close button", () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Fullscreen plan graph" }));
+    fireEvent.click(screen.getByRole("button", { name: "Exit fullscreen" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
 describe("BuildView missing plan", () => {
   it("says the active plan is missing rather than drawing a partial one", () => {
     setPlan(makeBuild());
