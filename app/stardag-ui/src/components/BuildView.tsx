@@ -34,6 +34,8 @@ interface BuildViewProps {
 }
 
 const PAGE_SIZE = 20;
+// The window in which a second click on refresh counts as a double-click.
+const DOUBLE_CLICK_MS = 300;
 
 /**
  * One build, over its **active plan**: the plan's scope and state, its
@@ -83,11 +85,44 @@ function BuildViewForIdentity({
     await reload();
   }, [reload]);
 
+  // Auto-refreshing a build that has stopped is pointless: the interval
+  // declines to run, and the control is switched off (adjusted during
+  // render) so it cannot go on claiming otherwise.
   const canAutoRefresh = build?.status === "running";
+  if (!canAutoRefresh && autoRefresh) setAutoRefresh(false);
   useEffect(() => {
     if (!autoRefresh || !canAutoRefresh) return;
     const handle = setInterval(refresh, 5000);
     return () => clearInterval(handle);
+  }, [autoRefresh, canAutoRefresh, refresh]);
+
+  // Single click refreshes; double-click toggles auto-refresh (v1's
+  // affordance). The single click is deferred by the double-click window:
+  // acting at once made the gestures overlap, so with auto-refresh on the
+  // first click of a double turned it off and the second straight back on.
+  // The button stays enabled while a refresh is in flight, or the second
+  // click could never land. The pending timer is cleared on unmount; the
+  // view remounts on a change of build or environment (see `BuildView`).
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (clickTimerRef.current !== null) clearTimeout(clickTimerRef.current);
+    },
+    [],
+  );
+  const handleRefreshClick = useCallback(() => {
+    if (clickTimerRef.current !== null) {
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+      if (canAutoRefresh) setAutoRefresh((previous) => !previous);
+      else void refresh();
+      return;
+    }
+    clickTimerRef.current = setTimeout(() => {
+      clickTimerRef.current = null;
+      if (autoRefresh) setAutoRefresh(false);
+      else void refresh();
+    }, DOUBLE_CLICK_MS);
   }, [autoRefresh, canAutoRefresh, refresh]);
 
   const handleBuildChanged = useCallback(
@@ -196,13 +231,16 @@ function BuildViewForIdentity({
                     {members.length} member{members.length === 1 ? "" : "s"}
                   </span>
                   <ToolbarButton
-                    label="Refresh"
+                    label={autoRefresh ? "Stop auto-refreshing" : "Refresh"}
                     hint={
                       autoRefresh
                         ? "Refreshing every 5 seconds"
-                        : "Re-read the build and its plan"
+                        : canAutoRefresh
+                          ? "Double-click to refresh every 5 seconds"
+                          : undefined
                     }
-                    onClick={refresh}
+                    onClick={handleRefreshClick}
+                    active={autoRefresh}
                   >
                     <svg
                       aria-hidden="true"
@@ -221,16 +259,6 @@ function BuildViewForIdentity({
                       />
                     </svg>
                   </ToolbarButton>
-                  {canAutoRefresh && (
-                    <label className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
-                      <input
-                        type="checkbox"
-                        checked={autoRefresh}
-                        onChange={(e) => setAutoRefresh(e.target.checked)}
-                      />
-                      auto
-                    </label>
-                  )}
                 </div>
                 <div className="flex items-center gap-1.5">
                   <BuildInfoDialog
