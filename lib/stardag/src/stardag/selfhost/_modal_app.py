@@ -68,7 +68,10 @@ SERVER_IMAGE_REPO = "ghcr.io/stardag-dev/stardag-server"
 # While the v2 line is still in flight, this pins the matching v2 image —
 # a release candidate (`server-vX.Y.ZrcN`) is a valid pin, same as a final
 # `server-vX.Y.Z`. The final cut of this release moves it to "0.6.0" once
-# `server-v0.6.0` ships.
+# `server-v0.6.0` ships. (v0.26.0/server-v0.5.0 was the last release of the
+# v1 line; the STA-81 load-bearing-pin note that used to live here was
+# about that line's cancel-draining pairing and no longer applies once the
+# pin is on the v2 side.)
 DEFAULT_SERVER_VERSION = "0.6.0rc1"
 
 # Minimum client interpreter for from-source image builds (stardag-api's
