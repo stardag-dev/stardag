@@ -126,11 +126,15 @@ can live to finish. Truncation re-reads immediately; it is never a stall.
 
 ### Retries and interruptions
 
-A tick retries the failures no backend can retry for you — a spawn that
-never produced a container, an execution Modal killed or lost — up to
-`TickConfig.max_attempts` (default 2) per task per **round** (a round
-starts at each re-trigger). An exception _inside_ your task is reported by
-the worker as `FAILED` and never reaches this budget; that is what Modal's
+A tick retries only the one failure no backend can retry for you — a spawn
+that fails before any container starts — up to `TickConfig.max_attempts`
+(default 2) within that single claim; nothing about the budget persists
+across ticks. An execution Modal killed or lost, and an exception _inside_
+your task, both bypass it: the first recovers when its claim lapses and
+the next claiming start takes it over, uncapped (an open design question,
+`docs/design/registry-v2/plan.md`); the second is reported by the worker
+as `FAILED` and is never retried by the tick — the build's `fail_mode`
+decides, and only a retry moves it back to `PENDING`. That is what Modal's
 own `retries=` is for.
 
 A task past its `timeout` that caught the interruption, checkpointed and
@@ -149,13 +153,11 @@ for a preemption and `InputCancellation` for a timeout, and only the first
 restarts.
 
 And it comes from the **worker**, which is the only thing that knows. A
-tick probing a running task sees whether the execution still exists, not
-what ended it, and a cancelled input stops existing while the container is
-still checkpointing. So a probe that finds an execution gone holds its
-verdict for `TickConfig.worker_report_grace_seconds` (default 30) and
-records a failure only if no report arrives. The worker's classification
-wins wherever it makes one; the probe is the fallback for the execution
-that ends without a word.
+tick never probes a running task for what ended it: a live claim is left
+alone, whoever holds it, and a lapsed claim is simply runnable again — no
+probe, no report-grace knob, no reaper. The claim's own TTL (the
+executor's timeout plus a fixed grace) is what already gives a worker time
+to report before the registry would call its execution gone.
 
 ### Wake-ups: how a build with no process learns something changed
 
