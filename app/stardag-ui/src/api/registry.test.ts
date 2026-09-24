@@ -6,10 +6,13 @@ vi.mock("./config", () => ({ API_V2: "https://api.test/api/v2" }));
 import { fetchWithAuth } from "./client";
 import {
   completeBuild,
+  deleteConcurrencyLimit,
   fetchBuilds,
+  fetchConcurrencyLimits,
   fetchPlanGraph,
   fetchTask,
   RegistryError,
+  setConcurrencyLimit,
 } from "./registry";
 
 const mocked = vi.mocked(fetchWithAuth);
@@ -27,11 +30,13 @@ beforeEach(() => mocked.mockReset());
 
 describe("registry API", () => {
   it("calls only /api/v2, with the environment id", async () => {
-    respond(200, { builds: [] });
+    respond(200, { builds: [], total: 0, next_cursor: null });
     await fetchBuilds("env-1", {
       status: "running",
       reactiveAppName: "app",
+      idleForSeconds: 3600,
       limit: 50,
+      cursor: "c1",
     });
     const url = new URL(mocked.mock.calls[0][0] as string);
     expect(url.pathname).toBe("/api/v2/builds");
@@ -39,7 +44,9 @@ describe("registry API", () => {
       environment_id: "env-1",
       status: "running",
       reactive_app_name: "app",
+      idle_for_seconds: "3600",
       limit: "50",
+      cursor: "c1",
     });
   });
 
@@ -74,5 +81,31 @@ describe("registry API", () => {
     await expect(fetchTask("t", "env-1")).rejects.toMatchObject({
       code: "task_not_found",
     });
+  });
+
+  it("reads, sets and deletes concurrency limits on the v2 routes", async () => {
+    respond(200, { limits: [] });
+    await fetchConcurrencyLimits("env-1", true);
+    let url = new URL(mocked.mock.calls[0][0] as string);
+    expect(url.pathname).toBe("/api/v2/concurrency-limits");
+    expect(url.searchParams.get("include_holders")).toBe("true");
+
+    respond(200, { key: "gpu:a", max_concurrent: 0 });
+    await setConcurrencyLimit("gpu:a", 0, "env-1");
+    url = new URL(mocked.mock.calls[1][0] as string);
+    expect(url.pathname).toBe("/api/v2/concurrency-limits/gpu%3Aa");
+    const init = mocked.mock.calls[1][1] as RequestInit;
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ max_concurrent: 0 });
+
+    mocked.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await deleteConcurrencyLimit("gpu:a", "env-1");
+    expect((mocked.mock.calls[2][1] as RequestInit).method).toBe("DELETE");
+
+    // A "/" would be a path separator on the server even encoded.
+    await expect(setConcurrencyLimit("a/b", 1, "env-1")).rejects.toMatchObject({
+      code: "invalid_limit_key",
+    });
+    expect(mocked).toHaveBeenCalledTimes(3);
   });
 });

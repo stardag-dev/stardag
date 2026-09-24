@@ -11,16 +11,22 @@ import type {
   BuildListResponse,
   BuildStatus,
   BuildTickSummaryListResponse,
+  ConcurrencyLimit,
+  ConcurrencyLimitListResponse,
   Deployment,
   DeploymentKind,
   DeploymentListResponse,
   Execution,
+  EventListResponse,
   ExecutionListResponse,
+  PlanDetail,
   PlanGraph,
+  PlanListResponse,
   PlanRoots,
   Settings,
   Task,
   TaskArtifactListResponse,
+  TaskEvent,
   TransitionResponse,
 } from "../types/task";
 import { fetchWithAuth } from "./client";
@@ -100,24 +106,35 @@ async function postJson<T>(
 export interface BuildFilters {
   status?: BuildStatus;
   reactiveAppName?: string;
-  // 1..500 on the server; there is no pagination and no total.
+  // Running builds with no lifecycle change for at least this long (>= 60).
+  // The server implies RUNNING and refuses any other status alongside it.
+  idleForSeconds?: number;
+  // Page size, 1..500 on the server.
   limit?: number;
+  // The previous page's `next_cursor`; absent for the first page.
+  cursor?: string;
 }
 
-/** The environment's builds, newest first (`GET /builds`). */
-export async function fetchBuilds(
+/**
+ * One page of the environment's builds, most recently active first
+ * (`GET /builds`). `total` counts every build the filters match; pass
+ * `next_cursor` back as `cursor` for the next page (keyset paging, so
+ * there is no page number to jump to).
+ */
+export function fetchBuilds(
   environmentId: string,
   filters: BuildFilters = {},
-): Promise<Build[]> {
+): Promise<BuildListResponse> {
   const query: Record<string, string> = {};
   if (filters.status) query.status = filters.status;
   if (filters.reactiveAppName) query.reactive_app_name = filters.reactiveAppName;
+  if (filters.idleForSeconds) query.idle_for_seconds = String(filters.idleForSeconds);
   if (filters.limit) query.limit = String(filters.limit);
-  const data = await getJson<BuildListResponse>(
+  if (filters.cursor) query.cursor = filters.cursor;
+  return getJson<BuildListResponse>(
     url("/builds", environmentId, query),
     "Failed to fetch builds",
   );
-  return data.builds;
 }
 
 export function fetchBuild(buildId: string, environmentId: string): Promise<Build> {
@@ -211,6 +228,18 @@ export function cancelBuild(buildId: string, environmentId: string): Promise<Bui
 
 // ---- Plans ----
 
+/** Every plan of the build, newest generation first, the active one marked. */
+export async function fetchBuildPlans(
+  buildId: string,
+  environmentId: string,
+): Promise<PlanDetail[]> {
+  const data = await getJson<PlanListResponse>(
+    url(`/builds/${buildId}/plans`, environmentId),
+    "Failed to fetch plans",
+  );
+  return data.plans;
+}
+
 export function fetchPlanRoots(
   planId: string,
   environmentId: string,
@@ -282,6 +311,26 @@ export function fetchTaskArtifacts(
   );
 }
 
+/** The server's cap on one event read. */
+export const EVENT_LIST_LIMIT = 500;
+
+/**
+ * The task's event log across every build, **oldest first**, at most
+ * `EVENT_LIST_LIMIT` rows (the oldest ones: the route has no cursor).
+ */
+export async function fetchTaskEvents(
+  taskId: string,
+  environmentId: string,
+): Promise<TaskEvent[]> {
+  const data = await getJson<EventListResponse>(
+    url(`/tasks/${taskId}/events`, environmentId, {
+      limit: String(EVENT_LIST_LIMIT),
+    }),
+    "Failed to fetch task events",
+  );
+  return data.events;
+}
+
 // ---- Deployments and settings ----
 
 export interface DeploymentFilters {
@@ -315,4 +364,69 @@ export function fetchSettings(
     url(`/settings/${settingsHash}`, environmentId),
     "Failed to fetch settings",
   );
+}
+
+// ---- Concurrency limits ----
+
+/**
+ * The routes take the key as a `/{key}` path segment, where a `/` is a
+ * separator even percent-encoded (the server decodes it before routing),
+ * so such a key is refused here rather than sent to 404.
+ */
+function limitUrl(key: string, environmentId: string) {
+  if (key.includes("/")) {
+    throw new RegistryError(
+      `A concurrency-limit key cannot contain "/": ${key}`,
+      400,
+      "invalid_limit_key",
+    );
+  }
+  return url(`/concurrency-limits/${encodeURIComponent(key)}`, environmentId);
+}
+
+/**
+ * The environment's named limits, each with how many slots live claims
+ * occupy — and, with `includeHolders`, which tasks occupy them.
+ */
+export async function fetchConcurrencyLimits(
+  environmentId: string,
+  includeHolders = false,
+): Promise<ConcurrencyLimit[]> {
+  const data = await getJson<ConcurrencyLimitListResponse>(
+    url(
+      "/concurrency-limits",
+      environmentId,
+      includeHolders ? { include_holders: "true" } : {},
+    ),
+    "Failed to fetch concurrency limits",
+  );
+  return data.limits;
+}
+
+/** Create or replace the cap on `key`. */
+export async function setConcurrencyLimit(
+  key: string,
+  maxConcurrent: number,
+  environmentId: string,
+): Promise<{ key: string; max_concurrent: number }> {
+  const response = await fetchWithAuth(limitUrl(key, environmentId), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_concurrent: maxConcurrent }),
+  });
+  if (!response.ok) throw await toError(response, "Failed to save concurrency limit");
+  return response.json() as Promise<{ key: string; max_concurrent: number }>;
+}
+
+/** Remove the cap on `key`: the key becomes unlimited. */
+export async function deleteConcurrencyLimit(
+  key: string,
+  environmentId: string,
+): Promise<void> {
+  const response = await fetchWithAuth(limitUrl(key, environmentId), {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw await toError(response, "Failed to delete concurrency limit");
+  }
 }

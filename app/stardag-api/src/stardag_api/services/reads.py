@@ -2,8 +2,9 @@
 
 - ``GET /builds`` (:func:`list_builds`): builds of the caller's environment,
   most recently active first, filtered by status and reactive app — the
-  watchdog's "RUNNING builds owned by app X" — a page at a time, with the
-  total the filters match.
+  watchdog's "RUNNING builds owned by app X" — and by idleness
+  (``idle_for_seconds``), a page at a time, with the total the filters
+  match.
 - ``GET /tasks/{task_id}`` (:func:`get_task`): a ``task`` row holds no
   parameters, so a completion is returned with its **instances** — each a
   body under one scope — newest first. Which body to rehydrate is the
@@ -23,7 +24,7 @@ Plain reads: no locks, no writes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -41,7 +42,8 @@ from stardag_api.models import (
     TaskStatus,
 )
 from stardag_api.services.builds import get_build
-from stardag_api.services.errors import NotFound
+from stardag_api.models.base import utc_now
+from stardag_api.services.errors import BadRequest, NotFound
 from stardag_api.services.paging import decode_cursor, encode_cursor
 
 #: Bounds of one listing.
@@ -63,18 +65,42 @@ async def list_builds(
     *,
     status: BuildStatus | None = None,
     reactive_app_name: str | None = None,
+    idle_for_seconds: int | None = None,
     limit: int = 100,
     cursor: str | None = None,
 ) -> BuildPage:
     """Builds, most recently active first, a page at a time
     (``ix_build_environment_status`` serves a status filter with this
-    order). ``total`` counts every build the filters match."""
+    order). ``total`` counts every build the filters match.
+
+    ``idle_for_seconds`` keeps builds that are **still running** and whose
+    ``last_active_at`` is at least that old. It implies RUNNING, as in v1:
+    a finished build is not idle, and without the predicate the filter
+    would list every build that ended long enough ago. So it combines with
+    no status or ``running`` only; any other status is a contradiction,
+    refused 400 ``idle_requires_running`` rather than served empty.
+    ``last_active_at`` moves on build lifecycle changes only (create,
+    resume, terminal status), not on task events, so "idle" here means "no
+    lifecycle change for that long" — a busy build started long enough ago
+    matches too. The order stays most recently active first, so the keyset
+    cursor is the same one."""
     limit = max(1, min(limit, MAX_LIST_LIMIT))
+    if idle_for_seconds is not None and status not in (None, BuildStatus.RUNNING):
+        raise BadRequest(
+            "idle_requires_running",
+            f"status={status.value!r} cannot be combined with idle_for_seconds: "
+            "an idle filter already means 'still running'",
+        )
     filters = [Build.environment_id == environment_id]
     if status is not None:
         filters.append(Build.status == status)
     if reactive_app_name is not None:
         filters.append(Build.reactive_app_name == reactive_app_name)
+    if idle_for_seconds is not None:
+        filters.append(Build.status == BuildStatus.RUNNING)
+        filters.append(
+            Build.last_active_at <= utc_now() - timedelta(seconds=idle_for_seconds)
+        )
     total = await session.scalar(
         select(func.count()).select_from(Build).where(*filters)
     )

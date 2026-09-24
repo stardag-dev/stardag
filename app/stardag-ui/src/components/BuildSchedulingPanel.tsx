@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchBuildTickSummaries } from "../api/registry";
+import { fetchBuildPlans, fetchBuildTickSummaries } from "../api/registry";
 import type {
   BuildFrontier,
   BuildStatus,
   BuildTickSummary,
   FrontierItem,
   FrontierMember,
+  PlanDetail,
 } from "../types/task";
 import { memberLabel } from "../utils/instances";
 import { schedulingState, type SchedulingState } from "../utils/scheduling";
+import { BuildPlans } from "./BuildPlans";
 import { Modal } from "./Modal";
 import { StatusBadge } from "./StatusBadge";
 import { TickSummaryTrail } from "./TickSummaryTrail";
@@ -78,14 +80,22 @@ interface BuildSchedulingPanelProps {
   frontier: BuildFrontier | null;
   frontierError: string | null;
   refreshToken?: number;
+  // False when the build view's member list is partial (roots + frontier).
+  membershipComplete?: boolean;
   onOpenTask?: (taskId: string) => void;
 }
 
+// The toolbar button's name, the tooltip's first line and the heading.
+export const PLANS_AND_SCHEDULING = "Plans and scheduling";
+
 /**
- * "What does the scheduler see?" — the frontier of the build's active
- * plan: what is runnable, what awaits discovery, what is running (with the
- * attempt and interruption counts the tick budgets on), any closure
- * conflict, and the reactive scheduler's recent ticks.
+ * "Which plans does this build have, and what does the scheduler see?" —
+ * the build's plans (scope, lifecycle, the active one marked), then the
+ * frontier of the active plan: what is runnable, what awaits discovery,
+ * what is running (with the attempt and interruption counts the tick
+ * budgets on), any closure conflict, and the reactive scheduler's recent
+ * ticks. The plan row lives here rather than above the DAG, which keeps
+ * the build overview from growing.
  */
 export function BuildSchedulingPanel({
   buildId,
@@ -94,9 +104,12 @@ export function BuildSchedulingPanel({
   frontier,
   frontierError,
   refreshToken = 0,
+  membershipComplete = true,
   onOpenTask,
 }: BuildSchedulingPanelProps) {
   const [open, setOpen] = useState(false);
+  const [plans, setPlans] = useState<PlanDetail[] | null>(null);
+  const [plansError, setPlansError] = useState<string | null>(null);
   const [summaries, setSummaries] = useState<BuildTickSummary[]>([]);
   const [ticksRead, setTicksRead] = useState(false);
   const [ticksError, setTicksError] = useState<string | null>(null);
@@ -106,6 +119,16 @@ export function BuildSchedulingPanel({
     if (!open) return;
     const epoch = ++epochRef.current;
     const fresh = () => epochRef.current === epoch;
+    fetchBuildPlans(buildId, environmentId)
+      .then((rows) => {
+        if (!fresh()) return;
+        setPlans(rows);
+        setPlansError(null);
+      })
+      .catch((err: unknown) => {
+        if (!fresh()) return;
+        setPlansError(err instanceof Error ? err.message : "Failed to load plans");
+      });
     fetchBuildTickSummaries(buildId, environmentId, TICK_LIMIT)
       .then((data) => {
         if (!fresh()) return;
@@ -131,13 +154,13 @@ export function BuildSchedulingPanel({
   return (
     <>
       <ToolbarButton
-        label="Scheduling"
+        label={PLANS_AND_SCHEDULING}
         hint={
           frontierError
             ? "The scheduler state could not be read"
             : state === "stalled"
               ? "This build is not progressing"
-              : "What the scheduler sees of the active plan"
+              : "The build's plans, and what the scheduler sees of the active one"
         }
         onClick={() => setOpen(true)}
         badge={
@@ -168,10 +191,19 @@ export function BuildSchedulingPanel({
       <Modal
         isOpen={open}
         onClose={() => setOpen(false)}
-        title="Scheduling"
+        title={PLANS_AND_SCHEDULING}
         maxWidthClass="max-w-3xl"
       >
         <div className="max-h-[70vh] space-y-3 overflow-y-auto">
+          <BuildPlans
+            plans={plans}
+            error={plansError}
+            activePlanComplete={frontier?.plan_complete ?? false}
+            membershipComplete={membershipComplete}
+          />
+          <h4 className="border-t border-gray-200 pt-3 text-xs font-semibold tracking-wide text-gray-500 uppercase dark:border-gray-700 dark:text-gray-400">
+            Scheduling
+          </h4>
           {frontierError && (
             <ResultBanner tone="warning">
               Could not read this build&rsquo;s frontier

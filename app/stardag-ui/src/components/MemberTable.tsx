@@ -1,6 +1,8 @@
 import type { PlanMember } from "../types/task";
 import { shortTaskId } from "../utils/ids";
 import { qualifiedName } from "../utils/instances";
+import { MEMBERSHIP_COLUMN_HELP } from "../utils/membership";
+import { MembershipFacts } from "./MembershipFacts";
 import { StatusBadge } from "./StatusBadge";
 
 interface MemberTableProps {
@@ -41,7 +43,9 @@ export function MemberTable({
             <tr>
               <th className={HEADER}>Task</th>
               <th className={HEADER}>Status</th>
-              <th className={HEADER}>Membership</th>
+              <th className={`${HEADER} cursor-help`} title={MEMBERSHIP_COLUMN_HELP}>
+                Membership<span aria-hidden="true"> ⓘ</span>
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-900">
@@ -79,24 +83,7 @@ export function MemberTable({
                   <StatusBadge status={member.status} />
                 </td>
                 <td className="px-4 py-2 text-xs text-gray-600 dark:text-gray-400">
-                  {[
-                    member.is_root ? "root" : null,
-                    member.admitted_by && member.admitted_by !== "root"
-                      ? member.admitted_by
-                      : null,
-                    member.excluded_at
-                      ? `excluded (${member.excluded_reason?.replace("_", " ") ?? "?"})`
-                      : null,
-                    member.attempts > 0
-                      ? `${member.attempts} attempt${member.attempts === 1 ? "" : "s"}${
-                          member.interruptions > 0
-                            ? `, ${member.interruptions} interrupted`
-                            : ""
-                        }`
-                      : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ") || "—"}
+                  <MembershipFacts member={member} />
                 </td>
               </tr>
             ))}

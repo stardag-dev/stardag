@@ -22,7 +22,6 @@ import {
   type PositionCache,
 } from "./dagLayout";
 import { MemberTable } from "./MemberTable";
-import { PlanHeader } from "./PlanHeader";
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
 import { ToolbarButton } from "./ui/ToolbarButton";
@@ -34,6 +33,8 @@ interface BuildViewProps {
 }
 
 const PAGE_SIZE = 20;
+// The window in which a second click on refresh counts as a double-click.
+const DOUBLE_CLICK_MS = 300;
 
 /**
  * One build, over its **active plan**: the plan's scope and state, its
@@ -83,11 +84,44 @@ function BuildViewForIdentity({
     await reload();
   }, [reload]);
 
+  // Auto-refreshing a build that has stopped is pointless: the interval
+  // declines to run, and the control is switched off (adjusted during
+  // render) so it cannot go on claiming otherwise.
   const canAutoRefresh = build?.status === "running";
+  if (!canAutoRefresh && autoRefresh) setAutoRefresh(false);
   useEffect(() => {
     if (!autoRefresh || !canAutoRefresh) return;
     const handle = setInterval(refresh, 5000);
     return () => clearInterval(handle);
+  }, [autoRefresh, canAutoRefresh, refresh]);
+
+  // Single click refreshes; double-click toggles auto-refresh (v1's
+  // affordance). The single click is deferred by the double-click window:
+  // acting at once made the gestures overlap, so with auto-refresh on the
+  // first click of a double turned it off and the second straight back on.
+  // The button stays enabled while a refresh is in flight, or the second
+  // click could never land. The pending timer is cleared on unmount; the
+  // view remounts on a change of build or environment (see `BuildView`).
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (clickTimerRef.current !== null) clearTimeout(clickTimerRef.current);
+    },
+    [],
+  );
+  const handleRefreshClick = useCallback(() => {
+    if (clickTimerRef.current !== null) {
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+      if (canAutoRefresh) setAutoRefresh((previous) => !previous);
+      else void refresh();
+      return;
+    }
+    clickTimerRef.current = setTimeout(() => {
+      clickTimerRef.current = null;
+      if (autoRefresh) setAutoRefresh(false);
+      else void refresh();
+    }, DOUBLE_CLICK_MS);
   }, [autoRefresh, canAutoRefresh, refresh]);
 
   const handleBuildChanged = useCallback(
@@ -196,13 +230,16 @@ function BuildViewForIdentity({
                     {members.length} member{members.length === 1 ? "" : "s"}
                   </span>
                   <ToolbarButton
-                    label="Refresh"
+                    label={autoRefresh ? "Stop auto-refreshing" : "Refresh"}
                     hint={
                       autoRefresh
                         ? "Refreshing every 5 seconds"
-                        : "Re-read the build and its plan"
+                        : canAutoRefresh
+                          ? "Double-click to refresh every 5 seconds"
+                          : undefined
                     }
-                    onClick={refresh}
+                    onClick={handleRefreshClick}
+                    active={autoRefresh}
                   >
                     <svg
                       aria-hidden="true"
@@ -221,16 +258,6 @@ function BuildViewForIdentity({
                       />
                     </svg>
                   </ToolbarButton>
-                  {canAutoRefresh && (
-                    <label className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
-                      <input
-                        type="checkbox"
-                        checked={autoRefresh}
-                        onChange={(e) => setAutoRefresh(e.target.checked)}
-                      />
-                      auto
-                    </label>
-                  )}
                 </div>
                 <div className="flex items-center gap-1.5">
                   <BuildInfoDialog
@@ -246,6 +273,7 @@ function BuildViewForIdentity({
                     frontier={frontier}
                     frontierError={plan.frontierError}
                     refreshToken={refreshToken}
+                    membershipComplete={view?.complete ?? true}
                     onOpenTask={setSelectedTaskId}
                   />
                   <BuildControlsDialog
@@ -260,13 +288,7 @@ function BuildViewForIdentity({
                 </div>
               </div>
 
-              <PlanHeader
-                frontier={frontier}
-                deployment={deployment}
-                complete={view?.complete ?? true}
-              />
-
-              <div className="flex items-center justify-between border-b border-gray-200 px-4 py-1.5 dark:border-gray-700">
+              <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
                 <button
                   onClick={() => {
                     const panel = dagPanelRef.current;
@@ -276,9 +298,26 @@ function BuildViewForIdentity({
                   }}
                   aria-expanded={showDag}
                   aria-controls="build-dag-panel"
-                  className="text-sm font-medium text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
+                  className="flex items-center gap-2 text-sm text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
                 >
-                  {showDag ? "▾" : "▸"} Plan graph
+                  <svg
+                    aria-hidden="true"
+                    data-testid="dag-toggle-chevron"
+                    className={`h-4 w-4 transition-transform ${
+                      showDag ? "rotate-90" : ""
+                    }`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M9 5l7 7-7 7"
+                    />
+                  </svg>
+                  <span className="font-medium">Plan graph</span>
                 </button>
               </div>
 
@@ -317,15 +356,6 @@ function BuildViewForIdentity({
               <PanelResizeHandle className="w-1 cursor-col-resize bg-gray-200 hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
               <Panel defaultSize={35} minSize={20} maxSize={55}>
                 <div className="flex h-full flex-col border-l border-gray-200 dark:border-gray-700">
-                  {onOpenTask && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenTask(selectedTaskId)}
-                      className="border-b border-gray-200 px-4 py-1 text-left text-xs text-blue-600 hover:underline dark:border-gray-700 dark:text-blue-400"
-                    >
-                      Open task page
-                    </button>
-                  )}
                   <div className="min-h-0 flex-1">
                     <TaskDetail
                       taskId={selectedTaskId}
@@ -334,8 +364,12 @@ function BuildViewForIdentity({
                         buildId,
                         planId: frontier?.plan_id ?? null,
                         planInstanceId: selectedMember?.instance_id ?? null,
+                        member: selectedMember,
                       }}
                       onClose={() => setSelectedTaskId(null)}
+                      onOpenTaskPage={
+                        onOpenTask ? () => onOpenTask(selectedTaskId) : undefined
+                      }
                       onChanged={refresh}
                       refreshToken={refreshToken}
                     />

@@ -1,6 +1,6 @@
 import { Logo } from "./Logo";
 
-export type NavItem = "builds" | "tasks" | "deployments" | "settings";
+export type NavItem = "builds" | "tasks" | "deployments" | "limits" | "settings";
 
 interface SidebarProps {
   activeItem: NavItem;
@@ -54,6 +54,20 @@ export function Sidebar({
             strokeLinejoin="round"
             strokeWidth={2}
             d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"
+          />
+        </svg>
+      ),
+    },
+    {
+      id: "limits",
+      label: "Concurrency",
+      icon: (
+        <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"
           />
         </svg>
       ),

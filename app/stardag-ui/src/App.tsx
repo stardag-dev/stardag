@@ -18,6 +18,7 @@ import { WorkspaceSettings } from "./components/WorkspaceSettings";
 import { PendingInvites } from "./components/PendingInvites";
 import type { NavItem } from "./components/Sidebar";
 import { Sidebar } from "./components/Sidebar";
+import { ConcurrencyLimits } from "./components/ConcurrencyLimits";
 import { DeploymentsPage } from "./components/DeploymentsPage";
 import { TaskPage } from "./components/TaskPage";
 import { ThemeToggle } from "./components/ThemeToggle";
@@ -187,6 +188,32 @@ function TaskPageRoute({
       onToggleSidebar={onToggleSidebar}
     >
       <TaskPage taskId={taskId} onOpenTask={onOpenTask} />
+    </MainLayout>
+  );
+}
+
+// Concurrency limits admin page
+type ConcurrencyLimitsPageProps = SidebarStateProps & {
+  onNavigate: (item: NavItem) => void;
+  onSelectBuild: (buildId: string) => void;
+  onOpenTask: (taskId: string) => void;
+};
+
+function ConcurrencyLimitsPage({
+  onNavigate,
+  onSelectBuild,
+  onOpenTask,
+  sidebarCollapsed,
+  onToggleSidebar,
+}: ConcurrencyLimitsPageProps) {
+  return (
+    <MainLayout
+      activeNav="limits"
+      onNavigate={onNavigate}
+      sidebarCollapsed={sidebarCollapsed}
+      onToggleSidebar={onToggleSidebar}
+    >
+      <ConcurrencyLimits onSelectBuild={onSelectBuild} onOpenTask={onOpenTask} />
     </MainLayout>
   );
 }
@@ -605,6 +632,9 @@ function Router() {
     // Deployments: /deployments (same env-scoped forms)
     if (path === "/deployments" || path.endsWith("/deployments")) return "deployments";
 
+    // Concurrency limits admin: /limits (same env-scoped forms)
+    if (path === "/limits" || path.endsWith("/limits")) return "limits";
+
     // Check for build ID in path: /builds/:id or /:org/:environment/builds/:id
     const buildMatch = path.match(/\/builds\/([^/]+)/);
     if (buildMatch) {
@@ -627,6 +657,9 @@ function Router() {
           break;
         case "deployments":
           navigateTo(`${basePath}/deployments`);
+          break;
+        case "limits":
+          navigateTo(`${basePath}/limits`);
           break;
         case "settings":
           navigateTo("/settings");
@@ -711,6 +744,17 @@ function Router() {
           <TaskPageRoute
             taskId={selectedTaskId}
             onNavigate={handleNavigation}
+            onOpenTask={handleOpenTask}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={handleToggleSidebar}
+          />
+        );
+
+      case "limits":
+        return (
+          <ConcurrencyLimitsPage
+            onNavigate={handleNavigation}
+            onSelectBuild={handleSelectBuild}
             onOpenTask={handleOpenTask}
             sidebarCollapsed={sidebarCollapsed}
             onToggleSidebar={handleToggleSidebar}

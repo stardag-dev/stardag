@@ -168,6 +168,40 @@ export interface PlanRoots {
   roots: FrontierMember[];
 }
 
+/**
+ * One of a build's plans, as `GET /builds/{id}/plans` lists them (newest
+ * generation first): lifecycle, scope with its deployment, member counts.
+ */
+export interface PlanDetail {
+  id: string;
+  build_id: string;
+  deployment_id: string;
+  deployment: Deployment;
+  settings_hash: string;
+  // Server-assigned per build, monotonic.
+  generation: number;
+  created_at: string;
+  // The build's active plan from here (the first on create, a
+  // replacement on seal).
+  activated_at: string | null;
+  // The static phase is fully stated and verified.
+  sealed_at: string | null;
+  // Set when a replacement plan activated.
+  superseded_at: string | null;
+  is_active: boolean;
+  member_count: number;
+  root_count: number;
+  // Given-up members; counted apart from `member_counts`.
+  excluded_count: number;
+  // Non-excluded members by their task's global status.
+  member_counts: Partial<Record<TaskStatus, number>>;
+}
+
+export interface PlanListResponse {
+  build_id: string;
+  plans: PlanDetail[];
+}
+
 // ---- Plan membership and edges (assumed: not served on this branch yet) ----
 
 export type AdmittedBy = "root" | "static" | "dynamic" | "closure";
@@ -284,6 +318,31 @@ export interface Task {
   instances: TaskInstance[];
 }
 
+// ---- The event log ----
+
+// Widened to `string` at the boundary so a type a newer server adds renders.
+export type EventType = string;
+
+/** One row of the append-only log (`GET /tasks/{id}/events`), oldest first. */
+export interface TaskEvent {
+  id: string;
+  event_type: EventType;
+  created_at: string;
+  // Null for an event with no build (an operator invalidate).
+  build_id: string | null;
+  plan_id: string | null;
+  execution_id: string | null;
+  task_id: string | null;
+  // False for a report that was recorded but refused: history, not state.
+  report_applied: boolean;
+  error_message: string | null;
+  event_metadata: Record<string, unknown> | null;
+}
+
+export interface EventListResponse {
+  events: TaskEvent[];
+}
+
 // ---- Executions ----
 
 export interface Execution {
@@ -361,4 +420,32 @@ export interface TaskArtifact {
 
 export interface TaskArtifactListResponse {
   artifacts: TaskArtifact[];
+}
+
+// ---- Concurrency limits ----
+
+/** A task occupying a slot of a limit key: a live claim. */
+export interface ConcurrencyLimitHolder {
+  task_id: string;
+  task_name: string;
+  // The claim's holder: the plan it was granted through, and its build.
+  build_id: string;
+  plan_id: string;
+  execution_id: string | null;
+  // When the claim was granted ("running since").
+  started_at: string | null;
+}
+
+export interface ConcurrencyLimit {
+  key: string;
+  // 0 refuses every claim carrying the key.
+  max_concurrent: number;
+  // Slots occupied by live claims.
+  in_use: number;
+  // Present when read with `include_holders=true`.
+  holders?: ConcurrencyLimitHolder[] | null;
+}
+
+export interface ConcurrencyLimitListResponse {
+  limits: ConcurrencyLimit[];
 }

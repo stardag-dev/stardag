@@ -11,9 +11,10 @@ interface TaskPageProps {
 }
 
 /**
- * A task page keyed by `task_id`, or — without one — a lookup by id. The
- * registry serves no task list or search route, so tasks are reached from
- * a build's plan, a pasted id, or a link.
+ * A task page keyed by `task_id`, or — without one — a lookup by id. v2
+ * keeps parameters on `task_instance.body` per scope and serves no search
+ * over them yet, so tasks are reached from a build's plan, a pasted id, or
+ * a link; the explorer returns with that route.
  */
 export function TaskPage({ taskId, onOpenTask }: TaskPageProps) {
   const { activeEnvironment } = useEnvironment();
@@ -71,8 +72,8 @@ export function TaskPage({ taskId, onOpenTask }: TaskPageProps) {
         </button>
       </form>
       <p className="text-sm text-gray-500 dark:text-gray-400">
-        Open a task by its id. Tasks are listed per build, in its plan; an
-        environment-wide task search is not served by this registry.
+        Open a task by its id; tasks are also listed per build, in its plan. Search over
+        task parameters returns in a later release.
       </p>
     </div>
   );
