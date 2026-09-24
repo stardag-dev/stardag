@@ -299,7 +299,16 @@ assignee the maintainer.
       build failure reason and the task event log (so
       `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
 - [ ] I10 — tests. docker-compose e2e tier re-pointed to v2 (STA-110).
-- [ ] I11 — docs
+- [ ] I11 — user docs in review (draft PR against `v2`): `concepts/parameters.md`,
+      `concepts/build-execution.md`, `concepts/modal-orchestration.md`
+      ("Deployments and code versions"), `how-to/evolve-dags.md`,
+      `how-to/integrate-modal.md`, `platform/api.md` rewritten for the
+      v2 entities; `concepts/dependencies.md`/`concepts/index.md` minor
+      fixes; `configuration/cli.md`'s build/task/concurrency-limit
+      sections cut to the four commands the v2 CLI currently ships.
+      `docs/design/README.md` and `DEV_README.md` needed no change.
+      `principles.md`/`CHANGELOG.md`/`RELEASE_NOTES.md` are a separate
+      session's half of I11.
 - [ ] I12 — release
 
 ## Delivery steps
