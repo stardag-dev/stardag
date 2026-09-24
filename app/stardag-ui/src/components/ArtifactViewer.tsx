@@ -3,6 +3,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { TaskArtifact } from "../types/task";
 import { FullscreenModal } from "./FullscreenModal";
+import { Tooltip } from "./ui/Tooltip";
 
 // Expand icon component
 function ExpandIcon({ className = "h-4 w-4" }: { className?: string }) {
@@ -30,13 +31,16 @@ interface ExpandButtonProps {
 
 export function ExpandButton({ onClick, title = "Expand" }: ExpandButtonProps) {
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      className="rounded p-1 text-gray-400 hover:bg-gray-200 hover:text-gray-600 dark:hover:bg-gray-600 dark:hover:text-gray-300"
-    >
-      <ExpandIcon />
-    </button>
+    <Tooltip content={title}>
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={title}
+        className="rounded p-1 text-gray-400 hover:bg-gray-200 hover:text-gray-600 dark:hover:bg-gray-600 dark:hover:text-gray-300"
+      >
+        <ExpandIcon />
+      </button>
+    </Tooltip>
   );
 }
 

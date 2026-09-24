@@ -101,9 +101,11 @@ shows one completion:
   ended ones included — executor, worker, how it ended or what became of
   its claim, its build, and for Modal the call id with a link to the Modal
   dashboard and the full set of Modal identifiers.
-- **Instances**: each construction of the task, under its deployment and
-  settings, with its parameters; parameters that differ between instances
-  are named.
+- **Task Parameters**: the parameters of the instance the viewed plan
+  holds (or the newest). The info icon shows that instance's scope —
+  deployment and settings hash — its hashes and times, and the task's other
+  instances below it, with the parameters they differ in. Fullscreen lists
+  every instance above the parameters of the selected one.
 - **Artifacts** the task produced, and its **output URI**.
 - **See full event log**: the task's append-only history across builds,
   including reports the registry recorded but refused and structure

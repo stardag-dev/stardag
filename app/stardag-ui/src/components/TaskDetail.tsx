@@ -10,7 +10,7 @@ import { CopyButton } from "./ModalExecution";
 import { TaskClaimPanel } from "./TaskClaimPanel";
 import { TaskEventLog } from "./TaskEventLog";
 import { TaskExecutions } from "./TaskExecutions";
-import { TaskInstances } from "./TaskInstances";
+import { TaskParameters } from "./TaskParameters";
 import { Tooltip } from "./ui/Tooltip";
 
 /** The build a task is opened from, when it is. */
@@ -51,7 +51,8 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 }
 
 /**
- * One completion: its status and claim, the instances that realise it,
+ * One completion: its status and claim, its parameters (over the instances
+ * that realise it),
  * every execution of it across builds (`GET /tasks/{id}/executions`,
  * ended ones included), and its artifacts.
  *
@@ -278,13 +279,11 @@ export function TaskDetail({
             </div>
           )}
 
-          <Section title={`Instances (${task.instances.length})`}>
-            <TaskInstances
-              instances={task.instances}
-              deploymentsById={deploymentsById}
-              planInstanceId={context?.planInstanceId}
-            />
-          </Section>
+          <TaskParameters
+            instances={task.instances}
+            deploymentsById={deploymentsById}
+            planInstanceId={context?.planInstanceId}
+          />
 
           <Section
             title={
