@@ -403,10 +403,19 @@ async def _local(
 
 
 async def activate_deployment(
-    session: AsyncSession, environment_id: UUID, deployment_id: UUID
+    session: AsyncSession,
+    environment_id: UUID,
+    deployment_id: UUID,
+    *,
+    modal_app_id: str | None = None,
+    image_id: str | None = None,
 ) -> DeploymentState:
-    """Mark a deployment live after its deploy succeeded. Idempotent by
-    state: an activated row is returned unchanged.
+    """Mark a deployment live after its deploy succeeded, recording what
+    only the finished deploy knows (``modal_app_id``, ``image_id``).
+    Idempotent by state: an activated row is returned unchanged. A given
+    value fills a NULL column or must equal the recorded one (409
+    ``deployment_activation_conflict`` otherwise, nothing written): a
+    deployment's identity does not change after the fact.
 
     Takes the app lock exclusively (``kind`` and ``app_name`` never change,
     so they are read first): a seal or reactivation checking currency holds
@@ -437,6 +446,22 @@ async def activate_deployment(
         )
         if row is None:
             raise unknown
+        given = {"modal_app_id": modal_app_id, "image_id": image_id}
+        clashing = sorted(
+            column
+            for column, value in given.items()
+            if value is not None and getattr(row, column) not in (None, value)
+        )
+        if clashing:
+            raise Conflict(
+                "deployment_activation_conflict",
+                "the activation names values other than those recorded",
+                deployment_id=str(deployment_id),
+                fields=clashing,
+            )
+        for column, value in given.items():
+            if value is not None:
+                setattr(row, column, value)
         if row.activated_at is None:
             row.activated_at = utc_now()
             await session.flush()

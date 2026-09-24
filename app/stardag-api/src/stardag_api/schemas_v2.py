@@ -68,6 +68,16 @@ class DeploymentCreate(BaseModel):
     modal_app_id: str | None = Field(default=None, max_length=64)
 
 
+class DeploymentActivate(BaseModel):
+    """``POST /deployments/{id}/activate``: what only the finished deploy
+    knows. Optional; a given value fills a NULL or must match."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    modal_app_id: str | None = Field(default=None, max_length=64)
+    image_id: str | None = Field(default=None, max_length=128)
+
+
 class DeploymentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

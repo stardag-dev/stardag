@@ -336,3 +336,46 @@ async def test_an_activation_waits_for_a_currency_check_in_flight(
         await seal.commit()
     state = await asyncio.wait_for(activating, 10)
     assert state.activated_at is not None and state.is_current
+
+
+async def test_activation_records_what_the_finished_deploy_knows(
+    client: AsyncClient,
+):
+    """``/activate {modal_app_id?, image_id?}``: the body is optional (the
+    old empty call still activates); a given value fills a NULL column and
+    must match a recorded one (409 ``deployment_activation_conflict``,
+    nothing written); a re-sent identical activation is a no-op."""
+    created = await client.post(
+        "/api/v2/deployments",
+        json={
+            "id": str(uuid4()),
+            "kind": "modal",
+            "app_name": "svc",
+            "code_id": "c1",
+            "image_id": "im-1",
+        },
+    )
+    assert created.status_code == 200, created.text
+    path = f"/api/v2/deployments/{created.json()['id']}/activate"
+
+    clash = await client.post(path, json={"image_id": "im-2"})
+    assert clash.status_code == 409
+    assert clash.json()["detail"]["code"] == "deployment_activation_conflict"
+    assert clash.json()["detail"]["fields"] == ["image_id"]
+
+    body = {"modal_app_id": "ap-123", "image_id": "im-1"}
+    activated = await client.post(path, json=body)
+    assert activated.status_code == 200, activated.text
+    row = activated.json()
+    assert row["activated_at"] is not None and row["is_current"]
+    assert (row["modal_app_id"], row["image_id"]) == ("ap-123", "im-1")
+    again = await client.post(path, json=body)
+    assert again.json()["activated_at"] == row["activated_at"]
+    assert (await client.post(path)).status_code == 200
+
+    empty = await client.post(
+        "/api/v2/deployments",
+        json={"id": str(uuid4()), "kind": "modal", "app_name": "svc", "code_id": "c2"},
+    )
+    bare = await client.post(f"/api/v2/deployments/{empty.json()['id']}/activate")
+    assert bare.status_code == 200 and bare.json()["modal_app_id"] is None

@@ -16,6 +16,7 @@ from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
 from stardag_api.models import DeploymentKind
 from stardag_api.schemas_v2 import (
+    DeploymentActivate,
     DeploymentCreate,
     DeploymentListResponse,
     DeploymentResponse,
@@ -44,8 +45,17 @@ async def create_deployment(body: DeploymentCreate, db: Db, auth: Auth):
 
 
 @router.post("/deployments/{deployment_id}/activate", response_model=DeploymentResponse)
-async def activate_deployment(deployment_id: UUID, db: Db, auth: Auth):
-    return await deployments.activate_deployment(db, auth.environment_id, deployment_id)
+async def activate_deployment(
+    deployment_id: UUID, db: Db, auth: Auth, body: DeploymentActivate | None = None
+):
+    body = body or DeploymentActivate()
+    return await deployments.activate_deployment(
+        db,
+        auth.environment_id,
+        deployment_id,
+        modal_app_id=body.modal_app_id,
+        image_id=body.image_id,
+    )
 
 
 @router.get("/deployments", response_model=DeploymentListResponse)

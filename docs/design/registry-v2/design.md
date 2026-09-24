@@ -334,6 +334,10 @@ Dropped from v1: `task_data`, `is_phantom`, `latest_status_scope_key`,
 | `generation`                                                     | server-assigned at create, monotonic per `(environment_id, kind, app_name)`; decides which activated deployment is current |
 | `activated_at`                                                   | set by `/activate` after the deploy succeeded; NULL rows are never current and cannot host a plan                          |
 
+`/activate {modal_app_id?, image_id?}` records what only the finished
+deploy knows: a given value fills a NULL column or must equal the recorded
+one (409 `deployment_activation_conflict`).
+
 Index `(environment_id, kind, app_name, generation DESC)`; unique
 `(environment_id, kind, app_name, generation)`; partial unique
 `(environment_id, code_id) WHERE kind = 'local'`.
