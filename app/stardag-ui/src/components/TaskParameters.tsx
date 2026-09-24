@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { Deployment, TaskInstance } from "../types/task";
 import { deploymentLabel } from "../utils/deployments";
+import { shortHash } from "../utils/ids";
 import { differingParameters, parametersOf } from "../utils/instances";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 import { ExpandButton } from "./ArtifactViewer";
@@ -324,10 +325,10 @@ function InstanceTable({
                   )}
                 </td>
                 <td className={`${TD} font-mono`} title={instance.settings_hash}>
-                  {instance.settings_hash.slice(0, 12)}
+                  {shortHash(instance.settings_hash)}
                 </td>
                 <td className={`${TD} font-mono`} title={instance.instance_hash}>
-                  {instance.instance_hash.slice(0, 12)}
+                  {shortHash(instance.instance_hash)}
                 </td>
                 <td className={TD}>{instance.expanded_at ? "yes" : "no"}</td>
                 {differing.length > 0 && (

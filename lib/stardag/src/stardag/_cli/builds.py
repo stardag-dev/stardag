@@ -32,7 +32,6 @@ from stardag._cli._output import (
     YES_OPTION,
     emit_json,
     parse_uuid,
-    short,
     stamp,
 )
 from stardag._cli._registry_ctx import (
@@ -241,7 +240,7 @@ def _render_build(build: BuildInfo, plan: dict[str, Any] | None = None) -> None:
         table.add_row("Active plan", plan["plan_id"] or "- (none yet)")
     if plan and plan["plan_id"]:
         table.add_row("Deployment", plan["deployment_id"] or "-")
-        table.add_row("Settings hash", short(plan["settings_hash"], 16))
+        table.add_row("Settings hash", plan["settings_hash"] or "-")
         if plan["settings"]:
             table.add_row("Settings", json.dumps(plan["settings"], sort_keys=True))
         table.add_row("Sealed", "yes" if plan["sealed"] else "no")

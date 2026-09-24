@@ -8,7 +8,9 @@ the empty settings are ``{}`` and get a row like any other.
 
 from __future__ import annotations
 
-from sqlalchemy import PrimaryKeyConstraint, String
+from uuid import UUID
+
+from sqlalchemy import PrimaryKeyConstraint, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,7 +26,8 @@ class SettingsRecord(EnvironmentScopedMixin, Base):
         PrimaryKeyConstraint("environment_id", "hash", name="pk_settings"),
     )
 
-    # sha256 hex of the canonical JSON body (sorted keys, compact
-    # separators, UTF-8): stable across code versions, unlike task hashes.
-    hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # uuid5 of the canonical JSON body (sorted keys, compact separators,
+    # UTF-8) in a fixed namespace (``services.deployments``), computed by
+    # the registry: stable across code versions, unlike task hashes.
+    hash: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     body: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False)

@@ -193,7 +193,7 @@ def _render_task(task: TaskInfo, artifacts: list[TaskArtifactInfo]) -> None:
         instances.add_row(
             str(i.id),
             str(i.deployment_id),
-            short(i.settings_hash),
+            str(i.settings_hash),
             stamp(i.expanded_at) if i.expanded_at else "no",
             stamp(i.created_at),
         )

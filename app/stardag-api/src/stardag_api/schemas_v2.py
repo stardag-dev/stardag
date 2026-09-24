@@ -109,7 +109,7 @@ class DeploymentListResponse(BaseModel):
 class SettingsResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    hash: str
+    hash: UUID
     body: dict[str, str]
 
 
@@ -199,7 +199,7 @@ class PlanResponse(BaseModel):
     id: UUID
     build_id: UUID
     deployment_id: UUID
-    settings_hash: str
+    settings_hash: UUID
     generation: int
     activated_at: datetime | None
     sealed_at: datetime | None
@@ -352,7 +352,7 @@ class FrontierResponse(BaseModel):
     build_id: UUID
     plan_id: UUID | None
     deployment_id: UUID | None
-    settings_hash: str | None
+    settings_hash: UUID | None
     sealed: bool
     plan_complete: bool
     build_status: BuildStatus | None

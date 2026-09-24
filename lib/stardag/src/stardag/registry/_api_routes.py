@@ -402,7 +402,7 @@ def _settings_req(settings_hash: str) -> Request[SettingsInfo]:
         "GET",
         f"/settings/{settings_hash}",
         SettingsInfo.model_validate,
-        operation=f"Get settings {settings_hash[:12]}",
+        operation=f"Get settings {settings_hash}",
     )
 
 

@@ -32,7 +32,7 @@ function plan(generation: number, overrides: Partial<PlanDetail> = {}): PlanDeta
     build_id: "b",
     deployment_id: `dep-${generation}`,
     deployment: deployment(generation, false),
-    settings_hash: `settings${generation}abcdef`,
+    settings_hash: `${generation}${generation}406eac-39d0-5b1b-9423-cfb4a1454543`,
     generation,
     created_at: "2026-09-24T00:00:00Z",
     activated_at: "2026-09-24T00:00:00Z",
@@ -51,7 +51,7 @@ const frontier: BuildFrontier = {
   build_id: "b",
   plan_id: "plan-2",
   deployment_id: "dep-2",
-  settings_hash: "settings2abcdef",
+  settings_hash: "22406eac-39d0-5b1b-9423-cfb4a1454543",
   sealed: true,
   plan_complete: false,
   build_status: "running",
@@ -93,7 +93,13 @@ describe("BuildSchedulingPanel", () => {
     });
     expect(within(active).getByText("active")).toBeInTheDocument();
     expect(within(active).getByText("etl gen 2 · modal")).toBeInTheDocument();
-    expect(within(active).getByText("settings settings")).toBeInTheDocument();
+    // The settings hash is a UUID5 and abbreviates like a task id.
+    const settings = within(active).getByText("22406eac");
+    expect(settings.tagName).toBe("CODE");
+    expect(settings.closest("[title]")).toHaveAttribute(
+      "title",
+      "Settings 22406eac-39d0-5b1b-9423-cfb4a1454543",
+    );
     expect(within(active).getByText(/1 excluded/)).toBeInTheDocument();
 
     const old = screen.getByRole("listitem", { name: "Plan generation 1" });

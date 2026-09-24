@@ -85,7 +85,7 @@ class PlanState:
     id: UUID
     build_id: UUID
     deployment_id: UUID
-    settings_hash: str
+    settings_hash: UUID
     generation: int
     activated_at: datetime | None
     sealed_at: datetime | None

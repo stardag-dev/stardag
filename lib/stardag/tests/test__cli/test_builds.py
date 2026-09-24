@@ -20,6 +20,7 @@ from stardag.registry import BuildFrontier, BuildInfo, SettingsInfo, TickSummary
 runner = CliRunner(env={"COLUMNS": "240"})
 
 BUILD_ID = "11111111-1111-1111-1111-111111111111"
+SETTINGS_HASH = "33333333-3333-5333-8333-333333333333"
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
 
 
@@ -76,7 +77,7 @@ def _frontier(**overrides) -> BuildFrontier:
         "build_id": BUILD_ID,
         "plan_id": str(uuid4()),
         "deployment_id": str(uuid4()),
-        "settings_hash": "abc123",
+        "settings_hash": SETTINGS_HASH,
         "sealed": True,
         "plan_complete": False,
         "build_status": "running",
@@ -92,7 +93,7 @@ def _show_registry(**overrides):
     methods = {
         "build_get": _build(),
         "build_get_frontier": _frontier(),
-        "settings_get": SettingsInfo(hash="abc123", body={"THREADS": "4"}),
+        "settings_get": SettingsInfo(hash=SETTINGS_HASH, body={"THREADS": "4"}),
         "build_list_executions": [],
     }
     methods.update(overrides)
@@ -156,7 +157,13 @@ class TestFrontier:
         with _patch_resolve(registry):
             result = runner.invoke(app, ["frontier", BUILD_ID])
         assert result.exit_code == 0, result.output
-        for text in ("abc123", "runnable-1", "discover-1", "running-1", "TrainModel"):
+        for text in (
+            SETTINGS_HASH,
+            "runnable-1",
+            "discover-1",
+            "running-1",
+            "TrainModel",
+        ):
             assert text in result.output
 
     def test_closure_conflicts_are_surfaced(self):

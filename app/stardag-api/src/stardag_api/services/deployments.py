@@ -17,8 +17,9 @@ See design.md, "The deterministic scope" and the ``deployment`` /
   is authoritative for its own plans, so the seal's currency check, resume's
   reactivation check and rollover apply to ``kind = modal`` only.
 
-Settings are a flat ``str → str`` body stored under the sha256 of its
-canonical JSON; keys starting ``STARDAG_`` or ``MODAL_`` are reserved for
+Settings are a flat ``str → str`` body stored under a uuid5 of its
+canonical JSON, computed here from the posted body (a client never sends
+a hash, so none can name a body it does not match); keys starting ``STARDAG_`` or ``MODAL_`` are reserved for
 the framework and refused here as well as at the trigger.
 
 Every write is idempotent by state: a re-sent create finds its row, a
@@ -27,12 +28,11 @@ re-sent activation finds it activated, and neither writes anything.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -49,6 +49,15 @@ LOCAL_APP_NAME = "local"
 #: Prefixes of the framework's own environment variables; never settings.
 RESERVED_SETTINGS_PREFIXES = ("STARDAG_", "MODAL_")
 
+#: The uuid5 namespace of settings hashes; never change it. The SDK's
+#: ``stardag.build._settings.SETTINGS_HASH_NAMESPACE`` holds the same value
+#: (``uuid5(<default task-id namespace>, "stardag.settings_hash.v1")``), and
+#: both sides pin it, with the empty settings' hash, in a test.
+SETTINGS_HASH_NAMESPACE = UUID("d9bc3c1c-6c3b-534d-be75-aaa4c8d71c59")
+
+#: The settings hash of the empty settings ``{}``.
+EMPTY_SETTINGS_HASH = UUID("11406eac-39d0-5b1b-9423-cfb4a1454543")
+
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -62,9 +71,11 @@ def canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def settings_hash(body: Mapping[str, str]) -> str:
-    """sha256 hex of the canonical JSON of a settings body."""
-    return hashlib.sha256(canonical_json(dict(body))).hexdigest()
+def settings_hash(body: Mapping[str, str]) -> UUID:
+    """uuid5 of the canonical JSON of a settings body, in
+    :data:`SETTINGS_HASH_NAMESPACE` — the same kind of identity as a task id
+    or an instance hash, in a namespace of its own."""
+    return uuid5(SETTINGS_HASH_NAMESPACE, canonical_json(dict(body)).decode("utf-8"))
 
 
 def validate_settings(body: Mapping[str, object]) -> dict[str, str]:
@@ -90,7 +101,7 @@ def validate_settings(body: Mapping[str, object]) -> dict[str, str]:
 
 async def ensure_settings(
     session: AsyncSession, environment_id: UUID, body: Mapping[str, object]
-) -> str:
+) -> UUID:
     """Validate, then insert-if-absent; returns the hash. No commit."""
     checked = validate_settings(body)
     shash = settings_hash(checked)
@@ -103,7 +114,7 @@ async def ensure_settings(
 
 
 async def get_settings(
-    session: AsyncSession, environment_id: UUID, shash: str
+    session: AsyncSession, environment_id: UUID, shash: UUID
 ) -> SettingsRecord:
     record = await session.scalar(
         select(SettingsRecord).where(
@@ -112,7 +123,7 @@ async def get_settings(
         )
     )
     if record is None:
-        raise NotFound("unknown_settings", f"no settings {shash}", hash=shash)
+        raise NotFound("unknown_settings", f"no settings {shash}", hash=str(shash))
     return record
 
 

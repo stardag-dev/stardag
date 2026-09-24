@@ -51,7 +51,8 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
 - **Breaking: `settings` replaces the build config.** `sd.build(settings=...)`
   and `build_trigger(settings=...)` take a flat `dict[str, str]` applied as
   environment variables in every process of the build, and part of the
-  build's scope. `STARDAG_*` and `MODAL_*` keys are refused. Removed:
+  build's scope, keyed by a settings hash that is a UUID5 like the task id
+  and instance hash. `STARDAG_*` and `MODAL_*` keys are refused. Removed:
   `build_config`, `sd.build_config_scope`, `sd.get_build_config`,
   `sd.set_build_config`, the ContextVar transport and the
   `STARDAG_BUILD_CONFIG` / `STARDAG_SCOPE_KEY` variables.
@@ -188,8 +189,10 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
 /deployments/{id}/activate` after it; `GET /deployments` marks the current
   Modal deployment per app. Local deployments are created activated and are
   never current.
-- **New: settings.** Stored by content hash, validated at the server
-  (`reserved_settings_key`), read at `GET /settings/{hash}`.
+- **New: settings.** Stored under a UUID5 of the body's canonical JSON,
+  computed by the server from the posted body (a client sends no hash),
+  validated there (`reserved_settings_key`), read at
+  `GET /settings/{hash}`.
 - **Changed: invalidation follows the world only.** The one path out of
   COMPLETED is discovery observing the target missing (`TASK_INVALIDATED`,
   with the `observed_at` guard); there is no operator route.

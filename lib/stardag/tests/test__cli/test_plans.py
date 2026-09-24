@@ -16,6 +16,7 @@ runner = CliRunner(env={"COLUMNS": "240"})
 
 PLAN_ID = "22222222-2222-2222-2222-222222222222"
 BUILD_ID = "11111111-1111-1111-1111-111111111111"
+SETTINGS_HASH = "33333333-3333-5333-8333-333333333333"
 
 
 def _mock_registry(**methods):
@@ -38,7 +39,7 @@ def _plan_roots(**overrides) -> PlanRoots:
         "plan_id": PLAN_ID,
         "build_id": BUILD_ID,
         "deployment_id": str(uuid4()),
-        "settings_hash": "abc123",
+        "settings_hash": SETTINGS_HASH,
         "roots": [],
     }
     data.update(overrides)
@@ -50,7 +51,7 @@ def _frontier(**overrides) -> BuildFrontier:
         "build_id": BUILD_ID,
         "plan_id": PLAN_ID,
         "deployment_id": str(uuid4()),
-        "settings_hash": "abc123",
+        "settings_hash": SETTINGS_HASH,
         "sealed": True,
         "plan_complete": False,
         "build_status": "running",
@@ -64,7 +65,7 @@ def _plan(**overrides) -> PlanDetail:
         "id": PLAN_ID,
         "build_id": BUILD_ID,
         "deployment_id": str(uuid4()),
-        "settings_hash": "abc123",
+        "settings_hash": SETTINGS_HASH,
         "generation": 1,
         "activated_at": "2026-09-24T00:00:00Z",
         "sealed_at": "2026-09-24T00:00:01Z",
@@ -83,7 +84,7 @@ def _show_registry(**overrides):
         "plan_get": _plan(),
         "plan_roots_info": _plan_roots(),
         "build_get_frontier": _frontier(),
-        "settings_get": SettingsInfo(hash="abc123", body={"THREADS": "4"}),
+        "settings_get": SettingsInfo(hash=SETTINGS_HASH, body={"THREADS": "4"}),
     }
     methods.update(overrides)
     return _mock_registry(**methods)

@@ -54,7 +54,7 @@ class PlanDetail:
     build_id: UUID
     deployment_id: UUID
     deployment: DeploymentState
-    settings_hash: str
+    settings_hash: UUID
     generation: int
     created_at: datetime
     activated_at: datetime | None
@@ -159,7 +159,7 @@ class PlanRoots:
     plan_id: UUID
     build_id: UUID
     deployment_id: UUID
-    settings_hash: str
+    settings_hash: UUID
     roots: list[FrontierMember]
 
 
@@ -237,7 +237,7 @@ class PlanGraph:
     plan_id: UUID
     build_id: UUID
     deployment_id: UUID
-    settings_hash: str
+    settings_hash: UUID
     members: list[GraphMember]
     edges: list[GraphEdge]
 

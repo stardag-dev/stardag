@@ -44,7 +44,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
       {
         id: "i-1",
         deployment_id: "dep-1",
-        settings_hash: "a".repeat(64),
+        settings_hash: "11406eac-39d0-5b1b-9423-cfb4a1454543",
         instance_hash: "h".repeat(16),
         body: { __namespace: "demo", __name: "Train", epochs: 3 },
         expanded_at: "2026-09-24T00:00:02Z",
