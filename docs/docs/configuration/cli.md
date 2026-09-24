@@ -514,13 +514,12 @@ holds a claim.
   or a re-trigger under new settings) — and **implies `--no-cancel`**: the
   build keeps running on its current plan; only the stray executions of
   its old one are stopped.
-- `--mark-lost` attempts to additionally end any selected execution that
-  has no call id to cancel, with outcome `lost`, after its own
-  confirmation — but the v2 server currently accepts only `outcome:
-"stopped"` on this endpoint and rejects the `lost` request with 422, so
-  today this reports every such execution as "not marked lost" rather
-  than ending it. Backend support for a distinct `lost` outcome has not
-  landed yet.
+- `--mark-lost` additionally ends any selected execution that has no call
+  id to cancel, with outcome `lost`, after its own confirmation and
+  warning. If it still holds the task's claim, the claim is released as
+  `cancelled` and the task set CANCELLED. No report from a marked-lost
+  execution is ever applied afterwards — if it is in fact still running,
+  its end is recorded but discarded, and its result is not applied.
 - Only Modal executions can be cancelled from here; one running in a
   driver's own process, or whose spawn has not yet reported a call id, is
   listed with the reason and left alone (re-run to catch the latter once
