@@ -144,7 +144,10 @@ async def build_aio(
         register_all: Expand complete tasks too, so every edge is recorded.
         on_registry_failure: ``"raise"`` (default) or ``"warn"`` — carry on
             through a registry *outage*; a refusal always raises.
-        concurrency_config / concurrency_limiter: Build-local limits.
+        concurrency_config: Build-local limits (how many tasks run at
+            once in this process).
+        concurrency_limiter: A pre-built limiter to use instead of
+            ``concurrency_config``.
         claim_config: How claims are waited on and renewed.
         settings: Environment variables applied for the build's duration
             (the scope's second half; ``STARDAG_*`` / ``MODAL_*`` refused).
