@@ -266,6 +266,50 @@ class TestRoutes:
             "claim_ttl_seconds": 120,
         }
 
+    def test_a_task_read_carries_its_claim_state(self):
+        """``GET /tasks/{id}``: the server's ``TaskResponse`` — status,
+        timestamps and the execution the claim names — parses whole."""
+        execution_id = uuid4()
+        recorder = _Recorder(
+            {
+                ("GET", "/api/v2/tasks/t1"): {
+                    "task_id": "t1",
+                    "task_namespace": "ns",
+                    "task_name": "T",
+                    "version": "1",
+                    "output_uri": "memory://x",
+                    "status": "running",
+                    "status_at": NOW.isoformat(),
+                    "started_at": NOW.isoformat(),
+                    "completed_at": None,
+                    "error_message": None,
+                    "claim_expires_at": NOW.isoformat(),
+                    "execution_id": str(execution_id),
+                    "instances": [],
+                }
+            }
+        )
+        task = _registry(recorder).task_get("t1")
+        assert (task.status, task.execution_id) == ("running", execution_id)
+        assert task.started_at == NOW and task.claim_expires_at == NOW
+
+    def test_concurrency_limits(self):
+        recorder = _Recorder(
+            {
+                ("DELETE", "/api/v2/concurrency-limits/gpu"): httpx.Response(204),
+                ("GET", "/api/v2/concurrency-limits"): {
+                    "limits": [{"key": "gpu", "max_concurrent": 2}]
+                },
+            }
+        )
+        registry = _registry(recorder)
+        registry.concurrency_limit_set("gpu", 2)
+        assert recorder.requests[-1].method == "PUT"
+        assert recorder.body() == {"max_concurrent": 2}
+        assert registry.concurrency_limit_list() == {"gpu": 2}
+        registry.concurrency_limit_delete("gpu")
+        assert recorder.requests[-1].url.path == "/api/v2/concurrency-limits/gpu"
+
     def test_deployments(self):
         deployment_id = uuid4()
         row = {
@@ -395,6 +439,9 @@ class TestRoutes:
         )
         assert execution.still_wanted and not execution.in_current_plan
         assert recorder.requests[-1].url.params["not_in_current_plan"] == "true"
+        registry.build_list_executions(build_id, include_ended=True)
+        assert recorder.requests[-1].url.params["include_ended"] == "true"
+        assert "not_in_current_plan" not in recorder.requests[-1].url.params
         registry.execution_report_stopped(execution_id)
         assert recorder.body() == {"outcome": "stopped"}
 

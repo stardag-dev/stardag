@@ -1,7 +1,9 @@
-"""``/api/v2`` routes for the deterministic scope: deployments and settings.
+"""``/api/v2`` routes for an environment's configuration: deployments and
+settings (the deterministic scope), and named concurrency limits.
 
 Thin by rule: parse, resolve the environment from the credentials, call
-one service in ``services/deployments.py``.
+one service in ``services/deployments.py`` or
+``services/concurrency_limits.py``.
 """
 
 from __future__ import annotations
@@ -9,25 +11,29 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
 from stardag_api.models import DeploymentKind
 from stardag_api.schemas_v2 import (
+    ConcurrencyLimitListResponse,
+    ConcurrencyLimitResponse,
+    ConcurrencyLimitSet,
     DeploymentActivate,
     DeploymentCreate,
     DeploymentListResponse,
     DeploymentResponse,
     SettingsResponse,
 )
-from stardag_api.services import deployments
+from stardag_api.services import concurrency_limits, deployments
 
 router = APIRouter(tags=["registry-v2"])
 
 Db = Annotated[AsyncSession, Depends(get_db)]
 Auth = Annotated[SdkAuth, Depends(require_sdk_auth)]
+LimitKey = Annotated[str, Path(min_length=1, max_length=255)]
 
 
 @router.post("/deployments", response_model=DeploymentResponse)
@@ -83,3 +89,25 @@ async def list_deployments(
 @router.get("/settings/{settings_hash}", response_model=SettingsResponse)
 async def get_settings(settings_hash: str, db: Db, auth: Auth):
     return await deployments.get_settings(db, auth.environment_id, settings_hash)
+
+
+@router.put("/concurrency-limits/{key}", response_model=ConcurrencyLimitResponse)
+async def set_concurrency_limit(
+    key: LimitKey, body: ConcurrencyLimitSet, db: Db, auth: Auth
+):
+    return await concurrency_limits.set_limit(
+        db, auth.environment_id, key, body.max_concurrent
+    )
+
+
+@router.delete("/concurrency-limits/{key}", status_code=204)
+async def delete_concurrency_limit(key: LimitKey, db: Db, auth: Auth) -> None:
+    await concurrency_limits.delete_limit(db, auth.environment_id, key)
+
+
+@router.get("/concurrency-limits", response_model=ConcurrencyLimitListResponse)
+async def list_concurrency_limits(db: Db, auth: Auth):
+    rows = await concurrency_limits.list_limits(db, auth.environment_id)
+    return ConcurrencyLimitListResponse(
+        limits=[ConcurrencyLimitResponse.model_validate(r) for r in rows]
+    )

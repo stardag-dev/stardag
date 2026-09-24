@@ -10,6 +10,8 @@ from uuid import UUID
 
 import pytest
 
+from stardag.exceptions import NotFoundError
+
 from stardag import BaseTask, auto_namespace
 from stardag.build import TickConfig, run_tick_aio
 from stardag.build._reactive import roll_over_aio
@@ -281,6 +283,31 @@ class TestRefusals:
         assert registry.builds[build_id].status == "running"
         # The refusal recorded the keys, so a freed slot finds the task.
         assert registry.tasks[str(task.id)].limit_keys == {"gpu"}
+
+    async def test_a_limit_is_configured_through_the_client_seam(
+        self, default_in_memory_fs_target: Target
+    ):
+        """``concurrency_limit_set/delete/list``: the fake follows the
+        server's seam, and the cap it sets is the one a claim meets."""
+        registry = InMemoryRegistry()
+        registry.concurrency_limit_set("gpu", 0)
+        assert registry.concurrency_limit_list() == {"gpu": 0}
+        task = SyncOnlyTask(name=f"limited-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        config = TickConfig(
+            linger_seconds=0,
+            poll_interval_seconds=0.01,
+            limit_key_selector=lambda t: ["gpu"],
+        )
+        executor = FakeDetachedExecutor(registry=registry)
+        summary = await _tick(registry, build_id, executor, config)
+        assert summary.limit_denied == 1
+        registry.concurrency_limit_delete("gpu")
+        assert registry.concurrency_limit_list() == {}
+        with pytest.raises(NotFoundError):
+            registry.concurrency_limit_delete("gpu")
+        summary = await _tick(registry, build_id, executor, config)
+        assert summary.spawned == 1
 
     async def test_a_spawn_failing_every_attempt_is_recorded_and_the_build_stalls(
         self, default_in_memory_fs_target: Target

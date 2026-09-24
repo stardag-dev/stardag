@@ -12,6 +12,11 @@ a plan's roots for rollover, and a completion with its instances.
   parameters, so a completion is returned with its **instances** — each a
   body under one scope — newest first. Which body to rehydrate is the
   caller's choice (they are different constructions of one promise).
+- ``GET /tasks/{task_id}/events`` and ``GET /builds/{id}/events``
+  (:func:`list_events`): the append-only log, oldest first. The status
+  columns are one row per task, overwritten by whoever wrote last; the log
+  is where "which build reset this task" and "which report was refused"
+  are still visible.
 
 Plain reads: no locks, no writes.
 """
@@ -29,11 +34,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stardag_api.models import (
     Build,
     BuildStatus,
+    Event,
+    EventType,
     PlanMember,
     Task,
     TaskInstance,
     TaskStatus,
 )
+from stardag_api.services.builds import get_build
 from stardag_api.services.errors import NotFound
 from stardag_api.services.frontier import FrontierMember
 from stardag_api.services.registration import get_plan
@@ -195,12 +203,82 @@ async def get_task(
     )
 
 
+@dataclass(frozen=True)
+class EventView:
+    id: UUID
+    event_type: EventType
+    created_at: datetime
+    build_id: UUID | None
+    plan_id: UUID | None
+    execution_id: UUID | None
+    task_id: str | None
+    report_applied: bool
+    error_message: str | None
+    event_metadata: dict[str, Any] | None
+
+
+async def list_events(
+    session: AsyncSession,
+    environment_id: UUID,
+    *,
+    build_id: UUID | None = None,
+    task_id: str | None = None,
+    limit: int = MAX_LIST_LIMIT,
+) -> list[EventView]:
+    """Events of one build or one task (exactly one of the two), oldest
+    first, at most ``limit``. 404 for an unknown build or task: an empty
+    list must mean "nothing recorded", never "no such thing"."""
+    if (build_id is None) == (task_id is None):
+        raise ValueError("list_events takes exactly one of build_id, task_id")
+    stmt = (
+        select(Event, Task.task_id)
+        .outerjoin(Task, Task.id == Event.task_pk)
+        .where(Event.environment_id == environment_id)
+    )
+    if build_id is not None:
+        build = await get_build(session, environment_id, build_id)
+        stmt = stmt.where(Event.build_id == build.id)
+    else:
+        task_pk = await session.scalar(
+            select(Task.id).where(
+                Task.environment_id == environment_id, Task.task_id == task_id
+            )
+        )
+        if task_pk is None:
+            raise NotFound("unknown_task", f"no task {task_id}", task_id=task_id)
+        stmt = stmt.where(Event.task_pk == task_pk)
+    rows = (
+        await session.execute(
+            stmt.order_by(Event.created_at, Event.id).limit(
+                max(1, min(limit, MAX_LIST_LIMIT))
+            )
+        )
+    ).tuples()
+    return [
+        EventView(
+            id=e.id,
+            event_type=e.event_type,
+            created_at=e.created_at,
+            build_id=e.build_id,
+            plan_id=e.plan_id,
+            execution_id=e.execution_id,
+            task_id=tid,
+            report_applied=e.report_applied,
+            error_message=e.error_message,
+            event_metadata=e.event_metadata,
+        )
+        for e, tid in rows
+    ]
+
+
 __all__ = [
+    "EventView",
     "InstanceView",
     "MAX_LIST_LIMIT",
     "PlanRoots",
     "TaskView",
     "get_task",
     "list_builds",
+    "list_events",
     "plan_roots",
 ]

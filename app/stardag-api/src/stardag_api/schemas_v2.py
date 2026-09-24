@@ -18,6 +18,7 @@ from stardag_api.models.enums import (
     BuildStatus,
     ClaimOutcome,
     DeploymentKind,
+    EventType,
     ExecutionOutcome,
     TaskStatus,
 )
@@ -610,3 +611,44 @@ class TaskArtifactResponse(BaseModel):
 
 class TaskArtifactListResponse(BaseModel):
     artifacts: list[TaskArtifactResponse]
+
+
+class EventResponse(BaseModel):
+    """One row of the append-only log. ``report_applied`` is False for a
+    report that was recorded but refused: history, not state."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    event_type: EventType
+    created_at: datetime
+    build_id: UUID | None
+    plan_id: UUID | None
+    execution_id: UUID | None
+    task_id: str | None
+    report_applied: bool
+    error_message: str | None
+    event_metadata: dict[str, Any] | None
+
+
+class EventListResponse(BaseModel):
+    """Oldest first."""
+
+    events: list[EventResponse]
+
+
+class ConcurrencyLimitSet(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_concurrent: int = Field(ge=0)
+
+
+class ConcurrencyLimitResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    key: str
+    max_concurrent: int
+
+
+class ConcurrencyLimitListResponse(BaseModel):
+    limits: list[ConcurrencyLimitResponse]

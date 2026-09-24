@@ -30,12 +30,21 @@ Auth = Annotated[SdkAuth, Depends(require_sdk_auth)]
 
 @router.get("/builds/{build_id}/executions", response_model=ExecutionListResponse)
 async def list_executions(
-    build_id: UUID, db: Db, auth: Auth, not_in_current_plan: bool = False
+    build_id: UUID,
+    db: Db,
+    auth: Auth,
+    not_in_current_plan: bool = False,
+    include_ended: bool = False,
 ):
     """The build's executions with no end reported (what ``builds stop``
-    lists); ``not_in_current_plan`` keeps the orphans."""
-    rows = await executions.list_unended(
-        db, auth.environment_id, build_id, not_in_current_plan=not_in_current_plan
+    lists); ``not_in_current_plan`` keeps the orphans, ``include_ended``
+    lists the whole ledger."""
+    rows = await executions.list_executions(
+        db,
+        auth.environment_id,
+        build_id,
+        not_in_current_plan=not_in_current_plan,
+        include_ended=include_ended,
     )
     return ExecutionListResponse(
         build_id=build_id,

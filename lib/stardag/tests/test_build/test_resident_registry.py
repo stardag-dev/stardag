@@ -135,6 +135,21 @@ class TestStaticPhase:
             execution = registry.executions[claim["execution_id"]]
             assert execution.outcome == "completed"
 
+    async def test_the_whole_ledger_lists_ended_executions(
+        self, engine, default_in_memory_fs_target: Target
+    ):
+        """``include_ended`` (the fake follows the server's seam): every
+        execution the build granted, where the default lists none once all
+        have ended."""
+        registry = InMemoryRegistry()
+        leaf, mid, root = _chain()
+        await engine([root], registry=registry)
+        (build_id,) = registry.builds
+        assert registry.build_list_executions(build_id) == []
+        ledger = registry.build_list_executions(build_id, include_ended=True)
+        assert {e.task_id for e in ledger} == {str(t.id) for t in (leaf, mid, root)}
+        assert {e.outcome for e in ledger} == {"completed"}
+
     async def test_a_yield_is_sent_once_with_suspend_false_and_keeps_the_claim(
         self, engine, default_in_memory_fs_target: Target
     ):
