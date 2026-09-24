@@ -575,3 +575,74 @@ async def test_seal_verifies_closure_over_edges_another_plan_added(h: Harness):
     assert closed.admitted == 1 and not closed.conflicts
     assert (await h.members(a.id))[u.task_id]["admitted_by"] == "closure"
     assert (await h.seal(a.id)).sealed_at is not None
+
+
+# --------------------------------------------------------------------------
+# A sealed plan: re-delivery and discovery only
+# --------------------------------------------------------------------------
+
+
+async def test_a_sealed_plan_refuses_new_members_and_new_edges(h: Harness):
+    """After ``/seal`` the request is fully stated: an exact re-delivery is
+    a no-op, a member the plan does not hold is 409 ``plan_sealed``, and so
+    is a new edge on an instance the plan already expanded. Nothing of a
+    refused chunk lands."""
+    a, c = item("A"), item("C")
+    root = item("R", upstreams=[a])
+    _, plan = await h.planned([root], [a, c, root], seal=True)
+
+    again = await h.register(plan.id, [a, c, root])
+    assert again == type(again)()  # every count zero
+
+    b = item("B")
+    with pytest.raises(Conflict) as exc:
+        await h.register(plan.id, [b])
+    assert exc.value.code == "plan_sealed"
+    assert exc.value.detail["task_ids"] == [b.task_id]
+    assert await h.task_count(b) == 0
+
+    grown = item("R", upstreams=[a, c])
+    assert grown.instance_hash == root.instance_hash
+    with pytest.raises(Conflict) as exc:
+        await h.register(plan.id, [grown])
+    assert exc.value.code == "plan_sealed"
+    assert set(await h.members(plan.id)) == {a.task_id, c.task_id, root.task_id}
+
+
+async def test_a_sealed_plan_takes_a_discovery_jobs_result(h: Harness):
+    """A root admitted unexpanded because its target existed, invalidated
+    after the seal, is a discovery job; its expansion lands through the
+    same route on the sealed plan, with the new upstreams it reaches."""
+    u = item("U")
+    root = item("R", upstreams=[u])
+    build, plan = await h.planned([root], [observed(unexpanded(root), True)], seal=True)
+    await h.register(plan.id, [observed(unexpanded(root), False)])
+    assert root.task_id in task_ids((await h.frontier(build)).discovery_jobs)
+
+    result = await h.register(plan.id, [u, root])
+    assert result.members_admitted == 1 and result.edges_created == 1
+    frontier = await h.frontier(build)
+    assert task_ids(frontier.runnable) == {u.task_id}
+    assert frontier.discovery_jobs == []
+
+
+async def test_a_chunk_carrying_one_instance_twice_must_agree(h: Harness):
+    """The driver de-duplicates by instance: an exact repeat in one chunk is
+    de-duplicated, and a repeat with other ``declared_upstreams`` is 400
+    ``duplicate_item`` naming the instance, rather than silently keeping
+    the first declaration's edges."""
+    u1, u2 = item("U1"), item("U2")
+    t = item("T", upstreams=[u1])
+    other = item("T", upstreams=[u1, u2])
+    assert other.instance_hash == t.instance_hash
+    _, plan = await h.planned([item("R", upstreams=[t])])
+
+    with pytest.raises(BadRequest) as exc:
+        await h.register(plan.id, [u1, u2, t, other])
+    assert exc.value.code == "duplicate_item"
+    assert exc.value.detail["instance_hash"] == t.instance_hash
+    assert exc.value.detail["fields"] == ["declared_upstreams"]
+    assert await h.task_count(t) == 0
+
+    result = await h.register(plan.id, [u1, t, t])
+    assert result.instances_created == 2

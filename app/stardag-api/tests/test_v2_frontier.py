@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import pytest
 
+from stardag_api.models import BuildStatus
 from stardag_api.services import frontier as frontier_service
+from stardag_api.services.errors import Conflict
 from tests.v2_support import Harness, item, observed, task_ids, unexpanded
 
 
@@ -144,3 +146,32 @@ async def test_exclusion_cascades_to_the_downstream_closure(h: Harness):
     _, plan = await h.planned([root], [leaf, root])
     exclude_member = getattr(frontier_service, "exclude_member")
     await exclude_member(plan.id, leaf.task_id)
+
+
+async def test_a_build_that_is_not_running_hands_out_no_work(h: Harness):
+    """A closure conflict fails the build in the frontier call itself: that
+    call, and every later one, returns no runnable members and no discovery
+    jobs and reports ``build_status``; a claiming start on a member the
+    failed build's plan still holds is 409 ``build_not_running``."""
+    deployment = await h.new_deployment()
+    u1 = item("U", extra={"mode": "fast"})
+    u2 = item("U", extra={"mode": "slow"})
+    x = item("X", upstreams=[u2])
+    ready = item("Ready")
+    build_a, plan_a = await h.planned(
+        [item("RA", upstreams=[x, ready])],
+        [u1, ready, observed(unexpanded(x), True)],
+        deployment_id=deployment,
+    )
+    assert ready.task_id in task_ids((await h.frontier(build_a)).runnable)
+    await h.planned([item("RB", upstreams=[x])], [u2, x], deployment_id=deployment)
+
+    for _ in range(2):
+        frontier = await h.frontier(build_a)
+        assert frontier.build_status == BuildStatus.FAILED
+        assert frontier.runnable == [] and frontier.discovery_jobs == []
+    with pytest.raises(Conflict) as exc:
+        await h.start(plan_a.id, ready)
+    assert exc.value.code == "build_not_running"
+    assert exc.value.detail["build_status"] == "failed"
+    assert (await h.task(ready))["status"] == "pending"

@@ -14,6 +14,12 @@ For a member ``m`` of the active plan, with instance ``i`` and task ``t``::
 
 evaluated after the closure step, in the same transaction. The frontier is
 a hint; a claiming start re-checks the predicate under its lock.
+
+Only a RUNNING build has work to hand out: for any other status (a closure
+conflict found in this very call fails the build) ``runnable`` and
+``discovery_jobs`` are empty and ``build_status`` says why. ``running``
+stays, as a diagnostic of claims still live. A claiming start refuses a
+build that is not RUNNING on its own (409 ``build_not_running``).
 """
 
 from __future__ import annotations
@@ -142,10 +148,12 @@ async def get_frontier(
             elif actionable and not row.blocked:
                 runnable.append(row)
 
+        await session.refresh(build)
+        if build.status != BuildStatus.RUNNING:
+            runnable, discovery = [], []
         bodies = await _bodies(
             session, [r.instance_id for r in (*runnable, *discovery, *running)]
         )
-        await session.refresh(build)
         return Frontier(
             build_id=build_id,
             plan_id=plan.id,

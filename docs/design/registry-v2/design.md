@@ -519,7 +519,11 @@ POST /builds/{id}/plans
      (is_root, admitted_by = root); 409 root_instance_conflict if the existing plan's
      root instances differ; the first plan of a build is activated here
 POST /plans/{plan_id}/members   (chunk, ≤1000 items, post-order, sorted within the chunk)
-  -> one transaction per chunk; for each item:
+  -> one transaction per chunk. One instance twice in a chunk must be the same item
+     (400 duplicate_item otherwise; observed_at aside). On a sealed plan only a re-delivery
+     (a member it holds, same instance: a no-op except for its observation) or a discovery
+     job's result (the first expansion of a member, and what it reaches in the chunk) may
+     land; anything else is 409 plan_sealed. For each item:
      task            insert-if-absent by task_id; an existing row must agree on namespace, name,
                      version and output_uri (409 task_identity_conflict otherwise — all four are
                      identity-level, and first-write-wins would leave the row naming the wrong class)
@@ -695,7 +699,9 @@ discovery job again, so nothing is retried every tick. Upstream completion is re
 on `task`, as in v1; edges are read on the instance, i.e. per scope, as in
 v1. SUSPENDED stays "run it from scratch once its dynamic children are
 COMPLETED" (verified v1 behaviour, kept). A claiming start names its plan
-and its execution id; it is refused with 409 `plan_superseded` if the plan is
+and its execution id; it is refused with 409 `build_not_running` if the
+plan's build is not RUNNING (the frontier of such a build lists no runnable
+members and no discovery jobs), and with 409 `plan_superseded` if the plan is
 not active — after first checking whether the same execution already holds
 the claim, so a retried granted start is a no-op, not a loss — and it
 **re-checks the runnable predicate inside its own transaction** (all
