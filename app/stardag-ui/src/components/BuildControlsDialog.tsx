@@ -9,6 +9,7 @@ import {
   NO_EXECUTOR,
   NO_REF_YET,
   stopCommand,
+  stopCommandEffect,
   workersIn,
   type StopFilters,
 } from "../utils/stoppable";
@@ -209,8 +210,6 @@ export function BuildControlsDialog({
           <div className="space-y-3">
             <p className="text-xs text-gray-600 dark:text-gray-400">
               Executions with no end reported, under any of this build&rsquo;s plans.
-              The command ends the listed Modal calls from your credentials, records
-              them stopped, then cancels the build.
               {orphanCount > 0 &&
                 ` ${orphanCount} ${
                   orphanCount === 1 ? "is an orphan" : "are orphans"
@@ -317,8 +316,8 @@ export function BuildControlsDialog({
                   </button>
                 </div>
                 <p className="text-xs text-gray-600 dark:text-gray-400">
-                  Add <code>--dry-run</code> to see its own list before anything
-                  happens.
+                  {stopCommandEffect(narrowed)} Add <code>--dry-run</code> to see its
+                  own list before anything happens.
                 </p>
               </div>
             )}

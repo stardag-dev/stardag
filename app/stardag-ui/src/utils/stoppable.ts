@@ -110,6 +110,28 @@ export function formatDurationFlag(seconds: number): string {
   return `${seconds}s`;
 }
 
+/**
+ * What the printed command does, in the order it does it — per mode, as
+ * `builds_stop.py` runs it. The build is cancelled unless
+ * `--not-in-current-plan` (which implies `--no-cancel`) is on the command;
+ * narrowing by task, worker, executor or age does **not** spare the build.
+ */
+export function stopCommandEffect(filters: StopFilters): string {
+  if (filters.notInCurrentPlan) {
+    return (
+      "The command ends the selected orphans' Modal calls from your credentials " +
+      "and records each one stopped. It does not cancel the build " +
+      "(--not-in-current-plan implies --no-cancel): the build keeps running on " +
+      "its active plan."
+    );
+  }
+  return (
+    "The command ends the selected Modal calls from your credentials, records " +
+    "each one stopped, then cancels the build, which releases every claim its " +
+    "plans hold."
+  );
+}
+
 /** The exact command for what is on screen — the panel's actual output. */
 export function stopCommand(buildId: string, filters: StopFilters): string {
   const parts = ["stardag builds stop", buildId];

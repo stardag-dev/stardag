@@ -6,6 +6,7 @@ import {
   NO_REF_YET,
   notStoppableReason,
   stopCommand,
+  stopCommandEffect,
   workerOf,
   workersIn,
 } from "./stoppable";
@@ -97,5 +98,22 @@ describe("stopCommand", () => {
 
   it("refuses an empty selection rather than widening it", () => {
     expect(() => stopCommand(BUILD, { taskIds: [] })).toThrow(/stop nothing/);
+  });
+});
+
+describe("stopCommandEffect", () => {
+  it("says the default command cancels the build", () => {
+    expect(stopCommandEffect({})).toMatch(/then cancels the build/);
+    // Narrowing does not spare the build: only the orphan flag does.
+    expect(stopCommandEffect({ taskIds: ["t-1"], worker: "gpu" })).toMatch(
+      /then cancels the build/,
+    );
+  });
+
+  it("says --not-in-current-plan leaves the build running", () => {
+    const effect = stopCommandEffect({ notInCurrentPlan: true });
+    expect(effect).not.toMatch(/then cancels the build/);
+    expect(effect).toMatch(/does not cancel the build/);
+    expect(effect).toMatch(/keeps running on its active plan/);
   });
 });

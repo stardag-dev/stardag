@@ -61,6 +61,28 @@ describe("BuildControlsDialog", () => {
     expect(screen.queryByText("holds the claim")).not.toBeInTheDocument();
   });
 
+  it("says what the printed command does, per mode", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-bbbbbbbb", false),
+    ]);
+    const user = userEvent.setup();
+    render(
+      <BuildControlsDialog
+        buildId={BUILD}
+        environmentId="env-1"
+        buildStatus="running"
+        onBuildChanged={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Build controls" }));
+    expect(await screen.findByText(/then cancels the build/)).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Orphans only (not in the current plan)"));
+    expect(screen.queryByText(/then cancels the build/)).not.toBeInTheDocument();
+    expect(screen.getByText(/does not cancel the build/)).toBeInTheDocument();
+  });
+
   it("says so when nothing is left to stop", async () => {
     vi.mocked(fetchBuildExecutions).mockResolvedValue([]);
     const user = userEvent.setup();
