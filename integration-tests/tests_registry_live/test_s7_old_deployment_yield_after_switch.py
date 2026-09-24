@@ -68,9 +68,11 @@ pytestmark = [
 APP_NAME = ROLLOVER_APP_NAMES["S7"]
 
 # The second deploy (30-60 s) must be activated before the parent yields;
-# the margin is a container start on top of two deploys' worth. Paid twice:
-# the restart under D2 runs the pre-yield section again.
-PRE_YIELD_SECONDS = 150
+# the margin is a container start on top of one deploy (measured ~45 s)
+# and the wait for RUNNING. Paid three times:
+# the restart under D2 runs the pre-yield section twice (yield, then
+# completion), so this constant is the scenario's long pole in CI.
+PRE_YIELD_SECONDS = 110
 CHILD_SECONDS = 5
 CHILDREN = 2
 
