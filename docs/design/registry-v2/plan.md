@@ -246,8 +246,8 @@ assignee the maintainer.
       `tasks`, `concurrency-limits`. The live tier is I0 step 4.
 - [ ] I8 — CLI (in review, draft PR against `v2`). `stardag build`
       (roots from `module:attr`, `--settings`, `--app`, `--reactive`,
-      `--resume`, `--dry-run`); `builds list/show/frontier/ticks/stop/
-cancel/complete/fail`, `stop` over the execution ledger with
+      `--resume`, `--dry-run`); `builds` list, show, frontier, ticks,
+      stop, cancel, complete and fail, `stop` over the execution ledger with
       `--not-in-current-plan`; `executions list`; `plans show`;
       `deployments list` (`stardag modal deployments` is its Modal alias);
       `tasks show/check/retry/cancel/exclude`. Client reads added:
