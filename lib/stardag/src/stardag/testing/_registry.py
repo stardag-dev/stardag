@@ -44,6 +44,7 @@ from stardag.testing._registry_exclusion import ExclusionMixin
 from stardag.testing._registry_plans import _outcome, plan_info
 from stardag.testing._registry_state import (
     WAKE_HANDOUT_WINDOW,
+    ArtifactRow,
     BuildRow,
     DeploymentRow,
     Event,
@@ -395,20 +396,19 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
 
     def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
         self.task(task_id)
-        latest: dict[tuple[str, str], Any] = {}
-        for artifact in self.artifacts.get(task_id, []):
-            latest[(artifact.type, artifact.name)] = artifact
         return [
             TaskArtifactInfo(
+                id=a.id,
                 task_id=task_id,
-                artifact_type=a.type,
+                artifact_type=a.artifact_type,
                 name=a.name,
                 # The HTTP contract normalises a markdown body to
                 # ``{"content": ...}`` (``_artifacts_body`` on upload); a
                 # json artifact's body is already a dict.
-                body={"content": a.body} if a.type == "markdown" else a.body,
+                body={"content": a.body} if a.artifact_type == "markdown" else a.body,
+                created_at=a.created_at,
             )
-            for a in latest.values()
+            for a in self.artifacts.get(task_id, [])
         ]
 
     def task_upload_artifacts(
@@ -425,7 +425,26 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
                 f"task {task_id} is not a member of plan {plan_id}",
                 status=404,
             )
-        self.artifacts.setdefault(task_id, []).extend(artifacts)
+        # Upsert per (type, name), like the server's `on_conflict_do_update`
+        # (services/artifacts.py): a re-upload replaces only `body`, so `id`
+        # and `created_at` are minted once and kept -- not reset on every
+        # upload -- exactly like the real ``TaskArtifact`` row.
+        by_key = {
+            (row.artifact_type, row.name): row
+            for row in self.artifacts.get(task_id, [])
+        }
+        now = self.now()
+        for artifact in artifacts:
+            key = (artifact.type, artifact.name)
+            prior = by_key.get(key)
+            by_key[key] = ArtifactRow(
+                id=prior.id if prior is not None else new_id(),
+                artifact_type=artifact.type,
+                name=artifact.name,
+                body=artifact.body,
+                created_at=prior.created_at if prior is not None else now,
+            )
+        self.artifacts[task_id] = list(by_key.values())
 
     # -- deployments and settings -------------------------------------------------------
 

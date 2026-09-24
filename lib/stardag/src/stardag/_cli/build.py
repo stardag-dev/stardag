@@ -143,7 +143,10 @@ def build_command(
     ),
     description: Optional[str] = typer.Option(None, "--description"),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Discover locally and print the plan; write nothing."
+        False,
+        "--dry-run",
+        help="Discover locally and print the plan; makes no registry writes. "
+        "With --resume and no --settings, reads the build's stored settings.",
     ),
     stardag_profile: Optional[str] = typer.Option(
         None, "-p", "--stardag-profile", help="Stardag profile (default: active)."
@@ -160,7 +163,10 @@ def build_command(
     Prints the build id and a one-line status.
 
     --dry-run reads the tasks' targets (completion checks) and writes
-    nothing: no registry call, no run.
+    nothing: no registry writes, no run. With --resume and no --settings,
+    it makes one registry *read* to install the resumed build's stored
+    settings before discovery, so the local walk matches what the
+    resumed build would actually see.
     """
     if reactive and app_ref is None:
         error_console.print(
@@ -217,7 +223,7 @@ def build_command(
                     raise typer.Exit(1)
 
                 if dry_run:
-                    _dry_run(roots, checked, json_output)
+                    _dry_run(roots, to_install, json_output)
                     return
                 if app_ref is not None:
                     _trigger(

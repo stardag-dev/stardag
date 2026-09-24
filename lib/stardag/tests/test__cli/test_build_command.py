@@ -127,6 +127,7 @@ class TestDryRun:
             )
         )
 
+        calls_before = len(fake_registry.calls)
         with registry_provider.override(fake_registry):
             result = runner.invoke(
                 cli,
@@ -143,6 +144,15 @@ class TestDryRun:
         payload = json.loads(result.stdout)
         expected = LeafTask(param_a=1, param_b="from-stored")
         assert payload["roots"] == [str(expected.id)]
+        # The payload must report the settings actually installed for the
+        # walk (the resumed build's stored ones), not the empty `checked`
+        # that a bare resume leaves behind -- otherwise the JSON claims a
+        # plan made under no settings while the walk ran under stored ones.
+        assert payload["settings"] == {LEAF_FROM_ENV_VAR: "from-stored"}
+        # A bare resume's dry run MAY read the build's stored settings (one
+        # frontier read, no more) -- the documented exception to
+        # --dry-run's "no registry call" contract -- but writes nothing.
+        assert fake_registry.methods_called()[calls_before:] == ["build_get_frontier"]
         # restored afterward
         assert os.environ.get(LEAF_FROM_ENV_VAR) is None
 

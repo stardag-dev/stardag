@@ -161,6 +161,21 @@ class ExecutionRow:
 
 
 @dataclass
+class ArtifactRow:
+    """One stored artifact, minted like the server's ``TaskArtifact`` row
+    (``services/artifacts.py``): ``id``/``created_at`` are assigned once,
+    on first upload of a ``(task, type, name)``, and survive a re-upload
+    that only replaces ``body`` -- the server's upsert only touches
+    ``body_json`` on conflict."""
+
+    id: UUID
+    artifact_type: str
+    name: str
+    body: Any
+    created_at: datetime
+
+
+@dataclass
 class Event:
     type: str
     task_id: str | None = None
@@ -189,7 +204,7 @@ class RegistryState:
         self.limits: dict[str, int] = {}
         self.events: list[Event] = []
         self.tick_summaries: dict[UUID, list[dict[str, Any]]] = {}
-        self.artifacts: dict[str, list[Any]] = {}
+        self.artifacts: dict[str, list[ArtifactRow]] = {}
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def now(self) -> datetime:

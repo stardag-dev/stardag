@@ -209,6 +209,38 @@ class TestTasks:
         # it rather than returning the raw markdown string.
         assert payload["artifacts"][0]["body"] == {"content": "# hi"}
         assert "TASK_STRUCTURE_DIVERGED" in payload["notes"][0]
+        # The real GET /tasks/{id}/artifacts response mints an `id` and
+        # `created_at` for every row (services/artifacts.py); the fake must
+        # match that contract rather than leaving both at their model
+        # defaults (None).
+        artifact = payload["artifacts"][0]
+        assert artifact["id"] is not None
+        assert artifact["created_at"] is not None
+
+    def test_artifact_upsert_keeps_id_and_created_at_but_replaces_body(
+        self, fake_registry, running_build
+    ):
+        """A re-upload of the same (type, name) is an upsert -- the server's
+        `on_conflict_do_update` only touches `body_json` -- so `id` and
+        `created_at` must survive unchanged while `body` is replaced."""
+        leaf = str(running_build.leaf.id)
+        fake_registry.task_upload_artifacts(
+            running_build.plan_id,
+            leaf,
+            [MarkdownArtifact(name="report", body="# hi")],
+        )
+        (first,) = fake_registry.task_list_artifacts(leaf)
+
+        fake_registry.task_upload_artifacts(
+            running_build.plan_id,
+            leaf,
+            [MarkdownArtifact(name="report", body="# updated")],
+        )
+        (second,) = fake_registry.task_list_artifacts(leaf)
+
+        assert second.id == first.id
+        assert second.created_at == first.created_at
+        assert second.body == {"content": "# updated"}
 
     def test_check_observes_the_target_locally(self, fake_registry, running_build):
         root = str(running_build.root.id)
