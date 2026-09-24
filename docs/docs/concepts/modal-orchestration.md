@@ -38,13 +38,15 @@ Three things follow, and every mode below rests on them:
 - **Cancellation is cooperative, and stopping is yours.** Nothing reaches
   into a container: a worker asks at its own checkpoints whether it is
   still wanted and exits cleanly when it is not, writing no output and
-  reporting no completion. **Cancelling or failing a build releases the
-  claims it holds**, so its tasks are immediately available to the next
-  build. (The two bulk paths — `builds cleanup` and the server's reaper —
-  each keep a switch for that, on by default.) To end the containers
-  rather than leave them to notice, use `stardag builds stop`: it lists
-  the build's live executions, cancels those calls from your side, and
-  only then cancels the build.
+  reporting no completion. **Cancelling, failing or completing a build
+  releases the claims held by every one of its plans** — superseded ones
+  included — so its tasks are immediately available to the next build,
+  and the released tasks go to `CANCELLED` (actionable), never a result.
+  To end the containers themselves, rather than leaving them to notice on
+  their own, is a build's **executions** (see [Builds stop over
+  executions](build-execution.md#builds-stop-over-executions)) — a
+  human-driven action, and deliberately not something anything automatic
+  does.
 - **Liveness is the backend's answer.** A scheduler asks Modal whether a
   recorded call is running, finished or gone — no heartbeats.
 
@@ -81,10 +83,10 @@ trigger (cheap, no target I/O):
   mint or resume the build; register the roots; spawn bootstrap
 
 bootstrap (one container, once per trigger):
-  fix the build's structure scope (this deployment's code id + the
-  dependencies_only config) and install the build config; discover the
-  DAG next to the target root; register it; check every incomplete task
-  can be rebuilt from registry data; arm the build; spawn the first tick
+  fix the build's scope (this deployment + its settings) and apply the
+  settings; discover the DAG next to the target root; register it; check
+  every incomplete task can be rebuilt from registry data; arm the build;
+  spawn the first tick
 
 tick (short-lived, single-flighted per build):
   acquire the build's scheduler lease (held → exit)
@@ -104,9 +106,10 @@ rate-limited API from a laptop — so triggering needs registry credentials
 only.
 
 **A tick rebuilds every task it schedules from the registry's stored
-`task_data`, and from nothing else.** That is what makes a running build
-safe to re-plan under new code — the payload is identity parameters only,
-so nothing carries over from the process that registered it. It is also a
+instance body, and from nothing else.** That is what makes a running build
+safe to re-plan under new code — the stored body is what that scope
+constructed, so nothing carries over from the process that registered it.
+It is also a
 hard requirement on the app: rebuilding resolves a class through stardag's
 polymorphic registry, which is populated by _importing_ the defining
 module, so the app must declare
@@ -162,8 +165,9 @@ can change a build's frontier but has no executor and **never spawns** —
 so a wake-up is two halves, done by two parties:
 
 1. **The registry flags.** Every change to a task's status — by any
-   worker, any tick, a resident build, an operator in the UI or CLI, the
-   reaper — flags every _other_ live reactive build holding that task. A
+   worker, any tick, a resident build, an operator in the UI or CLI —
+   flags every _other_ live reactive build whose active plan holds that
+   task. A
    transition out of `RUNNING` also flags the builds queued on the
    concurrency-limit keys the task held. Cancelling a build flags the
    build itself. The flag is `needs_tick_at` on the build; setting it is
@@ -262,49 +266,98 @@ of the same app re-plans it under its own code (see below).
 
 _In practice: [Evolve a DAG Safely](../how-to/evolve-dags.md#4-deploy-new-code)._
 
-A **deployment** is one code version of one app — exactly what Modal means
-by the word. Modal keeps one live deployment per app name: after
-`stardag modal deploy` under the same name, in-flight inputs finish on the
-old code but every _new_ spawn lands on the new one. The registry records
-each deployment as it happens (`app_name`, `code_id`, `deployed_at`); the
-newest is the current one, and `stardag modal deployments` lists them.
-Nothing is kept alive beside the current deployment and nothing needs
-collecting.
+A **deployment** is a registry row for one code version of one app,
+created by `stardag modal deploy` in two steps:
 
-A build's dependency edges belong to the code that evaluated them — its
-[structure scope](build-execution.md#structure-scope) — and a running build
-**follows the live deployment**. A reactive build progresses by new spawns,
-so after a redeploy its next tick runs on the new code. That tick finds the
-build's scope names another code id and re-plans the build: it rebuilds the
-roots from the registry, runs discovery under its own code with the build's
-stored config, registers the plan's edges under its own scope, and moves the
-build's scope (`rolled_over` in the tick summary). Discovery stops at
-completed tasks, so a redeploy costs one walk of the incomplete part of each
-running DAG.
+1. **Before** the deploy, the CLI mints a `deployment_id` (a uuid7) and
+   records it — `POST /deployments` — which is when the registry assigns
+   its `generation`, monotonic per app. The id is baked into the Modal
+   image as the `STARDAG_DEPLOYMENT_ID` secret every function reads.
+2. **After** the deploy succeeds, the CLI marks the row live —
+   `POST /deployments/{id}/activate` — recording the Modal app id and
+   image id the finished deploy learned. A failed activation exits
+   non-zero: until the row is activated, no tick of the new code can plan
+   (it exits `superseded`), and running reactive builds stay on the
+   previous deployment.
+
+"Current" for an app is the **activated deployment with the highest
+generation** — order is fixed when the deploy starts, not when its record
+lands, so a record that arrives late can never roll a build back to older
+code. `stardag modal deployments` lists them, newest first, and marks each
+app's current row. Nothing is kept alive beside the current deployment and
+nothing needs collecting.
+
+A **local** build (no `stardag modal deploy` involved) gets its deployment
+row looked up or created at `sd.build()` start, keyed on
+`(environment, kind="local", code_id)`, where `code_id` is
+`STARDAG_CODE_ID` if you set it, else the clean git HEAD SHA, else a
+fresh, one-off id (warned) for a dirty tree. `STARDAG_CODE_ID` is
+therefore the explicit pin when there is no git checkout to read a SHA
+from — a CI image, a container built from an archive. A local deployment
+row is **never current and never superseded**: it is authoritative for its
+own plans from the moment it is created, has no separate activation step,
+and the currency checks below apply to Modal deployments only — a local
+driver at a new commit plans under a new scope, but the old commit's plans
+stay usable rather than becoming unsealable.
+
+A build's dependency edges belong to the instance, which belongs to a
+scope — `(deployment, settings)`, see [Build &
+Execution](build-execution.md#the-plan-roots-discovery-closure) — and a
+running build **follows the live deployment**. A reactive build progresses
+by new spawns, so after a redeploy its next tick runs on the new code.
+That tick finds the build's active plan names another `deployment_id` and
+re-plans: it rehydrates the plan's root instances under its own code,
+compares their task ids against the build's recorded roots, then runs the
+static phase and seals under its own scope
+(`(this deployment, the plan's settings)`) — reusing a plan for that scope
+if one already exists and is sealed. You see `rolled_over` in that tick's
+summary. Discovery stops at completed tasks, so a redeploy costs one walk
+of the incomplete part of each running DAG.
 
 Three things follow from that:
 
-- A tick still lingering on the old code sees the scope move and exits
-  (`superseded`); the lease already guarantees one driver per build.
+- A tick still lingering on the old deployment sees the plan superseded
+  and exits (`superseded`); the scheduler lease already guarantees one
+  driver per build.
 - Workers are code-agnostic — the task id promises the output whatever
-  code produces it — but each registers the dynamic dependencies it yields
-  under **its own** code's scope. An old container's late yield lands in the
-  old scope, the rolled-over build never sees it, and the new code re-runs
-  the parent: wasted work, correct outcome.
+  code produces it — but each registers the dynamic dependencies it
+  yields against **its own** plan and deployment. An old container's late
+  yield is accepted into the superseded plan (a true fact about that
+  scope, useful to any scope-mate), the rolled-over build's own instance
+  has no dynamic edges yet, and its next tick restarts the parent under
+  the new code: the old children keep running as accepted duplicate work.
 - Executions the new plan no longer contains finish on their own; their
   targets are content-addressed, so they harm nothing.
 
-A rollover only moves _forward_: the tick asks the registry which code is
-the current deployment of its app and re-plans only if that is its own, so a
-tick of an older deployment that wins the lease late exits `superseded`
-instead of moving the build back. That is why `stardag modal deploy` records
-every deploy and exits non-zero if it cannot. What makes the re-plan safe is
-that a task is rebuilt from the registry's identity-level `task_data` and
-the new deployment's own code, so it carries nothing from the code that
-planned the build. What cannot roll over fails the build with
-`rollover_failed` — a root whose _identity_ parameters changed, or a task
-the new deployment cannot rebuild (its class gone, or outside its
+A rollover only moves _forward_: the tick asks the registry which
+deployment is current for its app and re-plans (or seals) only if that is
+its own — checked again at `/seal`, under the same per-app lock deploy
+activation uses, so two ticks racing under two new deployments cannot both
+win. A tick of an older deployment that wins the scheduler lease late
+exits `superseded` instead of moving the build back. That is why
+`stardag modal deploy` records every deploy and exits non-zero if it
+cannot. What makes the re-plan safe is that a task is rebuilt from the
+registry's stored instance body under the new deployment's own code, so it
+carries nothing from the code that planned the build. What cannot roll
+over fails the build — a root whose task id changed under the new code, or
+a task the new deployment cannot rebuild (its class gone, or outside its
 `task_modules`) — and the remedy is a new build.
+
+**One process, one build's settings, for the lifetime of the process.**
+Every process of a build — the bootstrap, each tick, each worker, a
+resident driver — applies the build's [settings](build-execution.md) as
+environment variables for as long as it is serving that build; see
+[Integrate with Modal](../how-to/integrate-modal.md#settings-per-build-configuration-without-touching-the-task-id)
+for the one-input-per-container consequence this has for deployed ticks
+and workers.
+
+**Time-based recovery is the watchdog's job, and only the watchdog's.**
+Everything else in this chapter — a wake-up, a rollover — is triggered by
+a write landing in the registry. A claim simply _expiring_ is not a write:
+nobody records it, so nothing is flagged, and the only thing that notices
+is a periodic sweep. See [the watchdog](#the-watchdog) above for why that
+is a deliberate trade rather than a gap to be closed with a smarter
+wake-up.
 
 A **branch deployment** is simply another app: give it its own name and it
 has its own single live version.

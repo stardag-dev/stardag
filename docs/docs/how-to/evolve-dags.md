@@ -6,28 +6,31 @@ disagreeing about what a task is.
 
 !!! tip "What you need to know"
 
-    - **Only identity parameters go in the constructor.** A knob that changes
-      _what is required or yielded_ is `significance="dependencies_only"`; one
-      that changes _how the work is done_ is `"execution_only"`. Both are read
-      from the **build config**, never passed at init.
-    - **One `build_config` per build**, keyed `"<namespace>.<Name>"`, passed
-      to `sd.build(...)` or `app.build_trigger(...)`. It is stored with the
-      build and every worker installs it before constructing a task.
+    - **Only fields that change the output need to be significant** (the
+      default). A field that changes only _how the work is done_ or
+      _which upstreams are required or yielded_ is
+      `sd.StardagField(significant=False)` — still an ordinary constructor
+      argument.
+    - **`settings`** is a flat `dict[str, str]` of environment variables
+      for build-wide knobs you would rather not turn into task parameters
+      — passed to `sd.build(...)` or `app.build_trigger(...)`, applied in
+      every process of the build.
     - **Changing `requires()` or a fan-out needs no version bump.** Deploy;
-      new builds plan under the new code, and builds already running
-      **roll over** to it at their next scheduler pass.
+      new builds plan under the new deployment, and builds already
+      running **roll over** to it at their next scheduler pass.
     - **One live deployment per app**, as on Modal. Want a branch to run
       beside production? Give it its own app name.
-    - **A build has one config for its life.** Re-triggering it with a
-      different `dependencies_only` config is refused; start a new build.
+    - **A build has one scope (deployment + settings) per plan.**
+      Re-triggering it with a root that would construct differently under
+      that scope is refused: **start a new build.**
 
-The concepts behind this page: [three levels of
-significance](../concepts/parameters.md#three-levels-of-significance),
-the [structure scope](../concepts/build-execution.md#structure-scope), and
-[deployments and code
+The concepts behind this page:
+[significant and non-significant fields](../concepts/parameters.md#significant-and-non-significant-fields),
+[the plan](../concepts/build-execution.md#the-plan-roots-discovery-closure),
+and [deployments and code
 versions](../concepts/modal-orchestration.md#deployments-and-code-versions).
 
-## 1. Say what each parameter is for
+## 1. Say what each field is for
 
 ```{.python notest}
 from typing import Annotated
@@ -35,9 +38,9 @@ import stardag as sd
 
 class Aggregate(sd.Task[Summary]):
     __namespace__ = "reports"
-    period: str                                                                      # identity
-    partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
-    num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
+    period: str                                                          # significant
+    partition_size: Annotated[int, sd.StardagField(significant=False)] = 100
+    num_threads: Annotated[int, sd.StardagField(significant=False)] = 4
 
     def requires(self):
         return ListExportFiles(period=self.period)
@@ -57,124 +60,145 @@ class Aggregate(sd.Task[Summary]):
 list comes from a static upstream, so it is known once that upstream has
 run; the partition size decides how that list is sliced into `ChunkStats`
 tasks, each summarising one slice. Slicing 1,000 files by 100 or by 500
-yields different chunk tasks but the same merged summary, so the partition
-size is _dependencies only_. The thread count changes neither, so it is
-_execution only_. Passing either at init raises — that is what keeps
-one task id to one structure within a build.
+yields different chunk tasks but the same merged summary, so
+`partition_size` is non-significant even though it changes structure.
+`num_threads` changes only execution — also non-significant. Both are
+ordinary constructor arguments; only their effect on `task.id` differs
+from `period`'s.
 
-The rule of thumb: **if two values of the parameter would give a different
-result at the target, it is identity.** If they give the same result
-through a different set of upstream tasks, it is `dependencies_only`.
-Anything else is `execution_only`.
+The rule of thumb: **if two values of the field would give a different
+result at the target, it is significant.** Otherwise it is not, whether it
+changes which upstreams are used or only how the work runs — the model
+does not need you to say which.
 
-## 2. Give values per build
+## 2. Give build-wide values through `settings`
+
+A field you set per instance (as in step 1) is the normal case. `settings`
+exists for the other one: a knob you would rather not thread through every
+task's constructor at all — a global thread count, a feature flag —
+applied as environment variables in every process of the build:
 
 ```{.python notest}
-config = {"reports.Aggregate": {"partition_size": 500, "num_threads": 8}}
-
 # Locally — also sd.build_aio and sd.build_sequential:
-sd.build(Aggregate(period="2026-01"), build_config=config)
+sd.build(Aggregate(period="2026-01"), settings={"NUM_THREADS": "8"})
 
 # On Modal, the same argument on the trigger:
-app.build_trigger(Aggregate(period="2026-01"), reactive=True, build_config=config)
-
-# In tests, or anywhere no build is running:
-with sd.build_config_scope({"reports.Aggregate": {"num_threads": 2}}):
-    assert Aggregate(period="2026-01").num_threads == 2
+app.build_trigger(
+    Aggregate(period="2026-01"), reactive=True, settings={"NUM_THREADS": "8"},
+)
 ```
 
-A misspelled class or field, an identity field, or a value of the wrong
-type is refused at the trigger, before a build exists. A re-trigger of an
-existing build (`build_trigger(build_id=...)`) reuses the build's stored
-config; passing a different one is refused, because a build has one config
-for its life.
+Read it back with the [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
+pattern, at run time rather than at import time — a warm container imports
+before it knows which build it is serving.
 
-!!! note "Environment variables"
+A reserved key (`STARDAG_*`, `MODAL_*`) is refused at the trigger, before
+a build exists — a plain typo in the key is not caught; `settings` is an
+arbitrary flat mapping and only the reserved prefixes and the
+string-value requirement are validated. A re-trigger of an existing build
+(`build_trigger(build_id=...)`) with `settings` omitted reuses the
+build's stored settings; passing different ones starts a new plan in the
+same build — see [The deterministic
+scope](../concepts/build-execution.md#the-plan-roots-discovery-closure).
 
-    They may affect how a task executes — a thread count read from the
-    environment is fine. They must not affect a task's output or which
-    dependencies it requires or yields; that is a parameter or a
-    `dependencies_only` value. The registry warns when a task yields a
-    different set than the one recorded for the same code and config.
+!!! note "Environment variables outside `settings`"
+
+    They may affect how a task executes — a thread count read directly
+    from the process environment is fine, same as one read from
+    `settings`. They must not affect a task's output or which dependencies
+    it requires or yields *unless* they arrive through `settings` or the
+    deployment itself — reading an arbitrary, unscoped environment
+    variable from `requires()` breaks the contract a scope's shared
+    structure relies on. The registry has no way to catch this at write
+    time; it shows up as a `TASK_STRUCTURE_DIVERGED` event when the same
+    instance's declared edges grow between two registrations in the same
+    scope.
 
 ## 3. Change dependencies
 
-Edit `requires()`, reshape a yield, or change a `dependencies_only`
-default. Then:
+Edit `requires()`, reshape a yield, or change a non-significant default.
+Then:
 
 ```bash
 stardag modal deploy app.py
 ```
 
 ```{.python notest}
-app.build_trigger(root, reactive=True)   # a new build, planned by the new code
+app.build_trigger(root, reactive=True)   # a new build, planned by the new deployment
 ```
 
-Nothing else. The new build's dependency edges are recorded under the new
-code's _structure scope_ and evaluated over that scope only, so upstreams
-the old code needed do not gate it, and an abandoned fan-out from an old
-build is not inherited. Completed tasks stay completed: the task id still
-promises the output, and the new build reuses every target that exists.
-Builds that were already running move to the new code too — see the next
-step.
+Nothing else. The new build's dependency edges are recorded on its
+instances under the new deployment's scope and evaluated over that scope
+only, so upstreams the old code needed do not gate it, and an abandoned
+fan-out from an old build is not inherited. Completed tasks stay
+completed: the task id still promises the output, and the new build
+reuses every target that exists.
 
-Two builds under the **same** code and config share what they discovered.
-If one has already run a fan-out parent to its yield, the other trusts
-those edges and waits on or runs the children instead of re-running the
-parent's pre-yield section.
+Two plans sharing a scope (the same deployment and settings) share what
+they discovered. If one has already run a fan-out parent to its yield, the
+other's frontier closure step admits those edges directly, and it waits on
+or runs the children instead of re-running the parent's pre-yield section.
 
 ## 4. Deploy new code
 
-There is one live deployment per app, on Modal and in stardag. After
-`stardag modal deploy` under the same name, containers already running
-finish on the old code, and every new spawn lands on the new one. A running
-build's next scheduler tick therefore runs on the new code, notices the
-build was planned by another code version, and **re-plans it**: discovery
-again under the new code with the build's stored config, edges recorded
-under the new scope, and the build's scope moved. You will see `rolled_over`
-in that tick's summary. Nothing to do on your side.
+There is one live deployment per app, on Modal and in the registry. Each
+`stardag modal deploy` **records a deployment row before the deploy** (so
+the registry assigns its `generation` before any code changes) and
+**activates it after** the deploy succeeds. After it, containers already
+running finish on the old code, and every new spawn lands on the new one.
 
 ```bash
-stardag modal deploy app.py        # the new code, same app name; recorded as a deployment
-stardag modal deployments          # code versions deployed, newest first — the newest is current
+stardag modal deploy app.py        # records, deploys, activates
+stardag modal deployments          # deployments recorded, newest first — the newest activated one is current
 ```
+
+A running build's next scheduler tick runs on the new deployment, notices
+the build's active plan names an older `deployment_id`, and **re-plans
+it**: it rehydrates the plan's root instances under the new code, checks
+their task ids are unchanged, then runs the static phase and seals a plan
+for `(new deployment, same settings)` — reusing one if a scope-mate
+already created and sealed it. You will see `rolled_over` in that tick's
+summary. Nothing to do on your side.
 
 What happens to work in flight:
 
 - Containers started under the old code finish and report as usual.
 - A dynamic dependency an old container yields after the redeploy is
-  recorded under the old code's scope, never the new one, so the re-planned
-  build does not see it and the new code decides its own structure. The
-  parent runs again under new code; the children it already ran stay
-  completed.
-- An execution the new plan no longer needs finishes on its own. Its output
-  is content-addressed, so it harms nothing.
-- A tick that was still lingering on the old code exits with `superseded`.
+  accepted into the superseded plan — a true fact about that scope, useful
+  to any scope-mate — but the rolled-over build's own instance for that
+  parent has no dynamic edges yet, so its next tick restarts the parent
+  under the new code. The children the old container already ran stay
+  completed and are reused; only the pre-yield section repeats.
+- An execution the new plan no longer needs finishes on its own. Its
+  output is content-addressed, so it harms nothing.
+- A tick still lingering on the old deployment exits with `superseded`.
 
-One precondition, checked by the tick before it re-plans: **the deployment
-must be recorded.** `stardag modal deploy` records each deploy in the
-registry; if it cannot (the registry was unreachable), the app is live but
-the command exits non-zero and says so, and no build rolls over to that
-code until you re-run the deploy — it is idempotent.
+One precondition, checked by the tick and again at its `/seal`: **the
+deployment must be the registry's current one for the app.** `stardag
+modal deploy` records and activates each deploy; if either step fails
+(the registry was unreachable), the command exits non-zero and says so,
+and no build rolls over to that code until you re-run it. Re-running is
+safe, not a retry of the same row: the deployment id is minted fresh by
+the `StardagApp` object each time the command's process runs, so a
+re-run after a failed record creates a new deployment row (and, if the
+Modal deploy itself already succeeded, deploys again) rather than
+retrying the original activation. The _server-side_ activate call is
+idempotent for a given id — re-sending it changes nothing — but the CLI
+gives it a new id on every invocation.
 
 What makes a rollover code-safe at all is that a task object has no
-representation outside a running process other than the registry's
-identity-level `task_data`. Rebuilt in the new deployment, under the
-build's config, a task is exactly what that deployment would construct —
-nothing carries over from the code that planned the build. (It used to:
-task objects were also pickled to the target root, and a pickle restores
-the non-identity values the _writing_ code resolved, which no rollover
-could refresh. That store has been retired — see
-[RELEASE_NOTES.md](https://github.com/stardag-dev/stardag/blob/main/RELEASE_NOTES.md)
-for the migration note.)
+representation outside a running process other than the registry's stored
+**instance body** — the full construction under its scope. Rebuilt in the
+new deployment, a task is exactly what that deployment would construct;
+nothing carries over from the code that planned the build.
 
-Two things cannot roll over: a root whose _identity_ parameters you
-changed, and a task the new deployment cannot rebuild — its class is gone,
-or no longer covered by the deployment's `task_modules`. Both fail the
-build with `rollover_failed`; re-trigger as a new build.
+Two things cannot roll over: a root whose _task id_ changed under the new
+code, and a task the new deployment cannot rebuild — its class is gone, or
+no longer covered by the deployment's `task_modules`. Both fail the build;
+re-trigger as a new build.
 
 **Branches.** A branch that should run beside production is another app
-with its own name and its own single live version. A convention, not a
+with its own name and its own single live deployment. A convention, not a
 feature:
 
 ```{.python notest}
@@ -183,36 +207,26 @@ import os
 app = sd_modal.StardagApp(f"reports-{os.environ.get('BRANCH', 'main')}", ...)
 ```
 
-Two things to know about the code id:
+Two things to know about the code id baked into a deployment:
 
-- It is the git SHA of a **clean** checkout. A dirty tree gets a one-off id
-  with a warning: every deploy of it is a new scope that shares nothing.
-  Commit before you deploy.
-- Where there is no git checkout — a CI image, a container built from an
-  archive — set `STARDAG_CODE_ID` to name the code yourself.
-
-## 5. Migrate from `hash_exclude`
-
-`sd.StardagField(hash_exclude=True)` dropped a field from the hash but let
-you pass the value at init, which is exactly what the build config exists
-to prevent. It keeps working for one release with a `DeprecationWarning`.
-
-1. Change the annotation to `significance="execution_only"`, or
-   `"dependencies_only"` if the value changes what the task requires or
-   yields.
-2. Delete the argument from every constructor call.
-3. Pass the value in `build_config`, keyed `"<namespace>.<Name>"`, where you
-   call `sd.build` or `build_trigger`.
-
-`AliasTask` needs no change.
+- For a Modal deployment it comes from `stardag modal deploy`, which pins
+  the deployment id itself (`STARDAG_DEPLOYMENT_ID`) — the code id is
+  recorded alongside it, from a **clean** checkout's git SHA. A dirty tree
+  gets a one-off id with a warning: every deploy of it is a new scope that
+  shares nothing. Commit before you deploy.
+- For a **local** build there is no deploy step: the deployment is looked
+  up or created from `(environment, kind="local", code_id)`, where
+  `code_id` is `STARDAG_CODE_ID` if you set it, else the clean git SHA,
+  else a one-off id. Set `STARDAG_CODE_ID` yourself where there is no git
+  checkout to read — a CI image, a container built from an archive.
 
 ## What to expect in the UI
 
-- The Task Explorer's graph follows each task's _provenance_: the edges
-  from the build that produced its current status. A hop between code
-  versions is marked.
-- A build's page shows the structure scope it is currently planned under;
-  it changes after a redeploy. `build:<id>` means the build never fixed one
-  — an older SDK, or a build with no structure to share.
-- Placeholder ("phantom") nodes are gone; an upstream that was never
-  registered is a registration error, not a grey node.
+- A build's page shows its active plan's DAG, over the edges its
+  instances recorded — a hop between deployments is visible as the
+  active plan changing scope after a redeploy.
+- Task instances are listed under the scope (deployment + settings) that
+  constructed them, so two constructions of one task id in two scopes
+  show up as two rows, not one.
+- The deployments page lists every recorded deployment, newest first,
+  with the current one for each app marked.

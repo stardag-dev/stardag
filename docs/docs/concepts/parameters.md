@@ -45,46 +45,72 @@ class TrainedModel(sd.Task[MyModel]):
 
 `TaskLoads[<Type>]` is short for _any Stardag task for which the return type of `.load()` is `<Type>`_.
 
-## Parameter Hashing
+## Two identities
 
-Parameter hashing gives each task instance a unique, deterministic identifier based on its parameters.
+Every task has two identities, and it matters which one a given piece of
+code needs.
 
-Parameter hashing solves several problems:
+| Identity             | Hashes                                                            | Answers                                              |
+| -------------------- | ----------------------------------------------------------------- | ---------------------------------------------------- |
+| `task.id`            | namespace, name, `version`, every **significant** field           | "Is this output done?" — global, across every build  |
+| `task.instance_hash` | the same, plus every **non-significant** field — i.e. all of them | "How exactly was this task constructed?" — per scope |
 
-1. **Deterministic IDs**: Same parameters always produce the same task ID
-2. **Unique paths**: Each configuration gets its own output location
-3. **Caching**: Re-running with same parameters reuses existing outputs
-4. **Composition**: Upstream task IDs are included in downstream hashes
+`task.id` (the **task id**) is a promise about **output**. It is what
+completion and the execution claim are keyed on, it is what names the
+target, and it is global: any build, anywhere, that constructs a task with
+the same task id is asking for the same thing.
 
-## Three levels of significance
+`task.instance_hash` is the hash of the task's full **instance body** —
+every field, defaults included, nested tasks embedded as their own full
+bodies. The registry stores a construction of a task under a deterministic
+scope (a deployment and its [settings](build-execution.md)) as an
+**instance**: an `(deployment, settings, instance_hash)` row holding that
+body. Two vocabulary words worth keeping straight, because the docs and
+the UI use them precisely:
+
+- An **instance** is that registry row.
+- The Python object you construct is a **task object**.
+
+One task object planned under two scopes is two instances; one instance
+rehydrates into any number of task objects. `instance_hash` on its own is
+never how you address an instance — it is only meaningful together with
+the scope it was registered under, and the CLI/UI/API always address an
+instance by its row id or by the full scope triple.
+
+Two task objects can share a task id while differing in their
+non-significant fields — two ways of asking for one completion. Globally
+the registry stores as many of those as show up; **within one plan there
+may be only one**, so two builds that construct the same task id
+differently, in the same scope, at the same time, is a conflict raised at
+the point of discovery.
+
+## Significant and non-significant fields
 
 !!! tip "In short"
 
-    Only parameters that change the **output** belong in the constructor.
-    A knob that changes which upstreams are required or yielded is
-    `significance="dependencies_only"`; one that changes only how the work
-    is done is `"execution_only"`. Both are read from one **build config**
-    per build, never passed at init. The how-to:
+    Only fields that change the **output** should be significant — the
+    default. A field that changes only how the work is done, or which
+    upstreams are required or yielded, but never the output, is
+    `sd.StardagField(significant=False)`. Both kinds are ordinary
+    constructor arguments. The how-to:
     [Evolve a DAG Safely](../how-to/evolve-dags.md).
 
-Not every parameter is part of what a task _promises_. Stardag
-distinguishes three levels, declared per field with
-`sd.StardagField(significance=...)`:
+Every field is one of two kinds, declared with
+`sd.StardagField(significant: bool = True)`:
 
-| Level          | `significance`         | Affects                                                      | Comes from                                  |
-| -------------- | ---------------------- | ------------------------------------------------------------ | ------------------------------------------- |
-| 1 Identity     | `"identity"` (default) | the output — what the task promises; part of the task ID     | the constructor, like any parameter         |
-| 2 Dependencies | `"dependencies_only"`  | which upstream tasks are required or yielded, not the output | the **build config**, never the constructor |
-| 3 Execution    | `"execution_only"`     | neither output nor structure — only how the work is done     | the **build config**, never the constructor |
+| Kind                  | `significant` | Affects                                                            |
+| --------------------- | ------------- | ------------------------------------------------------------------ |
+| Significant (default) | `True`        | the output — part of `task.id`                                     |
+| Non-significant       | `False`       | how the work is done, or which upstreams it has — never the output |
 
 ```{.python notest}
 from typing import Annotated
 
 class Aggregate(sd.Task[Summary]):
     __namespace__ = "reports"
-    period: str                                                             # identity
-    partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
-    num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
+    period: str                                                     # significant
+    partition_size: Annotated[int, sd.StardagField(significant=False)] = 100
+    num_threads: Annotated[int, sd.StardagField(significant=False)] = 4
 
     def requires(self):
         return ListExportFiles(period=self.period)
@@ -101,67 +127,95 @@ class Aggregate(sd.Task[Summary]):
 ```
 
 The file list is loaded from a static upstream; `partition_size` only
-decides how it is sliced into `ChunkStats` tasks. Slicing 1,000 files by
-100 or by 500 yields different chunk tasks but the same merged summary.
+decides how it is sliced into `ChunkStats` tasks, and `num_threads` only
+decides how fast the merge runs. Slicing 1,000 files by 100 or by 500
+yields different chunk tasks but the same merged summary, so
+`partition_size` and `num_threads` are both non-significant, even though
+one affects structure and the other only execution — the model needs only
+this one distinction; the API does not ask which of the two a
+non-significant field is for.
 
-A level 2 or 3 field is **never passed at init** — `Aggregate(period="2026-01",
-num_threads=2)` raises. Give it a default: the build config overrides the
-default, and a level 2 or 3 field without one would make every constructor
-call demand a value that only the config may supply. It is read from the
-**build config**, one mapping per build keyed by `namespace.Name`, or by the
-bare `Name` for a task without a `__namespace__`:
+Both kinds of field are **ordinary parameters**: passed at init like any
+other, stored on the instance body, and rehydrated from it. There is no
+"never at init, only from a build-wide config" restriction any more — a
+non-significant field's value simply does not affect `task.id`, so two
+task objects that differ only in a non-significant field share one
+completion.
+
+Only significant output matters for reuse across builds: if two builds
+construct the task with the same significant fields, they are asking for
+the same output, whatever their non-significant fields say. If they
+construct it with the same significant fields but _different_
+non-significant fields **in the same scope**, that is the one-instance-
+per-plan conflict above.
+
+**The three rules on what may affect what:**
+
+- **Output** is a function of the significant fields and nothing else —
+  not the code version, not an environment variable, not
+  [settings](build-execution.md). That is the task-id promise, and
+  keeping it is the user's job (bump `__version__` or add a significant
+  field when it changes).
+- **Structure** — which upstreams a task requires or yields — may depend
+  on the code and its deployment, and on settings, but on nothing else
+  from the environment. Within one scope (deployment + settings) it is
+  therefore deterministic: reading an arbitrary environment variable from
+  `requires()` is a contract breach, and the failure mode is over-gating
+  (a stricter frontier than intended), never wrong output.
+- **Execution** — how the work is done — may depend on anything: settings,
+  the environment, wall-clock time, whatever you like.
+
+## `compat_default`: adding a field without re-keying every downstream
 
 ```{.python notest}
-sd.build(root, build_config={"reports.Aggregate": {"partition_size": 500, "num_threads": 8}})
-
-# On Modal, the same argument on the trigger:
-app.build_trigger(root, reactive=True, build_config={...})
-
-# In tests, or anywhere no build is running:
-with sd.build_config_scope({"reports.Aggregate": {"num_threads": 2}}):
-    task = Aggregate(period="2026-01")  # num_threads == 2
+new_field: Annotated[int, sd.StardagField(compat_default=0)] = 0
 ```
 
-A key names a **class**, and not only a task class: a nested
-`sd.StardagBaseModel` held as a task parameter — where a chunk size or a
-worker count often lives more naturally than on the task itself — may
-declare level 2 and 3 fields of its own, and the config names it the same
-way. For a plain model the key is its `__namespace__` (usually unset) and
-class name; a model in a polymorphic family is keyed by the namespace and
-name it is _registered_ under, exactly as a task is. Two classes cannot
-share a key. A model under a key another model or a task already holds
-raises where the model is defined; a task defined under a key a model
-already holds is refused when the config is used, since nothing checks
-this index as task classes are registered. A `__namespace__` on the model
-separates them.
+`compat_default` is valid only on a significant field (a non-significant
+one is not in `task.id`, so there is nothing to keep stable). A
+significant field whose value equals its `compat_default` is dropped from
+the `task.id` hash, so adding the field to an existing task class does not
+change the id of every instance that would otherwise get the default —
+only instances that set a non-default value get a new id. It also lets a
+missing field on rehydration take the `compat_default` rather than
+failing.
 
-Why one mechanism and not two: if one downstream could pass a partition
-size to its upstream while another let the upstream read the config, there
-would be two versions of one upstream in one build with one task ID. The
-registry stores only identity parameters with a task; the build config is
-stored with the build, and every worker installs it before it constructs or
-rebuilds a task, so the two always agree.
+Supply it in the field's validated Python form, not its serialized form —
+both the hashing and the rehydration side compare against the raw value.
 
-The registry keys a build's dependency edges by a _structure scope_ — the
-code version plus the `dependencies_only` config — which is what lets a
-changed partition size or a changed `requires()` run without a version bump
-and without disturbing builds already running. See
-[Build & Execution](build-execution.md#structure-scope).
+## Serialization stability
 
-**Environment variables must not affect a task's output or its
-dependency structure.** They may affect execution (a thread count read
-from the environment is fine). Anything that changes what a task yields or
-writes is a parameter or a `dependencies_only` config value; reading it from
-the environment breaks the contract the shared structure relies on, and the
-registry warns when it notices.
+The instance body has no user-facing hash mode: it is simply the ordinary
+pydantic serialization of every field, canonicalised (sorted keys, sorted
+sets — including a set nested inside a list, dict or `Any` field —
+compact separators, UTF-8). What the framework asks of your fields is one
+thing: **stability**, a fixed point under its own round trip —
+`dump(validate(dump(x))) == dump(x)`. At registration, the driver runs
+that round trip once per distinct instance and raises
+`UnstableSerializationError`, naming the field that moved, rather than
+letting two processes disagree about one construction later.
 
-!!! note "`hash_exclude` is deprecated"
+Instabilities worth knowing about, because they are the ones the check
+exists for:
 
-    `sd.StardagField(hash_exclude=True)` did what `significance="execution_only"`
-    does — dropped the field from the hash — but allowed the value at init,
-    which is exactly what the build config exists to prevent. It keeps working
-    for one release with a `DeprecationWarning`; move the value to the build
-    config and change the annotation.
+- **Sets** iterate in a randomised, per-process order — sorted in every
+  dump, so this is handled for you, but a custom serializer that bypasses
+  the ordinary dump path can reintroduce it.
+- **Floats** are stable when the value is (`repr` is the shortest
+  round-trip form). `-0.0` round-trips fine — it is simply a different,
+  intentionally distinct value from `0.0` for hashing purposes — and a
+  numpy scalar on a typed field is coerced to a plain Python value before
+  it is ever dumped. Only a non-finite float (`NaN`, an infinity) is
+  actually rejected — not merely unstable, but refused outright, since it
+  is not valid JSON. A float computed non-deterministically in `__init__`
+  is the real risk: nothing catches that until the round trip disagrees
+  with itself.
+- **Datetimes**: naive vs aware, or a custom serializer that drops
+  precision, fail the round trip.
+- **Defaults**: the instance body includes every field, set at init or
+  not, so a changed class default under a new deployment produces a new
+  `instance_hash` — correct, since it is a new scope anyway, but worth
+  remembering when you compare instance hashes across a redeploy.
 
 ## The Task ID
 
@@ -183,12 +237,23 @@ The task ID is derived from:
 - Task name (class name or function name, unless overridden)
 - Task namespace
 - Task version
-- All parameter values (recursively hashed)
+- Every **significant** parameter value (recursively hashed; a nested
+  task appears by its own task id, not its full body — that id already
+  reflects only _its_ significant fields, recursively, so the outer id
+  inherits the nested task's significant identity but not its
+  non-significant fields)
 
 This recursive hashing ensures that:
 
-- Changes to upstream parameters change downstream IDs
-- The full DAG lineage is captured in the hash
+- Changes to an upstream's significant parameters change downstream ids
+- The full DAG lineage, at the significant level, is captured in the hash
+
+**"I want to fix its output" means a new task id.** Changing what a task
+produces is a change of promise: bump `__version__` or add/change a
+significant parameter. That flows into every downstream id on its own,
+because a downstream that takes the task as a parameter hashes its own id
+from it — there is no other way to change a task's output for one build
+without affecting every build that shares the completion.
 
 ## Output URIs
 
@@ -212,9 +277,7 @@ The `id[0:2]/id[2:4]` directory structure prevents having too many files in a si
 
     This documentation is still taking shape. It should soon cover:
 
-    - How (and when) to exclude parameters from hashing -> task ID
-    - How Task ID is obtained in more detail
+    - `task.instance_hash` in more detail, and how a scope reuses it
     - Customizing hash behaviour
-    - Compatibility mode validation
     - Task versioning
     - Best practices (examples for experimental ML and model hyperparameters)

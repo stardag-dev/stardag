@@ -384,10 +384,18 @@ assignee the maintainer.
       deploy. Nothing sleeps; shrinking those windows is the lever.
       The docker-compose e2e tier (`integration-tests/tests`) is re-pointed to v2 in PR #391 (merged).
 
-- [ ] I11 — docs. Principles and release notes drafted, in review (PR
-      #392): `docs/design/principles.md`, the v2 entries in `CHANGELOG.md`
-      and `RELEASE_NOTES.md`; versioning TODO(Anders). The user docs under
-      `docs/docs/` are the other half, on a separate branch.
+- [ ] I11 — docs. Two halves, two branches. Principles and release notes
+      drafted, in review (PR #392): `docs/design/principles.md`, the v2
+      entries in `CHANGELOG.md` and `RELEASE_NOTES.md`; versioning
+      TODO(Anders). User docs under `docs/docs/` in review (draft PR
+      against `v2`, #393): `concepts/parameters.md`,
+      `concepts/build-execution.md`, `concepts/modal-orchestration.md`
+      ("Deployments and code versions"), `how-to/evolve-dags.md`,
+      `how-to/integrate-modal.md`, `platform/api.md` rewritten for the v2
+      entities; `concepts/dependencies.md`/`concepts/index.md` minor
+      fixes; `configuration/cli.md` updated to the full v2 CLI merged in
+      I8 (#387). `docs/design/README.md` and `DEV_README.md` needed no
+      change.
 - [ ] I12 — release
 
 ## Delivery steps
