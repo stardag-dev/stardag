@@ -258,3 +258,61 @@ async def test_a_tick_finding_the_build_cancelled_meanwhile_leaves_it(
     )
     assert status == "cancelled"
     assert registry.builds[build.id].status == "cancelled"
+
+
+class CancelsThenFails(Task[str]):
+    """Fails while an operator cancels its build (the race)."""
+
+    name: str
+
+    def run(self):
+        _cancel_the_build()
+        raise ValueError("failed during the cancel")
+
+
+@ENGINES
+async def test_a_failure_racing_a_cancel_skips_nothing(
+    engine, registry, default_in_memory_fs_target: Target
+):
+    """The build is cancelled while a task fails: the engine's skip-blocked
+    finds a cancelled build (nothing failed, nothing to propagate), its
+    ``/fail`` is refused ``build_terminal``, and no member is skipped."""
+    bad = CancelsThenFails(name=f"race-{new_id()}")
+    root = SyncOnlyTask(name="root", deps=(bad,))
+    summary = await engine([root], registry=registry, fail_mode=FailMode.CONTINUE)
+    assert summary.status == BuildExitStatus.STOPPED
+    assert registry.builds[summary.build_id].status == "cancelled"
+    assert registry.status_of(root.id) != "skipped"
+    assert not any(e.type == "TASK_SKIPPED" for e in registry.events)
+    assert _build_events(registry) == [
+        ("BUILD_CANCELLED", True),
+        ("BUILD_FAILED", False),
+    ]
+
+
+class YieldsAFailingChild(Task[str]):
+    name: str
+
+    def run(self):
+        yield FailingTask(error_message=f"child of {self.name}")
+        self._save("done")
+
+
+async def test_sequential_a_failing_dynamic_child_is_not_a_deadlock(
+    registry, default_in_memory_fs_target: Target
+):
+    """A dynamic dependency that fails inside its parent is itself failed:
+    the reason names it, not a false ``Deadlock``."""
+    parent = YieldsAFailingChild(name=f"parent-{new_id()}")
+    child = FailingTask(error_message=f"child of {parent.name}")
+    summary = await build_sequential_aio(
+        [parent], registry=registry, fail_mode=FailMode.CONTINUE
+    )
+    assert summary.status == BuildExitStatus.FAILURE
+    assert summary.failed_task == child
+    assert summary.task_count.failed == 2
+    # Run once, inside its parent — not again by the top-level loop.
+    assert len(registry.calls_to("member_start", task_id=child.id)) == 1
+    reason = registry.builds[summary.build_id].error_message
+    assert reason.startswith(f"Task {describe_task(child)} failed: ValueError")
+    assert "Deadlock" not in reason

@@ -66,6 +66,8 @@ class ExclusionMixin(RegistryState):
 
     def build_skip_blocked(self, build_id: UUID) -> list[str]:
         self._record("build_skip_blocked", build_id=build_id)
+        if self.builds[build_id].status in ("cancelled", "completed"):
+            return []  # nothing failed: no failure to propagate
         plan = self.active_plan(build_id)
         members = self.members.get(plan.id, {}) if plan is not None else {}
         skipped: list[str] = []
@@ -74,13 +76,14 @@ class ExclusionMixin(RegistryState):
             changed = False
             for member in members.values():
                 task = self.tasks[member.task_id]
-                if task.status in ("completed", "running", "skipped", "failed"):
-                    continue
+                if task.status not in ("pending", "suspended", "interrupted"):
+                    continue  # the server skips only these
                 upstream_statuses = {
                     self.tasks[self.instances[u].task_id].status
                     for u in self.instances[member.instance_id].upstreams
                 }
-                if upstream_statuses & {"failed", "skipped"}:
+                # The server's blockers: failed, cancelled, skipped.
+                if upstream_statuses & {"failed", "cancelled", "skipped"}:
                     self.move(task, "skipped")
                     skipped.append(member.task_id)
                     changed = True

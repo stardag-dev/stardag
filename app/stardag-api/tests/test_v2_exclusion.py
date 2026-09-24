@@ -13,7 +13,7 @@ import pytest
 from httpx import AsyncClient
 
 from stardag_api.models import ExclusionReason
-from stardag_api.services import builds
+from stardag_api.services import builds, exclusion
 from stardag_api.services.errors import Conflict
 from stardag_api.services.transitions import (
     Transition,
@@ -69,6 +69,24 @@ async def test_skip_blocked_walks_instance_edges_within_the_plan(h: Harness):
         ok.task_id,
         after_done.task_id,
     }
+
+
+async def test_skip_blocked_is_a_no_op_on_a_cancelled_build(h: Harness):
+    """A cancel releases the build's claims, leaving those tasks CANCELLED;
+    a late skip-blocked from a driver that raced the cancel must not read
+    them as failures and skip their downstream: a build that did not fail
+    has no failure to propagate."""
+    leaf = item("Leaf")
+    root = item("Root", upstreams=[leaf])
+    build, plan = await h.planned([root], [leaf, root], seal=True)
+    await h.start(plan.id, leaf)
+    async with h.sf() as s:
+        await builds.cancel_build(s, ENV, build)
+    assert (await h.task(leaf))["status"] == "cancelled"
+    async with h.sf() as s:
+        result = await exclusion.skip_blocked(s, ENV, build)
+    assert result.skipped == []
+    assert (await h.task(root))["status"] == "pending"
 
 
 async def test_s18_an_operator_exclusion_cascades_and_leaves_the_global_status(

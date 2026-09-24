@@ -38,6 +38,7 @@ from sqlalchemy import String, Uuid, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
+    BuildStatus,
     EventType,
     ExclusionReason,
     Plan,
@@ -122,9 +123,17 @@ async def skip_blocked(
 ) -> SkipBlockedResult:
     """Skip the active plan's members blocked by a failed, cancelled or
     skipped upstream, in one transaction. Idempotent: a re-delivery finds
-    them SKIPPED and skips nothing."""
+    them SKIPPED and skips nothing.
+
+    A no-op on a CANCELLED or COMPLETED build: skipping is failure
+    propagation, and a build that did not fail has none to propagate (its
+    release left the claimed tasks CANCELLED, which the walk would
+    otherwise read as blockers). A FAILED build is still walked — a tick
+    fails the build first and skips after."""
     async with transaction(session):
         build = await lock_build(session, environment_id, build_id)
+        if build.status in (BuildStatus.CANCELLED, BuildStatus.COMPLETED):
+            return SkipBlockedResult(plan_id=None)
         plan = await active_plan(session, build.id)
         if plan is None:
             return SkipBlockedResult(plan_id=None)

@@ -165,6 +165,9 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   409 `build_terminal` and is recorded as its build event with
   `report_applied = false`; `resume` is the way out. A cancelled build no
   longer ends FAILED because its still-running driver reported a failure.
+- **Changed: `skip-blocked` is a no-op on a CANCELLED or COMPLETED build**,
+  so a driver racing an operator's cancel cannot skip the downstream of the
+  tasks the cancel released.
 - **Changed: the exclude response describes that call.** It gains
   `roots_excluded` (the roots this exclusion cascaded to), and
   `build_failed` now means this call failed the build.

@@ -240,6 +240,12 @@ class _SequentialEngine:
         return blocked
 
     def _note_failure(self, task: BaseTask, error: BaseException) -> None:
+        """The task that raised is failed — also when it is a dynamic
+        dependency run inside its parent, whose failure the top-level loop
+        records — so the blocked walk and the deadlock check see it."""
+        if task.id not in self.failed:
+            self.failed.add(task.id)
+            self.count.failed += 1
         if not any(f is error for _, f in self.failures):
             self.failures.append((task, error))
 
@@ -350,8 +356,9 @@ class _SequentialEngine:
                     self.stopped = str(e)
                     break
                 except Exception as e:
-                    self.failed.add(task.id)
-                    self.count.failed += 1
+                    if task.id not in self.failed:  # else noted where it raised
+                        self.failed.add(task.id)
+                        self.count.failed += 1
                     error = error or e
                     if self.fail_mode == FailMode.FAIL_FAST:
                         raise
