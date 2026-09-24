@@ -150,7 +150,16 @@ class MembersResult(_Response):
 
 class FrontierMember(_Response):
     """A member of the active plan as the frontier lists it, with the
-    instance body a tick rehydrates the task object from."""
+    instance body a tick rehydrates the task object from.
+
+    ``attempts`` and ``interruptions`` are served on ``runnable`` and
+    ``running`` items only (zero elsewhere), counted from the execution
+    ledger over **all** of the build's plans (design.md D9): ``attempts``
+    is every execution of the task under the build, ``interruptions`` those
+    whose claim was released ``interrupted`` or which ended ``interrupted``
+    or ``preempted``. The tick applies ``TickConfig.max_interruptions`` to
+    ``interruptions``.
+    """
 
     task_id: str
     instance_id: UUID | None = None
@@ -158,6 +167,8 @@ class FrontierMember(_Response):
     status: str
     is_root: bool = False
     body: dict[str, Any] = Field(default_factory=dict)
+    attempts: int = 0
+    interruptions: int = 0
 
 
 class PlanRoots(_Response):

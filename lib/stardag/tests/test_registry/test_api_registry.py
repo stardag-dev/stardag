@@ -149,7 +149,13 @@ class TestRoutes:
                     "plan_id": str(plan_id),
                     "sealed": True,
                     "runnable": [
-                        {"task_id": "t1", "instance_hash": "h", "status": "pending"}
+                        {
+                            "task_id": "t1",
+                            "instance_hash": "h",
+                            "status": "interrupted",
+                            "attempts": 3,
+                            "interruptions": 2,
+                        }
                     ],
                     "future_field": "ignored",
                 },
@@ -164,6 +170,11 @@ class TestRoutes:
         registry.plan_seal(plan_id)
         frontier = registry.build_get_frontier(build_id)
         assert frontier.sealed and frontier.runnable[0].task_id == "t1"
+        # The ledger counts the tick's interruption budget reads (D9).
+        assert (frontier.runnable[0].attempts, frontier.runnable[0].interruptions) == (
+            3,
+            2,
+        )
 
     def test_a_claiming_start_and_a_non_claiming_one(self):
         plan_id = uuid4()

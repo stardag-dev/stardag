@@ -86,6 +86,16 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   present** in a warm container, so discovery saw it complete and never
   invalidated it. Each discovery walk begins an observation fence, and a
   mounted-volume hit older than it reloads the volume once per walk.
+- **Restored: `TickConfig.max_interruptions` (default 20).** An
+  INTERRUPTED member is actionable, so a task that asks to be resumed on
+  every run was restarted forever. The frontier's per-member
+  `interruptions` (counted from the execution ledger over the build's plans)
+  is now read: at the cap the tick claims the member without spawning it
+  and records `TASK_FAILED` naming the count, and the build's fail mode
+  applies. `FrontierMember` gains `attempts` and `interruptions`. A FAILED
+  member is still never retried by the tick (the fail mode decides);
+  `max_attempts` still covers only a failed spawn. Also accepted in
+  `tick_kwargs`.
 - **Fixed: a watchdog sweep landing on a lingering tick was dropped.** A
   tick refused the scheduler lease now flags the build before exiting
   `lease_held`, so the holder acts on it (or a successor is spawned if the
