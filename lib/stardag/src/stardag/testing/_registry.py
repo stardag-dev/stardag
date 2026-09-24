@@ -27,10 +27,12 @@ from stardag.registry import (
     BuildNotifyResult,
     DeploymentInfo,
     ExecutionInfo,
+    PlanRoots,
     RegistryABC,
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
+    TaskArtifactInfo,
     TaskInfo,
     TaskInstanceInfo,
     TickSummaryRecord,
@@ -237,6 +239,23 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         build.status = "exit_early"
         return self._info(build)
 
+    def build_list(
+        self,
+        *,
+        status: str | None = None,
+        reactive_app_name: str | None = None,
+        limit: int = 100,
+    ) -> list[BuildInfo]:
+        self._record("build_list", status=status, reactive_app_name=reactive_app_name)
+        # Newest first, as the server orders by activity.
+        rows = [
+            b
+            for b in reversed(list(self.builds.values()))
+            if (status is None or b.status == status)
+            and (reactive_app_name is None or b.reactive_app_name == reactive_app_name)
+        ]
+        return [self._info(b) for b in rows[:limit]]
+
     def build_list_running(
         self, *, reactive_app_name: str | None = None, limit: int = 100
     ) -> list[UUID]:
@@ -246,6 +265,16 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             if b.status == "running"
             and (reactive_app_name is None or b.reactive_app_name == reactive_app_name)
         ][:limit]
+
+    def plan_roots_info(self, plan_id: UUID) -> PlanRoots:
+        plan = self.plan(plan_id)
+        return PlanRoots(
+            plan_id=plan.id,
+            build_id=plan.build_id,
+            deployment_id=plan.deployment_id,
+            settings_hash=plan.settings_hash,
+            roots=self.plan_roots(plan_id),
+        )
 
     # -- executions and tasks ------------------------------------------------------------
 
@@ -318,8 +347,28 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             version=task.version,
             output_uri=task.output_uri,
             status=task.status,
+            status_at=task.status_at,
+            completed_at=task.completed_at,
+            error_message=task.error_message,
+            claim_expires_at=task.claim_expires_at,
+            execution_id=task.execution_id,
             instances=instances,
         )
+
+    def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
+        self.task(task_id)
+        latest: dict[tuple[str, str], Any] = {}
+        for artifact in self.artifacts.get(task_id, []):
+            latest[(artifact.type, artifact.name)] = artifact
+        return [
+            TaskArtifactInfo(
+                task_id=task_id,
+                artifact_type=a.type,
+                name=a.name,
+                body=a.model_dump(mode="json").get("body"),
+            )
+            for a in latest.values()
+        ]
 
     def task_upload_artifacts(
         self,

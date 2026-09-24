@@ -1,5 +1,7 @@
 """Tests for the ``stardag builds`` CLI group on the v2 registry: ``show``,
-``frontier``, ``ticks`` and ``cancel``. The registry client is mocked at
+``frontier``, ``ticks`` and ``cancel`` (``stop`` and the lifecycle
+commands against the in-memory registry are in ``test_builds_stop.py`` and
+``test_v2_commands.py``). The registry client is mocked at
 ``stardag._cli.builds._resolve_registry``."""
 
 import json
@@ -11,7 +13,7 @@ from typer.testing import CliRunner
 
 from stardag._cli.builds import app
 from stardag.exceptions import APIError, NotFoundError
-from stardag.registry import BuildFrontier, BuildInfo, TickSummaryRecord
+from stardag.registry import BuildFrontier, BuildInfo, SettingsInfo, TickSummaryRecord
 
 # A wide console keeps each rendered row on one line.
 runner = CliRunner(env={"COLUMNS": "240"})
@@ -78,9 +80,20 @@ def _frontier(**overrides) -> BuildFrontier:
     return BuildFrontier.model_validate(data)
 
 
+def _show_registry(**overrides):
+    methods = {
+        "build_get": _build(),
+        "build_get_frontier": _frontier(),
+        "settings_get": SettingsInfo(hash="abc123", body={"THREADS": "4"}),
+        "build_list_executions": [],
+    }
+    methods.update(overrides)
+    return _mock_registry(**methods)
+
+
 class TestShow:
     def test_happy_path(self):
-        registry = _mock_registry(build_get=_build())
+        registry = _show_registry()
         with _patch_resolve(registry):
             result = runner.invoke(app, ["show", BUILD_ID])
         assert result.exit_code == 0, result.output
@@ -98,11 +111,13 @@ class TestShow:
         registry.build_get.assert_not_called()
 
     def test_json(self):
-        registry = _mock_registry(build_get=_build())
+        registry = _show_registry()
         with _patch_resolve(registry):
             result = runner.invoke(app, ["show", BUILD_ID, "--json"])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.stdout)["id"] == BUILD_ID
+        payload = json.loads(result.stdout)
+        assert payload["id"] == BUILD_ID
+        assert payload["active_plan"]["settings"] == {"THREADS": "4"}
 
     def test_a_missing_build_is_reported_and_the_client_closed(self):
         registry = _mock_registry(build_get=NotFoundError("no build"))

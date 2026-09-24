@@ -25,10 +25,28 @@ Usage:
     stardag environment target-roots remove <name> [--env <env>]
     stardag environment target-roots set <name=uri ...> [--json <json>] [--env <env>]
 
+    stardag build <module:attr ...> [--param k=v] [--settings K=V ...]
+        [--app module:attr [--reactive]] [--resume <build-id>] [--dry-run]
+
+    stardag builds list [--status S] [--app A] [--json]
     stardag builds show <build-id> [--json]
     stardag builds frontier <build-id> [--json]
     stardag builds ticks <build-id> [--limit N] [--json]
+    stardag builds stop <build-id> [--not-in-current-plan] [--no-cancel]
+        [--executor E] [--worker W] [--older-than D] [--task-id T] [--dry-run]
     stardag builds cancel <build-id> [--yes]
+    stardag builds complete <build-id> [--force]
+    stardag builds fail <build-id> [--message M]
+
+    stardag executions list --build <build-id> [--not-in-current-plan]
+    stardag plans show <plan-id>
+    stardag deployments list [--app A] [--kind modal|local] [--current]
+
+    stardag tasks show <task-id>
+    stardag tasks check <task-id> --module <import path>
+    stardag tasks retry <task-id> --build <build-id>
+    stardag tasks cancel <task-id> --build <build-id>
+    stardag tasks exclude <plan-id> <task-id> --reason R
 
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
     stardag modal deployments [--app name] [--current]
@@ -43,8 +61,8 @@ Usage:
     stardag self-host destroy [--delete-secrets] [--server-modal-env env]
 
 Machine-readable output:
-    The registry-backed read commands (`builds show/frontier/ticks`) take
-    `--json`. In that mode stdout
+    The registry-backed list and show commands take `--json`. In that mode
+    stdout
     carries exactly one JSON document — the SDK's model of the API
     payload — and every hint, warning and prompt goes to stderr, so
     piping to `jq` is safe.
@@ -58,7 +76,17 @@ Configuration:
 
 import typer
 
-from stardag._cli import auth, builds, config, environment
+from stardag._cli import (
+    auth,
+    builds,
+    config,
+    deployments,
+    environment,
+    executions,
+    plans,
+    tasks,
+)
+from stardag._cli.build import build_command
 
 # Main CLI app
 app = typer.Typer(
@@ -72,6 +100,11 @@ app.add_typer(auth.app, name="auth")
 app.add_typer(config.app, name="config")
 app.add_typer(environment.app, name="environment")
 app.add_typer(builds.app, name="builds")
+app.add_typer(executions.app, name="executions")
+app.add_typer(plans.app, name="plans")
+app.add_typer(deployments.app, name="deployments")
+app.add_typer(tasks.app, name="tasks")
+app.command("build")(build_command)
 
 # Add modal subcommand only if modal is installed
 try:

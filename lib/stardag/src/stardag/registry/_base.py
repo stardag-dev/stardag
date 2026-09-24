@@ -39,10 +39,12 @@ from stardag.registry._models import (
     FrontierMember,
     MembersResult,
     PlanInfo,
+    PlanRoots,
     RegistrationItem,
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
+    TaskArtifactInfo,
     TaskInfo,
     TickSummaryRecord,
     TransitionResult,
@@ -161,6 +163,17 @@ class RegistryABC:
     async def build_exit_early_aio(self, build_id: UUID) -> BuildInfo:
         return self.build_exit_early(build_id)
 
+    def build_list(
+        self,
+        *,
+        status: str | None = None,
+        reactive_app_name: str | None = None,
+        limit: int = 100,
+    ) -> list[BuildInfo]:
+        """``GET /builds``: builds, most recently active first, optionally
+        by status and by reactive app."""
+        raise _missing(self, "build_list")
+
     def build_list_running(
         self, *, reactive_app_name: str | None = None, limit: int = 100
     ) -> list[UUID]:
@@ -226,6 +239,10 @@ class RegistryABC:
 
     async def plan_seal_aio(self, plan_id: UUID) -> PlanInfo:
         return self.plan_seal(plan_id)
+
+    def plan_roots_info(self, plan_id: UUID) -> PlanRoots:
+        """``GET /plans/{id}/roots``: the plan's scope and root members."""
+        raise _missing(self, "plan_roots_info")
 
     def plan_roots(self, plan_id: UUID) -> list[FrontierMember]:
         """The plan's root members with their instance bodies (rollover)."""
@@ -480,6 +497,10 @@ class RegistryABC:
         """``GET /tasks/{task_id}``: a completion's identity and state, with
         its instances (each a construction under one scope), newest first."""
         raise _missing(self, "task_get")
+
+    def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
+        """``GET /tasks/{task_id}/artifacts``."""
+        raise _missing(self, "task_list_artifacts")
 
     def task_upload_artifacts(
         self,

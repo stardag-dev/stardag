@@ -20,6 +20,7 @@ from stardag.registry._api_http import HTTPTransport, Request
 from stardag.registry._api_routes import (
     _artifacts_body,
     _build_create_req,
+    _build_list_req,
     _build_get_req,
     _build_resume_req,
     _build_transition_req,
@@ -31,7 +32,6 @@ from stardag.registry._api_routes import (
     _executions_req,
     _frontier_req,
     _lease_req,
-    _list_running_req,
     _member_req,
     _members_req,
     _notify_req,
@@ -43,6 +43,7 @@ from stardag.registry._api_routes import (
     _skip_blocked_req,
     _start_req,
     _stopped_req,
+    _task_artifacts_req,
     _wake_candidates_req,
     _yield_req,
 )
@@ -58,10 +59,12 @@ from stardag.registry._models import (
     FrontierMember,
     MembersResult,
     PlanInfo,
+    PlanRoots,
     RegistrationItem,
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
+    TaskArtifactInfo,
     TaskInfo,
     TickSummaryRecord,
     TransitionResult,
@@ -187,10 +190,22 @@ class APIRegistry(HTTPTransport, RegistryABC):
     async def build_exit_early_aio(self, build_id: UUID) -> BuildInfo:
         return await self.acall(_build_transition_req(build_id, "exit-early"))
 
+    def build_list(
+        self,
+        *,
+        status: str | None = None,
+        reactive_app_name: str | None = None,
+        limit: int = 100,
+    ) -> list[BuildInfo]:
+        return self.call(_build_list_req(status, reactive_app_name, limit))
+
     def build_list_running(
         self, *, reactive_app_name: str | None = None, limit: int = 100
     ) -> list[UUID]:
-        return self.call(_list_running_req(reactive_app_name, limit))
+        builds = self.build_list(
+            status="running", reactive_app_name=reactive_app_name, limit=limit
+        )
+        return [b.id for b in builds]
 
     def build_get_frontier(self, build_id: UUID) -> BuildFrontier:
         return self.call(_frontier_req(build_id))
@@ -242,11 +257,14 @@ class APIRegistry(HTTPTransport, RegistryABC):
     async def plan_seal_aio(self, plan_id: UUID) -> PlanInfo:
         return await self.acall(_seal_req(plan_id))
 
-    def plan_roots(self, plan_id: UUID) -> list[FrontierMember]:
+    def plan_roots_info(self, plan_id: UUID) -> PlanRoots:
         return self.call(_plan_roots_req(plan_id))
 
+    def plan_roots(self, plan_id: UUID) -> list[FrontierMember]:
+        return self.plan_roots_info(plan_id).roots
+
     async def plan_roots_aio(self, plan_id: UUID) -> list[FrontierMember]:
-        return await self.acall(_plan_roots_req(plan_id))
+        return (await self.acall(_plan_roots_req(plan_id))).roots
 
     def build_skip_blocked(self, build_id: UUID) -> list[str]:
         return self.call(_skip_blocked_req(build_id))
@@ -502,7 +520,6 @@ class APIRegistry(HTTPTransport, RegistryABC):
         return self.call(_stopped_req(execution_id))
 
     def task_get(self, task_id: str) -> TaskInfo:
-        # (assumed) GET /tasks/{task_id}
         return self.call(
             Request(
                 "GET",
@@ -512,6 +529,9 @@ class APIRegistry(HTTPTransport, RegistryABC):
             )
         )
 
+    def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
+        return self.call(_task_artifacts_req(task_id))
+
     def _artifacts_req(
         self,
         plan_id: UUID,
@@ -519,7 +539,6 @@ class APIRegistry(HTTPTransport, RegistryABC):
         artifacts: "Sequence[Artifact]",
         execution_id: UUID | None,
     ) -> Request[None]:
-        # (assumed) POST /plans/{plan_id}/members/{task_id}/artifacts
         return Request(
             "POST",
             f"/plans/{plan_id}/members/{task_id}/artifacts",

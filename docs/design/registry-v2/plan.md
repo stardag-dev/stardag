@@ -244,7 +244,19 @@ assignee the maintainer.
       (root bodies for rollover), `GET /tasks/{id}` (`from_registry`),
       `POST /tasks/{id}/artifacts`. Left to I8: `builds list/stop/cleanup`,
       `tasks`, `concurrency-limits`. The live tier is I0 step 4.
-- [ ] I8 — CLI
+- [ ] I8 — CLI (in review, draft PR against `v2`). `stardag build`
+      (roots from `module:attr`, `--settings`, `--app`, `--reactive`,
+      `--resume`, `--dry-run`); `builds list/show/frontier/ticks/stop/
+cancel/complete/fail`, `stop` over the execution ledger with
+      `--not-in-current-plan`; `executions list`; `plans show`;
+      `deployments list` (`stardag modal deployments` is its Modal alias);
+      `tasks show/check/retry/cancel/exclude`. Client reads added:
+      `build_list`, `plan_roots_info`, `task_list_artifacts`, all on served
+      routes. Open server-contract items: no `GET /plans/{id}` (timestamps
+      and member counts are known only for the active plan, via the
+      frontier), no event read (`tasks show` cannot surface
+      `TASK_STRUCTURE_DIVERGED`), no route for a bare observation
+      (`tasks check --report` is refused).
 - [ ] I9 — UI
 - [ ] I10 — tests
 - [ ] I11 — docs

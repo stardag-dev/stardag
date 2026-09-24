@@ -418,6 +418,57 @@ class TestRoutes:
         assert all(not r.content for r in recorder.requests)
 
 
+class TestReads:
+    """The reads the CLI adds: the build listing, a plan's roots with its
+    scope, and a task's artifacts."""
+
+    def test_build_list_filters_and_the_running_listing_uses_it(self):
+        build_id = uuid4()
+        build = {"id": str(build_id), "status": "running", "root_task_ids": ["t"]}
+        recorder = _Recorder({("GET", "/api/v2/builds"): {"builds": [build]}})
+        registry = _registry(recorder)
+        (listed,) = registry.build_list(status="failed", reactive_app_name="app")
+        assert listed.id == build_id
+        params = recorder.requests[-1].url.params
+        assert (params["status"], params["reactive_app_name"]) == ("failed", "app")
+        assert registry.build_list_running() == [build_id]
+        assert recorder.requests[-1].url.params["status"] == "running"
+
+    def test_plan_roots_carry_the_scope(self):
+        plan_id, build_id, deployment_id = uuid4(), uuid4(), uuid4()
+        root = {"task_id": "t", "instance_hash": "h", "status": "pending"}
+        recorder = _Recorder(
+            {
+                ("GET", f"/api/v2/plans/{plan_id}/roots"): {
+                    "plan_id": str(plan_id),
+                    "build_id": str(build_id),
+                    "deployment_id": str(deployment_id),
+                    "settings_hash": "s",
+                    "roots": [root],
+                }
+            }
+        )
+        registry = _registry(recorder)
+        info = registry.plan_roots_info(plan_id)
+        assert (info.build_id, info.deployment_id) == (build_id, deployment_id)
+        assert [r.task_id for r in registry.plan_roots(plan_id)] == ["t"]
+
+    def test_task_artifacts(self):
+        artifact = {
+            "id": str(uuid4()),
+            "task_id": "t",
+            "artifact_type": "markdown",
+            "name": "report",
+            "body": {"content": "# hi"},
+            "created_at": NOW.isoformat(),
+        }
+        recorder = _Recorder(
+            {("GET", "/api/v2/tasks/t/artifacts"): {"artifacts": [artifact]}}
+        )
+        (listed,) = _registry(recorder).task_list_artifacts("t")
+        assert (listed.artifact_type, listed.name) == ("markdown", "report")
+
+
 class TestErrors:
     def _refusing(self, status: int, detail: typing.Any) -> APIRegistry:
         return _registry(

@@ -83,31 +83,22 @@ def deployments(
     current: bool = typer.Option(
         False, "--current", help="Only each app's current deployment."
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit the API payload as JSON on stdout."
+    ),
 ) -> None:
     """List the Modal deployments recorded in the registry, newest first.
 
-    One row per ``stardag modal deploy``; an app's current deployment is its
-    activated one with the highest generation, and running reactive builds
-    roll over to it at their next scheduler tick. A row with no activation
-    is a deploy whose record was created but never activated.
+    An alias of ``stardag deployments list --kind modal``. Reads
+    ``GET /deployments``; writes nothing. An app's current deployment is
+    its activated one with the highest generation, and running reactive
+    builds roll over to it at their next scheduler tick. A row with no
+    activation is a deploy whose record was created but never activated.
     """
-    from rich.table import Table
+    from stardag._cli.deployments import render_deployments
 
     registry = _deployment_registry("no deployments to list")
     if registry is None:
         return
     rows = registry.deployment_list(kind="modal", app_name=app_name, current=current)
-    table = Table(title="Deployments")
-    for col in ("App", "Deployment", "Gen", "Code id", "Deployed", "Activated", ""):
-        table.add_column(col)
-    for d in rows:
-        table.add_row(
-            d.app_name,
-            str(d.id),
-            str(d.generation),
-            d.code_id[:12],
-            d.deployed_at.isoformat(timespec="seconds") if d.deployed_at else "-",
-            d.activated_at.isoformat(timespec="seconds") if d.activated_at else "-",
-            "[green]current[/green]" if d.is_current else "",
-        )
-    console.print(table)
+    render_deployments(rows, json_output=json_output)
