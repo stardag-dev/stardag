@@ -172,7 +172,7 @@ def test_task_list_executions(include_ended: bool):
 def test_task_events():
     event = {
         "id": str(uuid4()),
-        "event_type": "TASK_STRUCTURE_DIVERGED",
+        "event_type": "task_structure_diverged",
         "created_at": "2026-09-24T00:00:00Z",
         "build_id": None,
         "plan_id": str(uuid4()),
@@ -185,7 +185,7 @@ def test_task_events():
     recorder = _Recorder({("GET", "/api/v2/tasks/t1/events"): {"events": [event]}})
     (row,) = _registry(recorder).task_events("t1", limit=50)
     assert recorder.requests[-1].url.params["limit"] == "50"
-    assert row.event_type == "TASK_STRUCTURE_DIVERGED"
+    assert row.event_type == "task_structure_diverged"
     assert row.event_metadata == {"added": ["h2"]}
 
 

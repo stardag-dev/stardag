@@ -52,7 +52,7 @@ class TestTasksShow:
         assert f"build {running_build.build_id}" in result.output
         assert "(live)" in result.output
         assert str(running_build.execution_id) in result.output
-        assert "TASK_STARTED" in result.output
+        assert "task_started" in result.output
         assert "not served" not in result.output
 
     def test_include_ended_lists_ended_executions(self, fake_registry, running_build):
@@ -88,7 +88,20 @@ class TestTasksShow:
         # --events bounds the JSON listing too; divergences come whole.
         assert payload["events"] == []
         (event,) = payload["structure_diverged"]
+        # The server's wire value is lowercase (EventType); the fake serves
+        # the same.
+        assert event["event_type"] == "task_structure_diverged"
         assert event["event_metadata"] == {"added_upstreams": ["h-new"]}
+
+    def test_list_json_items_carry_no_instances(self, fake_registry, running_build):
+        payload = json.loads(invoke("tasks", "list", "--json").stdout)
+        assert payload["tasks"] and all("instances" not in t for t in payload["tasks"])
+
+    def test_plan_json_has_no_create_only_field(self, fake_registry, running_build):
+        payload = json.loads(
+            invoke("plans", "show", running_build.plan_id, "--json").stdout
+        )
+        assert "created" not in payload
 
 
 class TestBuilds:

@@ -55,7 +55,9 @@ _TASK_ID = typer.Argument(..., help="Task ID (the completion hash)")
 # How ``tasks show`` reads the event log: the server serves at most 500 of
 # a task's events, oldest first.
 EVENT_READ_LIMIT = 500
-STRUCTURE_DIVERGED = "TASK_STRUCTURE_DIVERGED"
+# The wire value of EventType.TASK_STRUCTURE_DIVERGED (the server serves
+# event types lowercase).
+STRUCTURE_DIVERGED = "task_structure_diverged"
 
 
 # -----------------------------------------------------------------------------
@@ -99,7 +101,7 @@ def tasks_show(
         _fail(e)
     finally:
         registry.close()
-    diverged = [e for e in log if e.event_type == STRUCTURE_DIVERGED]
+    diverged = [e for e in log if e.event_type.lower() == STRUCTURE_DIVERGED]
     if json_output:
         emit_json(
             {
@@ -244,7 +246,10 @@ def tasks_list(
     finally:
         registry.close()
     if json_output:
-        emit_json(page.model_dump(mode="json"))
+        # List items carry no instances (``GET /tasks`` serves none).
+        emit_json(
+            page.model_dump(mode="json", exclude={"tasks": {"__all__": {"instances"}}})
+        )
         return
     if not page.tasks:
         console.print("No tasks match.")

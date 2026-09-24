@@ -92,7 +92,7 @@ def test_the_claim_holder_executions_and_events_of_a_task():
     (row,) = registry.task_list_executions("leaf")
     assert (row.build_id, row.outcome) == (build_id, "completed")
     events = registry.task_events("leaf")
-    assert [e.event_type for e in events][-2:] == ["TASK_STARTED", "TASK_COMPLETED"]
+    assert [e.event_type for e in events][-2:] == ["task_started", "task_completed"]
     assert all(e.id is not None and e.created_at is not None for e in events)
     failing = new_id()
     registry.member_retry(plan_id, "mid")  # a no-op on PENDING

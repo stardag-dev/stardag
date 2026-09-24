@@ -48,6 +48,14 @@ def _page(
     return page, (str(start + limit) if more else None)
 
 
+def _wire_event_type(internal: str) -> str:
+    """The server's ``EventType`` value for a fake event: lowercase, and a
+    late report (recorded under its outcome, ``FAILED``) under its task
+    event type (``task_failed``), as ``transition_task()`` records it."""
+    value = internal.lower()
+    return value if value.startswith(("task_", "build_")) else f"task_{value}"
+
+
 class ReadsMixin(RegistryState):
     """See the module docstring."""
 
@@ -276,7 +284,7 @@ class ReadsMixin(RegistryState):
         return [
             EventInfo(
                 id=e.id,
-                event_type=e.type,
+                event_type=_wire_event_type(e.type),
                 created_at=e.created_at,
                 error_message=e.error_message,
                 build_id=e.build_id,

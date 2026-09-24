@@ -143,6 +143,8 @@ class PlanDetail(PlanInfo):
     deployment: DeploymentInfo | None = None
     created_at: datetime | None = None
     is_active: bool = False
+    #: Not served by the read (only a create answers it): out of dumps.
+    created: bool = Field(default=False, exclude=True)
     member_count: int = 0
     root_count: int = 0
     excluded_count: int = 0
