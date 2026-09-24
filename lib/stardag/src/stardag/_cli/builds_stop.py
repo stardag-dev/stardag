@@ -48,6 +48,12 @@ def builds_stop(
     worker: Optional[str] = typer.Option(
         None, "--worker", help="Only executions on this worker (the app's name for it)."
     ),
+    namespace: Optional[str] = typer.Option(
+        None,
+        "--namespace",
+        help="Only tasks whose namespace starts with this (reads each listed "
+        "task's namespace from GET /tasks/{id}).",
+    ),
     older_than: Optional[str] = typer.Option(
         None,
         "--older-than",
@@ -108,6 +114,7 @@ def builds_stop(
     filters = _stop.Filters(
         executor=executor,
         worker=worker,
+        namespace=namespace,
         older_than_seconds=older_than_seconds,
         task_ids=tuple(task_id or ()),
     )
@@ -126,9 +133,14 @@ def builds_stop(
             executions = registry.build_list_executions(
                 parsed, not_in_current_plan=not_in_current_plan
             )
+            namespaces = (
+                _stop.task_namespaces(registry, executions)
+                if namespace is not None
+                else None
+            )
         except StardagError as e:
             _fail(e)
-        selected, excluded = _stop.split(executions, filters)
+        selected, excluded = _stop.split(executions, filters, namespaces=namespaces)
         stoppable = [e for e in selected if _stop.is_stoppable(e)]
         unstoppable = [e for e in selected if not _stop.is_stoppable(e)]
         losable = [e for e in unstoppable if not e.executor_ref] if mark_lost else []

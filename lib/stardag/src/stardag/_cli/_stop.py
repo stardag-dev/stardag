@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from stardag._cli._output import as_utc
 from stardag.registry import ExecutionInfo
@@ -99,16 +99,40 @@ class Filters:
 
     executor: str | None = None
     worker: str | None = None
+    #: A prefix of the task's namespace (v1's ``--namespace``). The ledger
+    #: rows carry no namespace, so the caller resolves each task's and
+    #: passes them to :func:`split`.
+    namespace: str | None = None
     older_than_seconds: int | None = None
     task_ids: tuple[str, ...] = ()
 
     @property
     def any_set(self) -> bool:
-        return any((self.executor, self.worker, self.older_than_seconds, self.task_ids))
+        return any(
+            (
+                self.executor,
+                self.worker,
+                self.namespace,
+                self.older_than_seconds,
+                self.task_ids,
+            )
+        )
 
-    def matches(self, execution: ExecutionInfo, *, now: datetime) -> bool:
+    def matches(
+        self,
+        execution: ExecutionInfo,
+        *,
+        now: datetime,
+        namespaces: Mapping[str, str] | None = None,
+    ) -> bool:
         if self.task_ids and execution.task_id not in self.task_ids:
             return False
+        if self.namespace is not None:
+            # A namespace that cannot be established matches nothing, as an
+            # undatable row never matches --older-than.
+            namespace = (namespaces or {}).get(execution.task_id or "")
+            if namespace is None or not namespace.startswith(self.namespace):
+                return False
         if self.executor is not None and executor_of(execution) != self.executor:
             return False
         if self.worker is not None and worker_of(execution) != self.worker:
@@ -128,16 +152,30 @@ def split(
     filters: Filters,
     *,
     now: datetime | None = None,
+    namespaces: Mapping[str, str] | None = None,
 ) -> tuple[list[ExecutionInfo], list[ExecutionInfo]]:
-    """``(selected, excluded_by_filter)``, one evaluation per execution."""
+    """``(selected, excluded_by_filter)``, one evaluation per execution.
+    ``namespaces`` maps task id to task namespace, for ``Filters.namespace``
+    (see :func:`task_namespaces`)."""
     reference = now or datetime.now(timezone.utc)
     selected: list[ExecutionInfo] = []
     excluded: list[ExecutionInfo] = []
     for execution in executions:
-        (selected if filters.matches(execution, now=reference) else excluded).append(
-            execution
-        )
+        matched = filters.matches(execution, now=reference, namespaces=namespaces)
+        (selected if matched else excluded).append(execution)
     return selected, excluded
+
+
+def task_namespaces(
+    registry: Any, executions: Iterable[ExecutionInfo]
+) -> dict[str, str]:
+    """Each listed task's namespace, one ``GET /tasks/{id}`` per distinct
+    task: the ledger rows name the task, not its namespace. Read only when
+    ``--namespace`` is given."""
+    return {
+        task_id: registry.task_get(task_id).task_namespace
+        for task_id in sorted({e.task_id for e in executions if e.task_id})
+    }
 
 
 class ModalUnavailable(RuntimeError):

@@ -26,35 +26,46 @@ Usage:
     stardag environment target-roots set <name=uri ...> [--json <json>] [--env <env>]
 
     stardag build <module:attr ...> [--param k=v] [--settings K=V ...]
-        [--app module:attr [--reactive]] [--resume <build-id>] [--dry-run]
+        [--app module:attr [--reactive]] [--resume <build-id>] [--description D]
+        [--dry-run] [--json]
 
-    stardag builds list [--status S] [--app A] [--json]
+    stardag builds list [--status S] [--app A | --reactive-app A] [--limit N]
+        [--cursor C] [--json]
     stardag builds show <build-id> [--json]
     stardag builds frontier <build-id> [--json]
     stardag builds ticks <build-id> [--limit N] [--json]
     stardag builds stop <build-id> [--not-in-current-plan] [--no-cancel]
-        [--executor E] [--worker W] [--older-than D] [--task-id T] [--dry-run]
-    stardag builds cancel <build-id> [--yes]
-    stardag builds complete <build-id> [--force]
-    stardag builds fail <build-id> [--message M]
+        [--executor E] [--worker W] [--namespace NS] [--older-than D]
+        [--task-id T ...] [--mark-lost] [--dry-run] [--yes] [--json]
+    stardag builds cancel <build-id> [--yes] [--json]
+    stardag builds complete <build-id> [--force] [--json]
+    stardag builds fail <build-id> [--message M] [--yes] [--json]
 
-    stardag executions list --build <build-id> [--not-in-current-plan]
-    stardag plans show <plan-id>
+    stardag executions list (--build <build-id> [--not-in-current-plan] |
+        --task <task-id>) [--include-ended] [--json]
+    stardag plans show <plan-id> [--json]
+    stardag plans list --build <build-id> [--json]
     stardag deployments list [--app A] [--kind modal|local] [--current]
+        [--limit N] [--json]
+    stardag deployments show <deployment-id> [--json]
 
-    stardag concurrency-limits list [--holders]
-    stardag concurrency-limits set <key> <max_concurrent>
-    stardag concurrency-limits delete <key> [--yes]
-    stardag concurrency-limits holders <key> [--limit N]
+    stardag concurrency-limits list [--holders] [--json]
+    stardag concurrency-limits set <key> <max_concurrent> [--json]
+    stardag concurrency-limits delete <key> [--yes] [--json]
+    stardag concurrency-limits holders <key> [--limit N] [--json]
 
-    stardag tasks show <task-id>
-    stardag tasks check <task-id> --module <import path>
+    stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
+    stardag tasks show <task-id> [--include-ended] [--events N] [--json]
+    stardag tasks check <task-id> --module <import path> [--json]
     stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
-    stardag tasks exclude <plan-id> <task-id> --reason R
+    stardag tasks exclude <plan-id> <task-id> --reason R [--yes] [--json]
+
+    Each of these registry-backed commands takes -p/--stardag-profile and
+    -e/--stardag-env (`stardag build` takes -p only).
 
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
-    stardag modal deployments [--app name] [--current]
+    stardag modal deployments [--app name] [--current] [--json]
     stardag modal stardag-api-key create [--modal-env env] [-w workspace] [-e env] [-p profile]
 
     stardag self-host up [--neon-api-key key] [--auth-mode local|oidc]
@@ -66,8 +77,8 @@ Usage:
     stardag self-host destroy [--delete-secrets] [--server-modal-env env]
 
 Machine-readable output:
-    The registry-backed list and show commands take `--json`. In that mode
-    stdout
+    Every command from `stardag build` to `stardag tasks` above (the
+    registry-backed ones) takes `--json`. In that mode stdout
     carries exactly one JSON document — the SDK's model of the API
     payload — and every hint, warning and prompt goes to stderr, so
     piping to `jq` is safe.

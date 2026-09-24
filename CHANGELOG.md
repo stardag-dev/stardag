@@ -190,15 +190,32 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   `--no-cancel`), `--mark-lost` ends executions it cannot stop as `lost`.
 - **New: `stardag executions list`, `stardag plans show`, `stardag
 deployments list`** (`stardag modal deployments` stays as an alias).
-- **Changed: `stardag tasks`** — `show`, new `check` (runs `complete()`
-  locally and prints the observation; reports nothing), `retry`, `cancel`,
-  new `exclude`. `tasks list` is removed.
+- **Changed: `stardag tasks`** — `list`, `show`, new `check` (runs
+  `complete()` locally and prints the observation; reports nothing),
+  `retry`, `cancel`, new `exclude`.
 - **Changed: `stardag tasks retry` and `tasks cancel` ask for confirmation**
   again (v1's prompt), skipped with `--yes`; `--json` without `--yes` is
   refused rather than prompting. `--build` is now optional: it defaults to
   the build holding the task's claim (`claim_build_id` from `GET
 /tasks/{id}`) and stays an override; a task holding no claim (a FAILED
   one) still needs it.
+- **New: the CLI on the v2 reads.** `tasks list` (`--status`, `--limit`,
+  `--cursor`; v1's `--older-than`, `--name` and `--namespace` need server
+  support and are not offered); `tasks show` names the claim's holder (plan
+  and build), lists the task's executions (`--include-ended`) and its last
+  events (`--events N`), calling out every `TASK_STRUCTURE_DIVERGED`;
+  `builds show` shows the failure reason and `last_active_at`; `builds
+list` pages (`--cursor`, prints `total` and the next cursor), shows
+  `last_active_at`, and takes `--reactive-app` as an alias of `--app`;
+  `builds frontier` shows "Needs tick" (the wake-up flag, read without
+  clearing it), member counts by status, roots completed out of total, and
+  attempts/interruptions per runnable and running member; `plans show`
+  works on a superseded plan (lifecycle, deployment, counts) and new `plans
+list --build`; new `deployments show`; `executions list --task` and
+  `--include-ended`; `builds stop --namespace` (v1's prefix filter, read per
+  listed task). `builds cancel` and `concurrency-limits set/delete` gain
+  `--json`, so every registry-backed command takes it. The usage block in
+  `stardag --help`'s module docstring lists every command and flag.
 - **Removed: `stardag builds cleanup`.**
 - **Restored: `stardag concurrency-limits`** (`list [--holders]`, `set`,
   `delete`, `holders`) — dropped by omission between two v2 work packages

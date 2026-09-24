@@ -28,7 +28,7 @@ class TestBuilds:
         assert result.exit_code == 0, result.output
         ids = [b["id"] for b in json.loads(result.stdout)["builds"]]
         assert ids == [str(running_build.build_id)]
-        (call,) = fake_registry.calls_to("build_list")
+        (call,) = fake_registry.calls_to("build_list_page")
         assert call["status"] == "running"
 
     def test_list_orders_by_last_active_at_not_insertion_order(self, fake_registry):
@@ -137,7 +137,8 @@ class TestPlans:
         result = invoke("plans", "show", running_build.plan_id, "--json")
         assert result.exit_code == 0, result.output
         payload = json.loads(result.stdout)
-        assert payload["active"] is True and payload["sealed"] is True
+        assert payload["is_active"] is True and payload["sealed_at"] is not None
+        assert payload["member_counts"] == {"pending": 1, "running": 1}
         assert payload["build_id"] == str(running_build.build_id)
         assert [r["task_id"] for r in payload["roots"]] == [str(running_build.root.id)]
         assert payload["outstanding"]["running"] == 1
@@ -146,6 +147,12 @@ class TestPlans:
         result = invoke("plans", "show", running_build.plan_id)
         assert result.exit_code == 0, result.output
         assert "SyncOnlyTask" in result.output
+
+    def test_list_the_builds_plans(self, fake_registry, running_build):
+        result = invoke("plans", "list", "--build", running_build.build_id, "--json")
+        assert result.exit_code == 0, result.output
+        (plan,) = json.loads(result.stdout)["plans"]
+        assert plan["id"] == str(running_build.plan_id)
 
 
 class TestDeployments:
@@ -230,7 +237,11 @@ class TestTasks:
         # (stardag.registry._api_routes._artifacts_body); the fake mirrors
         # it rather than returning the raw markdown string.
         assert payload["artifacts"][0]["body"] == {"content": "# hi"}
-        assert "TASK_STRUCTURE_DIVERGED" in payload["notes"][0]
+        assert payload["structure_diverged"] == []
+        assert payload["claim_build_id"] == str(running_build.build_id)
+        assert [e["id"] for e in payload["executions"]] == [
+            str(running_build.execution_id)
+        ]
         # The real GET /tasks/{id}/artifacts response mints an `id` and
         # `created_at` for every row (services/artifacts.py); the fake must
         # match that contract rather than leaving both at their model
