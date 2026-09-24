@@ -358,7 +358,7 @@ class ResidentSession:
             artifacts = await task.artifacts_aio()
             if artifacts:
                 await self.registry.task_upload_artifacts_aio(
-                    str(task.id), artifacts, execution_id=execution_id
+                    self.plan_id, str(task.id), artifacts, execution_id=execution_id
                 )
         except Exception as e:
             handle_registry_error(

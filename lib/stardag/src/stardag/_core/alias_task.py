@@ -105,7 +105,7 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
 
             registry = registry_provider.get()
 
-        info = registry.task_get(id)
+        info = registry.task_get(str(id))
         if info.output_uri is None:
             raise ValueError(
                 f"Cannot create AliasTask for task {id} without a FileSystemTarget "

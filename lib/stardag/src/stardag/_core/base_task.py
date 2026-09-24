@@ -467,9 +467,11 @@ class BaseTask(
     ) -> "BaseTask":
         """Instantiate the task from the registry.
 
-        Reads an instance body of the task (a task id may have several
-        instances — constructions under different scopes — and any of them
-        rehydrates into this completion).
+        A task id may have several instances — constructions under
+        different scopes — any of which rehydrates into this completion. A
+        task has no parameters, an instance does, so without a scope to
+        narrow by, this takes the newest instance's body (``TaskInfo``
+        orders them newest first).
 
         Validated in compat mode, same as ``task_from_registry_data``: the
         recomputed task id is checked against the requested one, so a
@@ -498,7 +500,7 @@ class BaseTask(
             id = UUID(id)
 
         registry = registry or registry_provider.get()
-        info = registry.task_get(id)
+        info = registry.task_get(str(id))
         if info.body is None:
             raise TaskRehydrationError(
                 f"The registry holds no instance body for task {id}."

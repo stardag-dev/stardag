@@ -501,7 +501,7 @@ class APIRegistry(HTTPTransport, RegistryABC):
     def execution_report_stopped(self, execution_id: UUID) -> TransitionResult:
         return self.call(_stopped_req(execution_id))
 
-    def task_get(self, task_id: UUID) -> TaskInfo:
+    def task_get(self, task_id: str) -> TaskInfo:
         # (assumed) GET /tasks/{task_id}
         return self.call(
             Request(
@@ -514,14 +514,15 @@ class APIRegistry(HTTPTransport, RegistryABC):
 
     def _artifacts_req(
         self,
+        plan_id: UUID,
         task_id: str,
         artifacts: "Sequence[Artifact]",
         execution_id: UUID | None,
     ) -> Request[None]:
-        # (assumed) POST /tasks/{task_id}/artifacts
+        # (assumed) POST /plans/{plan_id}/members/{task_id}/artifacts
         return Request(
             "POST",
-            f"/tasks/{task_id}/artifacts",
+            f"/plans/{plan_id}/members/{task_id}/artifacts",
             lambda _payload: None,
             json={
                 "execution_id": str(execution_id) if execution_id else None,
@@ -532,23 +533,27 @@ class APIRegistry(HTTPTransport, RegistryABC):
 
     def task_upload_artifacts(
         self,
+        plan_id: UUID,
         task_id: str,
         artifacts: "Sequence[Artifact]",
         *,
         execution_id: UUID | None = None,
     ) -> None:
         if artifacts:
-            self.call(self._artifacts_req(task_id, artifacts, execution_id))
+            self.call(self._artifacts_req(plan_id, task_id, artifacts, execution_id))
 
     async def task_upload_artifacts_aio(
         self,
+        plan_id: UUID,
         task_id: str,
         artifacts: "Sequence[Artifact]",
         *,
         execution_id: UUID | None = None,
     ) -> None:
         if artifacts:
-            await self.acall(self._artifacts_req(task_id, artifacts, execution_id))
+            await self.acall(
+                self._artifacts_req(plan_id, task_id, artifacts, execution_id)
+            )
 
     # -- deployments and settings ---------------------------------------------------
 

@@ -32,6 +32,7 @@ from stardag.registry import (
     SchedulerLeaseResult,
     SettingsInfo,
     TaskInfo,
+    TaskInstanceInfo,
     TickSummaryRecord,
     TransitionResult,
     WakeCandidate,
@@ -295,11 +296,21 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             self.close_claim(task, "stopped")
         return _outcome(task)
 
-    def task_get(self, task_id: UUID) -> TaskInfo:
-        task = self.task(str(task_id))
-        body = next(
-            (i.body for i in self.instances.values() if i.task_id == task.task_id), None
-        )
+    def task_get(self, task_id: str) -> TaskInfo:
+        task = self.task(task_id)
+        # Insertion order is oldest-first; the server reads newest first.
+        instances = [
+            TaskInstanceInfo(
+                id=i.id,
+                deployment_id=i.deployment_id,
+                settings_hash=i.settings_hash,
+                instance_hash=i.instance_hash,
+                body=i.body,
+            )
+            for i in self.instances.values()
+            if i.task_id == task.task_id
+        ]
+        instances.reverse()
         return TaskInfo(
             task_id=task.task_id,
             task_namespace=task.task_namespace,
@@ -307,16 +318,23 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             version=task.version,
             output_uri=task.output_uri,
             status=task.status,
-            body=body,
+            instances=instances,
         )
 
     def task_upload_artifacts(
         self,
+        plan_id: UUID,
         task_id: str,
         artifacts: Sequence[Artifact],
         *,
         execution_id: UUID | None = None,
     ) -> None:
+        if task_id not in self.members.get(plan_id, {}):
+            raise refuse(
+                "not_a_member",
+                f"task {task_id} is not a member of plan {plan_id}",
+                status=404,
+            )
         self.artifacts.setdefault(task_id, []).extend(artifacts)
 
     # -- deployments and settings -------------------------------------------------------

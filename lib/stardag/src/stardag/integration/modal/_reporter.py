@@ -264,7 +264,10 @@ class _WorkerLifecycleReporter:
             artifacts = self.task.artifacts()
             if artifacts:
                 self.registry.task_upload_artifacts(
-                    self._task_id, artifacts, execution_id=self.execution_id
+                    self.plan_id,
+                    self._task_id,
+                    artifacts,
+                    execution_id=self.execution_id,
                 )
 
         self._guard(_artifacts, "artifacts")

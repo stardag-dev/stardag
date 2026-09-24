@@ -476,27 +476,37 @@ class RegistryABC:
 
     # -- tasks ------------------------------------------------------------------
 
-    def task_get(self, task_id: UUID) -> TaskInfo:
-        """A completion's identity and state, with an instance body."""
+    def task_get(self, task_id: str) -> TaskInfo:
+        """``GET /tasks/{task_id}``: a completion's identity and state, with
+        its instances (each a construction under one scope), newest first."""
         raise _missing(self, "task_get")
 
     def task_upload_artifacts(
         self,
+        plan_id: UUID,
         task_id: str,
         artifacts: "Sequence[Artifact]",
         *,
         execution_id: UUID | None = None,
     ) -> None:
+        """``POST /plans/{plan_id}/members/{task_id}/artifacts``: upsert
+        artifacts onto the task named by its membership of ``plan_id`` (404
+        ``not_a_member`` otherwise). Artifacts belong to the task once
+        uploaded, not the plan or execution — ``execution_id`` is
+        informational only."""
         raise _missing(self, "task_upload_artifacts")
 
     async def task_upload_artifacts_aio(
         self,
+        plan_id: UUID,
         task_id: str,
         artifacts: "Sequence[Artifact]",
         *,
         execution_id: UUID | None = None,
     ) -> None:
-        self.task_upload_artifacts(task_id, artifacts, execution_id=execution_id)
+        self.task_upload_artifacts(
+            plan_id, task_id, artifacts, execution_id=execution_id
+        )
 
     # -- deployments and settings ----------------------------------------------
 

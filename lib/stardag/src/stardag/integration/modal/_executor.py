@@ -307,6 +307,12 @@ class ModalTaskExecutor(TaskExecutorABC):
         settings can redirect a worker's reports. ``STARDAG_DEPLOYMENT_ID``
         is never forwarded (it is the container's, baked by the deploy) and
         is removed from the selector's env.
+        ``STARDAG_WORKER_REPORTS_LIFECYCLE`` is likewise framework-owned:
+        it is always forced to this engine's own ``reports_lifecycle(task)``
+        value, never left at whatever a selector's env happened to carry —
+        otherwise a selector/deployment env supplying ``...=0`` could
+        suppress the worker's reports while the engine still expects them,
+        and the task would sit RUNNING until its claim lapses.
         """
         worker_name, selector_env = _normalize_worker_selection(
             self.worker_selector(task)
@@ -324,6 +330,10 @@ class ModalTaskExecutor(TaskExecutorABC):
         if not self.reports_lifecycle(task):
             env[STARDAG_WORKER_REPORTS_LIFECYCLE_ENV] = "0"
             return worker_function, env, executor_metadata
+        # Reporting is on: clear whatever the selector/deployment env may
+        # have set for this framework-owned var, so a stale "0" cannot
+        # silently suppress the worker's reports (see the docstring).
+        env.pop(STARDAG_WORKER_REPORTS_LIFECYCLE_ENV, None)
         if context.plan_id is not None:
             env[STARDAG_PLAN_ID_ENV] = str(context.plan_id)
         if execution_id is not None:

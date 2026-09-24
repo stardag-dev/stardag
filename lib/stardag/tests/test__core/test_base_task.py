@@ -20,7 +20,7 @@ from stardag._core.task import Task
 from stardag._core.task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, SubClass, TypeId
-from stardag.registry import RegistryABC, TaskInfo
+from stardag.registry import RegistryABC, TaskInfo, TaskInstanceInfo
 from stardag.target._in_memory import InMemoryTarget
 from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
 from stardag.utils.testing.namepace import (
@@ -613,7 +613,15 @@ def test_from_registry(default_in_memory_fs_target):
         version=task.version,
         output_uri=task.target().uri,
         status="completed",
-        body=task.instance_body(),
+        instances=[
+            TaskInstanceInfo(
+                id=uuid4(),
+                deployment_id=uuid4(),
+                settings_hash="deadbeef",
+                instance_hash=str(task.instance_hash),
+                body=task.instance_body(),
+            )
+        ],
     )
     loaded_task = MockTask.from_registry(id=task.id, registry=mock_registry)
     assert loaded_task == task
@@ -651,7 +659,15 @@ def test_from_registry_rejects_a_body_whose_recomputed_id_moves(
         version=task.version,
         output_uri=None,
         status="completed",
-        body=task.instance_body(),
+        instances=[
+            TaskInstanceInfo(
+                id=uuid4(),
+                deployment_id=uuid4(),
+                settings_hash="deadbeef",
+                instance_hash=str(task.instance_hash),
+                body=task.instance_body(),
+            )
+        ],
     )
     with pytest.raises(TaskRehydrationError, match="does not match"):
         MockTask.from_registry(id=stale_id, registry=mock_registry)

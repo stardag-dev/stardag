@@ -315,6 +315,36 @@ class TestWorkerEnv:
         assert env[STARDAG_EXECUTION_ID_ENV] == str(execution_id)
         assert STARDAG_DEPLOYMENT_ID_ENV not in env
 
+    async def test_a_stale_reports_lifecycle_override_from_the_selector_is_cleared(
+        self,
+    ):
+        """``STARDAG_WORKER_REPORTS_LIFECYCLE`` is framework-owned like the
+        ids above. A worker selector (or a deployment's baked env) that
+        happens to carry a stale ``=0`` must not survive into a worker
+        invocation where this engine expects self-reporting — otherwise the
+        worker suppresses its reports while the engine also does not report
+        for it, and the task sits RUNNING until its claim lapses."""
+        from stardag.integration.modal._metadata import (
+            STARDAG_PLAN_ID_ENV,
+            STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
+        )
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = ModalTaskExecutor(
+            modal_app_name="test-app",
+            worker_selector=lambda task: (
+                "default",
+                {STARDAG_WORKER_REPORTS_LIFECYCLE_ENV: "0"},
+            ),
+        )
+        executor._worker_functions["default"] = worker  # pyright: ignore[reportArgumentType]
+        with _in_build(plan_id=uuid4()):
+            assert executor.reports_lifecycle(_make_task()) is True
+        env, _ = await self._spawn_env(executor, worker, plan_id=uuid4())
+        assert env is not None
+        assert STARDAG_WORKER_REPORTS_LIFECYCLE_ENV not in env
+        assert STARDAG_PLAN_ID_ENV in env
+
     async def test_outside_a_build_only_the_selector_env_is_sent(self):
         from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
 

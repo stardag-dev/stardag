@@ -264,9 +264,23 @@ class ExecutionInfo(_Response):
         return self.claim_released_at is None and self.ended_at is None
 
 
+class TaskInstanceInfo(_Response):
+    """One instance of a completion: its body under one scope
+    (``deployment_id`` and ``settings_hash``) — a task id may hold several."""
+
+    id: UUID
+    deployment_id: UUID
+    settings_hash: str
+    instance_hash: str
+    body: dict[str, Any]
+    expanded_at: datetime | None = None
+    created_at: datetime | None = None
+
+
 class TaskInfo(_Response):
     """A completion (``task`` row): identity and global state only; it holds
-    no parameters. ``body`` is an instance body when the read names one."""
+    no parameters. ``instances`` holds each instance the read found, newest
+    first."""
 
     task_id: str
     task_namespace: str = ""
@@ -274,7 +288,14 @@ class TaskInfo(_Response):
     version: str | None = None
     output_uri: str | None = None
     status: str | None = None
-    body: dict[str, Any] | None = None
+    instances: list["TaskInstanceInfo"] = Field(default_factory=list)
+
+    @property
+    def body(self) -> dict[str, Any] | None:
+        """The newest instance's body, or ``None`` without one. A task has
+        no parameters — an instance does — so a caller not asking for a
+        specific scope (``from_registry``) takes the newest as its default."""
+        return self.instances[0].body if self.instances else None
 
 
 # -----------------------------------------------------------------------------
@@ -364,6 +385,7 @@ __all__ = [
     "SchedulerLeaseResult",
     "SettingsInfo",
     "TaskInfo",
+    "TaskInstanceInfo",
     "TickSummaryRecord",
     "TransitionResult",
     "WakeCandidate",
