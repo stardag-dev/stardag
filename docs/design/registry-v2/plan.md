@@ -322,10 +322,18 @@ assignee the maintainer.
       | —        | `test_builds_stop`                                     | skipped, `v2: I8` until #387 lands |
 
       S8, S22 and S24 replace the deleted `test_structure_scope_static/_dyn`.
-      No product defect was found: every red run was a harness or scenario
-      assumption (a stale deployed image; an S7 expectation of one restart
-      where the design gives two executions under the new plan — the
-      restart yields again into its own plan). Three things are synthesised
+      One product defect, SDK layer, found by S5 in CI: a Modal Volume
+      mounted into a warm container served a deleted target as present (a
+      hit never reloaded), so a bootstrap reusing such a container observed
+      it complete and the completion was never invalidated. A walk now
+      begins an observation fence (`stardag.target._freshness`), and a
+      mounted-volume hit older than it reloads once per volume per walk;
+      pinned by unit tests in `test__target_reload.py`, and S5 now runs its
+      sticky half first so the invalidating build meets that warm view. The
+      other red runs were harness or scenario assumptions (a stale deployed
+      image; an S7 expectation of one restart where the design gives two
+      executions under the new plan, since the restart yields again into
+      its own plan; S6 counting rows from a previous attempt). Three things are synthesised
       and say so in their docstrings: S21's short claim (the dying worker
       renews its own claim down to seconds through `claim/renew`; a real
       detached TTL is timeout + 15 min); S33's D2 tick (the SDK's own
@@ -341,8 +349,10 @@ assignee the maintainer.
       process (`_rollover.ROLLOVER_APP_NAMES`, collected by the log dump),
       with an optional root variant baked into its image (S20);
       `_targets.delete_target`; ledger helpers attributing an execution to
-      a build. CI budget: the rollover scenarios are the long pole, S7 at
-      ~9 min (three pre-yield runs, sized in the module); nothing sleeps.
+      a build. CI budget: an attempt took ~14 min with the 32 scenarios
+      concurrent (over the ~10 min target); the long poles are S7 and
+      `test_rollover`, each paying several pre-yield windows sized to a
+      deploy. Nothing sleeps; shrinking those windows is the lever.
 
 - [ ] I11 — docs
 - [ ] I12 — release
