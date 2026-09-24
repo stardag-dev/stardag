@@ -48,7 +48,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -163,7 +163,11 @@ async def _bump_last_active(
     await session.execute(
         update(Build)
         .where(Build.id.in_(targets))
-        .values(last_active_at=now)
+        # Monotonic: ``now`` is the caller's pre-lock timestamp, so a transition
+        # delayed behind the task lock must not move a newer stamp backwards.
+        .values(
+            last_active_at=func.greatest(func.coalesce(Build.last_active_at, now), now)
+        )
         .execution_options(synchronize_session=False)
     )
 

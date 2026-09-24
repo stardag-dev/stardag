@@ -335,6 +335,26 @@ async def test_task_activity_bumps_last_active_at_of_every_holding_build(h: Harn
     assert (await h.build(unrelated))["last_active_at"] == stale
 
 
+async def test_a_delayed_transition_never_moves_last_active_at_backwards(
+    h: Harness,
+):
+    """``flag_after_transition`` receives the caller's pre-lock ``now``; a
+    transition that waited behind the task lock carries a stamp older than
+    one a concurrent write already landed. The bump is ``GREATEST``, so it
+    never moves ``last_active_at`` backwards."""
+    deployment = await h.new_deployment()
+    t = item("Mono")
+    build, plan = await h.planned([t], [t], deployment_id=deployment)
+    ahead = utc_now() + timedelta(hours=1)
+    await _sql(
+        h, "UPDATE build SET last_active_at = :s WHERE id = :a", s=ahead, a=build
+    )
+
+    await h.start(plan.id, t)
+
+    assert (await h.build(build))["last_active_at"] == ahead
+
+
 async def test_a_locked_build_just_misses_the_bump(h: Harness):
     """No new lock: the bump ``SKIP LOCKED``s ``build`` like the flag does
     ``build_wake``, so a build another session holds ``FOR NO KEY UPDATE``
