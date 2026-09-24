@@ -911,8 +911,14 @@ git tag vX.Y.ZrcN && git push origin vX.Y.ZrcN
 ```
 
 - **The server image publishes only `:X.Y.ZrcN`** — an rc never moves the
-  mutable `:latest` tag, so a plain `stardag self-host up` (or `upgrade`)
-  is unaffected. Point a consumer at it explicitly:
+  mutable `:latest` tag, so `--server-version latest` (and
+  `_latest_released_server_version`, the resolver behind it) never
+  resolves to one. That is a separate question from what a plain
+  `stardag self-host up`/`upgrade` deploys: those follow
+  `DEFAULT_SERVER_VERSION` (or the recorded deployment), and an SDK
+  release cut during this pre-release window intentionally points that
+  constant at the matching `X.Y.ZrcN` — see the comment above it. To
+  target the rc from a different SDK, pass it explicitly:
   `stardag self-host up --server-version X.Y.ZrcN`.
 - **The SDK publishes to PyPI as a pre-release.** A plain `pip install
 stardag` still resolves to the last final release; a consumer gets the
