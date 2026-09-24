@@ -849,7 +849,7 @@ that actually happens is an **old SDK against a new API**. The server
 accepts every SDK version by default; the floor lives in
 `STARDAG_API_SDK_MINIMUM_VERSION` (see
 `app/stardag-api/src/stardag_api/sdk_compat.py`) and is published as
-`minimum_sdk_version` on `GET /api/v1/version`.
+`minimum_sdk_version` on `GET /api/v2/version`.
 
 Raising that floor is a product decision, not an implementation detail: it
 breaks working deployments on purpose. **An API change that raises
@@ -894,7 +894,7 @@ CI (`.github/workflows/publish-server-image.yml`) then:
 1. Builds the image and pushes it to
    `ghcr.io/stardag-dev/stardag-server:X.Y.Z` and `:latest`, with
    `STARDAG_SERVER_VERSION=X.Y.Z` baked in (surfaced at
-   `GET /api/v1/version`).
+   `GET /api/v2/version`).
 2. Creates a GitHub Release for the tag with the web UI (extracted from the
    pushed image, so it is byte-identical to what the image serves) attached
    as `stardag-ui-dist-X.Y.Z.tar.gz` (for deployments that serve the UI

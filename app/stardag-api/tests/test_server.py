@@ -11,7 +11,7 @@ from stardag_api.server import UI_MOUNT_NAME, create_app, mount_ui
 @pytest.mark.asyncio
 async def test_version_endpoint_defaults(client: AsyncClient, monkeypatch):
     monkeypatch.delenv("STARDAG_SERVER_VERSION", raising=False)
-    response = await client.get("/api/v1/version")
+    response = await client.get("/api/v2/version")
     assert response.status_code == 200
     data = response.json()
     assert data["server_version"] == "dev"
@@ -24,9 +24,15 @@ async def test_version_endpoint_server_version_from_env(
     client: AsyncClient, monkeypatch
 ):
     monkeypatch.setenv("STARDAG_SERVER_VERSION", "1.2.3")
-    response = await client.get("/api/v1/version")
+    response = await client.get("/api/v2/version")
     assert response.status_code == 200
     assert response.json()["server_version"] == "1.2.3"
+
+
+@pytest.mark.asyncio
+async def test_version_endpoint_v1_path_is_gone(client: AsyncClient):
+    response = await client.get("/api/v1/version")
+    assert response.status_code == 404
 
 
 @pytest.fixture
@@ -90,7 +96,7 @@ async def test_create_app_serves_ui_with_spa_fallback(ui_dist: Path):
         response = await client.get("/health")
         assert response.status_code == 200
         assert response.json() == {"status": "healthy"}
-        response = await client.get("/api/v1/version")
+        response = await client.get("/api/v2/version")
         assert response.status_code == 200
         response = await client.get("/.well-known/jwks.json")
         assert response.status_code == 200

@@ -223,19 +223,82 @@ async def test_exit_early_releases_nothing(h: Harness):
 
 async def test_lifecycle_transitions_are_idempotent_by_state(h: Harness):
     """A re-delivered transition finds the build in the requested state,
-    returns it, and writes no event and no timestamp."""
+    returns it, and writes no event and no timestamp. (EXIT_EARLY is not
+    terminal, so a fail may follow it.)"""
     t = item("T")
     build, _ = await h.planned([t], [t])
-    for fn in (builds.fail_build, builds.cancel_build, builds.exit_early):
+    for fn in (builds.exit_early, builds.fail_build):
         first = await _call(h, fn, build)
         again = await _call(h, fn, build)
         assert again.status == first.status
         assert again.completed_at == first.completed_at
-    assert await _build_events(h, build) == [
-        "build_failed",
-        "build_cancelled",
-        "build_exit_early",
+    assert await _build_events(h, build) == ["build_exit_early", "build_failed"]
+
+
+async def _refused_events(h: Harness, build_id: UUID) -> list[tuple[str, bool]]:
+    return [
+        (e["type"], e["report_applied"])
+        for e in await h.events(build_id=build_id)
+        if e["type"].startswith("build_")
     ]
+
+
+async def test_a_terminal_build_status_is_sticky(h: Harness):
+    """A resident driver still alive after an operator ``cancel`` reports
+    ``build_failed``: refused 409 ``build_terminal`` and recorded with
+    ``report_applied = false``; the build stays CANCELLED, keeps its (NULL)
+    failure reason, and a later ``exit-early`` is refused the same way."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    cancelled = await _call(h, builds.cancel_build, build)
+
+    with pytest.raises(Conflict) as exc:
+        await _call(h, builds.fail_build, build, error_message="task skipped")
+    assert exc.value.code == "build_terminal"
+    assert exc.value.detail == {"build_id": str(build), "build_status": "cancelled"}
+    with pytest.raises(Conflict) as exc:
+        await _call(h, builds.exit_early, build)
+    assert exc.value.code == "build_terminal"
+
+    after = await _call(h, builds.get_build, build)
+    assert after.status == "cancelled" and after.error_message is None
+    assert after.completed_at == cancelled.completed_at
+    assert await _refused_events(h, build) == [
+        ("build_cancelled", True),
+        ("build_failed", False),
+        ("build_exit_early", False),
+    ]
+    (refused,) = await h.events(build_id=build, types=["build_failed"])
+    assert refused["error_message"] == "task skipped"
+    assert refused["event_metadata"]["refused"] == "build_terminal"
+
+
+async def test_a_completed_build_refuses_a_later_cancel(h: Harness):
+    """``build_cancelled`` after ``build_completed``: refused and recorded;
+    the build stays COMPLETED. ``resume`` is still the way out."""
+    t = item("T")
+    build, plan = await h.planned([t], [t], seal=True)
+    await h.run(plan.id, t)
+    assert (await _call(h, builds.complete_build, build)).status == "completed"
+
+    with pytest.raises(Conflict) as exc:
+        await _call(h, builds.cancel_build, build)
+    assert (exc.value.code, exc.value.detail["build_status"]) == (
+        "build_terminal",
+        "completed",
+    )
+    with pytest.raises(Conflict) as exc:
+        await _call(h, builds.fail_build, build)
+    assert exc.value.code == "build_terminal"
+    assert (await _call(h, builds.get_build, build)).status == "completed"
+    assert await _refused_events(h, build) == [
+        ("build_completed", True),
+        ("build_cancelled", False),
+        ("build_failed", False),
+    ]
+
+    resumed = await _call(h, builds.resume_build, build)
+    assert resumed.build.status == "running"
 
 
 async def test_resume_makes_the_build_running_and_is_idempotent(h: Harness):
@@ -368,6 +431,10 @@ async def test_build_lifecycle_over_http(client: AsyncClient, h: Harness):
     assert exited.json()["status"] == "exit_early"
     failed = await client.post(f"{base}/fail", json={"error_message": "x"})
     assert failed.json()["status"] == "failed"
+    sticky = await client.post(f"{base}/cancel")
+    assert sticky.status_code == 409
+    assert sticky.json()["detail"]["code"] == "build_terminal"
+    assert (await client.get(base)).json()["status"] == "failed"
     deleted = await client.delete(base)
     assert deleted.status_code == 204
     assert (await client.get(base)).status_code == 404

@@ -138,7 +138,7 @@ $AWS_CMD ecr get-login-password --region $AWS_REGION | \
     docker login --username AWS --password-stdin "${ECR_URI%%/*}"
 
 # Resolve the server version to stamp into the image (surfaced at
-# GET /api/v1/version; otherwise the deployment reports "dev").
+# GET /api/v2/version; otherwise the deployment reports "dev").
 #
 # Honor an already-exported $STARDAG_SERVER_VERSION; otherwise derive it from
 # scripts/server-version.sh (git-describe). Never fail the deploy over

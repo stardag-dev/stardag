@@ -99,8 +99,10 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   API suite runs on Postgres.
 - **Breaking: the registry routes move to `/api/v2`.** Every `/api/v1`
   registry route (builds, tasks, search, deployments, locks, concurrency
-  limits, tick summaries) is removed, and so is the SDK version gate. Authentication, workspaces, environments, target
-  roots and `/api/v1/version` stay under `/api/v1`. The `/locks` routes are
+  limits, tick summaries) is removed, and so is the SDK version gate. Authentication, workspaces, environments and target
+  roots stay under `/api/v1`; the version route moves to `GET
+/api/v2/version` (same fields, unauthenticated), and `/api/v1/version`
+  is removed. The `/locks` routes are
   gone: the claim is the only mutual exclusion, and in-process claims renew
   through `POST …/tasks/{task_id}/claim/renew`.
 - **New: plans.** `POST /builds/{id}/plans`, chunked `POST
@@ -136,6 +138,19 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   fail and cancel alike, tasks set CANCELLED, which is actionable for other
   builds); `exit-early` releases nothing. Exclusion cascades downstream
   within the plan, and an excluded root fails the build.
+- **Changed: a terminal build status is sticky.** A `complete`, `fail`,
+  `cancel` or `exit-early` against a COMPLETED, FAILED or CANCELLED build is
+  409 `build_terminal` and is recorded as its build event with
+  `report_applied = false`; `resume` is the way out. A cancelled build no
+  longer ends FAILED because its still-running driver reported a failure.
+- **Changed: the exclude response describes that call.** It gains
+  `roots_excluded` (the roots this exclusion cascaded to), and
+  `build_failed` now means this call failed the build.
+- **Changed: a refused claim renewal says how the claim ended**
+  (`claim_outcome`: `released` when the build stopped, `taken_over`, or
+  `null` while merely lapsed).
+- **Changed: deployment listings drop `created`**, which only means
+  something on the create and activate responses.
 - **Changed: wake-up flags move to `build_wake`**, so flagging never locks
   the build row a claim holds.
 - **New: read routes.** `GET /builds` (status and app filters, cursor

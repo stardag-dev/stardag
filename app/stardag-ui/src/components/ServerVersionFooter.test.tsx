@@ -24,7 +24,7 @@ describe("ServerVersionFooter", () => {
 
     render(<ServerVersionFooter />);
     expect(await screen.findByText("Stardag server v0.1.0+1.gabc")).toBeInTheDocument();
-    expect(fetchMock.mock.calls[0][0] as string).toContain("/api/v1/version");
+    expect(fetchMock.mock.calls[0][0] as string).toContain("/api/v2/version");
   });
 
   it("shows a non-numeric version (e.g. dev) without a v prefix", async () => {

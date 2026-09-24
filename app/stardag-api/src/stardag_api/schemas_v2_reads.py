@@ -21,7 +21,7 @@ from stardag_api.models.enums import (
 )
 from stardag_api.schemas_v2 import (
     BuildResponse,
-    DeploymentResponse,
+    DeploymentInfo,
     FrontierMemberResponse,
 )
 
@@ -58,7 +58,7 @@ class PlanDetailResponse(BaseModel):
     id: UUID
     build_id: UUID
     deployment_id: UUID
-    deployment: DeploymentResponse
+    deployment: DeploymentInfo
     settings_hash: str
     generation: int
     created_at: datetime

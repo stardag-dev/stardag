@@ -78,7 +78,9 @@ class DeploymentActivate(BaseModel):
     image_id: str | None = Field(default=None, max_length=128)
 
 
-class DeploymentResponse(BaseModel):
+class DeploymentInfo(BaseModel):
+    """A deployment as read (listings, a plan's deployment)."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -91,11 +93,17 @@ class DeploymentResponse(BaseModel):
     deployed_at: datetime
     activated_at: datetime | None
     is_current: bool
+
+
+class DeploymentResponse(DeploymentInfo):
+    """``POST /deployments`` and ``/activate``: the deployment, and whether
+    this call created it (a lookup-or-create answers either way)."""
+
     created: bool
 
 
 class DeploymentListResponse(BaseModel):
-    deployments: list[DeploymentResponse]
+    deployments: list[DeploymentInfo]
 
 
 class SettingsResponse(BaseModel):
@@ -485,7 +493,11 @@ class ExclusionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     plan_id: UUID
+    #: Task ids this call excluded (the member, then its cascade).
     excluded: list[str]
+    #: The plan's roots among ``excluded``: this call cascaded to them.
+    roots_excluded: list[str]
+    #: This call failed the build (an excluded root, build not terminal).
     build_failed: bool
 
 
