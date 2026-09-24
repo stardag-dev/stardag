@@ -47,12 +47,26 @@ print(
     file=sys.stderr,
 )
 
+
 # Installs the *local* checkout when the SDK reports a dev version, which is
 # what makes this an end-to-end test of the branch rather than of the last
 # PyPI release.
-image = sd_modal.with_stardag_on_image(
-    modal.Image.debian_slim(python_version=python_version)
-).add_local_python_source("stardag_integration_tests")
+def scenario_image(env: dict[str, str] | None = None) -> modal.Image:
+    """The scenario apps' image, optionally with extra environment baked in.
+
+    ``env`` is applied before the local source is added, because Modal
+    refuses a build step after ``add_local_*``. Only the rollover app passes
+    any (see ``rollover_app``); every other app uses ``image`` below.
+    """
+    base = sd_modal.with_stardag_on_image(
+        modal.Image.debian_slim(python_version=python_version)
+    )
+    if env:
+        base = base.env(env)
+    return base.add_local_python_source("stardag_integration_tests")
+
+
+image = scenario_image()
 
 # The deployed ``tick`` function's own Modal timeout. Named here so a
 # scenario can read it rather than restate it -- see ``MAX_LINGER_SECONDS``.
@@ -78,13 +92,17 @@ TICK_TIMEOUT_SECONDS = 300
 MAX_LINGER_SECONDS = TICK_TIMEOUT_SECONDS - 60
 
 
-def build_scenario_app(app_name: str) -> sd_modal.StardagApp:
-    """A scenario app under ``app_name``. Identical but for the name."""
+def build_scenario_app(
+    app_name: str, *, app_image: modal.Image | None = None
+) -> sd_modal.StardagApp:
+    """A scenario app under ``app_name``. Identical but for the name (and, for
+    the rollover app, an image with a variant baked in)."""
+    chosen = image if app_image is None else app_image
     return sd_modal.StardagApp(
         app_name,
-        builder_settings=sd_modal.FunctionSettings(image=image, timeout=900),
+        builder_settings=sd_modal.FunctionSettings(image=chosen, timeout=900),
         worker_settings={
-            "default": sd_modal.FunctionSettings(image=image, timeout=600),
+            "default": sd_modal.FunctionSettings(image=chosen, timeout=600),
             # A second worker so one scenario can stop *some* of a build's
             # executions and watch the rest finish. Identical settings: what
             # it exists to be is a different Modal function, because that is
@@ -92,11 +110,11 @@ def build_scenario_app(app_name: str) -> sd_modal.StardagApp:
             # name recorded in the execution metadata). Costs a deploy-time
             # function registration and nothing at run time -- no task
             # routes here unless it asks.
-            ALT_WORKER: sd_modal.FunctionSettings(image=image, timeout=600),
+            ALT_WORKER: sd_modal.FunctionSettings(image=chosen, timeout=600),
         },
         worker_selector=registry_live_worker,
         tick_settings=sd_modal.FunctionSettings(
-            image=image, timeout=TICK_TIMEOUT_SECONDS
+            image=chosen, timeout=TICK_TIMEOUT_SECONDS
         ),
         # **Off on both apps, and the scenarios depend on it being off.**
         # The watchdog is a backstop that sweeps builds periodically; with
