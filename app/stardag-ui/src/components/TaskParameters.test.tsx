@@ -109,6 +109,12 @@ describe("TaskParameters", () => {
 
     fireEvent.click(rows[0]);
     expect(rows[0]).toHaveAttribute("aria-selected", "true");
+    // And from the keyboard.
+    expect(rows[1]).toHaveAttribute("tabindex", "0");
+    fireEvent.keyDown(rows[1], { key: "Enter" });
+    expect(rows[1]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(rows[0], { key: " " });
+    expect(rows[0]).toHaveAttribute("aria-selected", "true");
     expect(within(dialog).getByText(/"log": "debug"/)).toBeInTheDocument();
     expect(within(dialog).queryByText(/"log": "info"/)).not.toBeInTheDocument();
   });

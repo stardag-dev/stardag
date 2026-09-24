@@ -330,6 +330,38 @@ describe("TaskClaimPanel claim holder", () => {
     expect(within(modal).getAllByText("fc-abc123").length).toBeGreaterThan(0);
   });
 
+  it("names the executor from its metadata before the execution records it", async () => {
+    const user = userEvent.setup();
+    render(
+      <TaskClaimPanel
+        task={makeTask({ execution_id: "ex-2" })}
+        environmentId="env-1"
+        onChanged={() => {}}
+        currentExecution={{
+          id: "ex-2",
+          task_id: TASK_ID,
+          build_id: HOLDER_BUILD,
+          plan_id: HOLDER_PLAN,
+          instance_id: "i-1",
+          executor: null,
+          executor_ref: null,
+          executor_metadata: { kind: "modal" },
+          started_at: new Date(Date.now() - HOUR).toISOString(),
+          claim_released_at: null,
+          claim_outcome: null,
+          ended_at: null,
+          outcome: null,
+          in_current_plan: true,
+        }}
+      />,
+    );
+    const modal = await openClaim(user);
+    expect(
+      within(modal).getByText(/^modal, under its build's active plan/),
+    ).toBeInTheDocument();
+    expect(within(modal).queryByText(/not recorded/)).toBeNull();
+  });
+
   it("keeps the reset in the pane for a task that holds no claim", async () => {
     vi.mocked(retryMember).mockResolvedValue({
       applied: true,

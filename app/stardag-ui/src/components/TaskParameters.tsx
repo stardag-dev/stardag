@@ -290,10 +290,23 @@ function InstanceTable({
               <tr
                 key={instance.id}
                 onClick={onSelect ? () => onSelect(instance.id) : undefined}
+                // Selectable from the keyboard too: Tab to a row, Enter or
+                // Space to show its parameters.
+                tabIndex={onSelect ? 0 : undefined}
+                onKeyDown={
+                  onSelect
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onSelect(instance.id);
+                        }
+                      }
+                    : undefined
+                }
                 aria-selected={onSelect ? selected : undefined}
                 className={
                   onSelect
-                    ? `cursor-pointer ${
+                    ? `cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset ${
                         selected
                           ? "bg-blue-50 dark:bg-blue-950/40"
                           : "hover:bg-gray-50 dark:hover:bg-gray-800"

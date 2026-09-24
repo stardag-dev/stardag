@@ -42,6 +42,7 @@ export function ToolbarButton({
 
   return (
     <Tooltip
+      describe={false}
       content={
         <>
           {label}

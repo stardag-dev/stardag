@@ -32,13 +32,61 @@ describe("Tooltip", () => {
     });
     const tip = screen.getByRole("tooltip");
     expect(tip).toHaveTextContent("What this is");
-    expect(button.parentElement).toHaveAttribute("aria-describedby", tip.id);
+    // The focusable child is described, not the wrapper, and not only
+    // while hovered.
+    expect(button).toHaveAccessibleDescription("What this is");
+    expect(button.parentElement).not.toHaveAttribute("aria-describedby");
     // No native title anywhere: that is the slow, differently styled one.
     expect(button.parentElement).not.toHaveAttribute("title");
     act(() => {
       fireEvent.pointerLeave(button.parentElement!);
     });
     expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("describes the child from the start, and leaves a caller's own description alone", () => {
+    render(
+      <>
+        <Tooltip content="Help text">
+          <button type="button" aria-describedby="own">
+            A
+          </button>
+        </Tooltip>
+        <span id="own">Own</span>
+        <Tooltip content="Not me" describe={false}>
+          <button type="button">B</button>
+        </Tooltip>
+      </>,
+    );
+    expect(screen.getByRole("button", { name: "A" })).toHaveAccessibleDescription(
+      "Own Help text",
+    );
+    expect(screen.getByRole("button", { name: "B" })).not.toHaveAttribute(
+      "aria-describedby",
+    );
+  });
+
+  it("clamps into the window when it fits neither below nor above", () => {
+    Object.defineProperty(window, "innerWidth", { value: 1000, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: 300, configurable: true });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: HTMLElement) {
+        return this.getAttribute("role") === "tooltip"
+          ? rect(0, 0, 200, 200)
+          : rect(400, 140, 20, 20);
+      },
+    );
+    render(
+      <Tooltip content="Tall">
+        <button type="button">Mid</button>
+      </Tooltip>,
+    );
+    act(() => {
+      fireEvent.pointerEnter(screen.getByRole("button"));
+    });
+    // Below would end at 366 > 292; above would start at -66 < 8.
+    expect(screen.getByRole("tooltip").style.top).toBe(`${300 - 200 - 8}px`);
+    expect(screen.getByRole("tooltip").style.maxWidth).toContain("100vw");
   });
 
   it("shows on keyboard focus", () => {

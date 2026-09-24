@@ -20,7 +20,16 @@ interface TooltipProps {
   children: ReactNode;
   /** Classes for the wrapping span; `inline-flex` by default. */
   className?: string;
+  /**
+   * Whether the content becomes the child's `aria-describedby`. Off for a
+   * caller that already describes its control (`ToolbarButton`).
+   */
+  describe?: boolean;
 }
+
+// What can hold focus: the element the description belongs on.
+const FOCUSABLE =
+  'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 /**
  * The one hover explanation in the app: dark box, small text, shown at
@@ -37,13 +46,17 @@ interface TooltipProps {
  * scroll rather than following, since the coordinates are the anchor's at
  * open time.
  *
- * The open tooltip is the wrapper's `aria-describedby` target. Callers
- * must not also set `title`, or the browser's tooltip appears underneath.
+ * The content is also kept in the DOM, `hidden` (and portalled), as the description of
+ * the focusable child (or the first child when none is focusable), so a
+ * screen reader gets it with the control rather than only after a hover.
+ * Callers must not also set `title`, or the browser's tooltip appears
+ * underneath.
  */
 export function Tooltip({
   content,
   children,
   className = "inline-flex",
+  describe = true,
 }: TooltipProps) {
   const id = useId();
   const anchorRef = useRef<HTMLSpanElement>(null);
@@ -64,17 +77,45 @@ export function Tooltip({
     if (!el || !anchor || !tip) return;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
+    // Below if it fits, else above if that fits, else clamped into the
+    // window; the same clamp horizontally. A box larger than the window
+    // (its width is capped by `maxWidth`) pins to the top-left margin.
     const centred = anchor.left + anchor.width / 2 - tip.width / 2;
     const left = Math.max(EDGE, Math.min(centred, vw - tip.width - EDGE));
     const below = anchor.bottom + GAP;
+    const above = anchor.top - GAP - tip.height;
     const top =
-      below + tip.height > vh - EDGE && anchor.top - GAP - tip.height >= EDGE
-        ? anchor.top - GAP - tip.height
-        : below;
+      below + tip.height <= vh - EDGE
+        ? below
+        : above >= EDGE
+          ? above
+          : Math.max(EDGE, Math.min(below, vh - tip.height - EDGE));
     el.style.left = `${left}px`;
     el.style.top = `${top}px`;
     el.style.visibility = "visible";
   }, [open, content]);
+
+  const empty = content === null || content === undefined || content === "";
+  const descriptionId = `${id}-description`;
+
+  // Describe the focusable child, not the wrapper: focus is on the child.
+  useEffect(() => {
+    if (!describe || empty) return;
+    const anchor = anchorRef.current;
+    const target =
+      anchor?.querySelector<HTMLElement>(FOCUSABLE) ??
+      (anchor?.firstElementChild as HTMLElement | null);
+    if (!target) return;
+    const previous = target.getAttribute("aria-describedby");
+    target.setAttribute(
+      "aria-describedby",
+      previous ? `${previous} ${descriptionId}` : descriptionId,
+    );
+    return () => {
+      if (previous) target.setAttribute("aria-describedby", previous);
+      else target.removeAttribute("aria-describedby");
+    };
+  }, [describe, empty, descriptionId]);
 
   useEffect(() => {
     if (!open) return;
@@ -86,7 +127,6 @@ export function Tooltip({
     };
   }, [open, hide]);
 
-  const empty = content === null || content === undefined || content === "";
   return (
     <span
       ref={anchorRef}
@@ -95,18 +135,32 @@ export function Tooltip({
       onPointerLeave={hide}
       onFocus={show}
       onBlur={hide}
-      aria-describedby={open && !empty ? id : undefined}
     >
       {children}
+      {/* Portalled like the tooltip, so it is part of no container's
+          text or accessible name; aria-describedby spans the document. */}
+      {describe &&
+        !empty &&
+        createPortal(
+          <span id={descriptionId} hidden>
+            {content}
+          </span>,
+          document.body,
+        )}
       {open &&
         !empty &&
         createPortal(
           <div
             ref={tipRef}
-            id={id}
             role="tooltip"
-            style={{ position: "fixed", left: 0, top: 0, visibility: "hidden" }}
-            className="pointer-events-none z-[100] w-max max-w-64 rounded-md bg-gray-900 px-2 py-1 text-left text-xs font-normal tracking-normal whitespace-normal text-gray-100 normal-case shadow-lg dark:bg-gray-700"
+            style={{
+              position: "fixed",
+              left: 0,
+              top: 0,
+              visibility: "hidden",
+              maxWidth: `min(16rem, calc(100vw - ${2 * EDGE}px))`,
+            }}
+            className="pointer-events-none z-[100] w-max rounded-md bg-gray-900 px-2 py-1 text-left text-xs font-normal tracking-normal whitespace-normal text-gray-100 normal-case shadow-lg dark:bg-gray-700"
           >
             {content}
           </div>,

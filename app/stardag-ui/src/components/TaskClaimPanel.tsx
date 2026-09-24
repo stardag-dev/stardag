@@ -255,7 +255,7 @@ export function TaskClaimPanel({
               <>
                 <dt className={DT}>Executor</dt>
                 <dd>
-                  {currentExecution.executor ?? "not recorded"}, under{" "}
+                  {executorOf(currentExecution) ?? "not recorded"}, under{" "}
                   {currentExecution.in_current_plan
                     ? "its build's active plan"
                     : "an older plan of its build (an orphan)"}
