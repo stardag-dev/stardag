@@ -24,31 +24,24 @@ from uuid import UUID
 
 from stardag.build import (
     FailMode,
-    RollOverFailed,
     TickConfig,
     run_tick_aio,
 )
-from stardag.build._scope import code_id, is_synthetic_scope
+from stardag.build._deployment import own_deployment_id
+from stardag.build._reactive import roll_over_aio
+from stardag.build._registration import Walk
 from stardag.build._wakeups import SpawnTick
-from stardag.build_config import rebind_to_build_config, set_build_config
 from stardag.build._task_modules import (
     import_task_modules,
     set_declared_task_module_patterns,
 )
-from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.integration.modal._logging import _setup_logging
 from stardag.integration.modal._limit_keys import LimitKeySelector
 from stardag.integration.modal._selector import WorkerSelector
 from stardag.integration.modal._spawn import spawn_tick
 from stardag.integration.modal._settings import FunctionSettings
-from stardag._core.base_task import BaseTask
-from stardag.registry._base import (
-    BuildFrontier,
-    BuildInfo,
-    NoOpRegistry,
-    registry_provider,
-)
+from stardag.registry import BuildFrontier, is_noop_registry, registry_provider
 
 logger = logging.getLogger(__name__)
 
@@ -68,21 +61,11 @@ _TICK_KWARGS_ALLOWED = (
     # triggered against that deployment is where it can be said.
     "max_concurrent_actions",
     "max_spawns_per_tick",
-    # Per-build attempt budget. Belongs here more than most: the budget is
-    # per build by definition, and a build that has exhausted it is
-    # unblocked by re-triggering *with a raised* max_attempts — which only
-    # works if a re-trigger can say it.
+    # How many times a pass tries to spawn a claimed execution.
     "max_attempts",
-    # ...and the same argument for the interruption budget beside it: a
-    # long training run that gets killed and resumed more often than
-    # expected is recovered by re-triggering with a raised value, which
-    # only works if a re-trigger can say it.
-    "max_interruptions",
-    # ...and the window a tick waits before classifying an execution its
-    # probe found gone. Per-build for the same reason the two budgets are:
-    # how long a worker needs to checkpoint and report is a property of
-    # the tasks in this build, not of the deployment running them.
-    "worker_report_grace_seconds",
+    # Completion checks in flight while a discovery job walks: a property
+    # of the target backend this build's tasks write to.
+    "max_concurrent_discover",
 )
 
 
@@ -272,170 +255,67 @@ async def _run_deployed_tick_aio(
     *,
     deployment: _TickDeployment,
 ) -> dict[str, typing.Any]:
-    """One scheduler pass over a reactive build's frontier.
+    """One scheduler tick of a reactive build: the body of the deployed
+    ``tick`` function (see :meth:`StardagApp.finalize`).
 
-    The body of the deployed ``tick`` function (see
-    :meth:`StardagApp.finalize`), and the only place a tick body runs — the
-    watchdog sweep spawns this function rather than calling it. Returns a
-    JSON-able outcome: the
-    ``run_tick_aio`` summary, or a short ``{"outcome": ...}`` record for
-    the two cases that stop before the scheduler lease is even acquired —
-    a build that is not reactively scheduled, and one owned by another app.
+    Returns a JSON-able outcome: the ``run_tick_aio`` summary, or a short
+    ``{"outcome": ...}`` for the two cases that stop before the lease — a
+    build that is not reactively scheduled, and one owned by another app.
 
-    Named for the function it *is* the body of, not for the engine
-    entry point it calls: ``run_tick_aio`` below is
-    :func:`stardag.build.run_tick_aio`, the executor-agnostic scheduler
-    pass, and this is the Modal-specific preamble around it.
+    **A coroutine awaited by the deployed wrapper**: ticks share a container
+    (``_TICK_CONCURRENCY``), and they are safe to share because they share
+    its event loop and so the process-wide ``APIRegistry``'s async client.
 
-    **A coroutine, awaited by the deployed wrapper rather than driven by
-    ``asyncio.run``.** Ticks share a container (``_TICK_CONCURRENCY``), and
-    what makes that safe is that they share the container's *event loop*
-    and therefore the process-wide ``APIRegistry``'s one async client. So
-    everything below runs on the caller's loop, and every blocking call on
-    the way — the pre-lease registry read, the foreign-app forward, the
-    task-module import — is either awaited or deliberately accounted for:
-    on a shared container, a blocking call is not this tick's own latency,
-    it is a stall for every tick beside it.
+    The tick compares the active plan's deployment with its own
+    ``STARDAG_DEPLOYMENT_ID``; on a difference it rolls the build over (see
+    :func:`stardag.build._reactive.roll_over_aio`) when its deployment is
+    the app's current one, and exits ``superseded`` otherwise.
     """
     _setup_logging()
     app_name = deployment.app_name
     build_uuid = UUID(build_id)
     registry = registry_provider.get()
-    # The reactive marker/owner/config live in the registry (not on
-    # the target root): read them with the lighter GET /builds/{id}
-    # for this pre-lease gate — the full frontier is only fetched
-    # once the tick actually processes it (run_tick_aio). Reactive
-    # scheduling against a server predating the build_get shape 404s
-    # only on a genuine missing route; a resource-level 404 (build
-    # deleted) must propagate as a real not-found.
-    try:
-        build_info = await registry.build_get_aio(build_uuid)
-    except NotFoundError as e:
-        if not is_missing_route_error(e):
-            raise
-        raise RuntimeError(
-            "The registry server does not support reactive "
-            "scheduling (build endpoint too old). Upgrade "
-            "stardag-api to a version matching this SDK."
-        ) from e
-    reactive_app_name = build_info.reactive_app_name
-    if reactive_app_name is None:
-        # Not a reactively-scheduled build (e.g. a resident-
-        # orchestrator build swept by the watchdog): never schedule
-        # on top of it, and don't even acquire the scheduler lease.
+    build_info = await registry.build_get_aio(build_uuid)
+    owner_app = build_info.reactive_app_name
+    if owner_app is None:
         logger.info(
             f"Tick for build {build_id}: not reactively scheduled "
             "(no reactive_app_name); skipping."
         )
         return {"outcome": "not_reactive"}
-    # App ownership: with multiple StardagApps in one environment,
-    # every app's watchdog sweeps ALL running reactive builds — but
-    # only the app recorded at trigger time may drive a build.
-    # A foreign app's tick would schedule with ITS commit (its
-    # workers, its selectors) and its own task modules, against a
-    # build planned by the owner's code, so it must not run the
-    # tick loop itself. Instead it FORWARDS: best-effort spawn of
-    # the owner's tick, so wake-ups that land on the wrong app
-    # (e.g. a still-running worker of the previous owner after a
-    # takeover) are not dropped, and every app's watchdog sweep
-    # doubles as cross-app coverage. The owner-side single-flight
-    # lease collapses duplicate forwards. Explicit takeover =
-    # re-trigger from the new app (updates reactive_app_name and
-    # re-plans the build under the new code).
-    owner_app = reactive_app_name
     if owner_app != app_name:
+        # Only the app recorded at trigger time drives a build: a foreign
+        # app's tick would schedule with its own workers and selectors. It
+        # forwards instead (best-effort), so a wake-up landing on the wrong
+        # app is not dropped; the owner's lease collapses duplicates.
         forwarded = False
         try:
-            # Blocking backend call (a Modal RPC, hydrating a cold client),
-            # so off the loop: on a shared container it would stall every
-            # other tick. Same reasoning as ``drain_wake_candidates``.
             await asyncio.to_thread(_spawn_tick, build_uuid, owner_app)
             forwarded = True
         except Exception as e:
-            # Owner app deleted/renamed: the build is orphaned —
-            # surfaced in logs; remedy is a re-trigger from a live
-            # app (see the how-to's app-ownership section).
             logger.info(
-                f"Tick for build {build_id}: could not forward to "
-                f"owner app {owner_app!r} (deleted?): {e}"
+                f"Tick for build {build_id}: could not forward to owner app "
+                f"{owner_app!r} (deleted?): {e}"
             )
-        logger.info(
-            f"Tick for build {build_id}: owned by app "
-            f"{owner_app!r}, not {app_name!r}; "
-            f"{'forwarded to owner' if forwarded else 'skipping'}."
-        )
         return {
             "outcome": "foreign_app",
             "owner_app": owner_app,
             "forwarded": forwarded,
         }
-    # The structure scope. A server that knows scopes assigns every build
-    # one; None means the server predates them (refused below). A real
-    # scope naming another code id means the build was planned by other
-    # code — the live deployment inherits it and **re-plans** it under its
-    # own scope before scheduling (see ``_roll_over_build_aio``). The
-    # server's synthetic ``build:<this build's id>`` (a build nothing fixed
-    # a scope for — an older SDK) is driven as it is.
-    own_code_id = code_id()
-    if build_info.scope_key is None:
-        # A server that knows scopes assigns every build one — at least its
-        # own ``build:<id>`` placeholder. None means the server predates
-        # them, and such a server gates over environment-global edges,
-        # which this SDK refuses (see ``RegistryTooOldError``): driving the
-        # build would mix structures evaluated by different code.
-        logger.error(
-            f"Tick for build {build_id}: the registry reports no structure "
-            "scope for it, so it predates structure scopes. Refusing to drive "
-            "the build: upgrade the Registry API to a version matching this "
-            "SDK first."
-        )
-        return {"outcome": "registry_too_old", "build_id": str(build_id)}
-    may_roll_over = not is_synthetic_scope(build_info.scope_key, build_id=build_id)
-    # The build's config, installed before anything is rehydrated: a task
-    # rebuilt from registry data resolves its dependencies_only /
-    # execution_only fields from it, exactly as the bootstrap did.
-    set_build_config(build_info.build_config)
 
-    # Per-build tick configuration persisted at trigger time in the
-    # registry — every tick (worker wake-ups and watchdog sweeps
-    # spawn with only the build id) runs with the same settings.
-    # Explicit tick_kwargs (tests/manual invocations) win over
-    # persisted ones; the limit key selector is deployed-app config.
     config = _build_tick_config(
         build_info.reactive_tick_kwargs,
         tick_kwargs,
         deployment.limit_key_selector,
         tick_timeout_seconds=deployment.tick_timeout_seconds,
-        # How this tick starts another. Two uses: the exit hand-off —
-        # paired with the worker's conditional wake-up (see
-        # ``_WorkerLifecycleReporter._wake_scheduler``), the worker stops
-        # spawning while a scheduler is live and this is what guarantees
-        # the scheduler cannot exit past a wake-up it never served — and the
-        # cross-build drain, which spawns ticks for the flagged builds the
-        # registry hands out (see ``stardag.build._wakeups``).
         spawn_tick=_spawn_tick,
     )
-
-    # Register the app's task classes in THIS container before the
-    # tick reconstructs anything: rehydrating a task from registry
-    # data is a dict lookup in the polymorphic registry, which is
-    # populated only as a side effect of importing the defining
-    # modules. The list was expanded and frozen at deploy time; the
-    # import is cached per module list, so a container serving many
-    # ticks pays it once. Failures warn rather than abort — and are
-    # retained, so a later "could not rebuild" error can name them.
+    # Register the app's task classes before anything is rehydrated (the
+    # polymorphic registry fills only as the defining modules import). On
+    # the loop on purpose: user modules may have main-thread-only import
+    # side effects; the per-module-list cache makes later ticks free.
     if deployment.task_modules:
         set_declared_task_module_patterns(deployment.task_module_patterns)
-        # Stays ON the loop, unlike the forward above, and that is a
-        # deliberate trade. It is the one unbounded piece of work here — it
-        # can pull in a whole ML stack — so the first tick into a fresh
-        # container does stall any tick beside it. But this imports
-        # *arbitrary user modules*, and import-time side effects are
-        # routinely main-thread-only (``signal.signal`` raises outright off
-        # it), so running them in a worker thread trades a one-off,
-        # once-per-container stall for a class of failure that would
-        # surface as an unexplained import error in production. The
-        # per-module-list cache means later ticks return immediately.
         import_task_modules(deployment.task_modules)
 
     executor = ModalTaskExecutor(
@@ -444,54 +324,40 @@ async def _run_deployed_tick_aio(
         reactive=True,
         modal_workspace=deployment.modal_workspace,
         worker_timeouts=deployment.worker_timeouts,
-        build_config=build_info.build_config,
-        scope_key=build_info.scope_key,
     )
-    # A build planned by other code is re-planned under this deployment's
-    # — by the tick itself, once it holds the build's lease and has seen a
-    # RUNNING frontier (see ``RollOver``), never before: two deployments
-    # must not plan one build at once, and a late tick on a finished build
-    # must rewrite nothing. The hook does the work and updates the
-    # executor's scope so the workers it spawns are told the new one; a
-    # failure carries its report out through ``rollover_details``.
+    own = own_deployment_id()
     rollover_details: dict[str, typing.Any] = {}
 
-    async def _roll_over(frontier: BuildFrontier) -> str | None:
-        rolled = await _roll_over_build_aio(
-            registry,
-            build_uuid,
-            build_info,
-            frontier=frontier,
-            deployment=deployment,
-            own_code_id=own_code_id,
-            app_name=app_name,
-        )
-        if rolled is None:
-            # Not the current deployment: the loop sees the foreign scope
-            # again and ends this tick as superseded.
-            return None
-        if isinstance(rolled, dict):
-            rollover_details.update(rolled)
-            raise RollOverFailed(rolled["error"], rolled)
-        executor.scope_key = rolled
-        return rolled
+    async def _roll_over(frontier: BuildFrontier):
+        from stardag.integration.modal._bootstrap import _preflight_rehydration
+
+        def preflight(walk: Walk) -> None:
+            _preflight_rehydration(
+                build_uuid, walk.incomplete, deployment.task_module_patterns
+            )
+
+        assert own is not None
+        try:
+            return await roll_over_aio(
+                registry,
+                frontier,
+                own_deployment_id=own,
+                preflight=preflight,
+                max_concurrent_discover=config.max_concurrent_discover,
+            )
+        except Exception as e:
+            rollover_details.update(getattr(e, "payload", {}) or {})
+            raise
 
     summary = await run_tick_aio(
         build_uuid,
         registry=registry,
         task_executor=executor,
         config=config,
-        # Only a build with a real scope can be planned by other code; the
-        # server's placeholder (an older SDK's build) is driven as it is.
-        roll_over=_roll_over if may_roll_over else None,
+        deployment_id=own,
+        roll_over=_roll_over if own is not None else None,
     )
-    # The container id is in the line because ticks now share containers
-    # (``_TICK_CONCURRENCY``), and "how well are they packing?" is otherwise
-    # unanswerable from logs: ``modal app logs`` interleaves every function
-    # of the app with no per-container attribution, and ``modal container
-    # list`` names the app but not the function. Grouping this one line by
-    # container answers it, and it is also what tells you which container
-    # to reach for when one tick of many is misbehaving.
+    # The container id is in the line because ticks share containers.
     logger.info(
         f"Tick for build {build_id} (container "
         f"{os.environ.get('MODAL_TASK_ID', 'unknown')}): {summary}"
@@ -500,154 +366,6 @@ async def _run_deployed_tick_aio(
     if summary.outcome == "rollover_failed":
         result.update(rollover_details)
     return result
-
-
-async def _roll_over_build_aio(
-    registry: typing.Any,
-    build_id: UUID,
-    build_info: BuildInfo,
-    *,
-    frontier: BuildFrontier,
-    deployment: _TickDeployment,
-    own_code_id: str,
-    app_name: str,
-) -> str | dict[str, typing.Any] | None:
-    """Re-plan a build the live deployment inherited from other code.
-
-    **Forward only.** A tick of an *older* deployment can win the lease after
-    a newer one already moved the build — its container was mid-flight when
-    the redeploy landed — and would otherwise re-plan the build backward,
-    under code that is no longer live, with the two deployments moving it
-    back and forth. So before planning anything this asks the registry which
-    code is current for the app (the record ``stardag modal deploy`` writes,
-    newest first) and rolls over only when that is this tick's own code.
-    Any other answer returns ``None``: nothing is moved, and the loop ends
-    the tick as superseded; the current deployment's tick re-plans when it
-    is woken, which the registry's wake-up path does. An app with no
-    deployment on record at all is treated the same way: nothing says this
-    code is current, so nothing is moved. That is what makes the record
-    written by ``stardag modal deploy`` load-bearing, and why that command
-    fails rather than shrugs when it cannot record — the remedy is in the
-    log line here and in the command's error.
-
-    The build's edges were evaluated by the code its scope names; this
-    deployment runs other code, so it plans the build again under its own
-    scope — rehydrating the roots from the registry, walking discovery with
-    the build's stored config, registering the plan under the new scope and
-    moving the build to it (:func:`plan_under_scope_aio`, the bootstrap's
-    own step). Completed tasks stay completed; executions the old plan
-    started finish on their own; a tick still lingering on the old code
-    exits as superseded when it sees the scope move.
-
-    **Everything comes from the registry.** Registry ``task_data`` is
-    identity parameters only; rebuilt here, under this code with the
-    build's config installed, a root — and every task the tick loads
-    afterwards — is exactly what this deployment would construct. Nothing
-    carries state from the code that planned the build, which is what makes
-    a rollover code-safe. That is the whole reason the pickle store was
-    retired; a pickle restored the level 2/3 values the *old* code
-    resolved, and no rollover could refresh them.
-
-    Runs inside the tick, under the build's lease, once (see ``RollOver``).
-
-    Returns the new scope key, or the tick's outcome dict when the build
-    cannot roll over. Those cases are a task the new code cannot rebuild
-    from registry data — its class is gone, no longer covered by this
-    deployment's ``task_modules``, or its identity parameters changed — and
-    a stored build config that does not fit this code. Then the build is
-    failed with the remedy in its message: re-trigger it as a new build.
-    See ``docs/design/scope-keyed-dependency-structure.md``.
-    """
-    from stardag._core.rehydrate import task_from_registry_data
-    from stardag.build._scope import structure_scope_key
-    from stardag.integration.modal._bootstrap import (
-        _fail_build_best_effort,
-        plan_under_scope_aio,
-    )
-
-    def _failed(reason: str, exc: BaseException) -> dict[str, typing.Any]:
-        message = (
-            f"Rollover of build {build_id} to code {own_code_id!r} failed: "
-            f"{reason}: {type(exc).__name__}: {exc}. Re-trigger it as a new "
-            "build."
-        )
-        logger.error(message)
-        _fail_build_best_effort(registry, build_id, RuntimeError(message))
-        return {
-            "outcome": "rollover_failed",
-            "build_id": str(build_id),
-            "from_scope_key": build_info.scope_key,
-            "code_id": own_code_id,
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-
-    try:
-        recorded = await registry.deployment_list_aio(app_name=app_name)
-    except Exception as e:
-        logger.warning(
-            f"Tick for build {build_id}: could not read the deployments on "
-            f"record for app {app_name!r} ({type(e).__name__}: {e}); not "
-            "rolling the build over from this tick."
-        )
-        return None
-    if recorded:
-        current = next((d for d in recorded if d.current), recorded[0])
-        if current.code_id != own_code_id:
-            logger.info(
-                f"Tick for build {build_id}: planned by other code, but this "
-                f"tick runs {own_code_id[:12]} and the current deployment of "
-                f"{app_name!r} is {current.code_id[:12]}; leaving the rollover "
-                "to the current deployment's tick."
-            )
-            return None
-    else:
-        logger.warning(
-            f"Tick for build {build_id}: planned by other code, and no "
-            f"deployment of {app_name!r} is on record, so nothing says this "
-            f"tick's code ({own_code_id[:12]}) is the current one; not rolling "
-            "the build over. `stardag modal deploy` records the deployment; "
-            "re-run it if the last deploy could not reach the registry."
-        )
-        return None
-    try:
-        new_scope = structure_scope_key(own_code_id, build_info.build_config)
-    except Exception as e:
-        return _failed("the stored build config does not fit this code", e)
-    try:
-        roots: list[BaseTask] = []
-        for root_id in frontier.root_task_ids:
-            metadata = await registry.task_get_metadata_aio(UUID(root_id))
-            task = task_from_registry_data(metadata.body, expected_task_id=root_id)
-            if build_info.build_config:
-                task = rebind_to_build_config(task)
-            roots.append(task)
-    except Exception as e:
-        return _failed("a root could not be rehydrated under this code", e)
-    try:
-        discovery = await plan_under_scope_aio(
-            registry,
-            build_id,
-            roots,
-            scope_key=new_scope,
-            build_config=build_info.build_config,
-            task_module_patterns=deployment.task_module_patterns,
-            limit_key_selector=deployment.limit_key_selector,
-            retry_failed=False,
-        )
-    except Exception as e:
-        # Includes the rehydration pre-flight refusing the new plan: under
-        # this deployment's ``task_modules`` some task of the build is not
-        # reconstructable, so a tick of this code could never schedule it.
-        # A build failed here is the same answer the trigger would have
-        # given, arriving a redeploy later.
-        return _failed("planning under this code failed", e)
-    logger.info(
-        f"Tick for build {build_id}: rolled over from scope "
-        f"{build_info.scope_key!r} to {new_scope!r} — {len(roots)} root(s), "
-        f"{len(discovery.incomplete)} incomplete task(s) re-planned, "
-        f"{len(discovery.previously_completed)} already complete."
-    )
-    return new_scope
 
 
 # --- The watchdog sweep ---
@@ -705,12 +423,12 @@ def _run_watchdog_sweep(
     and by the watchdog period, and the remedy is the same as it was —
     upgrade the registry, or clean up abandoned RUNNING builds.
     """
-    if type(registry) is NoOpRegistry:
+    if is_noop_registry(registry):
         logger.warning("Tick watchdog: no registry configured; nothing to do.")
         return
     spawn = spawn or _spawn_sweep_tick
     running_builds = registry.build_list_running(
-        limit=sweep_limit, reactive_app_name=reactive_app_name
+        reactive_app_name=reactive_app_name, limit=sweep_limit
     )
     if len(running_builds) >= sweep_limit:
         logger.warning(

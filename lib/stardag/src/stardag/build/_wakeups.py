@@ -22,7 +22,6 @@ import logging
 import typing
 from uuid import UUID
 
-from stardag.exceptions import APIError, NotFoundError, is_missing_route_error
 from stardag.registry import RegistryABC
 
 logger = logging.getLogger(__name__)
@@ -35,26 +34,6 @@ about how a tick is started, and the same callable serves the tick's exit
 hand-off and the cross-build drain — both mean exactly "somebody has to look
 at this build, and it is not me".
 """
-
-# Set once per process when the registry answers the wake-candidates route
-# with a missing-route 404 — an older server, where cross-build wake-ups
-# remain the watchdog's job. Process-global, like the tick-summary flag, so
-# a process against such a server stops paying for a doomed request on
-# every pass.
-_wake_candidates_route_missing = False
-
-
-def _route_unsupported(error: Exception) -> bool:
-    """Whether ``error`` says the registry predates the wake-candidates route.
-
-    Two shapes, because the route sits under ``/builds``: a server with no
-    such path answers the missing-route 404, but a server that has
-    ``GET /builds/{build_id}`` and not this route matches the path to that
-    parameter and answers **405**. Both mean the same thing here.
-    """
-    if isinstance(error, NotFoundError):
-        return is_missing_route_error(error)
-    return isinstance(error, APIError) and error.status_code == 405
 
 
 async def drain_wake_candidates(
@@ -81,21 +60,10 @@ async def drain_wake_candidates(
     server does not need it, since which builds need a tick has nothing to
     do with who is asking.
     """
-    global _wake_candidates_route_missing
-    if _wake_candidates_route_missing:
-        return []
     try:
         candidates = await registry.build_wake_candidates_aio()
     except Exception as e:
-        if _route_unsupported(e):
-            _wake_candidates_route_missing = True
-            logger.debug(
-                "Registry API does not support wake candidates; cross-build "
-                "wake-ups are left to the watchdog in this process. Upgrade "
-                "stardag-api to have finishing builds wake their neighbours."
-            )
-        else:
-            logger.warning("Wake candidates not fetched (ignored): %s", e)
+        logger.warning("Wake candidates not fetched (ignored): %s", e)
         return []
 
     spawned: list[UUID] = []

@@ -24,11 +24,9 @@ from uuid import UUID
 import modal
 
 from stardag import BaseTask
-from stardag.build import discover_and_register_aio
-from stardag.build._reactive._discovery import DiscoveryResult
-from stardag.build._scope import code_id, structure_scope_key
-from stardag.build_config import build_config_scope, rebind_to_build_config
-from stardag.integration.modal._limit_keys import LimitKeySelector
+from stardag.build._deployment import resolve_deployment_id_aio
+from stardag.build._registration import Walk, register_plan_aio, walk_aio
+from stardag.build._settings import settings_applied
 from stardag.build._task_modules import (
     RehydrationPlan,
     TaskModulesError,
@@ -61,9 +59,9 @@ def _preflight_rehydration(
     rebuild, and reusing discovery's (pruned) walk avoids a second
     traversal of the DAG.
 
-    **It raises.** A tick has no second way to get a task object since the
-    pickle store was retired, so a task that fails the dry run is one the
-    build can never schedule. The alternatives are both worse than a
+    **It raises.** A tick has no second way to get a task object than its
+    instance body, so a task that fails the dry run is one the build can
+    never schedule. The alternatives are both worse than a
     refusal at trigger time: arming the build anyway means it runs until it
     reaches that task and then fails it, hours later, one task at a time;
     warning and continuing means the same thing with a log line nobody
@@ -181,176 +179,51 @@ def run_reactive_bootstrap(
     app_name: str,
     tick_kwargs: dict[str, typing.Any] | None,
     task_module_patterns: typing.Sequence[str],
-    limit_key_selector: LimitKeySelector | None = None,
-    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None = None,
+    settings: typing.Mapping[str, str] | None = None,
 ) -> ReactiveBootstrapResult:
-    """Discover the DAG, check it, arm the build, spawn the first tick.
+    """Plan the build, check it, arm it, spawn the first tick.
 
-    **First, the structure scope.** The bootstrap runs inside the
-    deployment, so it knows the code id every tick and worker of this
-    deployment will answer, and it holds the build config; it fixes the
-    build's scope from the two *before* registering any edge, so every
-    edge the build writes carries the scope of the code and config that
-    evaluated it. A build planned by other code (a re-trigger from a new
-    deployment) is simply re-planned here and its scope moved — see
-    :func:`plan_under_scope_aio`. The config is installed
-    for this process, and the roots — constructed on the triggering
-    machine, before any config existed — are re-created under it, so
-    their ``dependencies_only`` / ``execution_only`` fields, and those of
-    every task ``requires()`` constructs from here on, come from the
-    build config. See ``docs/design/scope-keyed-dependency-structure.md``.
+    **The static phase.** The bootstrap plans under its own deployment —
+    ``STARDAG_DEPLOYMENT_ID``, baked into the container by the deploy — or,
+    run in the triggering process (``reactive_discovery="local"``), under
+    the app's current deployment (D13). It applies the build's ``settings``,
+    walks the roots (stopping at complete tasks), refuses the build if a
+    tick could not rehydrate every task it walked, and registers the plan:
+    roots first, the rest in post-order chunks, then ``/seal``
+    (:func:`~stardag.build._registration.register_plan_aio`). A re-trigger
+    under the same scope reuses the build's plan: the observations are
+    re-sent (a vanished output is invalidated) and members that failed,
+    were cancelled, skipped, suspended or interrupted are reset — the retry
+    path of a reactive build.
 
-    Everything a reactive build needs before it can be scheduled, except
-    minting the build and registering its roots — those cost no target
-    I/O and must happen at the trigger, before anything is spawned.
+    Normally runs **inside Modal**, as the body of the deployed
+    ``bootstrap`` function, because discovery is target-root I/O (a mounted
+    volume there, a rate-limited API from a laptop).
 
-    Normally this runs **inside Modal**, as the body of the deployed
-    ``bootstrap`` function, because discovery is target-root I/O:
-    ``complete_aio()`` is one target existence check per task, and for a
-    ``modalvol://`` root that is a rate-limited Volume *API* call from
-    outside Modal versus a ``stat`` on a mounted filesystem inside it. The
-    same code also runs at the trigger when an app opts out with
-    ``StardagApp(reactive_discovery="local")``.
-
-    **The ordering guarantee — do not "tidy" this.** The reactive marker
-    (``build_set_reactive_meta``, which is what makes ``reactive_app_name``
-    non-None) is written **last**, after discovery *and* registration have
-    completed, and a tick no-ops on any build whose ``reactive_app_name``
-    is None. That ordering is the whole reason no tick can ever observe a
-    partially-registered DAG. It is load-bearing, not stylistic:
-    registration is chunked post-order, so the roots land *last*, and
-    mid-registration a build presents as "nothing actionable, roots not
-    complete" — exactly the shape terminal detection fails a build on.
-    Moving the marker earlier (or spawning a tick before it) reopens
-    precisely that window.
+    **The ordering guarantee.** The reactive marker
+    (``build_set_reactive_meta``) is written **last**, after the plan is
+    sealed, and a tick no-ops on a build without it; the first tick is
+    spawned after. (A plan registered roots-first is recoverable at any
+    point anyway — its unexpanded roots are discovery jobs any tick can
+    finish.)
 
     Raises on any failure without touching the build's status: recording
-    the terminal BUILD_FAILED belongs to the caller, which is the one
-    that knows whether *it* put the build into RUNNING (see
-    :meth:`StardagApp._trigger_reactive`). The first tick's spawn is part
-    of the work rather than an afterthought: an un-spawned tick is not a
-    partial success, it is a build nothing will ever move (a watchdog
-    would eventually adopt it; an app without one would simply stall).
+    BUILD_FAILED belongs to the caller, which knows whether *it* put the
+    build into RUNNING.
     """
-    # ``limit_key_selector`` rides along so every task is registered with
-    # the concurrency-limit keys it will run under. The registry uses those
-    # plan-time keys to wake the builds queued on a key when a slot frees —
-    # it can learn them nowhere else, since the selector is deployed-app
-    # code.
-    # The config is installed for the duration of the bootstrap only: the
-    # ``reactive_discovery="local"`` path runs this in the trigger's own
-    # process, and a completed build's level 2/3 values must not linger in
-    # the caller's context for the next task it constructs.
-    with build_config_scope(build_config):
-        return _run_reactive_bootstrap_scoped(
-            build_id,
-            task_list,
-            registry=registry,
-            app_name=app_name,
-            tick_kwargs=tick_kwargs,
-            task_module_patterns=task_module_patterns,
-            limit_key_selector=limit_key_selector,
-            build_config=build_config,
+    with settings_applied(settings):
+        if task_module_patterns:
+            import_task_modules(expand_task_module_patterns(task_module_patterns))
+        walk = asyncio.run(
+            _plan_aio(
+                registry,
+                build_id,
+                task_list,
+                app_name=app_name,
+                settings=dict(settings or {}),
+                task_module_patterns=task_module_patterns,
+            )
         )
-
-
-async def plan_under_scope_aio(
-    registry: typing.Any,
-    build_id: UUID,
-    roots: typing.Sequence[BaseTask],
-    *,
-    scope_key: str,
-    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None,
-    task_module_patterns: typing.Sequence[str],
-    limit_key_selector: LimitKeySelector | None,
-    retry_failed: bool,
-) -> DiscoveryResult:
-    """Plan ``build_id`` under ``scope_key``: discover, register, check, move.
-
-    The one planning step, shared by the reactive bootstrap (a fresh build)
-    and a tick's **rollover** (a build the live deployment inherits from
-    other code — see ``docs/design/scope-keyed-dependency-structure.md``).
-    Discovery walks the roots under the config already installed in this
-    process, registers every incomplete task with its static upstreams
-    **explicitly under** ``scope_key`` — the scope of the code doing the
-    walking — checks that a scheduler tick could rebuild every one of them
-    from registry data, and only then moves the build's scope to
-    ``scope_key``. Registering first and moving last means a scheduler that
-    reads the build mid-plan still gates over the old, complete plan rather
-    than a half-written new one.
-
-    Raises :class:`TaskModulesError` if the pre-flight refuses the plan —
-    for the bootstrap that fails the build at the trigger, and for a
-    rollover the tick turns it into ``rollover_failed``.
-
-    ``retry_failed`` is the bootstrap's re-trigger semantic (a failed task
-    is reset for another attempt); a rollover passes False, because new
-    code is not a retry request.
-    """
-    discovery = await discover_and_register_aio(
-        registry,
-        build_id,
-        tuple(roots),
-        retry_failed=retry_failed,
-        limit_key_selector=limit_key_selector,
-        scope_key=scope_key,
-    )
-    # --- rehydration pre-flight (see _preflight_rehydration): raises ---
-    _preflight_rehydration(
-        build_id, discovery.incomplete.values(), task_module_patterns
-    )
-    await registry.build_set_scope_aio(
-        build_id, scope_key=scope_key, build_config=build_config
-    )
-    return discovery
-
-
-def _run_reactive_bootstrap_scoped(
-    build_id: UUID,
-    task_list: list[BaseTask],
-    *,
-    registry: typing.Any,
-    app_name: str,
-    tick_kwargs: dict[str, typing.Any] | None,
-    task_module_patterns: typing.Sequence[str],
-    limit_key_selector: LimitKeySelector | None,
-    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]] | None,
-) -> ReactiveBootstrapResult:
-    """:func:`run_reactive_bootstrap` with the build config already installed."""
-    # The scope hash validates every class the build config names, and a
-    # configured class need not be one the roots import — a dynamic
-    # upstream three yields down is the typical case. Register the app's
-    # declared task modules first, exactly as the deployed ``build`` and
-    # ``tick`` wrappers do; cached per module list, so a warm container
-    # pays nothing.
-    if task_module_patterns:
-        import_task_modules(expand_task_module_patterns(task_module_patterns))
-    scope_key = structure_scope_key(code_id(), build_config)
-    if build_config:
-        # Only with a config to resolve: the roots arrived by value from the
-        # trigger, constructed before any config existed, so their
-        # non-identity fields are the defaults. Re-creating them here is
-        # what makes the config reach them. Without a config there is
-        # nothing to resolve and the objects stay exactly as sent.
-        task_list = [rebind_to_build_config(task) for task in task_list]
-    discovery = asyncio.run(
-        plan_under_scope_aio(
-            registry,
-            build_id,
-            task_list,
-            scope_key=scope_key,
-            build_config=build_config,
-            task_module_patterns=task_module_patterns,
-            limit_key_selector=limit_key_selector,
-            retry_failed=True,
-        )
-    )
-    # The reactive marker/owner/config, written LAST — see the ordering
-    # guarantee in this function's docstring. This is an upsert: because
-    # the registry is mutable — unlike a possibly immutable target root —
-    # a re-trigger MAY update tick_kwargs. tick_kwargs is passed through
-    # as-is: None (a bare re-trigger) preserves the stored config
-    # server-side rather than wiping it.
     registry.build_set_reactive_meta(
         build_id, app_name=app_name, tick_kwargs=tick_kwargs
     )
@@ -358,11 +231,36 @@ def _run_reactive_bootstrap_scoped(
     tick_call = tick_function.spawn(build_id=str(build_id))
     summary = {
         "build_id": str(build_id),
-        "scope_key": scope_key,
         "roots": len(task_list),
-        "incomplete": len(discovery.incomplete),
-        "previously_completed": len(discovery.previously_completed),
-        "retried": len(discovery.retried),
+        "incomplete": len(walk.incomplete),
+        "previously_completed": len(walk.previously_completed),
     }
     logger.info(f"Reactive bootstrap for build {build_id}: {summary}")
     return ReactiveBootstrapResult(summary=summary, tick_call=tick_call)
+
+
+async def _plan_aio(
+    registry: typing.Any,
+    build_id: UUID,
+    roots: typing.Sequence[BaseTask],
+    *,
+    app_name: str,
+    settings: dict[str, str],
+    task_module_patterns: typing.Sequence[str],
+) -> Walk:
+    deployment_id = await resolve_deployment_id_aio(registry, app_name=app_name)
+    walk = await walk_aio(list(roots))
+    _preflight_rehydration(build_id, walk.incomplete, task_module_patterns)
+    # Reactivates this scope's plan if the build moved away from it since.
+    await registry.build_resume_aio(
+        build_id, deployment_id=deployment_id, settings=settings
+    )
+    await register_plan_aio(
+        registry,
+        build_id,
+        walk,
+        deployment_id=deployment_id,
+        settings=settings,
+        retry_failed=True,
+    )
+    return walk

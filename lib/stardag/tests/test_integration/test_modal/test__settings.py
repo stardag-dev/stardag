@@ -222,7 +222,7 @@ class TestModalAcceptsWhatWeProduce:
 
     def test_the_stardag_tick_default_registers(self):
         """The one concurrency stardag applies on its own initiative."""
-        from stardag.integration.modal._app import _TICK_CONCURRENCY
+        from stardag.integration.modal._functions import _TICK_CONCURRENCY
 
         app = modal.App("settings-roundtrip-default")
 
