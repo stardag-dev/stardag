@@ -155,12 +155,17 @@ async def list_task_executions(
 
 
 async def report_stopped(
-    session: AsyncSession, environment_id: UUID, execution_id: UUID
+    session: AsyncSession,
+    environment_id: UUID,
+    execution_id: UUID,
+    *,
+    outcome: ExecutionOutcome = ExecutionOutcome.STOPPED,
 ) -> TransitionOutcome:
-    """Record that the operator stopped the execution (``outcome =
-    stopped``), through ``transition_task()``: the ledger end, and — if it
-    still holds the task's claim — the claim's release (the task
-    CANCELLED). Idempotent: an ended execution is left as it ended.
+    """Record an operator end of the execution — ``stopped`` (the CLI
+    stopped it) or ``lost`` (it cannot be stopped; the operator gives up on
+    it) — through ``transition_task()``: the ledger end, and — if it still
+    holds the task's claim — the claim's release (the task CANCELLED).
+    Idempotent: an ended execution is left as it ended.
 
     Only the execution's task and plan keys — which never change — are read
     before ``transition_task()`` locks the task row; the execution itself
@@ -186,6 +191,6 @@ async def report_stopped(
             environment_id,
             task_pk=keys.task_pk,
             plan_id=keys.plan_id,
-            transition=Transition.stop(execution_id),
+            transition=Transition.stop(execution_id, outcome),
             now=utc_now(),
         )

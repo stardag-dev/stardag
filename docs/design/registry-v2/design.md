@@ -454,7 +454,7 @@ with both paths named; the server is authoritative via the primary key.
 | `executor`, `executor_ref`, `executor_metadata` | the one place these live                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `started_at`                                    | the claim was granted                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `claim_released_at`, `claim_outcome`            | written by the **server** whenever the task leaves RUNNING or the claim changes hands, uniformly in `transition_task()`: `completed, failed, suspended, interrupted, cancelled` (the report that moved the task), `taken_over` (a later claiming start took a lapsed claim), `lapsed` (a lapsed claim closed by something other than a claiming start, e.g. an observed completion), `released` (build terminal transition) |
-| `ended_at`, `outcome`                           | written only by the **execution's own report** or an operator stop: `completed, failed, suspended, interrupted, preempted, stopped`                                                                                                                                                                                                                                                                                         |
+| `ended_at`, `outcome`                           | written only by the **execution's own report** or an operator end: `completed, failed, suspended, interrupted, preempted, stopped, lost` (`stopped`: the CLI stopped it; `lost`: it cannot be stopped and the operator gives up on it)                                                                                                                                                                                      |
 
 One row per execution, updated only at its two ends. It never decides
 anything: liveness is the claim on `task`. `ended_at IS NULL` means "no
@@ -469,7 +469,10 @@ with `report_applied = false`.
 Keeps: id, name, description, user, `status` + companions, `root_task_ids`
 (the request at completion-id level, stable across rollover), reactive
 columns (`reactive_app_name`, `reactive_tick_kwargs`, `scheduler_lease_*`),
-`last_active_at`, `executor_metadata`. Drops `scope_key`, `build_config`,
+`last_active_at`, `executor_metadata`, and `error_message` (why it is FAILED:
+the message of the `BUILD_FAILED` that produced the status; NULL for every
+other status, so a resumed or completed build does not keep explaining an old
+failure). Drops `scope_key`, `build_config`,
 `commit_hash`. The active plan is found through `plan`, not stored twice.
 
 The wake-up flags `needs_tick_at` and `tick_requested_at` are on
@@ -522,8 +525,8 @@ table a non-significant field can inflate. Deleting a build is refused
 (409) while any of its plans holds a live claim **or any of its executions
 has `ended_at IS NULL`**; `stardag builds stop` is how those are ended first
 (it writes `ended_at` with outcome `stopped`, also for a container the
-backend reports gone), so the ledger is never cascaded away under a worker
-that may still report.
+backend reports gone, or `lost` for one it cannot stop and gives up on), so
+the ledger is never cascaded away under a worker that may still report.
 
 ## Registration
 

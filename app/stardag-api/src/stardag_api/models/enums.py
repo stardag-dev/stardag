@@ -117,7 +117,11 @@ class ExecutionOutcome(str, enum.Enum):
     SUSPENDED = "suspended"
     INTERRUPTED = "interrupted"
     PREEMPTED = "preempted"
+    # Operator ends (``/executions/{id}/stopped``): the CLI stopped it, or
+    # could not and gives up on it (``lost``). Either way no later report of
+    # the execution is applied.
     STOPPED = "stopped"
+    LOST = "lost"
 
 
 class EventType(str, enum.Enum):

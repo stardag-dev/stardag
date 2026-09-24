@@ -19,7 +19,8 @@ nothing to derive an instance, a plan or a membership from.
 revision (the v2 line is unreleased), so later I0 steps change it here
 rather than stacking revisions on a schema nobody has: step 3c moved the
 wake-up flags off ``build`` onto ``build_wake`` and added the attempt-count
-and quota indexes; I5 added ``build.error_message``.
+and quota indexes; I5 added ``build.error_message`` and the
+``lost`` execution outcome.
 
 Mechanics worth knowing:
 
@@ -744,6 +745,7 @@ def upgrade() -> None:
                 "interrupted",
                 "preempted",
                 "stopped",
+                "lost",
                 name="execution_outcome",
             ),
             nullable=True,

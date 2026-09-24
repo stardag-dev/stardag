@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
+from stardag_api.models import ExecutionOutcome
 from stardag_api.schemas_v2 import (
     ExecutionListResponse,
     ExecutionResponse,
@@ -76,6 +77,8 @@ async def list_task_executions(
 async def report_stopped(
     execution_id: UUID, db: Db, auth: Auth, body: StoppedRequest | None = None
 ):
-    """The CLI reports an execution it stopped (``outcome = stopped``)."""
-    del body  # the one outcome there is
-    return await executions.report_stopped(db, auth.environment_id, execution_id)
+    """The CLI reports an execution it stopped, or gave up on (``lost``)."""
+    outcome = ExecutionOutcome((body or StoppedRequest()).outcome)
+    return await executions.report_stopped(
+        db, auth.environment_id, execution_id, outcome=outcome
+    )

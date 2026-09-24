@@ -527,11 +527,12 @@ class TaskExecutionListResponse(BaseModel):
 
 
 class StoppedRequest(BaseModel):
-    """What ``builds stop`` reports having stopped."""
+    """An operator end: ``stopped`` (the CLI stopped the execution) or
+    ``lost`` (it cannot be stopped, and the operator gives up on it)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    outcome: Literal["stopped"] = "stopped"
+    outcome: Literal["stopped", "lost"] = "stopped"
 
 
 # ---------------------------------------------------------------------------

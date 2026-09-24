@@ -396,3 +396,16 @@ app)` advisory lock that create uses: activation exclusively, the checks
   not counted (its budget is its own). Discovery jobs carry none. The
   quota count's `task_instance (environment_id, created_at)` index, noted
   missing in step 3b, now exists.
+
+## Implementation notes, I5 (2026-09-24)
+
+- **An operator end has two outcomes, `stopped` and `lost`** (the I8
+  decision: the CLI's `builds stop` gives up on an execution it cannot
+  stop). `POST /executions/{id}/stopped {outcome: "lost"}` is handled
+  exactly as `stopped` — the ledger end, and if the execution still holds
+  the task's claim, the claim released `cancelled` with the task CANCELLED
+  — and records `outcome = lost`, so the ledger says the container may
+  still be running. A later report from it is late: `ended_at` is set, so it
+  is recorded (`report_applied = false`) and refused
+  `execution_already_ended`, the task untouched. The v2 migration gains the
+  enum label in place (never deployed).
