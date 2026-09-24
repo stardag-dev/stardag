@@ -595,8 +595,10 @@ deployments`.
 Named concurrency limits cap how many tasks tagged with a given key may run
 concurrently across all builds in an environment. The SDK tags tasks with keys;
 the cap lives server-side in the registry and is enforced atomically when a task
-starts. Manage them with `stardag concurrency-limits` (or in the registry UI:
-workspace admin → Concurrency Limits).
+starts. Manage them with `stardag concurrency-limits` or the
+`GET/PUT/DELETE /api/v2/concurrency-limits` routes directly (see
+[Platform: API](../platform/api.md)) — the registry UI has no
+concurrency-limits admin page in v2.
 
 === "Active venv"
 
