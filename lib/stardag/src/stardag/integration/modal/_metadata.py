@@ -32,25 +32,17 @@ STARDAG_BUILD_ID_ENV = "STARDAG_BUILD_ID"
 """Env var through which the build id reaches Modal workers.
 
 Injected into ``env_overrides`` by :class:`ModalTaskExecutor` whenever a
-build is active (so it is also set as a process env var around the task's
-run). :class:`Runner` reads it to report the task's lifecycle events from
-inside the worker, and to bind the structure-scope check to the build (only
-``build:<this build>`` is the server's placeholder). Whether the worker
-*reports* is a separate switch, ``STARDAG_WORKER_REPORTS_LIFECYCLE``; the
-build id is forwarded either way. Riding on ``env_overrides`` keeps the
-worker function signature unchanged — older deployed workers simply apply
-it as a harmless env var.
+build is active. :class:`Runner` wakes the build's scheduler with it after
+a reactive worker's terminal report. Whether the worker *reports* is a
+separate switch, ``STARDAG_WORKER_REPORTS_LIFECYCLE``.
 """
 
 STARDAG_WORKER_REPORTS_LIFECYCLE_ENV = "STARDAG_WORKER_REPORTS_LIFECYCLE"
 """Env var switching worker-side lifecycle reporting off (``"0"``).
 
 Set by :class:`ModalTaskExecutor` when it was constructed with
-``worker_reports_lifecycle=False`` — a custom or legacy run function that
-does not self-report. It used to be inferred from the *absence* of
-``STARDAG_BUILD_ID``, which meant a non-reporting worker also lost the
-build id its scope check needs; the switch is explicit now so the id can
-always travel. Absent means reporting is on.
+``worker_reports_lifecycle=False`` — a custom run function that does not
+self-report. Absent means reporting is on.
 """
 
 STARDAG_MODAL_APP_NAME_ENV = "STARDAG_MODAL_APP_NAME"
@@ -63,67 +55,38 @@ when it finishes a task. Transported like ``STARDAG_BUILD_ID``.
 STARDAG_REACTIVE_ENV = "STARDAG_REACTIVE"
 """Env var flagging reactive scheduling to workers ("1" when reactive).
 
-In reactive mode the worker additionally registers dynamically yielded
-deps — which is what a later tick rebuilds them from — and wakes the
-scheduler after terminal events; there is no resident orchestrator to do
-either.
+In reactive mode the worker wakes the scheduler after its terminal report
+or its yield; there is no resident orchestrator to notice.
 """
 
 STARDAG_EXECUTION_ID_ENV = "STARDAG_EXECUTION_ID"
 """Env var carrying the identity of the execution this container *is*.
 
-Minted by the orchestrator before it claimed the task — the claim is
-taken before the spawn, so the executor ref does not exist yet — and
-forwarded per call so the worker can name its own execution.
-
-Three things depend on the worker having it. Its own TASK_STARTED is
-non-claiming and the registry refuses one that names an execution the
-task no longer runs under, which is what stops a late restart from
-evicting the build that took the task over meanwhile. Its interruption
-and preemption reports are honoured only while the task still holds the
-execution they name. And it is what the worker asks about at its
-cooperative-cancellation checkpoints — "is this execution still the one
-the task holds?" — so a superseded container stops rather than running
-to completion.
-
-Absent (an orchestrator predating it, or the non-detached submission
-path), the worker reports without one and the registry falls back to the
-``(executor, executor_ref)`` pair — the behaviour of every release before
-this, so a rolling deploy is safe in both directions. Cancellation still
-works in its build-level half: a worker with no identity can still be
-told its build is no longer running.
+Minted by the orchestrator before it claimed the task (the claim is taken
+before the spawn, so no executor ref exists yet) and forwarded per call.
+Every report the worker makes names it — its own non-claiming start, its
+completion, failure, yield, interruption — and the registry applies a report
+only while that execution holds the task's claim; it is also what the
+worker asks about at its cooperative-cancellation checkpoints. Written last
+by the executor, like ``STARDAG_PLAN_ID``.
 """
 
 STARDAG_CLAIM_TTL_SECONDS_ENV = "STARDAG_CLAIM_TTL_SECONDS"
-"""Env var carrying the claim TTL the orchestrator derived for this task.
-
-The worker's own TASK_STARTED is a start like any other, so without this
-it would re-stamp the claim with the registry's generic default and undo
-the orchestrator's derivation (see
-``stardag.build._reactive.claim_ttl_seconds``). Forwarding it also *improves*
-the bound: the worker's start is recorded when execution actually begins, so
-the expiry is re-based off the real start rather than off the pre-spawn
-claim, which absorbed however long the call sat queued.
+"""Env var carrying the claim TTL the orchestrator derived for this task
+(see ``stardag.build._claims.claim_ttl_seconds``), for diagnostics in the
+worker; the claim itself was taken with it before the spawn.
 """
 
-STARDAG_BUILD_CONFIG_ENV = "STARDAG_BUILD_CONFIG"
-"""Env var carrying the build's ``build_config`` (compact JSON) to workers.
+STARDAG_PLAN_ID_ENV = "STARDAG_PLAN_ID"
+"""Env var carrying the plan the execution was claimed under to workers.
 
-A worker installs it before the task runs, so tasks the task constructs —
-its dynamic dependencies — resolve their ``dependencies_only`` and
-``execution_only`` fields from the same config the bootstrap and the ticks
-use. Transported like ``STARDAG_BUILD_ID``; absent means ``{}``.
-"""
-
-STARDAG_SCOPE_KEY_ENV = "STARDAG_SCOPE_KEY"
-"""Env var carrying the build's structure scope key to workers.
-
-A worker runs whatever task it is handed — the task id promises the output
-whatever code produces it — but records the dynamic dependencies it yields
-under **its own** code id with the config half of this scope (see
-``_runner.worker_scope_key``), so a build that rolled over to a newer
-deployment never inherits an old worker's late yield. Absent, or the
-server's synthetic ``build:<id>``, means the server's default scope.
+Every report a worker makes names its member by ``(plan_id, task_id)`` and
+its execution by ``STARDAG_EXECUTION_ID``, so a worker spawned without a
+plan (no registry, or a build that never registered one) reports nothing.
+Written last by the executor, after the settings and the selector's env, so
+neither can redirect a worker's reports. The worker's *deployment* is not
+forwarded: ``STARDAG_DEPLOYMENT_ID`` is baked into its container by the
+deploy, and ``/yield`` refuses a worker whose deployment is not the plan's.
 """
 
 STARDAG_MODAL_FUNCTION_TIMEOUT_ENV = "STARDAG_MODAL_FUNCTION_TIMEOUT"

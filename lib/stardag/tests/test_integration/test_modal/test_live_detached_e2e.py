@@ -1,19 +1,20 @@
-"""Live e2e: orchestrator crash → resumed build re-attaches, task not restarted.
+"""Live e2e: orchestrator crash -> the next build waits on the claim, and the
+task is not restarted.
 
-The headline scenario of detached execution:
-
-1. Phase A (subprocess): a build spawns a long-running task on Modal via the
-   detached ``ModalTaskExecutor``; a file-backed registry stub records the
-   executor ref (function call id) at TASK_STARTED. The subprocess is then
-   SIGKILLed — a hard orchestrator crash, no cancel/cleanup runs.
-2. Phase B (this process): a "resumed" build whose registry reports the task
-   RUNNING with the recorded ref (exactly what the API registry does after
-   this change). The engine re-attaches instead of re-executing and awaits
-   the original worker.
+1. Phase A (subprocess): a build claims a long-running task and spawns it
+   on Modal via the detached ``ModalTaskExecutor``; its registry records
+   the execution id and the executor ref (function call id) of the
+   holder's non-claiming start to a file. The subprocess is then SIGKILLed
+   -- a hard orchestrator crash, no cancel or cleanup runs.
+2. Phase B (this process): a registry that holds that claim (seeded from
+   the file, as the real registry would still hold it) and a second build
+   of the same task. Its claiming start is denied ``task_already_running``;
+   it waits on the claim and, once the original worker's output lands,
+   observes the completion instead of spawning again.
 
 The task saves the Modal function call id it ran under; asserting it equals
 the ref recorded *before the crash* proves the original invocation produced
-the output — i.e. the task was not restarted.
+the output.
 """
 
 import json
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -40,7 +42,9 @@ try:
     from stardag.build import BuildExitStatus, build
     from stardag.integration.modal._executor import ModalTaskExecutor
     from stardag.integration.modal._metadata import MODAL_EXECUTOR_NAME
-    from stardag.registry import NoOpRegistry, RegisteredTaskInfo
+    from stardag.build import ClaimConfig
+    from stardag.build._registration import new_id, registration_item
+    from stardag.testing import InMemoryRegistry
     from stardag.testing.modal._tasks import SleepAndSaveCallId
 
 except ImportError:
@@ -89,29 +93,31 @@ import sys
 
 from stardag.build import build_aio
 from stardag.integration.modal._executor import ModalTaskExecutor
-from stardag.registry import NoOpRegistry
+from stardag.testing import InMemoryRegistry
 from stardag.testing.modal._tasks import SleepAndSaveCallId
 
 
-class FileRefRegistry(NoOpRegistry):
-    '''Records each TASK_STARTED executor ref to a JSON file.'''
+class FileRefRegistry(InMemoryRegistry):
+    '''Records the holder's non-claiming start (its executor ref) to a file.'''
 
     def __init__(self, path: str):
         super().__init__()
         self.path = path
 
-    async def task_start_aio(
-        self, build_id, task, executor=None, executor_ref=None, **kwargs
-    ):
-        with open(self.path, "w") as f:
-            json.dump(
-                {
-                    "task_id": str(task.id),
-                    "executor": executor,
-                    "executor_ref": executor_ref,
-                },
-                f,
-            )
+    def member_start(self, plan_id, task_id, **kwargs):
+        result = super().member_start(plan_id, task_id, **kwargs)
+        if not kwargs.get("claim", True) and kwargs.get("executor_ref"):
+            with open(self.path, "w") as f:
+                json.dump(
+                    {
+                        "task_id": task_id,
+                        "execution_id": str(kwargs["execution_id"]),
+                        "executor": kwargs.get("executor"),
+                        "executor_ref": kwargs["executor_ref"],
+                    },
+                    f,
+                )
+        return result
 
 
 async def main():
@@ -126,10 +132,11 @@ async def main():
     executor = ModalTaskExecutor(
         modal_app_name="stardag-testing-app",
         worker_selector=lambda t: "default",
+        worker_reports_lifecycle=False,
     )
-    await build_aio(
-        [task], task_executor=executor, registry=FileRefRegistry(ref_file)
-    )
+    registry = FileRefRegistry(ref_file)
+    registry.add_deployment(app_name="stardag-testing-app")
+    await build_aio([task], task_executor=executor, registry=registry)
 
 
 asyncio.run(main())
@@ -191,38 +198,58 @@ def test_crash_resume_reattaches_without_restarting_task(tmp_path):
     original_ref = ref_info["executor_ref"]
     assert original_ref and original_ref.startswith("fc-")
 
-    # Phase B — "resumed" orchestrator. The registry stub reports the task
-    # as RUNNING with the pre-crash ref, as the API registry would.
-    class ReattachRegistry(NoOpRegistry):
-        async def task_register_bulk_aio(
-            self,
-            build_id,
-            tasks,
-            *,
-            limit_keys=None,
-            declared_dependencies=None,
-            scope_key=None,
-        ):
-            return [
-                RegisteredTaskInfo(
-                    task_id=str(t.id),
-                    latest_status="running",
-                    latest_executor=MODAL_EXECUTOR_NAME,
-                    latest_executor_ref=original_ref,
-                )
-                for t in tasks
-            ]
+    # Phase B -- the registry still holds the pre-crash execution's claim.
+    registry = InMemoryRegistry()
+    deployment = registry.add_deployment(app_name=TEST_APP_NAME)
+    crashed_build = registry.build_create(root_task_ids=[str(task.id)]).id
+    item = registration_item(
+        task,
+        declared_upstreams=None,
+        observed_complete=False,
+        observed_at=datetime.now(timezone.utc),
+    )
+    plan = registry.plan_create(
+        crashed_build,
+        plan_id=new_id(),
+        deployment_id=deployment,
+        settings={},
+        roots=[item],
+    )
+    registry.member_start(
+        plan.id,
+        str(task.id),
+        execution_id=uuid.UUID(ref_info["execution_id"]),
+        claim_ttl_seconds=3600,
+    )
 
-    executor = ModalTaskExecutor(
+    class CountingExecutor(ModalTaskExecutor):
+        spawns = 0
+
+        async def submit_detached(self, task, *, execution_id):
+            CountingExecutor.spawns += 1
+            return await super().submit_detached(task, execution_id=execution_id)
+
+    executor = CountingExecutor(
         modal_app_name=TEST_APP_NAME,
         worker_selector=lambda t: "default",
+        worker_reports_lifecycle=False,
     )
-    summary = build([task], task_executor=executor, registry=ReattachRegistry())
+    summary = build(
+        [task],
+        task_executor=executor,
+        registry=registry,
+        claim_config=ClaimConfig(
+            wait_timeout_seconds=180,
+            wait_initial_interval_seconds=1.0,
+            wait_max_interval_seconds=5.0,
+        ),
+    )
 
     assert summary.status == BuildExitStatus.SUCCESS
+    assert CountingExecutor.spawns == 0
     assert task.complete()
     result = task.load()
     assert result["salt"] == salt
     # The crux: the output was produced by the ORIGINAL (pre-crash) worker
-    # invocation — the resumed build re-attached instead of re-executing.
+    # invocation -- the second build waited instead of re-executing.
     assert result["call_id"] == original_ref

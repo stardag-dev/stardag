@@ -1,73 +1,35 @@
 """Default ``RunFunction`` implementation — what runs inside a worker container.
 
 :class:`Runner` executes one task (sync, async, or dynamic-deps generator) and,
-when an orchestrator forwarded a build id, reports that task's whole lifecycle
-to the registry from inside the worker via :class:`_WorkerLifecycleReporter`.
-Reporting from here rather than from the orchestrator is what makes the events
-independent of the orchestrator's lifetime — and it is the only option under
-reactive scheduling, where there is no resident orchestrator at all.
+when an orchestrator forwarded a build, a plan and an execution, reports that
+execution's lifecycle to the registry from inside the worker via
+:class:`~._reporter._WorkerLifecycleReporter`. Reporting from here rather than
+from the orchestrator is what makes the events independent of the
+orchestrator's lifetime — and it is the only option under reactive
+scheduling, where there is no resident orchestrator at all.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import logging
 import os
-import threading
 import time
 import typing
-from uuid import UUID
-
-import modal
 
 from stardag import BaseTask, TaskStruct, flatten_task_struct
 from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
-from stardag.build import discover_and_register_aio
-from stardag.build._task_modules import (
-    declared_task_module_patterns,
-    format_uncovered_message,
-    uncovered_task_classes,
-)
-from stardag.integration.modal._limit_keys import deployed_limit_key_selector
-from stardag.integration.modal._logging import _setup_logging
-from stardag.build._scope import code_id, is_synthetic_scope, scope_config_hash
-from stardag.build_config import build_config_scope
-from stardag.integration.modal._metadata import (
-    STARDAG_BUILD_CONFIG_ENV,
-    STARDAG_SCOPE_KEY_ENV,
-    MODAL_EXECUTOR_NAME,
-    STARDAG_BUILD_ID_ENV,
-    STARDAG_CLAIM_TTL_SECONDS_ENV,
-    STARDAG_EXECUTION_ID_ENV,
-    STARDAG_MODAL_APP_ID_ENV,
-    STARDAG_MODAL_APP_NAME_ENV,
-    STARDAG_MODAL_ENVIRONMENT_ENV,
-    STARDAG_MODAL_FUNCTION_ID_ENV,
-    STARDAG_MODAL_FUNCTION_NAME_ENV,
-    STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
-    STARDAG_MODAL_WORKSPACE_ENV,
-    STARDAG_REACTIVE_ENV,
-    STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
-)
-from stardag.integration.modal._protocols import RunFunction
-from stardag.integration.modal._spawn import spawn_tick
 from stardag.cancellation import (
-    CancellationChecker,
     cancellation_scope,
     current_checker as _current_cancellation_checker,
 )
-from stardag.exceptions import (
-    APIError,
-    ExecutionCancelled,
-    ResumableInterruption,
-    execution_not_wanted,
-)
-from stardag.registry._base import NoOpRegistry, registry_provider
+from stardag.exceptions import ExecutionCancelled, ResumableInterruption
+from stardag.integration.modal._logging import _setup_logging
+from stardag.integration.modal._metadata import STARDAG_MODAL_FUNCTION_TIMEOUT_ENV
+from stardag.integration.modal._protocols import RunFunction
+from stardag.integration.modal._reporter import _WorkerLifecycleReporter
 from stardag.utils.env import temp_env_vars
-
-_T = typing.TypeVar("_T")
 
 # Modal's own "this input was cancelled" BaseException, imported so that a
 # client that predates or renames it degrades to "we cannot recognise a
@@ -130,13 +92,6 @@ differently.
 """
 
 logger = logging.getLogger(__name__)
-
-# How long the worker will wait for its interruption report to land before
-# giving up and letting the container die. Small relative to the ~60s
-# window Modal leaves between the timeout signal and SIGKILL: the report is
-# one HTTP call, and the rest of the window belongs to the task's own
-# checkpointing.
-_INTERRUPT_REPORT_TIMEOUT_SECONDS = 10.0
 
 # Slack for the elapsed-time fallback in ``_classify_interruption`` — read
 # only when the exception chain says nothing, which it does exactly when a
@@ -347,107 +302,6 @@ def _classify_interruption(
     return None
 
 
-def _build_config_from_env(
-    env_overrides: dict[str, str] | None,
-) -> dict[str, typing.Any] | None:
-    """The build config the orchestrator forwarded (see
-    ``STARDAG_BUILD_CONFIG_ENV``), or None when none was.
-
-    A forwarded value that does not decode to ``{"<class>": {"<field>":
-    value}}`` is an error, not a missing config: the build's scope was
-    hashed from the real config, and running this task on the field
-    defaults instead would evaluate a different structure under that scope.
-    Raising fails the attempt, which the scheduler records.
-    """
-    raw = (env_overrides or {}).get(STARDAG_BUILD_CONFIG_ENV) or os.environ.get(
-        STARDAG_BUILD_CONFIG_ENV
-    )
-    if not raw:
-        return None
-    try:
-        decoded = json.loads(raw)
-    except ValueError as e:
-        raise RuntimeError(
-            f"{STARDAG_BUILD_CONFIG_ENV} is not valid JSON ({e}); refusing to "
-            "run the task on field defaults under a scope hashed from the "
-            "build's config."
-        ) from e
-    if not isinstance(decoded, dict) or not all(
-        isinstance(fields, dict) for fields in decoded.values()
-    ):
-        raise RuntimeError(
-            f"{STARDAG_BUILD_CONFIG_ENV} must decode to a mapping of task "
-            f"class to field overrides, got {type(decoded).__name__}; refusing "
-            "to run the task on field defaults."
-        )
-    return decoded
-
-
-def worker_scope_key(forwarded: str | None, build_id: UUID) -> str | None:
-    """The structure scope this worker records its yields under.
-
-    Workers are code-agnostic: a task id promises its output whatever code
-    produces it, so a container of any version may run any task. What a
-    worker owns is where the dependencies it **discovers** are attributed:
-    under its own code id, with the config half of the scope the scheduler
-    forwarded (the config is the build's, fixed for its life, and hashing it
-    here would need every configured class importable). A build that has
-    since rolled over to a newer deployment therefore never inherits an old
-    worker's late yield — it lands in the old code's scope and the new plan
-    re-runs the parent. No forwarded scope at all means the server's
-    default — the build's current scope. This build's own placeholder
-    (``build:<build_id>``, a build nothing had fixed a scope for when this
-    worker was spawned) is sent back **as is**, not as "the default": the
-    build may since have been re-triggered by a newer SDK and moved to a
-    real scope, and the default would then be that new scope — exactly the
-    plan a late yield of this older worker must stay out of. Named
-    explicitly, the yield lands in the placeholder scope, which the moved
-    build no longer reads. Another build's placeholder is a misrouted
-    spawn: the scheduler forwards the scope of the build it drives, so a
-    placeholder naming some other build cannot be honoured (it carries no
-    config half) and must not fall back to writing into this build's
-    current scope either. It is refused, and the attempt fails before the
-    task runs.
-    """
-    if forwarded is None:
-        return None
-    if is_synthetic_scope(forwarded, build_id=build_id):
-        return forwarded
-    if is_synthetic_scope(forwarded):
-        raise RuntimeError(
-            f"Worker for build {build_id} was handed structure scope "
-            f"{forwarded!r}, another build's placeholder. A placeholder names "
-            "no code and no config, so this worker's yields could only be "
-            "misattributed; refusing to run the task."
-        )
-    return f"{code_id()}:{scope_config_hash(forwarded)}"
-
-
-def _worker_scope_preflight(env_overrides: dict[str, str] | None) -> str | None:
-    """The worker's scope, decided before any user code runs.
-
-    :func:`worker_scope_key` refuses a misrouted spawn (another build's
-    placeholder) by raising. That refusal has to happen here, ahead of
-    ``setup`` and outside the best-effort reporter creation — a reporter that
-    fails to build is logged and the task still runs, and a non-reporting
-    worker builds no reporter at all — or a misrouted task would run anyway
-    in both of those modes. No forwarded build id means nothing to bind to,
-    and the server decides.
-    """
-
-    def _get(key: str) -> str | None:
-        return (env_overrides or {}).get(key) or os.environ.get(key)
-
-    raw_build_id = _get(STARDAG_BUILD_ID_ENV)
-    if not raw_build_id:
-        return None
-    try:
-        build_id = UUID(raw_build_id)
-    except ValueError:
-        return None
-    return worker_scope_key(_get(STARDAG_SCOPE_KEY_ENV), build_id)
-
-
 def _checkpoint_at_yield() -> None:
     """The dynamic-dependency checkpoint, read off the ambient scope.
 
@@ -465,524 +319,6 @@ def _checkpoint_at_yield() -> None:
     checker = _current_cancellation_checker()
     if checker is not None:
         checker.raise_if_cancelled("dynamic-dependency yield")
-
-
-def _parsed_execution_id(raw: str | None) -> UUID | None:
-    """The forwarded execution identity, or None if it is unusable.
-
-    Malformed values are dropped rather than raised on, for the reason
-    the claim TTL is: this decides whether a report can name its
-    execution, and no worker should fail to report its own start over it.
-    Dropping it costs only the identity-based rules, which is how a
-    worker behaved before they existed.
-    """
-    if not raw:
-        return None
-    try:
-        return UUID(raw)
-    except ValueError:
-        logger.warning(f"Invalid {STARDAG_EXECUTION_ID_ENV}: {raw!r}")
-        return None
-
-
-class _WorkerLifecycleReporter:
-    """Reports a task's lifecycle events from inside a Modal worker.
-
-    Created by :class:`Runner` when a build id was forwarded (see
-    ``STARDAG_BUILD_ID_ENV``) and the container has a configured registry.
-    Reporting from the worker makes the events independent of the
-    orchestrator's lifetime: completion/failure land even if the build
-    function died mid-await, and each (re-)invocation's TASK_STARTED
-    carries its own function call id for re-attach.
-
-    All reporting is best-effort: a registry hiccup must never fail a task
-    whose actual work succeeded — failures are logged loudly and the
-    engine-side self-heal (target-existence check on the next build) covers
-    a lost completion event.
-    """
-
-    def __init__(
-        self,
-        registry: typing.Any,
-        build_id: UUID,
-        task: BaseTask,
-        *,
-        reactive: bool = False,
-        app_name: str | None = None,
-        executor_metadata: dict[str, typing.Any] | None = None,
-        claim_ttl_seconds: int | None = None,
-        scope_key: str | None = None,
-        execution_id: UUID | None = None,
-    ):
-        self.registry = registry
-        self.build_id = build_id
-        self.task = task
-        self.reactive = reactive
-        self.app_name = app_name
-        self.executor_metadata = executor_metadata
-        self.claim_ttl_seconds = claim_ttl_seconds
-        # The scope this worker's *yields* are recorded under: its own code
-        # id with the config half of the build's scope (see
-        # :func:`worker_scope_key`). None leaves it to the server.
-        self.scope_key = scope_key
-        # The execution this container *is*, as the orchestrator minted it
-        # before claiming the task. Named on this worker's own start and
-        # on its end-of-execution reports, which is what lets the registry
-        # tell them from a superseded execution's -- and it is what the
-        # cancellation checker below asks about. None on an older
-        # orchestrator, or on the non-detached submission path: the
-        # reports then fall back to the executor ref, and cancellation
-        # falls back to the build's status alone.
-        self.execution_id = execution_id
-        # Cooperative cancellation, hung off the reporter because this is
-        # the object that has a registry, a build id and an identity. A
-        # worker running with ``report_lifecycle=False`` therefore has no
-        # checkpoints either, which is correct rather than incidental:
-        # that mode means a resident orchestrator is doing the reporting,
-        # and a resident orchestrator holds its own handles.
-        self.cancellation = CancellationChecker(self._ask_if_superseded)
-
-    @classmethod
-    def create(
-        cls,
-        task: BaseTask,
-        env_overrides: dict[str, str] | None,
-        *,
-        scope_key: str | None = None,
-    ) -> "_WorkerLifecycleReporter | None":
-        """``scope_key`` is the worker's scope as :func:`_worker_scope_preflight`
-        decided it — decided *before* this, so a refusal is never swallowed
-        by the best-effort creation this runs under."""
-
-        def _get(key: str) -> str | None:
-            return (env_overrides or {}).get(key) or os.environ.get(key)
-
-        # The explicit switch first: a non-reporting worker still receives
-        # the build id (its scope check is bound to it), so the id's
-        # presence no longer means "report".
-        if _get(STARDAG_WORKER_REPORTS_LIFECYCLE_ENV) == "0":
-            return None
-        raw_build_id = _get(STARDAG_BUILD_ID_ENV)
-        if not raw_build_id:
-            return None
-        try:
-            build_id = UUID(raw_build_id)
-        except ValueError:
-            logger.warning(f"Invalid {STARDAG_BUILD_ID_ENV}: {raw_build_id!r}")
-            return None
-        registry = registry_provider.get()
-        # Exact-type check: only the literal do-nothing default suppresses
-        # reporting — NoOpRegistry *subclasses* may implement real behavior.
-        if type(registry) is NoOpRegistry:
-            return None
-        app_name = _get(STARDAG_MODAL_APP_NAME_ENV)
-        # Executor metadata forwarded by the orchestrator's executor (same
-        # dict it records on its own starts). Values missing on older
-        # orchestrators are simply omitted.
-        executor_metadata: dict[str, typing.Any] = {"kind": MODAL_EXECUTOR_NAME}
-        if app_name:
-            executor_metadata["app_name"] = app_name
-        for key, env_name in (
-            ("workspace", STARDAG_MODAL_WORKSPACE_ENV),
-            ("environment", STARDAG_MODAL_ENVIRONMENT_ENV),
-            ("function_name", STARDAG_MODAL_FUNCTION_NAME_ENV),
-            ("app_id", STARDAG_MODAL_APP_ID_ENV),
-            ("function_id", STARDAG_MODAL_FUNCTION_ID_ENV),
-        ):
-            value = _get(env_name)
-            if value:
-                executor_metadata[key] = value
-        # The orchestrator's derived claim TTL, if it sent one. Malformed
-        # values are ignored rather than raised on: this is a bound on an
-        # expiry, and no worker should fail to report its own start over it.
-        raw_ttl = _get(STARDAG_CLAIM_TTL_SECONDS_ENV)
-        try:
-            ttl_seconds = int(raw_ttl) if raw_ttl else None
-        except ValueError:
-            logger.warning(f"Invalid {STARDAG_CLAIM_TTL_SECONDS_ENV}: {raw_ttl!r}")
-            ttl_seconds = None
-        # A syntactically valid but out-of-range value is the same problem
-        # as a malformed one, and worse in effect: the server rejects it
-        # (422) on `task_start`, so the worker loses its whole lifecycle
-        # report over a bound on an expiry. Drop it and let the server pick
-        # its default.
-        if ttl_seconds is not None and ttl_seconds <= 0:
-            logger.warning(
-                f"Ignoring {STARDAG_CLAIM_TTL_SECONDS_ENV}={raw_ttl!r}: a claim "
-                "TTL must be positive. The server's default applies instead."
-            )
-            ttl_seconds = None
-        return cls(
-            registry,
-            build_id,
-            task,
-            reactive=_get(STARDAG_REACTIVE_ENV) == "1",
-            app_name=app_name,
-            executor_metadata=executor_metadata,
-            claim_ttl_seconds=ttl_seconds,
-            scope_key=scope_key,
-            execution_id=_parsed_execution_id(_get(STARDAG_EXECUTION_ID_ENV)),
-        )
-
-    def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
-        self._guard_value(fn, what)
-
-    def _guard_value(self, fn: typing.Callable[[], _T], what: str) -> "_T | None":
-        """``_guard`` for a call whose *answer* the caller wants.
-
-        ``None`` on failure, which every caller must already handle as
-        "the registry did not say" — a lifecycle report that raised tells
-        us nothing about the state it was reporting on.
-        """
-        try:
-            return fn()
-        except Exception:
-            logger.exception(
-                f"Worker lifecycle report ({what}) failed for task {self.task.id}"
-            )
-            return None
-
-    def _ask_if_superseded(self) -> bool:
-        """One registry read: is this execution still the one to run?
-
-        Returns True only when the registry positively said no. Every
-        failure returns False, which keeps the worker running — see
-        ``stardag.cancellation`` for why that polarity is the invariant
-        rather than leniency. ``APIRegistry.execution_status`` already
-        degrades this way; the guard here covers a custom registry that
-        raises instead.
-        """
-        try:
-            status = self.registry.execution_status(
-                self.build_id, self.task, self.execution_id
-            )
-        except Exception:
-            logger.warning(
-                f"Could not read execution status for task {self.task.id}; "
-                "assuming this execution is still wanted.",
-                exc_info=True,
-            )
-            return False
-        if status.still_current:
-            return False
-        logger.warning(
-            f"Task {self.task.id} is no longer waiting for this execution "
-            f"({status.reason or 'no reason given'}; build status "
-            f"{status.build_status!r}). Stopping at the next checkpoint."
-        )
-        return True
-
-    def _executor_ref(self) -> str | None:
-        """This container's call id — the name of the execution it is in.
-
-        Recorded on the start, and repeated on an end-of-execution report so
-        the registry can honour the report only while the task still holds
-        that ref. That is what stops a report which took longer to land than
-        its execution took to be replaced from applying to the replacement.
-
-        Best-effort: outside a Modal container there is no call id, and the
-        server falls back to the build-ownership test alone.
-        """
-        try:
-            return modal.current_function_call_id()
-        except Exception:
-            return None
-
-    def started(self) -> None:
-        """Report this worker's own start — and read the answer.
-
-        The start is *non-claiming*, and the registry refuses one naming
-        an execution the task no longer runs under. That refusal is this
-        worker's cheapest cancellation checkpoint: the question "am I
-        still wanted" answered inside a request it was making anyway, so
-        the checkpoint after this one costs nothing.
-
-        Consumed rather than merely logged. Before cooperative
-        cancellation the 409 was a signal nothing acted on and the worker
-        ran the task regardless; now something acts on it, and leaving it
-        in ``_guard``'s blanket swallow would throw away the answer.
-        Everything *else* stays best-effort: a registry that is down must
-        not fail a task that is about to run fine.
-        """
-
-        def _do() -> None:
-            try:
-                self.registry.task_start(
-                    self.build_id,
-                    self.task,
-                    executor=MODAL_EXECUTOR_NAME,
-                    executor_ref=self._executor_ref(),
-                    executor_metadata=self.executor_metadata,
-                    claim_ttl_seconds=self.claim_ttl_seconds,
-                    execution_id=self.execution_id,
-                )
-            except APIError as e:
-                if not execution_not_wanted(e):
-                    raise
-                self.cancellation.note_cancelled(
-                    "the registry refused its start: "
-                    f"{(e.payload or {}).get('error_code')}"
-                )
-
-        self._guard(_do, "start")
-
-    def completed(self) -> None:
-        self._guard(
-            lambda: self.registry.task_complete(self.build_id, self.task),
-            "complete",
-        )
-
-        def _artifacts() -> None:
-            artifacts = self.task.artifacts()
-            if artifacts:
-                self.registry.task_upload_artifacts(self.build_id, self.task, artifacts)
-
-        self._guard(_artifacts, "artifacts")
-        self._guard(self._wake_scheduler, "wake")
-
-    def suspended(self, task_struct: TaskStruct | None = None) -> None:
-        if self.reactive and task_struct is not None:
-            # No resident orchestrator to pick up the yielded deps:
-            # register them (with their requires() subtrees) — which is
-            # also what a later tick rebuilds them from — and record the
-            # dynamic edges, BEFORE the suspend event, so the frontier is
-            # consistent when a tick runs.
-            self._guard(
-                lambda: self._register_dynamic_deps(task_struct), "dynamic-deps"
-            )
-        self._guard(
-            lambda: self.registry.task_suspend(self.build_id, self.task),
-            "suspend",
-        )
-        self._guard(self._wake_scheduler, "wake")
-
-    def failed(self, exception: BaseException) -> None:
-        self._guard(
-            lambda: self.registry.task_fail(
-                self.build_id, self.task, error_message=str(exception)
-            ),
-            "fail",
-        )
-        self._guard(self._wake_scheduler, "wake")
-
-    def interrupted(self, reason: str) -> None:
-        """Report that the platform ended this execution — not a failure.
-
-        Deliberately never ``task_fail``: a worker-recorded failure lands in
-        the next frontier snapshot and, under FAIL_FAST, kills the build
-        before any scheduler can retry it. A tick gets away with
-        record-then-retry only because both halves happen inside one pass.
-        """
-        # Resolved here, on the container's own thread. The report runs on
-        # a separate one, and the call id is context-bound — looked up
-        # there it can come back None, which would silently drop the report
-        # back to the legacy no-ref path the server has to accept.
-        ref = self._executor_ref()
-        self._report_in_grace_window(
-            lambda: self.registry.task_interrupt(
-                self.build_id,
-                self.task,
-                reason=reason,
-                executor_ref=ref,
-                execution_id=self.execution_id,
-            ),
-            label="interrupt",
-            what="interruption",
-            consequence=(
-                "The execution claim stays held until a scheduler observes "
-                "the execution is gone."
-            ),
-        )
-
-    def preempted(self, reason: str) -> None:
-        """Report that the platform is restarting this execution itself.
-
-        Not a status change and **not** a claim release: the backend
-        restarts the same input on the same call id, and releasing the
-        claim would invite a second, concurrent execution of a task that is
-        about to resume. What this records is that a restart is now *due* —
-        the registry shortens the claim's expiry accordingly — so a restart
-        that never arrives becomes an ordinary lapsed claim in minutes
-        rather than being indistinguishable from a task running happily.
-        """
-        # Resolved on this thread, not the report's — see ``interrupted``.
-        ref = self._executor_ref()
-        self._report_in_grace_window(
-            lambda: self.registry.task_preempt(
-                self.build_id,
-                self.task,
-                reason=reason,
-                executor_ref=ref,
-                execution_id=self.execution_id,
-            ),
-            label="preempt",
-            what="preemption",
-            consequence=(
-                "If it never lands, the claim keeps its original expiry, so "
-                "a restart that does not arrive is noticed only when that "
-                "lapses rather than within the restart grace."
-            ),
-        )
-
-    def _report_in_grace_window(
-        self,
-        call: typing.Callable[[], typing.Any],
-        *,
-        label: str,
-        what: str,
-        consequence: str,
-    ) -> None:
-        """Record ``call`` and wake the scheduler, bounded by a deadline.
-
-        **Bounded, because this runs in a dying container.** Modal gives
-        roughly 60s between the interruption signal and the hard kill,
-        shared with whatever the task did to checkpoint. A registry that
-        hangs must not spend the rest of it — the whole value here is
-        promptness, and the fallback (report nothing, let a later tick
-        discover the state) is exactly the behaviour that predates this.
-        """
-        done = threading.Event()
-
-        def _report() -> None:
-            self._guard(call, label)
-            self._guard(self._wake_scheduler, f"{label}-wake")
-            done.set()
-
-        thread = threading.Thread(target=_report, daemon=True)
-        thread.start()
-        if not done.wait(_INTERRUPT_REPORT_TIMEOUT_SECONDS):
-            logger.error(
-                f"Reporting the {what} of task {self.task.id} did not "
-                f"finish within {_INTERRUPT_REPORT_TIMEOUT_SECONDS}s; giving "
-                f"up on it so the container can exit. {consequence}"
-            )
-
-    def _register_dynamic_deps(self, task_struct: TaskStruct) -> None:
-        # Dynamic deps are registered with their concurrency-limit keys
-        # too, so a slot release can wake the build queued on them exactly
-        # as it does for tasks the bootstrap registered. The selector is
-        # the deployed app's, published by the worker wrapper.
-        # Under THIS worker's scope: the dynamic dependencies were yielded by
-        # the code running here, and the build may since have rolled over to
-        # a newer deployment whose plan must not inherit them — see
-        # :func:`worker_scope_key`.
-        result = asyncio.run(
-            discover_and_register_aio(
-                self.registry,
-                self.build_id,
-                task_struct,
-                limit_key_selector=deployed_limit_key_selector(),
-                scope_key=self.scope_key,
-            )
-        )
-        # The bootstrap's pre-flight structurally cannot see dynamically
-        # yielded deps — they don't exist until their parent runs — so the
-        # check is re-run here, on the app's patterns as published by the
-        # deployed worker wrapper. Once per class per process: this runs on
-        # every suspending worker invocation.
-        #
-        # **A warning, not a raise**, unlike the bootstrap's. The parent
-        # task has already run; failing its bookkeeping now would throw
-        # that work away and still leave the dependency unschedulable.
-        # The tick that reaches such a dep fails it with the same reason,
-        # which is the loss this warning is announcing in advance — the
-        # remedy either way is to widen ``task_modules`` and redeploy.
-        patterns = declared_task_module_patterns()
-        if patterns:
-            uncovered = uncovered_task_classes(
-                result.incomplete.values(), patterns, only_unwarned=True
-            )
-            if uncovered:
-                logger.warning(
-                    format_uncovered_message(
-                        uncovered,
-                        patterns,
-                        remedy=(
-                            "These were registered as dynamic dependencies, "
-                            "so the bootstrap's pre-flight could not see "
-                            "them; a scheduler tick will fail each one it "
-                            "reaches."
-                        ),
-                    )
-                )
-        deps = flatten_task_struct(task_struct)
-        self.registry.task_add_dependencies(
-            self.build_id, self.task, deps, is_dynamic=True, scope_key=self.scope_key
-        )
-
-    def _wake_scheduler(self) -> None:
-        """Reactive wake-up: flag the build dirty, then spawn a tick — unless
-        a scheduler is already live to see the flag.
-
-        Order matters: the flag is set *before* anything else, so the
-        answer that decides whether to spawn is evaluated strictly after
-        the set. Combined with the tick's exit handshake (see
-        ``stardag.build._reactive._run_tick_body_aio``) that makes the skip
-        safe: a scheduler still holding the lease has not yet done its
-        post-release re-read, so it cannot exit past this flag.
-
-        Why skip at all: on a build whose tasks are short relative to a
-        tick container's startup, every completion used to spawn a tick
-        that started *after* the resident scheduler had already done the
-        work, took the lease or found the build terminal, and exited
-        having scheduled nothing. Seven tasks, seven cold starts, no work.
-
-        ``scheduler_live`` unknown — an older registry that does not answer
-        it, or a notify that failed outright — always spawns. That is the behaviour
-        this had before the flag existed, and it is the safe direction:
-        a redundant tick costs a container, a skipped one costs the build
-        its progress until the watchdog.
-        """
-        if not self.reactive:
-            return
-        app_name = self.app_name
-        # Tell the registry whether this caller can spawn at all: it stamps
-        # the build as handed out on the assumption that the notifier will,
-        # and a notifier that cannot (no app name to reach a tick with) must
-        # not block the drainers that can for a whole window.
-        notified = self._guard_value(
-            lambda: self.registry.build_notify(
-                self.build_id, can_spawn=app_name is not None
-            ),
-            "notify",
-        )
-        # ``is True``, not truthiness, and still load-bearing: the field is
-        # ``bool | None``, and an older server that does not answer it at
-        # all leaves it None. Only an explicit yes suppresses the spawn;
-        # None — like the ``notified is None`` of a notify that raised —
-        # means "unknown", and unknown spawns. The asymmetry decides it: a
-        # redundant tick costs one container, a wrongly skipped one costs
-        # the build its progress until the watchdog.
-        # A build that is no longer RUNNING is not flagged by the notify —
-        # it cannot act on a wake-up — and spawning for it would be the
-        # cancelled-build loop this closes: a cancelled build's workers keep
-        # running until they notice, and every one of them reported its way
-        # out through here. A cancelled build wants no tick of its own — the
-        # cleanup one existed to run the cancel drain, which is gone
-        # (STA-81). Unknown (an older server, or a notify that raised)
-        # spawns, as before.
-        if notified is not None and not notified.needs_tick:
-            logger.debug(
-                "Build %s wants no tick (it is no longer running, or one "
-                "has already been asked for); none spawned.",
-                self.build_id,
-            )
-            return
-        if notified is not None and notified.scheduler_live is True:
-            logger.debug(
-                "Build %s already has a live scheduler; wake-up flag set, "
-                "no tick spawned.",
-                self.build_id,
-            )
-            return
-        if app_name is None:
-            logger.warning(
-                "Reactive build without an app name — cannot spawn a "
-                "scheduler tick (relying on the watchdog)."
-            )
-            return
-
-        self._guard(lambda: spawn_tick(self.build_id, app_name), "tick-spawn")
 
 
 class Runner(RunFunction):
@@ -1068,30 +404,21 @@ class Runner(RunFunction):
         # understating elapsed time makes a real timeout read as a
         # preemption.
         started_at = time.monotonic()
-        # Refuse a misrouted spawn before any user code runs: raises for
-        # another build's placeholder, in every reporting mode (see
-        # ``_worker_scope_preflight``). The attempt fails here; the tick
-        # that spawned it records the failure when it probes the call.
-        worker_scope = _worker_scope_preflight(env_overrides)
         try:
             self.setup(task)
             # All lifecycle reporting happens inside the env-overrides
-            # context, so overrides carrying environment-sensitive config
-            # apply to reporting exactly as they do to run(). (Caveat:
+            # context — the selector's env, the build's settings and the
+            # framework's identifiers — so a yield walks the children under
+            # the build's settings exactly as run() sees them. (Caveat:
             # stardag's config/registry providers cache on first access —
-            # registry connection settings should come from the container's
-            # process environment, i.e. deployment secrets, not overrides.)
-            with (
-                temp_env_vars(env_overrides or {}),
-                build_config_scope(_build_config_from_env(env_overrides)),
-            ):
+            # registry connection settings come from the container's process
+            # environment, i.e. deployment secrets, not overrides.)
+            with temp_env_vars(env_overrides or {}):
                 # getattr: tolerate subclasses overriding __init__ w/o super()
                 reporter: _WorkerLifecycleReporter | None = None
                 if getattr(self, "report_lifecycle", True):
                     try:
-                        reporter = _WorkerLifecycleReporter.create(
-                            task, env_overrides, scope_key=worker_scope
-                        )
+                        reporter = _WorkerLifecycleReporter.create(task, env_overrides)
                     except Exception:
                         # Best-effort contract covers creation too: a broken
                         # registry config must not fail a task before it runs.
@@ -1114,11 +441,6 @@ class Runner(RunFunction):
                     # ``force`` would not save it either: the checker is
                     # built per attempt, so it has never asked and the
                     # throttle has nothing to reuse.
-                    #
-                    # Making it genuinely free would mean carrying the
-                    # build status on the start response, which threads a
-                    # value through every registry double and delegating
-                    # wrapper; that trade was considered and declined.
                     #
                     # Raised from here, outside the try below, so the
                     # end-of-attempt classifier never sees it: a
