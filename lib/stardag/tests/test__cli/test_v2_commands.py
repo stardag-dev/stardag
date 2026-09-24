@@ -287,10 +287,10 @@ class TestTasks:
     ):
         leaf = str(running_build.leaf.id)
         build = str(running_build.build_id)
-        cancelled = invoke("tasks", "cancel", leaf, "--build", build)
+        cancelled = invoke("tasks", "cancel", leaf, "--build", build, "--yes")
         assert cancelled.exit_code == 0, cancelled.output
         assert fake_registry.status_of(leaf) == "cancelled"
-        retried = invoke("tasks", "retry", leaf, "--build", build)
+        retried = invoke("tasks", "retry", leaf, "--build", build, "--yes")
         assert retried.exit_code == 0, retried.output
         assert fake_registry.status_of(leaf) == "pending"
 

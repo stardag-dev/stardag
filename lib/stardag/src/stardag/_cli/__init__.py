@@ -49,8 +49,8 @@ Usage:
 
     stardag tasks show <task-id>
     stardag tasks check <task-id> --module <import path>
-    stardag tasks retry <task-id> --build <build-id>
-    stardag tasks cancel <task-id> --build <build-id>
+    stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
+    stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks exclude <plan-id> <task-id> --reason R
 
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]

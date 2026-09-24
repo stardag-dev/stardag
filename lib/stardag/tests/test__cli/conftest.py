@@ -24,6 +24,7 @@ CLI_MODULES = (
     "plans",
     "deployments",
     "tasks",
+    "tasks_actions",
     "limits",
 )
 

@@ -193,6 +193,12 @@ deployments list`** (`stardag modal deployments` stays as an alias).
 - **Changed: `stardag tasks`** — `show`, new `check` (runs `complete()`
   locally and prints the observation; reports nothing), `retry`, `cancel`,
   new `exclude`. `tasks list` is removed.
+- **Changed: `stardag tasks retry` and `tasks cancel` ask for confirmation**
+  again (v1's prompt), skipped with `--yes`; `--json` without `--yes` is
+  refused rather than prompting. `--build` is now optional: it defaults to
+  the build holding the task's claim (`claim_build_id` from `GET
+/tasks/{id}`) and stays an override; a task holding no claim (a FAILED
+  one) still needs it.
 - **Removed: `stardag builds cleanup`.**
 - **Restored: `stardag concurrency-limits`** (`list [--holders]`, `set`,
   `delete`, `holders`) — dropped by omission between two v2 work packages
