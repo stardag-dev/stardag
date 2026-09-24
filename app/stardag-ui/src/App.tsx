@@ -28,6 +28,7 @@ import { BreadcrumbProvider, useBreadcrumb } from "./context/BreadcrumbContext";
 import type React from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import { EnvironmentProvider, useEnvironment } from "./context/EnvironmentContext";
+import { viewFromPath } from "./utils/routes";
 
 // Main app layout with sidebar
 interface MainLayoutProps {
@@ -629,29 +630,7 @@ function Router() {
   }, []);
 
   // Parse path to determine view
-  const getViewFromPath = useCallback(() => {
-    if (path === "/callback") return "callback";
-    if (path === "/settings") return "settings";
-    if (path === "/invites") return "invites";
-    if (path === "/workspaces/new") return "new-workspace";
-
-    // Tasks: /tasks[/:task_id], optionally under /:org[/:environment]
-    if (/(^|\/)tasks(\/[^/]+)?$/.test(path)) return "tasks";
-
-    // Deployments: /deployments (same env-scoped forms)
-    if (path === "/deployments" || path.endsWith("/deployments")) return "deployments";
-
-    // Concurrency limits admin: /limits (same env-scoped forms)
-    if (path === "/limits" || path.endsWith("/limits")) return "limits";
-
-    // Check for build ID in path: /builds/:id or /:org/:environment/builds/:id
-    const buildMatch = path.match(/\/builds\/([^/]+)/);
-    if (buildMatch) {
-      return "build";
-    }
-
-    return "builds";
-  }, [path]);
+  const getViewFromPath = useCallback(() => viewFromPath(path), [path]);
 
   // Handle sidebar navigation
   const handleNavigation = useCallback(
