@@ -7,12 +7,13 @@ vi.mock("../api/registry", () => ({
   fetchTask: vi.fn(),
   fetchTaskArtifacts: vi.fn(async () => ({ artifacts: [] })),
   fetchTaskEvents: vi.fn(async () => []),
+  EVENT_LIST_LIMIT: 500,
   fetchBuildExecutions: vi.fn(async () => []),
   fetchDeployments: vi.fn(async () => []),
 }));
 vi.mock("./TaskClaimPanel", () => ({ TaskClaimPanel: () => null }));
 
-import { fetchTask } from "../api/registry";
+import { fetchTask, fetchTaskEvents } from "../api/registry";
 import { TaskDetail } from "./TaskDetail";
 
 const TASK_ID = "df0c8b03-fab2-5ddd-9743-09fb4a634cf5";
@@ -105,5 +106,44 @@ describe("TaskDetail", () => {
     render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
     await screen.findByRole("heading", { name: /demo\.Train/ });
     expect(screen.queryByRole("button", { name: "Open task page" })).toBeNull();
+  });
+
+  it("opens the full event log over the task's events", async () => {
+    vi.mocked(fetchTaskEvents).mockResolvedValue([
+      {
+        id: "e1",
+        event_type: "task_pending",
+        created_at: "2026-09-24T00:00:00Z",
+        build_id: "01a0c5c3-f18e-7d22-bcaf-add71bd0287c",
+        plan_id: "p",
+        execution_id: null,
+        task_id: TASK_ID,
+        report_applied: true,
+        error_message: null,
+        event_metadata: null,
+      },
+      {
+        id: "e2",
+        event_type: "task_structure_diverged",
+        created_at: "2026-09-24T00:00:01Z",
+        build_id: "01a0c5c3-f18e-7d22-bcaf-add71bd0287c",
+        plan_id: "p",
+        execution_id: "0199aaaa-bbbb",
+        task_id: TASK_ID,
+        report_applied: false,
+        error_message: null,
+        event_metadata: { added: ["x"] },
+      },
+    ]);
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "See full event log" }));
+    expect(vi.mocked(fetchTaskEvents)).toHaveBeenCalledWith(TASK_ID, "env-1");
+    expect(await screen.findByText("Structure Diverged")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+    expect(screen.getByText("not applied")).toBeInTheDocument();
+    expect(screen.getByText("1 field")).toHaveAttribute(
+      "title",
+      JSON.stringify({ added: ["x"] }, null, 2),
+    );
   });
 });

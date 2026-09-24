@@ -15,6 +15,7 @@ import type {
   DeploymentKind,
   DeploymentListResponse,
   Execution,
+  EventListResponse,
   ExecutionListResponse,
   PlanDetail,
   PlanGraph,
@@ -23,6 +24,7 @@ import type {
   Settings,
   Task,
   TaskArtifactListResponse,
+  TaskEvent,
   TransitionResponse,
 } from "../types/task";
 import { fetchWithAuth } from "./client";
@@ -305,6 +307,26 @@ export function fetchTaskArtifacts(
     url(`/tasks/${taskId}/artifacts`, environmentId),
     "Failed to fetch task artifacts",
   );
+}
+
+/** The server's cap on one event read. */
+export const EVENT_LIST_LIMIT = 500;
+
+/**
+ * The task's event log across every build, **oldest first**, at most
+ * `EVENT_LIST_LIMIT` rows (the oldest ones: the route has no cursor).
+ */
+export async function fetchTaskEvents(
+  taskId: string,
+  environmentId: string,
+): Promise<TaskEvent[]> {
+  const data = await getJson<EventListResponse>(
+    url(`/tasks/${taskId}/events`, environmentId, {
+      limit: String(EVENT_LIST_LIMIT),
+    }),
+    "Failed to fetch task events",
+  );
+  return data.events;
 }
 
 // ---- Deployments and settings ----

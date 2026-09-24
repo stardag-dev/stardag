@@ -318,6 +318,31 @@ export interface Task {
   instances: TaskInstance[];
 }
 
+// ---- The event log ----
+
+// Widened to `string` at the boundary so a type a newer server adds renders.
+export type EventType = string;
+
+/** One row of the append-only log (`GET /tasks/{id}/events`), oldest first. */
+export interface TaskEvent {
+  id: string;
+  event_type: EventType;
+  created_at: string;
+  // Null for an event with no build (an operator invalidate).
+  build_id: string | null;
+  plan_id: string | null;
+  execution_id: string | null;
+  task_id: string | null;
+  // False for a report that was recorded but refused: history, not state.
+  report_applied: boolean;
+  error_message: string | null;
+  event_metadata: Record<string, unknown> | null;
+}
+
+export interface EventListResponse {
+  events: TaskEvent[];
+}
+
 // ---- Executions ----
 
 export interface Execution {

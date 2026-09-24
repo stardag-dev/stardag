@@ -9,6 +9,7 @@ import { ExecutionTable } from "./ExecutionTable";
 import { MembershipFacts } from "./MembershipFacts";
 import { CopyButton } from "./ModalExecution";
 import { TaskClaimPanel } from "./TaskClaimPanel";
+import { TaskEventLog } from "./TaskEventLog";
 import { TaskInstances } from "./TaskInstances";
 
 /** The build a task is opened from, when it is. */
@@ -224,6 +225,12 @@ export function TaskDetail({
               </pre>
             </Section>
           )}
+
+          <TaskEventLog
+            taskId={task.task_id}
+            taskLabel={qualifiedName(task.task_namespace, task.task_name)}
+            environmentId={environmentId}
+          />
 
           {task.output_uri && (
             <Section title="Output URI">
