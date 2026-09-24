@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { fetchBuildExecutions, fetchTask, fetchTaskArtifacts } from "../api/registry";
 import { useDeployments } from "../hooks/useDeployments";
-import type { Execution, Task, TaskArtifact } from "../types/task";
+import type { Execution, PlanMember, Task, TaskArtifact } from "../types/task";
 import { qualifiedName } from "../utils/instances";
 import { formatAbsoluteTime } from "../utils/time";
 import { ArtifactList } from "./ArtifactViewer";
 import { ExecutionTable } from "./ExecutionTable";
+import { MembershipFacts } from "./MembershipFacts";
 import { CopyButton } from "./ModalExecution";
 import { TaskClaimPanel } from "./TaskClaimPanel";
 import { TaskInstances } from "./TaskInstances";
@@ -17,6 +18,8 @@ export interface TaskBuildContext {
   planId: string | null;
   // The instance that plan holds for this task.
   planInstanceId: string | null;
+  // The task's membership of that plan, when the plan lists it.
+  member?: PlanMember | null;
 }
 
 interface TaskDetailProps {
@@ -135,6 +138,12 @@ export function TaskDetail({
             <p className="text-sm text-gray-500 dark:text-gray-400">
               Version {task.version}
             </p>
+          )}
+          {context?.member && (
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+              <span>In this plan:</span>
+              <MembershipFacts member={context.member} variant="chips" />
+            </div>
           )}
         </div>
         {onClose && (

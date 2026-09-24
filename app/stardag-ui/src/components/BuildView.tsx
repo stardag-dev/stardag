@@ -373,6 +373,7 @@ function BuildViewForIdentity({
                         buildId,
                         planId: frontier?.plan_id ?? null,
                         planInstanceId: selectedMember?.instance_id ?? null,
+                        member: selectedMember,
                       }}
                       onClose={() => setSelectedTaskId(null)}
                       onChanged={refresh}
