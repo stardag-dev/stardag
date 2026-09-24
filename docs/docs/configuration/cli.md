@@ -393,15 +393,16 @@ each value parsed as JSON when it parses, else taken as a string).
 === "Active venv"
 
     ```sh
-    stardag builds list [--status S] [--app NAME] [--limit N] [--json]
+    stardag builds list [--status S] [--app NAME | --reactive-app NAME]
+        [--limit N] [--cursor C] [--json]
     stardag builds show <build-id> [--json]
     stardag builds frontier <build-id> [--json]
     stardag builds ticks <build-id> [--limit N] [--json]
     stardag builds stop <build-id> [--not-in-current-plan]
-        [--executor NAME] [--worker NAME] [--older-than 30m]
+        [--executor NAME] [--worker NAME] [--namespace NS] [--older-than 30m]
         [--task-id ID ...] [--no-cancel] [--mark-lost] [--dry-run]
         [--yes] [--json]
-    stardag builds cancel <build-id> [--yes]
+    stardag builds cancel <build-id> [--yes] [--json]
     stardag builds complete <build-id> [--force] [--json]
     stardag builds fail <build-id> [--message TEXT] [--yes] [--json]
     ```
@@ -409,15 +410,16 @@ each value parsed as JSON when it parses, else taken as a string).
 === "uv run ..."
 
     ```sh
-    uv run stardag builds list [--status S] [--app NAME] [--limit N] [--json]
+    uv run stardag builds list [--status S] [--app NAME | --reactive-app NAME]
+        [--limit N] [--cursor C] [--json]
     uv run stardag builds show <build-id> [--json]
     uv run stardag builds frontier <build-id> [--json]
     uv run stardag builds ticks <build-id> [--limit N] [--json]
     uv run stardag builds stop <build-id> [--not-in-current-plan]
-        [--executor NAME] [--worker NAME] [--older-than 30m]
+        [--executor NAME] [--worker NAME] [--namespace NS] [--older-than 30m]
         [--task-id ID ...] [--no-cancel] [--mark-lost] [--dry-run]
         [--yes] [--json]
-    uv run stardag builds cancel <build-id> [--yes]
+    uv run stardag builds cancel <build-id> [--yes] [--json]
     uv run stardag builds complete <build-id> [--force] [--json]
     uv run stardag builds fail <build-id> [--message TEXT] [--yes] [--json]
     ```
@@ -427,10 +429,15 @@ profile / environment other than the active one. `stardag build` above is
 the exception: it takes only `-p/--stardag-profile` (no `--stardag-env`
 option).
 
-- `builds list` — builds, most recently active first (`--status`, `--app`
-  filter on a reactively-scheduled build's owning app).
-- `builds show` — one build: status, roots, reactive metadata, and its
-  active plan's deployment, settings and outstanding counts.
+- `builds list` — builds, most recently active first, a page at a time.
+  The table shows each build's `Last active` time, which is the order.
+  `--status` filters by status; `--app` (alias `--reactive-app`) keeps the
+  builds a given app schedules reactively. The footer says how many of the
+  `total` matches are shown and prints the cursor of the next page: pass
+  it back as `--cursor` (`--json` carries `total` and `next_cursor`).
+- `builds show` — one build: status, the failure reason of a `FAILED`
+  build, last activity, roots, reactive metadata, and its active plan's
+  deployment, settings and outstanding counts.
 - `builds frontier` — the build's active plan as a scheduler tick sees it,
   after the registry's closure step: members to expand (discovery jobs),
   members to claim (runnable), members under a live claim (running) — see
@@ -452,9 +459,12 @@ option).
 - `builds fail` — mark a build `FAILED`, recording `--message`. Releases
   the build's claims, like `cancel`; stops nothing.
 
-`--json` writes exactly one JSON document to stdout on every command
-(after acting, for a write); every hint, warning and prompt goes to
-stderr, so piping is safe:
+### JSON output
+
+Every command from `stardag build` through `stardag tasks` and
+`stardag concurrency-limits` takes `--json`. It writes exactly one JSON
+document to stdout (after acting, for a write); every hint, warning and
+prompt goes to stderr, so piping is safe:
 
 ```sh
 stardag builds frontier <build-id> --json | jq '.runnable | length'
@@ -462,7 +472,13 @@ stardag builds frontier <build-id> --json | jq '.runnable | length'
 
 The document is the SDK's model of the API payload — the same field names
 and nesting as the REST response, minus any field this SDK version does
-not model.
+not model — plus, on the commands that combine reads (`builds show`,
+`builds frontier`, `plans show`, `tasks show`), the extra keys they
+compute. A write that would ask for confirmation refuses to prompt in
+`--json` mode: pass `--yes` with it. The commands outside the registry
+groups (`auth`, `config`, `environment`, `modal deploy`, `self-host`) do
+not take `--json`; `stardag environment target-roots set --json` is an
+input flag (the roots as a JSON string), not this output mode.
 
 ### Reading the frontier
 
@@ -482,6 +498,23 @@ partitions of its members:
   claim another build took out on a shared task; this build's next tick
   waits for it to move rather than treating it as a problem (see [Build &
   Execution](../concepts/build-execution.md#shared-tasks-across-builds)).
+
+Runnable and running members carry their `Attempts` and `Interruptions`
+in this build, counted by the registry from the execution ledger over all
+of the build's plans. A member whose interruptions reach
+`TickConfig.max_interruptions` (default 20) is failed by the next tick
+rather than restarted.
+
+Above the lists, the summary also shows:
+
+- **Needs tick** — the build's wake-up flag (`GET /builds/{id}/notify`,
+  read without clearing it): something changed that a tick has not acted
+  on yet. A reactive build that says `yes` here for long, with nothing
+  running, has no tick coming; the watchdog sweep is what picks it up.
+- **Members** — the plan's non-excluded members by their task's status,
+  with the excluded ones counted apart (`GET /plans/{id}`).
+- **Roots** — how many of the plan's roots are `COMPLETED`, out of all of
+  them.
 
 An empty frontier with the build still `running` and no discovery jobs
 either means the plan is not yet sealed, or every member is settled —
@@ -503,9 +536,12 @@ stardag builds stop <build-id>             # stop, report, then cancel the build
 ```
 
 Filters compose and narrow the selection: `--executor modal`, `--worker
-NAME`, `--older-than 2h`, `--task-id <id>` (repeatable). Anything a filter
-excludes keeps running once the build is cancelled — it simply no longer
-holds a claim.
+NAME`, `--namespace NS` (tasks whose namespace starts with `NS`; the
+ledger rows name the task, so each listed task's namespace is read from
+`GET /tasks/{id}`), `--older-than 2h` (executions started at least that
+long ago — see [Durations](#durations)), `--task-id <id>` (repeatable).
+Anything a filter excludes keeps running once the build is cancelled — it
+simply no longer holds a claim.
 
 - `--no-cancel` stops and reports the selected executions but leaves the
   build running on its active plan.
@@ -528,18 +564,35 @@ holds a claim.
 `stardag executions list --build <build-id>` shows the same unended-
 executions list on its own, without acting on it.
 
-## Plan, Deployment and Task Commands
+### Durations
+
+`--older-than` takes one number and one optional unit — `s`, `m`, `h`, `d`
+or `w`; a bare number is seconds: `90s`, `90m`, `24h`, `3d`, `2w`. Case is
+ignored. Compound forms (`1h30m`), fractions (`1.5h`), months and years are
+not accepted, and neither is zero (a zero threshold would match
+everything, including work that just started).
+
+On `builds stop` the filter is applied by the CLI to the listed
+executions' `started_at`: an execution whose start time is unknown never
+matches.
+
+## Plan, Deployment, Execution and Task Commands
 
 === "Active venv"
 
     ```sh
     stardag plans show <plan-id> [--json]
+    stardag plans list --build <build-id> [--json]
     stardag deployments list [--app NAME] [--kind modal|local]
         [--current] [--limit N] [--json]
-    stardag tasks show <task-id> [--json]
+    stardag deployments show <deployment-id> [--json]
+    stardag executions list (--build <build-id> [--not-in-current-plan] |
+        --task <task-id>) [--include-ended] [--json]
+    stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
+    stardag tasks show <task-id> [--include-ended] [--events N] [--json]
     stardag tasks check <task-id> --module MODULE [--json]
-    stardag tasks retry <task-id> --build <build-id> [--json]
-    stardag tasks cancel <task-id> --build <build-id> [--json]
+    stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
+    stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks exclude <plan-id> <task-id> --reason TEXT [--yes] [--json]
     ```
 
@@ -547,43 +600,79 @@ executions list on its own, without acting on it.
 
     ```sh
     uv run stardag plans show <plan-id> [--json]
+    uv run stardag plans list --build <build-id> [--json]
     uv run stardag deployments list [--app NAME] [--kind modal|local]
         [--current] [--limit N] [--json]
-    uv run stardag tasks show <task-id> [--json]
+    uv run stardag deployments show <deployment-id> [--json]
+    uv run stardag executions list (--build <build-id> [--not-in-current-plan] |
+        --task <task-id>) [--include-ended] [--json]
+    uv run stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
+    uv run stardag tasks show <task-id> [--include-ended] [--events N] [--json]
     uv run stardag tasks check <task-id> --module MODULE [--json]
-    uv run stardag tasks retry <task-id> --build <build-id> [--json]
-    uv run stardag tasks cancel <task-id> --build <build-id> [--json]
+    uv run stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
+    uv run stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
     uv run stardag tasks exclude <plan-id> <task-id> --reason TEXT [--yes] [--json]
     ```
 
-- `plans show` — a plan's build, scope (deployment + settings), roots,
-  and — only while it is its build's active plan — whether it is sealed
-  and what is outstanding. A superseded or not-yet-sealed plan reports
-  those as unknown: the registry serves no per-plan read for them.
+- `plans show` — any plan, active or superseded (`GET /plans/{id}`): its
+  build and generation, lifecycle (created, activated, sealed,
+  superseded), scope (the deployment, resolved, and the settings), member
+  counts by status with the excluded ones apart, and its roots; for the
+  build's active plan, also whether it is complete and what is
+  outstanding.
+- `plans list --build <build-id>` — every plan of a build, newest
+  generation first, with lifecycle and counts (`GET /builds/{id}/plans`):
+  the history of its rollovers and re-triggers.
 - `deployments list` — every recorded deployment, newest first
   (`--app`, `--kind`, `--current` filter; `--current` keeps one row per
   app). A `modal` row with no `Activated` timestamp is a deploy whose
   record was created but whose activation never landed — re-run
   `stardag modal deploy`. Shares its listing with `stardag modal
 deployments`.
-- `tasks show` — one task's global status and claim, every instance the
-  registry holds of it (one per scope it was constructed under, newest
-  first), and its artifacts.
+- `deployments show <deployment-id>` — one deployment: kind, app,
+  generation, code id, image and Modal app ids, deployed and activated
+  times, and whether it is its app's current one.
+- `executions list` — the execution ledger: a build's executions
+  (`--build`) or one task's across builds, newest first (`--task`). By
+  default only those with no end reported — what `builds stop` would act
+  on; `--include-ended` lists every execution granted, with its outcome.
+  `--not-in-current-plan` (with `--build`) keeps the orphans.
+- `tasks list` — the environment's tasks, most recent status change
+  first, a page at a time (`--status` filters; pass the printed cursor
+  back as `--cursor`). `--status running` answers "who holds what": the
+  `Claim (build)` column names the build holding each claim. v1's
+  `--older-than`, `--name` and `--namespace` filters are not offered: the
+  registry's task list filters by status only.
+- `tasks show` — one task's global status and the claim's holder (plan and
+  build, live or lapsed), every instance the registry holds of it (one per
+  scope it was constructed under, newest first), its executions across
+  builds (`--include-ended` for all of them, not only the unended), its
+  last events (`--events N`, default 10, from the first 500 the registry
+  serves), and its artifacts. Every `TASK_STRUCTURE_DIVERGED` event — an
+  expanded instance that declared new static edges within its scope, which
+  the registry appends and records rather than refuses — is called out
+  above the event table, with its detail.
 - `tasks check <task-id> --module <import path>` — rehydrate the task's
   newest instance in this process (importing `--module`, repeatable, to
   resolve its class) and run `complete()` locally, printing the
   observation next to the registry's recorded status. Writes nothing: the
   registry only follows the world when a build's own discovery observes a
   target (see
-  [Invalidation](../concepts/build-execution.md#invalidation-the-registry-follows-the-world)),
-  so there is no `--report` flag here — trigger a build to make the
-  observation count.
+  [Invalidation](../concepts/build-execution.md#invalidation-the-registry-follows-the-world)).
+  The command accepts `--report`, but only to refuse it: it exits 1 with
+  a message saying to trigger a build instead, because there is no route
+  for a bare observation outside a build's discovery.
 - `tasks retry` — reset a failed (or otherwise ended) task to `PENDING`
-  under the named build's active plan, so its next tick or driver runs it
+  under the build's active plan, so its next tick or driver runs it
   again. Refused on `COMPLETED` or under a live claim.
-- `tasks cancel` — release the claim the named build holds on one task
+- `tasks cancel` — release the claim the build holds on one task
   (`CANCELLED`, actionable elsewhere). Nothing is stopped; `builds stop
 --task-id` stops the execution itself.
+- For both `retry` and `cancel`, `--build` defaults to the build holding
+  the task's claim (`claim_build_id` from `GET /tasks/{id}`) and remains
+  an override; a task that holds no claim (a `FAILED` one, typically)
+  needs `--build`. Both ask for confirmation, naming the task and the
+  build, unless `--yes`.
 - `tasks exclude <plan-id> <task-id>` — give up on one task within one
   plan: excludes it and its downstream closure (short of `COMPLETED`
   members) from that plan's scheduling and completion check, recording
@@ -603,19 +692,19 @@ concurrency-limits admin page in v2.
 === "Active venv"
 
     ```sh
-    stardag concurrency-limits list [--holders]
-    stardag concurrency-limits set <key> <max_concurrent>
-    stardag concurrency-limits delete <key> [--yes]
-    stardag concurrency-limits holders <key> [--limit N]
+    stardag concurrency-limits list [--holders] [--json]
+    stardag concurrency-limits set <key> <max_concurrent> [--json]
+    stardag concurrency-limits delete <key> [--yes] [--json]
+    stardag concurrency-limits holders <key> [--limit N] [--json]
     ```
 
 === "uv run ..."
 
     ```sh
-    uv run stardag concurrency-limits list [--holders]
-    uv run stardag concurrency-limits set <key> <max_concurrent>
-    uv run stardag concurrency-limits delete <key> [--yes]
-    uv run stardag concurrency-limits holders <key> [--limit N]
+    uv run stardag concurrency-limits list [--holders] [--json]
+    uv run stardag concurrency-limits set <key> <max_concurrent> [--json]
+    uv run stardag concurrency-limits delete <key> [--yes] [--json]
+    uv run stardag concurrency-limits holders <key> [--limit N] [--json]
     ```
 
 All commands accept `-p/--stardag-profile` and `-e/--stardag-env` to target a

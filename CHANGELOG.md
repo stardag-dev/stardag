@@ -225,6 +225,14 @@ list --build`; new `deployments show`; `executions list --task` and
   `list`/`holders` carry `in_use` and, with `--holders`, holder detail from
   one call (`GET /concurrency-limits?include_holders=true`), not one extra
   request per key as in v1.
+- **Docs: `configuration/cli.md` matches the CLI** — `plans show` reads
+  any plan, `tasks check --report` is described as what it is (accepted,
+  then refused with exit 1), the `--json` claim now holds and names the
+  commands outside it, the "Durations" grammar for `--older-than` is back,
+  and the new commands and flags are documented. `platform/api.md` lists
+  the served reads it missed (`GET /plans/{id}`, `/plans/{id}/graph`,
+  `/builds/{id}/plans`, `GET /tasks`, `/tasks/{id}/executions`,
+  `/deployments/{id}`).
 - `stardag modal deploy` records the deployment before the deploy and
   activates it after; a failed create or activation exits non-zero.
 

@@ -134,10 +134,13 @@ was with v1's clean-tree sharing.
 command line. `stardag builds stop` works over the execution ledger:
 `--not-in-current-plan` lists the executions a rollover left running under
 an old plan, and `--mark-lost` ends in the ledger an execution that cannot
-be stopped. New: `stardag executions list`, `stardag plans show`, `stardag
-deployments list`, `stardag tasks check` (runs `complete()` locally and
-prints the observation). Removed: `stardag concurrency-limits`, `stardag
-builds cleanup` and `stardag tasks list`.
+be stopped. New: `stardag executions list`, `stardag plans show` and
+`plans list`, `stardag deployments list` and `deployments show`, `stardag
+tasks check` (runs `complete()` locally and prints the observation).
+`stardag tasks list` pages by status (v1's age and name filters are gone),
+and `stardag concurrency-limits` stays (`list`, `set`, `delete`,
+`holders`; no `evict`: a slot is released by ending its execution). Removed:
+`stardag builds cleanup`.
 
 **Nothing marks a task incomplete by fiat.** The only way out of COMPLETED
 is a build observing the target missing. To re-run a task, delete its
