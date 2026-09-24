@@ -28,11 +28,14 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
     BuildStatus,
+    ClaimOutcome,
+    Execution,
+    ExecutionOutcome,
     Plan,
     PlanMember,
     Task,
@@ -58,6 +61,11 @@ class FrontierMember:
     status: TaskStatus
     is_root: bool
     body: dict[str, Any]
+    #: Executions of this task under any of the build's plans (runnable and
+    #: running items only; D9: counted from the ledger, never stored).
+    attempts: int = 0
+    #: Those of them that ended interrupted or preempted.
+    interruptions: int = 0
 
 
 @dataclass(frozen=True)
@@ -145,15 +153,18 @@ async def get_frontier(
         bodies = await _bodies(
             session, [r.instance_id for r in (*runnable, *discovery, *running)]
         )
+        counts = await _attempts(
+            session, build_id, [r.task_pk for r in (*runnable, *running)]
+        )
         return Frontier(
             build_id=build_id,
             plan_id=plan.id,
             deployment_id=plan.deployment_id,
             settings_hash=plan.settings_hash,
             sealed=plan.sealed_at is not None,
-            runnable=[_member(r, bodies) for r in runnable],
+            runnable=[_member(r, bodies, counts) for r in runnable],
             discovery_jobs=[_member(r, bodies) for r in discovery],
-            running=[_member(r, bodies) for r in running],
+            running=[_member(r, bodies, counts) for r in running],
             plan_complete=plan_complete,
             closure=closure,
             build_status=build.status,
@@ -205,7 +216,41 @@ async def _bodies(
     return {instance_id: body for instance_id, body in rows.tuples()}
 
 
-def _member(row: Any, bodies: dict[UUID, dict[str, Any]]) -> FrontierMember:
+async def _attempts(
+    session: AsyncSession, build_id: UUID, task_pks: list[UUID]
+) -> dict[UUID, tuple[int, int]]:
+    """Per task: (attempts, interruptions) over the executions of **any** of
+    the build's plans — a rollover does not reset the retry budget. An
+    interruption is an execution whose claim was released ``interrupted``
+    or whose own report ended it ``interrupted`` or ``preempted``. Served by
+    ``ix_execution_task_plan``."""
+    if not task_pks:
+        return {}
+    interrupted = or_(
+        Execution.claim_outcome == ClaimOutcome.INTERRUPTED,
+        Execution.outcome.in_(
+            [ExecutionOutcome.INTERRUPTED, ExecutionOutcome.PREEMPTED]
+        ),
+    )
+    rows = await session.execute(
+        select(
+            Execution.task_pk,
+            func.count(),
+            func.count().filter(interrupted),
+        )
+        .join(Plan, Plan.id == Execution.plan_id)
+        .where(Plan.build_id == build_id, Execution.task_pk.in_(task_pks))
+        .group_by(Execution.task_pk)
+    )
+    return {pk: (n, i) for pk, n, i in rows.tuples()}
+
+
+def _member(
+    row: Any,
+    bodies: dict[UUID, dict[str, Any]],
+    counts: dict[UUID, tuple[int, int]] | None = None,
+) -> FrontierMember:
+    attempts, interruptions = (counts or {}).get(row.task_pk, (0, 0))
     return FrontierMember(
         task_id=row.task_id,
         task_pk=row.task_pk,
@@ -214,4 +259,6 @@ def _member(row: Any, bodies: dict[UUID, dict[str, Any]]) -> FrontierMember:
         status=row.status,
         is_root=row.is_root,
         body=bodies[row.instance_id],
+        attempts=attempts,
+        interruptions=interruptions,
     )

@@ -187,6 +187,13 @@ async def verify_deployment_current(
     assert deployment is not None  # FK
     if deployment.kind is DeploymentKind.LOCAL:
         return
+    # The app lock, shared, held to the caller's commit: an activation (which
+    # takes it exclusively) either committed before this read, and the check
+    # sees it, or waits until the seal or reactivation has committed. So a
+    # plan under D2 cannot be sealed after D3's activation committed.
+    await _lock_app(
+        session, environment_id, deployment.kind, deployment.app_name, shared=True
+    )
     current = await current_deployment_id(
         session, environment_id, deployment.kind, deployment.app_name
     )
@@ -201,20 +208,29 @@ async def verify_deployment_current(
 
 
 async def _lock_app(
-    session: AsyncSession, environment_id: UUID, kind: DeploymentKind, app_name: str
+    session: AsyncSession,
+    environment_id: UUID,
+    kind: DeploymentKind,
+    app_name: str,
+    *,
+    shared: bool = False,
 ) -> None:
-    """Serialise generation assignment per ``(environment, kind, app)``: a
-    transaction-scoped advisory lock, since the row that would carry the
-    lock may not exist yet."""
+    """The app lock per ``(environment, kind, app)``: a transaction-scoped
+    advisory lock, since the row that would carry it may not exist yet.
+    Exclusive for what changes which deployment is current (create assigns
+    the generation, activate makes it eligible); shared for the checks that
+    read it (seal, resume's reactivation), which do not wait for each
+    other."""
     await _advisory_lock(
-        session, f"deployment:{environment_id}:{kind.value}:{app_name}"
+        session, f"deployment:{environment_id}:{kind.value}:{app_name}", shared=shared
     )
 
 
-async def _advisory_lock(session: AsyncSession, key: str) -> None:
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key}
-    )
+async def _advisory_lock(
+    session: AsyncSession, key: str, *, shared: bool = False
+) -> None:
+    fn = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
+    await session.execute(text(f"SELECT {fn}(hashtextextended(:key, 0))"), {"key": key})
 
 
 async def _next_generation(
@@ -387,25 +403,65 @@ async def _local(
 
 
 async def activate_deployment(
-    session: AsyncSession, environment_id: UUID, deployment_id: UUID
+    session: AsyncSession,
+    environment_id: UUID,
+    deployment_id: UUID,
+    *,
+    modal_app_id: str | None = None,
+    image_id: str | None = None,
 ) -> DeploymentState:
-    """Mark a deployment live after its deploy succeeded. Idempotent by
-    state: an activated row is returned unchanged."""
+    """Mark a deployment live after its deploy succeeded, recording what
+    only the finished deploy knows (``modal_app_id``, ``image_id``).
+    Idempotent by state: an activated row is returned unchanged. A given
+    value fills a NULL column or must equal the recorded one (409
+    ``deployment_activation_conflict`` otherwise, nothing written): a
+    deployment's identity does not change after the fact.
+
+    Takes the app lock exclusively (``kind`` and ``app_name`` never change,
+    so they are read first): a seal or reactivation checking currency holds
+    it shared to its commit, so the two serialise."""
     async with transaction(session):
+        where = (
+            Deployment.environment_id == environment_id,
+            Deployment.id == deployment_id,
+        )
+        unknown = NotFound(
+            "unknown_deployment",
+            f"no deployment {deployment_id}",
+            deployment_id=str(deployment_id),
+        )
+        app = (
+            await session.execute(
+                select(Deployment.kind, Deployment.app_name).where(*where)
+            )
+        ).first()
+        if app is None:
+            raise unknown
+        await _lock_app(session, environment_id, app.kind, app.app_name)
         row = await session.scalar(
             select(Deployment)
-            .where(
-                Deployment.environment_id == environment_id,
-                Deployment.id == deployment_id,
-            )
+            .where(*where)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if row is None:
-            raise NotFound(
-                "unknown_deployment",
-                f"no deployment {deployment_id}",
+            raise unknown
+        given = {"modal_app_id": modal_app_id, "image_id": image_id}
+        clashing = sorted(
+            column
+            for column, value in given.items()
+            if value is not None and getattr(row, column) not in (None, value)
+        )
+        if clashing:
+            raise Conflict(
+                "deployment_activation_conflict",
+                "the activation names values other than those recorded",
                 deployment_id=str(deployment_id),
+                fields=clashing,
             )
+        for column, value in given.items():
+            if value is not None:
+                setattr(row, column, value)
         if row.activated_at is None:
             row.activated_at = utc_now()
             await session.flush()

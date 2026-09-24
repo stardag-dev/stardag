@@ -105,15 +105,22 @@ async def report_stopped(
     """Record that the operator stopped the execution (``outcome =
     stopped``), through ``transition_task()``: the ledger end, and — if it
     still holds the task's claim — the claim's release (the task
-    CANCELLED). Idempotent: an ended execution is left as it ended."""
+    CANCELLED). Idempotent: an ended execution is left as it ended.
+
+    Only the execution's task and plan keys — which never change — are read
+    before ``transition_task()`` locks the task row; the execution itself
+    is loaded under that lock, so a stop or an end report that won the lock
+    first is seen, not a stale copy."""
     async with transaction(session):
-        execution = await session.scalar(
-            select(Execution).where(
-                Execution.environment_id == environment_id,
-                Execution.id == execution_id,
+        keys = (
+            await session.execute(
+                select(Execution.task_pk, Execution.plan_id).where(
+                    Execution.environment_id == environment_id,
+                    Execution.id == execution_id,
+                )
             )
-        )
-        if execution is None:
+        ).one_or_none()
+        if keys is None:
             raise NotFound(
                 "unknown_execution",
                 f"no execution {execution_id}",
@@ -122,8 +129,8 @@ async def report_stopped(
         return await transition_task(
             session,
             environment_id,
-            task_pk=execution.task_pk,
-            plan_id=execution.plan_id,
+            task_pk=keys.task_pk,
+            plan_id=keys.plan_id,
             transition=Transition.stop(execution_id),
             now=utc_now(),
         )

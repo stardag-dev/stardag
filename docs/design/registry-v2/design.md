@@ -334,6 +334,10 @@ Dropped from v1: `task_data`, `is_phantom`, `latest_status_scope_key`,
 | `generation`                                                     | server-assigned at create, monotonic per `(environment_id, kind, app_name)`; decides which activated deployment is current |
 | `activated_at`                                                   | set by `/activate` after the deploy succeeded; NULL rows are never current and cannot host a plan                          |
 
+`/activate {modal_app_id?, image_id?}` records what only the finished
+deploy knows: a given value fills a NULL column or must equal the recorded
+one (409 `deployment_activation_conflict`).
+
 Index `(environment_id, kind, app_name, generation DESC)`; unique
 `(environment_id, kind, app_name, generation)`; partial unique
 `(environment_id, code_id) WHERE kind = 'local'`.
@@ -414,7 +418,12 @@ alongside it. Reactivating an old scope on resume flips the timestamps.
 | `excluded_at`, `excluded_reason`           | `excluded_reason` ∈ `operator \| discovery_failed \| upstream_excluded`, set together with `excluded_at` (CHECK). "Given up on" (STA-104): not scheduled, does not gate the build's completion; exclusion **cascades to the member's downstream closure within the plan** (like skip-blocked, otherwise a downstream is neither runnable nor excluded) and **an excluded root fails the build** (the request cannot be met) |
 
 No counters: attempts and interruptions are counted from `execution` rows
-over the build's plans.
+over the build's plans (index `execution (task_pk, plan_id)`). The frontier
+carries them on its `runnable` and `running` items — `attempts` (executions
+of the task under any of the build's plans, so a replacement plan does not
+reset the budget) and `interruptions` (those released or ended
+`interrupted`, or ended `preempted`) — for the tick's retry and
+interruption budgets.
 
 Registering the same instance again is a no-op (`ON CONFLICT DO NOTHING …
 RETURNING`, STA-48's pattern; the event write is gated on the `RETURNING`,
@@ -449,10 +458,17 @@ with `report_applied = false`.
 
 Keeps: id, name, description, user, `status` + companions, `root_task_ids`
 (the request at completion-id level, stable across rollover), reactive
-columns (`reactive_app_name`, `reactive_tick_kwargs`, `needs_tick_at`,
-`tick_requested_at`, `scheduler_lease_*`), `last_active_at`,
-`executor_metadata`. Drops `scope_key`, `build_config`, `commit_hash`. The
-active plan is found through `plan`, not stored twice.
+columns (`reactive_app_name`, `reactive_tick_kwargs`, `scheduler_lease_*`),
+`last_active_at`, `executor_metadata`. Drops `scope_key`, `build_config`,
+`commit_hash`. The active plan is found through `plan`, not stored twice.
+
+The wake-up flags `needs_tick_at` and `tick_requested_at` are on
+**`build_wake`**, one row per build (PK `build_id`, composite FK onto
+`build`, created with it, `ON DELETE CASCADE`), so that flagging never locks
+the build row: a claiming start holds its build `FOR SHARE` while it holds
+the task row, and a flagger — inside another task's transition — can
+neither wait for that (build → task order; it would deadlock against the
+claim's task lock) nor skip it without losing the wake-up.
 
 ### `event`
 
@@ -477,7 +493,10 @@ table, plus `TASK_INVALIDATED`, `TASK_EXCLUDED`, `TASK_OBSERVED_COMPLETE`,
 
 ### Peripheral tables, re-pointed
 
-`task_artifact.task_pk` → `task` (artifacts belong to the promise).
+`task_artifact.task_pk` → `task` (artifacts belong to the promise); they
+are uploaded through the member that produced them, `POST
+/plans/{plan_id}/members/{task_id}/artifacts`, upserted per `(task, type,
+name)` as in v1, and read by `GET /tasks/{task_id}/artifacts`.
 `task_limit_key.task_pk` → `task`, written **at claim time from the claiming
 instance** and replaced on every claim (limit-key selection may read
 non-significant fields, so it is per instance; a slot is a limit key plus a
@@ -828,7 +847,9 @@ If they differ:
    — lookup-or-create; a plan for that scope may already exist and be
    sealed, in which case nothing is discovered — and seals. `/seal`
    re-checks that the plan's deployment is still the app's current one and
-   refuses otherwise, so two ticks under two new deployments cannot leave
+   refuses otherwise (under the app's advisory lock, shared to its commit;
+   create and `/activate` take it exclusively, so a seal and an activation
+   serialise), so two ticks under two new deployments cannot leave
    the build on the older code; the winner's seal supersedes the old plan in
    the same transaction.
 
@@ -906,8 +927,11 @@ of active plans (not "any event in the build"); flagging on every transition
 scheduler lease (its own columns on `build`, no longer on the lock table)
 and the watchdog carry over. Concretely: every status change made by
 `transition_task()` sets `needs_tick_at` on the other RUNNING reactive
-builds whose active plan has a non-excluded member for the task (build rows
-`FOR NO KEY UPDATE SKIP LOCKED`, ordered by id); a move out of RUNNING also
+builds whose active plan has a non-excluded member for the task (their
+`build_wake` rows `FOR NO KEY UPDATE SKIP LOCKED`, ordered by build id; the
+build row is read, never locked, so a claim in flight on the build does not
+hide it — only a concurrent flagger, `notify` or `wake-candidates` holding
+the same wake row does, and that writer is setting the flag); a move out of RUNNING also
 flags those whose active plan has an actionable member with a
 `task_limit_key` on one of the task's keys. `POST /builds/{id}/notify` flags
 the caller's RUNNING build and reads the lease after the flag's commit;
@@ -919,7 +943,10 @@ from them is renewal, as `POST …/tasks/{task_id}/claim/renew {execution_id}`
 for in-process executions, whose driver is alive to call it; the renewal is
 granted only if that execution holds the live claim, under the same row lock
 a claiming start takes, so a delayed resident process cannot extend a claim
-another execution has taken over.
+another execution has taken over. It also locks the task's limit rows (key
+order, as a claim does) and re-reads the clock before it extends the
+expiry, so a claim sharing a key never counts the holder lapsed and takes
+its slot while the renewal is in flight.
 
 ## Scenario checklist
 

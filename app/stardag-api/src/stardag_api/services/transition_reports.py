@@ -25,6 +25,8 @@ from stardag_api.models import (
     Plan,
     TaskStatus,
 )
+from stardag_api.models.base import utc_now
+from stardag_api.services.claim_limits import lock_held_limits
 from stardag_api.services.errors import Conflict, RecordedConflict
 from stardag_api.services.transition_step import StepBase
 from stardag_api.services.transition_types import (
@@ -242,6 +244,12 @@ class ReportSteps(StepBase):
 
     async def renew(self) -> TransitionOutcome:
         t, eid = self.task, self.execution_id()
+        if t.execution_id == eid:
+            # The task's limit rows before the expiry moves, then the clock
+            # re-read: a claim that counted this holder as lapsed while the
+            # renewal waited has taken the slot, and the claim is lapsed now.
+            await lock_held_limits(self.session, self.environment_id, t.id)
+            self.now = max(self.now, utc_now())
         if t.execution_id != eid or not self.live:
             raise Conflict(
                 "claim_not_held",
