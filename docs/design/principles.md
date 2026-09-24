@@ -151,9 +151,11 @@ be read through a pydantic-settings class at run time, not import time.
 Keys starting `STARDAG_` or `MODAL_` are refused; stardag's own identifiers
 are written last and cannot be overridden. Environment variables are
 process-global, so deployed ticks and workers run one input per container
-(a `max_concurrent_inputs` above one on them is refused at deploy), and a
-second build entering a process while another build's settings are
-installed raises `SettingsError`.
+(a `max_concurrent_inputs` above one on them is refused at deploy). A
+process holds one settings owner: concurrent `sd.build()` calls share it
+when their settings are equal, and a resident build under different
+settings, or a tick, worker or bootstrap's scoped settings crossing a
+resident owner in either direction, raises `SettingsError`.
 
 _The limit:_ nothing checks that a setting stays out of output. Completion
 is global, so a setting that changed output would let one build reuse

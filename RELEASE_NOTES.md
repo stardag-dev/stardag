@@ -98,11 +98,12 @@ Keys starting `STARDAG_` or `MODAL_` are refused, and settings are not for
 credentials. `build_config`, `sd.build_config_scope`, `sd.get_build_config`
 and `sd.set_build_config` are removed.
 
-A process applying settings serves one build at a time. Deployed ticks,
-workers and the bootstrap run one input per container, and `stardag modal
-deploy` refuses a `max_concurrent_inputs` above one on them; a second build
-entering a process while another's settings are installed raises
-`SettingsError`.
+A process holds one settings owner. Concurrent `sd.build()` calls share it
+when their settings are equal; a resident build under different settings,
+or a tick, worker or bootstrap's scoped settings crossing a resident
+owner in either direction, raises `SettingsError`. Deployed ticks,
+workers and the bootstrap run one input per container, and `stardag
+modal deploy` refuses a `max_concurrent_inputs` above one on them.
 
 **Two errors at the trigger, where v1 found the problem later.** Each
 distinct instance is round-tripped once at registration; a field whose
