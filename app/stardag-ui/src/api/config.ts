@@ -4,3 +4,5 @@ export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || window.location
 
 export const API_V1 = `${API_BASE_URL}/api/v1`;
 export const API_V1_UI = `${API_BASE_URL}/api/v1/ui`;
+// The registry: builds, plans, tasks, executions, deployments, settings.
+export const API_V2 = `${API_BASE_URL}/api/v2`;

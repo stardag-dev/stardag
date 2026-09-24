@@ -1,218 +1,59 @@
-import type { BuildFrontier, BuildStatus, TaskStatus } from "../types/task";
+import type { TaskStatus } from "../types/task";
 
 /**
- * The two ways a stuck task gets unstuck.
+ * A task's claim, read off the task (design.md, `task`).
  *
- * - `release` cancels it, freeing the execution claim and any
- *   concurrency-limit slot it holds. The remedy for a task left RUNNING.
- * - `retry` resets it to pending so it can be scheduled again. The remedy
- *   for a task left failed / cancelled / skipped / suspended. It does
- *   nothing to a RUNNING task by design — that would invite a second,
- *   concurrent execution of the same task.
+ * The claim is **live** when the task is RUNNING and its expiry is in the
+ * future; RUNNING with a past expiry is a **lapsed** claim, which the next
+ * claiming start takes over. Every other status holds no claim — a
+ * SUSPENDED or INTERRUPTED task included.
+ */
+export type ClaimState = "none" | "live" | "lapsed";
+
+export function claimState(
+  task: { status: TaskStatus; claim_expires_at: string | null },
+  now: number = Date.now(),
+): ClaimState {
+  if (task.status !== "running") return "none";
+  if (!task.claim_expires_at) return "lapsed";
+  const expires = Date.parse(task.claim_expires_at);
+  if (Number.isNaN(expires)) return "lapsed";
+  return expires > now ? "live" : "lapsed";
+}
+
+/**
+ * The two operator remedies on one task, both through a plan of the build
+ * being viewed (`/plans/{plan_id}/members/{task_id}/...`).
+ *
+ * - `release` cancels the task: its claim is released with outcome
+ *   `cancelled`. Only the build holding the claim may (409
+ *   `not_claim_holder` otherwise), and it stops nothing — the worker finds
+ *   out at its next checkpoint.
+ * - `retry` resets the task to PENDING. Refused on COMPLETED and on a live
+ *   claim; a lapsed claim is closed first.
  */
 export type ClaimAction = "release" | "retry";
 
-/**
- * One name per action, everywhere it is offered.
- *
- * "Release claim" described the mechanism and left every surface free to
- * call it something else — which is how this UI ended up with "Cancel
- * task" and "Release claim" as two names for one route. The name states
- * the consequence instead: releasing the claim is what lets the holding
- * build retry the task.
- */
 export const CLAIM_ACTION_LABELS: Record<ClaimAction, string> = {
   release: "Release claim and retry",
   retry: "Reset to pending",
 };
 
-/**
- * Which remedies the server will actually honour for a given status.
- *
- * Offering a button the server would treat as a no-op is worse than
- * offering nothing, so this mirrors the API's own rules: COMPLETED is
- * sticky, RUNNING is cancel-only, and PENDING/UNREGISTERED have nothing
- * to release and nothing a reset would change.
- */
-export function availableClaimActions(status: TaskStatus): ClaimAction[] {
+/** The remedies the server honours for a task in this state. */
+export function availableClaimActions(
+  status: TaskStatus,
+  claim: ClaimState,
+): ClaimAction[] {
   switch (status) {
     case "running":
-      return ["release"];
+      return claim === "live" ? ["release"] : ["release", "retry"];
     case "suspended":
-      return ["release", "retry"];
-    // "interrupted" belongs here and not with "suspended" above:
-    // retryable, but with no claim to release — the platform ended its
-    // execution and the server cleared the claim with it.
+    case "interrupted":
     case "failed":
     case "cancelled":
     case "skipped":
-    case "interrupted":
       return ["retry"];
     default:
       return [];
   }
-}
-
-/** A task whose global status is one of these is holding an execution claim. */
-export const CLAIM_HOLDING_STATUSES: TaskStatus[] = ["running", "suspended"];
-
-/**
- * Whether the platform said it was restarting this task's execution and
- * the restart has not landed yet.
- *
- * Derived rather than stored, which is what keeps it honest: the restarted
- * execution records its own `task_started`, moving `latest_status_at` past
- * `latest_preempted_at`, and this goes false with nothing to clear. A task
- * that is no longer running cannot be waiting for a restart at all.
- *
- * Worth surfacing because RUNNING alone cannot distinguish "a container is
- * working" from "a container was taken away and the replacement never
- * arrived". The claim's expiry is pulled in to a few minutes when this is
- * true, so the pair reads as "a restart is due by then".
- */
-export function restartExpected(task: {
-  latest_status?: TaskStatus | null;
-  latest_status_at?: string | null;
-  latest_preempted_at?: string | null;
-}): boolean {
-  if (task.latest_status !== "running") return false;
-  if (!task.latest_preempted_at) return false;
-  if (!task.latest_status_at) return true;
-  return Date.parse(task.latest_preempted_at) > Date.parse(task.latest_status_at);
-}
-
-export type SchedulingPanelForm = "hidden" | "collapsed" | "stalled" | "satisfied";
-
-/**
- * Whether every root this build asked for is now complete.
- *
- * A build is a *request for a set of root tasks to be materialised*. If the
- * roots are complete then so is everything they needed, and the request has
- * been satisfied — whatever the build's own status says, and whichever build
- * actually ran the tasks. Tasks are content-addressed and shared, so a build
- * can fail waiting on a task that another build completes an hour later. Its
- * status stays `failed` (an honest record of what its own driver decided) while
- * this becomes true.
- *
- * **Three clauses, and each excludes a real state:**
- *
- * - a non-empty root list — enforced in `rootsSatisfiedFrom` below, since that
- *   is where `every()` is called and where the vacuous-truth trap lives. A build
- *   with no roots has nothing to satisfy. This is not a corner case:
- *   `POST /builds` defaults `root_task_ids` to `[]`, so *every* build passes
- *   through rootless between being minted and having its roots registered,
- *   which is exactly what `build_trigger` does. Without this clause a build
- *   mid-creation would report its request satisfied.
- * - `roots.length === root_task_ids.length` — the server reports `roots` by
- *   looking the ids up, so a shorter list means some root is not resolvable
- *   (deleted, or in another environment). Unknown is not complete. Mirrors the
- *   SDK's own `roots_known` in `_handle_terminal`.
- * - `every(completed)` — the actual question.
- */
-export function rootsSatisfied(frontier: BuildFrontier): boolean {
-  const statusById = new Map(frontier.roots.map((r) => [r.task_id, r.latest_status]));
-  return (
-    frontier.roots.length === frontier.root_task_ids.length &&
-    rootsSatisfiedFrom(frontier.root_task_ids, (id) => statusById.get(id))
-  );
-}
-
-/**
- * The same rule against any source of task statuses.
- *
- * Exists so the two places that need it cannot drift: the scheduling panel asks
- * it of a `BuildFrontier`, while the build view asks it of the task list it has
- * already fetched — and a build being told "your work is done" by one component
- * and "you need intervention" by the other would be worse than either message
- * alone.
- *
- * An unresolvable root answers `undefined`, which is not `"completed"`, so
- * unknown counts as not satisfied without a special case.
- */
-export function rootsSatisfiedFrom(
-  rootTaskIds: string[],
-  statusOf: (taskId: string) => TaskStatus | undefined,
-): boolean {
-  if (rootTaskIds.length === 0) return false;
-  return rootTaskIds.every((id) => statusOf(id) === "completed");
-}
-
-/**
- * When — and how loudly — the build scheduling panel has something to say.
- *
- * `"stalled"` (full, prominent) requires the build to have tasks, nothing
- * actionable and nothing running. That is not an arbitrary heuristic: it
- * is *exactly* the condition under which the server computes
- * `blocked_by_external`, and exactly the condition the SDK reads as "this
- * build cannot progress" — the read that fails a build with "No runnable
- * or running tasks left but roots are not complete" even when an upstream
- * owned by another build is legitimately holding it up.
- *
- * Terminal states are qualified rather than blanket-included. Note this
- * whole paragraph is about the **`"stalled"`** form only — a terminal
- * reactive build still gets the quiet `"collapsed"` strip, which is the
- * one route to its tick trail and says nothing about blockers:
- *
- * - `completed` / `cancelled`: never *stalled*. The build is not "not
- *   progressing", it is done, or a user stopped it on purpose.
- * - `failed`: only when the failure has the stuck-build shape — an
- *   external blocker was reported, or the build failed while *nothing in
- *   it failed*. An ordinary DAG failure (a task raised) explains itself
- *   in the task table and does not need a scheduler post-mortem.
- *
- * `"satisfied"` short-circuits all of that. A build whose roots are complete
- * is not stalled and never needs intervention, whatever its status — so it must
- * not be told it does. This is the shape that motivated the form: a build fails
- * waiting on a shared task, another build completes the task, and the panel goes
- * on insisting "nothing is going to happen without intervention" over work that
- * is finished. It applies to `running` too, and there the copy differs: nothing
- * is wrong, the build simply has not been ticked since the roots landed.
- *
- * `"collapsed"` is a single quiet line for a reactive build the rule does
- * not flag: the live counts, plus access to the tick trail, which exists
- * nowhere else in the UI. `"hidden"` is everything else — a healthy
- * non-reactive build has no scheduler to reason about, and a permanently
- * empty box is worse than no box.
- */
-export function schedulingPanelForm(
-  frontier: BuildFrontier,
-  buildStatus: BuildStatus,
-): SchedulingPanelForm {
-  const totalTasks = Object.values(frontier.status_counts).reduce((a, b) => a + b, 0);
-  const stalledShape =
-    totalTasks > 0 && frontier.actionable.length === 0 && frontier.running.length === 0;
-
-  // Before any stalled reasoning: if the request is satisfied there is nothing
-  // to diagnose. Checked ahead of `stalledShape` on purpose — a satisfied build
-  // has no actionable and no running tasks by definition, so it always *looks*
-  // stalled.
-  //
-  // `completed` and `cancelled` are excluded, and for the same reason the
-  // stalled rule below excludes them: neither is a build anyone needs told
-  // anything. `completed` already says it. `cancelled` was stopped on purpose —
-  // announcing that its roots finished anyway is noise, and the form's advice to
-  // re-trigger and reconcile the record actively contradicts the user's
-  // intent. Both simply fall through to the quiet strip, which is what they got
-  // before this form existed.
-  const deliberatelyTerminal =
-    buildStatus === "completed" || buildStatus === "cancelled";
-  if (!deliberatelyTerminal && rootsSatisfied(frontier)) {
-    return "satisfied";
-  }
-
-  let stalled = false;
-  if (stalledShape) {
-    if (buildStatus === "completed" || buildStatus === "cancelled") {
-      stalled = false;
-    } else if (buildStatus === "failed") {
-      stalled =
-        frontier.blocked_by_external.length > 0 ||
-        (frontier.status_counts.failed ?? 0) === 0;
-    } else {
-      stalled = true;
-    }
-  }
-
-  if (stalled) return "stalled";
-  return frontier.reactive_app_name ? "collapsed" : "hidden";
 }

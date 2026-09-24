@@ -284,7 +284,20 @@ assignee the maintainer.
       step 4. Left to I8: `builds list/stop/cleanup`, `tasks`,
       `concurrency-limits` as CLI commands.
 - [ ] I8 — CLI
-- [ ] I9 — UI
+- [ ] I9 — UI (in review, draft PR #388 against `v2`). Every registry call
+      is on `/api/v2`; scope keys, `build_config`, phantoms, external
+      blockers and `/locks` are gone. Builds list, the build view over the
+      active plan (plan header, members, DAG over instance edges, frontier,
+      settings and deployment in build info), the stop list over
+      `GET /builds/{id}/executions` with orphans, the task page (claim,
+      instances under their scopes, artifacts) and a deployments page.
+      Coded against one route the registry does not serve, marked
+      **(assumed)** in `api/registry.ts`: `GET /plans/{id}/graph` (members
+      and instance edges); until it lands the view shows roots plus the
+      frontier and says it is partial. Removed for want of a v2 route: task
+      search/explorer, claim triage, bulk cancel, concurrency limits; the
+      build failure reason and the task event log (so
+      `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
 - [ ] I10 — tests (PR #389, draft). One registry-live module per `live`
       row of the design's scenario table, each run serially green against a
       provisioned v2 registry; S3 stays `test_rollover`. The scenario table
