@@ -154,6 +154,7 @@ class ReadsMixin(RegistryState):
             deployment=self._deployment_info(deployment) if deployment else None,
             settings_hash=plan.settings_hash,
             generation=plan.generation,
+            created_at=plan.created_at,
             activated_at=plan.activated_at,
             sealed_at=plan.sealed_at,
             superseded_at=plan.superseded_at,
@@ -274,7 +275,10 @@ class ReadsMixin(RegistryState):
         self.task(task_id)
         return [
             EventInfo(
+                id=e.id,
                 event_type=e.type,
+                created_at=e.created_at,
+                error_message=e.error_message,
                 build_id=e.build_id,
                 plan_id=e.plan_id,
                 execution_id=e.execution_id,

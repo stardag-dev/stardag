@@ -118,7 +118,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
             last_active_at=now,
         )
         self.builds[build_id] = build
-        self.events.append(Event("BUILD_STARTED", build_id=build_id))
+        self.log(Event("BUILD_STARTED", build_id=build_id))
         return self._info(build)
 
     def build_get(self, build_id: UUID) -> BuildInfo:
@@ -172,7 +172,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
             if changed:
                 build.is_resumed = True
                 build.last_active_at = self.now()
-                self.events.append(Event("BUILD_RESUMED", build_id=build_id))
+                self.log(Event("BUILD_RESUMED", build_id=build_id))
             return ResumeResult(
                 build=self._info(build),
                 plan=plan_info(plan) if plan is not None else None,
@@ -189,7 +189,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         build.error_message = error
         build.last_active_at = self.now()
         self.release_build_claims(build)
-        self.events.append(Event(f"BUILD_{status.upper()}", build_id=build_id))
+        self.log(Event(f"BUILD_{status.upper()}", build_id=build_id))
         return self._info(build)
 
     def build_complete(self, build_id: UUID, *, force: bool = False) -> BuildInfo:

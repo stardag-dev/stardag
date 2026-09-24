@@ -105,7 +105,11 @@ def tasks_show(
             {
                 **task.model_dump(mode="json"),
                 "executions": [x.model_dump(mode="json") for x in executions],
-                "events": [e.model_dump(mode="json") for e in log],
+                # --events bounds the listing here too; divergences are
+                # reported whole below, as in the text output.
+                "events": [e.model_dump(mode="json") for e in log[-events:]]
+                if events
+                else [],
                 "structure_diverged": [e.model_dump(mode="json") for e in diverged],
                 "artifacts": [a.model_dump(mode="json") for a in artifacts],
             }

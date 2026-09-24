@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from stardag.exceptions import APIError, NotFoundError
 
@@ -129,6 +129,7 @@ class PlanRow:
     activated_at: datetime | None = None
     sealed_at: datetime | None = None
     superseded_at: datetime | None = None
+    created_at: datetime | None = None
 
     @property
     def active(self) -> bool:
@@ -184,6 +185,10 @@ class Event:
     execution_id: UUID | None = None
     applied: bool = True
     detail: dict[str, Any] = field(default_factory=dict)
+    error_message: str | None = None
+    id: UUID = field(default_factory=uuid4)
+    #: Stamped by :meth:`RegistryState.log` from the registry clock.
+    created_at: datetime | None = None
 
 
 class RegistryState:
@@ -209,6 +214,13 @@ class RegistryState:
 
     def now(self) -> datetime:
         return self.clock()
+
+    def log(self, event: Event) -> None:
+        """Append to the event log, stamped with the registry clock (the
+        server's ``Event.created_at``)."""
+        if event.created_at is None:
+            event.created_at = self.now()
+        self.events.append(event)
 
     def _record(self, method: str, **kwargs: Any) -> None:
         self.calls.append((method, kwargs))
@@ -368,4 +380,4 @@ class RegistryState:
             if task.status == "running" and task.claim_plan_id in plan_ids:
                 self.close_claim(task, "released")
                 self.move(task, "cancelled", flag_except=build.id)
-                self.events.append(Event("TASK_CANCELLED", task.task_id, build.id))
+                self.log(Event("TASK_CANCELLED", task.task_id, build.id))

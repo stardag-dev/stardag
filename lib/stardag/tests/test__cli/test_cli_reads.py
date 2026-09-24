@@ -82,7 +82,11 @@ class TestTasksShow:
         assert result.exit_code == 0, result.output
         assert "Structure diverged 1 time(s)" in result.output
         assert "h-new" in result.output
-        payload = json.loads(invoke("tasks", "show", root, "--json").stdout)
+        payload = json.loads(
+            invoke("tasks", "show", root, "--events", "0", "--json").stdout
+        )
+        # --events bounds the JSON listing too; divergences come whole.
+        assert payload["events"] == []
         (event,) = payload["structure_diverged"]
         assert event["event_metadata"] == {"added_upstreams": ["h-new"]}
 

@@ -149,9 +149,7 @@ class PlansMixin(RegistryState):
             )
             if self._admit(plan, instance, admitted_by, is_root=as_roots):
                 counts["members_admitted"] += 1
-                self.events.append(
-                    Event("TASK_PENDING", item.task_id, plan.build_id, plan.id)
-                )
+                self.log(Event("TASK_PENDING", item.task_id, plan.build_id, plan.id))
             elif as_roots:
                 members[item.task_id].is_root = True
             self._observe(plan, self.tasks[item.task_id], item, counts)
@@ -201,7 +199,7 @@ class PlansMixin(RegistryState):
                 self.move(task, "completed")
                 task.completed_at = self.now()
                 counts["completed"] += 1
-                self.events.append(
+                self.log(
                     Event(
                         "TASK_OBSERVED_COMPLETE", task.task_id, plan.build_id, plan.id
                     )
@@ -212,9 +210,7 @@ class PlansMixin(RegistryState):
             self.move(task, "pending")
             task.completed_at = None
             counts["invalidated"] += 1
-            self.events.append(
-                Event("TASK_INVALIDATED", task.task_id, plan.build_id, plan.id)
-            )
+            self.log(Event("TASK_INVALIDATED", task.task_id, plan.build_id, plan.id))
 
     def _check_settings(self, settings: Mapping[str, str]) -> None:
         for key, value in settings.items():
@@ -285,6 +281,7 @@ class PlansMixin(RegistryState):
                 default=0,
             )
             plan = PlanRow(plan_id, build_id, deployment_id, shash, generation)
+            plan.created_at = self.now()
             if generation == 1:
                 plan.activated_at = self.now()
             self.plans[plan_id] = plan
@@ -562,7 +559,7 @@ class PlansMixin(RegistryState):
             task.claim_expires_at = now + ttl
             task.error_message = None
             self.move(task, "running", flag_except=plan.build_id)
-            self.events.append(
+            self.log(
                 Event("TASK_STARTED", task_id, plan.build_id, plan_id, execution_id)
             )
             return _outcome(task)
@@ -589,7 +586,7 @@ class PlansMixin(RegistryState):
         execution.ended_at = self.now()
         execution.outcome = outcome
         if task.execution_id != execution_id or execution.claim_released_at is not None:
-            self.events.append(
+            self.log(
                 Event(
                     outcome.upper(),
                     task_id,
@@ -597,6 +594,7 @@ class PlansMixin(RegistryState):
                     plan_id,
                     execution_id,
                     applied=False,
+                    error_message=error_message,
                 )
             )
             raise refuse("execution_not_current")
@@ -605,11 +603,18 @@ class PlansMixin(RegistryState):
         if status == "completed":
             task.completed_at = self.now()
             task.error_message = None
-        elif status == "failed":
+        elif status in ("failed", "interrupted"):
+            # As the server: assigned unconditionally, so a previous
+            # failure's text never explains this one.
             task.error_message = error_message
-        self.events.append(
+        self.log(
             Event(
-                f"TASK_{status.upper()}", task_id, plan.build_id, plan_id, execution_id
+                f"TASK_{status.upper()}",
+                task_id,
+                plan.build_id,
+                plan_id,
+                execution_id,
+                error_message=error_message,
             )
         )
         return _outcome(task)

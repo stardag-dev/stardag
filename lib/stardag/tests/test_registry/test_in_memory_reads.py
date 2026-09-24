@@ -51,6 +51,7 @@ def test_plan_get_counts_members_by_status_and_excluded_apart():
     assert plan.excluded_count == 2  # mid and its downstream root
     assert plan.member_counts == {"failed": 1}
     assert plan.deployment is not None and plan.deployment.id == deployment_id
+    assert plan.created_at is not None
     assert registry.build_list_plans(build_id)[0].id == plan_id
     with pytest.raises(NotFoundError):
         registry.plan_get(new_id())
@@ -90,8 +91,14 @@ def test_the_claim_holder_executions_and_events_of_a_task():
     assert registry.task_list_executions("leaf", include_ended=False) == []
     (row,) = registry.task_list_executions("leaf")
     assert (row.build_id, row.outcome) == (build_id, "completed")
-    types = [e.event_type for e in registry.task_events("leaf")]
-    assert types[-2:] == ["TASK_STARTED", "TASK_COMPLETED"]
+    events = registry.task_events("leaf")
+    assert [e.event_type for e in events][-2:] == ["TASK_STARTED", "TASK_COMPLETED"]
+    assert all(e.id is not None and e.created_at is not None for e in events)
+    failing = new_id()
+    registry.member_retry(plan_id, "mid")  # a no-op on PENDING
+    registry.member_start(plan_id, "mid", execution_id=failing)
+    registry.member_fail(plan_id, "mid", execution_id=failing, error_message="boom")
+    assert registry.task_events("mid")[-1].error_message == "boom"
 
 
 def test_deployment_get():
