@@ -587,12 +587,19 @@ class APIRegistry(HTTPTransport, RegistryABC):
             )
         )
 
-    def deployment_activate(self, deployment_id: UUID) -> DeploymentInfo:
+    def deployment_activate(
+        self,
+        deployment_id: UUID,
+        *,
+        modal_app_id: str | None = None,
+        image_id: str | None = None,
+    ) -> DeploymentInfo:
         return self.call(
             Request(
                 "POST",
                 f"/deployments/{deployment_id}/activate",
                 DeploymentInfo.model_validate,
+                json=_drop_none({"modal_app_id": modal_app_id, "image_id": image_id}),
                 operation=f"Activate deployment {deployment_id}",
             )
         )

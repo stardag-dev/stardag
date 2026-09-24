@@ -9,8 +9,9 @@ task is not restarted.
 2. Phase B (this process): a registry that holds that claim (seeded from
    the file, as the real registry would still hold it) and a second build
    of the same task. Its claiming start is denied ``task_already_running``;
-   it waits on the claim and, once the original worker's output lands,
-   observes the completion instead of spawning again.
+   it waits on the claim and, once the original worker's output lands
+   (and its completion report, relayed here -- see ``RelayingRegistry``),
+   finds the task completed instead of spawning again.
 
 The task saves the Modal function call id it ran under; asserting it equals
 the ref recorded *before the crash* proves the original invocation produced
@@ -199,28 +200,80 @@ def test_crash_resume_reattaches_without_restarting_task(tmp_path):
     assert original_ref and original_ref.startswith("fc-")
 
     # Phase B -- the registry still holds the pre-crash execution's claim.
-    registry = InMemoryRegistry()
+    # The crashed build's plan is as its static phase left it: the task
+    # registered *expanded* (it has no upstreams) and the plan sealed. A
+    # claiming start re-checks upstream completion under its lock (S39), so
+    # an unexpanded member -- upstreams unknown -- would be refused
+    # ``upstream_incomplete`` rather than granted.
+    original_execution = uuid.UUID(ref_info["execution_id"])
+
+    class RelayingRegistry(InMemoryRegistry):
+        """Relays the original worker's own completion report.
+
+        The detached worker runs with ``worker_reports_lifecycle=False``
+        because it cannot reach this in-process registry; a real one reports
+        its completion itself. v2 records a completion from the holder's
+        report while its claim is live -- an observation is refused against
+        a live claim ("its holder reports") -- so without the relay the
+        second build would see the output land and still be refused
+        ``plan_incomplete`` at ``/complete``. Relayed at the second build's
+        next claim attempt once the output exists, in this thread (the fake
+        is not thread-safe).
+        """
+
+        crashed_plan_id: uuid.UUID | None = None
+
+        def member_start(self, plan_id, task_id, **kwargs):
+            if (
+                kwargs.get("claim", True)
+                and self.crashed_plan_id is not None
+                and self.tasks[task_id].status == "running"
+                and task.complete()
+            ):
+                self.member_complete(
+                    self.crashed_plan_id, task_id, execution_id=original_execution
+                )
+            return super().member_start(plan_id, task_id, **kwargs)
+
+    registry = RelayingRegistry()
     deployment = registry.add_deployment(app_name=TEST_APP_NAME)
     crashed_build = registry.build_create(root_task_ids=[str(task.id)]).id
-    item = registration_item(
-        task,
-        declared_upstreams=None,
-        observed_complete=False,
-        observed_at=datetime.now(timezone.utc),
-    )
+    observed_at = datetime.now(timezone.utc)
     plan = registry.plan_create(
         crashed_build,
         plan_id=new_id(),
         deployment_id=deployment,
         settings={},
-        roots=[item],
+        # Roots are admitted first and unexpanded ...
+        roots=[
+            registration_item(
+                task,
+                declared_upstreams=None,
+                observed_complete=False,
+                observed_at=observed_at,
+            )
+        ],
     )
+    # ... and the walk's chunk expands them.
+    registry.plan_register_members(
+        plan.id,
+        [
+            registration_item(
+                task,
+                declared_upstreams=[],
+                observed_complete=False,
+                observed_at=observed_at,
+            )
+        ],
+    )
+    registry.plan_seal(plan.id)
     registry.member_start(
         plan.id,
         str(task.id),
-        execution_id=uuid.UUID(ref_info["execution_id"]),
+        execution_id=original_execution,
         claim_ttl_seconds=3600,
     )
+    registry.crashed_plan_id = plan.id
 
     class CountingExecutor(ModalTaskExecutor):
         spawns = 0

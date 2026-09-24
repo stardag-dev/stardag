@@ -65,11 +65,15 @@ class TestDeploymentRecord:
         assert (
             registry.deployment_list(kind="modal", app_name="myapp", current=True) == []
         )
-        _activate_deployment(registry, stardag_app.deployment_id, "myapp")
+        _activate_deployment(
+            registry, stardag_app.deployment_id, "myapp", modal_app_id="ap-123"
+        )
         (current,) = registry.deployment_list(
             kind="modal", app_name="myapp", current=True
         )
         assert current.id == stardag_app.deployment_id
+        # What only the finished deploy knows is recorded on activation.
+        assert current.modal_app_id == "ap-123"
 
     @pytest.mark.parametrize("step", ["create", "activate"])
     def test_a_failure_exits_non_zero(self, step):
@@ -87,7 +91,9 @@ class TestDeploymentRecord:
                     raise ConnectionError("registry unreachable")
                 return super().deployment_create(**kwargs)
 
-            def deployment_activate(self, deployment_id):
+            def deployment_activate(
+                self, deployment_id, *, modal_app_id=None, image_id=None
+            ):
                 raise ConnectionError("registry unreachable")
 
         registry = Failing()

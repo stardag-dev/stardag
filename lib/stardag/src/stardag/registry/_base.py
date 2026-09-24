@@ -550,7 +550,15 @@ class RegistryABC:
             modal_app_id=modal_app_id,
         )
 
-    def deployment_activate(self, deployment_id: UUID) -> DeploymentInfo:
+    def deployment_activate(
+        self,
+        deployment_id: UUID,
+        *,
+        modal_app_id: str | None = None,
+        image_id: str | None = None,
+    ) -> DeploymentInfo:
+        """``POST /deployments/{id}/activate``, with what only the finished
+        deploy knows (a given value fills a NULL or must match)."""
         raise _missing(self, "deployment_activate")
 
     def deployment_list(

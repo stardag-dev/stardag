@@ -57,6 +57,12 @@ registry_live_guard()
 
 pytestmark = [
     pytest.mark.registry_live,
+    # The command this drives is v1's (`_cli._stop`, over task rows). v2's
+    # `builds stop` lists and stops *executions* (`GET
+    # /builds/{id}/executions`, `POST /executions/{id}/stopped`, both
+    # served); the CLI over them is I8, and this scenario is re-pointed
+    # with it. The assertions stay as they are.
+    pytest.mark.skip(reason="v2: I8 (`stardag builds stop` over executions)"),
     # Longer than the tier's usual 900: this scenario now waits out the
     # excluded upstreams' own sleep, which is the price of asserting that
     # they were never touched rather than merely that they were listed.
@@ -118,7 +124,7 @@ def _stoppable_ids(build_id: uuid.UUID) -> set[str]:
     answer. What it buys is that the wait below is on the state the
     command is actually defined against.
     """
-    from stardag._cli import _stop
+    from stardag._cli import _stop  # type: ignore[attr-defined]  # v2: I8
     from stardag.registry import registry_provider
 
     executions, _ = _stop.collect_executions(registry_provider.get(), build_id)

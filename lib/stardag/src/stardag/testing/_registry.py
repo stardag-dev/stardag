@@ -431,11 +431,30 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         self.deployments[row.id] = row
         return self._deployment_info(row, created=True)
 
-    def deployment_activate(self, deployment_id: UUID) -> DeploymentInfo:
-        self._record("deployment_activate", deployment_id=deployment_id)
+    def deployment_activate(
+        self,
+        deployment_id: UUID,
+        *,
+        modal_app_id: str | None = None,
+        image_id: str | None = None,
+    ) -> DeploymentInfo:
+        self._record(
+            "deployment_activate",
+            deployment_id=deployment_id,
+            modal_app_id=modal_app_id,
+            image_id=image_id,
+        )
         row = self.deployments.get(deployment_id)
         if row is None:
             raise refuse("unknown_deployment", status=404)
+        # A given value fills a NULL or must match (the server's rule).
+        for column, value in (("modal_app_id", modal_app_id), ("image_id", image_id)):
+            if value is None:
+                continue
+            recorded = getattr(row, column)
+            if recorded is not None and recorded != value:
+                raise refuse("deployment_mismatch", field=column)
+            setattr(row, column, value)
         if row.activated_at is None:
             row.activated_at = self.now()
         return self._deployment_info(row)

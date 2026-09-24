@@ -337,7 +337,10 @@ class TestRoutes:
             "app_name": "app",
             "code_id": "sha",
         }
+        registry.deployment_activate(deployment_id, modal_app_id="ap-1")
+        assert recorder.body() == {"modal_app_id": "ap-1"}
         registry.deployment_activate(deployment_id)
+        assert recorder.body() in (None, {})
         (listed,) = registry.deployment_list(kind="modal", app_name="app", current=True)
         assert listed.generation == 3 and listed.is_current
         assert recorder.requests[-1].url.params["current"] == "true"
