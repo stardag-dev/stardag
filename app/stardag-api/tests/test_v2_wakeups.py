@@ -540,7 +540,9 @@ async def test_concurrency_limits_are_configured_over_http(
     put = await client.put("/api/v2/concurrency-limits/gpu", json={"max_concurrent": 1})
     assert put.json()["max_concurrent"] == 1
     listed = await client.get("/api/v2/concurrency-limits")
-    assert listed.json() == {"limits": [{"key": "gpu", "max_concurrent": 1}]}
+    assert listed.json() == {
+        "limits": [{"key": "gpu", "max_concurrent": 1, "in_use": 0, "holders": None}]
+    }
     bad = await client.put(
         "/api/v2/concurrency-limits/gpu", json={"max_concurrent": -1}
     )
@@ -561,3 +563,64 @@ async def test_concurrency_limits_are_configured_over_http(
     assert missing.status_code == 404
     assert missing.json()["detail"]["code"] == "unknown_limit"
     assert (await client.get("/api/v2/concurrency-limits")).json() == {"limits": []}
+
+
+async def test_concurrency_limits_report_in_use_and_holders(
+    client: AsyncClient, h: Harness
+):
+    """``in_use`` is always counted (the same live-claim definition the
+    claiming start enforces against); ``?include_holders=true`` adds who
+    holds them — task, build/plan, execution, ``started_at`` — from the
+    same call, not one extra request per key."""
+    await client.put("/api/v2/concurrency-limits/gpu", json={"max_concurrent": 2})
+
+    t1, t2 = item("T1"), item("T2")
+    build_a, plan_a = await h.planned([t1], [t1])
+    build_b, plan_b = await h.planned([t2], [t2])
+
+    idle = await client.get("/api/v2/concurrency-limits")
+    assert idle.json() == {
+        "limits": [{"key": "gpu", "max_concurrent": 2, "in_use": 0, "holders": None}]
+    }
+
+    execution_a = await h.start(plan_a.id, t1, limit_keys=["gpu"])
+
+    bare = await client.get("/api/v2/concurrency-limits")
+    (limit,) = bare.json()["limits"]
+    assert limit["in_use"] == 1
+    assert limit["holders"] is None  # not asked for
+
+    with_holders = await client.get(
+        "/api/v2/concurrency-limits", params={"include_holders": "true"}
+    )
+    (limit,) = with_holders.json()["limits"]
+    assert limit["in_use"] == 1
+    (holder,) = limit["holders"]
+    assert holder["task_id"] == t1.task_id
+    assert holder["task_name"] == "T1"
+    assert holder["build_id"] == str(build_a)
+    assert holder["plan_id"] == str(plan_a.id)
+    assert holder["execution_id"] == str(execution_a)
+    assert holder["started_at"] is not None
+
+    execution_b = await h.start(plan_b.id, t2, limit_keys=["gpu"])
+    full = await client.get(
+        "/api/v2/concurrency-limits", params={"include_holders": "true"}
+    )
+    (limit,) = full.json()["limits"]
+    assert limit["in_use"] == 2
+    assert {h["task_id"] for h in limit["holders"]} == {t1.task_id, t2.task_id}
+
+    await h.transition(plan_a.id, t1, Transition.complete(execution_a))
+    released = await client.get("/api/v2/concurrency-limits")
+    (limit,) = released.json()["limits"]
+    assert limit["in_use"] == 1
+
+    await h.lapse_claim(t2)
+    lapsed = await client.get(
+        "/api/v2/concurrency-limits", params={"include_holders": "true"}
+    )
+    (limit,) = lapsed.json()["limits"]
+    assert limit["in_use"] == 0
+    assert limit["holders"] == []
+    assert execution_b is not None  # sanity: t2's claim was the one that lapsed

@@ -170,8 +170,15 @@ deployments list`** (`stardag modal deployments` stays as an alias).
 - **Changed: `stardag tasks`** — `show`, new `check` (runs `complete()`
   locally and prints the observation; reports nothing), `retry`, `cancel`,
   new `exclude`. `tasks list` is removed.
-- **Removed: `stardag concurrency-limits`** (the whole group) and
-  `stardag builds cleanup`.
+- **Removed: `stardag builds cleanup`.**
+- **Restored: `stardag concurrency-limits`** (`list [--holders]`, `set`,
+  `delete`, `holders`) — dropped by omission between two v2 work packages
+  (the server routes and client methods already existed); no `evict`, since
+  a v2 slot is released by ending its execution (`stardag builds stop
+--mark-lost` is the recovery path for a holder whose worker is gone).
+  `list`/`holders` carry `in_use` and, with `--holders`, holder detail from
+  one call (`GET /concurrency-limits?include_holders=true`), not one extra
+  request per key as in v1.
 - `stardag modal deploy` records the deployment before the deploy and
   activates it after; a failed create or activation exits non-zero.
 

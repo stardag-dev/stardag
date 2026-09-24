@@ -553,5 +553,26 @@ class ConcurrencyLimitResponse(BaseModel):
     max_concurrent: int
 
 
+class ConcurrencyLimitHolder(BaseModel):
+    """A task currently occupying a slot of a limit key (a live claim)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    task_id: str
+    task_name: str
+    build_id: UUID
+    plan_id: UUID
+    execution_id: UUID | None
+    started_at: datetime | None
+
+
+class ConcurrencyLimitInfo(ConcurrencyLimitResponse):
+    """A limit as ``GET /concurrency-limits`` lists it: the cap, how many
+    slots are occupied, and — with ``include_holders=true`` — by what."""
+
+    in_use: int
+    holders: list[ConcurrencyLimitHolder] | None = None
+
+
 class ConcurrencyLimitListResponse(BaseModel):
-    limits: list[ConcurrencyLimitResponse]
+    limits: list[ConcurrencyLimitInfo]

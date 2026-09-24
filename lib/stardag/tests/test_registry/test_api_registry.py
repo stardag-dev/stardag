@@ -310,6 +310,66 @@ class TestRoutes:
         registry.concurrency_limit_delete("gpu")
         assert recorder.requests[-1].url.path == "/api/v2/concurrency-limits/gpu"
 
+    def test_concurrency_limits_detailed(self):
+        """``concurrency_limit_list_detailed`` sends ``include_holders``
+        only when asked, and parses ``in_use``/``holders`` into the client
+        models — the seam ``stardag concurrency-limits list``/``holders``
+        run on, which the CLI's own tests exercise against the in-memory
+        registry rather than this HTTP layer."""
+        build_id, plan_id, execution_id = uuid4(), uuid4(), uuid4()
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            with_holders = request.url.params.get("include_holders") == "true"
+            holders = (
+                [
+                    {
+                        "task_id": "t1",
+                        "task_name": "T",
+                        "build_id": str(build_id),
+                        "plan_id": str(plan_id),
+                        "execution_id": str(execution_id),
+                        "started_at": NOW.isoformat(),
+                    }
+                ]
+                if with_holders
+                else None
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "limits": [
+                        {
+                            "key": "gpu",
+                            "max_concurrent": 2,
+                            "in_use": 1,
+                            "holders": holders,
+                        }
+                    ]
+                },
+            )
+
+        registry = _registry(handler)
+
+        bare = registry.concurrency_limit_list_detailed()
+        assert "include_holders" not in requests[-1].url.params
+        (limit,) = bare
+        assert (limit.key, limit.max_concurrent, limit.in_use) == ("gpu", 2, 1)
+        assert limit.holders is None
+
+        detailed = registry.concurrency_limit_list_detailed(include_holders=True)
+        assert requests[-1].url.params.get("include_holders") == "true"
+        (limit,) = detailed
+        assert limit.holders is not None
+        (holder,) = limit.holders
+        assert holder.task_id == "t1"
+        assert holder.task_name == "T"
+        assert holder.build_id == build_id
+        assert holder.plan_id == plan_id
+        assert holder.execution_id == execution_id
+        assert holder.started_at == NOW
+
     def test_deployments(self):
         deployment_id = uuid4()
         row = {

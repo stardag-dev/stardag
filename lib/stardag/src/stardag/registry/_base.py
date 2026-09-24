@@ -32,6 +32,7 @@ from stardag.registry._models import (
     BuildFrontier,
     BuildInfo,
     BuildNotifyResult,
+    ConcurrencyLimitInfo,
     DeploymentInfo,
     DeploymentKind,
     ExclusionResult,
@@ -633,6 +634,16 @@ class RegistryABC:
     def concurrency_limit_list(self) -> dict[str, int]:
         """``GET /concurrency-limits``: key -> max_concurrent."""
         raise _missing(self, "concurrency_limit_list")
+
+    def concurrency_limit_list_detailed(
+        self, *, include_holders: bool = False
+    ) -> list[ConcurrencyLimitInfo]:
+        """``GET /concurrency-limits``, parsed in full: each key's cap, how
+        many slots are in use, and — with ``include_holders`` — by which
+        tasks. What ``stardag concurrency-limits list``/``holders`` render;
+        :meth:`concurrency_limit_list` stays the plain key -> cap mapping
+        for callers that only want the configuration."""
+        raise _missing(self, "concurrency_limit_list_detailed")
 
     # -- reactive scheduling -----------------------------------------------------
 

@@ -16,6 +16,7 @@ from fastapi import APIRouter, Path, Query
 from stardag_api.models import DeploymentKind
 from stardag_api.routes.registry_v2._common import Auth, Db
 from stardag_api.schemas_v2 import (
+    ConcurrencyLimitInfo,
     ConcurrencyLimitListResponse,
     ConcurrencyLimitResponse,
     ConcurrencyLimitSet,
@@ -107,8 +108,10 @@ async def delete_concurrency_limit(key: LimitKey, db: Db, auth: Auth) -> None:
 
 
 @router.get("/concurrency-limits", response_model=ConcurrencyLimitListResponse)
-async def list_concurrency_limits(db: Db, auth: Auth):
-    rows = await concurrency_limits.list_limits(db, auth.environment_id)
+async def list_concurrency_limits(db: Db, auth: Auth, include_holders: bool = False):
+    rows = await concurrency_limits.list_limits(
+        db, auth.environment_id, include_holders=include_holders
+    )
     return ConcurrencyLimitListResponse(
-        limits=[ConcurrencyLimitResponse.model_validate(r) for r in rows]
+        limits=[ConcurrencyLimitInfo.model_validate(r) for r in rows]
     )
