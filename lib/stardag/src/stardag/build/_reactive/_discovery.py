@@ -8,6 +8,7 @@ from functools import partial
 from typing import Callable, Coroutine, Sequence
 from uuid import UUID
 
+from stardag._core.instance import SeenInstances, extend_path
 from stardag import (
     BaseTask,
     TaskStruct,
@@ -261,14 +262,19 @@ async def discover_and_register_aio(
     # mutation itself, so it never serialises the I/O below.
     visit_lock = asyncio.Lock()
     visited: set[UUID] = set()
+    # One instance per task id per plan (v2 design, "Two hashes, one flag").
+    seen_instances = SeenInstances()
     # ONE semaphore for the whole walk (not one per recursion level, which
     # would bound nothing), gating exactly the remote call: the target
     # existence check. Mirrors ``build/_concurrent.py``'s
     # ``discover_semaphore``.
     discover_semaphore = asyncio.Semaphore(max(1, max_concurrent_discover))
 
-    async def visit(task: BaseTask) -> None:
+    async def visit(task: BaseTask, parent_path: str | None = None) -> None:
         """Check ``task`` for completion and recurse into its deps.
+
+        ``parent_path`` is the construction path of the task that reached
+        this one (None for a root), for ``InstanceConflictError``.
 
         Order-free by construction: it records facts about tasks and never
         appends to an ordered collection, so sibling subtrees may finish in
@@ -276,7 +282,9 @@ async def discover_and_register_aio(
         DAG and the completion predicate, not of the traversal order, so it
         is the same set the serial walk visited.
         """
+        path = extend_path(parent_path, task)
         async with visit_lock:
+            seen_instances.observe(task, path)
             if task.id in visited:
                 return
             visited.add(task.id)
@@ -287,7 +295,7 @@ async def discover_and_register_aio(
             return  # don't recurse below complete tasks
         deps = flatten_task_struct(task.requires())
         deps_of[task.id] = deps
-        await _run_concurrently([partial(visit, dep) for dep in deps])
+        await _run_concurrently([partial(visit, dep, path) for dep in deps])
 
     roots = flatten_task_struct(tasks)
     await _run_concurrently([partial(visit, task) for task in roots])

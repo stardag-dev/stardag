@@ -1,17 +1,23 @@
-"""Reconstruct task instances from registry-stored task data — pickle-free.
+"""Reconstruct task objects from registry-stored instance bodies — pickle-free.
 
-The ``task_data`` persisted at registration (``model_dump(mode="json")``) is
-self-describing: the polymorphic serializer embeds the ``__namespace`` /
-``__name`` discriminator keys, and nested task fields carry their own. That
-makes the registry's stored payload sufficient to rebuild the concrete task
-instance via the polymorphic validator — provided the module defining the
-task class has been imported (class registration happens at class-definition
-time).
+An **instance** is a registry row: one construction of a task under a
+deterministic scope, stored as its *body* — the registry-mode dump of every
+field, significant or not, defaults included (``BaseTask.instance_body``).
+The Python object rebuilt from it is a **task object**; one instance
+rehydrates into any number of them.
 
-This unlocks orchestration flows that don't depend on same-process (or
-same-deployment pickle) state: scheduler ticks re-hydrating tasks whose
-pickle is missing, UI-triggered retries, and non-Python-adjacent tooling
-that only has the registry payload.
+The body is self-describing: the polymorphic serializer embeds the
+``__namespace`` / ``__name`` discriminator keys, and nested task fields
+carry their own (as full bodies). That makes it sufficient to rebuild the
+concrete task object via the polymorphic validator — provided the module
+defining the task class has been imported (class registration happens at
+class-definition time).
+
+Rehydration is **strict for significant fields and lenient for the rest**:
+the recomputed task id must match the expected one (``expected_task_id``),
+while a stored key the class no longer declares is dropped with a warning
+and a missing non-significant field takes the class default. That is what
+lets an old plan's root bodies be re-read under new code.
 
 Known limitations:
 
@@ -25,7 +31,8 @@ Known limitations:
   user-invoked path.
 - Fields whose custom serializers are not losslessly round-trippable
   reconstruct to a *different* task identity — guarded by the optional
-  ``expected_task_id`` check.
+  ``expected_task_id`` check, and caught before registration by
+  ``check_serialization_stability``.
 - Nested task fields must use the polymorphic annotations
   (``sd.TaskLoads[T]`` / ``sd.SubClass[...]``) — a plain task-typed
   annotation validates children into the abstract base class.
@@ -75,17 +82,22 @@ def task_from_registry_data(
     *,
     expected_task_id: str | UUID | None = None,
 ) -> BaseTask:
-    """Reconstruct a task instance from its registry ``task_data`` payload.
+    """Reconstruct a task object from an instance body.
+
+    The body is the payload stored at registration for one instance (also
+    available as ``TaskMetadata.body`` from ``task_get_metadata``):
+    ``task.instance_body()``, including the polymorphic discriminator keys.
+    Validated in compat mode: strict for significant fields through the
+    task id check, lenient for non-significant ones (an unknown key is
+    dropped with a warning, a missing one takes the class default).
 
     Args:
-        task_data: The payload stored at registration (also available as
-            ``TaskMetadata.body`` from ``task_get_metadata``): a full
-            ``model_dump(mode="json")`` including the polymorphic
-            discriminator keys.
-        expected_task_id: When given, the reconstructed task's
-            (recomputed) deterministic id must match — catching lossy
-            serialization round-trips that would otherwise silently yield
-            a different task identity.
+        task_data: The instance body.
+        expected_task_id: When given, the reconstructed task object's
+            (recomputed) task id must match — catching lossy
+            serialization round-trips, or a significant field the class
+            no longer declares, that would otherwise silently yield a
+            different completion identity.
 
     Raises:
         TaskRehydrationError: If the task class is not registered (module

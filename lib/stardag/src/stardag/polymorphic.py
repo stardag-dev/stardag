@@ -559,9 +559,6 @@ class PolymorphicRoot(StardagBaseModel):
         if not _is_parameterized_generic_alias(cls):
             _validate_and_index_polymorphic_fields(cls)
 
-        # Last, not first: ``StardagBaseModel``'s hook indexes a model the
-        # build config can name, and its key is ``__type_id__`` for a
-        # polymorphic class — which the registration above is what sets.
         super().__pydantic_init_subclass__(**kwargs)
 
     def __class_getitem__(
