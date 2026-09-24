@@ -92,7 +92,7 @@ repos:
         verbose: true
       - id: pyright-integration-tests
         name: pyright (integration-tests)
-        entry: bash -c 'cd integration-tests && uv sync --all-extras && uv run pyright src tests'
+        entry: bash -c 'cd integration-tests && uv sync --all-extras && uv run pyright src tests tests_registry_live'
         language: system
         files: ^integration-tests/
         types: [python]

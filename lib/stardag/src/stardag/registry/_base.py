@@ -462,11 +462,16 @@ class RegistryABC:
         )
 
     def build_list_executions(
-        self, build_id: UUID, *, not_in_current_plan: bool = False
+        self,
+        build_id: UUID,
+        *,
+        not_in_current_plan: bool = False,
+        include_ended: bool = False,
     ) -> list[ExecutionInfo]:
         """``GET /builds/{id}/executions``: the build's executions with no end
         reported (``builds stop``, a worker's cancellation checkpoint);
-        ``not_in_current_plan`` keeps the orphans."""
+        ``not_in_current_plan`` keeps the orphans; ``include_ended`` lists
+        the whole ledger (every execution granted, ended or not)."""
         raise _missing(self, "build_list_executions")
 
     def execution_report_stopped(self, execution_id: UUID) -> TransitionResult:
@@ -545,7 +550,15 @@ class RegistryABC:
             modal_app_id=modal_app_id,
         )
 
-    def deployment_activate(self, deployment_id: UUID) -> DeploymentInfo:
+    def deployment_activate(
+        self,
+        deployment_id: UUID,
+        *,
+        modal_app_id: str | None = None,
+        image_id: str | None = None,
+    ) -> DeploymentInfo:
+        """``POST /deployments/{id}/activate``, with what only the finished
+        deploy knows (a given value fills a NULL or must match)."""
         raise _missing(self, "deployment_activate")
 
     def deployment_list(
@@ -577,6 +590,21 @@ class RegistryABC:
 
     async def settings_get_aio(self, settings_hash: str) -> SettingsInfo:
         return self.settings_get(settings_hash)
+
+    # -- concurrency limits ------------------------------------------------------
+
+    def concurrency_limit_set(self, key: str, max_concurrent: int) -> None:
+        """``PUT /concurrency-limits/{key}``: create or replace the cap on
+        how many tasks carrying ``key`` may hold a live claim at once."""
+        raise _missing(self, "concurrency_limit_set")
+
+    def concurrency_limit_delete(self, key: str) -> None:
+        """``DELETE /concurrency-limits/{key}`` (404 ``unknown_limit``)."""
+        raise _missing(self, "concurrency_limit_delete")
+
+    def concurrency_limit_list(self) -> dict[str, int]:
+        """``GET /concurrency-limits``: key -> max_concurrent."""
+        raise _missing(self, "concurrency_limit_list")
 
     # -- reactive scheduling -----------------------------------------------------
 
@@ -643,13 +671,17 @@ class RegistryABC:
             build_id, owner_id=owner_id, ttl_seconds=ttl_seconds
         )
 
-    def scheduler_lease_release(self, build_id: UUID, *, owner_id: str) -> None:
+    def scheduler_lease_release(
+        self, build_id: UUID, *, owner_id: str
+    ) -> SchedulerLeaseResult:
+        """Drop the lease if ``owner_id`` still holds it; ``held`` reports
+        whether it did (a lost tick cannot clear its successor's lease)."""
         raise _missing(self, "scheduler_lease_release")
 
     async def scheduler_lease_release_aio(
         self, build_id: UUID, *, owner_id: str
-    ) -> None:
-        self.scheduler_lease_release(build_id, owner_id=owner_id)
+    ) -> SchedulerLeaseResult:
+        return self.scheduler_lease_release(build_id, owner_id=owner_id)
 
     def build_report_tick_summary(
         self, build_id: UUID, summary: Mapping[str, Any]

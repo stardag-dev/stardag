@@ -268,18 +268,24 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         )
 
     def build_list_executions(
-        self, build_id: UUID, *, not_in_current_plan: bool = False
+        self,
+        build_id: UUID,
+        *,
+        not_in_current_plan: bool = False,
+        include_ended: bool = False,
     ) -> list[ExecutionInfo]:
         self._record(
             "build_list_executions",
             build_id=build_id,
             not_in_current_plan=not_in_current_plan,
+            include_ended=include_ended,
         )
         self.build(build_id)
         rows = [
             self._execution_info(e)
             for e in self.executions.values()
-            if e.ended_at is None and self.plans[e.plan_id].build_id == build_id
+            if (include_ended or e.ended_at is None)
+            and self.plans[e.plan_id].build_id == build_id
         ]
         return [r for r in rows if not (not_in_current_plan and r.in_current_plan)]
 
@@ -311,6 +317,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             if i.task_id == task.task_id
         ]
         instances.reverse()
+        current = self.executions.get(task.execution_id) if task.execution_id else None
         return TaskInfo(
             task_id=task.task_id,
             task_namespace=task.task_namespace,
@@ -318,6 +325,12 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             version=task.version,
             output_uri=task.output_uri,
             status=task.status,
+            status_at=task.status_at,
+            started_at=current.started_at if current else None,
+            completed_at=task.completed_at,
+            error_message=task.error_message,
+            claim_expires_at=task.claim_expires_at,
+            execution_id=task.execution_id,
             instances=instances,
         )
 
@@ -418,11 +431,30 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         self.deployments[row.id] = row
         return self._deployment_info(row, created=True)
 
-    def deployment_activate(self, deployment_id: UUID) -> DeploymentInfo:
-        self._record("deployment_activate", deployment_id=deployment_id)
+    def deployment_activate(
+        self,
+        deployment_id: UUID,
+        *,
+        modal_app_id: str | None = None,
+        image_id: str | None = None,
+    ) -> DeploymentInfo:
+        self._record(
+            "deployment_activate",
+            deployment_id=deployment_id,
+            modal_app_id=modal_app_id,
+            image_id=image_id,
+        )
         row = self.deployments.get(deployment_id)
         if row is None:
             raise refuse("unknown_deployment", status=404)
+        # A given value fills a NULL or must match (the server's rule).
+        for column, value in (("modal_app_id", modal_app_id), ("image_id", image_id)):
+            if value is None:
+                continue
+            recorded = getattr(row, column)
+            if recorded is not None and recorded != value:
+                raise refuse("deployment_mismatch", field=column)
+            setattr(row, column, value)
         if row.activated_at is None:
             row.activated_at = self.now()
         return self._deployment_info(row)
@@ -462,6 +494,20 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         if body is None:
             raise refuse("unknown_settings", status=404)
         return SettingsInfo(hash=settings_hash, body=dict(body))
+
+    # -- concurrency limits --------------------------------------------------------------
+
+    def concurrency_limit_set(self, key: str, max_concurrent: int) -> None:
+        self._record("concurrency_limit_set", key=key, max_concurrent=max_concurrent)
+        self.limits[key] = max_concurrent
+
+    def concurrency_limit_delete(self, key: str) -> None:
+        self._record("concurrency_limit_delete", key=key)
+        if self.limits.pop(key, None) is None:
+            raise refuse("unknown_limit", status=404)
+
+    def concurrency_limit_list(self) -> dict[str, int]:
+        return dict(sorted(self.limits.items()))
 
     # -- reactive scheduling ---------------------------------------------------------------
 
@@ -555,11 +601,15 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         build.lease_expires_at = self.now() + timedelta(seconds=ttl_seconds)
         return SchedulerLeaseResult(held=True, expires_at=build.lease_expires_at)
 
-    def scheduler_lease_release(self, build_id: UUID, *, owner_id: str) -> None:
+    def scheduler_lease_release(
+        self, build_id: UUID, *, owner_id: str
+    ) -> SchedulerLeaseResult:
         build = self.build(build_id)
-        if build.lease_owner == owner_id:
-            build.lease_owner = None
-            build.lease_expires_at = None
+        if build.lease_owner != owner_id:
+            return SchedulerLeaseResult(held=False)
+        build.lease_owner = None
+        build.lease_expires_at = None
+        return SchedulerLeaseResult(held=True)
 
     def build_report_tick_summary(
         self, build_id: UUID, summary: Mapping[str, Any]

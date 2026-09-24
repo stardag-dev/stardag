@@ -321,7 +321,7 @@ def _report_margin(deployment: Deployment, *, shared_id, build_id) -> None:
     """
     from stardag.registry import registry_provider
 
-    started_at = registry_provider.get().task_get_metadata(shared_id).started_at
+    started_at = registry_provider.get().task_get(shared_id).started_at
     registered_at = first_event_at(task_events(deployment, shared_id), build_id)
     if started_at is None or registered_at is None:
         print("[suspended] margin unavailable (missing registry timestamps)")

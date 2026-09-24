@@ -2,10 +2,6 @@
 :mod:`stardag.registry._api_http`). :class:`~stardag.registry.APIRegistry`
 sends each through its sync and async transport, so the two methods of one
 route cannot drift apart.
-
-Routes marked **(assumed)** are not served by the registry yet; they are
-coded to the shape ``docs/design/registry-v2/design.md`` implies and listed
-as open server-contract items in the I7 status of ``plan.md``.
 """
 
 from __future__ import annotations
@@ -135,7 +131,6 @@ def _frontier_req(build_id: UUID) -> Request[BuildFrontier]:
 
 
 def _list_running_req(reactive_app_name: str | None, limit: int) -> Request[list[UUID]]:
-    # (assumed) GET /builds?status=running&reactive_app_name=...
     params = {"status": "running", "limit": str(limit)}
     if reactive_app_name is not None:
         params["reactive_app_name"] = reactive_app_name
@@ -192,7 +187,6 @@ def _seal_req(plan_id: UUID) -> Request[PlanInfo]:
 
 
 def _plan_roots_req(plan_id: UUID) -> Request[list[FrontierMember]]:
-    # (assumed) GET /plans/{id}/roots -> {"roots": [FrontierMember]}
     def parse(payload: Any) -> list[FrontierMember]:
         return [
             FrontierMember.model_validate(r) for r in (payload or {}).get("roots", [])
@@ -240,7 +234,7 @@ def _discovery_failed_req(
 
 
 def _executions_req(
-    build_id: UUID, not_in_current_plan: bool
+    build_id: UUID, not_in_current_plan: bool, include_ended: bool = False
 ) -> Request[list[ExecutionInfo]]:
     def parse(payload: Any) -> list[ExecutionInfo]:
         return [
@@ -252,7 +246,10 @@ def _executions_req(
         "GET",
         f"/builds/{build_id}/executions",
         parse,
-        params={"not_in_current_plan": "true"} if not_in_current_plan else {},
+        params={
+            **({"not_in_current_plan": "true"} if not_in_current_plan else {}),
+            **({"include_ended": "true"} if include_ended else {}),
+        },
         operation=f"List executions of build {build_id}",
     )
 

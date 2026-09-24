@@ -1,6 +1,6 @@
 """Two builds in one structure scope share discovered structure.
 
-The reason the scope is the deployment plus config rather than the build.
+The reason the scope is the deployment plus settings rather than the build.
 When a second build registers a fan-out parent that a first build has
 already run to its yield, the second build trusts the first's dynamic edges:
 it is gated on the same children, admits them into its own plan when it
@@ -88,10 +88,15 @@ def test_a_scope_mate_reuses_the_parents_yield(deployment: Deployment) -> None:
         f"raise PRE_YIELD_SECONDS ({PRE_YIELD_SECONDS}s).\n" + describe(build_b)
     )
 
+    # One scope: both builds' active plans are under the same deployment
+    # and the same settings, so the instances (and their edges) are shared.
     registry = registry_provider.get()
-    assert (
-        registry.build_get(build_a).scope_key == registry.build_get(build_b).scope_key
-    )
+    frontier_a = registry.build_get_frontier(build_a)
+    frontier_b = registry.build_get_frontier(build_b)
+    assert (frontier_a.deployment_id, frontier_a.settings_hash) == (
+        frontier_b.deployment_id,
+        frontier_b.settings_hash,
+    ), (frontier_a, frontier_b)
 
     status_a = wait_for_terminal(build_a, timeout=BUILD_TIMEOUT_SECONDS)
     assert status_a == "completed", describe(build_a)

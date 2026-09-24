@@ -210,40 +210,79 @@ assignee the maintainer.
 ## Status
 
 - [x] Design approved for review (PR against v2)
-- [ ] I0 — Vertical spike: in progress — step 1 (schema, deletion, Postgres
-      default) done; step 2 (registration, frontier and transitions for the
-      static path, server side, under `/api/v2`) done, PR #380; step 3a
-      (build lifecycle, deployments, settings, wake-ups, notify, scheduler
-      lease, reactive meta, tick summaries; the authority refinement and
-      closure-first seal) done, PR #382; step 3b (`/yield`; interrupt,
+- [x] I0 — Vertical spike: done. Step 1 (schema, deletion, Postgres
+      default); step 2 (registration, frontier and transitions for the
+      static path, under `/api/v2`), PR #380; step 3a (build lifecycle,
+      deployments, settings, wake-ups, notify, scheduler lease, reactive
+      meta, tick summaries), PR #382; step 3b (`/yield`; interrupt,
       preempt, skip, a single task's cancel; skip-blocked and the exclusion
-      cascade, discovery failure as exclusion; `builds stop`, orphans, the
-      rate limit and the creation quota at the v2 route boundary; the
-      coordinator's rulings of 2026-09-24) done, PR #383, no `xfail` left
-      on the server side; step 3c (wake-up flags on `build_wake`, so a
-      claim in flight no longer hides its build's wake-up; the read routes
-      the SDK client calls: `GET /builds`, `GET /plans/{id}/roots`,
-      `GET /tasks/{id}` and task artifacts; attempt and interruption counts
-      on the frontier; `/activate` records `modal_app_id` and `image_id`;
-      seals serialise with activation, a renewal locks its limit slots)
-      done, PR #385; step 4 (live: SDK v2 client, reactive worker path,
-      fake registry, `test_reactive_e2e`) next.
+      cascade; `builds stop`, orphans, rate limit, creation quota), PR
+      #383; step 3c (wake-up flags on `build_wake`; the read routes the SDK
+      calls; attempt counts on the frontier; `/activate` records
+      `modal_app_id` and `image_id`), PR #385; step 4 (the live proof), PR
+      #386: the registry-live harness on `/api/v2`, `test_reactive_e2e`
+      and the must-still-hold list green against a provisioned v2
+      registry, the `modal_live` lib tier green on Modal. Step 4 added the
+      reads and routes the live tier needs (`GET /tasks/{id}/events`,
+      `GET /builds/{id}/events`, `GET /builds/{id}/executions?include_ended`,
+      `PUT/GET/DELETE /concurrency-limits/{key}`) and fixed what the live
+      run found (below).
+
+      | Scenario (live)                    | Outcome                        |
+      | ---------------------------------- | ------------------------------ |
+      | `test_reactive_e2e`                | green                          |
+      | `test_claim_race`                  | green                          |
+      | `test_cross_build_wake`            | green                          |
+      | `test_wake_storm`                  | green                          |
+      | `test_limit_slot_wake`             | green                          |
+      | `test_suspended_blocker`           | green                          |
+      | `test_failed_blocker`              | green                          |
+      | `test_watchdog_sweep`              | green                          |
+      | `test_wide_fan_out`                | green                          |
+      | `test_scheduler_lease_live` (4)    | green                          |
+      | `test_cancel_authority`            | green                          |
+      | `test_shared_structure_scope`      | green                          |
+      | `test_rollover`                    | green                          |
+      | `test_execution_identity` (3)      | green                          |
+      | `test_interruption_classification` | green                          |
+      | `test_builds_stop`                 | skipped, `v2: I8` (CLI)        |
+      | `test_structure_scope_static/_dyn` | deleted (S8/S22/S24, I10)      |
+
+      Skipped by I0, owned elsewhere: `stardag builds stop` over executions
+      and every other CLI surface (I8; the routes are served); the UI (I9);
+      the graph over instance edges as a read route (I4 — `test_rollover`
+      asserts the new scope through the parent's instances instead); the
+      registry-live scenarios for S1–S20 (I10); docs (I11). The live tier
+      was run serially per scenario on a developer stack, not as CI's
+      concurrent tier; the CI run is the merge gate.
+
+      What the live run found, by layer. SDK: the lease release dropped
+      the server's `held` answer (`scheduler_lease_release` now returns it;
+      unit tests on client and fake); `stardag modal deploy` never sent
+      `modal_app_id` on `/activate` (CLI and client tests). Server: none of
+      the step-3 rules failed live; the gaps were reads and routes the
+      tier depends on (above, `api-pg` tests). Harness and tests: v1 route
+      and model assumptions throughout, the lib live test's crashed-plan
+      setup (a claiming start re-checks upstreams, S39; an observation is
+      refused against a live claim, so the holder's completion is relayed),
+      and the live tier was never type-checked (the pyright hook now covers
+      `tests_registry_live`). Carried from #384's review: the local
+      deployment id is client-minted, the bootstrap is one build per
+      process, and the tick re-checks its lease after discovery and after
+      the executor-metadata await.
+
 - [ ] I1 — v2 schema
 - [ ] I2 — Registration service
 - [ ] I3 — Frontier and transitions
 - [ ] I4 — Deployments, builds, wake-ups, reads
 - [ ] I5 — Extract what stays
 - [ ] I6 — SDK core (in progress — hashing and field layer done; I7 pending)
-- [ ] I7 — SDK engines + Modal (in review, draft PR against `v2`). The
-      client, both engines, the tick, the worker and `stardag modal deploy`
-      run on `/api/v2`, against the step-3b routes; `build_config.py` is
-      gone and `settings` replaces it. Coded against routes the registry
-      does not serve yet, each marked **(assumed)** in
-      `registry/_api_routes.py` / `_api_registry.py`: `GET /builds`
-      (running, by reactive app: the watchdog), `GET /plans/{id}/roots`
-      (root bodies for rollover), `GET /tasks/{id}` (`from_registry`),
-      `POST /tasks/{id}/artifacts`. Left to I8: `builds list/stop/cleanup`,
-      `tasks`, `concurrency-limits`. The live tier is I0 step 4.
+- [ ] I7 — SDK engines + Modal (PR #384 merged). The client, both
+      engines, the tick, the worker and `stardag modal deploy` run on
+      `/api/v2`; `build_config.py` is gone and `settings` replaces it. Every
+      route the client calls is served (step 3c, step 4); proven live in I0
+      step 4. Left to I8: `builds list/stop/cleanup`, `tasks`,
+      `concurrency-limits` as CLI commands.
 - [ ] I8 — CLI
 - [ ] I9 — UI
 - [ ] I10 — tests

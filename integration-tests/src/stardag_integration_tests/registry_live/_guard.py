@@ -201,9 +201,12 @@ def _assert_registry_answers(
     response = None
     for attempt in range(_REACHABILITY_ATTEMPTS):
         try:
+            # The SDK's own prefix, so the check exercises the routes the
+            # workers call rather than restating a version here.
+            from stardag.registry._api_http import API_PREFIX
+
             response = registry.client.get(
-                f"{registry.api_url}/api/v1/builds",
-                params={"environment_id": registry.environment_id, "limit": 1},
+                f"{registry.api_url}{API_PREFIX}/builds", params={"limit": 1}
             )
             break
         except httpx.HTTPError as error:

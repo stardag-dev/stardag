@@ -48,7 +48,7 @@ def rate_limit(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
 
 async def _unended(h: Harness, build, **kwargs) -> list[executions.ExecutionState]:
     async with h.sf() as s:
-        return await executions.list_unended(s, ENV, build, **kwargs)
+        return await executions.list_executions(s, ENV, build, **kwargs)
 
 
 async def _stopped(h: Harness, execution_id):
@@ -263,3 +263,21 @@ async def test_executions_over_http(client: AsyncClient, h: Harness):
     assert stopped.status_code == 200 and stopped.json()["status"] == "cancelled"
     unknown = await client.post(f"/api/v2/executions/{uuid4()}/stopped")
     assert unknown.status_code == 404
+
+
+async def test_the_whole_ledger_over_http(client: AsyncClient, h: Harness):
+    """``include_ended`` lists every execution the build's plans granted,
+    ended or not: the durable record of what was spawned."""
+    t, u = item("T"), item("U")
+    build, plan = await h.planned([t, u], [t, u])
+    done = await h.run(plan.id, t)
+    live = await h.start(plan.id, u)
+    unended = await client.get(f"/api/v2/builds/{build}/executions")
+    assert [e["id"] for e in unended.json()["executions"]] == [str(live)]
+    ledger = await client.get(
+        f"/api/v2/builds/{build}/executions", params={"include_ended": True}
+    )
+    by_id = {e["id"]: e for e in ledger.json()["executions"]}
+    assert set(by_id) == {str(done), str(live)}
+    assert by_id[str(done)]["outcome"] == "completed"
+    assert by_id[str(live)]["ended_at"] is None
