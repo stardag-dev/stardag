@@ -107,14 +107,16 @@ async def _flag_for_the_holder(
     ``notify`` reads the lease after the flag is durable. If the holder had
     already released it -- and so may have run its exit handshake before
     the flag landed -- nobody will see the flag; spawn a successor, as a
-    worker's notify does. Best-effort: a failure here leaves the outcome
+    worker's notify does, and likewise when the answer is unknown. Best-effort: a failure here leaves the outcome
     ``lease_held`` and the build to the next wake-up or watchdog period.
     """
     try:
         notified = await registry.build_notify_aio(
             build_id, can_spawn=config.spawn_tick is not None
         )
-        if not notified.needs_tick or notified.scheduler_live is not False:
+        # Unknown (``None``) spawns, as in a worker's notify: a redundant
+        # tick costs a container, a skipped one costs the build its progress.
+        if not notified.needs_tick or notified.scheduler_live is True:
             return
         if config.spawn_tick is None:
             return

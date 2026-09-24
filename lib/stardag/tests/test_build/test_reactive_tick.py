@@ -493,6 +493,32 @@ class TestLeaseAndHandshake:
         assert spawned == [(build_id, "app")]
         assert summary.successor_spawned == 1
 
+    async def test_an_unknown_scheduler_state_gets_a_successor(
+        self, default_in_memory_fs_target: Target
+    ):
+        """``scheduler_live`` unknown is treated as gone, as a worker's
+        notify treats it: a redundant tick is cheap, a missing one stalls."""
+
+        class LeaseUnknown(InMemoryRegistry):
+            def build_notify(self, build_id, *, can_spawn=True):
+                result = super().build_notify(build_id, can_spawn=can_spawn)
+                return result.model_copy(update={"scheduler_live": None})
+
+        registry = LeaseUnknown()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"u-{new_id()}")])
+        registry.scheduler_lease_acquire(build_id, owner_id="holder", ttl_seconds=60)
+        spawned: list[tuple[UUID, str]] = []
+        config = TickConfig(
+            linger_seconds=0.5,
+            poll_interval_seconds=0.01,
+            spawn_tick=lambda b, a: spawned.append((b, a)),
+        )
+        summary = await _tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry), config
+        )
+        assert summary.outcome == "lease_held"
+        assert spawned == [(build_id, "app")]
+
     async def test_a_failed_flag_does_not_change_the_outcome(
         self, default_in_memory_fs_target: Target
     ):
