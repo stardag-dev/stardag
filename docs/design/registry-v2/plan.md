@@ -369,7 +369,11 @@ assignee the maintainer.
       timed); S37's missing activation (the real CLI with its activation
       step replaced). S21 and S37 recover through a watchdog sweep, by
       design: a lapse or a re-sent record flags nothing, and a lingering
-      tick polls the flag, not the frontier.
+      tick polls the flag, not the frontier. S21 drives the sweep
+      periodically (one per scheduler-lease TTL, until the takeover is on
+      the ledger), as the watchdog does: a sweep's tick that finds the
+      lease held exits, and one CI run's first sweep landed while the
+      spawning tick still lingered with it.
 
       Harness: `lapse_app` (a third provisioned app, so a sweep reaches only
       its own builds); the rollover app named per scenario by the deploying
