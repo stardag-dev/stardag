@@ -192,8 +192,43 @@ def test_concurrent_acquires_grant_exactly_one() -> None:
             "were granted; the build row's FOR UPDATE must serialize them "
             "down to exactly one"
         )
-        # Every denial reports the winner's expiry: same row, same value.
-        assert {r.expires_at for r in denied} == {held[0].expires_at}
+        # Every denial reports the expiry stored on the row that refused it,
+        # and every lease that can refuse this round is one the winner was
+        # granted: no denial may report an expiry later than the winner's
+        # final one.
+        #
+        # This asserted that every denial reported exactly the winner's
+        # echoed expiry until a live run showed it is not what the server
+        # promises. The SDK's transport retries a request whose response was
+        # lost, and an acquire retried by the owner already holding the
+        # lease is granted again with a fresh ``now + ttl`` ("a retried
+        # acquire is not a lost race", ``acquire_lease``). The winner then
+        # echoes its *last* grant, while each denial reports whichever
+        # grant was on the row when it was refused -- so the denials may
+        # differ from the winner, and among themselves: one refused before
+        # the retry reports the first grant, one refused after it (itself
+        # retried, say) the re-grant. Seen live: all twelve acquires were
+        # logged by the server within the same second, a thirteenth arrived
+        # 31s later (the 30s client timeout, then the retry), and the
+        # winner's echoed expiry was 31s past the one the eleven denials
+        # reported. A lower bound (the winner's *first* grant) would be
+        # tighter, but a lost response is by definition not observable
+        # here, so it is omitted. What remains is the direction nothing
+        # legitimate can produce: a denial reporting a *later* expiry than
+        # the winner's final one was refused by a lease the winner never
+        # held.
+        granted_until = held[0].expires_at
+        assert granted_until is not None, f"round {round_no}: the grant had no expiry"
+        for refused in denied:
+            assert refused.expires_at is not None, (
+                f"round {round_no}: a denial carried no expiry; it was "
+                "refused by a live lease and must report it"
+            )
+            assert refused.expires_at <= granted_until, (
+                f"round {round_no}: a denial reported an expiry of "
+                f"{refused.expires_at}, later than the winner's own "
+                f"{granted_until}"
+            )
 
         winner = owners[results.index(held[0])]
         loser = next(o for o in owners if o != winner)
