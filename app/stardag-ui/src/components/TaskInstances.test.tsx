@@ -71,7 +71,7 @@ describe("TaskInstances", () => {
     dialog = screen.getByRole("heading", { name: "Instance" }).parentElement!
       .parentElement!;
     expect(within(dialog).getByText("h1".repeat(8))).toBeInTheDocument();
-    expect(within(dialog).getByText("modal etl gen 3")).toBeInTheDocument();
+    expect(within(dialog).getByText("etl gen 3 · modal")).toBeInTheDocument();
     expect(within(dialog).getByText(/"epochs": 3/)).toBeInTheDocument();
   });
 });

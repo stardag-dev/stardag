@@ -96,7 +96,7 @@ export function BuildPlans({
                   </span>
                 )}
                 <Chip title={`Deployment ${plan.deployment_id}`}>
-                  {plan.deployment.kind} {deploymentLabel(plan.deployment)}
+                  {deploymentLabel(plan.deployment)} · {plan.deployment.kind}
                   {plan.deployment.kind !== "local" && !plan.deployment.is_current
                     ? " (not current)"
                     : ""}

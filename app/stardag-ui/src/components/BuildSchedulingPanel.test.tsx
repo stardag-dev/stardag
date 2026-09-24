@@ -91,12 +91,14 @@ describe("BuildSchedulingPanel", () => {
       name: "Plan generation 2 (active)",
     });
     expect(within(active).getByText("active")).toBeInTheDocument();
-    expect(within(active).getByText("modal etl gen 2")).toBeInTheDocument();
+    expect(within(active).getByText("etl gen 2 · modal")).toBeInTheDocument();
     expect(within(active).getByText("settings settings")).toBeInTheDocument();
     expect(within(active).getByText(/1 excluded/)).toBeInTheDocument();
 
     const old = screen.getByRole("listitem", { name: "Plan generation 1" });
-    expect(within(old).getByText("modal etl gen 1 (not current)")).toBeInTheDocument();
+    expect(
+      within(old).getByText("etl gen 1 · modal (not current)"),
+    ).toBeInTheDocument();
     expect(within(old).queryByText("active")).not.toBeInTheDocument();
     expect(vi.mocked(fetchBuildPlans)).toHaveBeenCalledWith("b", "env-1");
   });

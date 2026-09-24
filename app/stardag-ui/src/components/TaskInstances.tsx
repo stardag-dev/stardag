@@ -163,7 +163,7 @@ function InstanceCard({
           <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
             <dt className="text-gray-500 dark:text-gray-400">Deployment</dt>
             <dd className="text-gray-900 dark:text-gray-100">
-              {deployment ? `${deployment.kind} ${scopeLabel}` : scopeLabel}{" "}
+              {deployment ? `${scopeLabel} · ${deployment.kind}` : scopeLabel}{" "}
               <code className="font-mono text-xs text-gray-500">
                 {instance.deployment_id}
               </code>
