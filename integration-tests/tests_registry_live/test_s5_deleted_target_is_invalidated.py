@@ -11,14 +11,19 @@ build.
 
 Two halves, both on one salted chain ``Range -> Square -> Sum``:
 
-1. **Invalidation.** After a first build completes the chain, the targets of
-   ``Square`` and ``Sum`` are deleted and a second build of the same root is
+1. **Stickiness.** After a first build completes the chain, ``Square``'s
+   target is deleted and a second build of the same root is triggered. The
+   root's target exists, so the walk stops there and never looks at
+   ``Square``: it stays COMPLETED in the registry, as the design says
+   ("without discovery seeing it, it stays COMPLETED").
+2. **Invalidation.** ``Sum``'s target is deleted too and a third build is
    triggered. Its walk finds both missing, invalidates both, and re-runs
-   them -- and not ``Range``, whose target still exists.
-2. **Stickiness.** ``Square``'s target is deleted again and a third build of
-   the same root is triggered. The root's target exists, so the walk stops
-   there and never looks at ``Square``: it stays COMPLETED in the registry,
-   as the design says ("without discovery seeing it, it stays COMPLETED").
+   them -- and not ``Range``, whose target still exists. The order is
+   deliberate: the second build leaves a warm bootstrap container whose
+   Modal Volume view holds ``Sum``'s file, and a walk answered from that
+   view would see a deleted target as present. The SDK refreshes a mounted
+   volume once per walk for exactly this (``stardag.target._freshness``);
+   CI found the stale hit before it did.
 
 The alternative this rules out is v1's: a COMPLETED task could not be reset
 at all, so a vanished output could never be rebuilt; and its opposite, a
@@ -96,42 +101,46 @@ def test_s5_a_deleted_target_is_invalidated_and_rerun(deployment: Deployment) ->
         describe(first)
     )
 
-    # 1. Invalidation: the world lost two outputs; a build observes it.
+    # 1. Stickiness: a deletion discovery never looks at is not observed.
+    # The root's target exists, so the walk stops there. This build also
+    # leaves a warm bootstrap container whose volume view holds the root's
+    # file -- which is what makes the next half a test of freshness.
     delete_target(_uri(middle), modal_environment=env)
-    delete_target(_uri(root), modal_environment=env)
     second = _trigger()
     assert wait_for_terminal(second, timeout=BUILD_TIMEOUT_SECONDS) == "completed", (
         describe(second)
     )
-    for task in (middle, root):
-        events = task_events(deployment, task.id)
-        assert _invalidations(deployment, task.id, second), (
-            f"{task.id}'s missing target was not invalidated by the build that "
-            f"observed it.\n{describe_events(events, first=first, second=second)}"
-        )
-        rows = spawned_of(deployment, task.id, first, second)
-        assert [r["build_id"] for r in rows] == [str(first), str(second)], (
-            f"{task.id} should have run once per build: once to produce it, "
-            "once to re-produce it.\n"
-            + describe_ledger(rows, first=first, second=second)
-        )
-        assert task.complete(), f"{task.id} was not re-produced"
-    leaf_rows = spawned_of(deployment, leaf.id, first, second)
-    assert [r["build_id"] for r in leaf_rows] == [str(first)], (
-        "The leaf's target never went missing, so nothing should have re-run it.\n"
-        + describe_ledger(leaf_rows, first=first, second=second)
+    assert task_status(middle.id) == "completed", (
+        "The registry withdrew a completion no driver observed missing."
     )
+    assert not _invalidations(deployment, middle.id, second), describe_events(
+        task_events(deployment, middle.id), first=first, second=second
+    )
+    assert len(spawned_of(deployment, middle.id, second)) == 0
 
-    # 2. Stickiness: a deletion discovery never looks at is not observed.
-    delete_target(_uri(middle), modal_environment=env)
+    # 2. Invalidation: the root's output goes too, and a build observes both
+    # missing -- from a view at least as fresh as its walk, even in a warm
+    # container that saw the root's file (CI found exactly that stale hit).
+    delete_target(_uri(root), modal_environment=env)
     third = _trigger()
     assert wait_for_terminal(third, timeout=BUILD_TIMEOUT_SECONDS) == "completed", (
         describe(third)
     )
-    assert task_status(middle.id) == "completed", (
-        "The registry withdrew a completion no driver observed missing."
+    for task in (middle, root):
+        events = task_events(deployment, task.id)
+        assert _invalidations(deployment, task.id, third), (
+            f"{task.id}'s missing target was not invalidated by the build that "
+            f"observed it.\n{describe_events(events, first=first, third=third)}"
+        )
+        rows = spawned_of(deployment, task.id, first, second, third)
+        assert [r["build_id"] for r in rows] == [str(first), str(third)], (
+            f"{task.id} should have run once to produce it and once to "
+            "re-produce it.\n"
+            + describe_ledger(rows, first=first, second=second, third=third)
+        )
+        assert task.complete(), f"{task.id} was not re-produced"
+    leaf_rows = spawned_of(deployment, leaf.id, first, second, third)
+    assert [r["build_id"] for r in leaf_rows] == [str(first)], (
+        "The leaf's target never went missing, so nothing should have re-run it.\n"
+        + describe_ledger(leaf_rows, first=first, third=third)
     )
-    assert not _invalidations(deployment, middle.id, third), describe_events(
-        task_events(deployment, middle.id), first=first, second=second, third=third
-    )
-    assert len(spawned_of(deployment, middle.id, third)) == 0
