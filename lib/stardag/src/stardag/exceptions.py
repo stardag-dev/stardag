@@ -72,30 +72,34 @@ class ResumableInterruption(StardagError):
 
 
 def execution_not_wanted(error: "APIError") -> bool:
-    """Whether the registry refused a call because this execution is over.
+    """Whether the registry refused a report because this execution is over.
 
-    Two error codes, one meaning: *stop, this container is not what the
-    task is waiting for.* ``execution_superseded`` is the task having
-    moved on to another execution; ``task_cancelled`` is the build having
-    declared it not to be run at all and released the claim that would
-    otherwise have protected it.
+    ``execution_not_current``: the task's claim has moved on from this
+    execution (taken over after it lapsed, closed by an observation, or
+    released by its build's terminal transition). ``execution_superseded``:
+    a claiming start named an execution whose claim has already ended.
+    ``unknown_execution``: the registry never recorded it. ``not_claim_holder``:
+    the report came through a plan other than the one holding the claim.
+    Either way, *stop: this container is not what the task is waiting for*.
 
     Matched on the code rather than the status, because 409 also carries
-    the claim denials and the already-completed answer, which mean
-    different things and have different callers.
-
-    One predicate rather than two because both consumers — the reactive
-    tick's post-spawn start and the worker's own start report — act
-    identically on either: stop the execution. Splitting them would mean
-    two call sites that have to be kept in agreement, and a third code
-    added later would have to find both.
+    the claim denials and conflicts, which mean different things.
     """
     if error.status_code != 409:
         return False
-    return (error.payload or {}).get("error_code") in _EXECUTION_OVER_CODES
+    return error.code in EXECUTION_OVER_CODES
 
 
-_EXECUTION_OVER_CODES = frozenset({"execution_superseded", "task_cancelled"})
+#: The refusal codes :func:`execution_not_wanted` reads as "this execution
+#: is over".
+EXECUTION_OVER_CODES = frozenset(
+    {
+        "execution_not_current",
+        "execution_superseded",
+        "unknown_execution",
+        "not_claim_holder",
+    }
+)
 
 
 class ExecutionCancelled(StardagError):
@@ -183,10 +187,11 @@ class APIError(StardagError):
     Attributes:
         status_code: HTTP status code (if available)
         detail: Error detail message from the API
-        payload: The structured error detail (the API's ``detail`` dict)
-            when the response carried one — lets callers branch on
-            ``error_code`` and read machine-readable fields without
-            string matching.
+        payload: The structured error detail (the API's ``detail`` dict,
+            ``{"code", "message", ...}``) when the response carried one.
+        code: ``payload["code"]`` — the machine-readable reason a caller
+            branches on (``plan_superseded``, ``task_already_running``,
+            ...), never the status alone.
     """
 
     def __init__(
@@ -206,6 +211,12 @@ class APIError(StardagError):
         if detail:
             parts.append(f": {detail}")
         super().__init__(" ".join(parts))
+
+    @property
+    def code(self) -> str | None:
+        """The registry's refusal code (``detail.code``), if it sent one."""
+        value = (self.payload or {}).get("code")
+        return value if isinstance(value, str) else None
 
 
 class AuthenticationError(APIError):
@@ -316,8 +327,9 @@ class NotFoundError(APIError):
         self,
         message: str = "Resource not found",
         detail: str | None = None,
+        payload: dict | None = None,
     ):
-        super().__init__(message, status_code=404, detail=detail)
+        super().__init__(message, status_code=404, detail=detail, payload=payload)
 
 
 def is_missing_route_error(err: "NotFoundError") -> bool:
@@ -333,89 +345,6 @@ def is_missing_route_error(err: "NotFoundError") -> bool:
     misreporting a legitimate resource-level 404.
     """
     return getattr(err, "detail", None) == "Not Found"
-
-
-class RegistryTooOldError(APIError):
-    """The Registry API predates a contract this SDK depends on.
-
-    Raised when a server does not know structure scopes — the route
-    ``PUT /builds/{id}/scope`` is missing, or ``POST /builds`` /
-    ``POST /builds/{id}/resume`` answer without a ``scope_key`` although one
-    was sent (an older server ignores unknown fields silently, so its
-    silence is the only evidence). Dependency gating on such a server is
-    environment-global and would mix edges evaluated by different code,
-    which this SDK does not tolerate: upgrade the Registry API first, then
-    the SDK. The reverse order (new server, old SDK) is supported.
-    """
-
-    def __init__(self, message: str, *, operation: str | None = None):
-        self.operation = operation
-        super().__init__(message, status_code=None, detail=None)
-
-
-class SDKVersionUnsupportedError(APIError):
-    """This SDK is older than the registry's minimum supported version (426).
-
-    Raised when the server answers ``426 Upgrade Required`` to the
-    ``X-Stardag-SDK-Version`` this SDK sends on every request. The server
-    knows both versions *and* the exact upgrade command, so it composes the
-    user-facing sentence; we carry it through verbatim rather than
-    paraphrasing it — a paraphrase is a second source of truth that starts
-    drifting the day the server's wording changes.
-
-    ``sdk_version`` / ``minimum_sdk_version`` are the same two versions in
-    machine-readable form, for callers that want to branch rather than print.
-
-    Attributes:
-        message: The server's sentence, unadorned — what a UI should show.
-            ``str(exc)`` is the same text with ``(HTTP 426)`` appended by
-            :class:`APIError`.
-        sdk_version: The version this SDK reported, as the server saw it.
-        minimum_sdk_version: The oldest version the server accepts.
-    """
-
-    # Only used if a 426 somehow arrives without the structured detail —
-    # the server always sends one, so this is a floor, not the normal path.
-    _FALLBACK_MESSAGE = (
-        "This Stardag registry requires a newer stardag SDK than the one "
-        'installed. Upgrade with: pip install --upgrade "stardag"'
-    )
-
-    def __init__(
-        self,
-        message: str | None = None,
-        sdk_version: str | None = None,
-        minimum_sdk_version: str | None = None,
-        payload: dict | None = None,
-    ):
-        self.message = message or self._FALLBACK_MESSAGE
-        self.sdk_version = sdk_version
-        self.minimum_sdk_version = minimum_sdk_version
-        super().__init__(
-            self.message,
-            status_code=426,
-            detail=None,
-            payload=payload,
-        )
-
-
-class ScopeMismatchError(APIError):
-    """The registry refused to move a build's structure scope (HTTP 409
-    ``scope_mismatch``).
-
-    The registry keys a build's dependency edges by a structure scope — the
-    code id of the deployment (or local process) that evaluated
-    ``requires()`` plus the hash of its ``dependencies_only`` config. A
-    build's scope *moves* when the code driving it changes (a rollover to
-    the live deployment); what it may not do is change its **build config**,
-    which is fixed for the build's life — that is the refusal this carries,
-    as :class:`BuildConfigMismatchError`. The answer is a new build. See
-    ``docs/design/scope-keyed-dependency-structure.md``.
-    """
-
-
-class BuildConfigMismatchError(ScopeMismatchError):
-    """A build was resumed with a different ``build_config``."""
 
 
 class RateLimitError(APIError):

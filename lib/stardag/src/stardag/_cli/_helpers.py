@@ -10,7 +10,7 @@ from stardag._cli.credentials import (
     validate_active_profile,
 )
 from stardag.config.loader import get_config
-from stardag.registry._http_client import SDK_CLIENT_HEADERS
+from stardag.registry._api_http import SDK_CLIENT_HEADERS
 
 
 def validate_active_profile_cli() -> tuple[str, str] | tuple[None, None]:

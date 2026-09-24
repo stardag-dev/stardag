@@ -439,34 +439,17 @@ Set an explicit worker `timeout`: the execution claim's TTL is derived
 from it, which is what lets other builds tell an abandoned claim from a
 live one, and what keeps a live claim from being taken early.
 
-**Ticks share containers.** A tick is almost entirely I/O wait — read the
-frontier, spawn, then poll on a sleep until its linger deadline — so the
-deployed `tick` is registered with `max_concurrent_inputs=10` and one
-container serves up to ten concurrent reactive builds. That is what makes
-`linger_seconds` cheap: a resident tick driving level after level no
-longer costs a container of its own.
+**One build per container at a time.** A build's `settings` are applied
+as environment variables, which are per process, so the deployed `tick`
+and every worker function serve one input per container and scale by
+containers (`max_containers`). A `max_concurrent_inputs` above one in
+`tick_settings` or `worker_settings` is refused at deploy, and a container
+asked to run a second build while another build's settings are applied
+refuses it rather than running under the wrong values. The cost is more
+containers — a lingering tick holds one of its own.
 
-Nothing else is packed by default. Workers run your code and may be CPU-
-or GPU-bound; the builder runs a whole build; the bootstrap walks a DAG.
-Override per function where you know better:
-
-```{.python notest}
-tick_settings=sd_modal.FunctionSettings(image=image, max_concurrent_inputs=32),
-# ...or opt an I/O-bound worker in:
-worker_settings={
-    "fetch": sd_modal.FunctionSettings(image=image, max_concurrent_inputs=8),
-},
-```
-
-A worker that opts in must be safe to run **concurrently on threads** —
-Modal serves concurrent inputs to a sync function that way, and to an
-`async def` as asyncio tasks on one event loop.
-
-`target_concurrent_inputs` is the concurrency Modal's autoscaler _aims_
-for below the ceiling, so it requires `max_concurrent_inputs` alongside
-it; setting it alone is refused at deploy. Note also that `tick_settings`
-registers both `tick` and `tick_watchdog`, but a concurrency declared
-there applies only to the tick — the watchdog is sync and never packed.
+`target_concurrent_inputs` requires `max_concurrent_inputs` alongside it;
+setting it alone is refused at deploy.
 
 **Per-build knobs** (`tick_kwargs`, persisted with the build so every tick
 shares them): `linger_seconds` (default 120), `poll_interval_seconds` (3),

@@ -10,7 +10,6 @@ import asyncio
 import threading
 import time
 import typing
-from uuid import UUID
 
 import pytest
 
@@ -21,10 +20,7 @@ from stardag.build import (
     BuildSummary,
     DefaultExecutionModeSelector,
     FailMode,
-    GlobalLockConfig,
     HybridConcurrentTaskExecutor,
-    LockAcquisitionResult,
-    LockAcquisitionStatus,
     RoutedTaskExecutor,
     TaskCount,
     TaskExecutionError,
@@ -34,6 +30,7 @@ from stardag.build import (
 )
 from stardag.registry import NoOpRegistry, registry_provider
 from stardag.target import InMemoryFileTarget
+from stardag.testing import InMemoryRegistry
 from stardag.utils.testing.dynamic_deps_dag import (
     assert_dynamic_deps_task_complete_recursive,
     get_dynamic_deps_dag,
@@ -170,35 +167,19 @@ class TestBuildAio:
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
     ):
-        """Passing resume_build_id fires build_resume_aio (not build_start_aio).
-
-        Regression: previously the SDK silently reused the build_id with
-        no registry call, so a previously-failed build kept showing as
-        FAILED in the UI even while the SDK ran tasks under it.
-        """
-        from tests.test_build.conftest import RecordingRegistry
-
-        recording_registry = RecordingRegistry()
-        existing_build_id = UUID("11111111-2222-3333-4444-555555555555")
+        """Passing resume_build_id resumes that build (no new build is
+        created) and plans it under this scope."""
+        registry = InMemoryRegistry()
         task = SyncOnlyTask(name="resumed-task")
+        existing = registry.build_create(root_task_ids=[str(task.id)]).id
+        registry.build_fail(existing, "earlier attempt")
 
-        summary = await build_aio(
-            [task],
-            registry=recording_registry,
-            resume_build_id=existing_build_id,
-        )
+        summary = await build_aio([task], registry=registry, resume_build_id=existing)
         assert summary.status == BuildExitStatus.SUCCESS
-        assert summary.build_id == existing_build_id, (
-            "Resume should preserve the supplied build_id"
-        )
-
-        method_calls = [c[0] for c in recording_registry.calls]
-        assert "build_resume_aio" in method_calls, (
-            f"Expected build_resume_aio fired on resume; got {method_calls}"
-        )
-        assert "build_start_aio" not in method_calls, (
-            "build_start_aio must NOT fire when resuming"
-        )
+        assert summary.build_id == existing
+        assert registry.called("build_resume", build_id=existing)
+        assert len(registry.calls_to("build_create")) == 1
+        assert registry.builds[existing].status == "completed"
 
     @pytest.mark.asyncio
     async def test_dynamic_deps(
@@ -395,34 +376,24 @@ class TestBuildAio:
 # ============================================================================
 
 
-from tests.test_build.conftest import RecordingRegistry  # noqa: E402
-
-
-class _GatedFailRegistry(RecordingRegistry):
-    """RecordingRegistry that gates ``task_fail_aio`` on caller-controlled events.
-
-    Used by the race regression test to deterministically place a sibling's
-    completion inside ``cancel_pending_in_flight``'s race window without
-    relying on wall-clock timing. Tests set ``fail_aio_entered_event`` /
-    ``fail_aio_can_proceed_event`` on the instance, then arrange for one
-    task to await the entered event and another task's ``run_aio`` to set
-    the can-proceed event after the first finishes its work.
-    """
+class _GatedFailRegistry(InMemoryRegistry):
+    """An in-memory registry whose ``member_fail_aio`` waits on
+    caller-controlled events, to place a sibling's completion inside the
+    fail-handling window without wall-clock timing."""
 
     fail_aio_entered_event: asyncio.Event | None = None
     fail_aio_can_proceed_event: asyncio.Event | None = None
 
-    async def task_fail_aio(
-        self,
-        build_id,
-        task,
-        error_message: str | None = None,
-    ) -> None:
+    async def member_fail_aio(
+        self, plan_id, task_id, *, execution_id, error_message=None
+    ):
         if self.fail_aio_entered_event is not None:
             self.fail_aio_entered_event.set()
         if self.fail_aio_can_proceed_event is not None:
             await self.fail_aio_can_proceed_event.wait()
-        await super().task_fail_aio(build_id, task, error_message)
+        return self.member_fail(
+            plan_id, task_id, execution_id=execution_id, error_message=error_message
+        )
 
 
 class TestFailFastCancelAndSkip:
@@ -435,14 +406,9 @@ class TestFailFastCancelAndSkip:
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         recording_registry,
     ):
-        """FAIL_FAST: a slow in-flight sibling is cancelled with task_cancel_aio.
-
-        Without this behavior, the slow sibling would either run to
-        completion (FAIL_FAST being a lie) or be silently abandoned
-        (registry stuck in RUNNING). We assert (a) the build returns
-        promptly rather than waiting for the 5-second sleep and
-        (b) the slow task got task_cancel_aio fired against it.
-        """
+        """FAIL_FAST: a slow in-flight sibling is cancelled, and the build's
+        failure releases its claim (the task is CANCELLED in the registry,
+        actionable for any other build)."""
 
         class SlowAsyncTask(Task[str]):
             name: str
@@ -473,11 +439,9 @@ class TestFailFastCancelAndSkip:
         assert elapsed < 2.0, (
             f"FAIL_FAST took {elapsed:.2f}s — cancellation did not kick in"
         )
-        assert recording_registry.has_call("task_cancel_aio", slow.id), (
-            f"Expected task_cancel_aio for slow task; got calls: "
-            f"{[c[0] for c in recording_registry.calls]}"
-        )
-        assert recording_registry.has_call("task_fail_aio", failing.id)
+        assert recording_registry.status_of(slow.id) == "cancelled"
+        assert recording_registry.status_of(failing.id) == "failed"
+        assert not recording_registry.called("member_complete", task_id=slow.id)
 
     @pytest.mark.asyncio
     async def test_fail_fast_processes_sibling_done_during_fail_handling(
@@ -535,14 +499,11 @@ class TestFailFastCancelAndSkip:
                 fail_mode=FailMode.FAIL_FAST,
             )
 
-        assert registry.has_call("task_complete_aio", success.id), (
-            "Sibling that completed during fail-handling must be "
-            "recorded as completed, not cancelled. "
-            f"Calls: {[c[0] for c in registry.calls]}"
+        assert registry.called("member_complete", task_id=success.id), (
+            "Sibling that completed during fail-handling must be recorded as "
+            "completed, not cancelled."
         )
-        assert not registry.has_call("task_cancel_aio", success.id), (
-            "Already-done sibling must not be marked CANCELLED"
-        )
+        assert registry.status_of(success.id) == "completed"
 
     @pytest.mark.asyncio
     async def test_fail_fast_records_sibling_completion_in_same_batch(
@@ -590,10 +551,10 @@ class TestFailFastCancelAndSkip:
         finally:
             await trigger_fut
 
-        assert recording_registry.has_call("task_complete_aio", success.id), (
+        assert recording_registry.status_of(success.id) == "completed", (
             "Sibling completion in same `done` batch must not be lost"
         )
-        assert recording_registry.has_call("task_fail_aio", failure.id)
+        assert recording_registry.status_of(failure.id) == "failed"
 
     @pytest.mark.asyncio
     async def test_continue_mode_does_not_cancel_siblings(
@@ -626,10 +587,7 @@ class TestFailFastCancelAndSkip:
 
         assert summary.status == BuildExitStatus.FAILURE
         assert sibling.complete()
-        assert recording_registry.has_call("task_complete_aio", sibling.id)
-        assert not recording_registry.has_call("task_cancel_aio", sibling.id), (
-            "CONTINUE must not cancel in-flight siblings"
-        )
+        assert recording_registry.status_of(sibling.id) == "completed"
 
     @pytest.mark.asyncio
     async def test_skips_emitted_for_transitively_blocked_tasks_continue(
@@ -637,7 +595,8 @@ class TestFailFastCancelAndSkip:
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         recording_registry,
     ):
-        """CONTINUE: tasks transitively blocked by a failure get TASK_SKIPPED."""
+        """CONTINUE: tasks transitively blocked by a failure are skipped
+        (locally, and by the registry's skip-blocked over the plan)."""
         leaf = FailingTask(error_message="leaf fails")
         mid = SyncOnlyTask(name="mid", deps=(leaf,))
         root = SyncOnlyTask(name="root", deps=(mid,))
@@ -653,9 +612,9 @@ class TestFailFastCancelAndSkip:
         assert summary.task_count.skipped == 2, (
             f"Expected 2 skipped (mid+root), got {summary.task_count}"
         )
-        assert recording_registry.has_call("task_skip_aio", mid.id)
-        assert recording_registry.has_call("task_skip_aio", root.id)
-        assert recording_registry.has_call("task_fail_aio", leaf.id)
+        assert recording_registry.status_of(mid.id) == "skipped"
+        assert recording_registry.status_of(root.id) == "skipped"
+        assert recording_registry.status_of(leaf.id) == "failed"
 
     @pytest.mark.asyncio
     async def test_skips_emitted_in_fail_fast_mode_too(
@@ -675,16 +634,12 @@ class TestFailFastCancelAndSkip:
                 fail_mode=FailMode.FAIL_FAST,
             )
 
-        # Skip events fire BEFORE build_fail_aio so the registry is
+        # Skips land BEFORE the build is failed, so the registry is
         # coherent at the moment the build is marked failed.
-        method_seq = [m for (m, _, _) in recording_registry.calls]
-        skip_idx = method_seq.index("task_skip_aio")
-        fail_idx = method_seq.index("build_fail_aio")
-        assert skip_idx < fail_idx, (
-            f"task_skip_aio must precede build_fail_aio; got order: {method_seq}"
-        )
-        assert recording_registry.has_call("task_skip_aio", mid.id)
-        assert recording_registry.has_call("task_skip_aio", root.id)
+        method_seq = recording_registry.methods_called()
+        assert method_seq.index("build_skip_blocked") < method_seq.index("build_fail")
+        assert recording_registry.status_of(mid.id) == "skipped"
+        assert recording_registry.status_of(root.id) == "skipped"
 
     @pytest.mark.asyncio
     async def test_routed_executor_cancel_routes_correctly(
@@ -741,69 +696,6 @@ class TestFailFastCancelAndSkip:
         text = repr(summary)
         assert "Cancelled: 1" in text
         assert "Skipped: 2" in text
-
-    @pytest.mark.asyncio
-    async def test_fail_fast_releases_lock_for_cancelled_task(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """FAIL_FAST cancel path releases a held global lock with completed=False.
-
-        Locks an in-flight task via the global concurrency lock manager,
-        then triggers a fail-fast on a sibling. Asserts the slow task's
-        lock is released and that the release is recorded as not-completed
-        (so external observers see the slot freed without a completion
-        record).
-        """
-
-        class SlowAsyncTask(Task[str]):
-            name: str
-
-            async def run_aio(self):
-                await asyncio.sleep(5)
-                self._save("done")
-
-        class FailingAsyncTask(Task[str]):
-            async def run_aio(self):
-                await asyncio.sleep(0)
-                raise ValueError("Intentional failure")
-
-        slow = SlowAsyncTask(name="slow-locked")
-        failing = FailingAsyncTask()
-
-        lock_manager = MockGlobalLockManager()
-        lock_manager.set_result(
-            str(slow.id),
-            LockAcquisitionResult(status=LockAcquisitionStatus.ACQUIRED, acquired=True),
-        )
-        lock_manager.set_result(
-            str(failing.id),
-            LockAcquisitionResult(status=LockAcquisitionStatus.ACQUIRED, acquired=True),
-        )
-
-        with pytest.raises(ValueError, match="Intentional failure"):
-            await build_aio(
-                [slow, failing],
-                registry=noop_registry,
-                fail_mode=FailMode.FAIL_FAST,
-                global_lock_manager=lock_manager,
-                global_lock_config=GlobalLockConfig(enabled=True),
-            )
-
-        slow_releases = [
-            (tid, completed)
-            for (tid, completed) in lock_manager.releases
-            if tid == str(slow.id)
-        ]
-        assert slow_releases, (
-            f"Expected lock release for cancelled slow task; got "
-            f"releases: {lock_manager.releases}"
-        )
-        assert all(completed is False for (_, completed) in slow_releases), (
-            f"Cancelled task lock must be released with completed=False; "
-            f"got: {slow_releases}"
-        )
 
 
 # ============================================================================
@@ -1244,599 +1136,45 @@ class TestProcessPoolDynamicDeps:
 # ============================================================================
 
 
-class MockLockHandle:
-    """Mock lock handle for testing."""
+class _FailingPlanRegistry(InMemoryRegistry):
+    """A registry whose plan registration hits an outage."""
 
-    def __init__(self, result: LockAcquisitionResult):
-        self._result = result
-        self._completed = False
-
-    @property
-    def result(self) -> LockAcquisitionResult:
-        return self._result
-
-    def mark_completed(self) -> None:
-        self._completed = True
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        return False
+    def plan_create(self, build_id, **kwargs):
+        raise ConnectionError("Registry unavailable")
 
 
-class MockGlobalLockManager:
-    """Mock global lock manager for testing lock integration."""
-
-    def __init__(self):
-        self.owner_id = "mock-owner"
-        self.config = GlobalLockConfig()
-        self.results_by_task: dict[str, LockAcquisitionResult] = {}
-        self.call_counts: dict[str, int] = {}
-        self.result_sequence: dict[str, list[LockAcquisitionResult]] = {}
-        self.releases: list[tuple[str, bool]] = []
-
-    def set_result(self, task_id: str, result: LockAcquisitionResult) -> None:
-        """Set the result for a specific task."""
-        self.results_by_task[task_id] = result
-
-    def set_result_sequence(
-        self, task_id: str, results: list[LockAcquisitionResult]
-    ) -> None:
-        """Set a sequence of results for a task (one per call)."""
-        self.result_sequence[task_id] = results
-
-    def lock(self, task_id: str) -> MockLockHandle:
-        """Return a lock handle for context manager usage."""
-        # This is for protocol compliance, but build_aio uses acquire() directly
-        result = self.results_by_task.get(
-            task_id,
-            LockAcquisitionResult(status=LockAcquisitionStatus.ACQUIRED, acquired=True),
-        )
-        return MockLockHandle(result)
-
-    async def acquire(self, task_id: str) -> LockAcquisitionResult:
-        """Acquire a lock for a task (simple version without retry)."""
-        return await self._acquire_internal(task_id)
-
-    async def _acquire_internal(self, task_id: str) -> LockAcquisitionResult:
-        """Internal acquire without retry."""
-        self.call_counts[task_id] = self.call_counts.get(task_id, 0) + 1
-        call_num = self.call_counts[task_id]
-
-        # Check for sequence first
-        if task_id in self.result_sequence:
-            seq = self.result_sequence[task_id]
-            idx = call_num - 1
-            if idx < len(seq):
-                return seq[idx]
-            else:
-                return seq[-1]
-        elif task_id in self.results_by_task:
-            return self.results_by_task[task_id]
-        else:
-            return LockAcquisitionResult(
-                status=LockAcquisitionStatus.ACQUIRED, acquired=True
-            )
-
-    async def _acquire_with_retry(
-        self, task_id: str, config: GlobalLockConfig
-    ) -> LockAcquisitionResult:
-        """Acquire with retry/backoff - matches the interface called by build_aio."""
-        timeout = config.lock_wait_timeout_seconds
-        current_interval = config.lock_wait_initial_interval_seconds
-        max_interval = config.lock_wait_max_interval_seconds
-        backoff_factor = config.lock_wait_backoff_factor
-
-        start_time = asyncio.get_event_loop().time()
-
-        while True:
-            result = await self._acquire_internal(task_id)
-
-            if result.status == LockAcquisitionStatus.ACQUIRED:
-                return result
-
-            if result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
-                return result
-
-            if result.status == LockAcquisitionStatus.ERROR:
-                return result
-
-            # HELD_BY_OTHER or CONCURRENCY_LIMIT_REACHED - retry with backoff
-            if timeout is None:
-                return result
-
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed >= timeout:
-                return LockAcquisitionResult(
-                    status=result.status,
-                    acquired=False,
-                    error_message=f"Timeout after {timeout}s: {result.status.value}",
-                )
-
-            await asyncio.sleep(current_interval)
-            current_interval = min(current_interval * backoff_factor, max_interval)
-
-    async def release(self, task_id: str, task_completed: bool = False) -> bool:
-        """Release a lock."""
-        self.releases.append((task_id, task_completed))
-        return True
-
-    async def check_task_completed(self, task_id: str) -> bool:
-        return False
-
-
-class TestGlobalConcurrencyLock:
-    """Tests for global concurrency lock integration with build."""
+class TestRegistryOutage:
+    """``on_registry_failure="warn"`` carries a build through an outage."""
 
     @pytest.mark.asyncio
-    async def test_lock_acquired_executes_task(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test that task executes normally when lock is acquired."""
-        task = SyncOnlyTask(name="test_locked")
-
-        lock_manager = MockGlobalLockManager()
-        lock_manager.set_result(
-            str(task.id),
-            LockAcquisitionResult(status=LockAcquisitionStatus.ACQUIRED, acquired=True),
-        )
-
-        summary = await build_aio(
-            [task],
-            registry=noop_registry,
-            global_lock_manager=lock_manager,
-            global_lock_config=GlobalLockConfig(enabled=True),
-        )
-
-        assert summary.status == BuildExitStatus.SUCCESS
-        assert task.complete()
-        # Verify lock was released with completed=True
-        assert len(lock_manager.releases) == 1
-        assert lock_manager.releases[0][1] is True  # task_completed=True
-
-    @pytest.mark.asyncio
-    async def test_lock_already_completed_skips_task(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test that task is skipped when lock reports already completed."""
-        task = SyncOnlyTask(name="test_already_completed")
-
-        # Pre-complete the task (simulate another process completed it)
-        task.target().save({"name": "test_already_completed", "mode": "external"})
-
-        lock_manager = MockGlobalLockManager()
-        lock_manager.set_result(
-            str(task.id),
-            LockAcquisitionResult(
-                status=LockAcquisitionStatus.ALREADY_COMPLETED, acquired=False
-            ),
-        )
-
-        config = GlobalLockConfig(
-            enabled=True,
-            completion_retry_timeout_seconds=1,
-            completion_retry_interval_seconds=0.1,
-        )
-
-        summary = await build_aio(
-            [task],
-            registry=noop_registry,
-            global_lock_manager=lock_manager,
-            global_lock_config=config,
-        )
-
-        assert summary.status == BuildExitStatus.SUCCESS
-        # Task was pre-completed, so it's counted as previously_completed during discovery
-        assert summary.task_count.previously_completed == 1
-        # Lock was not released (we didn't acquire it)
-        assert len(lock_manager.releases) == 0
-
-    @pytest.mark.asyncio
-    async def test_lock_held_by_other_waits_and_succeeds(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test waiting when lock held by other, then succeeding when task completes."""
-        task = SyncOnlyTask(name="test_wait_for_lock")
-
-        lock_manager = MockGlobalLockManager()
-        lock_manager.set_result_sequence(
-            str(task.id),
-            [
-                LockAcquisitionResult(
-                    status=LockAcquisitionStatus.HELD_BY_OTHER, acquired=False
-                ),
-                LockAcquisitionResult(
-                    status=LockAcquisitionStatus.HELD_BY_OTHER, acquired=False
-                ),
-            ],
-        )
-
-        config = GlobalLockConfig(
-            enabled=True,
-            lock_wait_timeout_seconds=2,
-            lock_wait_initial_interval_seconds=0.05,
-        )
-
-        # Complete the task after a short delay (simulating external completion)
-        async def complete_task_externally():
-            await asyncio.sleep(0.1)
-            task.target().save({"name": "test_wait_for_lock", "mode": "external"})
-
-        # Run both concurrently
-        async def run_build():
-            return await build_aio(
-                [task],
-                registry=noop_registry,
-                global_lock_manager=lock_manager,
-                global_lock_config=config,
-            )
-
-        summary, _ = await asyncio.gather(run_build(), complete_task_externally())
-
-        assert summary.status == BuildExitStatus.SUCCESS
-        assert task.complete()
-        # Lock was called multiple times (retries)
-        assert lock_manager.call_counts[str(task.id)] >= 2
-
-    @pytest.mark.asyncio
-    async def test_lock_held_by_other_timeout(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test timeout when lock remains held by other."""
-        task = SyncOnlyTask(name="test_lock_timeout")
-
-        lock_manager = MockGlobalLockManager()
-        lock_manager.set_result(
-            str(task.id),
-            LockAcquisitionResult(
-                status=LockAcquisitionStatus.HELD_BY_OTHER, acquired=False
-            ),
-        )
-
-        config = GlobalLockConfig(
-            enabled=True,
-            lock_wait_timeout_seconds=0.2,
-            lock_wait_initial_interval_seconds=0.05,
-        )
-
-        with pytest.raises(Exception, match="Timeout|unavailable"):
-            await build_aio(
-                [task],
-                registry=noop_registry,
-                global_lock_manager=lock_manager,
-                global_lock_config=config,
-            )
-
-    @pytest.mark.asyncio
-    async def test_lock_error_fails_task(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test that lock error causes task failure."""
-        task = SyncOnlyTask(name="test_lock_error")
-
-        lock_manager = MockGlobalLockManager()
-        lock_manager.set_result(
-            str(task.id),
-            LockAcquisitionResult(
-                status=LockAcquisitionStatus.ERROR,
-                acquired=False,
-                error_message="Connection failed",
-            ),
-        )
-
-        with pytest.raises(Exception, match="Connection failed"):
-            await build_aio(
-                [task],
-                registry=noop_registry,
-                global_lock_manager=lock_manager,
-                global_lock_config=GlobalLockConfig(enabled=True),
-            )
-
-    @pytest.mark.asyncio
-    async def test_selective_locking(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test selective locking based on GlobalLockConfig.enabled callable."""
-        task1 = SyncOnlyTask(name="expensive_task")
-        task2 = SyncOnlyTask(name="cheap_task")
-
-        lock_manager = MockGlobalLockManager()
-
-        # Only lock tasks with "expensive" in name
-        def should_lock(task):
-            return "expensive" in task.name
-
-        config = GlobalLockConfig(enabled=should_lock)
-
-        summary = await build_aio(
-            [task1, task2],
-            registry=noop_registry,
-            global_lock_manager=lock_manager,
-            global_lock_config=config,
-        )
-
-        assert summary.status == BuildExitStatus.SUCCESS
-        # Only task1 should have been locked
-        assert str(task1.id) in lock_manager.call_counts
-        assert str(task2.id) not in lock_manager.call_counts
-
-    @pytest.mark.asyncio
-    async def test_lock_without_lock_config(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test that lock is not used when global_lock_config.enabled=False."""
-        task = SyncOnlyTask(name="test_no_lock")
-
-        lock_manager = MockGlobalLockManager()
-
-        # Default config has enabled=False
-        summary = await build_aio(
-            [task],
-            registry=noop_registry,
-            global_lock_manager=lock_manager,
-            global_lock_config=GlobalLockConfig(enabled=False),
-        )
-
-        assert summary.status == BuildExitStatus.SUCCESS
-        assert task.complete()
-        # Lock should not have been called
-        assert str(task.id) not in lock_manager.call_counts
-
-    @pytest.mark.asyncio
-    async def test_lock_released_on_task_failure(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test that lock is released with task_completed=False when task fails."""
-        task = FailingTask(error_message="intentional failure")
-
-        lock_manager = MockGlobalLockManager()
-        lock_manager.set_result(
-            str(task.id),
-            LockAcquisitionResult(status=LockAcquisitionStatus.ACQUIRED, acquired=True),
-        )
-
-        with pytest.raises(ValueError, match="intentional failure"):
-            await build_aio(
-                [task],
-                registry=noop_registry,
-                global_lock_manager=lock_manager,
-                global_lock_config=GlobalLockConfig(enabled=True),
-            )
-
-        # Verify lock was released with completed=False
-        assert len(lock_manager.releases) == 1
-        task_id, completed = lock_manager.releases[0]
-        assert task_id == str(task.id)
-        assert completed is False  # task_completed=False for failure
-
-    @pytest.mark.asyncio
-    async def test_lock_concurrency_limit_reached(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test that CONCURRENCY_LIMIT_REACHED status is handled correctly."""
-        task = SyncOnlyTask(name="test_concurrency_limit")
-
-        lock_manager = MockGlobalLockManager()
-        lock_manager.set_result(
-            str(task.id),
-            LockAcquisitionResult(
-                status=LockAcquisitionStatus.CONCURRENCY_LIMIT_REACHED,
-                acquired=False,
-                error_message="Max concurrent tasks reached",
-            ),
-        )
-
-        config = GlobalLockConfig(
-            enabled=True,
-            lock_wait_timeout_seconds=0.2,
-            lock_wait_initial_interval_seconds=0.05,
-        )
-
-        with pytest.raises(Exception, match="concurrency_limit_reached"):
-            await build_aio(
-                [task],
-                registry=noop_registry,
-                global_lock_manager=lock_manager,
-                global_lock_config=config,
-            )
-
-    @pytest.mark.asyncio
-    async def test_lock_with_dynamic_deps(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test that lock is held across dynamic dependency suspension.
-
-        When a task yields dynamic deps, it should:
-        1. Acquire lock before first execution
-        2. Keep lock while waiting for dynamic deps
-        3. Re-acquire lock when resuming (handles TTL expiration)
-        4. Release lock on final completion
-        """
-        reset_execution_counts()
-
-        # Task with dynamic dependency (using DynamicDiamondTask for both)
-        dynamic_dep = DynamicDiamondTask(name="dynamic_dep", test_id="lock_dyn")
-        parent_task = DynamicDiamondTask(
-            name="parent_with_dynamic",
-            test_id="lock_dyn",
-            dynamic_task_deps=(dynamic_dep,),
-        )
-
-        lock_manager = MockGlobalLockManager()
-
-        summary = await build_aio(
-            [parent_task],
-            registry=noop_registry,
-            global_lock_manager=lock_manager,
-            global_lock_config=GlobalLockConfig(enabled=True),
-        )
-
-        assert summary.status == BuildExitStatus.SUCCESS
-        assert parent_task.complete()
-        assert dynamic_dep.complete()
-
-        # Both tasks should have had locks acquired
-        assert str(parent_task.id) in lock_manager.call_counts
-        assert str(dynamic_dep.id) in lock_manager.call_counts
-
-        # Parent should have acquired lock twice (initial + after dynamic deps)
-        # because we always re-acquire to handle potential TTL expiration
-        assert lock_manager.call_counts[str(parent_task.id)] >= 1
-
-        # Both locks should have been released with completed=True
-        parent_releases = [
-            (tid, comp)
-            for tid, comp in lock_manager.releases
-            if tid == str(parent_task.id)
-        ]
-        dynamic_releases = [
-            (tid, comp)
-            for tid, comp in lock_manager.releases
-            if tid == str(dynamic_dep.id)
-        ]
-        assert len(parent_releases) >= 1
-        assert all(comp is True for _, comp in parent_releases)
-        assert len(dynamic_releases) == 1
-        assert dynamic_releases[0][1] is True
-
-    @pytest.mark.asyncio
-    async def test_multiple_tasks_concurrent_lock_acquisition(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test multiple independent tasks acquiring locks concurrently."""
-        task1 = SyncOnlyTask(name="concurrent_1")
-        task2 = SyncOnlyTask(name="concurrent_2")
-        task3 = SyncOnlyTask(name="concurrent_3")
-
-        lock_manager = MockGlobalLockManager()
-
-        summary = await build_aio(
-            [task1, task2, task3],
-            registry=noop_registry,
-            global_lock_manager=lock_manager,
-            global_lock_config=GlobalLockConfig(enabled=True),
-        )
-
-        assert summary.status == BuildExitStatus.SUCCESS
-        assert task1.complete()
-        assert task2.complete()
-        assert task3.complete()
-
-        # All three tasks should have acquired locks
-        assert str(task1.id) in lock_manager.call_counts
-        assert str(task2.id) in lock_manager.call_counts
-        assert str(task3.id) in lock_manager.call_counts
-
-        # All three locks should have been released
-        released_task_ids = {tid for tid, _ in lock_manager.releases}
-        assert str(task1.id) in released_task_ids
-        assert str(task2.id) in released_task_ids
-        assert str(task3.id) in released_task_ids
-
-    @pytest.mark.asyncio
-    async def test_no_lock_manager_provided(
-        self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
-        noop_registry,
-    ):
-        """Test that build works normally when no lock manager is provided."""
-        task = SyncOnlyTask(name="no_lock_manager_task")
-
-        # global_lock_manager=None should work fine
-        summary = await build_aio(
-            [task],
-            registry=noop_registry,
-            global_lock_manager=None,
-            global_lock_config=GlobalLockConfig(enabled=True),
-        )
-
-        assert summary.status == BuildExitStatus.SUCCESS
-        assert task.complete()
-
-
-# ============================================================================
-# Test: Concurrent build previously-completed registration
-# ============================================================================
-
-
-class FailOnRegisterRegistry(NoOpRegistry):
-    """Registry that fails on task_register but succeeds on task_complete."""
-
-    def __init__(self) -> None:
-        self.register_calls: list[UUID] = []
-        self.complete_calls: list[UUID] = []
-
-    def task_register(self, build_id: UUID, task, **kwargs) -> None:
-        self.register_calls.append(task.id)
-        raise ConnectionError("Registry register unavailable")
-
-    def task_complete(self, build_id: UUID, task) -> None:
-        self.complete_calls.append(task.id)
-
-    async def task_register_aio(self, build_id: UUID, task, **kwargs) -> None:
-        self.register_calls.append(task.id)
-        raise ConnectionError("Registry register unavailable")
-
-    async def task_complete_aio(self, build_id: UUID, task) -> None:
-        self.complete_calls.append(task.id)
-
-
-class TestConcurrentPreviouslyCompletedRegistration:
-    """Test that register failure for previously-completed tasks logs task.id."""
-
-    @pytest.mark.asyncio
-    async def test_register_failure_logs_task_id(
+    async def test_plan_registration_outage_warns_and_runs_locally(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         caplog,
     ):
-        """Warning message for failed registration should include the task.id."""
         import logging
 
-        registry = FailOnRegisterRegistry()
-
-        task = SyncOnlyTask(name="pre_complete_concurrent")
-        # Pre-complete the task
-        task.target().save({"name": "pre_complete_concurrent", "mode": "pre-existing"})
-
+        registry = _FailingPlanRegistry()
+        task = SyncOnlyTask(name="outage")
         with caplog.at_level(logging.WARNING):
             summary = await build_aio(
                 [task], registry=registry, on_registry_failure="warn"
             )
-
         assert summary.status == BuildExitStatus.SUCCESS
-        # Register was attempted
-        assert len(registry.register_calls) == 1
-        # Complete should NOT have been called since register failed
-        assert len(registry.complete_calls) == 0
-
-        # The warning should include the task.id for debugging
-        warning_messages = [
-            r.message for r in caplog.records if r.levelno >= logging.WARNING
+        assert task.complete()
+        # No claim was attempted without a plan.
+        assert not registry.called("member_start")
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
-        assert any(str(task.id) in msg for msg in warning_messages), (
-            f"Warning should include task.id ({task.id}), got: {warning_messages}"
-        )
+        assert any(str(task.id) in m for m in warnings), warnings
+
+    @pytest.mark.asyncio
+    async def test_plan_registration_outage_raises_by_default(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        with pytest.raises(ConnectionError):
+            await build_aio(
+                [SyncOnlyTask(name="outage-raise")], registry=_FailingPlanRegistry()
+            )

@@ -7,7 +7,7 @@ Covers ConcurrencyConfig + LocalConcurrencyLimiter:
 - slot released across dynamic-deps suspension (no deadlock under tight cap)
 - unknown limit name raises
 - invalid limit value raises at construction
-- composition with the global lock
+- composition with registry claims
 """
 
 from __future__ import annotations
@@ -22,16 +22,11 @@ from stardag import Task, auto_namespace
 from stardag.build import (
     BuildExitStatus,
     ConcurrencyConfig,
-    GlobalLockConfig,
     LocalConcurrencyLimiter,
     build_aio,
 )
-from stardag.build._base import (
-    GlobalConcurrencyLockManager,
-    LockAcquisitionResult,
-    LockAcquisitionStatus,
-)
 from stardag.target import InMemoryFileTarget
+from stardag.testing import InMemoryRegistry
 from stardag.utils.testing.dynamic_deps_dag import (
     assert_dynamic_deps_task_complete_recursive,
     get_dynamic_deps_dag,
@@ -253,42 +248,24 @@ def test_invalid_limit_value_raises_at_construction():
 
 
 # ============================================================================
-# Composition with the global lock
+# Composition with registry claims
 # ============================================================================
 
 
-class _AlwaysAcquireLockManager:
-    """Minimal lock manager that always grants the lock (no real locking)."""
-
-    async def acquire(self, task_id: str) -> LockAcquisitionResult:
-        return LockAcquisitionResult(
-            status=LockAcquisitionStatus.ACQUIRED, acquired=True
-        )
-
-    async def release(self, task_id: str, task_completed: bool = False) -> bool:
-        return True
-
-    def lock(self, task_id: str):  # pragma: no cover - unused by build_aio
-        raise NotImplementedError
-
-
-async def test_cap_composes_with_global_lock(
+async def test_cap_composes_with_claims(
     default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
     tracker: _ConcurrencyTracker,
-    noop_registry,
 ):
-    lock_manager: GlobalConcurrencyLockManager = (
-        _AlwaysAcquireLockManager()  # type: ignore[assignment]
-    )
+    """Every execution claims (D11) before it takes a local slot."""
+    registry = InMemoryRegistry()
     tasks = [TrackedTask(name=f"t{i}", group="g") for i in range(6)]
 
     summary = await build_aio(
         tasks,
-        registry=noop_registry,
-        global_lock_manager=lock_manager,
-        global_lock_config=GlobalLockConfig(enabled=True),
+        registry=registry,
         concurrency_config=ConcurrencyConfig(max_concurrent_tasks=2),
     )
 
     assert summary.status == BuildExitStatus.SUCCESS
     assert tracker.total_max == 2
+    assert len(registry.calls_to("member_start")) == 6

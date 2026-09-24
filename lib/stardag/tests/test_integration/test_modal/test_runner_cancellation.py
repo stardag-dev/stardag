@@ -1,103 +1,43 @@
 """The worker's two automatic checkpoints, and what a cancelled one does.
 
-A cancel does not reach into the container. It marks the build and
-releases its claims; this is the other half — the container asking, at
-points where stopping is safe, and stopping cleanly when the answer is
-no.
+A cancel does not reach into the container. It releases the build's claims;
+this is the other half — the container asking, at points where stopping is
+safe, whether its execution is still the one the task is waiting for (one
+read of the build's unended executions, ``GET /builds/{id}/executions``),
+and stopping cleanly when the answer is no.
 
 "Cleanly" is precise and each part of it is tested here: **no output
 written, no completion reported, no end-of-attempt event, and not a
-normal return**. The last one is the least obvious and the most
-important. A backend call that returns successfully with no output is
-read by a scheduler's probe as "the worker wrote it, eventual
-consistency" and recorded as a completion — a completion for a target
-that does not exist. So the checkpoint raises.
+normal return** — a backend call that returns successfully with no output
+would read to a scheduler's probe as a completion. So the checkpoint
+raises.
 """
 
 from __future__ import annotations
 
-from uuid import UUID, uuid4
-
 import pytest
 
 try:
-    import modal  # noqa: F401
+    import modal
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
 
+import stardag as sd
+from stardag.build._registration import new_id
 from stardag.cancellation import CHECK_INTERVAL_ENV
-from stardag.exceptions import APIError, ExecutionCancelled
-from stardag.integration.modal._metadata import (
-    STARDAG_BUILD_ID_ENV,
-    STARDAG_EXECUTION_ID_ENV,
-)
+from stardag.exceptions import ExecutionCancelled
 from stardag.integration.modal._runner import Runner
-from stardag.registry import ExecutionStatus, NoOpRegistry, registry_provider
+from stardag.registry import registry_provider
+from stardag.testing import InMemoryRegistry
 from stardag.testing.modal._tasks import SyncDynamicRangeSumTask, make_range
+from tests.test_integration.test_modal._planned import Planned, plan_and_claim
 
-WORKER_CALL_ID = "fc-worker-call-1"
-
-
-class CancellingRegistry(NoOpRegistry):
-    """A registry that answers the one question, and records the asking."""
-
-    def __init__(
-        self,
-        *,
-        status: ExecutionStatus | None = None,
-        start_error: Exception | None = None,
-    ) -> None:
-        super().__init__()
-        self.status = status or ExecutionStatus()
-        self.start_error = start_error
-        self.calls: list[str] = []
-        self.asked: list[UUID | None] = []
-        self.started_with: list[UUID | None] = []
-
-    def task_start(
-        self,
-        build_id,
-        task,
-        executor=None,
-        executor_ref=None,
-        executor_metadata=None,
-        claim_ttl_seconds=None,
-        execution_id=None,
-    ) -> None:
-        self.calls.append("task_start")
-        self.started_with.append(execution_id)
-        if self.start_error is not None:
-            raise self.start_error
-
-    def task_complete(self, build_id, task) -> None:
-        self.calls.append("task_complete")
-
-    def task_suspend(self, build_id, task) -> None:
-        self.calls.append("task_suspend")
-
-    def task_fail(self, build_id, task, error_message=None) -> None:
-        self.calls.append("task_fail")
-
-    def task_interrupt(
-        self, build_id, task, reason=None, executor_ref=None, execution_id=None
-    ) -> None:
-        self.calls.append("task_interrupt")
-
-    def task_add_dependencies(
-        self, build_id, task, upstream_tasks, is_dynamic=True, *, scope_key=None
-    ) -> None:
-        self.calls.append("task_add_dependencies")
-
-    def execution_status(self, build_id, task, execution_id=None) -> ExecutionStatus:
-        self.calls.append("execution_status")
-        self.asked.append(execution_id)
-        return self.status
+_END_REPORTS = ("member_complete", "member_fail", "member_interrupt", "member_yield")
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def fake_call_id(monkeypatch):
-    monkeypatch.setattr(modal, "current_function_call_id", lambda: WORKER_CALL_ID)
-    return WORKER_CALL_ID
+    monkeypatch.setattr(modal, "current_function_call_id", lambda: "fc-worker-call-1")
 
 
 @pytest.fixture(autouse=True)
@@ -106,206 +46,170 @@ def no_throttle(monkeypatch):
     monkeypatch.setenv(CHECK_INTERVAL_ENV, "0")
 
 
-def _env(build_id: UUID, execution_id: UUID | None = None) -> dict[str, str]:
-    env = {STARDAG_BUILD_ID_ENV: str(build_id)}
-    if execution_id is not None:
-        env[STARDAG_EXECUTION_ID_ENV] = str(execution_id)
-    return env
+def _run(planned: Planned, runner: Runner | None = None):
+    with registry_provider.override(planned.registry):
+        return (runner or Runner())(planned.task, env_overrides=planned.env())
 
 
-def _cancelled(reason: str = "build_not_running") -> ExecutionStatus:
-    return ExecutionStatus(still_current=False, reason=reason, build_status="cancelled")
+def _cancel_after(planned: Planned, reads: int) -> None:
+    """Cancel the build once the worker has read its executions ``reads``
+    times: the first checkpoint(s) pass, the next one sees the release."""
+    registry = planned.registry
+    original = registry.build_list_executions
+    count = [0]
+
+    def reading(build_id, *, not_in_current_plan=False):
+        count[0] += 1
+        if count[0] > reads and registry.builds[build_id].status == "running":
+            registry.build_cancel(build_id)
+        return original(build_id, not_in_current_plan=not_in_current_plan)
+
+    registry.build_list_executions = reading  # type: ignore[method-assign]
+
+
+def _assert_stopped_cleanly(planned: Planned) -> None:
+    assert not planned.task.complete(), "the cancelled execution wrote its output"
+    for method in _END_REPORTS:
+        assert not planned.registry.called(method, task_id=planned.task_id), method
 
 
 class TestTheIdentityReachesTheWorker:
-    def test_the_start_names_the_forwarded_execution(
-        self, fake_call_id, default_in_memory_fs_target
-    ):
-        """Without this the worker's self-report cannot be matched to the
-        claim, and both rules the identity buys fall back to the ref."""
-        registry = CancellingRegistry()
-        build_id, execution_id = uuid4(), uuid4()
+    def test_the_start_names_the_forwarded_execution(self, default_in_memory_fs_target):
+        planned = plan_and_claim(make_range(limit=3))
 
-        with registry_provider.override(registry):
-            Runner()(make_range(limit=3), env_overrides=_env(build_id, execution_id))
+        _run(planned)
 
-        assert registry.started_with == [execution_id]
-
-    def test_a_malformed_identity_is_dropped_rather_than_fatal(
-        self, fake_call_id, default_in_memory_fs_target, caplog
-    ):
-        """No worker should fail to report its own start over an env var.
-
-        Dropping it costs only the identity-based rules, which is how a
-        worker behaved before they existed.
-        """
-        registry = CancellingRegistry()
-        build_id = uuid4()
-        env = _env(build_id)
-        env[STARDAG_EXECUTION_ID_ENV] = "not-a-uuid"
-
-        with registry_provider.override(registry):
-            result = Runner()(make_range(limit=3), env_overrides=env)
-
-        assert result is None
-        assert registry.started_with == [None]
-        assert "task_complete" in registry.calls
+        (start,) = planned.registry.calls_to(
+            "member_start", task_id=planned.task_id, claim=False
+        )
+        assert start["execution_id"] == planned.execution_id
 
 
 class TestCheckpointOne:
-    def test_a_cancelled_build_stops_before_run(
-        self, fake_call_id, default_in_memory_fs_target
-    ):
+    def test_a_cancelled_build_stops_before_run(self, default_in_memory_fs_target):
         """Catches a cancel that landed between the spawn and the start —
-        the common case on a queued fan-out, where a container may sit
-        in a backend queue for minutes."""
-        registry = CancellingRegistry(status=_cancelled())
-        task = make_range(limit=3)
+        the common case on a queued fan-out. The released claim makes the
+        start itself refused, which is the checkpoint."""
+        planned = plan_and_claim(make_range(limit=3))
+        planned.registry.build_cancel(planned.build_id)
 
-        with registry_provider.override(registry):
-            with pytest.raises(ExecutionCancelled):
-                Runner()(task, env_overrides=_env(uuid4(), uuid4()))
+        with pytest.raises(ExecutionCancelled):
+            _run(planned)
 
-        assert not task.complete(), "the cancelled execution wrote its output"
-        assert "task_complete" not in registry.calls
-        assert "task_fail" not in registry.calls
-        assert "task_interrupt" not in registry.calls
+        _assert_stopped_cleanly(planned)
 
     def test_the_refused_start_is_the_checkpoint_and_costs_no_extra_call(
-        self, fake_call_id, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        """The cheapest version of the checkpoint there is.
+        """A start naming an execution whose claim was taken over is refused
+        (``execution_not_current``): that refusal *is* "you are no longer
+        wanted", so the checkpoint reads it instead of asking again."""
+        planned = plan_and_claim(make_range(limit=3))
+        planned.registry.build_cancel(planned.build_id)
 
-        A worker's own start is non-claiming, and the registry refuses one
-        naming a superseded execution. That 409 *is* "you are no longer
-        wanted", arriving inside a request the worker was making anyway —
-        so the checkpoint reads it instead of asking again.
-        """
-        registry = CancellingRegistry(
-            start_error=APIError(
-                "superseded",
-                status_code=409,
-                payload={"error_code": "execution_superseded"},
-            )
+        with pytest.raises(ExecutionCancelled):
+            _run(planned)
+
+        assert not planned.registry.called("build_list_executions"), (
+            "the worker asked a question the refusal had already answered"
         )
 
-        with registry_provider.override(registry):
-            with pytest.raises(ExecutionCancelled):
-                Runner()(make_range(limit=3), env_overrides=_env(uuid4(), uuid4()))
+    def test_an_unknown_execution_is_not_wanted(self, default_in_memory_fs_target):
+        planned = plan_and_claim(make_range(limit=3))
+        planned.execution_id = new_id()  # never started by anybody
 
-        assert registry.calls == ["task_start"], (
-            "the worker asked a question the 409 had already answered"
-        )
+        with pytest.raises(ExecutionCancelled):
+            _run(planned)
+
+        _assert_stopped_cleanly(planned)
+
+    def test_a_live_execution_runs(self, default_in_memory_fs_target):
+        planned = plan_and_claim(make_range(limit=3))
+
+        assert _run(planned) is None
+
+        assert planned.registry.called("build_list_executions")
+        assert planned.registry.status_of(planned.task.id) == "completed"
 
     def test_an_unrelated_start_failure_is_not_a_cancellation(
-        self, fake_call_id, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        """Lifecycle reporting stays best-effort for everything else.
+        """A registry that is down carries no information about whether
+        this execution is wanted, so it must not stop the task."""
+        planned = plan_and_claim(make_range(limit=3))
 
-        A registry that is down must not stop a task that is about to run
-        perfectly well — the failure carries no information about whether
-        this execution is wanted.
-        """
-        registry = CancellingRegistry(start_error=ConnectionError("registry down"))
-        task = make_range(limit=3)
+        def down(*args, **kwargs):
+            raise ConnectionError("registry down")
 
-        with registry_provider.override(registry):
-            result = Runner()(task, env_overrides=_env(uuid4(), uuid4()))
+        planned.registry.member_start = down  # type: ignore[method-assign]
+        planned.registry.build_list_executions = down  # type: ignore[method-assign]
 
-        assert result is None
-        assert task.complete()
+        assert _run(planned) is None
+        assert planned.task.complete()
 
     def test_a_registry_that_cannot_answer_lets_the_worker_run(
-        self, fake_call_id, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        """The invariant, from the worker's side.
+        """The fail-open invariant: a registry without the read (a custom
+        one) has no opinion."""
 
-        ``NoOpRegistry`` has no opinion, which is what a custom registry
-        and a server predating the endpoint both look like from here.
-        """
-        task = make_range(limit=3)
+        class NoExecutionsRead(InMemoryRegistry):
+            def build_list_executions(self, build_id, *, not_in_current_plan=False):
+                raise NotImplementedError
 
-        with registry_provider.override(NoOpRegistry()):
-            result = Runner()(task, env_overrides=_env(uuid4(), uuid4()))
+        planned = plan_and_claim(make_range(limit=3), NoExecutionsRead())
 
-        assert result is None
-        assert task.complete()
+        assert _run(planned) is None
+        assert planned.task.complete()
 
     def test_a_worker_that_reports_nothing_has_no_checkpoints(
-        self, fake_call_id, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        """``report_lifecycle=False`` means a resident orchestrator is
-        doing the reporting — and a resident orchestrator holds its own
-        handles, so it never needed the container to ask."""
-        registry = CancellingRegistry(status=_cancelled())
-        task = make_range(limit=3)
+        """``report_lifecycle=False``: a resident orchestrator reports, and
+        holds its own handles, so the container never needs to ask."""
+        planned = plan_and_claim(make_range(limit=3))
+        planned.registry.build_cancel(planned.build_id)
 
-        with registry_provider.override(registry):
-            result = Runner(report_lifecycle=False)(
-                task, env_overrides=_env(uuid4(), uuid4())
-            )
+        assert _run(planned, Runner(report_lifecycle=False)) is None
 
-        assert result is None
-        assert registry.calls == []
+        assert planned.reports() == []
+        assert not planned.registry.called("build_list_executions")
 
 
 class TestCheckpointTwo:
     def test_a_cancel_lands_at_a_dynamic_dependency_yield(
-        self, fake_call_id, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
         """The yield is where a worker is about to register children and
-        suspend, so a build that has stopped should not pay for a whole
-        new layer of the DAG.
+        suspend; a build that has stopped should not pay for a new layer.
+        The cancel arrives after the start-of-attempt read, so only the
+        yield's checkpoint can catch it."""
+        planned = plan_and_claim(SyncDynamicRangeSumTask(limit=3))
+        _cancel_after(planned, reads=1)
 
-        The cancel is made to arrive *after* the start, so the first
-        checkpoint passes and only the yield can catch it — which is what
-        makes this a test of the second checkpoint rather than the first.
-        """
-        answers = [ExecutionStatus(), _cancelled()]
-        registry = CancellingRegistry()
+        with pytest.raises(ExecutionCancelled):
+            _run(planned)
 
-        def answer(build_id, task, execution_id=None):
-            registry.calls.append("execution_status")
-            return answers.pop(0) if answers else _cancelled()
-
-        registry.execution_status = answer  # type: ignore[method-assign]
-        task = SyncDynamicRangeSumTask(limit=3)
-
-        with registry_provider.override(registry):
-            with pytest.raises(ExecutionCancelled):
-                Runner()(task, env_overrides=_env(uuid4(), uuid4()))
-
-        assert "task_add_dependencies" not in registry.calls, (
-            "a cancelled build still registered a layer of children"
-        )
-        assert "task_suspend" not in registry.calls
-        assert not task.complete()
+        _assert_stopped_cleanly(planned)
+        assert not planned.registry.called("member_yield")
 
     def test_a_live_build_passes_straight_through_the_yield(
-        self, fake_call_id, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        registry = CancellingRegistry()
-        task = SyncDynamicRangeSumTask(limit=3)
+        planned = plan_and_claim(SyncDynamicRangeSumTask(limit=3))
 
-        with registry_provider.override(registry):
-            result = Runner()(task, env_overrides=_env(uuid4(), uuid4()))
+        assert _run(planned) is not None, "the task should have suspended"
 
-        assert result is not None, "the task should have suspended on its deps"
-        assert "task_suspend" in registry.calls
+        assert planned.registry.status_of(planned.task.id) == "suspended"
 
 
 class TestTheUserFacingHelper:
     def test_a_task_can_ask_and_stop_where_it_knows_it_is_safe(
-        self, fake_call_id, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        """The opt-in for a long ``run()`` body.
-
-        Deliberately not a background thread raising into the task: that
-        can interrupt a write halfway, which is the one thing
-        content-addressed targets exist to prevent.
-        """
-        import stardag as sd
-
+        """The opt-in for a long ``run()`` body — deliberately not a
+        background thread raising into the task, which could interrupt a
+        write halfway."""
         asked: list[bool] = []
 
         class AskingRunner(Runner):
@@ -315,21 +219,11 @@ class TestTheUserFacingHelper:
                     raise ExecutionCancelled("stopping at a safe point")
                 return super().run(task)
 
-        # The cancel lands after the start, so checkpoint one passes and
-        # only the task's own ask can catch it.
-        answers = [ExecutionStatus(), _cancelled("superseded")]
-        registry = CancellingRegistry()
-        registry.execution_status = (  # type: ignore[method-assign]
-            lambda build_id, task, execution_id=None: (
-                answers.pop(0) if answers else _cancelled("superseded")
-            )
-        )
-        task = make_range(limit=3)
+        planned = plan_and_claim(make_range(limit=3))
+        _cancel_after(planned, reads=1)
 
-        with registry_provider.override(registry):
-            with pytest.raises(ExecutionCancelled):
-                AskingRunner()(task, env_overrides=_env(uuid4(), uuid4()))
+        with pytest.raises(ExecutionCancelled):
+            _run(planned, AskingRunner())
 
         assert asked == [True]
-        assert not task.complete()
-        assert "task_complete" not in registry.calls
+        _assert_stopped_cleanly(planned)

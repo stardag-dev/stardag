@@ -2,15 +2,17 @@
 
 This module contains:
 - Data structures: BuildExitStatus, TaskCount, BuildSummary, FailMode
+- The ambient build context: BuildContext (build, plan, scope)
 - Task state tracking: TaskExecutionState
-- Task executor protocol: TaskExecutorABC
-- Global concurrency lock: GlobalConcurrencyLock, GlobalLockConfig, LockAcquisitionResult
+- Task executor protocol: TaskExecutorABC, RoutedTaskExecutor
+- Claims: ClaimConfig
 """
 
 from __future__ import annotations
 
 import traceback as tb_module
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -22,31 +24,50 @@ from typing import (
     Generator,
     Generic,
     Literal,
-    Protocol,
     TypeVar,
 )
 from uuid import UUID
 
 from stardag import BaseTask, TaskStruct
-from stardag.exceptions import RegistryTooOldError, ScopeMismatchError
+from stardag.exceptions import APIError
 
 logger = logging.getLogger(__name__)
 
 # Type alias for the on_registry_failure parameter
 OnRegistryFailure = Literal["warn", "raise"]
 
-# Build id of the enclosing build_aio() call. Set for the duration of a
-# build so components invoked from within it (e.g. executors forwarding the
-# build id to self-reporting remote workers) can access it without threading
-# it through every signature.
-current_build_id_var: ContextVar[UUID | None] = ContextVar(
-    "stardag_current_build_id", default=None
+
+@dataclass(frozen=True)
+class BuildContext:
+    """The build a driver is running: its id, its plan and its scope.
+
+    Set for the duration of a build (resident engine) or a tick, so an
+    executor can forward what a worker needs — the build and plan ids its
+    reports name, and the settings it applies — without every signature
+    carrying them. ``plan_id`` is None while the build has no plan (no
+    registry, or before registration).
+    """
+
+    build_id: UUID
+    plan_id: UUID | None = None
+    deployment_id: UUID | None = None
+    settings: Mapping[str, str] = field(default_factory=dict)
+
+
+current_build_context_var: ContextVar[BuildContext | None] = ContextVar(
+    "stardag_current_build_context", default=None
 )
 
 
+def get_current_build_context() -> BuildContext | None:
+    """The build context of the enclosing build or tick, if any."""
+    return current_build_context_var.get()
+
+
 def get_current_build_id() -> UUID | None:
-    """Return the build id of the enclosing ``build[_aio]()`` call, if any."""
-    return current_build_id_var.get()
+    """The build id of the enclosing build or tick, if any."""
+    context = current_build_context_var.get()
+    return None if context is None else context.build_id
 
 
 # =============================================================================
@@ -57,14 +78,14 @@ def get_current_build_id() -> UUID | None:
 class BuildExitStatus(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"
-    EXIT_EARLY = "exit_early"  # All remaining tasks running in other builds
+    EXIT_EARLY = "exit_early"  # All remaining tasks claimed by other builds
 
 
 @dataclass
 class TaskCount:
     discovered: int = 0
-    # Tasks found complete during discovery or via lock service (ALREADY_COMPLETED).
-    # These tasks were not executed by this build.
+    # Tasks found complete during discovery, or completed by another
+    # execution while this build waited on its claim. Not executed here.
     previously_completed: int = 0
     succeeded: int = 0
     failed: int = 0
@@ -183,22 +204,17 @@ class TaskExecutionState:
     dynamic_deps: list[BaseTask] = field(default_factory=list)
     # Generator if task has dynamic deps and is suspended
     generator: Generator[TaskStruct, None, None] | None = None
-    # True when registry.task_register has been called for this task in this build
-    registered: bool = False
-    # True when registry.task_start has been called
-    started: bool = False
     # True when task execution has fully completed
     completed: bool = False
     # Exception if task failed
     exception: BaseException | None = None
-    # True when task is waiting for a global lock held by another build
-    waiting_for_lock: bool = False
-    # Identity of the execution this build is about to run, or is running,
-    # for the task. Minted when the claim is taken -- before the spawn, so
-    # before any executor ref exists -- and reused by the start that
-    # records the ref and by the worker inside the container, so all three
-    # name one execution. None when nothing has been claimed or started
-    # yet for this attempt, and cleared again when the claim was lost.
+    # True while this build waits on another execution's claim on the task
+    waiting_on_claim: bool = False
+    # The execution this build runs for the task: minted before the claim
+    # (so before any executor ref exists) and named by the claim, the start
+    # recording the ref, the worker's own reports and every renewal. Kept
+    # across an in-process yield (the claim is kept, D11); cleared when the
+    # execution ends or the claim was not won.
     execution_id: UUID | None = None
 
     @property
@@ -213,43 +229,27 @@ class TaskExecutionState:
 
 @dataclass
 class ClaimConfig:
-    """Configuration for per-task execution claims (default exactly-once).
+    """How a resident build claims its executions (D11: every execution
+    claims, when the build has a registry).
 
-    A claim denial with a re-attachable executor ref resolves immediately
-    (attach to the winner). The wait knobs below apply only when the
-    winning execution exposes no probeable ref (e.g. a local executor in
-    another build, or the winner's crash window between its claim and its
-    ref-recording start): the loser polls target completion and re-tries
-    the claim with backoff until ``wait_timeout_seconds``. The claim is
-    always attempted at least once — ``wait_timeout_seconds=0`` means
-    "claim, but don't wait if held".
+    A claim another execution holds is waited on: the build polls the
+    target's completion and re-asks for the claim with backoff, for at most
+    ``wait_timeout_seconds`` (``0`` means "claim, but do not wait"). A claim
+    that lapsed is taken over by the next claiming start on the server, so
+    nothing here needs to judge whether a holder is dead.
 
-    A ref-less winner whose claim has *lapsed* needs no knob at all: the
-    denial echoes the claim's expiry, so the loser recovers on evidence
-    rather than on a locally configured guess at how long "too long" is.
+    An in-process execution's claim carries ``in_process_ttl_seconds`` and
+    is renewed every ``renew_interval_seconds`` while it runs, so a resident
+    process that dies stops renewing and its claims lapse like any other
+    worker's. A detached execution's TTL comes from its executor's timeout.
     """
 
     wait_timeout_seconds: float | None = 300.0
     wait_initial_interval_seconds: float = 1.0
     wait_max_interval_seconds: float = 15.0
     wait_backoff_factor: float = 2.0
-
-
-class DetachedExecutionStatus(StrEnum):
-    """Observed state of a detached execution, by its (executor, ref).
-
-    Used by reactive scheduler ticks to decide what to do with a task the
-    registry reports as RUNNING: leave it (RUNNING), self-heal completion
-    (SUCCEEDED), record the failure (FAILED), or leave-and-warn (UNKNOWN —
-    e.g. the ref belongs to a different backend or the backend can't say;
-    conservatively treated as possibly-still-running to avoid duplicate
-    executions).
-    """
-
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    UNKNOWN = "unknown"
+    in_process_ttl_seconds: int = 120
+    renew_interval_seconds: float = 30.0
 
 
 @dataclass
@@ -257,24 +257,20 @@ class DetachedHandle:
     """Handle to a detached (orchestrator-independent) task execution.
 
     A detached execution keeps running even if the process that spawned it
-    dies; the executor records enough in ``ref`` to re-attach later (e.g. a
-    Modal function call id). The build engine persists ``(executor, ref)``
-    in the registry alongside the TASK_STARTED event, so a resumed build can
-    re-attach to a still-running execution instead of re-executing the task.
+    dies. The engine records ``(executor, ref)`` with the execution's start
+    so an operator (``stardag builds stop``) can reach it, and awaits
+    ``wait()`` for the result.
 
     Attributes:
-        executor: Name of the execution backend (e.g. ``"modal"``). Matched
-            on re-attach so a ref is only handed back to the backend that
-            created it.
+        executor: Name of the execution backend (e.g. ``"modal"``).
         ref: Backend-specific reference to the execution.
         wait: Zero-arg callable returning an awaitable that resolves to the
             task result, with the same contract as
             :meth:`TaskExecutorABC.submit` (``None`` | ``TaskStruct`` |
             ``TaskExecutionError``).
         executor_metadata: Optional backend-descriptive metadata recorded
-            with the TASK_STARTED event (e.g. the Modal
-            app/workspace/environment/function) for surfacing in the UI.
-            Best-effort — ``None`` when the executor could not resolve it.
+            with the start (e.g. the Modal app/workspace/function), for the
+            UI. Best-effort — ``None`` when unresolvable.
     """
 
     executor: str
@@ -286,50 +282,21 @@ class DetachedHandle:
 class TaskExecutorABC(ABC):
     """Abstract base for task executors.
 
-    Receives tasks and executes them according to some policy. The executor is
-    responsible for:
-    - Executing tasks in the appropriate context (async/thread/process)
-    - Handling generator suspension for dynamic dependencies
-
-    The executor is NOT responsible for:
-    - Dependency resolution - handled by build()
-    - Registry calls (start_task, complete_task, etc.) - handled by build()
+    Receives tasks and executes them according to some policy. The executor
+    is responsible for executing tasks in the appropriate context
+    (async/thread/process/remote) and for generator suspension. Dependency
+    resolution and the registry are the build engine's.
     """
 
     @abstractmethod
     async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
-        """Submit a task for execution.
-
-        Args:
-            task: The task to execute.
+        """Execute a task in-process (or block on a remote one).
 
         Returns:
-            - None: Task completed successfully with no dynamic dependencies.
-            - TaskStruct: Task "suspended" because it yielded dynamic dependencies.
-                The returned TaskStruct contains the discovered dependencies.
-            - TaskExecutionError: Task failed. Contains the exception and a
-                pre-formatted traceback string captured at the point of failure.
-
-        **No execution identity is passed here, deliberately.** A worker
-        started this way cannot name its own execution, so its
-        self-reports are matched on the executor reference alone — which
-        is what its own start records, and what every release before
-        identities existed used. Nothing degrades; the two rules the
-        identity buys (an idempotent retried claim, and a superseded
-        start refused) simply do not apply to it, and the refusal needs
-        an identity on *both* sides, so this path is never wrongly
-        refused either.
-
-        The trade is a breaking change against no gain. ``submit`` is the
-        one method nearly every custom executor overrides, and the engine
-        passing a new keyword would raise ``TypeError`` in all of them,
-        for a mode — a claimed *non-detached* execution — that has to be
-        asked for explicitly. :meth:`submit_detached` takes the identity
-        instead; see its docstring.
-
-        Cooperative cancellation is *not* fully excluded from this path:
-        a worker with no identity can still be told its build is no
-        longer running, which is the case that motivates it.
+            - None: completed, no dynamic dependencies.
+            - TaskStruct: suspended on dynamic dependencies.
+            - TaskExecutionError: failed, with the traceback captured where
+                it happened.
         """
         ...
 
@@ -346,203 +313,86 @@ class TaskExecutorABC(ABC):
     async def cancel(self, task: BaseTask) -> None:
         """Best-effort cancel an in-flight task.
 
-        Default: no-op. The build loop also calls ``asyncio.Task.cancel()``
-        on the future wrapping ``submit()``, which propagates as
-        ``asyncio.CancelledError`` into cooperative awaitables (async
-        tasks, ``modal.Function.remote.aio``). Override this for executors
-        that need explicit teardown beyond asyncio cooperation (e.g.
-        cancelling a tracked remote handle).
-
-        Effectiveness depends on the executor and how it implements
-        ``teardown()``. For example, ``HybridConcurrentTaskExecutor``
-        cannot reliably terminate thread- or process-pool work from
-        Python, AND its ``teardown()`` calls ``shutdown(wait=True)`` —
-        so the build will block until the underlying thread/subprocess
-        finishes. Async-only tasks and Modal calls do propagate the
-        cancellation cooperatively and unblock the build promptly.
-
-        Note: for *detached* executions (``submit_detached``/``reattach``)
-        asyncio cancellation of the ``wait()`` awaitable does NOT stop the
-        remote work — executors supporting detached mode MUST override this
-        to cancel the tracked remote execution, or FAIL_FAST/user
-        cancellation will leave workers running.
+        Default: no-op; the engine also cancels the asyncio future wrapping
+        ``submit()``, which propagates into cooperative awaitables. Executors
+        of detached executions must override this to stop the remote work —
+        cancelling ``wait()`` does not.
         """
         pass
 
     async def get_executor_metadata(self, task: BaseTask) -> dict[str, Any] | None:
-        """Descriptive executor metadata for executions of ``task``.
-
-        Same dict as :attr:`DetachedHandle.executor_metadata`, but
-        resolvable *without* starting anything — used to stamp
-        slot-acquiring TASK_STARTED events recorded before the actual
-        spawn, so the registry never shows a RUNNING task with blank
-        executor info in the acquire→spawn window. Best-effort; default
-        None (no metadata).
-        """
+        """Descriptive executor metadata for executions of ``task``, without
+        starting anything (stamped on the claiming start). Best-effort."""
         return None
 
     def execution_timeout_seconds(self, task: BaseTask) -> float | None:
-        """Wall-clock limit this backend enforces on an execution of ``task``.
-
-        Not a request, a *fact*: the number after which the backend itself
-        kills the execution (e.g. Modal's per-function ``timeout``). It is
-        the only thing that lets a scheduler put a defensible expiry on the
-        execution claim it records — a claim that outlives the execution it
-        guards by a small margin, and no more (see
-        ``stardag.build._reactive.claim_ttl_seconds``).
-
-        Return None when the backend enforces no limit, or when it cannot
-        be resolved for this task; callers then fall back to the registry's
-        own default rather than inventing a bound. Must not raise and must
-        not do I/O — it is called on the spawn path for every task.
-        """
+        """Wall-clock limit this backend enforces on an execution of
+        ``task`` — a *fact* (e.g. Modal's per-function ``timeout``), from
+        which a detached execution's claim TTL is derived. None when there
+        is none or it cannot be resolved. Must not raise or do I/O."""
         return None
 
     def reports_lifecycle(self, task: BaseTask) -> bool:
-        """Whether the *execution side* reports this task's lifecycle events.
+        """Whether the *execution side* reports this task's lifecycle.
 
-        When True, the build engine does not emit TASK_COMPLETED /
-        TASK_SUSPENDED / TASK_RESUMED events or upload artifacts for the
-        task — the worker executing it reports those itself (e.g. the Modal
-        ``Runner``), which also survives an orchestrator crash mid-task.
-        The engine still emits TASK_STARTED at submission (immediate
-        re-attachability of detached spawns) and TASK_FAILED as a fallback
-        (the worker may die before reporting); duplicate events are
-        tolerated by the registry's event-sourced status derivation.
-
-        Default: False — the engine reports everything, as before.
+        When True the worker executing it reports its own start (with its
+        executor ref), completion, failure and yields — naming the execution
+        the engine claimed — and the engine reports none of them. Default:
+        False, the engine reports everything.
         """
         return False
 
-    # -------------------------------------------------------------------------
-    # Optional detached-execution surface
-    # -------------------------------------------------------------------------
+    def deployment_app_name(self) -> str | None:
+        """The deployed app this executor runs tasks on, if any.
+
+        A driver whose tasks run on a deployed app plans under that app's
+        current deployment (D13) — its workers yield into the plan, and the
+        registry refuses a yield from another deployment. Default: None (a
+        pure local executor; the build plans under a local deployment).
+        """
+        return None
+
+    # -- detached executions -------------------------------------------------
 
     def supports_detached(self, task: BaseTask) -> bool:
-        """Whether this executor can run ``task`` as a detached execution.
-
-        Detached executions survive the orchestrator process (see
-        :class:`DetachedHandle`). Default: False — ``submit()`` is used.
-        """
+        """Whether this executor can run ``task`` as a detached execution
+        (one that survives the orchestrator). Default: False."""
         return False
 
     async def submit_detached(
-        self, task: BaseTask, *, execution_id: UUID | None = None
+        self, task: BaseTask, *, execution_id: UUID
     ) -> DetachedHandle:
         """Start a detached execution of ``task`` and return its handle.
 
-        Only called when :meth:`supports_detached` returned True for the
-        task. Implementations should return as soon as the execution is
-        durably started (spawned) — the build engine records the handle's
-        ``(executor, ref)`` in the registry *before* awaiting ``wait()``.
-
-        ``execution_id`` is the identity the caller minted before it
-        claimed the task. An implementation whose workers report their own
-        lifecycle **must forward it into the execution**, because the
-        registry honours a worker's start and its interruption reports
-        only while the task still holds the execution they name — a worker
-        that cannot name its own execution loses those protections and
-        falls back to the pre-identity rules. It is also what lets the
-        worker ask whether it is still wanted. Forwarded explicitly rather
-        than read from ambient context: it is per-execution, and a value
-        this specific going missing is invisible until a report is quietly
-        mis-attributed.
-
-        **Breaking for an existing override.** The default here is for
-        *callers*, not for subclasses: Python dispatches to the override,
-        and both engines pass the keyword unconditionally, so an
-        implementation still declaring ``submit_detached(self, task)``
-        raises ``TypeError`` before it spawns. Add the parameter.
-
-        Deliberately not softened with a signature check that omits the
-        keyword for an override that cannot take it. That would hand such
-        an executor a worker unable to name its own execution, with both
-        protections and cooperative cancellation silently absent — a
-        value this specific going missing is invisible until a report is
-        quietly mis-attributed, which is the failure this whole protocol
-        exists to remove. A ``TypeError`` at the seam is the better
-        answer.
-
-        See :meth:`submit` for why the non-detached path has no identity
-        at all.
+        ``execution_id`` is the execution the engine claimed. An executor
+        whose workers report their own lifecycle must forward it into the
+        execution: every report names it, and the registry applies a report
+        only while that execution holds the task's claim.
 
         Raises:
-            Exception: if the execution could not be started; the build
-                engine converts it into a task failure.
+            Exception: the execution could not be started (the engine
+                records the failure against the execution).
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support detached execution"
         )
 
-    async def reattach(
-        self, task: BaseTask, executor: str, ref: str
-    ) -> DetachedHandle | None:
-        """Re-attach to a previously started detached execution, if possible.
-
-        Called by the build engine when the registry reports the task as
-        RUNNING with a recorded ``(executor, ref)`` — typically after the
-        orchestrator was restarted, or when another build started the task.
-
-        Returns:
-            A handle whose ``wait()`` resolves to the execution's result
-            (including an execution that already finished successfully), or
-            None when re-attach isn't possible — unknown executor name,
-            execution failed/was cancelled/expired — in which case the build
-            engine falls back to normal (re-)execution.
-        """
-        return None
-
-    async def detached_status(
-        self, task: BaseTask, executor: str, ref: str
-    ) -> DetachedExecutionStatus:
-        """Non-blocking status probe of a detached execution.
-
-        Used by reactive scheduler ticks (which never await results — the
-        workers report their own lifecycle). Default: UNKNOWN.
-        """
-        return DetachedExecutionStatus.UNKNOWN
-
     async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
-        """Best-effort cancel of a detached execution by its recorded ref.
+        """Best-effort stop of a detached execution by its reference.
 
-        Unlike :meth:`cancel` (which works on in-flight handles tracked by
-        this executor instance), this cancels an execution named only by a
-        recorded reference.
-
-        **No scheduler calls this to revoke another process's work any
-        more** (STA-81). Both remaining callers are orphan handlers: an
-        engine stopping a container it spawned *itself*, in the pass that
-        spawned it, when the registry then refused the start — the
-        execution is orphaned, nothing else can find it, and the handle is
-        still in hand. The reactive path is in
-        ``build/_reactive/_frontier_actions.py``, the resident one in
-        ``build/_concurrent.py``.
-
-        Note ``stardag builds stop`` does not come through here: it ends
-        the selected calls directly, from the operator's credentials.
+        Called only for an execution this engine spawned itself whose start
+        the registry then refused — an orphan nothing else can find.
         Default: no-op.
         """
         pass
 
     def can_spawn_scheduler_ticks(self) -> bool:
-        """Whether :meth:`spawn_scheduler_tick` reaches a deployed ``tick``.
-
-        The resident engine asks this once per build before it starts
-        draining the registry's wake candidates after each result (see
-        ``stardag.build._wakeups``); an executor with no deployment behind
-        it — the default — is never asked to spawn.
-        """
+        """Whether :meth:`spawn_scheduler_tick` reaches a deployed ``tick``
+        (a resident build then drains the registry's wake candidates)."""
         return False
 
     def spawn_scheduler_tick(self, build_id: UUID, app_name: str) -> None:
-        """Spawn a reactive scheduler tick for ``build_id`` on ``app_name``.
-
-        The spawn half of a cross-build wake-up, for a *resident* build: the
-        registry flags reactive builds whose frontier this build's work may
-        have changed, and a resident engine whose executor can reach a
-        deployed tick finishes the job after each result it processes. Only
-        called when :meth:`can_spawn_scheduler_ticks` returned True.
-        """
+        """Spawn a reactive scheduler tick for ``build_id`` on ``app_name``."""
         raise NotImplementedError(f"{type(self).__name__} cannot spawn scheduler ticks")
 
 
@@ -551,17 +401,11 @@ ExecutorKeyT = TypeVar("ExecutorKeyT")
 
 
 class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
-    """Task executor that routes tasks to different executors based on a router function.
-
-    This enables flexible execution strategies where different tasks can be
-    executed by different executors. For example:
-    - Route some tasks to Modal for GPU execution
-    - Route other tasks to local thread/process pools
-    - Route based on task type, resource requirements, etc.
+    """Task executor that routes tasks to different executors.
 
     Example:
         local_executor = HybridConcurrentTaskExecutor()
-        modal_executor = ModalTaskExecutor(app_name="my-app")
+        modal_executor = ModalTaskExecutor(modal_app_name="my-app", ...)
 
         routed = RoutedTaskExecutor(
             executors={"local": local_executor, "modal": modal_executor},
@@ -575,17 +419,13 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         executors: dict[ExecutorKeyT, TaskExecutorABC],
         router: Callable[[BaseTask], ExecutorKeyT],
     ) -> None:
-        """Initialize the routed executor.
-
-        Args:
-            executors: Mapping from routing keys to task executors.
-            router: Function that determines which executor to use for each task.
-        """
         self.executors = executors
         self.router = router
 
+    def _executor_for(self, task: BaseTask) -> TaskExecutorABC | None:
+        return self.executors.get(self.router(task))
+
     async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
-        """Route task to appropriate executor and submit."""
         key = self.router(task)
         executor = self.executors.get(key)
         if executor is None:
@@ -597,278 +437,94 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         return await executor.submit(task)
 
     async def setup(self) -> None:
-        """Setup all child executors."""
         for executor in self.executors.values():
             await executor.setup()
 
     async def teardown(self) -> None:
-        """Teardown all child executors."""
         for executor in self.executors.values():
             await executor.teardown()
 
     async def cancel(self, task: BaseTask) -> None:
-        """Route cancel to the executor that owns the task."""
-        key = self.router(task)
-        executor = self.executors.get(key)
-        if executor is None:
-            return
-        await executor.cancel(task)
+        executor = self._executor_for(task)
+        if executor is not None:
+            await executor.cancel(task)
+
+    async def get_executor_metadata(self, task: BaseTask) -> dict[str, Any] | None:
+        executor = self._executor_for(task)
+        return None if executor is None else await executor.get_executor_metadata(task)
+
+    def execution_timeout_seconds(self, task: BaseTask) -> float | None:
+        executor = self._executor_for(task)
+        return None if executor is None else executor.execution_timeout_seconds(task)
 
     def reports_lifecycle(self, task: BaseTask) -> bool:
-        """Route to the owning executor's lifecycle-reporting mode."""
-        executor = self.executors.get(self.router(task))
-        if executor is None:
-            return False
-        return executor.reports_lifecycle(task)
+        executor = self._executor_for(task)
+        return False if executor is None else executor.reports_lifecycle(task)
 
-    def can_spawn_scheduler_ticks(self) -> bool:
-        """True if any routed executor can — a hybrid run's Modal half."""
-        return any(e.can_spawn_scheduler_ticks() for e in self.executors.values())
+    def deployment_app_name(self) -> str | None:
+        """The one deployed app the routed executors run on, if any.
 
-    def spawn_scheduler_tick(self, build_id: UUID, app_name: str) -> None:
-        """Spawn through the first routed executor that can."""
-        for executor in self.executors.values():
-            if executor.can_spawn_scheduler_ticks():
-                executor.spawn_scheduler_tick(build_id, app_name)
-                return
-        raise NotImplementedError("no routed executor can spawn scheduler ticks")
+        Raises:
+            ValueError: Two routed executors run on different apps — a plan
+                has one deployment, so their workers could not both yield
+                into it.
+        """
+        apps = {
+            app
+            for executor in self.executors.values()
+            if (app := executor.deployment_app_name()) is not None
+        }
+        if len(apps) > 1:
+            raise ValueError(
+                f"RoutedTaskExecutor routes to several deployed apps "
+                f"({', '.join(sorted(apps))}); a build plans under one "
+                "deployment, so its tasks must run on one app."
+            )
+        return next(iter(apps), None)
 
     def supports_detached(self, task: BaseTask) -> bool:
-        """Route to the owning executor's detached support."""
-        executor = self.executors.get(self.router(task))
-        if executor is None:
-            return False
-        return executor.supports_detached(task)
+        executor = self._executor_for(task)
+        return False if executor is None else executor.supports_detached(task)
 
     async def submit_detached(
-        self, task: BaseTask, *, execution_id: UUID | None = None
+        self, task: BaseTask, *, execution_id: UUID
     ) -> DetachedHandle:
-        """Route detached submission to the owning executor."""
         key = self.router(task)
         executor = self.executors.get(key)
         if executor is None:
             raise KeyError(f"No executor found for routing key: {key}")
         return await executor.submit_detached(task, execution_id=execution_id)
 
-    async def reattach(
-        self, task: BaseTask, executor: str, ref: str
-    ) -> DetachedHandle | None:
-        """Route re-attach to the executor the task routes to.
-
-        The routed executor itself checks whether the recorded ``executor``
-        name matches its backend (returns None otherwise), so a ref recorded
-        by a different backend is never re-attached by the wrong one.
-        """
-        routed = self.executors.get(self.router(task))
-        if routed is None:
-            return None
-        return await routed.reattach(task, executor, ref)
-
-    async def detached_status(
-        self, task: BaseTask, executor: str, ref: str
-    ) -> DetachedExecutionStatus:
-        """Route the status probe to the executor the task routes to."""
-        routed = self.executors.get(self.router(task))
-        if routed is None:
-            return DetachedExecutionStatus.UNKNOWN
-        return await routed.detached_status(task, executor, ref)
-
     async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
-        """Route the detached cancel to the executor the task routes to."""
-        routed = self.executors.get(self.router(task))
+        routed = self._executor_for(task)
         if routed is not None:
             await routed.cancel_detached(task, executor, ref)
 
+    def can_spawn_scheduler_ticks(self) -> bool:
+        return any(e.can_spawn_scheduler_ticks() for e in self.executors.values())
 
-# =============================================================================
-# Global Concurrency Lock
-# =============================================================================
-
-
-class LockAcquisitionStatus(StrEnum):
-    """Status of a lock acquisition attempt."""
-
-    ACQUIRED = "acquired"
-    ALREADY_COMPLETED = "already_completed"
-    HELD_BY_OTHER = "held_by_other"
-    CONCURRENCY_LIMIT_REACHED = "concurrency_limit_reached"
-    ERROR = "error"
-
-
-@dataclass
-class LockAcquisitionResult:
-    """Result of a lock acquisition attempt."""
-
-    status: LockAcquisitionStatus
-    acquired: bool
-    error_message: str | None = None
-
-
-class LockHandle(Protocol):
-    """Async context manager for a held lock.
-
-    Returned by GlobalConcurrencyLockManager.lock(). Use as:
-
-        async with lock_manager.lock(task_id) as handle:
-            if handle.result.acquired:
-                # execute task
-                handle.mark_completed()  # record completion on release
-    """
-
-    @property
-    def result(self) -> LockAcquisitionResult:
-        """The result of the lock acquisition attempt."""
-        ...
-
-    def mark_completed(self) -> None:
-        """Mark that the task completed successfully.
-
-        When called before exiting the context, the lock release will
-        record task completion (implementation-dependent behavior).
-        """
-        ...
-
-    async def __aenter__(self) -> "LockHandle": ...
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool: ...
-
-
-class GlobalConcurrencyLockManager(Protocol):
-    """Protocol for managing distributed locks for task execution.
-
-    Implementations provide distributed locking for task execution across
-    multiple build processes/instances. This enables "exactly once" execution
-    guarantees globally (not just within a single build).
-
-    The owner identity is set at instance creation time (not per-call),
-    as a single build process typically has one owner ID.
-
-    Usage:
-        lock_manager = SomeLockManager(owner_id="build-123")
-
-        async with lock_manager.lock("task-id") as handle:
-            if handle.result.acquired:
-                # execute task
-                handle.mark_completed()
-            elif handle.result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
-                # skip - task already completed elsewhere
-
-    Implementations:
-    - RegistryGlobalConcurrencyLockManager: Uses Stardag Registry API (default)
-    - Custom implementations can use Redis, DynamoDB, PostgreSQL advisory locks, etc.
-    """
-
-    def lock(self, task_id: str) -> LockHandle:
-        """Get an async context manager for locking a task.
-
-        Args:
-            task_id: The task identifier (hash).
-
-        Returns:
-            A LockHandle that can be used as an async context manager.
-            The handle's result indicates whether the lock was acquired.
-        """
-        ...
-
-    async def acquire(self, task_id: str) -> LockAcquisitionResult:
-        """Acquire a lock for a task.
-
-        Lower-level method - prefer using lock() context manager.
-
-        Args:
-            task_id: The task identifier (hash).
-
-        Returns:
-            LockAcquisitionResult with status:
-            - ACQUIRED: Lock acquired successfully
-            - ALREADY_COMPLETED: Task has completion record
-            - HELD_BY_OTHER: Lock held by another owner
-            - CONCURRENCY_LIMIT_REACHED: Concurrency limit reached
-            - ERROR: Unexpected error
-        """
-        ...
-
-    async def release(self, task_id: str, task_completed: bool = False) -> bool:
-        """Release a lock.
-
-        Lower-level method - prefer using lock() context manager.
-
-        Args:
-            task_id: The task identifier.
-            task_completed: If True, record that the task completed successfully.
-
-        Returns:
-            True if successfully released, False otherwise.
-        """
-        ...
-
-
-@dataclass
-class GlobalLockConfig:
-    """Configuration for global concurrency locking at the build level.
-
-    Attributes:
-        enabled: Whether to use global locking. Can be:
-            - True: Lock all tasks
-            - False: Lock no tasks (default)
-            - Callable: Function that returns True/False for each task
-        completion_retry_timeout_seconds: Max time to retry task.complete()
-            when lock manager indicates already_completed but target doesn't
-            exist yet (handles eventual consistency like S3).
-        completion_retry_interval_seconds: Interval between completion retries.
-        lock_wait_timeout_seconds: Max time to wait when lock is held by another
-            process or concurrency limit is reached. During this time, we poll
-            for task completion (another process may complete it) and retry
-            lock acquisition. Set to None to fail immediately without waiting.
-        lock_wait_initial_interval_seconds: Initial interval between checks when
-            waiting for lock availability.
-        lock_wait_max_interval_seconds: Maximum interval between checks (caps
-            exponential backoff).
-        lock_wait_backoff_factor: Multiplier for exponential backoff (e.g., 2.0
-            means each interval doubles).
-        exit_early_when_all_locked: If True, the build will exit early when all
-            remaining tasks are waiting for locks held by other builds. This
-            avoids waiting indefinitely when another build will complete the
-            remaining work.
-    """
-
-    enabled: bool | Callable[[BaseTask], bool] = False
-    completion_retry_timeout_seconds: float = 30
-    completion_retry_interval_seconds: float = 1.0
-    lock_wait_timeout_seconds: float | None = 300  # 5 minutes
-    lock_wait_initial_interval_seconds: float = 1.0
-    lock_wait_max_interval_seconds: float = 30.0
-    lock_wait_backoff_factor: float = 2.0
-    exit_early_when_all_locked: bool = False
-
-
-class GlobalLockSelector(Protocol):
-    """Protocol for selecting whether a task should use global locking."""
-
-    def __call__(self, task: BaseTask) -> bool:
-        """Return True if task should use global lock."""
-        ...
-
-
-class DefaultGlobalLockSelector:
-    """Default selector that uses GlobalLockConfig.enabled to determine locking.
-
-    If enabled is a callable, it's called for each task.
-    Otherwise, the boolean value is used for all tasks.
-    """
-
-    def __init__(self, config: GlobalLockConfig) -> None:
-        self.config = config
-
-    def __call__(self, task: BaseTask) -> bool:
-        if callable(self.config.enabled):
-            return self.config.enabled(task)
-        return self.config.enabled
+    def spawn_scheduler_tick(self, build_id: UUID, app_name: str) -> None:
+        for executor in self.executors.values():
+            if executor.can_spawn_scheduler_ticks():
+                executor.spawn_scheduler_tick(build_id, app_name)
+                return
+        raise NotImplementedError("no routed executor can spawn scheduler ticks")
 
 
 # =============================================================================
 # Registry Error Handling
 # =============================================================================
+
+
+def is_refusal(error: BaseException) -> bool:
+    """Whether ``error`` is the registry saying *no* (a 4xx it understood:
+    a conflict, an invalid request), as opposed to an outage."""
+    return (
+        isinstance(error, APIError)
+        and error.status_code is not None
+        and 400 <= error.status_code < 500
+        and error.status_code not in (401, 403, 404, 408, 429)
+    )
 
 
 def handle_registry_error(
@@ -878,30 +534,12 @@ def handle_registry_error(
 ) -> None:
     """Handle a registry call failure based on the configured mode.
 
-    ``"warn"`` tolerates an *outage*: the registry was unreachable or
-    errored, the build is still sound, and the caller chose to carry on
-    without the record. It never tolerates a *refusal* — the registry
-    understood the call and said no, or does not speak the contract this
-    SDK depends on — because the build would then run under a different
-    rule than the one it asked for. A :class:`RegistryTooOldError` (the
-    server predates structure scopes, so it would gate over
-    environment-global edges) and a :class:`ScopeMismatchError` (the
-    server refused a scope or config claim) propagate whatever the mode.
-    Every registry call the engines guard passes through here, so this is
-    the one place that distinction has to be made.
-
-    Args:
-        error: The exception that occurred.
-        message: A human-readable message describing what failed.
-        on_registry_failure: "warn" to log and continue, "raise" to propagate.
+    ``"warn"`` tolerates an *outage* — the registry was unreachable or
+    errored, and the caller chose to carry on without the record. It never
+    tolerates a *refusal* (:func:`is_refusal`): the registry understood the
+    call and said no, so carrying on would run the build under a different
+    rule than the one it asked for.
     """
-    if on_registry_failure == "raise" or isinstance(error, _NEVER_SWALLOWED):
+    if on_registry_failure == "raise" or is_refusal(error):
         raise error.with_traceback(error.__traceback__)
     logger.warning(f"{message}: {error}")
-
-
-# Refusals, as opposed to outages: see handle_registry_error.
-_NEVER_SWALLOWED: tuple[type[Exception], ...] = (
-    RegistryTooOldError,
-    ScopeMismatchError,
-)

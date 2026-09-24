@@ -1,16 +1,15 @@
 """The orchestrator side: a ``TaskExecutorABC`` that runs tasks on Modal.
 
 Used by whatever is driving a build — a resident ``build`` function
-(:class:`stardag.integration.modal.Builder`) or a reactive scheduler tick —
-to spawn tasks onto the app's deployed ``worker_*`` functions, re-attach to
-still-running ones after a restart, and cancel them.
+(:class:`stardag.integration.modal.Builder`), a hybrid local build, or a
+reactive scheduler tick — to spawn claimed executions onto the app's
+deployed ``worker_*`` functions, and to cancel them.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import json
 import traceback as tb_module
 import typing
 from uuid import UUID
@@ -19,22 +18,19 @@ import modal
 
 from stardag import BaseTask, TaskStruct
 from stardag.build import (
-    DetachedExecutionStatus,
     DetachedHandle,
     TaskExecutionError,
     TaskExecutorABC,
-    get_current_build_id,
+    get_current_build_context,
 )
-from stardag.build._reactive import claim_ttl_seconds
-from stardag.build._scope import code_id, structure_scope_key
-from stardag.build_config import get_build_config, jsonable_build_config
+from stardag.build._claims import claim_ttl_seconds
+from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
-    STARDAG_BUILD_CONFIG_ENV,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
     STARDAG_EXECUTION_ID_ENV,
-    STARDAG_SCOPE_KEY_ENV,
+    STARDAG_PLAN_ID_ENV,
     STARDAG_MODAL_APP_ID_ENV,
     STARDAG_MODAL_APP_NAME_ENV,
     STARDAG_MODAL_ENVIRONMENT_ENV,
@@ -58,20 +54,15 @@ from stardag.integration.modal._selector import (
 logger = logging.getLogger(__name__)
 
 
-def _is_transient_modal_error(exception: BaseException) -> bool:
-    """Best-effort classification of transport-level (retryable) errors.
-
-    Anything raised by ``FunctionCall.get`` that reflects the CALL's outcome
-    (``modal.exception.RemoteError``, user exceptions re-raised from the
-    function, expired results) is terminal; connection/socket/gRPC-transport
-    failures are not — they say nothing about the call.
-    """
-    if isinstance(exception, (OSError, ConnectionError)):
-        return True
-    module = type(exception).__module__ or ""
-    if module.startswith("grpclib") or module.startswith("h2"):
-        return True
-    return type(exception).__name__ in ("ClientClosed", "StreamTerminatedError")
+#: Framework-owned identifiers a worker reports through: never forwarded
+#: from a selector's env, only written from the build context.
+_FRAMEWORK_IDENTIFIER_ENVS = (
+    STARDAG_DEPLOYMENT_ID_ENV,
+    STARDAG_BUILD_ID_ENV,
+    STARDAG_PLAN_ID_ENV,
+    STARDAG_EXECUTION_ID_ENV,
+    STARDAG_CLAIM_TTL_SECONDS_ENV,
+)
 
 
 class ModalTaskExecutor(TaskExecutorABC):
@@ -82,9 +73,14 @@ class ModalTaskExecutor(TaskExecutorABC):
 
     By default tasks are executed *detached* (``worker.spawn`` + a tracked
     ``FunctionCall``): the worker invocation survives this process, its
-    function call id is recorded in the registry, and a resumed build
-    re-attaches to still-running workers instead of re-executing them.
-    Pass ``detached=False`` for the legacy blocking ``worker.remote`` mode.
+    function call id is recorded with its start, and the worker reports its
+    own lifecycle naming the execution the engine claimed. Pass
+    ``detached=False`` for blocking ``worker.remote`` calls, whose lifecycle
+    the engine reports.
+
+    A build whose tasks run here plans under the app's current deployment
+    (D13, :meth:`deployment_app_name`): its workers yield into the plan, and
+    the registry refuses a yield from another deployment.
 
     Example:
         from stardag.build import HybridConcurrentTaskExecutor, RoutedTaskExecutor
@@ -112,9 +108,6 @@ class ModalTaskExecutor(TaskExecutorABC):
         reactive: bool = False,
         modal_workspace: str | None = None,
         worker_timeouts: dict[str, int] | None = None,
-        build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]]
-        | None = None,
-        scope_key: str | None = None,
     ):
         """Initialize Modal executor.
 
@@ -122,15 +115,13 @@ class ModalTaskExecutor(TaskExecutorABC):
             modal_app_name: Name of the Modal app with worker functions.
             worker_selector: Function that selects which Modal worker to use per task.
             detached: Execute tasks as detached spawned function calls
-                (restart-safe, re-attachable, explicitly cancellable).
+                (restart-safe, explicitly cancellable).
                 False restores the legacy blocking ``remote`` calls.
             worker_reports_lifecycle: Whether the deployed workers report the
-                task lifecycle (started/completed/suspended/failed events +
-                artifacts) themselves via the default :class:`Runner`. When
-                True the build engine skips its own completed/suspended/
-                resumed reporting for Modal-routed tasks. Set False when
-                driving an app deployed with an older stardag version whose
-                workers don't self-report, or when using a custom
+                task lifecycle (start with ref, completion, failure, yield,
+                artifacts) themselves via the default :class:`Runner`, for
+                detached executions. When True the engine reports none of
+                those for Modal-routed tasks. Set False for a custom
                 ``run_function`` without lifecycle reporting.
             modal_workspace: Explicit Modal workspace name for the executor
                 metadata recorded with task starts (UI deep links). Default:
@@ -147,22 +138,12 @@ class ModalTaskExecutor(TaskExecutorABC):
         self.worker_selector = worker_selector
         self.detached = detached
         self.worker_timeouts = dict(worker_timeouts or {})
-        # The build's config and structure scope, forwarded to every worker
-        # this executor spawns (see STARDAG_BUILD_CONFIG_ENV /
-        # STARDAG_SCOPE_KEY_ENV). None when the caller has none to forward.
-        # Forwarded as JSON (STARDAG_BUILD_CONFIG_ENV), so it is settled into
-        # its JSON form here; the engines do the same at their entry, and a
-        # caller constructing the executor directly gets the same guarantee.
-        self.build_config = jsonable_build_config(build_config)
-        self.scope_key = scope_key
         self.worker_reports_lifecycle = worker_reports_lifecycle
         # Reactive scheduling: forward the app name + reactive flag so
-        # workers register their dynamic deps and wake the scheduler tick.
-        # That is the whole reactive protocol — a worker that does not
-        # report cannot register the dependencies it yields, cannot record
-        # its own suspension and wakes no tick, so a reactive build with
-        # non-reporting workers would sit RUNNING forever on its first
-        # dynamic yield. Refuse the combination here rather than there.
+        # workers wake the scheduler tick. That is the whole reactive
+        # protocol — a worker that does not report cannot record its end or
+        # its yield and wakes no tick, so a reactive build with
+        # non-reporting workers would sit RUNNING until its claims lapsed.
         if reactive and not worker_reports_lifecycle:
             raise ValueError(
                 "ModalTaskExecutor(reactive=True) needs self-reporting workers: "
@@ -318,113 +299,98 @@ class ModalTaskExecutor(TaskExecutorABC):
         timeout = self.worker_timeouts.get(worker_name)
         return float(timeout) if timeout is not None else None
 
+    def deployment_app_name(self) -> str | None:
+        """The app whose current deployment a build of these tasks plans
+        under (D13)."""
+        return self.modal_app_name
+
     async def _prepare_invocation(
         self, task: BaseTask, execution_id: UUID | None = None
     ) -> tuple[modal.Function, dict[str, str] | None, dict[str, typing.Any] | None]:
-        """Resolve the worker function, env overrides, and executor metadata.
+        """Resolve the worker function, its env overrides, and the executor
+        metadata.
 
-        When an enclosing build is active, the build id and app name are
-        injected as env overrides (``STARDAG_BUILD_ID``,
-        ``STARDAG_MODAL_APP_NAME``) whatever ``worker_reports_lifecycle``
-        says: the worker's scope check is bound to the build id. With
-        reporting on, the resolved executor metadata rides along the same
-        channel (``STARDAG_MODAL_*``) so worker self-reported starts carry
-        it too — as does the derived claim TTL, so the worker's own start
-        does not re-stamp the claim with the registry's generic default.
-        With reporting off, ``STARDAG_WORKER_REPORTS_LIFECYCLE=0`` tells the
-        worker so, and none of the reporter's inputs are sent.
+        The env overrides are layered in the design's precedence: the worker
+        selector's per-task env, then the build's settings, then the
+        framework's own identifiers **last** — the build and plan ids and
+        the execution id the reports name, the claim TTL, the app name and
+        the Modal coordinates — so neither a selector (user code) nor
+        settings can redirect a worker's reports. ``STARDAG_DEPLOYMENT_ID``
+        is never forwarded (it is the container's, baked by the deploy), and
+        every framework identifier is removed from the selector's env
+        first, so one the context cannot supply (no plan, no execution, no
+        context) is left unset, never selector-chosen.
+        ``STARDAG_WORKER_REPORTS_LIFECYCLE`` is likewise framework-owned:
+        it is always forced to this engine's own ``reports_lifecycle(task)``
+        value, never left at whatever a selector's env happened to carry —
+        otherwise a selector/deployment env supplying ``...=0`` could
+        suppress the worker's reports while the engine still expects them,
+        and the task would sit RUNNING until its claim lapses.
         """
-        worker_name, env_overrides = _normalize_worker_selection(
+        worker_name, selector_env = _normalize_worker_selection(
             self.worker_selector(task)
         )
         worker_function = self._get_worker_function(worker_name)
         executor_metadata = await self._metadata_for_worker(worker_name)
-        build_id = get_current_build_id()
-        if build_id is not None:
-            # The build id and app name travel whether or not the worker
-            # reports: the worker's structure-scope check is bound to the
-            # build id (only ``build:<this build>`` is the placeholder), and
-            # a non-reporting worker needs that binding as much as a
-            # reporting one. Reporting itself is an explicit switch below.
-            env_overrides = {
-                **(env_overrides or {}),
-                STARDAG_BUILD_ID_ENV: str(build_id),
-                STARDAG_MODAL_APP_NAME_ENV: self.modal_app_name,
-            }
-            if not self.worker_reports_lifecycle:
-                env_overrides[STARDAG_WORKER_REPORTS_LIFECYCLE_ENV] = "0"
-            else:
-                ttl_seconds = claim_ttl_seconds(task, self)
-                if ttl_seconds is not None:
-                    env_overrides[STARDAG_CLAIM_TTL_SECONDS_ENV] = str(ttl_seconds)
-                if execution_id is not None:
-                    # The identity of the execution this container is, so
-                    # its self-reported start and its end-of-execution
-                    # reports can name it, and so it can ask whether it is
-                    # still wanted. Only sent when the worker reports:
-                    # nothing else in the container reads it.
-                    env_overrides[STARDAG_EXECUTION_ID_ENV] = str(execution_id)
-                # The worker function's own ``timeout``, so the worker can
-                # tell a timeout from a cancellation — the two are
-                # indistinguishable from inside the container without it.
-                # See STARDAG_MODAL_FUNCTION_TIMEOUT_ENV. Same source the
-                # claim TTL is derived from, forwarded raw rather than
-                # re-derived from the TTL (which has grace folded in).
-                timeout_seconds = self.execution_timeout_seconds(task)
-                if timeout_seconds is not None:
-                    env_overrides[STARDAG_MODAL_FUNCTION_TIMEOUT_ENV] = str(
-                        timeout_seconds
-                    )
-                if executor_metadata is not None:
-                    for env_name, key in (
-                        (STARDAG_MODAL_WORKSPACE_ENV, "workspace"),
-                        (STARDAG_MODAL_ENVIRONMENT_ENV, "environment"),
-                        (STARDAG_MODAL_FUNCTION_NAME_ENV, "function_name"),
-                        (STARDAG_MODAL_APP_ID_ENV, "app_id"),
-                        (STARDAG_MODAL_FUNCTION_ID_ENV, "function_id"),
-                    ):
-                        value = executor_metadata.get(key)
-                        if value:
-                            env_overrides[env_name] = value
-                if self.reactive:
-                    env_overrides[STARDAG_REACTIVE_ENV] = "1"
-        # The build's config and scope, so the worker resolves the dynamic
-        # dependencies it yields under the same config the scheduler plans
-        # with, and refuses to run under other code. Outside the lifecycle
-        # branch on purpose: a worker that does not self-report (a custom or
-        # legacy run function) still constructs tasks, and a configured
-        # build's structure must not depend on how its workers report.
-        #
-        # Given at construction by the deployed builder and the tick; an
-        # executor a caller constructed *before* the build (the documented
-        # ``sd.build(root, executor=ModalTaskExecutor(...), build_config=...)``
-        # path) has neither, and takes them from the build it is running in:
-        # the config the engine installed, and the scope the engine derived
-        # from it the same way, on this machine. Without that, discovery
-        # would plan under the config while the workers ran at the defaults.
-        build_config = self.build_config
-        scope_key = self.scope_key
-        if build_config is None and get_current_build_id() is not None:
-            build_config = get_build_config()
-        if scope_key is None and get_current_build_id() is not None:
-            scope_key = structure_scope_key(code_id(), build_config)
-        if build_config:
-            env_overrides = {
-                **(env_overrides or {}),
-                STARDAG_BUILD_CONFIG_ENV: json.dumps(
-                    dict(build_config), separators=(",", ":"), sort_keys=True
-                ),
-            }
-        if scope_key is not None:
-            env_overrides = {
-                **(env_overrides or {}),
-                STARDAG_SCOPE_KEY_ENV: scope_key,
-            }
-        return worker_function, env_overrides, executor_metadata
+        env: dict[str, str] = dict(selector_env or {})
+        # The framework's identifiers are never taken from a selector: they
+        # are removed here and written below only from the build context, so
+        # a context without a plan (a registry failure degraded to ``warn``)
+        # or no context at all leaves them unset rather than selector-chosen.
+        for key in _FRAMEWORK_IDENTIFIER_ENVS:
+            env.pop(key, None)
+        context = get_current_build_context()
+        if context is None:
+            return worker_function, env or None, executor_metadata
+        env.update(context.settings)
+        env[STARDAG_BUILD_ID_ENV] = str(context.build_id)
+        env[STARDAG_MODAL_APP_NAME_ENV] = self.modal_app_name
+        if not self.reports_lifecycle(task):
+            env[STARDAG_WORKER_REPORTS_LIFECYCLE_ENV] = "0"
+            return worker_function, env, executor_metadata
+        # Reporting is on: clear whatever the selector/deployment env may
+        # have set for this framework-owned var, so a stale "0" cannot
+        # silently suppress the worker's reports (see the docstring).
+        env.pop(STARDAG_WORKER_REPORTS_LIFECYCLE_ENV, None)
+        # The execution id is only meaningful under the plan the worker
+        # reports through: without a plan (a registration failure degraded
+        # to ``warn``) neither is sent, and neither was left from a selector.
+        if context.plan_id is not None:
+            env[STARDAG_PLAN_ID_ENV] = str(context.plan_id)
+            if execution_id is not None:
+                env[STARDAG_EXECUTION_ID_ENV] = str(execution_id)
+        ttl_seconds = claim_ttl_seconds(task, self)
+        if ttl_seconds is not None:
+            env[STARDAG_CLAIM_TTL_SECONDS_ENV] = str(ttl_seconds)
+        # The worker function's own ``timeout``, so the worker can tell a
+        # timeout from a cancellation (see STARDAG_MODAL_FUNCTION_TIMEOUT_ENV).
+        timeout_seconds = self.execution_timeout_seconds(task)
+        if timeout_seconds is not None:
+            env[STARDAG_MODAL_FUNCTION_TIMEOUT_ENV] = str(timeout_seconds)
+        if executor_metadata is not None:
+            for env_name, key in (
+                (STARDAG_MODAL_WORKSPACE_ENV, "workspace"),
+                (STARDAG_MODAL_ENVIRONMENT_ENV, "environment"),
+                (STARDAG_MODAL_FUNCTION_NAME_ENV, "function_name"),
+                (STARDAG_MODAL_APP_ID_ENV, "app_id"),
+                (STARDAG_MODAL_FUNCTION_ID_ENV, "function_id"),
+            ):
+                value = executor_metadata.get(key)
+                if value:
+                    env[env_name] = value
+        if self.reactive:
+            env[STARDAG_REACTIVE_ENV] = "1"
+        return worker_function, env, executor_metadata
 
     def reports_lifecycle(self, task: BaseTask) -> bool:
-        """Workers self-report lifecycle when enabled and a build is active."""
-        active = self.worker_reports_lifecycle and get_current_build_id() is not None
+        """Workers self-report the lifecycle of a *detached* execution of an
+        active build (a blocking ``remote`` call has no execution identity
+        of its own; the engine reports it)."""
+        active = (
+            self.worker_reports_lifecycle
+            and self.detached
+            and get_current_build_context() is not None
+        )
         if active and not self._reports_lifecycle_logged:
             # Make the version-skew failure mode visible: nothing verifies
             # the deployed workers actually self-report. If the app was
@@ -435,11 +401,10 @@ class ModalTaskExecutor(TaskExecutorABC):
             logger.info(
                 "Engine-side lifecycle reporting is suppressed for "
                 f"Modal-routed tasks (app {self.modal_app_name!r}): workers "
-                "are assumed to self-report started/completed/suspended/"
-                "failed events. If the deployed app predates worker "
-                "self-reporting or uses a custom run function, pass "
+                "self-report their start, end and yields. A custom run "
+                "function without lifecycle reporting needs "
                 "ModalTaskExecutor(worker_reports_lifecycle=False) — "
-                "otherwise tasks will appear stuck RUNNING in the registry."
+                "otherwise its tasks stay RUNNING until their claims lapse."
             )
         return active
 
@@ -507,7 +472,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         )
 
     async def submit_detached(
-        self, task: BaseTask, *, execution_id: UUID | None = None
+        self, task: BaseTask, *, execution_id: UUID
     ) -> DetachedHandle:
         """Spawn the task on its worker function; return a re-attachable handle."""
         (
@@ -519,90 +484,6 @@ class ModalTaskExecutor(TaskExecutorABC):
             task, env_overrides=env_overrides
         )
         return self._make_handle(task, function_call, executor_metadata)
-
-    async def reattach(
-        self, task: BaseTask, executor: str, ref: str
-    ) -> DetachedHandle | None:
-        """Re-attach to a spawned function call by id, if it is still live.
-
-        Returns None (→ normal re-execution) when the ref belongs to a
-        different backend, the call failed/was cancelled, or the result has
-        expired. A call that already finished successfully yields a handle
-        resolving immediately to its result.
-
-        Known ambiguity (accepted): Modal's ``get(timeout=0)`` poll timeout
-        raises the *builtin* ``TimeoutError`` (modal 1.5), and a task body
-        that itself raised ``TimeoutError`` re-raises the same type — such
-        a failed call classifies as still-running here. Not narrowable:
-        ``modal.exception.TimeoutError`` is not what the poll raises, and
-        ``FunctionCall.get_call_graph()`` does not reliably surface input
-        status (verified live: stays PENDING after success/cancel). The
-        re-attach path self-corrects: awaiting the returned handle's
-        ``wait()`` re-raises the failure and the task is recorded failed.
-        """
-        if executor != MODAL_EXECUTOR_NAME or not self.detached:
-            return None
-        try:
-            function_call = modal.FunctionCall.from_id(ref)
-        except Exception:
-            return None
-        try:
-            result = await function_call.get.aio(timeout=0)
-        except TimeoutError:
-            # Still running (or queued) — the interesting case. Base
-            # metadata only: the worker function behind a bare ref isn't
-            # known here.
-            return self._make_handle(
-                task, function_call, await self._get_base_executor_metadata()
-            )
-        except Exception:
-            # Failed, cancelled, expired result, or unknown id — re-execute.
-            return None
-
-        async def resolved() -> None | TaskStruct | TaskExecutionError:
-            return result
-
-        return DetachedHandle(executor=MODAL_EXECUTOR_NAME, ref=ref, wait=resolved)
-
-    async def detached_status(
-        self, task: BaseTask, executor: str, ref: str
-    ) -> DetachedExecutionStatus:
-        """Non-blocking probe of a spawned function call's state.
-
-        Note: an expired result (>~7 days) and an unknown id also classify
-        as FAILED — callers (scheduler ticks) check target existence first,
-        so a successfully-finished-long-ago execution is already resolved
-        as complete before this is consulted.
-
-        Known ambiguity (accepted, see also ``reattach``): the poll timeout
-        is the builtin ``TimeoutError``, indistinguishable from a task body
-        that raised ``TimeoutError`` — such a failed execution classifies
-        as RUNNING here. In practice the worker's own TASK_FAILED report
-        resolves the task first; only a registry-less worker raising
-        builtin TimeoutError hits the ambiguity.
-        """
-        if executor != MODAL_EXECUTOR_NAME or not self.detached:
-            return DetachedExecutionStatus.UNKNOWN
-        try:
-            function_call = modal.FunctionCall.from_id(ref)
-            await function_call.get.aio(timeout=0)
-        except TimeoutError:
-            return DetachedExecutionStatus.RUNNING
-        except Exception as e:
-            # Transient transport/infrastructure errors must NOT classify as
-            # FAILED: callers (claim loser-resolution, tick healing) treat
-            # FAILED as proof of death — a network blip mistaken for a dead
-            # winner would let a racer record a live execution as failed and
-            # spawn the duplicate the claim exists to prevent. UNKNOWN is
-            # the safe degradation (leave/wait and re-probe later).
-            if _is_transient_modal_error(e):
-                logger.warning(
-                    f"Transient error probing Modal call {ref!r}; treating "
-                    f"as unknown: {e}"
-                )
-                return DetachedExecutionStatus.UNKNOWN
-            return DetachedExecutionStatus.FAILED
-        return DetachedExecutionStatus.SUCCEEDED
 
     def can_spawn_scheduler_ticks(self) -> bool:
         return True

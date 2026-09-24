@@ -1,1307 +1,584 @@
-"""Base registry classes and utilities."""
+"""The registry interface (v2), the do-nothing default, and the provider.
 
-import abc
+:class:`RegistryABC` is the SDK's one seam to the registry: every route of
+``/api/v2`` the engines, the Modal integration and the CLI use is a method
+here, and :class:`~stardag.registry.APIRegistry` implements them over HTTP.
+Methods come in pairs — a sync one and an ``_aio`` one — because both kinds
+of caller exist (a Modal worker's reporter and the CLI are sync; the engines
+and the tick are async). The ``_aio`` defaults call the sync method, which
+is what an in-memory double wants; the HTTP client overrides both.
+
+Nothing here is abstract: a double implements the seams its test exercises,
+and an unimplemented one raises :class:`NotImplementedError` naming itself.
+A build without a registry uses :class:`NoOpRegistry`, which the engines
+recognise by its exact type and never call (design.md D11: no registry, no
+plan, no claims).
+
+**Identities are client-minted** (build, plan, execution, deployment and
+yield-batch ids), so every write is idempotent on re-delivery; see
+design.md, "Registration".
+"""
+
+from __future__ import annotations
+
 import os
 import subprocess
-from datetime import datetime
-from functools import lru_cache
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from stardag.base_model import StardagBaseModel
+from stardag.registry._models import (
+    BuildFrontier,
+    BuildInfo,
+    BuildNotifyResult,
+    DeploymentInfo,
+    DeploymentKind,
+    ExclusionResult,
+    ExecutionInfo,
+    FrontierMember,
+    MembersResult,
+    PlanInfo,
+    RegistrationItem,
+    ResumeResult,
+    SchedulerLeaseResult,
+    SettingsInfo,
+    TaskInfo,
+    TickSummaryRecord,
+    TransitionResult,
+    WakeCandidate,
+    YieldResult,
+)
 from stardag.utils.resource_provider import resource_provider
 
 if TYPE_CHECKING:
-    from stardag import BaseTask
     from stardag.artifact import Artifact
 
 
-class FrontierTaskRef(StardagBaseModel):
-    """A task in a build's scheduling frontier (see :class:`BuildFrontier`)."""
+def _missing(registry: object, method: str) -> NotImplementedError:
+    return NotImplementedError(f"{type(registry).__name__} does not implement {method}")
 
-    task_id: str
-    latest_status: str
-    latest_executor: str | None = None
-    latest_executor_ref: str | None = None
-    # Executor-descriptive metadata recorded with the latest start (e.g.
-    # Modal app/workspace/environment). None on servers predating the field.
-    latest_executor_metadata: dict[str, Any] | None = None
-    # When the current status was recorded (None on servers predating the
-    # field).
-    latest_status_at: datetime | None = None
-    # The build whose event produced the current status. The claim
-    # holder, for any status a task can be held in — and the field that
-    # separates this build's executions from a neighbour's: ``running``
-    # is every RUNNING task in the *plan*, which after plan closure
-    # includes tasks another build is executing. Acting destructively
-    # on one of those kills somebody else's worker. None on servers
-    # predating the field, and on a task whose owning build is gone.
-    latest_status_build_id: UUID | None = None
-    # When the RUNNING execution claim stops being honoured, if ever — the
-    # one piece of *third-party evaluable* liveness evidence a claim
-    # carries: past it the claim is re-claimable and stops occupying
-    # concurrency slots, so a reader may treat it as abandoned without
-    # probing anything. None means "never lapses" (older server, or a start
-    # predating the column) and is NOT evidence of death. Only meaningful
-    # while ``latest_status == "running"``: every other transition releases
-    # the claim, and the server clears this with it.
-    latest_status_expires_at: datetime | None = None
-    # How many times execution has been *started* for this task in the
-    # build's current **round** — the budget a reactive tick's
-    # ``TickConfig.max_attempts`` spends (see ``stardag.build._reactive``).
-    #
-    # A round runs from the build's most recent BUILD_RESUMED event, or
-    # from the build's beginning if it has never been resumed. So the count
-    # is scoped tighter than the build: re-triggering an existing build id
-    # emits BUILD_RESUMED and thereby starts a fresh round, which is what
-    # makes "re-trigger it" a real escape from an exhausted budget rather
-    # than a no-op. A *bare* retry (the retry route, the UI's Retry,
-    # ``stardag tasks retry``) emits no such event and does not reset it.
-    #
-    # The server collapses *runs of consecutive* TASK_STARTED events into
-    # one attempt, so the several starts one execution records — the
-    # reactive path's two (the claiming start, then the one carrying the
-    # executor ref) and the resident path's three (claim, engine ref,
-    # worker self-report) — count once each. A start separated from the
-    # previous one by any other event (a failure, a suspension) is a new
-    # attempt.
-    #
-    # ``0`` means "not attempted in this **round**" — an ordinary spawn
-    # candidate, never a reason to deny a start. Note *round*, not build:
-    # BUILD_RESUMED resets the count, so a task that ran in an earlier
-    # round of the same build reads ``0`` again after a re-trigger. That is
-    # deliberate — a retry budget is per attempt at making the build
-    # progress, and a resume is a new attempt.
-    #
-    # ``None`` means the *server does not report attempts at all* (it
-    # predates the field, so the key is absent from the payload and this
-    # default applies). That is not the same statement as ``0`` and must
-    # not be collapsed into it: a budget is only enforceable against a
-    # counter that exists, so a reader with no counter cannot allow a retry
-    # either — it has no way to stop allowing one. Callers therefore read
-    # ``None`` as "no retry policy is possible here" and degrade to exactly
-    # the behaviour they had before attempts were counted.
-    attempt_count: int | None = None
-    # How many times an execution of this task was **interrupted** by the
-    # platform in the same round — a function timeout, or a reclaimed
-    # container. Budgeted separately from ``attempt_count``, against
-    # ``TickConfig.max_interruptions``, and deliberately so: a task built to
-    # be killed and resumed until it converges would otherwise burn a budget
-    # meant for genuine failures and fail the build for the one reason it
-    # was designed to survive.
-    #
-    # ``None`` carries the same "this server does not report it" meaning as
-    # above, but a different consequence. An unreportable *attempt* count
-    # refuses the retry, because retrying is the thing that could loop
-    # unbounded. An unreportable *interruption* count has no such danger to
-    # guard against on its own — but it also cannot bound a respawn loop, so
-    # it degrades to treating the interruption as an ordinary retryable
-    # failure under the attempt budget, which is bounded.
-    interrupt_count: int | None = None
 
+class RegistryABC:
+    """The v2 registry client interface. See the module docstring."""
 
-class FrontierExternalBlocker(StardagBaseModel):
-    """An upstream outside this build that holds one of its tasks back.
+    # -- builds ---------------------------------------------------------------
 
-    Task rows (and their dependency edges) are per *environment*, not per
-    build, so an upstream left non-COMPLETED by some *other* build still
-    gates this build's downstream tasks — silently, since such an upstream
-    need not be part of this build's task set at all (a dynamic dependency
-    registered under an earlier build is the common case). Each entry pairs
-    one blocked task of this build with one such blocker.
-
-    "Not this build's doing" is decided server-side by the build whose
-    event produced the blocker's current status: if that is not this build,
-    this build did not put the blocker in that state and cannot generally
-    get it out of it.
-
-    The blocked side carries only ``task_id`` (the caller registered it, and
-    every other frontier field is task_id-keyed too); the *blocking* side
-    carries name/namespace because it may be entirely unknown to the caller,
-    and a diagnostic is useless without something human-readable.
-    """
-
-    # Blocked task — always a member of this build's task set.
-    task_id: str
-    # The blocking upstream. Identity is spelled out because this build may
-    # never have seen this task.
-    blocking_task_id: str
-    blocking_task_namespace: str
-    blocking_task_name: str
-    # Task status value; never "completed" (a completed upstream blocks
-    # nothing).
-    blocking_status: str
-    # When the blocker entered its current status, and the build whose event
-    # put it there ("running under build Z since T"). Both are None only for
-    # rows predating status denormalisation server-side.
-    blocking_status_at: datetime | None = None
-    blocking_status_build_id: UUID | None = None
-    # When the blocker's RUNNING execution claim lapses, if ever — the same
-    # column as ``FrontierTaskRef.latest_status_expires_at``, surfaced here
-    # because it turns the wait-or-fail decision for a RUNNING blocker from
-    # an inference into a read (see
-    # ``stardag.build._reactive._classify_external_blockers``). None =
-    # "never lapses". Always None for a non-RUNNING blocker: it holds no
-    # claim, so "will anyone move it?" must be asked of its owning build.
-    blocking_status_expires_at: datetime | None = None
-    # Whether the blocker is also part of *this* build's task set. True is the
-    # normal case: a build's plan holds every dependency that was not complete
-    # at discovery, so the blocker is this build's own task and shows up in its
-    # ``actionable``/``running`` too.
-    #
-    # False is still reachable, and not only for builds registered before
-    # closure existed. Closure runs once, at registration, so a dependency edge
-    # written afterwards is not in the plan — which is what happens whenever a
-    # concurrent build's worker yields dynamic dependencies into its own plan.
-    # Re-triggering re-runs discovery and brings them in.
-    #
-    # Reported for diagnostics, not branched on: the scheduler decides from
-    # the blocker's *status* (see
-    # ``stardag.build._reactive._classify_external_blockers``), and the
-    # attempt count below is what keeps it from resetting a task outside the
-    # plan.
-    blocking_in_build: bool
-    # Attempts this blocker has already spent **in this build's round**,
-    # when the blocker is in this build's plan (None otherwise, and on
-    # servers predating the field). A tick that resets an in-plan blocker
-    # needs this to stay inside the same budget an ordinary retry obeys —
-    # otherwise a task that fails every time is reset, rerun and re-failed
-    # forever.
-    blocking_attempt_count: int | None = None
-
-
-class BuildFrontier(StardagBaseModel):
-    """Scheduling state of a build, consumed by reactive scheduler ticks.
-
-    ``actionable``: tasks with global status pending/suspended/interrupted/running whose
-    upstream dependencies (static + dynamic) are all completed. The
-    scheduler partitions them: pending/suspended → spawn; running → probe
-    the detached execution ref. ``status_counts`` covers all tasks in the
-    build (terminal detection).
-
-    ``blocked_by_external`` explains the gap between the two scopes this
-    payload mixes: dependency gating is environment-global while ``running``
-    and ``status_counts`` cover only tasks this build has events for, so a
-    build can have nothing actionable and nothing running yet still be
-    legitimately waiting. See :class:`FrontierExternalBlocker`.
-    """
-
-    build_id: UUID
-    build_status: str
-    needs_tick: bool
-    root_task_ids: list[str]
-    roots: list[FrontierTaskRef]
-    status_counts: dict[str, int]
-    actionable: list[FrontierTaskRef]
-    # All RUNNING tasks in the build, including non-actionable ones (e.g.
-    # inside the dynamic-dep registration window) — cancellation targets.
-    # Defaults to empty for servers predating the field.
-    running: list[FrontierTaskRef] = []
-    # The structure scope the build is currently planned under — the scope
-    # gating was evaluated over for this payload. A tick compares its code
-    # id half with its own on every read: a build re-planned by a newer
-    # deployment mid-tick is that tick's cue to exit as superseded. None on
-    # servers predating scopes.
-    scope_key: str | None = None
-    # Non-terminal tasks of this build held back by an upstream this build
-    # does not own, capped server-side (hence the truncation flag — the list
-    # is a diagnostic, not a work queue; a truncated list still proves
-    # "waiting, not stuck").
-    #
-    # Populated ONLY when the build has nothing actionable and nothing
-    # running, i.e. only when it looks stalled — which keeps a per-edge join
-    # off the hot path of every healthy build's linger polls. So an EMPTY
-    # list means "not externally blocked, OR not stalled"; never read it as
-    # proof that no external blocker exists. Also empty on servers predating
-    # the fields, where the tick's terminal detection degrades to exactly its
-    # pre-fix behaviour.
-    blocked_by_external: list[FrontierExternalBlocker] = []
-    blocked_by_external_truncated: bool = False
-    # Reactive-scheduling marker/owner, moved off the target root into the
-    # registry. None means the build is NOT reactively scheduled (a stray
-    # tick must no-op on it, so a resident-orchestrator build is never
-    # double-scheduled). Non-None is the owning app that drives the tick
-    # (ownership guard). Set via ``build_set_reactive_meta``. None also on
-    # servers predating the field (the reactive trigger fails loudly against
-    # such servers when it PUTs the reactive-meta endpoint, so a tick never
-    # observes this).
-    reactive_app_name: str | None = None
-    # Reactive-scheduler tick configuration (a ``TickConfig`` kwargs dict);
-    # None/absent is treated as ``{}``. Read from the frontier only for the
-    # backstop marker check — the Modal tick reads it from the lighter
-    # ``build_get`` before acquiring the lease.
-    reactive_tick_kwargs: dict[str, Any] | None = None
-
-
-class WakeCandidate(StardagBaseModel):
-    """A build the caller should spawn a scheduler tick for.
-
-    The hand-over between the two halves of a cross-build wake-up: the
-    registry flags builds whose frontier may have changed (it sees every
-    write) and hands them out here, once per window; the caller — a tick,
-    or a resident engine with a Modal executor — spawns. Carries the app
-    name because that is what reaches the right deployed ``tick`` function;
-    the build may belong to a different app than the caller.
-    """
-
-    build_id: UUID
-    reactive_app_name: str
-
-
-class BuildNotifyResult(StardagBaseModel):
-    """Outcome of ``build_notify`` — the wake-up set, and who can serve it.
-
-    ``scheduler_live`` is what makes a wake-up *conditional*: it reports
-    whether the build's scheduler lease was held when the server produced
-    this response — which is at some point *after* the flag was set, not
-    atomically with it. That ordering is the whole guarantee, and it is
-    enough: a "yes" means the lease was still held after the flag was
-    already durable, so its holder cannot exit without seeing the flag (it
-    re-reads once more after releasing — see
-    ``stardag.build._reactive._hand_off_if_needed``). A "no" means nobody
-    held it, so the caller must spawn. Answering in the notify response
-    rather than from a separate query is what pins the read to that side of
-    the write; a separate query invites the opposite ordering.
-
-    ``None`` means the server did not say (it predates the field), and is
-    **not** "no scheduler": a caller must fall back to spawning
-    unconditionally, which is what every SDK did before this existed.
-    """
-
-    build_id: UUID | None = None
-    needs_tick: bool = True
-    scheduler_live: bool | None = None
-
-
-class BuildInfo(StardagBaseModel):
-    """Slim build record from ``build_get`` (``GET /builds/{id}``).
-
-    Carries the reactive marker/owner/config a scheduler tick's pre-lease
-    gate needs, without the cost of a full frontier computation. Extra
-    fields on the server response are ignored.
-    """
-
-    id: UUID
-    # The build's *derived* status (computed server-side from its recorded
-    # events, same values as ``BuildFrontier.build_status``): pending /
-    # running / completed / failed / cancelled. None on servers or custom
-    # registries that don't report it — a consumer asking "is this build
-    # still live?" must treat None as unknown rather than as terminal.
-    status: str | None = None
-    # Reactive-scheduling marker/owner (see ``BuildFrontier``). None = not
-    # reactively scheduled.
-    reactive_app_name: str | None = None
-    # Reactive-scheduler tick configuration; None/absent treated as ``{}``.
-    reactive_tick_kwargs: dict[str, Any] | None = None
-    # The structure scope the build's dependency edges live in
-    # (``<code_id>:<config_hash>``, or the server's synthetic ``build:<id>``
-    # for a build that never set one). A tick compares it with the scope
-    # its own code and the build's config produce, and refuses to drive a
-    # build under other code. None on servers predating scopes.
-    scope_key: str | None = None
-    # The build config levels 2 and 3 parameters are read from; None = {}.
-    build_config: dict[str, Any] | None = None
-
-
-class DeploymentInfo(StardagBaseModel):
-    """One deployed code version of an app, as the registry records it.
-
-    Exactly Modal's notion: one code version of one app name. The registry
-    keeps a row per ``stardag modal deploy`` so operators can see which
-    code ids an app has run and which is current; the newest row for an
-    app is the current one. Nothing resolves triggers through it and
-    nothing is kept alive beside it — a running build rolls over to the
-    live deployment at its next scheduler pass.
-    """
-
-    id: UUID
-    app_name: str
-    code_id: str
-    deployed_at: datetime | None = None
-    current: bool = False
-    # Modal's own app id for the deployment, when the deploy reported one.
-    modal_app_id: str | None = None
-
-
-class _DeriveDependencies:
-    """Sentinel type for :data:`DERIVE_DEPENDENCIES`."""
-
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return "DERIVE_DEPENDENCIES"
-
-
-DERIVE_DEPENDENCIES = _DeriveDependencies()
-"""Default for a single registration's ``declared_dependencies``: evaluate
-``task.requires()`` here. The two other values mean different things — a
-sequence declares exactly that set, ``None`` declares nothing (the task was
-pruned at, so its dependencies were never evaluated) — and one of them had
-to be the default; this sentinel keeps the legacy behaviour for callers
-that predate the distinction."""
-
-DeclaredDependencies: TypeAlias = "Sequence[BaseTask] | None | _DeriveDependencies"
-
-
-class SchedulerLeaseResult(StardagBaseModel):
-    """Outcome of acquiring, renewing or releasing a build's scheduler lease.
-
-    ``held`` is the whole answer: for an acquire it means "you may drive
-    this build", for a renew and a release "you still held it". A renew
-    answering False is how a tick whose lease lapsed learns it was taken
-    over — the honest response is to stop driving, not to keep going.
-    """
-
-    build_id: UUID | None = None
-    held: bool = False
-    expires_at: datetime | None = None
-
-
-class StartClaimResult(StardagBaseModel):
-    """Outcome of a claiming task start (see ``task_start_claim_aio``).
-
-    ``started=True`` means this caller won: the TASK_STARTED event was
-    recorded (and any requested concurrency-limit slots acquired). On a
-    denial, ``denied_reason`` says why and — for ``already_running`` — the
-    running execution's ``(executor, executor_ref)`` is echoed so the
-    caller can re-attach or probe liveness.
-    """
-
-    started: bool
-    denied_reason: Literal["already_running", "already_completed", "limit"] | None = (
-        None
-    )
-    executor: str | None = None
-    executor_ref: str | None = None
-    # ISO timestamp at which the winning execution's claim lapses, echoed on
-    # ``already_running`` denials when the server provides it. A lapsed claim
-    # is re-claimable, so a ref-less loser can act on evidence that the
-    # winner is gone rather than guessing from how long it has been running.
-    # None = "never lapses" (older server, or a start predating the column),
-    # which is not evidence of death — the loser waits, as it always has.
-    latest_status_expires_at: str | None = None
-    denied_keys: list[str] = []
-    # The claim identity the task now holds, echoed by a registry that
-    # understands ``execution_id``. On a grant it is the caller's own id
-    # coming back, which is how a caller confirms the server honoured
-    # it; on an ``already_running`` denial it names the claim that won.
-    # ``None`` from a registry predating the field -- not an error,
-    # since the only cost is the idempotent retry, which is how every
-    # earlier release behaved.
-    execution_id: str | None = None
-
-
-class ExecutionStatus(StardagBaseModel):
-    """Whether a running worker is still the one its task is waiting for.
-
-    Cooperative cancellation's answer. **Every default here says "keep
-    running"** — which is not a convenience but the invariant in
-    :mod:`stardag.cancellation`, expressed as field defaults: a registry
-    that does not implement this, a server predating the endpoint, and a
-    response that did not parse must all leave the worker alone.
-    """
-
-    still_current: bool = True
-    # ``build_not_running`` or ``superseded`` when not current; None
-    # otherwise. A value this client does not recognise is still a "no" —
-    # the boolean decides, this only explains.
-    reason: str | None = None
-    build_status: str | None = None
-    task_status: str | None = None
-    # The execution the task holds now, which on ``superseded`` is the one
-    # that replaced the caller's.
-    latest_execution_id: UUID | None = None
-
-
-class RegisteredTaskInfo(StardagBaseModel):
-    """Slim per-task info echoed back from a bulk task registration.
-
-    Carries the task's current *global* execution state (across builds) so
-    the build engine learns — with zero extra roundtrips — whether a task is
-    already RUNNING with a re-attachable detached execution. The executor
-    fields are only meaningful when ``latest_status == "running"``.
-    """
-
-    task_id: str
-    latest_status: str | None = None
-    latest_executor: str | None = None
-    latest_executor_ref: str | None = None
-    latest_executor_metadata: dict[str, Any] | None = None
-
-
-class BuildSummary(StardagBaseModel):
-    """One build row from ``GET /builds`` (and the single-build endpoints).
-
-    A read model for operators, not for the build engine: the CLI's
-    ``stardag builds list/show/cancel`` and anything else that needs to
-    *look at* builds rather than drive one. Unknown response fields are
-    ignored (pydantic's default), so a newer server can add fields without
-    breaking an older SDK.
-
-    ``last_active_at`` and ``last_activity_at`` are two different numbers
-    and confusing them is the classic way to cancel live work:
-
-    - ``last_active_at`` is the column the list is ordered by, bumped only
-      by build-level *lifecycle* transitions (resume, complete, fail,
-      cancel, exit-early, roots appended). Task events deliberately do not
-      touch it, so a build that has been running tasks for three days
-      still shows its last lifecycle change here.
-    - ``last_activity_at`` is the activity signal: the newest of the
-      build's entire event stream (task events included), its
-      ``last_active_at``, and any pending scheduler wake-up. This is what
-      staleness must be measured on, and what the server's bulk-cancel
-      idle filter measures.
-
-    Both are None on servers predating the fields.
-    """
-
-    id: UUID
-    name: str
-    # Derived server-side from the build's recorded events: pending /
-    # running / completed / failed / cancelled.
-    status: str | None = None
-    # Why a FAILED build failed, as recorded server-side. None for any other
-    # status, and on servers predating the field — so a consumer must not read
-    # None as "failed for no reason".
-    latest_error_message: str | None = None
-    description: str | None = None
-    commit_hash: str | None = None
-    root_task_ids: list[str] = []
-    created_at: datetime | None = None
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
-    # True when the most recent build-level event is BUILD_RESUMED.
-    is_resumed: bool = False
-    executor_metadata: dict[str, Any] | None = None
-    # Reactive-scheduling marker/owner; None means the build is not
-    # reactively scheduled (see :class:`BuildInfo`).
-    reactive_app_name: str | None = None
-    reactive_tick_kwargs: dict[str, Any] | None = None
-    last_active_at: datetime | None = None
-    last_activity_at: datetime | None = None
-
-
-class BuildListPage(StardagBaseModel):
-    """One page of ``GET /builds``.
-
-    ``total`` counts everything matching the filter, not this page — the
-    two together are what tells a caller whether it has seen everything.
-    """
-
-    builds: list[BuildSummary] = []
-    total: int = 0
-    page: int = 1
-    page_size: int = 0
-
-
-class BuildCancelResult(BuildSummary):
-    """Response of ``POST /builds/{id}/cancel``.
-
-    A superset of :class:`BuildSummary`, mirroring the server.
-
-    The cascade fields list the tasks whose claims the cancel released,
-    and are populated **whether or not ``cascade`` was passed**: a cancel
-    now always releases, and the parameter is an accepted no-op. They were
-    empty without it before, so do not read "empty" as "nothing was
-    released".
-
-    Two cases do still produce empty: the build held no claims, and a
-    server predating the cascade, which omits the fields entirely so they
-    default here. Neither is distinguishable from the other in the
-    response, and neither means the claims survived on a current server.
-    """
-
-    # Tasks moved to CANCELLED alongside the build, releasing their
-    # execution claims and any concurrency-limit slots they held.
-    cascaded_task_ids: list[str] = []
-    cascaded_task_count: int = 0
-
-
-class BuildFailResult(BuildSummary):
-    """Response of ``POST /builds/{id}/fail``.
-
-    A superset of :class:`BuildSummary`, mirroring the server.
-    ``skipped_task_ids`` is what the fail itself skipped while completing
-    the blocked closure — a server predating that omits the field, and it
-    defaults here to empty, which reads correctly as "this server did not
-    skip anything; ask ``skip-blocked`` yourself".
-    """
-
-    skipped_task_ids: list[str] = []
-
-
-class BulkCancelBuildRef(StardagBaseModel):
-    """One build cancelled — or, in a dry run, *selected* — by bulk cancel."""
-
-    build_id: UUID
-    name: str = ""
-    # The idleness signal the selection was made on (see
-    # :class:`BuildSummary` on why this is not ``last_active_at``).
-    last_activity_at: datetime | None = None
-    reactive_app_name: str | None = None
-    # Tasks cancelled along with the build; empty when cascade is off.
-    cascaded_task_ids: list[str] = []
-
-
-class BulkCancelResult(StardagBaseModel):
-    """Result of ``POST /builds/bulk-cancel``.
-
-    In a dry run this reports exactly what a real run would have done and
-    nothing is written — which is what makes it safe to make ``dry_run``
-    the default of any cleanup UX built on top.
-    """
-
-    dry_run: bool = False
-    builds: list[BulkCancelBuildRef] = []
-    build_count: int = 0
-    task_count: int = 0
-    # Explicitly-requested build ids that were *not* acted on, keyed by id
-    # with a machine-readable reason: "not_found" (unknown, or another
-    # environment — deliberately indistinguishable), "not_running",
-    # "reactive", "not_idle".
-    skipped: dict[str, str] = {}
-    # More builds matched the filter than ``limit`` allowed — call again.
-    truncated: bool = False
-
-
-class TaskSummary(StardagBaseModel):
-    """One task row from ``GET /tasks``.
-
-    The status fields are *environment-global*, not per build: a task row
-    is unique per ``(environment_id, task_id)``, so a task left RUNNING by
-    a build whose orchestrator died denies the execution claim to every
-    future build that needs it until something moves it.
-    ``latest_status_build_id`` is therefore the answer to "who is holding
-    this claim", and ``latest_status_at`` to "since when".
-    """
-
-    id: UUID
-    task_id: str
-    task_namespace: str = ""
-    task_name: str = ""
-    version: str | None = None
-    output_uri: str | None = None
-    created_at: datetime | None = None
-    is_phantom: bool = False
-    latest_status: str | None = None
-    latest_status_at: datetime | None = None
-    latest_status_build_id: UUID | None = None
-    # ...and "until when", plus why it may be sooner than the executor's
-    # timeout would imply. A preemption brings the expiry forward to a
-    # restart-sized grace, so the pair reads as "a restart is due by then";
-    # ``latest_preempted_at > latest_status_at`` is the test for one still
-    # outstanding. Both None on servers predating the fields.
-    latest_status_expires_at: datetime | None = None
-    latest_preempted_at: datetime | None = None
-    latest_executor: str | None = None
-    latest_executor_ref: str | None = None
-    latest_executor_metadata: dict[str, Any] | None = None
-    # The execution the task is currently running under, as minted by
-    # whoever claimed it. None from a registry predating it.
-    latest_execution_id: UUID | None = None
-
-
-class TaskListPage(StardagBaseModel):
-    """One page of ``GET /tasks``."""
-
-    tasks: list[TaskSummary] = []
-    total: int = 0
-    page: int = 1
-    page_size: int = 0
-
-
-class TickSummaryRecord(StardagBaseModel):
-    """A persisted reactive-scheduler tick summary.
-
-    ``summary`` is the dict the SDK reported, verbatim and including
-    ``outcome`` — the server stores it as an open blob, so a client may
-    encounter keys neither it nor the server knows about. Render it
-    generically rather than field by field.
-    """
-
-    id: UUID
-    build_id: UUID
-    outcome: str
-    summary: dict[str, Any] = {}
-    created_at: datetime | None = None
-
-
-class TaskMetadata(StardagBaseModel):
-    """Metadata for a registered task in the registry."""
-
-    # Core Task fields
-    id: UUID
-    body: dict[str, Any]
-    name: str
-    namespace: str
-    version: str
-    output_uri: str | None  # only if the task has a FileSystemTarget output
-    # Registry Metadata fields
-    status: str
-    registered_at: datetime | None
-    started_at: datetime | None
-    completed_at: datetime | None
-    error_message: str | None
-
-
-class RegistryABC(metaclass=abc.ABCMeta):
-    """Abstract base class for task registries.
-
-    A registry tracks task execution within builds. Implementations must
-    provide at least the `task_register` method. All other methods have default
-    no-op implementations for backwards compatibility.
-
-    The registry is stateless with respect to build_id - the build_id is passed
-    explicitly to all methods that need it. This allows a single registry instance
-    to be reused across multiple builds.
-
-    **A note for custom implementations, because the defaults here can
-    mislead.** A parameter added to a method with a default is safe for
-    *callers*, not for *overrides*: Python dispatches to the override, and
-    the engines pass the new keyword unconditionally, so a subclass still
-    declaring the old signature raises ``TypeError``. ``execution_id`` was
-    added this way to ``task_start``, ``task_start_claim``,
-    ``task_interrupt`` and ``task_preempt`` (and their ``_aio`` twins) —
-    if you override any of them, add it.
-
-    That was chosen over a signature check that quietly drops the keyword,
-    because dropping it would leave the execution unable to name itself
-    and the protections it buys silently absent. A ``TypeError`` at the
-    seam says so.
-
-    Method naming convention:
-    - Build methods: build_<action> (e.g., build_start, build_complete)
-    - Task methods: task_<action> (e.g., task_register, task_start)
-    - Async versions: <method>_aio suffix (e.g., build_start_aio, task_register_aio)
-    """
-
-    # -------------------------------------------------------------------------
-    # Build lifecycle methods
-    # -------------------------------------------------------------------------
-
-    def build_start(
+    def build_create(
         self,
-        root_tasks: list["BaseTask"] | None = None,
+        *,
+        root_task_ids: Sequence[str],
+        build_id: UUID | None = None,
+        name: str | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
-        *,
-        scope_key: str | None = None,
-        build_config: Mapping[str, Mapping[str, Any]] | None = None,
-    ) -> UUID:
-        """Start a new build session.
+    ) -> BuildInfo:
+        """``POST /builds``: a RUNNING build requesting ``root_task_ids``.
+        Idempotent on a client-minted ``build_id``."""
+        raise _missing(self, "build_create")
 
-        Called at the beginning of a build. Returns a build ID.
-
-        Args:
-            root_tasks: The root tasks being built
-            description: Optional description of the build
-            executor_metadata: Optional metadata describing where/how the
-                build is executed (e.g. the Modal app/workspace/environment
-                for a triggered build). Backends that don't track it may
-                ignore it.
-            scope_key: The structure scope the build's dependency edges live
-                in, when the caller runs discovery itself (a local build). A
-                reactive trigger leaves it out and the bootstrap sets it via
-                :meth:`build_set_scope` before registering any edge.
-            build_config: The build config levels 2 and 3 parameters are
-                read from; fixed for the build's life.
-
-        Returns:
-            Build ID (UUID) for the new build session.
-        """
-        return UUID("00000000-0000-0000-0000-000000000000")
-
-    def build_set_scope(
+    async def build_create_aio(
         self,
-        build_id: UUID,
         *,
-        scope_key: str,
-        build_config: Mapping[str, Mapping[str, Any]] | None = None,
-    ) -> None:
-        """Set or move the build's structure scope; fix its build config.
+        root_task_ids: Sequence[str],
+        build_id: UUID | None = None,
+        name: str | None = None,
+        description: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
+    ) -> BuildInfo:
+        return self.build_create(
+            root_task_ids=root_task_ids,
+            build_id=build_id,
+            name=name,
+            description=description,
+            executor_metadata=executor_metadata,
+        )
 
-        Called by whoever plans the build — the reactive bootstrap inside
-        the deployment, a local build, or a tick re-planning a build it
-        inherited from other code — once the plan is registered under
-        ``scope_key``. Idempotent for the same scope; a different scope
-        simply moves the build (a rollover). A different ``build_config`` on
-        a build that already has one raises
-        :class:`BuildConfigMismatchError`: a build has one config for its
-        life. Default: no-op.
-        """
-        pass
+    def build_get(self, build_id: UUID) -> BuildInfo:
+        raise _missing(self, "build_get")
 
-    async def build_set_scope_aio(
-        self,
-        build_id: UUID,
-        *,
-        scope_key: str,
-        build_config: Mapping[str, Mapping[str, Any]] | None = None,
-    ) -> None:
-        """Async version of build_set_scope."""
-        self.build_set_scope(build_id, scope_key=scope_key, build_config=build_config)
+    async def build_get_aio(self, build_id: UUID) -> BuildInfo:
+        return self.build_get(build_id)
 
     def build_resume(
         self,
         build_id: UUID,
+        *,
+        deployment_id: UUID | None = None,
+        settings: Mapping[str, str] | None = None,
         executor_metadata: dict[str, Any] | None = None,
+    ) -> ResumeResult:
+        """``POST /builds/{id}/resume``: make the build RUNNING again and,
+        when the caller names its scope, reuse or reactivate the plan for
+        it."""
+        raise _missing(self, "build_resume")
+
+    async def build_resume_aio(
+        self,
+        build_id: UUID,
         *,
-        scope_key: str | None = None,
-        build_config: Mapping[str, Mapping[str, Any]] | None = None,
-    ) -> None:
-        """Mark an existing build as resumed.
+        deployment_id: UUID | None = None,
+        settings: Mapping[str, str] | None = None,
+        executor_metadata: dict[str, Any] | None = None,
+    ) -> ResumeResult:
+        return self.build_resume(
+            build_id,
+            deployment_id=deployment_id,
+            settings=settings,
+            executor_metadata=executor_metadata,
+        )
 
-        ``scope_key`` / ``build_config``, when given, must agree with the
-        build's (a build still on its synthetic scope adopts them); a
-        mismatch raises :class:`ScopeMismatchError` — a resume under other
-        code is a new build.
+    def build_complete(self, build_id: UUID, *, force: bool = False) -> BuildInfo:
+        """``POST /builds/{id}/complete``, refused (409 ``plan_incomplete``)
+        unless the active plan is sealed and every non-excluded member is
+        COMPLETED; ``force`` overrides outstanding members only."""
+        raise _missing(self, "build_complete")
 
-        Called when ``sd.build(resume_build_id=...)`` reuses an existing
-        build (potentially in a terminal state) instead of starting a new
-        one. The registry should record a BUILD_RESUMED event so the
-        build flips back to RUNNING and the UI can surface a
-        "running (resumed)" affordance.
+    async def build_complete_aio(
+        self, build_id: UUID, *, force: bool = False
+    ) -> BuildInfo:
+        return self.build_complete(build_id, force=force)
 
-        Default implementation is a no-op so older registry backends
-        keep working unchanged.
+    def build_fail(self, build_id: UUID, error_message: str | None = None) -> BuildInfo:
+        raise _missing(self, "build_fail")
 
-        Args:
-            build_id: The build UUID being resumed.
-            executor_metadata: Optional metadata describing where/how the
-                resumed build is executed (see :meth:`build_start`).
-        """
-        pass
-
-    def build_complete(self, build_id: UUID) -> None:
-        """Mark a build as completed successfully.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-        """
-        pass
-
-    def build_fail(
+    async def build_fail_aio(
         self, build_id: UUID, error_message: str | None = None
-    ) -> "BuildFailResult | None":
-        """Mark a build as failed, releasing the claims it holds.
+    ) -> BuildInfo:
+        return self.build_fail(build_id, error_message)
 
-        The claims go in the same transaction that marks the build failed,
-        and the server completes the blocked closure there too — so the
-        descendants of what it just released are SKIPPED rather than left
-        PENDING.
+    def build_cancel(self, build_id: UUID) -> BuildInfo:
+        raise _missing(self, "build_cancel")
 
-        Returns what that skipped, or None for backends that don't report
-        it (the default). **A caller that counts skips must read this**,
-        because asking ``skip-blocked`` afterwards now finds the work
-        already done and answers empty. Same optional-return convention as
-        :meth:`build_cancel`; an override that returns None is unaffected.
+    async def build_cancel_aio(self, build_id: UUID) -> BuildInfo:
+        return self.build_cancel(build_id)
 
-        Args:
-            build_id: The build UUID returned by build_start.
-            error_message: Optional error message describing the failure.
-        """
-        return None
-        pass
+    def build_exit_early(self, build_id: UUID) -> BuildInfo:
+        """``POST /builds/{id}/exit-early``: the resident driver stops;
+        nothing is released (its in-flight executions keep reporting)."""
+        raise _missing(self, "build_exit_early")
 
-    def build_cancel(
-        self, build_id: UUID, *, cascade: bool = False
-    ) -> "BuildCancelResult | None":
-        """Cancel a build, releasing the claims its tasks hold.
-
-        A task the build left RUNNING keeps denying its execution claim —
-        and occupying its concurrency-limit slots — long after the build
-        is gone, because task rows are per *environment* with a
-        denormalised global status. So a cancel releases them.
-
-        **``cascade`` no longer decides that**, on a server carrying
-        STA-81: the release is unconditional and the parameter is accepted
-        as a no-op, kept so existing callers keep working. It is still
-        honoured by an older server, where passing False means the claims
-        are left to expire — so keep passing True if you support both.
-
-        Nothing is *stopped* either way. The server never reaches an
-        execution backend; a worker exits at its own next checkpoint, and
-        one whose ``run()`` has no checkpoint finishes. ``stardag builds
-        stop`` is what ends the containers, from the operator's own
-        credentials, before cancelling.
-
-        Returns the cancelled build plus what the cancel released, or
-        None for backends that don't report it (the default). The return
-        value exists for operator tooling; lifecycle callers ignore it.
-        Same optional-return convention as ``task_register_bulk``.
-        """
-        return None
-
-    def build_exit_early(self, build_id: UUID, reason: str | None = None) -> None:
-        """Mark a build as exited early.
-
-        Called when all remaining tasks are running in other builds
-        and this build should stop waiting.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            reason: Optional reason for exiting early.
-        """
-        pass
-
-    # -------------------------------------------------------------------------
-    # Task lifecycle methods
-    # -------------------------------------------------------------------------
-
-    @abc.abstractmethod
-    def task_register(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        *,
-        declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
-        scope_key: str | None = None,
-    ) -> None:
-        """Register a task as pending/scheduled.
-
-        This is called when a task is about to be executed.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task to register.
-            declared_dependencies: The task's static upstreams **as
-                discovery computed them**. A sequence declares exactly that
-                set; ``None`` declares nothing — the task was pruned at
-                because it was already complete, so its ``requires()`` was
-                never evaluated and must not be evaluated here; the default
-                sentinel evaluates ``task.requires()`` (legacy callers).
-            scope_key: The structure scope the declared edges are recorded
-                under — the scope of the code that evaluated
-                ``requires()``. ``None`` records them under the build's
-                current scope, which is right for the code that planned the
-                build; a worker of another code version names its own.
-        """
-        pass
-
-    def task_register_bulk(
-        self,
-        build_id: UUID,
-        tasks: Sequence["BaseTask"],
-        *,
-        limit_keys: Mapping[UUID, Sequence[str]] | None = None,
-        declared_dependencies: Mapping[UUID, "Sequence[BaseTask] | None"] | None = None,
-        scope_key: str | None = None,
-    ) -> list[RegisteredTaskInfo] | None:
-        """Register many tasks to a build in a single call.
-
-        Default implementation falls back to ``task_register`` per task —
-        backends that can batch (e.g. the API registry's bulk endpoint)
-        should override this to make one HTTP call instead of N.
-
-        Order of ``tasks`` is significant: the SDK's post-order discover
-        walk emits deps before parents so that ``dependency_task_ids``
-        lookups inside the registry resolve to existing rows (no phantom
-        creation). Backends that process the batch as one transaction
-        should preserve array order.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            tasks: Tasks to register, in registration order.
-
-        Returns:
-            Per-task :class:`RegisteredTaskInfo` (used by the build engine
-            to re-attach to detached executions that are still running), or
-            None when the backend doesn't provide it.
-
-        ``limit_keys`` maps task ids to the named concurrency-limit keys the
-        task runs under, for backends that record them at plan time (the
-        API registry does — a slot release wakes the builds queued on a key
-        only if the registry knows which pending tasks want it). The
-        default ignores it.
-
-        ``declared_dependencies`` maps task ids to the static upstreams
-        discovery computed for them; a task absent from the map declares
-        nothing (it was pruned at). ``None`` for the whole mapping keeps the
-        legacy behaviour of evaluating ``requires()`` per task.
-
-        ``scope_key`` is the structure scope the declared edges are recorded
-        under (see :meth:`task_register`); ``None`` is the build's current
-        scope.
-        """
-        for task in tasks:
-            self.task_register(
-                build_id,
-                task,
-                declared_dependencies=_declared_for(task, declared_dependencies),
-                scope_key=scope_key,
-            )
-        return None
-
-    def build_list(
-        self,
-        *,
-        page: int = 1,
-        page_size: int = 20,
-        status: str | None = None,
-        reactive_app_name: str | None = None,
-        idle_for_seconds: int | None = None,
-    ) -> BuildListPage:
-        """List builds in the environment, most recently active first.
-
-        The general listing behind ``build_list_running`` and the CLI's
-        ``stardag builds list``. Filters are applied *server-side*:
-
-            status: derived build status (e.g. ``"running"``).
-            reactive_app_name: only builds driven by this reactive app.
-            idle_for_seconds: only builds with no activity of any kind for
-                at least this long (minimum 60). Measured on
-                ``BuildSummary.last_activity_at`` — see that class for why
-                that is not ``last_active_at``.
-
-        Default: not supported (backends that cannot enumerate builds).
-        """
-        raise NotImplementedError(f"{type(self).__name__} does not support build_list")
+    async def build_exit_early_aio(self, build_id: UUID) -> BuildInfo:
+        return self.build_exit_early(build_id)
 
     def build_list_running(
-        self, limit: int = 100, reactive_app_name: str | None = None
+        self, *, reactive_app_name: str | None = None, limit: int = 100
     ) -> list[UUID]:
-        """List ids of builds currently in RUNNING status (most recent first).
-
-        Used by the reactive scheduler watchdog to sweep for builds that may
-        need a tick. ``reactive_app_name`` narrows the listing to builds
-        reactively scheduled by that app — the watchdog's actual question, and
-        what keeps ``limit`` from being consumed by builds no tick of this app
-        can advance (resident builds, and builds left RUNNING by an
-        orchestrator that died without emitting a terminal event).
-
-        Default: empty (no reactive-scheduling support).
-        """
-        return []
-
-    async def build_list_running_aio(
-        self, limit: int = 100, reactive_app_name: str | None = None
-    ) -> list[UUID]:
-        """Async version of build_list_running."""
-        return self.build_list_running(limit, reactive_app_name)
-
-    def build_bulk_cancel(
-        self,
-        *,
-        build_ids: Sequence[UUID | str] | None = None,
-        idle_for_seconds: int | None = None,
-        reactive_app_name: str | None = None,
-        include_reactive: bool = False,
-        cascade: bool = True,
-        dry_run: bool = False,
-        limit: int = 100,
-        reason: str | None = None,
-    ) -> BulkCancelResult:
-        """Cancel RUNNING builds matching a filter (bulk cleanup / reaper).
-
-        Nothing terminates abandoned builds on its own: build status is
-        derived from build-level events, so a build whose orchestrator
-        died without emitting one stays RUNNING forever, holding whatever
-        execution claims and concurrency-limit slots its tasks had when it
-        vanished. This is the cleanup.
-
-        At least one of ``build_ids`` / ``idle_for_seconds`` is required —
-        an unqualified "cancel everything running" is not a cleanup
-        operation. Only RUNNING builds are ever eligible, which makes the
-        call idempotent. Reactive builds are excluded unless
-        ``include_reactive`` (or ``reactive_app_name``) says otherwise:
-        they are quiet between ticks *by design*, so quiet does not mean
-        abandoned. ``cascade`` is honoured here and defaults True, because
-        releasing leaked claims is the entire point — unlike the
-        single-build cancel, where it is an accepted no-op and the release
-        is unconditional. Removing this switch too is STA-103.
-
-        ``dry_run=True`` reports the exact same selection — builds, the
-        tasks a real run would cancel, and the per-build ``skipped``
-        reasons — and writes nothing. Prefer it over reimplementing
-        selection client-side: the server's answer is the one that will
-        actually be acted on.
-
-        Default: not supported.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support build_bulk_cancel"
-        )
-
-    def build_report_tick_summary(
-        self, build_id: UUID, summary: dict[str, Any]
-    ) -> None:
-        """Record one reactive scheduler tick's summary against a build.
-
-        Pure observability, on a hot path: callers report and move on, and
-        must never fail a tick because this failed. ``summary`` is stored
-        verbatim server-side apart from a required ``outcome`` key, so new
-        summary fields need no server release. Default: no-op — a backend
-        without the endpoint simply keeps the trail in its logs.
-        """
-        pass
-
-    async def build_report_tick_summary_aio(
-        self, build_id: UUID, summary: dict[str, Any]
-    ) -> None:
-        """Async version of build_report_tick_summary."""
-        self.build_report_tick_summary(build_id, summary)
-
-    def build_list_tick_summaries(
-        self, build_id: UUID, limit: int = 20
-    ) -> list[TickSummaryRecord]:
-        """List a build's retained tick summaries, newest first.
-
-        The read side of ``build_report_tick_summary``: "why is this build
-        not progressing?" answered from the scheduler's own account of
-        each tick, instead of from logs scattered across short-lived tick
-        containers. Retention is finite server-side. Default: empty.
-        """
-        return []
-
-    def task_list(
-        self,
-        *,
-        page: int = 1,
-        page_size: int = 20,
-        status: Sequence[str] | None = None,
-        status_older_than: datetime | None = None,
-        task_name: str | None = None,
-        task_namespace: str | None = None,
-    ) -> TaskListPage:
-        """List tasks in the environment.
-
-        ``status`` is the *environment-global* status and may name several
-        values (``["running", "suspended"]`` matches either) — which makes
-        this the way to ask "which tasks are holding an execution claim?".
-        ``status_older_than`` is an absolute cutoff (``latest_status_at <
-        status_older_than``), not a duration, so a paged scan cannot drift
-        while it pages; tasks with no recorded timestamp never match.
-
-        With either filter applied, results come back oldest-claim-first
-        — the triage order.
-
-        Default: not supported.
-        """
-        raise NotImplementedError(f"{type(self).__name__} does not support task_list")
-
-    def task_cancel_by_id(self, build_id: UUID, task_id: str) -> None:
-        """Cancel a task addressed by id rather than by task object.
-
-        Same event as ``task_cancel``; separate because operator tooling
-        (and the server) only ever has the id — rehydrating a task object
-        just to cancel it would fail for exactly the abandoned tasks that
-        most need cancelling. Default: no-op.
-        """
-        pass
-
-    async def task_cancel_by_id_aio(self, build_id: UUID, task_id: str) -> None:
-        """Async version of task_cancel_by_id."""
-        self.task_cancel_by_id(build_id, task_id)
-
-    def task_retry_by_id(self, build_id: UUID, task_id: str) -> None:
-        """Reset a retryable task to pending, addressed by id.
-
-        See ``task_cancel_by_id`` for why the id-addressed variant exists.
-        Default: no-op.
-        """
-        pass
-
-    async def task_retry_by_id_aio(self, build_id: UUID, task_id: str) -> None:
-        """Async version of task_retry_by_id."""
-        self.task_retry_by_id(build_id, task_id)
-
-    def build_add_roots(self, build_id: UUID, root_task_ids: list[str]) -> None:
-        """Append root task ids to a build (reactive re-trigger with new roots).
-
-        Default: no-op.
-        """
-        pass
-
-    async def build_add_roots_aio(
-        self, build_id: UUID, root_task_ids: list[str]
-    ) -> None:
-        """Async version of build_add_roots."""
-        self.build_add_roots(build_id, root_task_ids)
-
-    def task_retry(self, build_id: UUID, task: "BaseTask") -> None:
-        """Reset a failed/cancelled/skipped task to pending (retry).
-
-        Backends flip only terminal-but-retryable statuses; completed and
-        running tasks are unaffected. Default: no-op.
-        """
-        pass
-
-    async def task_retry_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version of task_retry."""
-        self.task_retry(build_id, task)
-
-    def build_skip_blocked(self, build_id: UUID) -> list[str]:
-        """Mark tasks transitively blocked by failures as skipped.
-
-        Returns the skipped task ids. Default: no-op (empty).
-        """
-        return []
-
-    async def build_skip_blocked_aio(self, build_id: UUID) -> list[str]:
-        """Async version of build_skip_blocked."""
-        return self.build_skip_blocked(build_id)
-
-    def build_notify(
-        self, build_id: UUID, *, can_spawn: bool = True
-    ) -> "BuildNotifyResult":
-        """Set the build's scheduler wake-up flag (reactive scheduling).
-
-        Returns what the server knew *after* the set — in particular
-        whether a scheduler is live (see :class:`BuildNotifyResult`), which
-        is what lets a caller skip spawning a tick that would only find the
-        scheduler lease held and exit.
-
-        Default: no-op, reporting an unknown scheduler state so callers
-        keep spawning unconditionally (backends without reactive-scheduling
-        support).
-        """
-        return BuildNotifyResult(build_id=build_id)
-
-    async def build_notify_aio(
-        self, build_id: UUID, *, can_spawn: bool = True
-    ) -> "BuildNotifyResult":
-        """Async version of build_notify."""
-        return self.build_notify(build_id, can_spawn=can_spawn)
-
-    def build_get_notify(self, build_id: UUID) -> BuildNotifyResult:
-        """Read the build's scheduler wake-up flag without setting it.
-
-        The linger poll's question, and the cheapest possible answer to it:
-        one boolean, one row. A lingering tick asks it every few seconds and
-        used to ask it by fetching the whole frontier, of which it read this
-        field alone.
-
-        ``scheduler_live`` is not reported — the caller holds the lease, so
-        the answer is always itself.
-
-        Default: read the flag off the frontier, which is where this poll
-        got it before and which every backend that supports reactive
-        scheduling can already answer. Deliberately *not* a constant:
-        "always needs a tick" turns the linger loop into a hot loop, and
-        "never" stalls the build until the watchdog — there is no safe
-        direction to default to, only the real answer.
-
-        **Override both this and the async version** to make the poll
-        cheap. Unlike every other ``_aio`` default on this class, which
-        delegates to its sync twin, ``build_get_notify_aio`` goes sideways
-        to ``build_get_frontier_aio`` — delegating to a blocking call on
-        the hot path would stall the event loop. The cost of that choice is
-        that overriding only the sync method here silently has no effect on
-        the path the tick actually takes.
-        """
-        frontier = self.build_get_frontier(build_id)
-        return BuildNotifyResult(build_id=build_id, needs_tick=frontier.needs_tick)
-
-    async def build_get_notify_aio(self, build_id: UUID) -> BuildNotifyResult:
-        """Async version of build_get_notify."""
-        frontier = await self.build_get_frontier_aio(build_id)
-        return BuildNotifyResult(build_id=build_id, needs_tick=frontier.needs_tick)
-
-    async def build_acquire_scheduler_lease_aio(
-        self, build_id: UUID, *, owner_id: str, ttl_seconds: int
-    ) -> SchedulerLeaseResult:
-        """Take the build's scheduler single-flight lease.
-
-        At most one tick drives a build at a time. ``held=False`` means
-        somebody else is, and this tick should no-op — safe because the
-        wake-up that spawned it was flagged *before* the spawn, so the
-        holder's own re-checks (its linger poll, then the exit handshake)
-        cover it.
-
-        Default: grant unconditionally. A backend with no notion of a lease
-        cannot arbitrate one, and the honest failure there is duplicate
-        ticks — wasteful, but idempotent, and task starts are arbitrated
-        separately by the execution claim — rather than a build that
-        nothing drives.
-        """
-        return SchedulerLeaseResult(build_id=build_id, held=True)
-
-    async def build_renew_scheduler_lease_aio(
-        self, build_id: UUID, *, owner_id: str, ttl_seconds: int
-    ) -> SchedulerLeaseResult:
-        """Extend the lease while a tick keeps driving the build.
-
-        ``held=False`` means the lease lapsed and was taken over, so this
-        tick no longer owns the build. Default: grant, per
-        ``build_acquire_scheduler_lease_aio``.
-        """
-        return SchedulerLeaseResult(build_id=build_id, held=True)
-
-    async def build_release_scheduler_lease_aio(
-        self, build_id: UUID, *, owner_id: str
-    ) -> SchedulerLeaseResult:
-        """Drop the lease, if this caller still holds it. Default: no-op."""
-        return SchedulerLeaseResult(build_id=build_id, held=True)
-
-    def build_clear_notify(self, build_id: UUID) -> None:
-        """Clear the build's scheduler wake-up flag. Default: no-op."""
-        pass
-
-    def build_wake_candidates(self, limit: int = 20) -> list[WakeCandidate]:
-        """Hand out the reactive builds that need a tick and have no scheduler.
-
-        The spawn half of a cross-build wake-up (``POST
-        /builds/wake-candidates``): every build returned is flagged, holds
-        no live scheduler lease, and has not been handed out within the
-        server's window — and is marked handed out by this call, so
-        concurrent callers get disjoint answers. The caller spawns one tick
-        per entry. Default: nothing, which is correct for a backend with no
-        notion of cross-build wake-ups.
-        """
-        return []
-
-    async def build_wake_candidates_aio(self, limit: int = 20) -> list[WakeCandidate]:
-        """Async version of build_wake_candidates."""
-        return self.build_wake_candidates(limit)
-
-    async def build_clear_notify_aio(self, build_id: UUID) -> None:
-        """Async version of build_clear_notify."""
-        self.build_clear_notify(build_id)
+        """RUNNING builds, most recently active first (the watchdog sweep)."""
+        raise _missing(self, "build_list_running")
 
     def build_get_frontier(self, build_id: UUID) -> BuildFrontier:
-        """Return the build's scheduling frontier (reactive scheduling).
-
-        Default: not supported — reactive scheduling requires a registry
-        backend that can compute the frontier (e.g. the API registry).
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support reactive scheduling "
-            "(build_get_frontier)"
-        )
+        raise _missing(self, "build_get_frontier")
 
     async def build_get_frontier_aio(self, build_id: UUID) -> BuildFrontier:
-        """Async version of build_get_frontier."""
         return self.build_get_frontier(build_id)
 
-    def build_get(self, build_id: UUID) -> BuildInfo:
-        """Return a slim build record (``GET /builds/{id}``).
+    # -- plans and registration ----------------------------------------------
 
-        Lighter than ``build_get_frontier`` (no frontier computation): used
-        by the reactive tick's pre-lease marker/ownership gate, which only
-        needs ``reactive_app_name``/``reactive_tick_kwargs``. Default: not
-        supported.
-        """
-        raise NotImplementedError(f"{type(self).__name__} does not support build_get")
+    def plan_create(
+        self,
+        build_id: UUID,
+        *,
+        plan_id: UUID,
+        deployment_id: UUID,
+        settings: Mapping[str, str],
+        roots: Sequence[RegistrationItem],
+    ) -> PlanInfo:
+        """``POST /builds/{id}/plans``: look up or create the build's plan
+        for ``(deployment, settings)``, admitting ``roots`` first and
+        unexpanded. An existing plan is returned as it is (its own id, not
+        ``plan_id``)."""
+        raise _missing(self, "plan_create")
 
-    async def build_get_aio(self, build_id: UUID) -> BuildInfo:
-        """Async version of build_get."""
-        return self.build_get(build_id)
-
-    def build_get_summary(self, build_id: UUID) -> BuildSummary:
-        """Return the full build record (``GET /builds/{id}``).
-
-        Same endpoint as ``build_get``, deliberately a different read
-        model. ``BuildInfo`` is the contract a *custom* registry backend
-        must satisfy for reactive scheduling — four fields, all of which
-        such a backend necessarily has. ``BuildSummary`` is the operator
-        view of an API-registry build: names, timestamps, liveness. Fusing
-        them would make every reactive-capable backend responsible for
-        fields it has no notion of.
-
-        Default: not supported.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support build_get_summary"
+    async def plan_create_aio(
+        self,
+        build_id: UUID,
+        *,
+        plan_id: UUID,
+        deployment_id: UUID,
+        settings: Mapping[str, str],
+        roots: Sequence[RegistrationItem],
+    ) -> PlanInfo:
+        return self.plan_create(
+            build_id,
+            plan_id=plan_id,
+            deployment_id=deployment_id,
+            settings=settings,
+            roots=roots,
         )
+
+    def plan_register_members(
+        self, plan_id: UUID, items: Sequence[RegistrationItem]
+    ) -> MembersResult:
+        """``POST /plans/{id}/members``: one chunk (at most 1000 items), in
+        one transaction."""
+        raise _missing(self, "plan_register_members")
+
+    async def plan_register_members_aio(
+        self, plan_id: UUID, items: Sequence[RegistrationItem]
+    ) -> MembersResult:
+        return self.plan_register_members(plan_id, items)
+
+    def plan_seal(self, plan_id: UUID) -> PlanInfo:
+        """``POST /plans/{id}/seal``: verify the static phase and seal (a
+        replacement activates here)."""
+        raise _missing(self, "plan_seal")
+
+    async def plan_seal_aio(self, plan_id: UUID) -> PlanInfo:
+        return self.plan_seal(plan_id)
+
+    def plan_roots(self, plan_id: UUID) -> list[FrontierMember]:
+        """The plan's root members with their instance bodies (rollover)."""
+        raise _missing(self, "plan_roots")
+
+    async def plan_roots_aio(self, plan_id: UUID) -> list[FrontierMember]:
+        return self.plan_roots(plan_id)
+
+    def build_skip_blocked(self, build_id: UUID) -> list[str]:
+        """``POST /builds/{id}/skip-blocked``: mark the active plan's members
+        transitively blocked by a failed, cancelled or skipped upstream
+        SKIPPED; returns their task ids."""
+        raise _missing(self, "build_skip_blocked")
+
+    async def build_skip_blocked_aio(self, build_id: UUID) -> list[str]:
+        return self.build_skip_blocked(build_id)
+
+    # -- member transitions ----------------------------------------------------
+
+    def member_start(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        claim: bool = True,
+        claim_ttl_seconds: int | None = None,
+        executor: str | None = None,
+        executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
+        limit_keys: Sequence[str] = (),
+    ) -> TransitionResult:
+        """``POST /plans/{id}/members/{task_id}/start``.
+
+        A **claiming** start takes the claim for ``execution_id`` (minted by
+        the caller before the spawn) and is the decision: refused 409 with
+        ``task_already_completed``, ``task_already_running``,
+        ``upstream_incomplete``, ``member_excluded``, ``plan_superseded`` or
+        ``concurrency_limit_reached``. A retried granted start is a no-op. A
+        **non-claiming** start is the holder's own "I am running" report,
+        with the executor details the claim could not know."""
+        raise _missing(self, "member_start")
+
+    async def member_start_aio(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        claim: bool = True,
+        claim_ttl_seconds: int | None = None,
+        executor: str | None = None,
+        executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
+        limit_keys: Sequence[str] = (),
+    ) -> TransitionResult:
+        return self.member_start(
+            plan_id,
+            task_id,
+            execution_id=execution_id,
+            claim=claim,
+            claim_ttl_seconds=claim_ttl_seconds,
+            executor=executor,
+            executor_ref=executor_ref,
+            executor_metadata=executor_metadata,
+            limit_keys=limit_keys,
+        )
+
+    def member_complete(
+        self, plan_id: UUID, task_id: str, *, execution_id: UUID
+    ) -> TransitionResult:
+        raise _missing(self, "member_complete")
+
+    async def member_complete_aio(
+        self, plan_id: UUID, task_id: str, *, execution_id: UUID
+    ) -> TransitionResult:
+        return self.member_complete(plan_id, task_id, execution_id=execution_id)
+
+    def member_fail(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        error_message: str | None = None,
+    ) -> TransitionResult:
+        raise _missing(self, "member_fail")
+
+    async def member_fail_aio(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        error_message: str | None = None,
+    ) -> TransitionResult:
+        return self.member_fail(
+            plan_id, task_id, execution_id=execution_id, error_message=error_message
+        )
+
+    def member_yield(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        deployment_id: UUID,
+        batch_id: UUID,
+        items: Sequence[RegistrationItem],
+        yielded: Sequence[str],
+        suspend: bool,
+    ) -> YieldResult:
+        """``POST /plans/{id}/members/{task_id}/yield``: one yield batch in
+        one transaction — the children and their static closure land, the
+        parent gets dynamic edges to ``yielded`` (instance hashes), and with
+        ``suspend`` the parent is SUSPENDED and its claim released. A batch
+        re-delivered under the same ``batch_id`` is replayed. Refused 409
+        ``deployment_mismatch`` when ``deployment_id`` is not the plan's."""
+        raise _missing(self, "member_yield")
+
+    async def member_yield_aio(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        deployment_id: UUID,
+        batch_id: UUID,
+        items: Sequence[RegistrationItem],
+        yielded: Sequence[str],
+        suspend: bool,
+    ) -> YieldResult:
+        return self.member_yield(
+            plan_id,
+            task_id,
+            execution_id=execution_id,
+            deployment_id=deployment_id,
+            batch_id=batch_id,
+            items=items,
+            yielded=yielded,
+            suspend=suspend,
+        )
+
+    def member_retry(self, plan_id: UUID, task_id: str) -> TransitionResult:
+        """Reset to PENDING (the fail mode's retry). Idempotent by state;
+        refused 409 on COMPLETED and on a live claim."""
+        raise _missing(self, "member_retry")
+
+    async def member_retry_aio(self, plan_id: UUID, task_id: str) -> TransitionResult:
+        return self.member_retry(plan_id, task_id)
+
+    def member_interrupt(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        error_message: str | None = None,
+    ) -> TransitionResult:
+        """The platform ended the execution and nothing will restart it:
+        INTERRUPTED (actionable), claim released."""
+        raise _missing(self, "member_interrupt")
+
+    def member_preempt(
+        self, plan_id: UUID, task_id: str, *, execution_id: UUID
+    ) -> TransitionResult:
+        """The backend restarts the execution itself: no status change, the
+        claim kept but due to lapse soon. Not an end: the restart reports
+        under the same execution id, and its non-claiming start restores
+        the claim's TTL."""
+        raise _missing(self, "member_preempt")
+
+    def member_cancel(self, plan_id: UUID, task_id: str) -> TransitionResult:
+        """One task's cancel, by the build holding its claim (409
+        ``not_claim_holder`` otherwise)."""
+        raise _missing(self, "member_cancel")
+
+    async def member_cancel_aio(self, plan_id: UUID, task_id: str) -> TransitionResult:
+        return self.member_cancel(plan_id, task_id)
+
+    def member_skip(self, plan_id: UUID, task_id: str) -> TransitionResult:
+        """A member that cannot run because an upstream failed: SKIPPED. A
+        scheduling decision naming no execution; 409 ``task_not_skippable``
+        on FAILED / CANCELLED."""
+        raise _missing(self, "member_skip")
+
+    async def member_skip_aio(self, plan_id: UUID, task_id: str) -> TransitionResult:
+        return self.member_skip(plan_id, task_id)
+
+    def member_exclude(
+        self, plan_id: UUID, task_id: str, *, reason: str | None = None
+    ) -> ExclusionResult:
+        """An operator gives up on a member in this plan. Cascades to its
+        downstream closure; an excluded root fails the build. The global
+        status is untouched."""
+        raise _missing(self, "member_exclude")
+
+    def member_discovery_failed(
+        self, plan_id: UUID, task_id: str, *, error: str
+    ) -> ExclusionResult:
+        """The tick could not discover a member (its ``requires()`` raised,
+        its body did not rehydrate): excluded as ``discovery_failed``, with
+        the same cascade as :meth:`member_exclude`."""
+        raise _missing(self, "member_discovery_failed")
+
+    async def member_discovery_failed_aio(
+        self, plan_id: UUID, task_id: str, *, error: str
+    ) -> ExclusionResult:
+        return self.member_discovery_failed(plan_id, task_id, error=error)
+
+    # -- claims and executions ------------------------------------------------
+
+    def claim_renew(
+        self,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        claim_ttl_seconds: int | None = None,
+    ) -> TransitionResult:
+        """``POST /tasks/{task_id}/claim/renew``: extend an in-process
+        execution's claim (D11). Refused 409 ``claim_not_held`` unless
+        ``execution_id`` holds the live claim."""
+        raise _missing(self, "claim_renew")
+
+    async def claim_renew_aio(
+        self,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        claim_ttl_seconds: int | None = None,
+    ) -> TransitionResult:
+        return self.claim_renew(
+            task_id, execution_id=execution_id, claim_ttl_seconds=claim_ttl_seconds
+        )
+
+    def build_list_executions(
+        self, build_id: UUID, *, not_in_current_plan: bool = False
+    ) -> list[ExecutionInfo]:
+        """``GET /builds/{id}/executions``: the build's executions with no end
+        reported (``builds stop``, a worker's cancellation checkpoint);
+        ``not_in_current_plan`` keeps the orphans."""
+        raise _missing(self, "build_list_executions")
+
+    def execution_report_stopped(self, execution_id: UUID) -> TransitionResult:
+        """``POST /executions/{id}/stopped``: an execution the caller stopped
+        (``outcome = stopped``); releases its claim if it still holds it."""
+        raise _missing(self, "execution_report_stopped")
+
+    # -- tasks ------------------------------------------------------------------
+
+    def task_get(self, task_id: str) -> TaskInfo:
+        """``GET /tasks/{task_id}``: a completion's identity and state, with
+        its instances (each a construction under one scope), newest first."""
+        raise _missing(self, "task_get")
+
+    def task_upload_artifacts(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        artifacts: "Sequence[Artifact]",
+        *,
+        execution_id: UUID | None = None,
+    ) -> None:
+        """``POST /plans/{plan_id}/members/{task_id}/artifacts``: upsert
+        artifacts onto the task named by its membership of ``plan_id`` (404
+        ``not_a_member`` otherwise). Artifacts belong to the task once
+        uploaded, not the plan or execution — ``execution_id`` is
+        informational only."""
+        raise _missing(self, "task_upload_artifacts")
+
+    async def task_upload_artifacts_aio(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        artifacts: "Sequence[Artifact]",
+        *,
+        execution_id: UUID | None = None,
+    ) -> None:
+        self.task_upload_artifacts(
+            plan_id, task_id, artifacts, execution_id=execution_id
+        )
+
+    # -- deployments and settings ----------------------------------------------
+
+    def deployment_create(
+        self,
+        *,
+        kind: DeploymentKind,
+        code_id: str,
+        deployment_id: UUID | None = None,
+        app_name: str | None = None,
+        image_id: str | None = None,
+        modal_app_id: str | None = None,
+    ) -> DeploymentInfo:
+        """``POST /deployments``. A Modal deployment is created **before**
+        its deploy (the server assigns ``generation``) and activated after;
+        a local one is looked up or created by ``code_id`` and is born
+        activated."""
+        raise _missing(self, "deployment_create")
+
+    async def deployment_create_aio(
+        self,
+        *,
+        kind: DeploymentKind,
+        code_id: str,
+        deployment_id: UUID | None = None,
+        app_name: str | None = None,
+        image_id: str | None = None,
+        modal_app_id: str | None = None,
+    ) -> DeploymentInfo:
+        return self.deployment_create(
+            kind=kind,
+            code_id=code_id,
+            deployment_id=deployment_id,
+            app_name=app_name,
+            image_id=image_id,
+            modal_app_id=modal_app_id,
+        )
+
+    def deployment_activate(self, deployment_id: UUID) -> DeploymentInfo:
+        raise _missing(self, "deployment_activate")
+
+    def deployment_list(
+        self,
+        *,
+        kind: DeploymentKind | None = None,
+        app_name: str | None = None,
+        current: bool = False,
+        limit: int = 100,
+    ) -> list[DeploymentInfo]:
+        """Newest first. ``current=True`` keeps one row per app: its
+        activated deployment with the highest generation."""
+        raise _missing(self, "deployment_list")
+
+    async def deployment_list_aio(
+        self,
+        *,
+        kind: DeploymentKind | None = None,
+        app_name: str | None = None,
+        current: bool = False,
+        limit: int = 100,
+    ) -> list[DeploymentInfo]:
+        return self.deployment_list(
+            kind=kind, app_name=app_name, current=current, limit=limit
+        )
+
+    def settings_get(self, settings_hash: str) -> SettingsInfo:
+        raise _missing(self, "settings_get")
+
+    async def settings_get_aio(self, settings_hash: str) -> SettingsInfo:
+        return self.settings_get(settings_hash)
+
+    # -- reactive scheduling -----------------------------------------------------
 
     def build_set_reactive_meta(
         self,
@@ -1309,716 +586,119 @@ class RegistryABC(metaclass=abc.ABCMeta):
         *,
         app_name: str,
         tick_kwargs: dict[str, Any] | None = None,
-    ) -> None:
-        """Mark a build reactively scheduled and store its tick config.
+    ) -> BuildInfo:
+        """Mark the build reactively scheduled by ``app_name``; ``None``
+        ``tick_kwargs`` keeps the stored configuration."""
+        raise _missing(self, "build_set_reactive_meta")
 
-        Upsert (idempotent). ``app_name`` (the marker/owner) is always set
-        and surfaces as ``reactive_app_name`` on the build/frontier. When
-        ``tick_kwargs`` is None (a bare re-trigger) the stored config is left
-        untouched — so a re-trigger with no explicit tick_kwargs preserves
-        the existing ones; passing tick_kwargs updates them. Default: no-op
-        (backends without reactive support).
-        """
-        pass
+    def build_notify(
+        self, build_id: UUID, *, can_spawn: bool = True
+    ) -> BuildNotifyResult:
+        raise _missing(self, "build_notify")
 
-    async def build_set_reactive_meta_aio(
-        self,
-        build_id: UUID,
-        *,
-        app_name: str,
-        tick_kwargs: dict[str, Any] | None = None,
-    ) -> None:
-        """Async version of build_set_reactive_meta."""
-        self.build_set_reactive_meta(
-            build_id, app_name=app_name, tick_kwargs=tick_kwargs
+    async def build_notify_aio(
+        self, build_id: UUID, *, can_spawn: bool = True
+    ) -> BuildNotifyResult:
+        return self.build_notify(build_id, can_spawn=can_spawn)
+
+    def build_get_notify(self, build_id: UUID) -> BuildNotifyResult:
+        raise _missing(self, "build_get_notify")
+
+    async def build_get_notify_aio(self, build_id: UUID) -> BuildNotifyResult:
+        return self.build_get_notify(build_id)
+
+    def build_clear_notify(self, build_id: UUID) -> None:
+        raise _missing(self, "build_clear_notify")
+
+    async def build_clear_notify_aio(self, build_id: UUID) -> None:
+        self.build_clear_notify(build_id)
+
+    def build_wake_candidates(self, limit: int = 20) -> list[WakeCandidate]:
+        raise _missing(self, "build_wake_candidates")
+
+    async def build_wake_candidates_aio(self, limit: int = 20) -> list[WakeCandidate]:
+        return self.build_wake_candidates(limit)
+
+    def scheduler_lease_acquire(
+        self, build_id: UUID, *, owner_id: str, ttl_seconds: int
+    ) -> SchedulerLeaseResult:
+        raise _missing(self, "scheduler_lease_acquire")
+
+    async def scheduler_lease_acquire_aio(
+        self, build_id: UUID, *, owner_id: str, ttl_seconds: int
+    ) -> SchedulerLeaseResult:
+        return self.scheduler_lease_acquire(
+            build_id, owner_id=owner_id, ttl_seconds=ttl_seconds
         )
 
-    # -------------------------------------------------------------------------
-    # Deployments
-    # -------------------------------------------------------------------------
+    def scheduler_lease_renew(
+        self, build_id: UUID, *, owner_id: str, ttl_seconds: int
+    ) -> SchedulerLeaseResult:
+        raise _missing(self, "scheduler_lease_renew")
 
-    def deployment_record(
-        self, *, app_name: str, code_id: str, modal_app_id: str | None = None
-    ) -> DeploymentInfo | None:
-        """Record that ``code_id`` was deployed as ``app_name`` (idempotent
-        on the pair; a repeat refreshes ``deployed_at``). ``modal_app_id`` is
-        Modal's own identifier for the app, kept for cross-reference.
-
-        See :class:`DeploymentInfo`. Default: no-op returning None, for
-        backends that do not track deployments.
-        """
-        return None
-
-    def deployment_list(self, *, app_name: str | None = None) -> list[DeploymentInfo]:
-        """The environment's recorded deployments, newest first, the newest
-        per app marked ``current``. Default: none."""
-        return []
-
-    async def deployment_list_aio(
-        self, *, app_name: str | None = None
-    ) -> list[DeploymentInfo]:
-        """Async version of :meth:`deployment_list`."""
-        return self.deployment_list(app_name=app_name)
-
-    def task_start(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        executor: str | None = None,
-        executor_ref: str | None = None,
-        executor_metadata: dict[str, Any] | None = None,
-        claim_ttl_seconds: int | None = None,
-        execution_id: UUID | None = None,
-    ) -> None:
-        """Mark a task as started/running.
-
-        Called immediately before a task begins execution. The caller is
-        responsible for having already registered the task in the build —
-        ``task_start`` only emits the started event.
-
-        ``executor`` / ``executor_ref`` identify a detached execution (e.g.
-        executor="modal" with a Modal function call id) so a later resumed
-        build can re-attach instead of re-executing.
-        ``executor_metadata`` optionally describes the execution backend in
-        more detail (e.g. Modal app/workspace/environment/function) for
-        surfacing in the UI. Backends that don't track them may ignore all
-        three.
-
-        ``claim_ttl_seconds`` is how long the execution claim this start
-        records stays honoured (see
-        ``FrontierTaskRef.latest_status_expires_at``). None leaves it to the
-        backend's own default. Callers that know the wall-clock limit the
-        execution runs under should pass it rather than accept that default
-        — see ``stardag.build._reactive.claim_ttl_seconds``.
-
-        ``execution_id`` names the execution this start belongs to. A
-        worker's own start is *non-claiming*, and the registry refuses a
-        non-claiming start whose identity is not the one the task holds —
-        which is what stops a late restart from evicting the build that
-        took the task over meanwhile. Repeat the id the claim was taken
-        with; omitted, the ``(executor, executor_ref)`` pair decides, as
-        it did before identities existed.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task that is starting.
-            execution_id: Optional identity of the execution this call
-                belongs to, minted by the caller before it claims. The
-                claim is taken before the spawn, so there is no executor
-                reference yet; this is the identity that exists anyway.
-                Repeat it on every later call about the same execution.
-                Omitted, the registry falls back to the
-                ``(executor, executor_ref)`` pair, which is the behaviour
-                of every release before it existed.
-        """
-        pass
-
-    def task_complete(self, build_id: UUID, task: "BaseTask") -> None:
-        """Mark a task as completed successfully.
-
-        Called after a task finishes execution without errors.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task that completed.
-        """
-        pass
-
-    def task_fail(
-        self, build_id: UUID, task: "BaseTask", error_message: str | None = None
-    ) -> None:
-        """Mark a task as failed.
-
-        Called when a task raises an exception during execution.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task that failed.
-            error_message: Optional error message describing the failure.
-        """
-        pass
-
-    def task_interrupt(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        reason: str | None = None,
-        executor_ref: str | None = None,
-        execution_id: UUID | None = None,
-    ) -> None:
-        """Record that a task's execution was interrupted by the platform.
-
-        Not a failure: the execution ended for a reason unrelated to the
-        task's correctness (the backend hit its function timeout, or
-        reclaimed the container), so the task is the scheduler's to start
-        again. Called by the worker itself, in the grace window the
-        platform gives it before the kill, which is what releases the
-        execution claim and any concurrency-limit slots straight away.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task whose execution was interrupted.
-            reason: Optional description of what interrupted it.
-            executor_ref: Optional name of the execution being reported
-                on. The registry honours the report only while the task
-                still holds this ref, which is what stops a slow report
-                from applying to a replacement execution.
-            execution_id: Optional identity of the execution this call
-                belongs to, minted by the caller before it claims. The
-                claim is taken before the spawn, so there is no executor
-                reference yet; this is the identity that exists anyway.
-                Repeat it on every later call about the same execution.
-                Omitted, the registry falls back to the
-                ``(executor, executor_ref)`` pair, which is the behaviour
-                of every release before it existed.
-        """
-        pass
-
-    def task_preempt(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        reason: str | None = None,
-        executor_ref: str | None = None,
-        execution_id: UUID | None = None,
-    ) -> None:
-        """Record that the platform is restarting this execution itself.
-
-        A preemption, as distinct from :meth:`task_interrupt`. The
-        container was taken away, but the backend restarts the *same*
-        execution — same ref, no attempt spent — so the task does not
-        change status and does **not** release its claim: releasing it
-        would invite a second, concurrent execution of a task that is
-        about to resume.
-
-        What it records is that a restart is now *due*, which is otherwise
-        invisible: a task whose restart never arrives is indistinguishable
-        from one running happily, and stays that way until its whole claim
-        lapses. The registry shortens that claim to a restart-sized grace
-        instead, and the restart's own ``task_start`` re-grants it.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task whose execution was preempted.
-            reason: Optional description of what preempted it.
-            executor_ref: As for :meth:`task_interrupt`.
-            execution_id: As for :meth:`task_interrupt`.
-        """
-        pass
-
-    def task_suspend(self, build_id: UUID, task: "BaseTask") -> None:
-        """Mark a task as suspended waiting for dynamic dependencies.
-
-        Called when a task yields dynamic deps that are not yet complete.
-        The task will remain suspended until its dynamic deps are built.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task that is suspended.
-        """
-        pass
-
-    def task_add_dependencies(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        upstream_tasks: Sequence["BaseTask"],
-        is_dynamic: bool = True,
-        *,
-        scope_key: str | None = None,
-    ) -> None:
-        """Record dependency edges for a task.
-
-        Called by the build system when a task yields dynamic deps — the
-        edges aren't known at ``task_register`` time (static ``requires()``
-        chain only), so this is how they reach the registry so that the
-        full DAG renders correctly in the UI.
-
-        Registries that can't write to a graph (the in-memory cases) may
-        treat this as a no-op. HTTP-backed implementations should tolerate
-        404 from older API versions that don't support the endpoint.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The downstream task whose deps are being added.
-            upstream_tasks: The yielded deps to record as edges.
-            is_dynamic: Marks the edges as dynamic (True by default —
-                static ``requires()`` are recorded during task_register).
-            scope_key: The structure scope the edges are recorded under —
-                the scope of the code that yielded them. ``None`` is the
-                build's current scope; a worker names its own (see
-                :meth:`task_register`).
-        """
-        pass
-
-    def task_resume(self, build_id: UUID, task: "BaseTask") -> None:
-        """Mark a task as resumed after dynamic dependencies completed.
-
-        Called when a task's dynamic dependencies are complete and
-        the task is ready to continue execution (either by resuming
-        a suspended generator or by re-executing the task).
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task that is resuming.
-        """
-        pass
-
-    def task_cancel(self, build_id: UUID, task: "BaseTask") -> None:
-        """Cancel a task.
-
-        Called when a task is cancelled — by the user, or by the build
-        engine when terminating in-flight siblings on a fail-fast failure.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task to cancel.
-        """
-        pass
-
-    def task_skip(self, build_id: UUID, task: "BaseTask") -> None:
-        """Mark a task as skipped.
-
-        Called when a task will not run because a dependency failed or
-        was cancelled. Distinct from ``task_cancel``: skipped tasks
-        never started executing.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task to skip.
-        """
-        pass
-
-    def task_waiting_for_lock(
-        self, build_id: UUID, task: "BaseTask", lock_owner: str | None = None
-    ) -> None:
-        """Record that a task is waiting for a global lock.
-
-        Called when a task cannot acquire its lock because another
-        build is holding it.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The task waiting for the lock.
-            lock_owner: Optional identifier of who holds the lock.
-        """
-        pass
-
-    def task_upload_artifacts(
-        self, build_id: UUID, task: "BaseTask", artifacts: Sequence["Artifact"]
-    ) -> None:
-        """Upload artifacts for a completed task.
-
-        Called after a task completes successfully if it has artifacts.
-
-        Args:
-            build_id: The build UUID returned by build_start.
-            task: The completed task.
-            artifacts: List of artifacts to upload.
-        """
-        pass
-
-    @abc.abstractmethod
-    def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
-        """Get metadata for a registered task.
-
-        Args:
-            task_id: The ID of the task to get metadata for.
-        Returns:
-            A TaskMetadata object containing task metadata.
-        """
-        pass
-
-    def execution_status(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        execution_id: UUID | None = None,
-    ) -> ExecutionStatus:
-        """Ask whether this execution is still the one the task is waiting for.
-
-        Cooperative cancellation's single question, asked by a worker
-        about *itself*. Nothing pushes a cancel into a container; the
-        container pulls, at points in its own code where stopping is
-        safe.
-
-        Not abstract, and the default answer is "still current". A
-        registry that cannot answer must not be able to stop a worker —
-        see :class:`ExecutionStatus` for why the polarity runs that way.
-
-        Args:
-            build_id: The build this execution belongs to.
-            task: The task being executed.
-            execution_id: This execution's identity, as minted at its
-                claim. Omitted, only the build half of the answer is
-                evaluated, which still catches a cancelled build.
-        """
-        return ExecutionStatus()
-
-    # -------------------------------------------------------------------------
-    # Async versions - default implementations delegate to sync methods
-    # -------------------------------------------------------------------------
-
-    async def build_start_aio(
-        self,
-        root_tasks: list["BaseTask"] | None = None,
-        description: str | None = None,
-        executor_metadata: dict[str, Any] | None = None,
-        *,
-        scope_key: str | None = None,
-        build_config: Mapping[str, Mapping[str, Any]] | None = None,
-    ) -> UUID:
-        """Async version of build_start."""
-        return self.build_start(
-            root_tasks,
-            description,
-            executor_metadata=executor_metadata,
-            scope_key=scope_key,
-            build_config=build_config,
+    async def scheduler_lease_renew_aio(
+        self, build_id: UUID, *, owner_id: str, ttl_seconds: int
+    ) -> SchedulerLeaseResult:
+        return self.scheduler_lease_renew(
+            build_id, owner_id=owner_id, ttl_seconds=ttl_seconds
         )
 
-    async def build_resume_aio(
-        self,
-        build_id: UUID,
-        executor_metadata: dict[str, Any] | None = None,
-        *,
-        scope_key: str | None = None,
-        build_config: Mapping[str, Mapping[str, Any]] | None = None,
+    def scheduler_lease_release(self, build_id: UUID, *, owner_id: str) -> None:
+        raise _missing(self, "scheduler_lease_release")
+
+    async def scheduler_lease_release_aio(
+        self, build_id: UUID, *, owner_id: str
     ) -> None:
-        """Async version of build_resume."""
-        self.build_resume(
-            build_id,
-            executor_metadata=executor_metadata,
-            scope_key=scope_key,
-            build_config=build_config,
-        )
+        self.scheduler_lease_release(build_id, owner_id=owner_id)
 
-    async def build_complete_aio(self, build_id: UUID) -> None:
-        """Async version of build_complete."""
-        self.build_complete(build_id)
-
-    async def build_fail_aio(
-        self, build_id: UUID, error_message: str | None = None
-    ) -> "BuildFailResult | None":
-        """Async version of build_fail."""
-        return self.build_fail(build_id, error_message)
-
-    async def build_cancel_aio(
-        self, build_id: UUID, *, cascade: bool = False
-    ) -> "BuildCancelResult | None":
-        """Async version of build_cancel."""
-        return self.build_cancel(build_id, cascade=cascade)
-
-    async def build_exit_early_aio(
-        self, build_id: UUID, reason: str | None = None
+    def build_report_tick_summary(
+        self, build_id: UUID, summary: Mapping[str, Any]
     ) -> None:
-        """Async version of build_exit_early."""
-        self.build_exit_early(build_id, reason)
+        raise _missing(self, "build_report_tick_summary")
 
-    async def task_register_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        *,
-        declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
-        scope_key: str | None = None,
+    async def build_report_tick_summary_aio(
+        self, build_id: UUID, summary: Mapping[str, Any]
     ) -> None:
-        """Async version of task_register."""
-        self.task_register(
-            build_id,
-            task,
-            declared_dependencies=declared_dependencies,
-            scope_key=scope_key,
-        )
+        self.build_report_tick_summary(build_id, summary)
 
-    async def task_register_bulk_aio(
-        self,
-        build_id: UUID,
-        tasks: Sequence["BaseTask"],
-        *,
-        limit_keys: Mapping[UUID, Sequence[str]] | None = None,
-        declared_dependencies: Mapping[UUID, "Sequence[BaseTask] | None"] | None = None,
-        scope_key: str | None = None,
-    ) -> list[RegisteredTaskInfo] | None:
-        """Async version of task_register_bulk.
+    def build_list_tick_summaries(
+        self, build_id: UUID, *, limit: int = 20
+    ) -> list[TickSummaryRecord]:
+        raise _missing(self, "build_list_tick_summaries")
 
-        Default implementation falls back to ``task_register_aio`` per
-        task. Override for backends that can batch (the API registry
-        does so with the ``/tasks/bulk`` endpoint).
-        """
-        for task in tasks:
-            await self.task_register_aio(
-                build_id,
-                task,
-                declared_dependencies=_declared_for(task, declared_dependencies),
-                scope_key=scope_key,
-            )
-        return None
+    # -- lifecycle ---------------------------------------------------------------
 
-    async def task_start_claim_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        executor: str | None = None,
-        executor_ref: str | None = None,
-        executor_metadata: dict[str, Any] | None = None,
-        limit_keys: Sequence[str] | None = None,
-        claim_ttl_seconds: int | None = None,
-        execution_id: UUID | None = None,
-        *,
-        claim: bool = True,
-    ) -> StartClaimResult:
-        """Mark a task started, arbitrating an execution claim and limit slots.
+    def close(self) -> None:
+        """Release connections (a no-op for registries that hold none)."""
 
-        The claim guarantees at most one concurrent RUNNING execution per
-        task (environment-wide, across builds): a start racing an existing
-        RUNNING task is denied — with the running execution's ref echoed —
-        instead of recorded. COMPLETED tasks deny with
-        ``already_completed`` (callers treat this like the lock's
-        ALREADY_COMPLETED: verify the target with eventual-consistency
-        retries). ``limit_keys`` compose atomically (a denied claim
-        consumes no slots).
-
-        ``claim`` is **keyword-only**, and that is what makes it safe: no
-        positional argument can reach it, at any position. Had it been
-        ordinary and placed before ``claim_ttl_seconds``, a positional TTL
-        would have bound to it — any truthy int reads as "claim" — and the
-        TTL would silently become None, which is exactly the unexpiring
-        claim this API works to prevent. Its position at the end is then
-        only tidiness; the ``*`` is the guarantee.
-
-        ``claim=False`` acquires the limit slots without arbitrating: the
-        start is recorded even against a live claim, and the only denial
-        left is ``limit``. That is not a weaker claim, it is the absence of
-        one, and exactly one caller wants it — a limiter acquiring slots
-        for a task its *own* build has already claimed (see
-        ``stardag.build._registry_limiter``), which a claiming start would
-        deny as ``already_running``. Everything that arbitrates leaves it
-        alone.
-
-        ``claim_ttl_seconds`` bounds how long the granted claim is honoured
-        (surfaced to every reader as
-        ``FrontierTaskRef.latest_status_expires_at``). Past it the claim is
-        re-claimable and stops occupying concurrency slots, which is what
-        lets a build in *another* scheduler decide a claim is abandoned
-        without probing an executor it cannot reach. None leaves it to the
-        backend's default; derive it from the execution's own wall-clock
-        limit where one is known (see
-        ``stardag.build._reactive.claim_ttl_seconds``).
-
-        **This is the extension seam for custom arbitration backends**: a
-        custom ``RegistryABC`` implementation can arbitrate however it
-        likes (Redis, DynamoDB, ...), keeping claim, status and completion
-        consistent in one backend. There is deliberately no default
-        implementation: a backend that answers "you won" without
-        arbitrating is indistinguishable from one that arbitrates
-        correctly, and the build engines rely on this method for
-        exactly-once execution. Implement it, or subclass
-        :class:`NoOpRegistry` to opt out explicitly.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement task_start_claim_aio. "
-            "Implement it to arbitrate per-task execution claims (see "
-            "APIRegistry), or subclass NoOpRegistry to opt out of "
-            "arbitration."
-        )
-
-    async def task_start_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        executor: str | None = None,
-        executor_ref: str | None = None,
-        executor_metadata: dict[str, Any] | None = None,
-        claim_ttl_seconds: int | None = None,
-        execution_id: UUID | None = None,
-    ) -> None:
-        """Async version of task_start."""
-        self.task_start(
-            build_id,
-            task,
-            executor=executor,
-            executor_ref=executor_ref,
-            executor_metadata=executor_metadata,
-            claim_ttl_seconds=claim_ttl_seconds,
-            execution_id=execution_id,
-        )
-
-    async def task_complete_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version of task_complete."""
-        self.task_complete(build_id, task)
-
-    async def task_fail_aio(
-        self, build_id: UUID, task: "BaseTask", error_message: str | None = None
-    ) -> None:
-        """Async version of task_fail."""
-        self.task_fail(build_id, task, error_message)
-
-    async def task_interrupt_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        reason: str | None = None,
-        executor_ref: str | None = None,
-        execution_id: UUID | None = None,
-    ) -> None:
-        """Async version of task_interrupt."""
-        self.task_interrupt(
-            build_id, task, reason, executor_ref, execution_id=execution_id
-        )
-
-    async def task_preempt_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        reason: str | None = None,
-        executor_ref: str | None = None,
-        execution_id: UUID | None = None,
-    ) -> None:
-        """Async version of task_preempt."""
-        self.task_preempt(
-            build_id, task, reason, executor_ref, execution_id=execution_id
-        )
-
-    async def task_suspend_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version of task_suspend."""
-        self.task_suspend(build_id, task)
-
-    async def task_add_dependencies_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        upstream_tasks: Sequence["BaseTask"],
-        is_dynamic: bool = True,
-        *,
-        scope_key: str | None = None,
-    ) -> None:
-        """Async version of task_add_dependencies."""
-        self.task_add_dependencies(
-            build_id, task, upstream_tasks, is_dynamic, scope_key=scope_key
-        )
-
-    async def task_resume_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version of task_resume."""
-        self.task_resume(build_id, task)
-
-    async def task_cancel_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version of task_cancel."""
-        self.task_cancel(build_id, task)
-
-    async def task_skip_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version of task_skip."""
-        self.task_skip(build_id, task)
-
-    async def task_waiting_for_lock_aio(
-        self, build_id: UUID, task: "BaseTask", lock_owner: str | None = None
-    ) -> None:
-        """Async version of task_waiting_for_lock."""
-        self.task_waiting_for_lock(build_id, task, lock_owner)
-
-    async def task_upload_artifacts_aio(
-        self, build_id: UUID, task: "BaseTask", artifacts: Sequence["Artifact"]
-    ) -> None:
-        """Async version of task_upload_artifacts."""
-        self.task_upload_artifacts(build_id, task, artifacts)
-
-    async def task_get_metadata_aio(self, task_id: UUID) -> TaskMetadata:
-        """Async version of task_get_metadata."""
-        return self.task_get_metadata(task_id)
-
-    async def execution_status_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        execution_id: UUID | None = None,
-    ) -> ExecutionStatus:
-        """Async version of execution_status."""
-        return self.execution_status(build_id, task, execution_id)
+    async def aclose(self) -> None:
+        self.close()
 
 
 class NoOpRegistry(RegistryABC):
-    """A registry that does nothing.
+    """No registry configured.
 
-    Used as a default when no registry is configured.
+    The engines recognise it by exact type and make no registry call at all
+    (D11: a single-process build without a registry has no plan and no
+    claims). Its methods raise, so a code path that reaches one by mistake
+    fails loudly rather than pretending to have recorded something.
     """
 
-    def build_start(
-        self,
-        root_tasks: list["BaseTask"] | None = None,
-        description: str | None = None,
-        executor_metadata: dict[str, Any] | None = None,
-        *,
-        scope_key: str | None = None,
-        build_config: Mapping[str, Mapping[str, Any]] | None = None,
-    ) -> UUID:
-        """Return a placeholder build ID."""
-        return UUID("00000000-0000-0000-0000-000000000000")
 
-    def task_register(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        *,
-        declared_dependencies: "DeclaredDependencies" = DERIVE_DEPENDENCIES,
-        scope_key: str | None = None,
-    ) -> None:
-        pass
-
-    def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
-        raise NotImplementedError("NoOpRegistry does not support task_get_metadata.")
-
-    async def task_start_claim_aio(
-        self,
-        build_id: UUID,
-        task: "BaseTask",
-        executor: str | None = None,
-        executor_ref: str | None = None,
-        executor_metadata: dict[str, Any] | None = None,
-        limit_keys: Sequence[str] | None = None,
-        claim_ttl_seconds: int | None = None,
-        execution_id: UUID | None = None,
-        *,
-        claim: bool = True,
-    ) -> StartClaimResult:
-        """Always grant: there is nothing to arbitrate against.
-
-        This is the registry-*less* path — no shared state records that a
-        task is RUNNING, so no other execution can be observed and no
-        cross-build exactly-once guarantee is on offer in the first place.
-        Granting unconditionally is the honest answer here, unlike on
-        :class:`RegistryABC` (where it would silently defeat arbitration a
-        real backend was expected to provide).
-        """
-        return StartClaimResult(
-            started=True,
-            execution_id=None if execution_id is None else str(execution_id),
-        )
-
-
-def _declared_for(
-    task: "BaseTask",
-    declared: Mapping[UUID, "Sequence[BaseTask] | None"] | None,
-) -> "DeclaredDependencies":
-    """Per-task declaration from a bulk mapping: absent map → derive (legacy);
-    absent task → declares nothing."""
-    if declared is None:
-        return DERIVE_DEPENDENCIES
-    return declared.get(task.id)
+def is_noop_registry(registry: RegistryABC) -> bool:
+    """Whether ``registry`` is the do-nothing default (exact type: a
+    subclass is a double that means to be called)."""
+    return type(registry) is NoOpRegistry
 
 
 def init_registry() -> RegistryABC:
-    """Initialize the default registry based on configuration.
-
-    Returns APIRegistry if registry is configured, otherwise NoOpRegistry.
-    """
+    """The configured registry: an :class:`APIRegistry` when a registry is
+    configured, :class:`NoOpRegistry` otherwise."""
     from stardag.config import config_provider
     from stardag.registry._api_registry import APIRegistry
 
-    config = config_provider.get()
-
-    if config.registry is not None:
+    if config_provider.get().registry is not None:
         return APIRegistry()
-
     return NoOpRegistry()
 
 
@@ -2027,15 +707,12 @@ registry_provider = resource_provider(RegistryABC, init_registry)
 
 @lru_cache
 def get_git_commit_hash() -> str:
-    """Get the short SHA of the current Git commit."""
-
-    supported_env_vars = ["SHORT_SHA", "COMMIT_HASH"]
-
-    for env_var in supported_env_vars:
+    """The short SHA of the current Git commit (``-dirty`` if uncommitted
+    changes), or ``SHORT_SHA`` / ``COMMIT_HASH`` from the environment."""
+    for env_var in ("SHORT_SHA", "COMMIT_HASH"):
         short_sha = os.environ.get(env_var)
         if short_sha:
             return short_sha
-
     try:
         short_sha = (
             subprocess.check_output(
@@ -2044,19 +721,13 @@ def get_git_commit_hash() -> str:
             .strip()
             .decode("utf-8")
         )
-        # Check if there are uncommitted changes
-        dirty_flag = subprocess.check_output(
+        dirty = subprocess.check_output(
             ["git", "status", "--porcelain"], stderr=subprocess.DEVNULL
         ).strip()
-
-        if dirty_flag:
-            short_sha += "-dirty"
-
-        return short_sha
-
+        return short_sha + "-dirty" if dirty else short_sha
     except subprocess.CalledProcessError:
         raise RuntimeError(
             "Unable to get Git commit short SHA, you need to either run in an "
-            "environment where git is available or set one of the env vars SHORT_SHA "
-            "or COMMIT_HASH."
+            "environment where git is available or set one of the env vars "
+            "SHORT_SHA or COMMIT_HASH."
         )

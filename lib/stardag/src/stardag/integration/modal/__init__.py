@@ -57,11 +57,7 @@ modules directly. Roughly in the order a build passes through them:
   helpers.
 """
 
-from stardag.integration.modal._app import (
-    BuildTriggerResult,
-    FinalizeResult,
-    StardagApp,
-)
+from stardag.integration.modal._app import FinalizeResult, StardagApp
 from stardag.integration.modal._bootstrap import ReactiveDiscovery
 from stardag.integration.modal._builder import (
     BuildFailedError,
@@ -83,6 +79,7 @@ from stardag.integration.modal._selector import (
     WorkerSelectorByName,
 )
 from stardag.integration.modal._settings import FunctionSettings
+from stardag.integration.modal._trigger import BuildTriggerResult
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
     VOLUME_MOUNT_PATH_PREFIX,
