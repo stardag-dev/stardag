@@ -449,10 +449,17 @@ with `report_applied = false`.
 
 Keeps: id, name, description, user, `status` + companions, `root_task_ids`
 (the request at completion-id level, stable across rollover), reactive
-columns (`reactive_app_name`, `reactive_tick_kwargs`, `needs_tick_at`,
-`tick_requested_at`, `scheduler_lease_*`), `last_active_at`,
-`executor_metadata`. Drops `scope_key`, `build_config`, `commit_hash`. The
-active plan is found through `plan`, not stored twice.
+columns (`reactive_app_name`, `reactive_tick_kwargs`, `scheduler_lease_*`),
+`last_active_at`, `executor_metadata`. Drops `scope_key`, `build_config`,
+`commit_hash`. The active plan is found through `plan`, not stored twice.
+
+The wake-up flags `needs_tick_at` and `tick_requested_at` are on
+**`build_wake`**, one row per build (PK `build_id`, composite FK onto
+`build`, created with it, `ON DELETE CASCADE`), so that flagging never locks
+the build row: a claiming start holds its build `FOR SHARE` while it holds
+the task row, and a flagger — inside another task's transition — can
+neither wait for that (build → task order; it would deadlock against the
+claim's task lock) nor skip it without losing the wake-up.
 
 ### `event`
 
@@ -906,8 +913,11 @@ of active plans (not "any event in the build"); flagging on every transition
 scheduler lease (its own columns on `build`, no longer on the lock table)
 and the watchdog carry over. Concretely: every status change made by
 `transition_task()` sets `needs_tick_at` on the other RUNNING reactive
-builds whose active plan has a non-excluded member for the task (build rows
-`FOR NO KEY UPDATE SKIP LOCKED`, ordered by id); a move out of RUNNING also
+builds whose active plan has a non-excluded member for the task (their
+`build_wake` rows `FOR NO KEY UPDATE SKIP LOCKED`, ordered by build id; the
+build row is read, never locked, so a claim in flight on the build does not
+hide it — only a concurrent flagger, `notify` or `wake-candidates` holding
+the same wake row does, and that writer is setting the flag); a move out of RUNNING also
 flags those whose active plan has an actionable member with a
 `task_limit_key` on one of the task's keys. `POST /builds/{id}/notify` flags
 the caller's RUNNING build and reads the lease after the flag's commit;

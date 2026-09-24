@@ -339,3 +339,21 @@ NULL`, where v1 compared it with the status time). The `preempted`
   count scans `task_instance` by `(environment_id, created_at)`, which has
   no index yet; it runs only when a chunk inserted rows and the quota is
   configured.
+
+## Implementation notes, I0 step 3c (2026-09-24)
+
+- **The wake-up flags move to `build_wake`.** Step 3a's round made a
+  claiming start hold its build row `FOR SHARE` (so a terminal transition
+  or a delete is a synchronisation point for claims). Flagging set
+  `needs_tick_at` on the build row `FOR NO KEY UPDATE SKIP LOCKED`, which
+  conflicts with `FOR SHARE`: every build with a claim in flight was
+  skipped and its wake-up lost until the watchdog. Blocking instead would
+  deadlock (the flagger holds a task row; the claim holds the build and
+  wants its task row). `needs_tick_at` and `tick_requested_at` are now on
+  `build_wake` (one row per build, created with it, cascaded with it);
+  flagging, `notify`, `DELETE …/notify` and `wake-candidates` lock only
+  those rows and read `build` unlocked. `wake-candidates` therefore reads
+  the lease without the build lock: a lease being acquired concurrently can
+  be missed, which costs one spawned tick that finds the lease held and
+  exits, bounded by the hand-out window. The v2 migration is amended in
+  place (never deployed).

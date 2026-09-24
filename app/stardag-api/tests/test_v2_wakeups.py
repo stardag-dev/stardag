@@ -21,7 +21,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.config import settings as app_settings
-from stardag_api.services import builds, reactive, wakeups
+from stardag_api.models.base import utc_now
+from stardag_api.services import builds, reactive, transitions, wakeups
 from stardag_api.services.errors import Conflict
 from stardag_api.services.transitions import Transition
 from tests.v2_support import ENV, Harness, item, observed
@@ -105,6 +106,62 @@ async def test_flagging_is_over_active_plan_membership_not_events(h: Harness):
     assert await _flagged(h, holder)
     for build in (writer, passive, finished, excluding, moved_on):
         assert not await _flagged(h, build), build
+
+
+async def test_a_claim_in_flight_does_not_lose_its_builds_wake_up(h: Harness):
+    """Build B's claiming start holds B's build row ``FOR SHARE`` (build →
+    task lock order) and has not committed, while a task B holds completes
+    in another session. The flag lands on ``build_wake``, which the claim
+    does not lock, so B's wake-up is set rather than skipped until the
+    watchdog — and the completion does not wait for the claim either."""
+    deployment = await h.new_deployment()
+    t, u = item("T"), item("U")
+    _, plan_a = await h.planned([t], [t], deployment_id=deployment)
+    build_b, plan_b = await h.planned(
+        [t, u], [t, u], deployment_id=deployment, seal=True
+    )
+    await _reactive(h, build_b)
+    execution = await h.start(plan_a.id, t)
+    await _clear(h, build_b)
+    u_pk = (await h.task(u))["id"]
+
+    async with h.sf() as claiming:
+        async with claiming.begin():
+            await transitions.transition_task(
+                claiming,
+                ENV,
+                task_pk=u_pk,
+                plan_id=plan_b.id,
+                transition=Transition.start(uuid4()),
+                now=utc_now(),
+            )
+            # The row is locked in a mode the old flagging (the build row
+            # FOR NO KEY UPDATE SKIP LOCKED) would have skipped.
+            async with h.sf() as probe:
+                skipped = await probe.scalar(
+                    text(
+                        "SELECT count(*) FROM (SELECT 1 FROM build WHERE id = :b"
+                        " FOR NO KEY UPDATE SKIP LOCKED) x"
+                    ),
+                    {"b": build_b},
+                )
+            assert skipped == 0, "the claiming start holds the build row"
+            await asyncio.wait_for(
+                h.transition(plan_a.id, t, Transition.complete(execution)), 5
+            )
+            assert await _flagged(h, build_b)
+    assert (await h.task(u))["status"] == "running"
+
+
+async def test_the_wake_row_is_born_and_deleted_with_its_build(h: Harness):
+    """``POST /builds`` creates the build's ``build_wake`` row (flagging
+    only updates rows, so a build without one could never be woken); a
+    build delete cascades it."""
+    build = await _svc(h, builds.create_build, root_task_ids=["r"])
+    assert await h.count("build_wake") == 1
+    assert (await h.build(build.id))["needs_tick_at"] is None
+    await _svc(h, builds.delete_build, build.id)
+    assert await h.count("build_wake") == 0
 
 
 async def test_every_status_change_flags_and_a_no_op_does_not(h: Harness):
@@ -214,7 +271,9 @@ async def test_notify_flags_a_running_build_and_reports_a_live_scheduler(
     assert row["needs_tick_at"] is not None and row["tick_requested_at"] is not None
 
     await _svc(h, wakeups.clear_notify, build)
-    await _sql(h, "UPDATE build SET tick_requested_at = NULL WHERE id = :b", b=build)
+    await _sql(
+        h, "UPDATE build_wake SET tick_requested_at = NULL WHERE build_id = :b", b=build
+    )
     await _svc(h, wakeups.acquire_lease, build, owner_id="tick-1", ttl_seconds=60)
     state = await _svc(h, wakeups.notify, build)
     assert state.needs_tick and state.scheduler_live is True
@@ -241,8 +300,8 @@ async def test_wake_candidates_hand_each_build_out_once_per_window(h: Harness):
     for age, build in enumerate(reversed(built)):
         await _sql(
             h,
-            "UPDATE build SET needs_tick_at = now() - make_interval(secs => :s)"
-            " WHERE id = :b",
+            "UPDATE build_wake SET needs_tick_at ="
+            " now() - make_interval(secs => :s) WHERE build_id = :b",
             s=age + 1,
             b=build,
         )
@@ -250,7 +309,9 @@ async def test_wake_candidates_hand_each_build_out_once_per_window(h: Harness):
     await _svc(h, wakeups.acquire_lease, leased, owner_id="o", ttl_seconds=60)
     await _svc(h, wakeups.clear_notify, quiet)
     await _sql(
-        h, "UPDATE build SET needs_tick_at = now() WHERE id = :b", b=not_reactive
+        h,
+        "UPDATE build_wake SET needs_tick_at = now() WHERE build_id = :b",
+        b=not_reactive,
     )
 
     first = await _svc(h, wakeups.wake_candidates)
@@ -260,7 +321,7 @@ async def test_wake_candidates_hand_each_build_out_once_per_window(h: Harness):
 
     await _sql(
         h,
-        "UPDATE build SET tick_requested_at = now() - make_interval(secs => :w)",
+        "UPDATE build_wake SET tick_requested_at = now() - make_interval(secs => :w)",
         w=(wakeups.WAKE_HANDOUT_WINDOW + timedelta(seconds=1)).total_seconds(),
     )
     again = await _svc(h, wakeups.wake_candidates, limit=5)

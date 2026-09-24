@@ -138,27 +138,9 @@ class Build(EnvironmentScopedMixin, Base):
         nullable=True,
     )
 
-    # Reactive-scheduler dirty flag: set by POST /builds/{id}/notify (e.g. a
-    # worker finishing a task), cleared by the scheduler tick before it
-    # computes the frontier (DELETE /builds/{id}/notify). A notify landing
-    # between clear and compute re-sets it, so the tick's linger poll picks
-    # the wake-up back up — no lost signals. NULL = no pending wake-up.
-    needs_tick_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-
-    # When a caller was last told to spawn a tick for this build — by
-    # ``POST /builds/wake-candidates`` handing it out, or by
-    # ``POST /builds/{id}/notify`` reporting no live scheduler to a worker
-    # that will spawn. A flagged build is handed out at most once per
-    # ``services.wakeups.WAKE_HANDOUT_WINDOW``, which is what turns N
-    # concurrent askers into one container rather than N. Not a liveness
-    # signal and not cleared: it simply ages out.
-    tick_requested_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
+    # The wake-up flags (``needs_tick_at``, ``tick_requested_at``) live on
+    # ``build_wake``, one row per build: flagging must not lock this row,
+    # which a claiming start holds ``FOR SHARE`` (models/build_wake.py).
 
     # The reactive scheduler's single-flight lease on this build: at most
     # one tick drives a build at a time. Held while a tick runs (renewed

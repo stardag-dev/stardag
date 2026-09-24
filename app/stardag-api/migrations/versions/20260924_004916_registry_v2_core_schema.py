@@ -15,7 +15,13 @@ empty. The v1 rows cannot be carried over: a v1 ``tasks`` row holds one
 first-write-wins parameter body per completion and no scope, so there is
 nothing to derive an instance, a plan or a membership from.
 
-Two mechanics worth knowing:
+**Amended in place, never deployed.** No registry has ever run this
+revision (the v2 line is unreleased), so later I0 steps change it here
+rather than stacking revisions on a schema nobody has: step 3c moved the
+wake-up flags off ``build`` onto ``build_wake`` and added the attempt-count
+and quota indexes.
+
+Mechanics worth knowing:
 
 - Every FK between environment-scoped tables is composite and leads with
   ``environment_id`` (the design's environment rule), onto a unique key
@@ -83,8 +89,6 @@ def upgrade() -> None:
         sa.Column(
             "executor_metadata", postgresql.JSONB(astext_type=sa.Text()), nullable=True
         ),
-        sa.Column("needs_tick_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("tick_requested_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("scheduler_lease_until", sa.DateTime(timezone=True), nullable=True),
         sa.Column("scheduler_lease_owner", sa.String(length=64), nullable=True),
         sa.Column("reactive_app_name", sa.String(length=64), nullable=True),
@@ -150,6 +154,36 @@ def upgrade() -> None:
         op.f("ix_build_reactive_app_name"), "build", ["reactive_app_name"], unique=False
     )
     op.create_index(op.f("ix_build_user_id"), "build", ["user_id"], unique=False)
+    op.create_table(
+        "build_wake",
+        sa.Column("build_id", sa.Uuid(), nullable=False),
+        sa.Column("needs_tick_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("tick_requested_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("environment_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["environment_id", "build_id"],
+            ["build.environment_id", "build.id"],
+            name="fk_build_wake_build",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["environment_id"], ["environments.id"], ondelete="CASCADE"
+        ),
+        sa.PrimaryKeyConstraint("build_id"),
+    )
+    op.create_index(
+        "ix_build_wake_flagged",
+        "build_wake",
+        ["environment_id", "needs_tick_at"],
+        unique=False,
+        postgresql_where=sa.text("needs_tick_at IS NOT NULL"),
+    )
     op.create_table(
         "deployment",
         sa.Column("id", sa.Uuid(), nullable=False),

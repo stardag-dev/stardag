@@ -144,6 +144,13 @@ class Harness:
                     "roots": json.dumps(sorted({r.task_id for r in roots})),
                 },
             )
+            await s.execute(
+                text(
+                    "INSERT INTO build_wake (build_id, environment_id)"
+                    " VALUES (:id, :env)"
+                ),
+                {"id": build_id, "env": ENV},
+            )
             await s.commit()
         return build_id
 
@@ -376,7 +383,12 @@ class Harness:
         return rows[0]
 
     async def build(self, build_id: UUID) -> RowMapping:
-        rows = await self._rows("SELECT * FROM build WHERE id = :id", id=build_id)
+        # The build row with its wake flags (``build_wake``) alongside.
+        rows = await self._rows(
+            "SELECT b.*, w.needs_tick_at, w.tick_requested_at FROM build b"
+            " LEFT JOIN build_wake w ON w.build_id = b.id WHERE b.id = :id",
+            id=build_id,
+        )
         return rows[0]
 
     async def edges(self, deployment_id: UUID) -> set[tuple[str, str]]:
