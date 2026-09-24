@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
+from httpx import AsyncClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -468,3 +470,234 @@ async def test_s21_race_two_starts_on_a_lapsed_claim_grant_exactly_one(
     ]
     assert task_locks and all("FOR NO KEY UPDATE" in s for s in task_locks)
     assert not [s for s in task_locks if "FOR KEY SHARE" in s]
+
+
+# -- the remaining transitions (I0 step 3b) -----------------------------------
+
+
+async def test_interrupt_releases_the_claim_and_is_actionable(h: Harness):
+    """An interruption (the platform took the execution away) moves the
+    task to INTERRUPTED — not a failure, not terminal — releasing the claim
+    (``claim_outcome = interrupted``) and ending the execution; the task is
+    ACTIONABLE and the message is kept."""
+    t = item("T")
+    build, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    await h.transition(plan.id, t, Transition.interrupt(execution, "timeout"))
+    task = await h.task(t)
+    assert task["status"] == "interrupted" and task["claim_plan_id"] is None
+    assert task["error_message"] == "timeout"
+    ledger = await h.execution(execution)
+    assert (ledger["claim_outcome"], ledger["outcome"]) == (
+        "interrupted",
+        "interrupted",
+    )
+    assert t.task_id in task_ids((await h.frontier(build)).runnable)
+
+
+async def test_s21_a_late_interrupt_after_takeover_is_recorded_not_applied(
+    h: Harness,
+):
+    """S21 — the dead worker's lapsed claim was taken over (``taken_over``);
+    if it reports after all, the report writes its own ledger end and is
+    recorded ``report_applied = false``; the successor's claim is untouched."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    dead = await h.start(plan.id, t)
+    await h.lapse_claim(t)
+    successor = await h.start(plan.id, t)
+    with pytest.raises(Conflict) as exc:
+        await h.transition(plan.id, t, Transition.interrupt(dead, "oom"))
+    assert exc.value.code == "execution_not_current"
+    old = await h.execution(dead)
+    assert (old["claim_outcome"], old["outcome"]) == ("taken_over", "interrupted")
+    task = await h.task(t)
+    assert task["status"] == "running" and task["execution_id"] == successor
+    (late,) = await h.events(t, types=["task_interrupted"])
+    assert not late["report_applied"]
+
+
+async def test_s35_duplicate_interrupt_after_a_retry_is_not_applied(h: Harness):
+    """S35 — one terminal report per execution, for an interruption too: a
+    delayed duplicate after an operator retry is recorded, not applied."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    await h.transition(plan.id, t, Transition.interrupt(execution))
+    await h.transition(plan.id, t, Transition.retry())
+    with pytest.raises(Conflict) as exc:
+        await h.transition(plan.id, t, Transition.interrupt(execution))
+    assert exc.value.code == "execution_already_ended"
+    assert (await h.task(t))["status"] == "pending"
+
+
+async def test_preempt_is_status_neutral_and_pulls_the_expiry_to_a_grace(
+    h: Harness,
+):
+    """A preemption keeps the task RUNNING under the same claim, sets
+    ``preempted_at`` and pulls the expiry forward to the restart grace —
+    never back (a claim shorter than the grace keeps its expiry). The
+    restart's own non-claiming start re-grants the TTL. Not an end: the
+    ledger's ``ended_at`` stays NULL and the restart completes normally."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t, claim_ttl_seconds=86400)
+    before = (await h.task(t))["claim_expires_at"]
+    outcome = await h.transition(plan.id, t, Transition.preempt(execution))
+    assert outcome.status == "running" and outcome.execution_id == execution
+    task = await h.task(t)
+    assert task["preempted_at"] is not None
+    assert task["claim_expires_at"] < before
+    assert task["claim_expires_at"] <= utcnow() + timedelta(seconds=901)
+    assert (await h.execution(execution))["ended_at"] is None
+
+    await h.transition(
+        plan.id,
+        t,
+        Transition.start(execution, claim=False, claim_ttl_seconds=7200),
+    )
+    task = await h.task(t)
+    assert task["preempted_at"] is None
+    assert task["claim_expires_at"] > utcnow() + timedelta(seconds=7000)
+    await h.transition(plan.id, t, Transition.complete(execution))
+    assert (await h.task(t))["status"] == "completed"
+
+    short = item("Short")
+    _, plan2 = await h.planned([short], [short])
+    brief = await h.start(plan2.id, short, claim_ttl_seconds=60)
+    expiry = (await h.task(short))["claim_expires_at"]
+    await h.transition(plan2.id, short, Transition.preempt(brief))
+    assert (await h.task(short))["claim_expires_at"] == expiry
+
+
+async def test_a_preemption_from_a_stale_execution_is_recorded_not_applied(
+    h: Harness,
+):
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    stale = await h.start(plan.id, t)
+    await h.lapse_claim(t)
+    await h.start(plan.id, t)
+    with pytest.raises(Conflict) as exc:
+        await h.transition(plan.id, t, Transition.preempt(stale))
+    assert exc.value.code == "execution_not_current"
+    assert (await h.task(t))["preempted_at"] is None
+    (late,) = await h.events(t, types=["task_preempted"])
+    assert not late["report_applied"]
+
+
+async def test_skip_is_a_scheduling_decision_idempotent_by_state(h: Harness):
+    """``skip`` names no execution: a PENDING member goes SKIPPED
+    (ACTIONABLE once gated open); a re-sent skip is a no-op; refused
+    against a live claim, a COMPLETED task and a FAILED one."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    skipped = await h.transition(plan.id, t, Transition.skip())
+    assert skipped.applied and skipped.status == "skipped"
+    again = await h.transition(plan.id, t, Transition.skip())
+    assert not again.applied
+    assert len(await h.events(t, types=["task_skipped"])) == 1
+
+    running = await h.start(plan.id, t)
+    with pytest.raises(Conflict) as exc:
+        await h.transition(plan.id, t, Transition.skip())
+    assert exc.value.code == "task_already_running"
+    await h.transition(plan.id, t, Transition.fail(running, "x"))
+    with pytest.raises(Conflict) as exc:
+        await h.transition(plan.id, t, Transition.skip())
+    assert exc.value.code == "task_not_skippable"
+
+
+async def test_cancel_is_for_the_build_holding_the_claim(h: Harness):
+    """A single task's cancel: only the build holding the claim (409
+    ``not_claim_holder`` for any other, and for a task nobody holds);
+    CANCELLED with ``claim_outcome = cancelled``, the execution's
+    ``ended_at`` untouched (cooperative); a re-sent cancel is a no-op."""
+    deployment = await h.new_deployment()
+    t = item("T")
+    _, plan_a = await h.planned([t], [t], deployment_id=deployment)
+    _, plan_b = await h.planned([t], [t], deployment_id=deployment)
+    with pytest.raises(Conflict) as exc:
+        await h.transition(plan_a.id, t, Transition.cancel())
+    assert exc.value.code == "not_claim_holder"
+
+    execution = await h.start(plan_a.id, t)
+    with pytest.raises(Conflict) as exc:
+        await h.transition(plan_b.id, t, Transition.cancel())
+    assert exc.value.code == "not_claim_holder"
+    assert (await h.task(t))["status"] == "running"
+
+    cancelled = await h.transition(plan_a.id, t, Transition.cancel())
+    assert cancelled.applied and cancelled.status == "cancelled"
+    ledger = await h.execution(execution)
+    assert ledger["claim_outcome"] == "cancelled" and ledger["ended_at"] is None
+    assert not (await h.transition(plan_a.id, t, Transition.cancel())).applied
+    with pytest.raises(Conflict) as late:
+        await h.transition(plan_a.id, t, Transition.complete(execution))
+    assert late.value.code == "execution_not_current"
+
+
+async def test_a_non_claiming_start_follows_the_authority_rule(h: Harness):
+    """The holder's self-report is applied when it names the task's current
+    execution, lapsed or not; late (recorded, refused) only once a claiming
+    start took the claim over."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    await h.lapse_claim(t)
+    applied = await h.transition(
+        plan.id, t, Transition.start(execution, claim=False, executor_ref="fc-1")
+    )
+    assert applied.applied
+    assert (await h.execution(execution))["executor_ref"] == "fc-1"
+
+    await h.start(plan.id, t)
+    with pytest.raises(Conflict) as exc:
+        await h.transition(plan.id, t, Transition.start(execution, claim=False))
+    assert exc.value.code == "execution_not_current"
+
+
+async def test_status_timestamps_are_stamped_after_the_row_lock(h: Harness):
+    """``completed_at`` (and every status timestamp) is the time the
+    transition took effect under the lock, not the caller's earlier clock —
+    so the ``observed_at`` guard compares against the real completion."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    task_pk = (await h.task(t))["id"]
+    early = utcnow() - timedelta(minutes=5)
+    async with h.sf() as s:
+        await transitions.transition_task(
+            s,
+            ENV,
+            task_pk=task_pk,
+            plan_id=plan.id,
+            transition=Transition.complete(execution),
+            now=early,
+        )
+        await s.commit()
+    task = await h.task(t)
+    assert task["completed_at"] > early + timedelta(minutes=4)
+    assert task["status_at"] == task["completed_at"]
+    # An observation made after the caller's clock but before the real
+    # completion does not invalidate it.
+    await h.register(plan.id, [observed(t, False, at=early + timedelta(minutes=1))])
+    assert (await h.task(t))["status"] == "completed"
+
+
+async def test_remaining_transitions_over_http(client: AsyncClient, h: Harness):
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    base = f"/api/v2/plans/{plan.id}/members/{t.task_id}"
+    execution = str(await h.start(plan.id, t))
+    preempted = await client.post(f"{base}/preempt", json={"execution_id": execution})
+    assert preempted.status_code == 200 and preempted.json()["status"] == "running"
+    interrupted = await client.post(
+        f"{base}/interrupt", json={"execution_id": execution, "error_message": "x"}
+    )
+    assert interrupted.json()["status"] == "interrupted"
+    skipped = await client.post(f"{base}/skip")
+    assert skipped.json()["status"] == "skipped"
+    refused = await client.post(f"{base}/cancel")
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "not_claim_holder"

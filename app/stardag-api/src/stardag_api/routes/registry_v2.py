@@ -17,9 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
+from stardag_api.models import ExclusionReason
 from stardag_api.schemas_v2 import (
     BuildCreate,
     BuildResponse,
+    DiscoveryFailedRequest,
+    ExcludeRequest,
+    ExclusionResponse,
+    SkipBlockedResponse,
     FailRequest,
     FrontierResponse,
     MembersRequest,
@@ -30,14 +35,27 @@ from stardag_api.schemas_v2 import (
     ReportRequest,
     StartRequest,
     TransitionResponse,
+    YieldRequest,
+    YieldResponse,
 )
 from stardag_api.routes.registry_v2_builds import router as builds_router
+from stardag_api.routes.registry_v2_executions import router as executions_router
+from stardag_api.routes.registry_v2_guard import v2_write_guard
 from stardag_api.routes.registry_v2_scope import router as scope_router
 from stardag_api.routes.registry_v2_wakeups import router as wakeups_router
-from stardag_api.services import builds, frontier, plans, registration, transitions
+from stardag_api.services import (
+    builds,
+    exclusion,
+    frontier,
+    plans,
+    registration,
+    transitions,
+    yields,
+)
 from stardag_api.services.transitions import Transition
 
-router = APIRouter(tags=["registry-v2"])
+# The rate limit applies to every write route, the sub-routers' included.
+router = APIRouter(tags=["registry-v2"], dependencies=[Depends(v2_write_guard)])
 
 Db = Annotated[AsyncSession, Depends(get_db)]
 Auth = Annotated[SdkAuth, Depends(require_sdk_auth)]
@@ -81,6 +99,11 @@ async def create_plan(build_id: UUID, body: PlanCreate, db: Db, auth: Auth):
 @router.get("/builds/{build_id}/frontier", response_model=FrontierResponse)
 async def get_frontier(build_id: UUID, db: Db, auth: Auth):
     return await frontier.get_frontier(db, auth.environment_id, build_id)
+
+
+@router.post("/builds/{build_id}/skip-blocked", response_model=SkipBlockedResponse)
+async def skip_blocked(build_id: UUID, db: Db, auth: Auth):
+    return await exclusion.skip_blocked(db, auth.environment_id, build_id)
 
 
 # -- plans ------------------------------------------------------------------------
@@ -170,6 +193,99 @@ async def retry(plan_id: UUID, task_id: str, db: Db, auth: Auth):
     return await _transition(db, auth, plan_id, task_id, Transition.retry())
 
 
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/interrupt", response_model=TransitionResponse
+)
+async def interrupt(plan_id: UUID, task_id: str, body: FailRequest, db: Db, auth: Auth):
+    return await _transition(
+        db,
+        auth,
+        plan_id,
+        task_id,
+        Transition.interrupt(body.execution_id, body.error_message),
+    )
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/preempt", response_model=TransitionResponse
+)
+async def preempt(plan_id: UUID, task_id: str, body: ReportRequest, db: Db, auth: Auth):
+    return await _transition(
+        db, auth, plan_id, task_id, Transition.preempt(body.execution_id)
+    )
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/skip", response_model=TransitionResponse
+)
+async def skip(plan_id: UUID, task_id: str, db: Db, auth: Auth):
+    return await _transition(db, auth, plan_id, task_id, Transition.skip())
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/cancel", response_model=TransitionResponse
+)
+async def cancel(plan_id: UUID, task_id: str, db: Db, auth: Auth):
+    """A single task's cancel, by the build holding its claim (via one of its
+    plans); 409 ``not_claim_holder`` otherwise."""
+    return await _transition(db, auth, plan_id, task_id, Transition.cancel())
+
+
+@router.post("/plans/{plan_id}/members/{task_id}/yield", response_model=YieldResponse)
+async def yield_batch(
+    plan_id: UUID, task_id: str, body: YieldRequest, db: Db, auth: Auth
+):
+    return await yields.yield_batch(
+        db,
+        auth.environment_id,
+        plan_id=plan_id,
+        task_id=task_id,
+        execution_id=body.execution_id,
+        deployment_id=body.deployment_id,
+        batch_id=body.batch_id,
+        items=body.items,
+        yielded=body.yielded,
+        suspend=body.suspend,
+    )
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/exclude", response_model=ExclusionResponse
+)
+async def exclude(
+    plan_id: UUID,
+    task_id: str,
+    db: Db,
+    auth: Auth,
+    body: ExcludeRequest | None = None,
+):
+    return await exclusion.exclude_member(
+        db,
+        auth.environment_id,
+        plan_id=plan_id,
+        task_id=task_id,
+        reason=ExclusionReason.OPERATOR,
+        note=body.reason if body else None,
+    )
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/discovery-failed",
+    response_model=ExclusionResponse,
+)
+async def discovery_failed(
+    plan_id: UUID, task_id: str, body: DiscoveryFailedRequest, db: Db, auth: Auth
+):
+    return await exclusion.exclude_member(
+        db,
+        auth.environment_id,
+        plan_id=plan_id,
+        task_id=task_id,
+        reason=ExclusionReason.DISCOVERY_FAILED,
+        error_message=body.error,
+    )
+
+
 # -- claims -------------------------------------------------------------------------
 
 
@@ -187,5 +303,6 @@ async def renew_claim(task_id: str, body: RenewRequest, db: Db, auth: Auth):
 # -- sub-routers ----------------------------------------------------------------
 
 router.include_router(builds_router)
+router.include_router(executions_router)
 router.include_router(scope_router)
 router.include_router(wakeups_router)

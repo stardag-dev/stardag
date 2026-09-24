@@ -256,3 +256,105 @@ lifecycle and wake-ups needed. The design now says what the code does.
   make an overlap safe, so the guard keys on the build, not the values.
   The cost is more containers — a lingering tick now holds one of its own
   — accepted.
+
+## Implementation notes, I0 step 3b (2026-09-24)
+
+Six rulings by the coordinator, then the readings `/yield`, the remaining
+transitions, exclusion and `builds stop` needed. `design.md` now says what
+the code does; the readings marked "to confirm" are open.
+
+Rulings:
+
+- **Local deployments are never current and never superseded.** The seal's
+  current-deployment check, resume's reactivation check and rollover apply
+  to `kind = modal` only; a `local` deployment is authoritative for its own
+  plans, and `GET /deployments` marks no local row current. A local driver
+  at a new commit plans under a new scope; the old commit's plans stay
+  usable rather than becoming unsealable.
+- **A refused claim records the limit keys it asked for** (step 3a's
+  reading, confirmed): the refusal holds no slot — its claim is not live —
+  and makes the queued task findable when a slot on those keys frees.
+- **A non-claiming start follows the authority rule of every report**:
+  applied while its `execution_id` is the task's current execution, lapsed
+  or not; late only after a takeover (or an observation or a build release
+  closed the claim). Step 2 required a live claim.
+- **Reactivating a superseded plan on resume respects the latest-request
+  rule** (409 `plan_superseded`). Read literally — "no plan of a higher
+  generation exists" — the rule refuses every reactivation, since a
+  superseded plan was always superseded by a later generation, and S14's
+  reactivation could never happen. The reading taken: the rule refuses
+  while a _later request is still registering_ (a higher-generation plan
+  never activated), which is the race the seal's rule exists for; moving
+  between requests the build already activated is what resume is for. To
+  confirm.
+- **Every status timestamp is stamped after the row lock** in
+  `transition_task()`: the caller's clock orders the transaction's events,
+  the task and ledger columns get the time the transition took effect. A
+  completion stamped before its lock wait could precede an observation
+  made during the wait, and the `observed_at` guard would then let a
+  stale "missing" undo a real completion.
+- **Terminal build states keep "last event wins"** (a repeat of the same
+  state is a no-op): a documented v1 carry-over, not a new rule.
+- **A report comes through the plan holding the claim** (carried from the
+  step-3 base): the current execution's report under a plan other than
+  `task.claim_plan_id` is 409 `not_claim_holder` with no trace, before any
+  ledger end. Step 3b applies it to `interrupt`, `preempt` and `/yield` as
+  well (a yield's replay lookup still comes first, so a retried batch is
+  replayed whatever its route).
+
+Readings:
+
+- **An `instance_conflict` at `/yield` is applied by the server**: the
+  batch's items roll back to a savepoint, the parent gets `TASK_FAILED`
+  with the conflict named (its claim released `failed`, its execution
+  ended), and the batch is refused 409 `instance_conflict`. Any other
+  registration refusal rolls the whole batch back and leaves the worker to
+  report `TASK_FAILED` (S13).
+- **A refused batch is recorded without a typed `batch_id`** (the id is in
+  its metadata): the replay lookup keys on the typed column, so a refusal
+  can never be replayed as an applied batch, and the unique index is not
+  spent on it. `yielded` must be a subset of the batch's items (400
+  `unknown_yielded_instance`); the yielded instances are admitted
+  `dynamic`, their closure `static`.
+- **A preemption is not an end of the execution.** The platform restarts
+  the same execution under the same id, so `/preempt` writes no `ended_at`
+  (an end would refuse the restart's reports as `execution_already_ended`);
+  it sets `preempted_at` and pulls the claim's expiry to a 900 s grace,
+  never back. The restart's non-claiming start re-grants the TTL and clears
+  `preempted_at` ("a restart is outstanding" is `preempted_at IS NOT
+NULL`, where v1 compared it with the status time). The `preempted`
+  execution outcome is therefore unused. To confirm.
+- **`skip` is a scheduling decision, not a report.** The design lists it
+  among the reports naming an `execution_id`, but v1's SDK uses it for a
+  never-started task whose upstream failed, which has no execution. It
+  names none; it moves PENDING, SUSPENDED or INTERRUPTED (or a lapsed
+  claim) to SKIPPED, is refused against a live claim, COMPLETED, and FAILED
+  / CANCELLED (409 `task_not_skippable`: results a skip must not
+  overwrite), and is idempotent. Skip-blocked applies it. To confirm.
+- **A single task's cancel** is for the build holding the claim, through
+  any of its plans (409 `not_claim_holder`, also when nobody holds it); the
+  execution's `ended_at` is untouched (cooperative).
+- **The exclusion cascade stops at COMPLETED.** A downstream is excluded
+  (`upstream_excluded`) when it is not COMPLETED and has an excluded,
+  not-COMPLETED upstream: a COMPLETED member blocks nobody, so excluding a
+  COMPLETED member cascades nothing, and a COMPLETED root reached by the
+  walk is not excluded (the build is not failed for a request already met).
+  Exclusion is refused on a superseded plan (`plan_superseded`) and is
+  idempotent by state; an excluded root fails the build (`root_excluded`)
+  in the same transaction.
+- **`/executions/{id}/stopped` releases a claim the execution still
+  holds.** Nothing will ever report for a stopped execution, so leaving its
+  claim would hold the task until the claim lapsed (up to 24 h); the stop
+  writes the ledger end (`stopped`) and, if the execution is current and
+  unreleased, releases the claim `cancelled` with the task CANCELLED
+  (ACTIONABLE). To confirm.
+- **The guardrails at the v2 boundary**: v1's per-workspace rate limit is a
+  router-level dependency of the v2 router (every write route, reads not
+  limited, 429 `rate_limited` with `Retry-After`); the 24-hour quota is per
+  environment on `task_instance` rows
+  (`LIMITS_MAX_TASK_INSTANCES_PER_ENVIRONMENT_24H`), charged in
+  `register_items` after the insert for the rows it returned, so a
+  re-delivered chunk is never refused (429 `creation_quota_exceeded`). The
+  count scans `task_instance` by `(environment_id, created_at)`, which has
+  no index yet; it runs only when a chunk inserted rows and the quota is
+  configured.

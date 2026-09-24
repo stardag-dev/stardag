@@ -49,7 +49,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -66,14 +66,9 @@ from stardag_api.models import (
     TaskStatus,
 )
 from stardag_api.models.base import utc_now
-from stardag_api.services import event_log
 from stardag_api.services.claim_limits import full_limits, replace_limit_keys
-from stardag_api.services.errors import (
-    BadRequest,
-    Conflict,
-    NotFound,
-    RecordedConflict,
-)
+from stardag_api.services.errors import Conflict, NotFound, RecordedConflict
+from stardag_api.services.transition_reports import ReportSteps
 from stardag_api.services.transition_types import (
     ACTIONABLE_STATUSES,
     DEFAULT_CLAIM_TTL_SECONDS,
@@ -95,6 +90,8 @@ __all__ = [
     "TransitionKind",
     "TransitionOutcome",
     "apply_member_transition",
+    "lock_task",
+    "member_task_pk",
     "renew_claim",
     "transition_task",
 ]
@@ -117,22 +114,7 @@ async def apply_member_transition(
     A recorded refusal (:class:`RecordedConflict`) is committed, then raised.
     """
     async with transaction(session):
-        task_pk = await session.scalar(
-            select(PlanMember.task_pk)
-            .join(Task, Task.id == PlanMember.task_pk)
-            .where(
-                PlanMember.environment_id == environment_id,
-                PlanMember.plan_id == plan_id,
-                Task.task_id == task_id,
-            )
-        )
-        if task_pk is None:
-            raise NotFound(
-                "not_a_member",
-                f"task {task_id} is not a member of plan {plan_id}",
-                task_id=task_id,
-                plan_id=str(plan_id),
-            )
+        task_pk = await member_task_pk(session, environment_id, plan_id, task_id)
         return await transition_task(
             session,
             environment_id,
@@ -141,6 +123,45 @@ async def apply_member_transition(
             transition=transition,
             now=utc_now(),
         )
+
+
+async def member_task_pk(
+    session: AsyncSession, environment_id: UUID, plan_id: UUID, task_id: str
+) -> UUID:
+    """The task pk of ``task_id`` as a member of ``plan_id`` (404
+    ``not_a_member`` otherwise)."""
+    task_pk = await session.scalar(
+        select(PlanMember.task_pk)
+        .join(Task, Task.id == PlanMember.task_pk)
+        .where(
+            PlanMember.environment_id == environment_id,
+            PlanMember.plan_id == plan_id,
+            Task.task_id == task_id,
+        )
+    )
+    if task_pk is None:
+        raise NotFound(
+            "not_a_member",
+            f"task {task_id} is not a member of plan {plan_id}",
+            task_id=task_id,
+            plan_id=str(plan_id),
+        )
+    return task_pk
+
+
+async def lock_task(session: AsyncSession, environment_id: UUID, task_pk: UUID) -> Task:
+    """The task row, locked ``FOR NO KEY UPDATE`` (never ``FOR UPDATE``: that
+    would conflict with the FK key-share locks of every insert referencing
+    it, STA-51) and re-read."""
+    task = await session.scalar(
+        select(Task)
+        .where(Task.environment_id == environment_id, Task.id == task_pk)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
+    if task is None:
+        raise NotFound("unknown_task", f"no task {task_pk}")
+    return task
 
 
 async def renew_claim(
@@ -191,7 +212,7 @@ async def transition_task(
 ) -> TransitionOutcome:
     """Apply one transition inside the caller's transaction (no commit).
 
-    Locks the task row first. Raises :class:`Conflict` for a refusal that
+    Locks the task row first, then reads the clock. Raises :class:`Conflict` for a refusal that
     leaves no trace, :class:`RecordedConflict` for one whose record is in
     the session. A transition that changes the status flags the other
     builds it is news for (``wakeups.flag_after_transition``), here, so no
@@ -200,15 +221,13 @@ async def transition_task(
     if transition.kind is TransitionKind.START and transition.claim:
         assert plan_id is not None, "a claiming start names its plan"
         await _share_build(session, plan_id)
-    task = await session.scalar(
-        select(Task)
-        .where(Task.environment_id == environment_id, Task.id == task_pk)
-        .with_for_update(key_share=True)
-        .execution_options(populate_existing=True)
-    )
-    if task is None:
-        raise NotFound("unknown_task", f"no task {task_pk}")
-    step = _Step(session, environment_id, task, plan_id, transition, now)
+    task = await lock_task(session, environment_id, task_pk)
+    # Stamped after the lock: every timestamp the transition writes is when
+    # it took effect, not when the caller began waiting (the observed_at
+    # guard compares against the real completion time). ``now`` orders the
+    # transaction's events.
+    stamp = max(now, utc_now())
+    step = _Step(session, environment_id, task, plan_id, transition, stamp, now)
     previous = task.status
     outcome = await _dispatch(step)
     if task.status != previous:
@@ -256,8 +275,16 @@ async def _dispatch(step: _Step) -> TransitionOutcome:
         )
     if kind in REPORTS:
         return await step.report()
+    if kind is TransitionKind.PREEMPT:
+        return await step.preempt()
     if kind is TransitionKind.RETRY:
         return await step.retry()
+    if kind is TransitionKind.SKIP:
+        return await step.skip()
+    if kind is TransitionKind.CANCEL:
+        return await step.cancel()
+    if kind is TransitionKind.STOP:
+        return await step.stop()
     if kind is TransitionKind.RENEW:
         return await step.renew()
     if kind is TransitionKind.OBSERVE_COMPLETE:
@@ -269,110 +296,10 @@ async def _dispatch(step: _Step) -> TransitionOutcome:
     raise AssertionError(kind)  # pragma: no cover
 
 
-class _Step:
-    """One transition on one locked task row."""
-
-    def __init__(
-        self,
-        session: AsyncSession,
-        environment_id: UUID,
-        task: Task,
-        plan_id: UUID | None,
-        transition: Transition,
-        now: datetime,
-    ) -> None:
-        self.session = session
-        self.environment_id = environment_id
-        self.task = task
-        self.plan_id = plan_id
-        self.transition = transition
-        self.now = now
-
-    # -- shared --------------------------------------------------------------
-
-    @property
-    def live(self) -> bool:
-        t = self.task
-        return (
-            t.status == TaskStatus.RUNNING
-            and t.claim_expires_at is not None
-            and t.claim_expires_at > self.now
-        )
-
-    def outcome(self, applied: bool) -> TransitionOutcome:
-        return TransitionOutcome(
-            applied=applied,
-            status=self.task.status,
-            execution_id=self.task.execution_id,
-            claim_expires_at=self.task.claim_expires_at,
-        )
-
-    def execution_id(self) -> UUID:
-        if self.transition.execution_id is None:
-            raise BadRequest(
-                "execution_id_required",
-                f"a {self.transition.kind.value} names its execution",
-            )
-        return self.transition.execution_id
-
-    async def build_id(self) -> UUID | None:
-        if self.plan_id is None:
-            return None
-        return await self.session.scalar(
-            select(Plan.build_id).where(Plan.id == self.plan_id)
-        )
-
-    async def record(
-        self,
-        event_type: EventType,
-        *,
-        execution_id: UUID | None = None,
-        report_applied: bool = True,
-        error_message: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        await event_log.append(
-            self.session,
-            [
-                event_log.event_row(
-                    self.environment_id,
-                    event_type,
-                    at=self.now,
-                    build_id=await self.build_id(),
-                    task_pk=self.task.id,
-                    plan_id=self.plan_id,
-                    execution_id=execution_id,
-                    report_applied=report_applied,
-                    error_message=error_message,
-                    metadata=metadata,
-                )
-            ],
-        )
-
-    async def release_ledger(self, outcome: ClaimOutcome) -> None:
-        """The server's end of the ledger for the current execution: the
-        claim moved (``claim_released_at``/``claim_outcome``)."""
-        if self.task.execution_id is not None:
-            await self.session.execute(
-                update(Execution)
-                .where(
-                    Execution.id == self.task.execution_id,
-                    Execution.claim_released_at.is_(None),
-                )
-                .values(claim_released_at=self.now, claim_outcome=outcome)
-            )
-
-    async def close_claim(self, outcome: ClaimOutcome) -> None:
-        """Whatever moves the task off RUNNING closes the current claim:
-        the ledger end, then the task's claim columns. The caller moves the
-        status before the next flush."""
-        await self.release_ledger(outcome)
-        self.task.claim_plan_id = None
-        self.task.claim_expires_at = None
-
-    def move(self, status: TaskStatus) -> None:
-        self.task.status = status
-        self.task.status_at = self.now
+class _Step(ReportSteps):
+    """One transition on one locked task row: the claim and the
+    non-claiming start here; reports in ``transition_reports.py``; shared
+    state in ``transition_step.py``."""
 
     # -- start -----------------------------------------------------------------
 
@@ -557,15 +484,27 @@ class _Step:
 
     async def self_report_start(self) -> TransitionOutcome:
         """A non-claiming start: the claim holder reporting that it runs,
-        with the executor details the claim could not know."""
+        with the executor details the claim could not know. The authority
+        rule of every report: applied when it names the task's current
+        execution whose claim has not been released, lapsed or not; late
+        (recorded, refused) only after a takeover, an observation or a
+        build released the claim.
+
+        After a preemption this is the restart arriving: the claim gets a
+        fresh TTL (``claim_ttl_seconds``, or the default) and
+        ``preempted_at`` is cleared. Otherwise the expiry is unchanged."""
         t, eid = self.task, self.execution_id()
-        execution = await self._execution(EventType.TASK_STARTED, eid)
+        execution = await self.named_execution(EventType.TASK_STARTED, eid)
         if t.execution_id == eid and execution.claim_released_at is None:
             # The current, unreleased execution — its claim lapsed or not —
             # under the wrong plan is a trace-free refusal, decided before
-            # the live-claim one (as a report decides it).
+            # the not-current one (as a report decides it).
             self.check_claim_plan(eid)
-        if t.execution_id != eid or not self.live or execution.ended_at is not None:
+        if (
+            t.execution_id != eid
+            or execution.claim_released_at is not None
+            or execution.ended_at is not None
+        ):
             await self.record(
                 EventType.TASK_STARTED,
                 execution_id=eid,
@@ -574,206 +513,21 @@ class _Step:
             )
             raise RecordedConflict(
                 "execution_not_current",
-                "the execution does not hold the task's live claim",
+                "the execution's claim has been released (taken over, closed"
+                " or released by its build), or it has ended",
                 execution_id=str(eid),
             )
         for column in ("executor", "executor_ref", "executor_metadata"):
             value = getattr(self.transition, column)
             if value is not None:
                 setattr(execution, column, value)
-        await self.record(
-            EventType.TASK_STARTED, execution_id=eid, metadata={"claim": False}
-        )
-        await self.session.flush()
-        return self.outcome(applied=True)
-
-    def check_claim_plan(self, eid: UUID) -> None:
-        """A holder's report comes through the plan its claim was granted
-        through: a report naming the current execution under another plan
-        (``task.claim_plan_id`` differs from the route's) is 409
-        ``not_claim_holder``, and leaves no trace — the execution may still
-        report its end through its own plan."""
-        t = self.task
-        if t.claim_plan_id != self.plan_id:
-            raise Conflict(
-                "not_claim_holder",
-                "the task's claim is held through another plan; its execution"
-                " reports through that plan",
-                task_id=t.task_id,
-                execution_id=str(eid),
-                plan_id=str(self.plan_id) if self.plan_id else None,
-                claim_plan_id=str(t.claim_plan_id) if t.claim_plan_id else None,
-            )
-
-    async def _execution(self, event_type: EventType, eid: UUID) -> Execution:
-        """The named execution of this task, or a recorded refusal."""
-        execution = await self.session.get(Execution, eid)
-        if execution is None or execution.task_pk != self.task.id:
-            await self.record(
-                event_type,
-                report_applied=False,
-                metadata={"execution_id": str(eid), "refused": "unknown_execution"},
-            )
-            raise RecordedConflict(
-                "unknown_execution",
-                "no execution with this id exists for the task",
-                execution_id=str(eid),
-            )
-        return execution
-
-    # -- reports ---------------------------------------------------------------
-
-    async def report(self) -> TransitionOutcome:
-        """complete / fail / suspend, under the authority rule."""
-        t, eid = self.task, self.execution_id()
-        event_type, status, claim_outcome, outcome = REPORTS[self.transition.kind]
-        execution = await self._execution(event_type, eid)
-        error = self.transition.error_message
-        if execution.ended_at is not None:
-            await self.record(
-                event_type, execution_id=eid, report_applied=False, error_message=error
-            )
-            raise RecordedConflict(
-                "execution_already_ended",
-                "this execution has already reported its end",
-                execution_id=str(eid),
-                outcome=execution.outcome.value if execution.outcome else None,
-            )
-        current = t.execution_id == eid and execution.claim_released_at is None
-        if current:
-            # Before the ledger end: a report under the wrong plan must not
-            # spend the execution's one terminal report.
-            self.check_claim_plan(eid)
-        # The execution's own end, whether or not it may still move the task.
-        execution.ended_at = self.now
-        execution.outcome = outcome
-        # Current and not yet released — a lapsed claim included: it names
-        # this execution until a claiming start takes it over.
-        if not current:
-            await self.record(
-                event_type, execution_id=eid, report_applied=False, error_message=error
-            )
-            await self.session.flush()
-            raise RecordedConflict(
-                "execution_not_current",
-                "the execution's claim has been released (taken over, closed or"
-                " released by its build); its end is recorded and the task is"
-                " unchanged",
-                execution_id=str(eid),
-            )
-        # An unreleased claim of the current execution is RUNNING: every
-        # move off RUNNING releases it.
-        assert t.status == TaskStatus.RUNNING, t.status
-        await self.close_claim(claim_outcome)
-        self.move(status)
-        if status == TaskStatus.COMPLETED:
-            t.completed_at = self.now
-            t.error_message = None
-        elif status == TaskStatus.FAILED:
-            t.error_message = error
-        await self.record(event_type, execution_id=eid, error_message=error)
-        await self.session.flush()
-        return self.outcome(applied=True)
-
-    async def retry(self) -> TransitionOutcome:
-        """Reset to PENDING (fail mode's retry, or an operator's). Idempotent
-        by state; refused on COMPLETED and on a live claim."""
-        t = self.task
-        if t.status == TaskStatus.COMPLETED:
-            raise Conflict(
-                "task_already_completed", "the task is COMPLETED", task_id=t.task_id
-            )
-        if self.live:
-            raise Conflict(
-                "task_already_running",
-                "an execution holds a live claim on the task",
-                task_id=t.task_id,
-            )
-        if t.status == TaskStatus.PENDING:
-            return self.outcome(applied=False)
-        if t.status == TaskStatus.RUNNING:  # a lapsed claim
-            await self.close_claim(ClaimOutcome.LAPSED)
-        self.move(TaskStatus.PENDING)
-        t.error_message = None
-        await self.record(EventType.TASK_RETRIED)
-        await self.session.flush()
-        return self.outcome(applied=True)
-
-    async def renew(self) -> TransitionOutcome:
-        t, eid = self.task, self.execution_id()
-        if t.execution_id != eid or not self.live:
-            raise Conflict(
-                "claim_not_held",
-                "only the execution holding the live claim can renew it",
-                execution_id=str(eid),
-            )
-        t.claim_expires_at = self.now + claim_ttl(self.transition.claim_ttl_seconds)
-        await self.session.flush()
-        return self.outcome(applied=True)
-
-    async def release(self) -> TransitionOutcome:
-        """A build's terminal transition releases the claim its plan holds
-        (``claim_outcome = released``): the task goes CANCELLED — the build
-        stopped wanting it, which is not a result, so CANCELLED is
-        ACTIONABLE for every other build ("revocation is not a result").
-        A no-op unless ``plan_id`` holds the task's claim, live or lapsed.
-        The execution is not touched: it may still be running, and its
-        report, now late, is recorded and refused."""
-        t = self.task
-        if t.status != TaskStatus.RUNNING or t.claim_plan_id != self.plan_id:
-            return self.outcome(applied=False)
-        execution_id = t.execution_id
-        await self.close_claim(ClaimOutcome.RELEASED)
-        self.move(TaskStatus.CANCELLED)
-        await self.record(
-            EventType.TASK_CANCELLED,
-            execution_id=execution_id,
-            metadata={"released_by": self.transition.reason},
-        )
-        await self.session.flush()
-        return self.outcome(applied=True)
-
-    # -- observations (from registration) ------------------------------------
-
-    async def observe_complete(self) -> TransitionOutcome:
-        """The target exists: COMPLETED, unless a live claim holds the task
-        (its holder reports). A lapsed claim is closed first."""
-        t = self.task
-        if t.status == TaskStatus.COMPLETED or self.live:
-            return self.outcome(applied=False)
-        if t.status == TaskStatus.RUNNING:
-            await self.close_claim(ClaimOutcome.LAPSED)
-        self.move(TaskStatus.COMPLETED)
-        t.completed_at = self.now
-        t.error_message = None
-        observed_at = self.transition.observed_at
-        await self.record(
-            EventType.TASK_OBSERVED_COMPLETE,
-            metadata={
-                "observed_at": None if observed_at is None else observed_at.isoformat()
-            },
-        )
-        await self.session.flush()
-        return self.outcome(applied=True)
-
-    async def invalidate(self) -> TransitionOutcome:
-        """The target is missing: COMPLETED → PENDING, only if the completion
-        on record precedes the observation (S31)."""
-        t, observed_at = self.task, self.transition.observed_at
-        assert observed_at is not None
-        if t.status != TaskStatus.COMPLETED:
-            return self.outcome(applied=False)
-        if t.completed_at is not None and t.completed_at >= observed_at:
-            return self.outcome(applied=False)
-        self.move(TaskStatus.PENDING)
-        t.completed_at = None
-        await self.record(
-            EventType.TASK_INVALIDATED,
-            metadata={
-                "reason": "target_missing",
-                "observed_at": observed_at.isoformat(),
-                "plan_id": str(self.plan_id) if self.plan_id else None,
-            },
-        )
+        metadata: dict[str, Any] = {"claim": False}
+        if t.preempted_at is not None:
+            expires_at = self.now + claim_ttl(self.transition.claim_ttl_seconds)
+            t.claim_expires_at = expires_at
+            t.preempted_at = None
+            metadata["restart"] = True
+            metadata["claim_expires_at"] = expires_at.isoformat()
+        await self.record(EventType.TASK_STARTED, execution_id=eid, metadata=metadata)
         await self.session.flush()
         return self.outcome(applied=True)

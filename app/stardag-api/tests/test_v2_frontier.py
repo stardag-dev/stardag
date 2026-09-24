@@ -15,7 +15,6 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.models import BuildStatus
-from stardag_api.services import frontier as frontier_service
 from stardag_api.services.errors import Conflict
 from stardag_api.services.frontier import Frontier
 from tests.v2_support import Harness, item, observed, task_ids, unexpanded
@@ -229,29 +228,6 @@ async def test_closure_and_a_plan_retry_do_not_deadlock(h: Harness):
     )
     assert not [o for o in outcomes if isinstance(o, BaseException)], outcomes
     assert (await h.build(build_a))["status"] == "failed"
-
-
-@pytest.mark.xfail(reason="v2: I3", strict=True)
-async def test_skip_blocked_over_instance_edges(h: Harness):
-    """Blocked-by-failure propagation over instance edges within the plan
-    (design.md, "The runnable rule"): lands with I3."""
-    leaf = item("Leaf")
-    root = item("Root", upstreams=[leaf])
-    _, plan = await h.planned([root], [leaf, root])
-    skip_blocked = getattr(frontier_service, "skip_blocked")
-    await skip_blocked(plan.id)
-
-
-@pytest.mark.xfail(reason="v2: I3", strict=True)
-async def test_exclusion_cascades_to_the_downstream_closure(h: Harness):
-    """An excluded member's downstream closure within the plan is excluded
-    (``upstream_excluded``) and an excluded root fails the build (S18,
-    S34): lands with I3."""
-    leaf = item("Leaf")
-    root = item("Root", upstreams=[leaf])
-    _, plan = await h.planned([root], [leaf, root])
-    exclude_member = getattr(frontier_service, "exclude_member")
-    await exclude_member(plan.id, leaf.task_id)
 
 
 async def test_a_build_that_is_not_running_hands_out_no_work(h: Harness):

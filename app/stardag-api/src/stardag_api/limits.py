@@ -35,6 +35,10 @@ class LimitsSettings(BaseSettings):
     max_tasks_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
     max_events_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
     max_artifacts_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
+    # Per-environment 24h creation quota of the v2 registry: task_instance
+    # rows, the table a non-significant field can inflate. Charged only for
+    # rows actually inserted.
+    max_task_instances_per_environment_24h: Annotated[int, Field(ge=1)] | None = None
 
     # Structural limits
     max_dependency_ids_per_task: Annotated[int, Field(ge=1)] | None = None
