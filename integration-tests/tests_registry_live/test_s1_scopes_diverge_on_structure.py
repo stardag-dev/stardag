@@ -60,7 +60,7 @@ BUILD_TIMEOUT_SECONDS = 600
 
 def test_s1_diverging_scopes_run_one_completion_once(deployment: Deployment) -> None:
     from stardag.registry import registry_provider
-    from stardag.registry._models import TaskInstanceInfo
+    from stardag.registry import TaskInstanceInfo
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
         SCOPED_UPSTREAMS_SETTING,
