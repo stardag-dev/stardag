@@ -454,6 +454,39 @@ async def test_instance_body_conflict(h: Harness):
     assert exc.value.code == "instance_body_conflict"
 
 
+async def test_resent_plan_checks_root_identity(h: Harness):
+    """A re-sent plan is not only a root hash-set comparison: a root under
+    a recorded hash with another ``output_uri`` is 409
+    ``task_identity_conflict``, and nothing changes."""
+    deployment = await h.new_deployment()
+    root = item("Root")
+    build = await h.new_build([root])
+    first = await h.plan(build, deployment, [root])
+    moved = root.model_copy(update={"output_uri": "memory://elsewhere"})
+    assert moved.instance_hash == root.instance_hash
+    with pytest.raises(Conflict) as exc:
+        await h.plan(build, deployment, [moved])
+    assert exc.value.code == "task_identity_conflict"
+    assert (await h.task(root))["output_uri"] == root.output_uri
+    assert (await h.plan(build, deployment, [root])).id == first.id
+
+
+async def test_resent_plan_checks_root_body(h: Harness):
+    """A re-sent plan whose root carries the recorded instance hash with
+    other body bytes is 409 ``instance_body_conflict``."""
+    deployment = await h.new_deployment()
+    root = item("Root", extra={"a": 1})
+    build = await h.new_build([root])
+    await h.plan(build, deployment, [root])
+    tampered = root.model_copy(update={"body": {**root.body, "a": 2}})
+    assert tampered.instance_hash == root.instance_hash
+    with pytest.raises(Conflict) as exc:
+        await h.plan(build, deployment, [tampered])
+    assert exc.value.code == "instance_body_conflict"
+    recorded = await h.instance(deployment, root)
+    assert recorded is not None and recorded["body"] == root.body
+
+
 async def test_chunk_size_is_bounded(h: Harness):
     _, plan = await h.planned([item("R")])
     too_many = [item("L", params={"i": i}) for i in range(MAX_CHUNK_ITEMS + 1)]

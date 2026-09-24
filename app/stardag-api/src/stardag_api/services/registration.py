@@ -151,7 +151,9 @@ async def create_plan(
     The roots are admitted first and unexpanded (``is_root``, ``admitted_by
     = root``), so a crash at any later point leaves them as discovery jobs.
     A re-trigger with other root instances under the same scope is 409
-    ``root_instance_conflict``; the first plan of a build is activated here.
+    ``root_instance_conflict``; a re-send of the same instances goes through
+    the item path again, so a changed body or task identity is refused as
+    on any other registration. The first plan of a build is activated here.
     """
     if not roots:
         raise BadRequest("no_roots", "a plan needs at least one root")
@@ -204,7 +206,17 @@ async def create_plan(
             )
         )
         if existing is not None:
+            # The hash sets first, so another root instance is
+            # root_instance_conflict rather than an instance_conflict on its
+            # member; then the one item path, which is a no-op for what
+            # landed and checks each root's body and task identity against
+            # the recorded rows (instance_body_conflict,
+            # task_identity_conflict) — a matching hash is not a matching
+            # item.
             await _check_roots(session, existing, roots)
+            await register_items(
+                session, environment_id, existing, roots, as_roots=True, now=now
+            )
             return PlanState.of(existing)
 
         if await session.get(Plan, plan_id) is not None:
