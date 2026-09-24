@@ -44,10 +44,11 @@ import uuid
 
 import pytest
 
+from stardag_integration_tests.registry_live._events import current_execution
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     describe,
-    find_task,
     task_status,
     tick_summaries,
     wait_for_task_status,
@@ -79,12 +80,15 @@ TICK_TIMEOUT_SECONDS = 180
 BUILD_TIMEOUT_SECONDS = 600
 
 
-def _owner(task_id: str):
-    """The build whose event produced the task's current status."""
-    return find_task(task_id, task_name="Slow").latest_status_build_id
+def _owner(deployment: Deployment, task_id: str) -> str | None:
+    """The build whose execution the task's claim names (live or not)."""
+    current = current_execution(deployment, task_id)
+    return current.build_id if current is not None else None
 
 
-def test_a_cancelled_build_cannot_touch_another_builds_execution() -> None:
+def test_a_cancelled_build_cannot_touch_another_builds_execution(
+    deployment: Deployment,
+) -> None:
     from stardag.integration.modal._spawn import spawn_tick
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.dag_app import APP_NAME, app
@@ -112,17 +116,18 @@ def test_a_cancelled_build_cannot_touch_another_builds_execution() -> None:
         build_id=build_a,
         timeout=STATUS_TIMEOUT_SECONDS,
     )
-    assert _owner(shared_id) == build_a, describe(build_a)
-
-    # The cascade releases the claim. Stopping the container it belonged to
-    # is not something the server can do -- it can only record that the
-    # claim is gone -- so from here the execution is A's engine's to stop,
-    # and a tick is the only thing that will.
+    assert _owner(deployment, shared_id) == str(build_a), describe(build_a)
     registry = registry_provider.get()
-    cancelled = registry.build_cancel(build_a, cascade=True)
-    assert cancelled is not None
-    assert shared_id in cancelled.cascaded_task_ids, (
-        "The cascade did not release the shared task's claim, so the rest "
+    plan_a = registry.build_get_frontier(build_a).plan_id
+    assert plan_a is not None, describe(build_a)
+
+    # A cancel releases the build's claims (v2: every build terminal
+    # transition but exit-early does). Stopping the container it belonged
+    # to is not something the server can do -- it can only record that the
+    # claim is gone -- and A's worker, reporting from here on, is late.
+    registry.build_cancel(build_a)
+    assert task_status(shared.id) == "cancelled", (
+        "The cancel did not release the shared task's claim, so the rest "
         f"of this scenario cannot happen.\n{describe(build_a)}"
     )
 
@@ -136,12 +141,14 @@ def test_a_cancelled_build_cannot_touch_another_builds_execution() -> None:
     ).build_id
     # Wait for the *owner* to be B, not merely for the task to be RUNNING.
     # A's own worker is still starting up around now and self-reports a
-    # TASK_STARTED of its own, which can land after the cascade and put the
-    # task back to RUNNING under A -- a real behaviour (the server cannot
-    # stop anything, so a live worker keeps talking), and one that makes a
-    # status-only wait return on the wrong build's execution under load.
+    # start of its own; v2 refuses it as late (the cancel closed its claim),
+    # and waiting on the owner keeps this wait honest if that rule ever
+    # regressed -- a status-only wait would return on A's execution.
     wait_until(
-        lambda: task_status(shared.id) == "running" and _owner(shared_id) == build_b,
+        lambda: (
+            task_status(shared.id) == "running"
+            and _owner(deployment, shared_id) == str(build_b)
+        ),
         build_id=build_b,
         timeout=STATUS_TIMEOUT_SECONDS,
         what=f"build {build_b} to claim the shared task",
@@ -169,7 +176,7 @@ def test_a_cancelled_build_cannot_touch_another_builds_execution() -> None:
         f"--- build A (cancelled) ---\n{describe(build_a)}\n"
         f"--- build B ---\n{describe(build_b)}"
     )
-    assert _owner(shared_id) == build_b, (
+    assert _owner(deployment, shared_id) == str(build_b), (
         "The shared task's status is no longer B's doing, so the cancelled "
         "build rewrote it.\n" + describe(build_a)
     )
@@ -183,16 +190,16 @@ def test_a_cancelled_build_cannot_touch_another_builds_execution() -> None:
     from stardag.exceptions import APIError
 
     with pytest.raises(APIError) as refused:
-        registry.task_cancel_by_id(build_a, shared_id)
+        registry.member_cancel(plan_a, shared_id)
     assert refused.value.status_code == 409, (
         "The registry accepted a cancel of a task held by another build. "
         f"That is the incident this scenario exists for.\n{describe(build_a)}"
     )
-    assert (refused.value.payload or {}).get("error_code") == "not_claim_holder", (
+    assert refused.value.code == "not_claim_holder", (
         f"Refused, but not as a claim-holder violation: {refused.value.payload}"
     )
     # And it really was refused, rather than recorded and then overwritten.
-    assert _owner(shared_id) == build_b, describe(build_b)
+    assert _owner(deployment, shared_id) == str(build_b), describe(build_b)
 
     status_b = wait_for_terminal(build_b, timeout=BUILD_TIMEOUT_SECONDS)
     assert status_b == "completed", (

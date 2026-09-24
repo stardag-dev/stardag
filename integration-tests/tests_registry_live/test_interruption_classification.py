@@ -48,13 +48,17 @@ import uuid
 
 import pytest
 
-from stardag_integration_tests.registry_live._events import events_by, task_events
+from stardag_integration_tests.registry_live._events import (
+    current_execution,
+    events_by,
+    task_events,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     assert_trail_complete,
     describe,
-    find_task,
+    task_status,
     tick_summaries,
     wait_for_task_status,
     wait_for_terminal,
@@ -108,14 +112,17 @@ _STARTS_BEFORE_THE_TASK_BODY_RUNS = 3
 def _worker_has_started(deployment: Deployment, task_id) -> bool:
     """Whether the worker itself has reported starting — see above."""
     events = task_events(deployment, task_id, missing_ok=True)
-    starts = [e for e in events if e["event_type"] == "task_started"]
+    starts = [
+        e for e in events if e["event_type"] == "task_started" and e["report_applied"]
+    ]
     return len(starts) >= _STARTS_BEFORE_THE_TASK_BODY_RUNS
 
 
-def _executor_ref(task_id: str) -> str | None:
-    """The Modal call id the registry has recorded for this task, if any."""
-    row = find_task(str(task_id), task_name="Resumable")
-    return row.latest_executor_ref
+def _executor_ref(deployment: Deployment, task_id) -> str | None:
+    """The Modal call id the registry recorded for this task's current
+    execution, if any (on the execution ledger, not the task row)."""
+    current = current_execution(deployment, task_id)
+    return current.executor_ref if current is not None else None
 
 
 def _resumption_reports(summaries: list[dict]) -> str:
@@ -160,7 +167,7 @@ def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
         timeout=RUNNING_TIMEOUT_SECONDS,
     )
     ref = wait_until(
-        lambda: _executor_ref(root.id),
+        lambda: _executor_ref(deployment, root.id),
         build_id=build_id,
         timeout=RUNNING_TIMEOUT_SECONDS,
         what=f"task {root.id} to record its Modal call id",
@@ -218,8 +225,7 @@ def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
     # bounded by its own budget and deliberately spends no attempt — a task
     # designed to be killed and resumed until it converges would otherwise
     # fail the build for the one reason it was built to survive.
-    row = find_task(str(root.id), task_name="Resumable")
-    assert row.latest_status == "completed", describe(build_id)
+    assert task_status(root.id) == "completed", describe(build_id)
 
     # The resumption, from the task's own event log rather than from a
     # tick's count of them. Same reasoning as the rollover scenario
