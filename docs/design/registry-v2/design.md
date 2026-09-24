@@ -206,10 +206,15 @@ activated** (`activated_at` set in the same insert, `generation` assigned as
 for any row); the two-step create/activate is for Modal deployments only.
 A `local` row's `app_name` is `"local"` unless the driver names an app, so
 its generations are ordered like any app's; a lookup naming another app for
-a recorded code id is 409 `local_deployment_conflict`. Generation assignment
+a recorded code id is 409 `local_deployment_conflict`. A `local` deployment
+is **never current and never superseded**: it is authoritative for its own
+plans, so the seal's current-deployment check, resume's reactivation check
+and rollover apply to `kind = modal` only (a local driver at a new commit
+plans under a new scope; the old commit's plans stay usable), and
+`GET /deployments` marks no local row current. Generation assignment
 is serialised per `(environment, kind, app_name)` (a transaction-scoped
 advisory lock, since the row may not exist yet), and `deployed_at` is the
-registry's clock. `GET /deployments` marks each row current or not
+registry's clock. `GET /deployments` marks each Modal row current or not
 (`?current=true` keeps one per app), which is how a hybrid driver finds the
 app's current deployment.
 
@@ -579,7 +584,8 @@ POST /plans/{plan_id}/seal
   -> then verifies: every root member is expanded or COMPLETED (a root whose target already existed
      is admitted unexpanded and stays so until an invalidation makes it a discovery job);
      every edge from a member has its upstream as a member (closure holds); plan.deployment_id
-     is still the app's current deployment
+     is still the app's current deployment, for a Modal deployment — a local one is
+     authoritative for its own plans and never superseded
      (rollover only moves forward — checked here, not only at the start); no plan with a
      higher generation exists for this build (409 plan_superseded otherwise: the latest
      request wins, and its roots are already discovery jobs any tick can finish);
@@ -647,7 +653,13 @@ false` and keeps the claim while its in-process generator waits (D11). Both
 engines use this one route in this one order — v1 had them in different
 orders. A failure to register is **not** swallowed: the worker reports
 `TASK_FAILED` with the error rather than suspending a parent with no
-children; an `instance_conflict` here is non-retryable.
+children; an `instance_conflict` here is non-retryable, and the server
+applies it: the items roll back to a savepoint, the parent gets `TASK_FAILED`
+with the conflict named, and the batch is refused 409 `instance_conflict`.
+Every `yielded` hash must be one of the batch's items (400
+`unknown_yielded_instance`); the yielded instances are admitted
+`admitted_by = dynamic`, their closure `static`. A refused batch is recorded
+without a typed `batch_id`, so it can never be replayed as applied.
 
 **Invalidation: the registry follows the world.** The only path out of
 COMPLETED is discovery's `observed_complete: false` on a task whose registry
@@ -735,7 +747,10 @@ Blocked-by-failure propagation (`skip-blocked`) is the same recursive walk
 as v1, over instance edges within the plan; exclusion propagates the same
 way.
 
-**Build status** stays a stored column driven by build events, as in v1, and
+**Build status** stays a stored column driven by build events, as in v1
+(terminal states keep v1's "last event wins": a `fail` after `complete`
+moves the build to FAILED, and a repeat of the current state is a no-op —
+a documented carry-over, not a new rule), and
 the server does not flip it inside task transactions (that would lock every
 build holding the task on each completion, the inversion `_flag_builds`
 avoids with `SKIP LOCKED`). What changes is that completion is **verified**:
@@ -775,8 +790,11 @@ unsealed plan is completed by re-sending; none means discovery runs.
 (`BUILD_RESUMED`) and looks the plan up by the caller's scope: the active one
 is reused; one that was active before and has since been superseded is
 reactivated (the active plan superseded, in one transaction, after the same
-deployment-currency check a seal makes); an unsealed replacement is left to
-its seal; none is returned as none, and the driver creates it.
+deployment-currency check a seal makes, Modal deployments only, and under
+the seal's latest-request rule: while a later request for the build is
+still registering — a higher-generation plan never activated — the
+reactivation is refused 409 `plan_superseded`); an unsealed replacement is
+left to its seal; none is returned as none, and the driver creates it.
 
 ## Rollover
 
@@ -846,7 +864,14 @@ generator `run` and will restart under the new code.
   closed by an observation (`lapsed`) or released by a build transition —
   writes that execution's ledger end (`ended_at`, `outcome`) and is recorded
   as an event with `report_applied = false`; it never touches `task`. Anything else
-  (unknown execution, second terminal report) is recorded and refused. One
+  (unknown execution, second terminal report) is recorded and refused. The
+  holder's **non-claiming start** (its self-report, carrying executor details)
+  follows the same rule: applied while it names the current execution, lapsed
+  or not; late only after a takeover. Every timestamp a transition writes
+  (`status_at`, `completed_at`, `started_at`, the claim's expiry, the ledger's
+  ends) is stamped **after the task row lock is granted**, so the `observed_at`
+  guard compares against the real completion time, not the time its caller
+  began waiting. One
   `transition_task()` implements this for every event type — v1 guarded four
   of eight routes, and the lock-release route committed a completion before
   its ownership check.
