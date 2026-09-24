@@ -7,6 +7,6 @@
     "app/stardag-api/src"
   ],
   "extraPaths": ["lib/stardag/src", "lib/stardag-examples/src"],
-  "pythonVersion": "3.10",
+  "pythonVersion": "3.11",
   "typeCheckingMode": "standard"
 }

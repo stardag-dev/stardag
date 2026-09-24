@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal, Type, TypeVar
+from typing import Any, Literal, Never, Type, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -45,7 +45,6 @@ from pydantic import (
     model_validator,
 )
 from pydantic.fields import FieldInfo
-from typing_extensions import Never
 
 logger = logging.getLogger(__name__)
 

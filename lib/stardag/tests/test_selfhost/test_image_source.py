@@ -158,7 +158,7 @@ def test_client_python_version_rejects_too_old(monkeypatch: pytest.MonkeyPatch):
     from stardag.selfhost._modal_app import client_python_version
 
     monkeypatch.setattr(sys, "version_info", (3, 9, 0, "final", 0))
-    with pytest.raises(RuntimeError, match="requires Python >= 3.10"):
+    with pytest.raises(RuntimeError, match="requires Python >= 3.11"):
         client_python_version()
 
 

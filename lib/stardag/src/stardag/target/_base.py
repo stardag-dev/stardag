@@ -5,18 +5,13 @@ import shutil
 import tempfile
 import typing
 from contextlib import asynccontextmanager
+from pathlib import Path
+from types import TracebackType
+from typing import Self
 
 import aiofiles
 import aiofiles.os
 from pydantic_settings import BaseSettings
-
-try:
-    from typing import Self
-except ImportError:
-    from typing_extensions import Self
-
-from pathlib import Path
-from types import TracebackType
 
 import uuid6
 

@@ -78,7 +78,7 @@ DEFAULT_SERVER_VERSION = "0.4.0"
 
 # Minimum client interpreter for from-source image builds (stardag-api's
 # requires-python; the image gets the client's version via add_python).
-MIN_IMAGE_PYTHON = (3, 10)
+MIN_IMAGE_PYTHON = (3, 11)
 
 
 def server_image_ref(version: str) -> str:

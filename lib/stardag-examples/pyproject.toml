@@ -3,7 +3,7 @@ name = "stardag-examples"
 version = "0.0.1"
 description = ""
 authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.8.2",
     # The modal/walkthrough example relies on

@@ -49,6 +49,8 @@ together, and there is no compatibility with v1 in either direction.
 
 ### What changes for you
 
+**Python 3.11 or newer; 3.10 support removed.**
+
 **One flag instead of significance levels.** A parameter either is part of
 the task id or is not:
 

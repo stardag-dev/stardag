@@ -4,7 +4,7 @@ This section will get you up and running with Stardag quickly.
 
 ## Prerequisites
 
-- Python 3.10 or higher
+- Python 3.11 or higher
 - pip or uv package manager
 
 ## Learning Path

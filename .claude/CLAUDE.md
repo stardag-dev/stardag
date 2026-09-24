@@ -13,7 +13,7 @@ Stardag is a Python framework for building DAGs (Directed Acyclic Graphs) with:
 
 ## Tech Stack
 
-- Python 3.10+
+- Python 3.11+
 - Pydantic for task models and validation
 - Optional integrations: Prefect, Modal, AWS S3
 
