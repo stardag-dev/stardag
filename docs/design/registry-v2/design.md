@@ -731,7 +731,9 @@ plan's build is not RUNNING (the frontier of such a build lists no runnable
 members and no discovery jobs), and with 409 `plan_superseded` if the plan is
 not active — after first checking whether the same execution already holds
 the claim, so a retried granted start is a no-op, not a loss — with 409
-`member_excluded` for an excluded member, and it **re-checks the runnable
+`member_excluded` for an excluded member, with 409 `task_not_actionable` for
+a status outside ACTIONABLE (FAILED in particular: the fail mode decides, and
+only `retry` moves it back to PENDING), and it **re-checks the runnable
 predicate inside its own transaction** (the instance expanded, all upstream
 tasks COMPLETED, read under the task row lock), refusing 409
 `upstream_incomplete` otherwise — with `reason: not_expanded` for an
@@ -859,6 +861,11 @@ generator `run` and will restart under the new code.
   `transition_task()` implements this for every event type — v1 guarded four
   of eight routes, and the lock-release route committed a completion before
   its ownership check.
+- A report on the current execution, and the holder's self-report start,
+  come through the plan the claim was granted through: under any other plan
+  (`task.claim_plan_id` differs from the route's `plan_id`) they are 409
+  `not_claim_holder` and leave no trace — no ledger end, no event — so the
+  execution's one terminal report is not spent by a mis-routed call.
 - Completion from any plan is completion for all; the new plan never waits
   on the old plan's _plan_, only on the task's global status.
 

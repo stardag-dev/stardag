@@ -228,6 +228,40 @@ async def test_claim_refusals(h: Harness):
     assert missing.value.code == "not_a_member"
 
 
+async def test_a_report_comes_through_the_plan_holding_the_claim(h: Harness):
+    """A task shared by two builds, claimed through plan A: its execution's
+    report, and its self-report start, under plan B are 409
+    ``not_claim_holder`` — lapsed or not — and leave no trace (the task
+    RUNNING, the execution not ended, no event), so the same report through
+    plan A still applies."""
+    deployment = await h.new_deployment()
+    t = item("T")
+    _, plan_a = await h.planned([t], [t], deployment_id=deployment)
+    _, plan_b = await h.planned([t], [t], deployment_id=deployment)
+    execution = await h.start(plan_a.id, t)
+    events_before = len(await h.events(t))
+
+    for transition in (
+        Transition.start(execution, claim=False, executor="x"),
+        Transition.complete(execution),
+    ):
+        with pytest.raises(Conflict) as exc:
+            await h.transition(plan_b.id, t, transition)
+        assert exc.value.code == "not_claim_holder"
+        assert exc.value.detail["claim_plan_id"] == str(plan_a.id)
+    await h.lapse_claim(t)
+    with pytest.raises(Conflict) as exc:
+        await h.transition(plan_b.id, t, Transition.fail(execution, "boom"))
+    assert exc.value.code == "not_claim_holder"
+
+    assert (await h.task(t))["status"] == "running"
+    assert (await h.execution(execution))["ended_at"] is None
+    assert len(await h.events(t)) == events_before
+
+    outcome = await h.transition(plan_a.id, t, Transition.complete(execution))
+    assert outcome.applied and outcome.status.value == "completed"
+
+
 async def test_a_claiming_start_refuses_a_status_outside_actionable(h: Harness):
     """A claiming start is decided by ACTIONABLE, not only by COMPLETED and
     a live claim: a FAILED task is 409 ``task_not_actionable`` (the fail

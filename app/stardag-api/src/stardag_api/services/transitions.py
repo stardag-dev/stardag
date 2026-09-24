@@ -30,7 +30,10 @@ rules, in one place:
   released by a build transition — ``execution.claim_released_at`` set) is
   a report *late*: it writes that execution's ledger end, is recorded with
   ``report_applied = false`` and refused (S19). One terminal report per
-  execution (S35).
+  execution (S35). A report — and the holder's self-report start — on the
+  current execution comes through the plan the claim was granted through
+  (``task.claim_plan_id``); under any other plan it is 409
+  ``not_claim_holder``, with no trace.
 - **The ledger's two ends.** Every move off RUNNING closes the current
   execution's claim (``claim_released_at``/``claim_outcome``, the server's
   end); ``ended_at``/``outcome`` are written only by the execution's own
@@ -539,6 +542,7 @@ class _Step:
                 "the execution does not hold the task's live claim",
                 execution_id=str(eid),
             )
+        self.check_claim_plan(eid)
         for column in ("executor", "executor_ref", "executor_metadata"):
             value = getattr(self.transition, column)
             if value is not None:
@@ -548,6 +552,24 @@ class _Step:
         )
         await self.session.flush()
         return self.outcome(applied=True)
+
+    def check_claim_plan(self, eid: UUID) -> None:
+        """A holder's report comes through the plan its claim was granted
+        through: a report naming the current execution under another plan
+        (``task.claim_plan_id`` differs from the route's) is 409
+        ``not_claim_holder``, and leaves no trace — the execution may still
+        report its end through its own plan."""
+        t = self.task
+        if t.claim_plan_id != self.plan_id:
+            raise Conflict(
+                "not_claim_holder",
+                "the task's claim is held through another plan; its execution"
+                " reports through that plan",
+                task_id=t.task_id,
+                execution_id=str(eid),
+                plan_id=str(self.plan_id) if self.plan_id else None,
+                claim_plan_id=str(t.claim_plan_id) if t.claim_plan_id else None,
+            )
 
     async def _execution(self, event_type: EventType, eid: UUID) -> Execution:
         """The named execution of this task, or a recorded refusal."""
@@ -583,12 +605,17 @@ class _Step:
                 execution_id=str(eid),
                 outcome=execution.outcome.value if execution.outcome else None,
             )
+        current = t.execution_id == eid and execution.claim_released_at is None
+        if current:
+            # Before the ledger end: a report under the wrong plan must not
+            # spend the execution's one terminal report.
+            self.check_claim_plan(eid)
         # The execution's own end, whether or not it may still move the task.
         execution.ended_at = self.now
         execution.outcome = outcome
         # Current and not yet released — a lapsed claim included: it names
         # this execution until a claiming start takes it over.
-        if t.execution_id != eid or execution.claim_released_at is not None:
+        if not current:
             await self.record(
                 event_type, execution_id=eid, report_applied=False, error_message=error
             )
