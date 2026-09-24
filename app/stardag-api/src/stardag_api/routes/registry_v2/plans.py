@@ -1,53 +1,47 @@
-"""The ``/api/v2`` registry routes of the static path.
+"""``/api/v2`` routes of a plan: registration (members, seal), the reads
+(the plan, its roots, its graph), and every transition of a member — the
+execution reports, the scheduling decisions, ``/yield``, exclusion and
+artifact upload.
 
-Thin by rule (engineering rule 1): parse, resolve the environment from the
-caller's credentials, call one service, convert its result. Service
-refusals (:class:`stardag_api.services.errors.RegistryError`) are mapped to
-their status codes by the handler in ``main.py``, with the service's
-``code`` as ``detail.code``.
+Thin by rule: parse, resolve the environment from the credentials, call
+one service, convert its result.
 """
 
 from __future__ import annotations
 
-from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.auth import SdkAuth, require_sdk_auth
-from stardag_api.db import get_db
+from stardag_api.auth import SdkAuth
 from stardag_api.models import ExclusionReason
+from stardag_api.routes.registry_v2._common import Auth, Db, artifact_list
 from stardag_api.schemas_v2 import (
-    BuildCreate,
-    BuildResponse,
     DiscoveryFailedRequest,
     ExcludeRequest,
     ExclusionResponse,
-    SkipBlockedResponse,
     FailRequest,
-    FrontierResponse,
     MembersRequest,
     MembersResponse,
-    PlanCreate,
     PlanResponse,
-    RenewRequest,
     ReportRequest,
     StartRequest,
     TransitionResponse,
     YieldRequest,
     YieldResponse,
 )
-from stardag_api.routes.registry_v2_builds import router as builds_router
-from stardag_api.routes.registry_v2_executions import router as executions_router
-from stardag_api.routes.registry_v2_guard import v2_write_guard
-from stardag_api.routes.registry_v2_reads import router as reads_router
-from stardag_api.routes.registry_v2_scope import router as scope_router
-from stardag_api.routes.registry_v2_wakeups import router as wakeups_router
+from stardag_api.schemas_v2_reads import (
+    ArtifactUploadRequest,
+    PlanDetailResponse,
+    PlanGraphResponse,
+    PlanRootsResponse,
+    TaskArtifactListResponse,
+)
 from stardag_api.services import (
-    builds,
+    artifacts,
     exclusion,
-    frontier,
+    plan_reads,
     plans,
     registration,
     transitions,
@@ -55,59 +49,15 @@ from stardag_api.services import (
 )
 from stardag_api.services.transitions import Transition
 
-# The rate limit applies to every write route, the sub-routers' included.
-router = APIRouter(tags=["registry-v2"], dependencies=[Depends(v2_write_guard)])
-
-Db = Annotated[AsyncSession, Depends(get_db)]
-Auth = Annotated[SdkAuth, Depends(require_sdk_auth)]
+router = APIRouter(tags=["registry-v2"])
 
 
-# -- builds ---------------------------------------------------------------------
-
-
-@router.post("/builds", response_model=BuildResponse)
-async def create_build(body: BuildCreate, db: Db, auth: Auth):
-    return await builds.create_build(
-        db,
-        auth.environment_id,
-        build_id=body.id,
-        name=body.name,
-        description=body.description,
-        root_task_ids=body.root_task_ids,
-        user_id=auth.user.id if auth.user else None,
-        executor_metadata=body.executor_metadata,
+async def _transition(
+    db: AsyncSession, auth: SdkAuth, plan_id: UUID, task_id: str, t: Transition
+) -> transitions.TransitionOutcome:
+    return await transitions.apply_member_transition(
+        db, auth.environment_id, plan_id=plan_id, task_id=task_id, transition=t
     )
-
-
-@router.get("/builds/{build_id}", response_model=BuildResponse)
-async def get_build(build_id: UUID, db: Db, auth: Auth):
-    return await builds.get_build(db, auth.environment_id, build_id)
-
-
-@router.post("/builds/{build_id}/plans", response_model=PlanResponse)
-async def create_plan(build_id: UUID, body: PlanCreate, db: Db, auth: Auth):
-    return await registration.create_plan(
-        db,
-        auth.environment_id,
-        build_id=build_id,
-        plan_id=body.plan_id,
-        deployment_id=body.deployment_id,
-        settings_body=body.settings,
-        roots=body.roots,
-    )
-
-
-@router.get("/builds/{build_id}/frontier", response_model=FrontierResponse)
-async def get_frontier(build_id: UUID, db: Db, auth: Auth):
-    return await frontier.get_frontier(db, auth.environment_id, build_id)
-
-
-@router.post("/builds/{build_id}/skip-blocked", response_model=SkipBlockedResponse)
-async def skip_blocked(build_id: UUID, db: Db, auth: Auth):
-    return await exclusion.skip_blocked(db, auth.environment_id, build_id)
-
-
-# -- plans ------------------------------------------------------------------------
 
 
 @router.post("/plans/{plan_id}/members", response_model=MembersResponse)
@@ -120,17 +70,6 @@ async def register_members(plan_id: UUID, body: MembersRequest, db: Db, auth: Au
 @router.post("/plans/{plan_id}/seal", response_model=PlanResponse)
 async def seal_plan(plan_id: UUID, db: Db, auth: Auth):
     return await plans.seal_plan(db, auth.environment_id, plan_id)
-
-
-# -- member transitions -------------------------------------------------------------
-
-
-async def _transition(
-    db: AsyncSession, auth: SdkAuth, plan_id: UUID, task_id: str, t: Transition
-) -> transitions.TransitionOutcome:
-    return await transitions.apply_member_transition(
-        db, auth.environment_id, plan_id=plan_id, task_id=task_id, transition=t
-    )
 
 
 @router.post(
@@ -287,24 +226,36 @@ async def discovery_failed(
     )
 
 
-# -- claims -------------------------------------------------------------------------
+@router.get("/plans/{plan_id}", response_model=PlanDetailResponse)
+async def get_plan(plan_id: UUID, db: Db, auth: Auth):
+    return await plan_reads.get_plan_detail(db, auth.environment_id, plan_id)
 
 
-@router.post("/tasks/{task_id}/claim/renew", response_model=TransitionResponse)
-async def renew_claim(task_id: str, body: RenewRequest, db: Db, auth: Auth):
-    return await transitions.renew_claim(
+@router.get("/plans/{plan_id}/roots", response_model=PlanRootsResponse)
+async def plan_roots(plan_id: UUID, db: Db, auth: Auth):
+    return await plan_reads.plan_roots(db, auth.environment_id, plan_id)
+
+
+@router.get("/plans/{plan_id}/graph", response_model=PlanGraphResponse)
+async def plan_graph(plan_id: UUID, db: Db, auth: Auth):
+    return await plan_reads.plan_graph(db, auth.environment_id, plan_id)
+
+
+@router.post(
+    "/plans/{plan_id}/members/{task_id}/artifacts",
+    response_model=TaskArtifactListResponse,
+)
+async def upload_artifacts(
+    plan_id: UUID, task_id: str, body: ArtifactUploadRequest, db: Db, auth: Auth
+):
+    rows = await artifacts.upload_artifacts(
         db,
         auth.environment_id,
+        plan_id=plan_id,
         task_id=task_id,
-        execution_id=body.execution_id,
-        claim_ttl_seconds=body.claim_ttl_seconds,
+        artifacts=[
+            artifacts.ArtifactIn(artifact_type=a.type, name=a.name, body=a.body)
+            for a in body.artifacts
+        ],
     )
-
-
-# -- sub-routers ----------------------------------------------------------------
-
-router.include_router(builds_router)
-router.include_router(executions_router)
-router.include_router(reads_router)
-router.include_router(scope_router)
-router.include_router(wakeups_router)
+    return artifact_list(rows)

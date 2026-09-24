@@ -11,12 +11,10 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path, Query
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Path, Query
 
-from stardag_api.auth import SdkAuth, require_sdk_auth
-from stardag_api.db import get_db
 from stardag_api.models import DeploymentKind
+from stardag_api.routes.registry_v2._common import Auth, Db
 from stardag_api.schemas_v2 import (
     ConcurrencyLimitListResponse,
     ConcurrencyLimitResponse,
@@ -31,8 +29,6 @@ from stardag_api.services import concurrency_limits, deployments
 
 router = APIRouter(tags=["registry-v2"])
 
-Db = Annotated[AsyncSession, Depends(get_db)]
-Auth = Annotated[SdkAuth, Depends(require_sdk_auth)]
 LimitKey = Annotated[str, Path(min_length=1, max_length=255)]
 
 
