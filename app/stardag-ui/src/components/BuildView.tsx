@@ -12,6 +12,7 @@ import { useDeployments } from "../hooks/useDeployments";
 import type { Build, TaskStatus } from "../types/task";
 import { rootsCompleted } from "../utils/builds";
 import { shortTaskId } from "../utils/ids";
+import { DEFAULT_GROUP_AFTER } from "../utils/planGraph";
 import { BuildControlsDialog } from "./BuildControlsDialog";
 import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildInfoDialog } from "./BuildInfoDialog";
@@ -80,6 +81,8 @@ function BuildViewForIdentity({
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [showDag, setShowDag] = useState(true);
   const [dagFullscreen, setDagFullscreen] = useState(false);
+  // Shared by the inline and the fullscreen graph.
+  const [groupAfter, setGroupAfter] = useState(DEFAULT_GROUP_AFTER);
   const [dagDirection, setDagDirection] = useState<LayoutDirection>("LR");
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
   const positionCacheRef = useRef<PositionCache>(createPositionCache());
@@ -221,6 +224,8 @@ function BuildViewForIdentity({
       direction={dagDirection}
       onDirectionChange={setDagDirection}
       positionCache={positionCacheRef}
+      groupAfter={groupAfter}
+      onGroupAfterChange={setGroupAfter}
     />
   );
 
