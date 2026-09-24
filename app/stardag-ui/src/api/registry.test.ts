@@ -27,11 +27,12 @@ beforeEach(() => mocked.mockReset());
 
 describe("registry API", () => {
   it("calls only /api/v2, with the environment id", async () => {
-    respond(200, { builds: [] });
+    respond(200, { builds: [], total: 0, next_cursor: null });
     await fetchBuilds("env-1", {
       status: "running",
       reactiveAppName: "app",
       limit: 50,
+      cursor: "c1",
     });
     const url = new URL(mocked.mock.calls[0][0] as string);
     expect(url.pathname).toBe("/api/v2/builds");
@@ -40,6 +41,7 @@ describe("registry API", () => {
       status: "running",
       reactive_app_name: "app",
       limit: "50",
+      cursor: "c1",
     });
   });
 

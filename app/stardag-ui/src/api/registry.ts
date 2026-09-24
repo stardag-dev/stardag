@@ -100,24 +100,31 @@ async function postJson<T>(
 export interface BuildFilters {
   status?: BuildStatus;
   reactiveAppName?: string;
-  // 1..500 on the server; there is no pagination and no total.
+  // Page size, 1..500 on the server.
   limit?: number;
+  // The previous page's `next_cursor`; absent for the first page.
+  cursor?: string;
 }
 
-/** The environment's builds, newest first (`GET /builds`). */
-export async function fetchBuilds(
+/**
+ * One page of the environment's builds, most recently active first
+ * (`GET /builds`). `total` counts every build the filters match; pass
+ * `next_cursor` back as `cursor` for the next page (keyset paging, so
+ * there is no page number to jump to).
+ */
+export function fetchBuilds(
   environmentId: string,
   filters: BuildFilters = {},
-): Promise<Build[]> {
+): Promise<BuildListResponse> {
   const query: Record<string, string> = {};
   if (filters.status) query.status = filters.status;
   if (filters.reactiveAppName) query.reactive_app_name = filters.reactiveAppName;
   if (filters.limit) query.limit = String(filters.limit);
-  const data = await getJson<BuildListResponse>(
+  if (filters.cursor) query.cursor = filters.cursor;
+  return getJson<BuildListResponse>(
     url("/builds", environmentId, query),
     "Failed to fetch builds",
   );
-  return data.builds;
 }
 
 export function fetchBuild(buildId: string, environmentId: string): Promise<Build> {

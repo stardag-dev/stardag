@@ -22,24 +22,33 @@ const STATUS_LABELS: Record<BuildStatus, string> = {
   exit_early: "Exited early",
 };
 
-// `GET /builds` takes a limit (at most 500) and has no pagination or total,
-// so the list shows the newest N and says when it may be cut short.
-const LIMIT_OPTIONS = [50, 100, 500];
+const PAGE_SIZE = 20;
 
 const CONTROL =
   "rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100";
 
-/** The environment's builds, newest first, filtered server-side. */
+const PAGER_BUTTON =
+  "rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700";
+
+/**
+ * The environment's builds, most recently active first, filtered and paged
+ * server-side. Paging is keyset (`cursor`), so a page is reached by
+ * Previous/Next rather than by number; `total` gives the page count.
+ */
 export function BuildsList({ onSelectBuild }: BuildsListProps) {
   const { activeEnvironment } = useEnvironment();
   const { setItems: setBreadcrumb } = useBreadcrumb();
   const [builds, setBuilds] = useState<Build[]>([]);
+  const [total, setTotal] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  // Keyset paging: the cursor each page was read with, page 1's being
+  // null. "Next" pushes the last page's `next_cursor`, "Previous" pops.
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<BuildStatus | "">("");
   const [reactiveAppInput, setReactiveAppInput] = useState("");
   const [reactiveApp, setReactiveApp] = useState("");
-  const [limit, setLimit] = useState(LIMIT_OPTIONS[0]);
   const epochRef = useRef(0);
 
   useEffect(() => {
@@ -49,34 +58,59 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
 
   // Debounced: the reactive-app filter is server-side.
   useEffect(() => {
-    const handle = setTimeout(() => setReactiveApp(reactiveAppInput.trim()), 300);
+    const next = reactiveAppInput.trim();
+    if (next === reactiveApp) return;
+    const handle = setTimeout(() => {
+      setReactiveApp(next);
+      setCursors([null]);
+    }, 300);
     return () => clearTimeout(handle);
-  }, [reactiveAppInput]);
+  }, [reactiveAppInput, reactiveApp]);
+
+  // A cursor belongs to one environment's listing: back to page 1 on a
+  // switch (adjusted during render, so no fetch runs with a foreign cursor).
+  const environmentId = activeEnvironment?.id ?? null;
+  const [pagedEnvironmentId, setPagedEnvironmentId] = useState(environmentId);
+  if (environmentId !== pagedEnvironmentId) {
+    setPagedEnvironmentId(environmentId);
+    setCursors([null]);
+  }
+
+  const page = cursors.length;
+  const cursor = cursors[cursors.length - 1];
 
   const load = useCallback(async () => {
     const epoch = ++epochRef.current;
     if (!activeEnvironment?.id) {
       setBuilds([]);
+      setTotal(0);
+      setNextCursor(null);
       return;
     }
     const fresh = () => epochRef.current === epoch;
     setLoading(true);
     setError(null);
     try {
-      const rows = await fetchBuilds(activeEnvironment.id, {
+      const response = await fetchBuilds(activeEnvironment.id, {
         status: statusFilter || undefined,
         reactiveAppName: reactiveApp || undefined,
-        limit,
+        limit: PAGE_SIZE,
+        cursor: cursor ?? undefined,
       });
-      if (fresh()) setBuilds(rows);
+      if (!fresh()) return;
+      setBuilds(response.builds);
+      setTotal(response.total);
+      setNextCursor(response.next_cursor);
     } catch (err) {
       if (!fresh()) return;
       setBuilds([]);
+      setTotal(0);
+      setNextCursor(null);
       setError(err instanceof Error ? err.message : "Failed to load builds");
     } finally {
       if (fresh()) setLoading(false);
     }
-  }, [activeEnvironment?.id, statusFilter, reactiveApp, limit]);
+  }, [activeEnvironment?.id, statusFilter, reactiveApp, cursor]);
 
   useEffect(() => {
     load();
@@ -91,10 +125,12 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
   }
 
   const filtersActive = statusFilter !== "" || reactiveApp !== "";
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const clearFilters = () => {
     setStatusFilter("");
     setReactiveAppInput("");
     setReactiveApp("");
+    setCursors([null]);
   };
 
   return (
@@ -105,7 +141,10 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
           <select
             aria-label="Filter by build status"
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as BuildStatus | "")}
+            onChange={(e) => {
+              setStatusFilter(e.target.value as BuildStatus | "");
+              setCursors([null]);
+            }}
             className={CONTROL}
           >
             <option value="">All statuses</option>
@@ -124,21 +163,6 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
           onChange={(e) => setReactiveAppInput(e.target.value)}
           className={`w-36 ${CONTROL}`}
         />
-        <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
-          Show
-          <select
-            aria-label="How many builds to show"
-            value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
-            className={CONTROL}
-          >
-            {LIMIT_OPTIONS.map((n) => (
-              <option key={n} value={n}>
-                newest {n}
-              </option>
-            ))}
-          </select>
-        </label>
         {filtersActive && (
           <button
             onClick={clearFilters}
@@ -148,11 +172,7 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
           </button>
         )}
         <span className="ml-auto text-xs text-gray-500 dark:text-gray-400">
-          {loading
-            ? "Loading…"
-            : `${builds.length} build${builds.length === 1 ? "" : "s"}${
-                builds.length === limit ? " (newest shown; there may be more)" : ""
-              }`}
+          {loading ? "Loading…" : `${total} build${total === 1 ? "" : "s"}`}
         </span>
       </div>
 
@@ -211,6 +231,28 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
           </table>
         )}
       </div>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between border-t border-gray-200 bg-white px-6 py-3 dark:border-gray-700 dark:bg-gray-800">
+          <button
+            onClick={() => setCursors((c) => (c.length > 1 ? c.slice(0, -1) : c))}
+            disabled={page === 1 || loading}
+            className={PAGER_BUTTON}
+          >
+            Previous
+          </button>
+          <span className="text-sm text-gray-500 dark:text-gray-400">
+            Page {page} of {totalPages}
+          </span>
+          <button
+            onClick={() => nextCursor && setCursors((c) => [...c, nextCursor])}
+            disabled={!nextCursor || loading}
+            className={PAGER_BUTTON}
+          >
+            Next
+          </button>
+        </div>
+      )}
     </div>
   );
 }
