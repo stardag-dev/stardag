@@ -20,7 +20,9 @@ from stardag import BaseTask
 from stardag._cli._output import JSON_OPTION, emit_json, parse_uuid
 from stardag._cli._registry_ctx import console, error_console
 from stardag._cli._roots import RefError, parse_params, resolve_app, resolve_roots
-from stardag.build._settings import SettingsError, validate_settings
+from stardag.build._settings import SettingsError, resolve_settings, validate_settings
+from stardag.exceptions import StardagError
+from stardag.registry import registry_provider
 
 
 def _parse_settings(pairs: list[str]) -> dict[str, str] | None:
@@ -176,17 +178,35 @@ def build_command(
             raise typer.Exit(1)
 
         # A root factory (module:attr callable) may read the environment,
-        # so --settings must be installed before resolve_roots imports and
-        # constructs the roots -- not only later, inside the build itself
-        # (sd.build/build_trigger apply it again there; nesting under the
-        # same, already-validated settings is a no-op re-entry, see
-        # resident_settings). A bare resume (no --settings given, checked
-        # is None) has nothing new to apply here, and must not pre-empt the
-        # build's own resolution of the resumed build's stored settings.
+        # so the build's settings must be installed before resolve_roots
+        # imports and constructs the roots -- not only later, inside the
+        # build itself (sd.build/build_trigger apply them again there;
+        # nesting under the same, already-validated settings is a no-op
+        # re-entry, see resident_settings). Explicit --settings always
+        # wins. A bare resume (no --settings given, checked is None) has
+        # nothing new to validate, but still needs its *stored* settings
+        # installed now -- resolved from the registry the same way
+        # sd.build/build_trigger resolve them later -- or a root factory
+        # that reads the environment would construct roots under the
+        # ambient environment instead of the resumed build's own.
         from stardag.build._settings import resident_settings
 
+        to_install = checked
+        if checked is None and resume_id is not None:
+            try:
+                to_install = resolve_settings(registry_provider.get(), resume_id, None)
+            except SettingsError as e:
+                error_console.print(f"[bold red]Error:[/bold red] {e}")
+                raise typer.Exit(1)
+            except StardagError as e:
+                error_console.print(
+                    f"[bold red]Error:[/bold red] Could not read build "
+                    f"{resume_id}'s settings: {e}"
+                )
+                raise typer.Exit(1)
+
         settings_ctx = (
-            resident_settings(checked) if checked is not None else nullcontext()
+            resident_settings(to_install) if to_install is not None else nullcontext()
         )
         try:
             with settings_ctx:

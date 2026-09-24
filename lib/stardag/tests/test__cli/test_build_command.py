@@ -3,6 +3,7 @@ validation, and ``--dry-run`` on a small DAG."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -93,6 +94,54 @@ class TestDryRun:
         assert result.exit_code == 0, result.output
         payload = json.loads(result.stdout)
         expected = LeafTask(param_a=1, param_b="from-settings")
+        assert payload["roots"] == [str(expected.id)]
+        # restored afterward
+        assert os.environ.get(LEAF_FROM_ENV_VAR) is None
+
+    def test_bare_resume_installs_the_resumed_builds_stored_settings(
+        self, default_in_memory_fs_target, fake_registry
+    ):
+        """A bare ``--resume`` (no --settings) must resolve the resumed
+        build's own stored settings and install them before resolve_roots
+        runs, the same way an explicit --settings does -- otherwise a root
+        factory that reads the environment (like ``leaf_from_env``)
+        constructs roots under the ambient environment instead of the
+        resumed build's, which can produce different task ids/graph and
+        get the resume rejected, or acted on under the wrong scope."""
+        from stardag.build._registration import register_plan_aio, walk_aio
+        from stardag.registry import registry_provider
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+        from stardag.utils.testing.simple_dag import LEAF_FROM_ENV_VAR, LeafTask
+
+        placeholder = SyncOnlyTask(name="placeholder")
+        build_id = fake_registry.build_create(root_task_ids=[str(placeholder.id)]).id
+        deployment_id = fake_registry.add_deployment()
+        walk = asyncio.run(walk_aio([placeholder]))
+        asyncio.run(
+            register_plan_aio(
+                fake_registry,
+                build_id,
+                walk,
+                deployment_id=deployment_id,
+                settings={LEAF_FROM_ENV_VAR: "from-stored"},
+            )
+        )
+
+        with registry_provider.override(fake_registry):
+            result = runner.invoke(
+                cli,
+                [
+                    "build",
+                    "stardag.utils.testing.simple_dag:leaf_from_env",
+                    "--resume",
+                    str(build_id),
+                    "--dry-run",
+                    "--json",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        expected = LeafTask(param_a=1, param_b="from-stored")
         assert payload["roots"] == [str(expected.id)]
         # restored afterward
         assert os.environ.get(LEAF_FROM_ENV_VAR) is None
