@@ -356,15 +356,6 @@ function BuildViewForIdentity({
               <PanelResizeHandle className="w-1 cursor-col-resize bg-gray-200 hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
               <Panel defaultSize={35} minSize={20} maxSize={55}>
                 <div className="flex h-full flex-col border-l border-gray-200 dark:border-gray-700">
-                  {onOpenTask && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenTask(selectedTaskId)}
-                      className="border-b border-gray-200 px-4 py-1 text-left text-xs text-blue-600 hover:underline dark:border-gray-700 dark:text-blue-400"
-                    >
-                      Open task page
-                    </button>
-                  )}
                   <div className="min-h-0 flex-1">
                     <TaskDetail
                       taskId={selectedTaskId}
@@ -376,6 +367,9 @@ function BuildViewForIdentity({
                         member: selectedMember,
                       }}
                       onClose={() => setSelectedTaskId(null)}
+                      onOpenTaskPage={
+                        onOpenTask ? () => onOpenTask(selectedTaskId) : undefined
+                      }
                       onChanged={refresh}
                       refreshToken={refreshToken}
                     />

@@ -27,6 +27,8 @@ interface TaskDetailProps {
   environmentId: string;
   context?: TaskBuildContext;
   onClose?: () => void;
+  // Shown as a link icon next to the header when given.
+  onOpenTaskPage?: () => void;
   // Called after a remedy changed the task, so the parent re-reads.
   onChanged?: () => void;
   // A refresh of the parent, which re-reads this task too.
@@ -57,6 +59,7 @@ export function TaskDetail({
   environmentId,
   context,
   onClose,
+  onOpenTaskPage,
   onChanged,
   refreshToken = 0,
 }: TaskDetailProps) {
@@ -122,9 +125,35 @@ export function TaskDetail({
     <div className="h-full overflow-auto bg-white p-4 dark:bg-gray-800">
       <div className="mb-4 flex items-start justify-between">
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-lg font-semibold text-gray-900 dark:text-gray-100">
-            {task ? qualifiedName(task.task_namespace, task.task_name) : "Task"}
-          </h2>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <h2 className="truncate text-lg font-semibold text-gray-900 dark:text-gray-100">
+              {task ? qualifiedName(task.task_namespace, task.task_name) : "Task"}
+            </h2>
+            {onOpenTaskPage && (
+              <button
+                type="button"
+                onClick={onOpenTaskPage}
+                aria-label="Open task page"
+                title="Open task page"
+                className="flex-shrink-0 rounded p-0.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400"
+              >
+                <svg
+                  aria-hidden="true"
+                  className="h-4 w-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
+                  />
+                </svg>
+              </button>
+            )}
+          </div>
           <div className="flex items-center gap-1">
             <p
               className="truncate font-mono text-sm text-gray-500 dark:text-gray-400"

@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PlanMember, Task } from "../types/task";
 import { MEMBERSHIP_HELP } from "../utils/membership";
@@ -88,5 +88,22 @@ describe("TaskDetail", () => {
     render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
     await screen.findByRole("heading", { name: /demo\.Train/ });
     expect(screen.queryByText("In this plan:")).not.toBeInTheDocument();
+  });
+
+  it("links to the task page from an icon next to the header", async () => {
+    const open = vi.fn();
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" onOpenTaskPage={open} />);
+    const heading = await screen.findByRole("heading", { name: /demo\.Train/ });
+    const link = within(heading.parentElement!).getByRole("button", {
+      name: "Open task page",
+    });
+    fireEvent.click(link);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no task-page link on the task page itself", async () => {
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    await screen.findByRole("heading", { name: /demo\.Train/ });
+    expect(screen.queryByRole("button", { name: "Open task page" })).toBeNull();
   });
 });
