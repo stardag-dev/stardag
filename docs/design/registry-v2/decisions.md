@@ -276,6 +276,12 @@ Rulings:
   stale "missing" undo a real completion.
 - **Terminal build states keep "last event wins"** (a repeat of the same
   state is a no-op): a documented v1 carry-over, not a new rule.
+- **A report comes through the plan holding the claim** (carried from the
+  step-3 base): the current execution's report under a plan other than
+  `task.claim_plan_id` is 409 `not_claim_holder` with no trace, before any
+  ledger end. Step 3b applies it to `interrupt`, `preempt` and `/yield` as
+  well (a yield's replay lookup still comes first, so a retried batch is
+  replayed whatever its route).
 
 Readings:
 

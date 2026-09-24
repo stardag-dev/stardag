@@ -30,7 +30,10 @@ rules, in one place:
   released by a build transition — ``execution.claim_released_at`` set) is
   a report *late*: it writes that execution's ledger end, is recorded with
   ``report_applied = false`` and refused (S19). One terminal report per
-  execution (S35).
+  execution (S35). A report — and the holder's self-report start — on the
+  current execution comes through the plan the claim was granted through
+  (``task.claim_plan_id``); under any other plan it is 409
+  ``not_claim_holder``, with no trace.
 - **The ledger's two ends.** Every move off RUNNING closes the current
   execution's claim (``claim_released_at``/``claim_outcome``, the server's
   end); ``ended_at``/``outcome`` are written only by the execution's own
@@ -479,6 +482,7 @@ class _Step(ReportSteps):
                 " or released by its build), or it has ended",
                 execution_id=str(eid),
             )
+        self.check_claim_plan(eid)
         for column in ("executor", "executor_ref", "executor_metadata"):
             value = getattr(self.transition, column)
             if value is not None:

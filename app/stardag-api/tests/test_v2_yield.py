@@ -318,3 +318,30 @@ async def test_yield_over_http(client: AsyncClient, h: Harness):
     mismatch = await client.post(path, json={**body, "deployment_id": str(uuid4())})
     assert mismatch.status_code == 409
     assert mismatch.json()["detail"]["code"] == "deployment_mismatch"
+
+
+async def test_a_yield_and_a_preemption_come_through_the_claims_plan(h: Harness):
+    """The authority rule's plan half, for ``/yield`` and ``/preempt``: the
+    current execution of a task shared by two builds, claimed through plan
+    A, is 409 ``not_claim_holder`` under plan B — lapsed or not — and leaves
+    no trace; through plan A the same batch applies."""
+    deployment = await h.new_deployment()
+    parent = item("P")
+    _, plan_a = await h.planned([parent], [parent], deployment_id=deployment)
+    _, plan_b = await h.planned([parent], [parent], deployment_id=deployment)
+    execution = await h.start(plan_a.id, parent)
+    events_before = len(await h.events(parent))
+    batch = uuid4()
+
+    with pytest.raises(Conflict) as exc:
+        await h.yield_(plan_b.id, parent, execution, [item("C")], batch_id=batch)
+    assert exc.value.code == "not_claim_holder"
+    await h.lapse_claim(parent)
+    with pytest.raises(Conflict) as exc:
+        await h.transition(plan_b.id, parent, Transition.preempt(execution))
+    assert exc.value.code == "not_claim_holder"
+    assert len(await h.events(parent)) == events_before
+    assert item("C").task_id not in await h.members(plan_b.id)
+
+    result = await h.yield_(plan_a.id, parent, execution, [item("C")], batch_id=batch)
+    assert result.status == "suspended" and not result.replayed

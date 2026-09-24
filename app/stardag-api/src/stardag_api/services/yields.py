@@ -263,8 +263,22 @@ async def _check_current(
         and parent.execution_id == execution_id
         and execution.claim_released_at is None
         and execution.ended_at is None
-        and execution.plan_id == plan_id
     ):
+        # The authority rule's plan half: the current execution yields
+        # through the plan holding its claim (409 ``not_claim_holder``
+        # otherwise, with no trace, as for every report).
+        if parent.claim_plan_id != plan_id:
+            raise Conflict(
+                "not_claim_holder",
+                "the task's claim is held through another plan; its execution"
+                " yields through that plan",
+                task_id=parent.task_id,
+                execution_id=str(execution_id),
+                plan_id=str(plan_id),
+                claim_plan_id=(
+                    str(parent.claim_plan_id) if parent.claim_plan_id else None
+                ),
+            )
         return
     await event_log.append(
         session,

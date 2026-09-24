@@ -63,12 +63,17 @@ class ReportSteps(StepBase):
                 execution_id=str(eid),
                 outcome=execution.outcome.value if execution.outcome else None,
             )
+        current = t.execution_id == eid and execution.claim_released_at is None
+        if current:
+            # Before the ledger end: a report under the wrong plan must not
+            # spend the execution's one terminal report.
+            self.check_claim_plan(eid)
         # The execution's own end, whether or not it may still move the task.
         execution.ended_at = self.now
         execution.outcome = outcome
         # Current and not yet released — a lapsed claim included: it names
         # this execution until a claiming start takes it over.
-        if t.execution_id != eid or execution.claim_released_at is not None:
+        if not current:
             await self.record(
                 event_type, execution_id=eid, report_applied=False, error_message=error
             )
@@ -120,6 +125,7 @@ class ReportSteps(StepBase):
                 " is recorded and the task is unchanged",
                 execution_id=str(eid),
             )
+        self.check_claim_plan(eid)
         assert t.status == TaskStatus.RUNNING and t.claim_expires_at is not None
         expires_at = min(t.claim_expires_at, self.now + PREEMPT_RESTART_GRACE)
         t.claim_expires_at = expires_at

@@ -25,7 +25,7 @@ from stardag_api.models import (
     TaskStatus,
 )
 from stardag_api.services import event_log
-from stardag_api.services.errors import BadRequest, RecordedConflict
+from stardag_api.services.errors import BadRequest, Conflict, RecordedConflict
 from stardag_api.services.transition_types import Transition, TransitionOutcome
 
 
@@ -145,6 +145,24 @@ class StepBase:
     def move(self, status: TaskStatus) -> None:
         self.task.status = status
         self.task.status_at = self.now
+
+    def check_claim_plan(self, eid: UUID) -> None:
+        """A holder's report comes through the plan its claim was granted
+        through: a report naming the current execution under another plan
+        (``task.claim_plan_id`` differs from the route's) is 409
+        ``not_claim_holder``, and leaves no trace — the execution may still
+        report its end through its own plan."""
+        t = self.task
+        if t.claim_plan_id != self.plan_id:
+            raise Conflict(
+                "not_claim_holder",
+                "the task's claim is held through another plan; its execution"
+                " reports through that plan",
+                task_id=t.task_id,
+                execution_id=str(eid),
+                plan_id=str(self.plan_id) if self.plan_id else None,
+                claim_plan_id=str(t.claim_plan_id) if t.claim_plan_id else None,
+            )
 
     async def named_execution(self, event_type: EventType, eid: UUID) -> Execution:
         """The named execution of this task, or a recorded refusal."""

@@ -74,7 +74,7 @@ class Plan(EnvironmentScopedMixin, Base):
             ["environment_id", "deployment_id"],
             ["deployment.environment_id", "deployment.id"],
             name="fk_plan_deployment",
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
         ),
         ForeignKeyConstraint(
             ["environment_id", "settings_hash"],
