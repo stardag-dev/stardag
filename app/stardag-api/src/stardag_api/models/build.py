@@ -106,20 +106,21 @@ class Build(EnvironmentScopedMixin, Base):
         default=list,
     )
 
-    # Bumped on build-level lifecycle events only (BUILD_RESUMED,
-    # BUILD_COMPLETED, BUILD_FAILED, BUILD_CANCELLED, BUILD_EXIT_EARLY) —
-    # initial creation sets it via DEFAULT. Task events do NOT touch this
-    # column, so the per-task hot path is free of contention on the build
-    # row.
+    # Bumped on build-level lifecycle events (BUILD_RESUMED, BUILD_COMPLETED,
+    # BUILD_FAILED, BUILD_CANCELLED, BUILD_EXIT_EARLY; initial creation sets
+    # it via DEFAULT) and, as in v1, on task activity: every status change of
+    # a task the build's active plan holds bumps it too
+    # (``wakeups.flag_after_transition``, called from ``transition_task()``).
+    # That bump is a best-effort ``SKIP LOCKED`` UPDATE outside this
+    # service — a build whose row a claiming start or a terminal transition
+    # holds at that moment just misses the one bump, caught by the build's
+    # next task event or its own next lifecycle write. So the per-task hot
+    # path is not free of contention on the build row, but it never waits
+    # for it.
     #
-    # This column drives the "Home" / list-builds ordering: a resumed
-    # build (BUILD_RESUMED) jumps to the top instead of staying buried at
-    # its original ``created_at`` position. The trade-off vs touching on
-    # every task event is that a long-running build won't bump position
-    # while it's mid-execution — but its ``status=running`` badge already
-    # signals activity, and "most recent lifecycle change" is a cleaner
-    # sort key than "any event in the build's subtree." See
-    # the build lifecycle service.
+    # This column drives the "Home" / list-builds ordering and the
+    # ``idle_for_seconds`` filter (``GET /builds``): "idle" means no task or
+    # lifecycle activity for that long, not merely no lifecycle change.
     last_active_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,

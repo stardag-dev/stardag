@@ -32,6 +32,13 @@ writer is setting at that moment.
 
 The scheduler lease is two owner-checked columns on ``build``: at most one
 tick drives a build; a lapsed lease is taken over by the next acquire.
+
+``flag_after_transition`` also bumps ``build.last_active_at`` on every
+RUNNING build holding the task (reactive or not — a resident build has no
+flag but still has task activity), as v1 did. This ``SKIP LOCKED``s
+``build`` directly rather than going through ``build_wake``: unlike the
+flag, a missed bump has no correctness consequence, so the lock-avoidance
+that motivates the separate table doesn't apply here.
 """
 
 from __future__ import annotations
@@ -41,7 +48,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -121,6 +128,50 @@ async def _flag(
     )
 
 
+async def _bump_last_active(
+    session: AsyncSession,
+    environment_id: UUID,
+    build_ids: Select[tuple[UUID]],
+    *,
+    now: datetime,
+) -> None:
+    """Task activity bumps ``last_active_at``, as it did in v1. Wider than
+    ``_flag``'s targets: a resident build has no wake row and no tick to
+    spawn, but its ``last_active_at`` should move on its own task events the
+    same as a reactive build's, so this reaches every RUNNING build in
+    ``build_ids``, not only the reactive ones.
+
+    ``SKIP LOCKED`` directly on ``build`` — the thing the module docstring
+    says flagging must not do, because losing a flag can stall a build's
+    scheduling. Missing a ``last_active_at`` bump has no such consequence
+    (it self-heals on the build's next task event, or its next lifecycle
+    write): so a build a claiming start or a terminal transition holds
+    concurrently just misses this one bump. No new lock is taken to get
+    there — this reuses ``build_ids`` and adds one more ``SKIP LOCKED``
+    UPDATE of the same shape as the flag's, on ``build`` instead of
+    ``build_wake`` (the two tables can't share one UPDATE statement).
+    """
+    targets = (
+        select(Build.id)
+        .where(
+            Build.id.in_(build_ids),
+            Build.environment_id == environment_id,
+            Build.status == BuildStatus.RUNNING,
+        )
+        .with_for_update(skip_locked=True)
+    )
+    await session.execute(
+        update(Build)
+        .where(Build.id.in_(targets))
+        # Monotonic: ``now`` is the caller's pre-lock timestamp, so a transition
+        # delayed behind the task lock must not move a newer stamp backwards.
+        .values(
+            last_active_at=func.greatest(func.coalesce(Build.last_active_at, now), now)
+        )
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def flag_after_transition(
     session: AsyncSession,
     environment_id: UUID,
@@ -131,7 +182,11 @@ async def flag_after_transition(
     source_build_id: UUID | None,
     now: datetime,
 ) -> None:
-    """Flag the other builds a status change of ``task_pk`` is news for.
+    """Flag the other builds a status change of ``task_pk`` is news for, and
+    bump ``last_active_at`` on every RUNNING build holding it — the source
+    build included, unlike the flag (a build's own task activity is exactly
+    what should keep it "active"; only the flag, which wakes a build up for
+    something *else*, has no reason to tell a build about itself).
 
     Every transition flags, into RUNNING included: a spurious flag costs one
     tick pass that finds nothing, collapsed by the scheduler lease, and a
@@ -140,13 +195,15 @@ async def flag_after_transition(
     """
     if previous == current:
         return
+    holding = _holding_builds([task_pk])
     await _flag(
         session,
         environment_id,
-        _holding_builds([task_pk]),
+        holding,
         exclude_build_id=source_build_id,
         now=now,
     )
+    await _bump_last_active(session, environment_id, holding, now=now)
     if previous != TaskStatus.RUNNING:
         return
     # The task's limit slots are free. The builds waiting on those keys may

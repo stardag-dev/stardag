@@ -191,9 +191,9 @@ async def list_builds(
         Query(
             ge=60,
             description=(
-                "Only builds still RUNNING whose last lifecycle change "
-                "(`last_active_at`) is at least this many seconds old. "
-                "Combines with no status or status=running only."
+                "Only builds still RUNNING whose last task or lifecycle "
+                "activity (`last_active_at`) is at least this many seconds "
+                "old. Combines with no status or status=running only."
             ),
         ),
     ] = None,

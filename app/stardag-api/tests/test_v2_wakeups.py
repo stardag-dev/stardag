@@ -300,6 +300,93 @@ async def test_a_renewal_holds_its_limit_slot_against_a_concurrent_claim(
 
 
 # --------------------------------------------------------------------------
+# last_active_at bump
+# --------------------------------------------------------------------------
+
+
+async def test_task_activity_bumps_last_active_at_of_every_holding_build(h: Harness):
+    """A task transition bumps ``last_active_at`` on every RUNNING build
+    whose active plan holds the task, as in v1 — the build whose own
+    transition it was included, and a non-reactive (resident) build too:
+    wider than the flag, which only reactive builds need. A build that does
+    not hold the task is untouched."""
+    deployment = await h.new_deployment()
+    t = item("T")
+    other_t = item("Other")
+    source, plan_source = await h.planned([t], [t], deployment_id=deployment)
+    resident_holder, _ = await h.planned([t], [t], deployment_id=deployment)
+    unrelated, _ = await h.planned([other_t], [other_t], deployment_id=deployment)
+    await _reactive(h, source)  # resident_holder and unrelated stay non-reactive
+
+    stale = utc_now() - timedelta(hours=2)
+    await _sql(
+        h,
+        "UPDATE build SET last_active_at = :s WHERE id IN (:a, :b, :c)",
+        s=stale,
+        a=source,
+        b=resident_holder,
+        c=unrelated,
+    )
+
+    await h.start(plan_source.id, t)
+
+    assert (await h.build(source))["last_active_at"] > stale
+    assert (await h.build(resident_holder))["last_active_at"] > stale
+    assert (await h.build(unrelated))["last_active_at"] == stale
+
+
+async def test_a_delayed_transition_never_moves_last_active_at_backwards(
+    h: Harness,
+):
+    """``flag_after_transition`` receives the caller's pre-lock ``now``; a
+    transition that waited behind the task lock carries a stamp older than
+    one a concurrent write already landed. The bump is ``GREATEST``, so it
+    never moves ``last_active_at`` backwards."""
+    deployment = await h.new_deployment()
+    t = item("Mono")
+    build, plan = await h.planned([t], [t], deployment_id=deployment)
+    ahead = utc_now() + timedelta(hours=1)
+    await _sql(
+        h, "UPDATE build SET last_active_at = :s WHERE id = :a", s=ahead, a=build
+    )
+
+    await h.start(plan.id, t)
+
+    assert (await h.build(build))["last_active_at"] == ahead
+
+
+async def test_a_locked_build_just_misses_the_bump(h: Harness):
+    """No new lock: the bump ``SKIP LOCKED``s ``build`` like the flag does
+    ``build_wake``, so a build another session holds ``FOR NO KEY UPDATE``
+    at the moment of the transition simply is not bumped — it self-heals
+    on the build's own next task event or lifecycle write.
+
+    Uses ``complete`` rather than a claiming ``start``: a claiming start
+    itself takes the build row ``FOR SHARE`` (``_share_build``) and would
+    block on ``locker``'s lock rather than exercise the bump's own ``SKIP
+    LOCKED`` path.
+    """
+    deployment = await h.new_deployment()
+    t = item("T")
+    source, plan_source = await h.planned([t], [t], deployment_id=deployment)
+    execution = await h.start(plan_source.id, t)
+    stale = utc_now() - timedelta(hours=2)
+    await _sql(
+        h, "UPDATE build SET last_active_at = :s WHERE id = :b", s=stale, b=source
+    )
+
+    async with h.sf() as locker:
+        async with locker.begin():
+            await locker.execute(
+                text("SELECT 1 FROM build WHERE id = :b FOR NO KEY UPDATE"),
+                {"b": source},
+            )
+            await h.transition(plan_source.id, t, Transition.complete(execution))
+            assert (await h.build(source))["last_active_at"] == stale
+    assert (await h.build(source))["last_active_at"] == stale
+
+
+# --------------------------------------------------------------------------
 # notify, wake-candidates
 # --------------------------------------------------------------------------
 

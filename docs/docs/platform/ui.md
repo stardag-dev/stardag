@@ -34,10 +34,11 @@ to the selected environment, and its URL can be shared or bookmarked:
 ## Builds
 
 The builds list shows the environment's builds, **most recently active
-first** (the _Last active_ column: a build's last lifecycle change —
-created, resumed or finished; task activity does not move it). Filter by
-status, by reactive app, or by _Idle for_ to find running builds with no
-lifecycle change for a while; the list pages through the server's cursor.
+first** (the _Last active_ column: a build's last task or lifecycle
+activity — created, resumed, finished, or a status change of a task it
+holds). Filter by status, by reactive app, or by _Idle for_ to find running
+builds with no task or lifecycle activity for a while; the list pages
+through the server's cursor.
 
 ### The build view
 

@@ -79,11 +79,12 @@ async def list_builds(
     would list every build that ended long enough ago. So it combines with
     no status or ``running`` only; any other status is a contradiction,
     refused 400 ``idle_requires_running`` rather than served empty.
-    ``last_active_at`` moves on build lifecycle changes only (create,
-    resume, terminal status), not on task events, so "idle" here means "no
-    lifecycle change for that long" — a busy build started long enough ago
-    matches too. The order stays most recently active first, so the keyset
-    cursor is the same one."""
+    ``last_active_at`` moves on build lifecycle changes (create, resume,
+    terminal status) and on task activity (a status change of a task the
+    build's active plan holds), so "idle" here means "no task or lifecycle
+    activity for that long" — a build only sitting on stalled tasks matches,
+    a busy one does not. The order stays most recently active first, so the
+    keyset cursor is the same one."""
     limit = max(1, min(limit, MAX_LIST_LIMIT))
     if idle_for_seconds is not None and status not in (None, BuildStatus.RUNNING):
         raise BadRequest(
