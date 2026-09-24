@@ -311,7 +311,10 @@ assignee the maintainer.
       build failure reason and the task event log (so
       `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
 - [ ] I10 — tests. docker-compose e2e tier re-pointed to v2 (STA-110).
-- [ ] I11 — docs
+- [ ] I11 — docs. Principles and release notes drafted, in review (PR
+      #392): `docs/design/principles.md`, the v2 entries in `CHANGELOG.md`
+      and `RELEASE_NOTES.md`; versioning TODO(Anders). The user docs under
+      `docs/docs/` are the other half, on a separate branch.
 - [ ] I12 — release
 
 ## Delivery steps
