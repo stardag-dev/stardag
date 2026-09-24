@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { DagGraph, type LayoutDirection } from "./DagGraph";
 import { PythonCodeBlock } from "./PythonCodeBlock";
-import type { TaskWithContext, TaskGraphResponse } from "../types/task";
+import type { PlanView } from "../utils/planGraph";
 import mlPipelineCode from "../code-examples/ml-pipeline.py?raw";
 
 // Hook to detect if screen is wide (for responsive DAG direction)
@@ -101,95 +101,99 @@ const JSON_DATA = {
   },
 };
 
-// Mock graph data matching the ML pipeline structure
-const MOCK_GRAPH: TaskGraphResponse = {
-  nodes: [
+// Mock plan matching the ML pipeline structure. Node ids stand in for
+// instance ids, as in a real plan graph.
+const MOCK_PLAN: PlanView = {
+  complete: true,
+  members: [
     {
-      id: "1",
       task_id: "dump-1",
+      instance_id: "1",
+      task_namespace: "ml_pipeline",
       task_name: "Dump",
-      task_namespace: "ml_pipeline",
       status: "completed",
-      artifact_count: 0,
+      is_root: false,
+      admitted_by: "static",
+      excluded_at: null,
+      excluded_reason: null,
     },
     {
-      id: "2",
       task_id: "dataset-1",
+      instance_id: "2",
+      task_namespace: "ml_pipeline",
       task_name: "Dataset",
-      task_namespace: "ml_pipeline",
       status: "completed",
-      artifact_count: 0,
+      is_root: false,
+      admitted_by: "static",
+      excluded_at: null,
+      excluded_reason: null,
     },
     {
-      id: "3",
       task_id: "subset-train",
+      instance_id: "3",
+      task_namespace: "ml_pipeline",
       task_name: "Subset (train)",
-      task_namespace: "ml_pipeline",
       status: "completed",
-      artifact_count: 0,
+      is_root: false,
+      admitted_by: "static",
+      excluded_at: null,
+      excluded_reason: null,
     },
     {
-      id: "4",
       task_id: "subset-test",
+      instance_id: "4",
+      task_namespace: "ml_pipeline",
       task_name: "Subset (test)",
-      task_namespace: "ml_pipeline",
       status: "completed",
-      artifact_count: 0,
+      is_root: false,
+      admitted_by: "static",
+      excluded_at: null,
+      excluded_reason: null,
     },
     {
-      id: "5",
       task_id: "trained-model-1",
+      instance_id: "5",
+      task_namespace: "ml_pipeline",
       task_name: "TrainedModel",
-      task_namespace: "ml_pipeline",
       status: "completed",
-      artifact_count: 0,
+      is_root: false,
+      admitted_by: "static",
+      excluded_at: null,
+      excluded_reason: null,
     },
     {
-      id: "6",
       task_id: "predictions-1",
-      task_name: "Predictions",
+      instance_id: "6",
       task_namespace: "ml_pipeline",
+      task_name: "Predictions",
       status: "running",
-      artifact_count: 0,
+      is_root: false,
+      admitted_by: "static",
+      excluded_at: null,
+      excluded_reason: null,
     },
     {
-      id: "7",
       task_id: "metrics-1",
-      task_name: "Metrics",
+      instance_id: "7",
       task_namespace: "ml_pipeline",
+      task_name: "Metrics",
       status: "pending",
-      artifact_count: 0,
+      is_root: true,
+      admitted_by: "root",
+      excluded_at: null,
+      excluded_reason: null,
     },
   ],
   edges: [
-    { source: "1", target: "2" }, // Dump -> Dataset
-    { source: "2", target: "3" }, // Dataset -> Subset (train)
-    { source: "2", target: "4" }, // Dataset -> Subset (test)
-    { source: "3", target: "5" }, // Subset (train) -> TrainedModel
-    { source: "5", target: "6" }, // TrainedModel -> Predictions
-    { source: "4", target: "6" }, // Subset (test) -> Predictions
-    { source: "6", target: "7" }, // Predictions -> Metrics
+    { upstream_instance_id: "1", downstream_instance_id: "2", is_dynamic: false }, // Dump -> Dataset
+    { upstream_instance_id: "2", downstream_instance_id: "3", is_dynamic: false }, // Dataset -> Subset (train)
+    { upstream_instance_id: "2", downstream_instance_id: "4", is_dynamic: false }, // Dataset -> Subset (test)
+    { upstream_instance_id: "3", downstream_instance_id: "5", is_dynamic: false }, // Subset (train) -> TrainedModel
+    { upstream_instance_id: "5", downstream_instance_id: "6", is_dynamic: false }, // TrainedModel -> Predictions
+    { upstream_instance_id: "4", downstream_instance_id: "6", is_dynamic: false }, // Subset (test) -> Predictions
+    { upstream_instance_id: "6", downstream_instance_id: "7", is_dynamic: false }, // Predictions -> Metrics
   ],
 };
-
-// Convert to TaskWithContext for DagGraph
-const MOCK_TASKS: TaskWithContext[] = MOCK_GRAPH.nodes.map((node) => ({
-  id: node.id,
-  task_id: node.task_id,
-  environment_id: "demo",
-  task_namespace: node.task_namespace,
-  task_name: node.task_name,
-  task_data: {},
-  version: "0",
-  output_uri: null,
-  created_at: new Date().toISOString(),
-  status: node.status,
-  started_at: null,
-  completed_at: null,
-  error_message: null,
-  artifact_count: node.artifact_count,
-  isFilterMatch: true,
-}));
 
 // Collapsible JSON section component
 interface CollapsibleJsonProps {
@@ -403,8 +407,7 @@ export function LandingPageDemo() {
           <div style={{ height: isDagWide ? "18rem" : "27rem" }}>
             <DagGraph
               key={dagDirection}
-              tasks={MOCK_TASKS}
-              graph={MOCK_GRAPH}
+              view={MOCK_PLAN}
               selectedTaskId={null}
               onTaskClick={() => {}}
               defaultDirection={dagDirection}

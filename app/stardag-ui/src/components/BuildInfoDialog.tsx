@@ -1,35 +1,62 @@
-import { useState, type ReactNode } from "react";
-import type { Build } from "../types/task";
+import { useEffect, useState, type ReactNode } from "react";
+import { fetchSettings } from "../api/registry";
+import type { Build, BuildFrontier, Deployment, Settings } from "../types/task";
+import { deploymentLabel } from "../utils/deployments";
 import { isModalMetadata, modalAppUrl } from "../utils/modalLinks";
-import { isSyntheticScope } from "../utils/scope";
 import { formatAbsoluteTime } from "../utils/time";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { Modal } from "./Modal";
 import { CopyChip } from "./ui/CopyChip";
 import { ToolbarButton } from "./ui/ToolbarButton";
 
+interface BuildInfoDialogProps {
+  build: Build;
+  environmentId: string;
+  // The active plan, as the frontier reports it; null while unread.
+  frontier: BuildFrontier | null;
+  // The active plan's deployment, resolved from the deployment list.
+  deployment: Deployment | null;
+}
+
 /**
- * Everything about a build that is not "where am I" or "what can I do".
- *
- * These facts were four coloured pills — the Modal app, a `reactive`
- * badge, a truncated structure scope and a build-config count — sitting
- * first in the breadcrumb and then in the toolbar. As pills they were
- * loud enough to read as status while saying nothing that changes during
- * a build, and each had to be truncated to fit, which is how a scope key
- * ends up as `scope: 5c6ed85f155d…` and tells you nothing.
- *
- * Behind one icon they can be shown properly: full values, room to say
- * what each one means, and a copy affordance on the two that get pasted
- * into commands.
+ * Everything about a build that is not "where am I" or "what can I do":
+ * its id, execution, the scope its active plan runs under (deployment and
+ * settings), and its times. The settings body is read on open, by hash.
  */
-export function BuildInfoDialog({ build }: { build: Build }) {
+export function BuildInfoDialog({
+  build,
+  environmentId,
+  frontier,
+  deployment,
+}: BuildInfoDialogProps) {
   const [open, setOpen] = useState(false);
+  const settingsHash = frontier?.settings_hash ?? null;
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || !settingsHash) return;
+    let stale = false;
+    fetchSettings(settingsHash, environmentId)
+      .then((s) => {
+        if (stale) return;
+        setSettings(s);
+        setSettingsError(null);
+      })
+      .catch((err: unknown) => {
+        if (stale) return;
+        setSettingsError(err instanceof Error ? err.message : "Failed to read settings");
+      });
+    return () => {
+      stale = true;
+    };
+  }, [open, settingsHash, environmentId]);
 
   return (
     <>
       <ToolbarButton
         label="Build info"
-        hint="Id, execution, structure scope and config"
+        hint="Id, execution, deployment and settings"
         onClick={() => setOpen(true)}
       >
         <svg
@@ -48,56 +75,37 @@ export function BuildInfoDialog({ build }: { build: Build }) {
         </svg>
       </ToolbarButton>
 
-      <Modal
-        isOpen={open}
-        onClose={() => setOpen(false)}
-        title="Build info"
-        maxWidthClass="max-w-2xl"
-      >
+      <Modal isOpen={open} onClose={() => setOpen(false)} title="Build info" maxWidthClass="max-w-2xl">
         <div className="max-h-[70vh] space-y-0 overflow-y-auto">
           <Field label="Name">
-            <span className="font-medium text-gray-900 dark:text-gray-100">
-              {build.name}
-            </span>
+            <span className="font-medium text-gray-900 dark:text-gray-100">{build.name}</span>
             <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
           </Field>
-
-          <Field
-            label="Build id"
-            hint="What every CLI command against this build takes"
-          >
+          <Field label="Build id" hint="What every CLI command against this build takes">
             <CopyChip label={build.id} value={build.id} title="Build id" />
           </Field>
-
           {build.description && <Field label="Description">{build.description}</Field>}
-
           <ExecutorField build={build} />
-          <ScopeField scopeKey={build.scope_key} />
-
-          {build.commit_hash && (
-            <Field label="Commit">
-              <CopyChip
-                label={build.commit_hash}
-                value={build.commit_hash}
-                title="Commit"
-              />
-            </Field>
-          )}
-
+          <DeploymentField frontier={frontier} deployment={deployment} />
+          <SettingsField
+            settingsHash={settingsHash}
+            settings={settings && settings.hash === settingsHash ? settings : null}
+            error={settingsError}
+          />
+          <Field label="Roots" hint="The request, at completion-id level; stable across rollover">
+            <span>
+              {build.root_task_ids.length} task{build.root_task_ids.length === 1 ? "" : "s"}
+            </span>
+          </Field>
           <Field label="Created">{formatAbsoluteTime(build.created_at)}</Field>
-          {build.started_at && (
-            <Field label="Started">{formatAbsoluteTime(build.started_at)}</Field>
-          )}
-          {build.completed_at && (
-            <Field label="Ended">{formatAbsoluteTime(build.completed_at)}</Field>
-          )}
-
-          <ConfigField config={build.build_config} />
+          {build.started_at && <Field label="Started">{formatAbsoluteTime(build.started_at)}</Field>}
+          {build.completed_at && <Field label="Ended">{formatAbsoluteTime(build.completed_at)}</Field>}
         </div>
       </Modal>
     </>
   );
 }
+
 
 /**
  * One fact: a muted label, then the value.
@@ -206,52 +214,79 @@ function ExecutorField({ build }: { build: Build }) {
   );
 }
 
-/**
- * The structure scope, at full length and explained.
- *
- * As a pill it was `scope: 5c6ed85f155d…`, which is neither readable nor
- * comparable — and comparing two of them is the only thing anyone does
- * with a scope key.
- */
-function ScopeField({ scopeKey }: { scopeKey?: string | null }) {
-  if (!scopeKey) return null;
-  const synthetic = isSyntheticScope(scopeKey);
+/** The active plan's deployment: app, generation, code id. */
+function DeploymentField({
+  frontier,
+  deployment,
+}: {
+  frontier: BuildFrontier | null;
+  deployment: Deployment | null;
+}) {
+  const deploymentId = frontier?.deployment_id ?? null;
+  if (!deploymentId) {
+    return (
+      <Field label="Deployment" hint="The build has no active plan yet.">
+        <span className="text-gray-500 dark:text-gray-400">None</span>
+      </Field>
+    );
+  }
+  if (!deployment) {
+    return (
+      <Field label="Deployment" hint="Not among the environment's listed deployments.">
+        <CopyChip label={deploymentId} value={deploymentId} title="Deployment id" />
+      </Field>
+    );
+  }
   return (
     <Field
-      label="Structure scope"
+      label="Deployment"
       hint={
-        synthetic
-          ? "Synthetic: this build shares its dependency edges with no other build."
-          : "The code version and structure config this build is currently planned under. It moves when the app is redeployed — the next scheduler pass re-plans the build under the new code."
+        deployment.is_current
+          ? "The app's current deployment."
+          : "Not the app's current deployment: the build's next tick rolls it over."
       }
     >
-      {synthetic ? (
-        <span className="text-gray-500 dark:text-gray-400">
-          Per-build <code className="font-mono text-xs">({scopeKey})</code>
+      <span className="font-medium">{deploymentLabel(deployment)}</span>
+      <span className="text-gray-600 dark:text-gray-400">{deployment.kind}</span>
+      <CopyChip label={deployment.code_id} value={deployment.code_id} title="Code id" />
+      {deployment.is_current && (
+        <span className="rounded bg-green-100 px-1.5 py-0.5 text-xs text-green-800 dark:bg-green-900/40 dark:text-green-300">
+          current
         </span>
-      ) : (
-        <CopyChip label={scopeKey} value={scopeKey} title="Structure scope" />
       )}
     </Field>
   );
 }
 
-/** The central values levels 2 and 3 parameters were read from. */
-function ConfigField({
-  config,
+/** The active plan's settings, by hash, with the body once read. */
+function SettingsField({
+  settingsHash,
+  settings,
+  error,
 }: {
-  config?: Record<string, Record<string, unknown>> | null;
+  settingsHash: string | null;
+  settings: Settings | null;
+  error: string | null;
 }) {
-  const classCount = config ? Object.keys(config).length : 0;
-  if (classCount === 0) return null;
+  if (!settingsHash) return null;
+  const keys = settings ? Object.keys(settings.body).length : null;
   return (
     <Field
-      label={`Build config — ${classCount} task class${classCount === 1 ? "" : "es"}`}
-      hint="Part of the structure scope, so two builds that disagree here do not share dependency edges."
+      label={keys === null ? "Settings" : `Settings — ${keys} key${keys === 1 ? "" : "s"}`}
+      hint="Part of the plan's scope: two plans under different settings share no instances."
     >
-      <pre className="max-h-64 w-full overflow-auto rounded bg-gray-50 p-3 font-mono text-[11px] text-gray-700 dark:bg-gray-900 dark:text-gray-300">
-        {JSON.stringify(config, null, 2)}
-      </pre>
+      <CopyChip label={settingsHash.slice(0, 16)} value={settingsHash} title="Settings hash" />
+      {error ? (
+        <span className="text-xs text-red-600 dark:text-red-400">{error}</span>
+      ) : settings === null ? (
+        <span className="text-xs text-gray-500">Reading…</span>
+      ) : keys === 0 ? (
+        <span className="text-xs text-gray-500 dark:text-gray-400">empty</span>
+      ) : (
+        <pre className="max-h-64 w-full overflow-auto rounded bg-gray-50 p-3 font-mono text-[11px] text-gray-700 dark:bg-gray-900 dark:text-gray-300">
+          {JSON.stringify(settings.body, null, 2)}
+        </pre>
+      )}
     </Field>
   );
 }
