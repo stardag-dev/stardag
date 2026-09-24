@@ -93,7 +93,8 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   core tables (including `distributed_locks`) and creates `task`,
   `deployment`, `settings`, `task_instance`, `task_instance_dependency`,
   `plan`, `plan_member`, `execution`, `build_wake` and the re-pointed
-  `event`, `task_artifact` and `task_limit_key`. Downgrade raises.
+  `event`, `task_artifact` and `task_limit_key`. Concurrency limits are
+  among the dropped tables and must be set again. Downgrade raises.
   **PostgreSQL 15 or newer** is required (SQLite is not supported), and the
   API suite runs on Postgres.
 - **Breaking: the registry routes move to `/api/v2`.** Every `/api/v1`
