@@ -112,8 +112,10 @@ def test_s6_a_redeploy_of_unchanged_code_replans_without_rerunning(
         status = wait_for_terminal(build_id, timeout=BUILD_TIMEOUT_SECONDS)
         assert status == "completed", describe(build_id)
 
-        rows = app_deployments(APP_NAME)
-        assert len(rows) == 2 and {r.code_id for r in rows} == {code_id}, rows
+        # This run's rows only: the app outlives a run (CI's retry reuses the
+        # registry), and the code id is this run's own.
+        rows = [d for d in app_deployments(APP_NAME) if d.code_id == code_id]
+        assert len(rows) == 2, rows
         newer, older = rows
         assert newer.is_current and not older.is_current, rows
         assert older.id == first.deployment_id, (first.deployment_id, rows)
