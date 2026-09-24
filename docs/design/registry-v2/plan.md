@@ -299,14 +299,19 @@ assignee the maintainer.
       route the client calls is served (step 3c, step 4); proven live in I0
       step 4. Left to I8: `builds list/stop/cleanup`, `tasks`,
       `concurrency-limits` as CLI commands.
-- [ ] I8 — CLI. Of the server gaps its PR (#387) lists, `GET /plans/{id}`
-      is served by I5 (#390), as is the `lost` outcome its stop filter sends;
-      the event read was already served (#386); the bare-observation route
-      is not.
-- [ ] I9 — UI. Server gaps its PR (#388) lists — `GET /plans/{id}/graph`,
-      the build failure reason (`error_message`), task search and claim
-      triage (`GET /tasks?status=`), executions per task — are served by I5
-      (#390); the task event log was already served (#386).
+- [ ] I8 — CLI (in review, PR #387 against `v2`). Of the server gaps its
+      PR lists, `GET /plans/{id}` is served by I5 (#390), as is the `lost`
+      outcome its stop filter sends; the event read was already served
+      (#386); the bare-observation route is not, by decision (D7).
+- [x] I9 — UI (merged, PR #388). Every registry call is on `/api/v2`; scope
+      keys, `build_config`, phantoms, external blockers and `/locks` are
+      gone. Builds list, the build view over the active plan, the stop list
+      over `GET /builds/{id}/executions` with orphans, the task page and a
+      deployments page. The server gaps it listed — `GET /plans/{id}/graph`,
+      the build failure reason (`error_message`), `GET /tasks?status=`,
+      executions per task — are served by I5 (#390); the task event log was
+      already served (#386). Removed for want of a v2 route: task search,
+      claim triage, bulk cancel, concurrency-limits admin.
 - [ ] I10 — tests
 - [ ] I11 — docs
 - [ ] I12 — release

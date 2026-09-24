@@ -80,7 +80,7 @@ const COUNTERS: Record<string, { label: string; help: string }> = {
   },
   rolled_over: {
     label: "rolled over",
-    help: "The build was planned by an earlier deployment; this tick re-planned it under the current code and moved its structure scope.",
+    help: "The build was planned by an earlier deployment; this tick planned it again under the current deployment, which superseded the old plan.",
   },
   terminal_status: {
     label: "terminal status",
