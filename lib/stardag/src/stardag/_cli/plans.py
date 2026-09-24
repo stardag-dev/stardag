@@ -19,7 +19,7 @@ from stardag._cli._registry_ctx import (
     _resolve_registry,
     console,
 )
-from stardag.exceptions import StardagError
+from stardag.exceptions import NotFoundError, StardagError
 
 app = typer.Typer(help="Inspect plans.", no_args_is_help=True)
 
@@ -46,7 +46,7 @@ def plans_show(
         info = registry.plan_roots_info(parsed)
         try:
             settings = registry.settings_get(info.settings_hash).body
-        except StardagError:
+        except NotFoundError:
             settings = None
         frontier = registry.build_get_frontier(info.build_id)
     except StardagError as e:

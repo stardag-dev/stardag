@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 from stardag._cli import app as cli
 from stardag.artifact import MarkdownArtifact
+from stardag.exceptions import APIError
 
 runner = CliRunner(env={"COLUMNS": "240"})
 
@@ -28,6 +30,29 @@ class TestBuilds:
         assert ids == [str(running_build.build_id)]
         (call,) = fake_registry.calls_to("build_list")
         assert call["status"] == "running"
+
+    def test_list_orders_by_last_active_at_not_insertion_order(self, fake_registry):
+        """The server orders GET /builds most-recently-active first
+        (Build.last_active_at.desc()). A build resumed after a newer one
+        was created must sort ahead of it — insertion order alone gets
+        this backwards."""
+        from datetime import datetime, timedelta, timezone
+
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ticks = iter(t0 + timedelta(seconds=i) for i in range(10))
+        fake_registry.clock = lambda: next(ticks)
+
+        older = fake_registry.build_create(root_task_ids=["a"]).id  # t=0
+        newer = fake_registry.build_create(root_task_ids=["b"]).id  # t=1
+        fake_registry.build_cancel(older)  # t=2
+        fake_registry.build_cancel(newer)  # t=3
+        # Touch `older` last: it should now sort ahead of `newer`.
+        fake_registry.build_resume(older)  # t=4
+
+        result = invoke("builds", "list", "--json")
+        assert result.exit_code == 0, result.output
+        ids = [b["id"] for b in json.loads(result.stdout)["builds"]]
+        assert ids == [str(older), str(newer)]
 
     def test_show_names_the_active_plan_and_counts(self, fake_registry, running_build):
         result = invoke("builds", "show", running_build.build_id, "--json")
@@ -118,6 +143,27 @@ class TestDeployments:
         result = invoke("deployments", "list", "--kind", "cloud")
         assert result.exit_code == 1
 
+    def test_activation_conflict_mirrors_the_server(self, fake_registry):
+        """The server raises 409 ``deployment_activation_conflict`` with
+        every clashing field (services/deployments.py, activate_deployment)
+        — not the singular ``field`` of a ``deployment_mismatch``, which is
+        a different 409 (a yield's deployment_id not matching its plan)."""
+        deployment_id = fake_registry.add_deployment(
+            kind="modal", app_name="app", code_id="a" * 20, activated=False
+        )
+        fake_registry.deployment_activate(
+            deployment_id, modal_app_id="ap-1", image_id="im-1"
+        )
+        with pytest.raises(APIError) as excinfo:
+            fake_registry.deployment_activate(
+                deployment_id, modal_app_id="ap-2", image_id="im-1"
+            )
+        err = excinfo.value
+        assert err.status_code == 409
+        assert err.code == "deployment_activation_conflict"
+        assert err.payload is not None
+        assert err.payload["fields"] == ["modal_app_id"]
+
 
 class TestTasks:
     def test_show_task_instances_and_artifacts(self, fake_registry, running_build):
@@ -134,6 +180,10 @@ class TestTasks:
         assert payload["execution_id"] == str(running_build.execution_id)
         assert len(payload["instances"]) == 1
         assert [a["name"] for a in payload["artifacts"]] == ["report"]
+        # The HTTP contract normalises a markdown body to {"content": ...}
+        # (stardag.registry._api_routes._artifacts_body); the fake mirrors
+        # it rather than returning the raw markdown string.
+        assert payload["artifacts"][0]["body"] == {"content": "# hi"}
         assert "TASK_STRUCTURE_DIVERGED" in payload["notes"][0]
 
     def test_check_observes_the_target_locally(self, fake_registry, running_build):

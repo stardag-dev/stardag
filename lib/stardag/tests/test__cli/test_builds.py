@@ -126,6 +126,21 @@ class TestShow:
         assert result.exit_code == 1
         registry.close.assert_called_once()
 
+    def test_a_missing_settings_row_reads_as_null(self):
+        registry = _show_registry(settings_get=NotFoundError("no settings"))
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["show", BUILD_ID, "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["active_plan"]["settings"] is None
+
+    def test_a_settings_read_failure_other_than_404_propagates(self):
+        registry = _show_registry(settings_get=APIError("auth failed", status_code=401))
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["show", BUILD_ID])
+        assert result.exit_code == 1
+        registry.close.assert_called_once()
+
 
 class TestFrontier:
     def test_renders_the_plan_and_its_three_lists(self):

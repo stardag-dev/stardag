@@ -68,6 +68,11 @@ class BuildRow:
     is_resumed: bool = False
     error_message: str | None = None
     created_at: datetime | None = None
+    #: Bumped on build-level lifecycle events only (created, resumed,
+    #: completed/failed/cancelled/exit-early) — mirrors the server's
+    #: ``Build.last_active_at`` (models/build.py), which "GET /builds"
+    #: orders by, most recently active first.
+    last_active_at: datetime | None = None
 
 
 @dataclass

@@ -166,18 +166,19 @@ def build_command(
             "scheduling runs on a deployed app's ticks."
         )
         raise typer.Exit(1)
-    try:
-        checked = _parse_settings(settings)
-        roots = resolve_roots(refs, parse_params(param))
-    except (RefError, SettingsError) as e:
-        error_console.print(f"[bold red]Error:[/bold red] {e}")
-        raise typer.Exit(1)
     resume_id: UUID | None = parse_uuid(resume) if resume else None
 
-    if dry_run:
-        _dry_run(roots, checked, json_output)
-        return
     with _profile(stardag_profile):
+        try:
+            checked = _parse_settings(settings)
+            roots = resolve_roots(refs, parse_params(param))
+        except (RefError, SettingsError) as e:
+            error_console.print(f"[bold red]Error:[/bold red] {e}")
+            raise typer.Exit(1)
+
+        if dry_run:
+            _dry_run(roots, checked, json_output)
+            return
         if app_ref is not None:
             _trigger(
                 app_ref, roots, checked, resume_id, reactive, description, json_output

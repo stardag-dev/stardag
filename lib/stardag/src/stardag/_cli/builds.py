@@ -45,7 +45,7 @@ from stardag._cli._registry_ctx import (
     error_console,
 )
 from stardag._cli.builds_stop import builds_stop
-from stardag.exceptions import StardagError
+from stardag.exceptions import NotFoundError, StardagError
 from stardag.registry import BuildFrontier, BuildInfo, FrontierMember
 
 app = typer.Typer(
@@ -172,7 +172,7 @@ def builds_show(
         if frontier.settings_hash:
             try:
                 settings = registry.settings_get(frontier.settings_hash).body
-            except StardagError:
+            except NotFoundError:
                 settings = None
         if frontier.plan_id is not None:
             unended = registry.build_list_executions(parsed)

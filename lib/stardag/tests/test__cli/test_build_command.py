@@ -4,6 +4,7 @@ validation, and ``--dry-run`` on a small DAG."""
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from typer.testing import CliRunner
@@ -36,6 +37,38 @@ class TestDryRun:
         result = runner.invoke(cli, ["build", SIMPLE_DAG, "--dry-run"])
         assert result.exit_code == 0, result.output
         assert "4 task(s): 4 to run" in result.output
+
+    def test_resolves_roots_under_the_requested_profile(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        """--dry-run used to return before --stardag-profile was applied, and
+        roots were resolved (imported/constructed) before entering the
+        profile context — so a dry run never actually walked targets under
+        the requested profile."""
+        import stardag._cli.build as build_module
+
+        real_resolve_roots = build_module.resolve_roots
+        seen: list[str | None] = []
+
+        def spy(refs, params):
+            seen.append(os.environ.get("STARDAG_PROFILE"))
+            return real_resolve_roots(refs, params)
+
+        monkeypatch.setattr(build_module, "resolve_roots", spy)
+        result = runner.invoke(
+            cli,
+            [
+                "build",
+                SIMPLE_DAG,
+                "--dry-run",
+                "--stardag-profile",
+                "a-test-profile",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert seen == ["a-test-profile"]
+        # restored afterward
+        assert os.environ.get("STARDAG_PROFILE") is None
 
 
 class TestRefusals:

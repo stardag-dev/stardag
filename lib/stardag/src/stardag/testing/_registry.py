@@ -95,6 +95,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             status=build.status,
             root_task_ids=list(build.root_task_ids),
             created_at=build.created_at,
+            last_active_at=build.last_active_at,
             is_resumed=build.is_resumed,
             executor_metadata=build.executor_metadata,
             reactive_app_name=build.reactive_app_name,
@@ -118,13 +119,15 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         build_id = build_id or new_id()
         if build_id in self.builds:
             return self._info(self.builds[build_id])
+        now = self.now()
         build = BuildRow(
             id=build_id,
             name=name or f"build-{len(self.builds) + 1}",
             root_task_ids=sorted(set(root_task_ids)),
             description=description,
             executor_metadata=executor_metadata,
-            created_at=self.now(),
+            created_at=now,
+            last_active_at=now,
         )
         self.builds[build_id] = build
         self.events.append(Event("BUILD_STARTED", build_id=build_id))
@@ -184,6 +187,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
                 build.executor_metadata = executor_metadata
             if changed:
                 build.is_resumed = True
+                build.last_active_at = self.now()
                 self.events.append(Event("BUILD_RESUMED", build_id=build_id))
             return ResumeResult(
                 build=self._info(build),
@@ -199,6 +203,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
             return self._info(build)
         build.status = status
         build.error_message = error
+        build.last_active_at = self.now()
         self.release_build_claims(build)
         self.events.append(Event(f"BUILD_{status.upper()}", build_id=build_id))
         return self._info(build)
@@ -237,6 +242,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         self._record("build_exit_early", build_id=build_id)
         build = self.build(build_id)
         build.status = "exit_early"
+        build.last_active_at = self.now()
         return self._info(build)
 
     def build_list(
@@ -247,13 +253,22 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         limit: int = 100,
     ) -> list[BuildInfo]:
         self._record("build_list", status=status, reactive_app_name=reactive_app_name)
-        # Newest first, as the server orders by activity.
-        rows = [
-            b
-            for b in reversed(list(self.builds.values()))
-            if (status is None or b.status == status)
-            and (reactive_app_name is None or b.reactive_app_name == reactive_app_name)
-        ]
+        # Most recently active first, then by id — as the server orders
+        # (``Build.last_active_at.desc(), Build.id.desc()``), not insertion
+        # order.
+        rows = sorted(
+            (
+                b
+                for b in self.builds.values()
+                if (status is None or b.status == status)
+                and (
+                    reactive_app_name is None
+                    or b.reactive_app_name == reactive_app_name
+                )
+            ),
+            key=lambda b: (b.last_active_at, b.id),
+            reverse=True,
+        )
         return [self._info(b) for b in rows[:limit]]
 
     def build_list_running(
@@ -387,7 +402,10 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
                 task_id=task_id,
                 artifact_type=a.type,
                 name=a.name,
-                body=a.model_dump(mode="json").get("body"),
+                # The HTTP contract normalises a markdown body to
+                # ``{"content": ...}`` (``_artifacts_body`` on upload); a
+                # json artifact's body is already a dict.
+                body={"content": a.body} if a.type == "markdown" else a.body,
             )
             for a in latest.values()
         ]
@@ -505,14 +523,20 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, RegistryABC):
         row = self.deployments.get(deployment_id)
         if row is None:
             raise refuse("unknown_deployment", status=404)
-        # A given value fills a NULL or must match (the server's rule).
-        for column, value in (("modal_app_id", modal_app_id), ("image_id", image_id)):
-            if value is None:
-                continue
-            recorded = getattr(row, column)
-            if recorded is not None and recorded != value:
-                raise refuse("deployment_mismatch", field=column)
-            setattr(row, column, value)
+        # A given value fills a NULL or must match (the server's rule):
+        # 409 `deployment_activation_conflict` with every clashing field,
+        # nothing written (services/deployments.py, activate_deployment).
+        given = {"modal_app_id": modal_app_id, "image_id": image_id}
+        clashing = sorted(
+            column
+            for column, value in given.items()
+            if value is not None and getattr(row, column) not in (None, value)
+        )
+        if clashing:
+            raise refuse("deployment_activation_conflict", fields=clashing)
+        for column, value in given.items():
+            if value is not None:
+                setattr(row, column, value)
         if row.activated_at is None:
             row.activated_at = self.now()
         return self._deployment_info(row)
