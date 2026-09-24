@@ -766,8 +766,8 @@ the server does not flip it inside task transactions (that would lock every
 build holding the task on each completion, the inversion `_flag_builds`
 avoids with `SKIP LOCKED`). What changes is that completion is **verified**:
 the frontier response carries `plan_complete` (= sealed, and every
-non-excluded member COMPLETED) as a diagnostic, and `/complete` **recomputes
-the same predicate in its own transaction** and is refused with 409
+non-excluded member COMPLETED) as a diagnostic, and `/complete` runs the
+closure step, then **recomputes the same predicate in its own transaction** and is refused with 409
 `plan_incomplete` unless it holds or `force` is set (the operator override
 that v1's unchecked `/complete` was; `force` overrides outstanding members,
 **never a missing seal and never an excluded root** — an unsealed plan is a
@@ -786,7 +786,11 @@ CANCELLED is ACTIONABLE, so any other build holding the task runs it). The
 execution's `ended_at` is untouched — the container may run on — and its
 report is late from then on. `exit-early` releases nothing: a resident
 build's in-flight tasks keep reporting, and if the process is gone their
-claims lapse like any other worker's. A plan's roots are the build's request:
+claims lapse like any other worker's. A claiming start takes the build row
+`FOR SHARE` before its task row, which is what makes terminal transitions and
+deletes (`FOR NO KEY UPDATE` on the build) a synchronisation point for claims:
+a start in flight is waited for, and a start arriving after one reads the new
+status and is refused with `build_not_running`. A plan's roots are the build's request:
 `POST /builds` records `root_task_ids` (required, non-empty) and `create_plan`
 refuses roots whose task ids are not exactly those (400 `root_mismatch`).
 

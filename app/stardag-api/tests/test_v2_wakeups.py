@@ -10,6 +10,7 @@ on every transition and on limit-slot release; the lease owner-checked on
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -17,6 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.config import settings as app_settings
 from stardag_api.services import builds, reactive, wakeups
@@ -335,6 +337,40 @@ async def test_tick_summaries_are_verbatim_and_pruned(
     rows = await _svc(h, reactive.list_tick_summaries, build)
     assert [r.outcome for r in rows] == ["o4", "o3", "o2"]
     assert rows[0].summary == {"outcome": "o4", "novel": 4}
+
+
+async def test_tick_summary_retention_is_single_flight_per_build(
+    h: Harness, async_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+):
+    """Insert-and-prune runs under the build row lock: a summary written
+    while another writer's insert is uncommitted waits for it, then prunes
+    with it counted — rather than each pruning from a snapshot without the
+    other's row and the trail keeping more than the cap."""
+    monkeypatch.setattr(app_settings, "max_tick_summaries_per_build", 1)
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    async with async_engine.connect() as other:
+        await other.execute(
+            text("SELECT 1 FROM build WHERE id = :b FOR NO KEY UPDATE"),
+            {"b": build},
+        )
+        await other.execute(
+            text(
+                "INSERT INTO build_tick_summary (id, environment_id, build_id,"
+                " outcome, summary, created_at) VALUES (:id, :env, :b, 'first',"
+                " '{\"outcome\": \"first\"}', now() - interval '1 second')"
+            ),
+            {"id": uuid4(), "env": ENV, "b": build},
+        )
+        adding = asyncio.create_task(
+            _svc(h, reactive.add_tick_summary, build, {"outcome": "second"})
+        )
+        await asyncio.sleep(0.3)
+        assert not adding.done(), "the summary must wait for the build lock"
+        await other.commit()
+    await asyncio.wait_for(adding, 10)
+    rows = await _svc(h, reactive.list_tick_summaries, build)
+    assert [r.outcome for r in rows] == ["second"]
 
 
 async def test_reactive_routes_over_http(client: AsyncClient, h: Harness):

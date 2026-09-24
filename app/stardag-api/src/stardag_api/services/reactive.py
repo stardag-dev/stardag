@@ -69,7 +69,10 @@ async def add_tick_summary(
     summary: Mapping[str, Any],
 ) -> BuildTickSummary:
     """Record one tick's summary and prune the build's trail to the newest
-    ``max_tick_summaries_per_build``. One insert, one bounded delete."""
+    ``max_tick_summaries_per_build``. One insert, one bounded delete, under
+    the build row lock, so the insert-and-retain step is single-flight per
+    build: a concurrent writer's insert is committed, and so counted, before
+    this one prunes."""
     body = dict(summary)
     outcome = body.get("outcome")
     if not isinstance(outcome, str) or not 0 < len(outcome) <= 32:
@@ -80,7 +83,7 @@ async def add_tick_summary(
             f"a tick summary must be at most {MAX_TICK_SUMMARY_BYTES} bytes as JSON",
         )
     async with transaction(session):
-        build = await get_build(session, environment_id, build_id)
+        build = await lock_build(session, environment_id, build_id)
         row = BuildTickSummary(
             id=generate_uuid7(),
             environment_id=environment_id,

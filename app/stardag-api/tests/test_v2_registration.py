@@ -592,6 +592,47 @@ async def test_seal_refuses_when_its_closure_step_finds_a_conflict(h: Harness):
     assert (await h.build(build))["status"] == "failed"
 
 
+async def test_a_retried_seal_runs_the_closure_step(h: Harness):
+    """A retried ``/seal`` on a sealed plan still runs the closure step
+    before it returns idempotently: an edge another plan added since the
+    seal, from a shared instance to one this plan does not hold, is
+    admitted (``admitted_by = closure``), not left outside the plan."""
+    deployment = await h.new_deployment()
+    u = item("U")
+    x = item("X", upstreams=[u])
+    _, a = await h.planned(
+        [x], [observed(unexpanded(x), True)], deployment_id=deployment, seal=True
+    )
+    await h.planned([item("RB", upstreams=[x])], [u, x], deployment_id=deployment)
+
+    again = await h.seal(a.id)
+    assert again.sealed_at == a.sealed_at
+    assert (await h.members(a.id))[u.task_id]["admitted_by"] == "closure"
+
+
+async def test_a_retried_seal_refuses_on_a_closure_conflict(h: Harness):
+    """The same on a conflict: a retried seal whose closure step reaches a
+    second instance of a member's completion fails the build (committed)
+    and is refused with ``instance_conflict``."""
+    deployment = await h.new_deployment()
+    u1 = item("U", extra={"mode": "fast"})
+    u2 = item("U", extra={"mode": "slow"})
+    x = item("X", upstreams=[u2])
+    root = item("RA", upstreams=[u1, x])
+    build, plan = await h.planned(
+        [root],
+        [u1, observed(unexpanded(x), True), root],
+        deployment_id=deployment,
+        seal=True,
+    )
+    await h.planned([item("RB", upstreams=[x])], [u2, x], deployment_id=deployment)
+
+    with pytest.raises(Conflict) as exc:
+        await h.seal(plan.id)
+    assert exc.value.code == "instance_conflict"
+    assert (await h.build(build))["status"] == "failed"
+
+
 # --------------------------------------------------------------------------
 # A sealed plan: re-delivery and discovery only
 # --------------------------------------------------------------------------

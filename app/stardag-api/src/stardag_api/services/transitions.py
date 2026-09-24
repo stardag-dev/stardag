@@ -7,8 +7,11 @@ design.md, "The runnable rule", "Claim × plan invariants" and the
 
 Every transition first locks the ``task`` row ``FOR NO KEY UPDATE`` — not
 ``FOR UPDATE``, which would conflict with the ``FOR KEY SHARE`` every
-insert referencing the task takes through its foreign key (STA-51). The
-rules, in one place:
+insert referencing the task takes through its foreign key (STA-51). A
+claiming start takes its build row ``FOR SHARE`` before that (lock order
+build → task), so a terminal build transition or a delete — ``FOR NO KEY
+UPDATE`` on the build — is a synchronisation point for claims. The rules,
+in one place:
 
 - **The claim.** Live when ``status = RUNNING AND claim_expires_at > now``.
   A claiming start names its plan and a client-minted execution id; the same
@@ -215,6 +218,9 @@ async def transition_task(
     builds it is news for (``wakeups.flag_after_transition``), here, so no
     path that moves a status can forget to.
     """
+    if transition.kind is TransitionKind.START and transition.claim:
+        assert plan_id is not None, "a claiming start names its plan"
+        await _share_build(session, plan_id)
     task = await lock_task(session, environment_id, task_pk)
     # Stamped after the lock: every timestamp the transition writes is when
     # it took effect, not when the caller began waiting (the observed_at
@@ -235,6 +241,30 @@ async def transition_task(
             now=now,
         )
     return outcome
+
+
+async def _share_build(session: AsyncSession, plan_id: UUID) -> None:
+    """A claiming start takes its build row ``FOR SHARE`` before the task
+    row. Terminal transitions and deletes hold the build ``FOR NO KEY
+    UPDATE`` while they release the build's claims or check for live work,
+    so a claim waits for them and then reads the build's new status
+    (``build_not_running``): their snapshot of the build's claims is then
+    the whole set. Claims do not wait for each other."""
+    build_id = await session.scalar(select(Plan.build_id).where(Plan.id == plan_id))
+    locked = (
+        None
+        if build_id is None
+        else await session.scalar(
+            select(Build.id).where(Build.id == build_id).with_for_update(read=True)
+        )
+    )
+    if locked is None:
+        raise Conflict(
+            "build_not_running",
+            "the plan's build no longer exists; it hands out no more work",
+            build_id=str(build_id) if build_id else None,
+            build_status=None,
+        )
 
 
 async def _dispatch(step: _Step) -> TransitionOutcome:
@@ -315,11 +345,11 @@ class _Step(ReportSteps):
                 "the plan is not the build's active plan",
                 plan_id=str(plan.id),
             )
-        # A plain read, not a lock: the build row is locked before task rows
-        # elsewhere (plan creation observing its roots), so locking it here,
-        # after the task row, could deadlock. A start racing the build's end
-        # is left to that end, which releases the claims held by the build's
-        # plans (design.md, "The runnable rule"; the build lifecycle routes).
+        # A plain read under the build row's share lock, which
+        # transition_task() took before the task row (build → task order):
+        # a terminal transition or a delete in flight was waited for, so
+        # its status is the one read here, and a claim it has not seen
+        # cannot be granted behind it (design.md, "The runnable rule").
         build_status = await self.session.scalar(
             select(Build.status).where(Build.id == plan.build_id)
         )
@@ -465,6 +495,11 @@ class _Step(ReportSteps):
         ``preempted_at`` is cleared. Otherwise the expiry is unchanged."""
         t, eid = self.task, self.execution_id()
         execution = await self.named_execution(EventType.TASK_STARTED, eid)
+        if t.execution_id == eid and execution.claim_released_at is None:
+            # The current, unreleased execution — its claim lapsed or not —
+            # under the wrong plan is a trace-free refusal, decided before
+            # the not-current one (as a report decides it).
+            self.check_claim_plan(eid)
         if (
             t.execution_id != eid
             or execution.claim_released_at is not None
@@ -482,7 +517,6 @@ class _Step(ReportSteps):
                 " or released by its build), or it has ended",
                 execution_id=str(eid),
             )
-        self.check_claim_plan(eid)
         for column in ("executor", "executor_ref", "executor_metadata"):
             value = getattr(self.transition, column)
             if value is not None:
