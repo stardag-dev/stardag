@@ -170,15 +170,15 @@ Each description: two paragraphs of scope, a "Done when", and a link to
 `plan.md` and the PR list. Created on approval, Backlog, team Stardag,
 assignee the maintainer.
 
-| Issue               | Scope                                                                                                                | Work packages |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------- |
-| STA-105 (exists)    | Umbrella: design approved, `v2` branch and PRs, decisions log; closes when v2 ships                                  | design PRs    |
-| v2 server           | Schema, registration service, frontier + transitions + ledger, deployments/builds/wake-ups/reads, service extraction | I1–I5         |
-| v2 SDK              | Two hashes and `significant`, engines and Modal integration, registry client, deploy CLI                             | I6–I7         |
-| v2 CLI              | `stardag build`, stop filter, executions/plans/deployments commands, `tasks check`                                   | I8            |
-| v2 UI               | Instances, claim panel, plan view, deployments, executions; delete scope code                                        | I9            |
-| v2 live scenarios   | Registry-live scenarios S1–S20 and harness changes                                                                   | I10           |
-| v2 docs and release | Docs rewrite, principles.md, release line and cut-over                                                               | I11–I12       |
+| Issue                         | Scope                                                                                                                | Work packages |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------- |
+| STA-105                       | Umbrella: design approved, `v2` branch and PRs, decisions log; closes when v2 ships                                  | design PRs    |
+| STA-106 (v2 server)           | Schema, registration service, frontier + transitions + ledger, deployments/builds/wake-ups/reads, service extraction | I1–I5         |
+| STA-107 (v2 SDK)              | Two hashes and `significant`, engines and Modal integration, registry client, deploy CLI                             | I6–I7         |
+| STA-108 (v2 CLI)              | `stardag build`, stop filter, executions/plans/deployments commands, `tasks check`                                   | I8            |
+| STA-109 (v2 UI)               | Instances, claim panel, plan view, deployments, executions; delete scope code                                        | I9            |
+| STA-110 (v2 live scenarios)   | Registry-live scenarios S1–S20 and harness changes                                                                   | I10           |
+| STA-111 (v2 docs and release) | Docs rewrite, principles.md, release line and cut-over                                                               | I11–I12       |
 
 `blockedBy` relations follow the sequencing above.
 
@@ -210,7 +210,13 @@ assignee the maintainer.
 ## Status
 
 - [x] Design approved for review (PR against v2)
-- [ ] I0 — Vertical spike (skipped: —)
+- [ ] I0 — Vertical spike: in progress — step 1 (schema, deletion, Postgres
+      default) done; step 2 (registration, frontier and transitions for the
+      static path, server side, under `/api/v2`) done; steps 3–4 (build
+      lifecycle, deployments, wake-ups, yield, worker path; live scenario)
+      pending. PR #380. (skipped so far: skip-blocked and the exclusion
+      cascade, `xfail("v2: I3")`; wake-up flagging,
+      `xfail("v2: I0 step 3")`)
 - [ ] I1 — v2 schema
 - [ ] I2 — Registration service
 - [ ] I3 — Frontier and transitions

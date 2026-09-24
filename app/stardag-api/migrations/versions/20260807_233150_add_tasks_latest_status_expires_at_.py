@@ -36,12 +36,11 @@ Create Date: 2026-08-07 23:31:50.581651
 
 """
 
+import os
 from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-
-from stardag_api.config import claim_settings
 
 
 # revision identifiers, used by Alembic.
@@ -76,7 +75,15 @@ def upgrade() -> None:
     # cost is that the migration's result depends on configuration, which
     # is acceptable for a data heal whose whole content is a policy
     # judgement about how long silence means abandoned.
-    ttl_seconds = int(claim_settings.default_ttl_seconds)
+    #
+    # Read straight from the environment variable that configured it
+    # (``STARDAG_API_CLAIM_DEFAULT_TTL_SECONDS``, default one week) rather
+    # than through the application's settings class: a migration must not
+    # import application code, which moves on after the revision is written
+    # (registry v2 deleted that class).
+    ttl_seconds = int(
+        os.environ.get("STARDAG_API_CLAIM_DEFAULT_TTL_SECONDS", 7 * 24 * 60 * 60)
+    )
     dialect = op.get_bind().dialect.name
     # Interval arithmetic has no portable spelling. ttl_seconds is an int,
     # so the interpolation carries no injection surface.

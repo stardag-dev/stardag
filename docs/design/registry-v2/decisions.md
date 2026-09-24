@@ -169,3 +169,25 @@ unexpanded members' targets before sealing; `force` never overrides an
 excluded root. On the FK column order: PostgreSQL matches referenced columns
 to a unique constraint as a set, so the original text was creatable, but
 writing it in key order costs nothing and removes the doubt.
+
+## Implementation notes, I0 step 1 (2026-09-24)
+
+Corrections the schema work made to `design.md`, none of them a change of
+decision; the design now says what the migration does.
+
+- `event.build_id`: no CHECK tying it to the event type. `build_id`,
+  `plan_id` and `execution_id` are nullable pointers,
+  `ON DELETE SET NULL (col)` and `DEFERRABLE INITIALLY DEFERRED`: a build
+  delete reaches one event row along three paths, and an immediate check fails on an
+  execution already deleted whose own SET NULL has not run yet. The one
+  CHECK kept is that a build-level event carries no `plan_id`.
+- "Every composite-FK column NOT NULL" becomes "every composite-FK _scope_
+  column NOT NULL": the pointer columns on `task` and `event` are nullable,
+  and Postgres skipping the check when they are NULL is the intended "no
+  claim".
+- PostgreSQL 15 or newer is a requirement, for the column-list
+  `SET NULL (col)` form.
+- `excluded_reason` is `operator | discovery_failed | upstream_excluded`.
+- `TASK_WAITING_FOR_LOCK` is removed with the lock table.
+- A `local` deployment's `app_name` is `"local"` unless the driver names an
+  app.
