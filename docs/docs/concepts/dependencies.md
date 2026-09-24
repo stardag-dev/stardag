@@ -2,6 +2,14 @@
 
 Dependencies define how tasks relate to each other and form the DAG structure.
 
+The registry records a task's dependency edges on its **instance** — a
+construction of the task under a scope — not on the task id, and static
+edges declared through `requires()` (below) are recorded as such, distinct
+from ones a task yields dynamically at run time. See [Build &
+Execution](build-execution.md#the-plan-roots-discovery-closure) for how
+that lets two builds in the same scope share what they discovered, and
+[Parameters](parameters.md) for the vocabulary (instance vs. task object).
+
 ## Declaring Dependencies
 
 Task dependencies are declared via the method `requires`:
