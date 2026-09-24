@@ -392,8 +392,13 @@ def _run_watchdog_sweep(
     population is builds where nothing is known to have happened at all.
 
     A spawn that duplicates a tick already running is not free — a container
-    starts either way — but it is cheap and self-limiting: the second tick
-    finds the scheduler lease held and exits without acting.
+    starts either way — but it is cheap and bounded: the second tick finds
+    the scheduler lease held, flags the build, and exits without acting. The
+    flag is what makes that safe. A holder that is lingering polls the flag,
+    not the frontier, so it acts on its next poll or in its exit handshake;
+    one that is mid-frontier acts on its next read, since it clears the flag
+    right before each. If the holder had already released the lease when
+    the flag landed, the refused tick spawns a successor.
 
     It used to run the tick body for every build sequentially inside the
     *sweep's* single container, which made three things a function of how

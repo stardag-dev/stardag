@@ -86,6 +86,11 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   present** in a warm container, so discovery saw it complete and never
   invalidated it. Each discovery walk begins an observation fence, and a
   mounted-volume hit older than it reloads the volume once per walk.
+- **Fixed: a watchdog sweep landing on a lingering tick was dropped.** A
+  tick refused the scheduler lease now flags the build before exiting
+  `lease_held`, so the holder acts on it (or a successor is spawned if the
+  holder had already left); a lapsed claim no longer waits a full watchdog
+  period for its takeover.
 
 ### Server
 
