@@ -93,7 +93,9 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   and return a new `BuildExitStatus.STOPPED` summary carrying a
   `BuildStopped` error; a lifecycle report refused `build_terminal` does the
   same. A refused claim renewal now says whether the build released the
-  claim or another execution took it over.
+  claim or another execution took it over. A reactive tick counts such a
+  claim as denied and treats a refused `/complete` or `/fail` as the
+  status that stands, instead of ending in `error`.
 - **Changed: a failed build's reason names the failed task.** The message
   written on `/fail` reads
   `Task <name> (<id>) failed: <error>; N downstream member(s) blocked`,

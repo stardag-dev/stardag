@@ -395,6 +395,27 @@ class TestTheEnd:
         assert (summary.outcome, summary.terminal_status) == ("terminal", "cancelled")
         assert summary.spawned == 0
 
+    async def test_a_build_cancelled_mid_pass_is_a_denied_claim_not_an_error(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The operator cancels between the frontier read and the claim: the
+        claim is refused ``build_not_running`` and counted like any denied
+        claim, and the tick winds down (lingers out; the cancel sets no
+        wake-up flag) instead of ending in ``error``."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"t-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+
+        class CancelsInMetadata(FakeDetachedExecutor):
+            async def get_executor_metadata(self, task):
+                registry.build_cancel(build_id)
+                return None
+
+        summary = await _tick(registry, build_id, CancelsInMetadata(registry=registry))
+        assert summary.outcome == "lingered_out" and summary.error_type is None
+        assert summary.claim_denied == 1 and summary.spawned == 0
+        assert registry.builds[build_id].status == "cancelled"
+
     async def test_a_build_that_is_not_reactive_is_not_driven(
         self, default_in_memory_fs_target: Target
     ):

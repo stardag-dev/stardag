@@ -316,3 +316,30 @@ async def test_sequential_a_failing_dynamic_child_is_not_a_deadlock(
     reason = registry.builds[summary.build_id].error_message
     assert reason.startswith(f"Task {describe_task(child)} failed: ValueError")
     assert "Deadlock" not in reason
+
+
+def test_the_fake_exclusion_cascade_stops_at_a_completed_member(
+    registry, default_in_memory_fs_target: Target
+):
+    """Mirrors the server: excluding a member does not cascade through a
+    COMPLETED downstream, so a root past it is not excluded."""
+    from stardag.build._registration import register_plan_aio, walk_aio
+
+    bad = SyncOnlyTask(name=f"bad-{new_id()}")
+    done = SyncOnlyTask(name="done", deps=(bad,))
+    root = SyncOnlyTask(name="root", deps=(done,))
+    deployment = registry.add_deployment(kind="local", code_id="c")
+    build = registry.build_create(root_task_ids=[str(root.id)])
+    plan = asyncio.run(
+        register_plan_aio(
+            registry,
+            build.id,
+            asyncio.run(walk_aio([root], register_all=True)),
+            deployment_id=deployment,
+            settings={},
+        )
+    )
+    registry.tasks[str(done.id)].status = "completed"
+    result = registry.member_exclude(plan.id, str(bad.id), reason="x")
+    assert result.excluded == [str(bad.id)]
+    assert result.roots_excluded == [] and not result.build_failed

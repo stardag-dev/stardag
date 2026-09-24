@@ -34,14 +34,22 @@ class ExclusionMixin(RegistryState):
         if self.member(plan_id, task_id).excluded_reason is not None:
             # Idempotent by state, as on the server: nothing written.
             return ExclusionResult(plan_id=plan_id)
-        excluded = {self.member(plan_id, task_id).instance_id}
+        # As on the server, a COMPLETED member blocks nobody: the cascade
+        # neither starts from nor passes through one.
         members[task_id].excluded_reason = reason
         excluded_ids = [task_id]
+        excluded = (
+            set()
+            if self.tasks[task_id].status == "completed"
+            else {self.member(plan_id, task_id).instance_id}
+        )
         changed = True
         while changed:
             changed = False
             for member in members.values():
                 if member.excluded_reason is not None:
+                    continue
+                if self.tasks[member.task_id].status == "completed":
                     continue
                 if excluded & set(self.instances[member.instance_id].upstreams):
                     member.excluded_reason = "upstream_excluded"
