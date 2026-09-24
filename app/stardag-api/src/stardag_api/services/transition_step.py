@@ -165,8 +165,12 @@ class StepBase:
             )
 
     async def named_execution(self, event_type: EventType, eid: UUID) -> Execution:
-        """The named execution of this task, or a recorded refusal."""
-        execution = await self.session.get(Execution, eid)
+        """The named execution of this task, or a recorded refusal.
+
+        Re-read under the task row lock (``populate_existing``): a copy the
+        session loaded before the lock may predate a concurrent end or stop
+        that held it, and would decide this transition wrongly."""
+        execution = await self.session.get(Execution, eid, populate_existing=True)
         if execution is None or execution.task_pk != self.task.id:
             await self.record(
                 event_type,

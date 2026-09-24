@@ -8,6 +8,7 @@ through the services under test (``stardag_api.services.registration``,
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -405,6 +406,25 @@ class Harness:
     async def count(self, table: str) -> int:
         rows = await self._rows(f"SELECT count(*) AS n FROM {table}")
         return rows[0]["n"]
+
+    # -- two sessions ------------------------------------------------------------
+
+    async def blocked_or_done(self, pending: asyncio.Task[Any]) -> bool:
+        """Wait until ``pending`` has finished or some backend waits on a
+        lock (a row or an advisory lock); True if it is blocked. How a
+        two-session test orders the second session behind the first one's
+        open transaction without sleeping on a guess."""
+        for _ in range(500):
+            if pending.done():
+                return False
+            rows = await self._rows(
+                "SELECT count(*) AS n FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            )
+            if rows[0]["n"]:
+                return True
+            await asyncio.sleep(0.02)
+        raise AssertionError("neither blocked nor done")
 
     # -- time travel -------------------------------------------------------------
 

@@ -7,14 +7,29 @@ scenario table.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from httpx import AsyncClient
 
 from stardag_api.models import ExclusionReason
 from stardag_api.services import builds
 from stardag_api.services.errors import Conflict
-from stardag_api.services.transitions import Transition
-from tests.v2_support import ENV, Harness, item, observed, task_ids, unexpanded
+from stardag_api.services.transitions import (
+    Transition,
+    TransitionKind,
+    member_task_pk,
+    transition_task,
+)
+from tests.v2_support import (
+    ENV,
+    Harness,
+    item,
+    observed,
+    task_ids,
+    unexpanded,
+    utcnow,
+)
 
 
 @pytest.fixture
@@ -162,6 +177,39 @@ async def test_an_excluded_member_cannot_be_claimed(h: Harness):
     with pytest.raises(Conflict) as exc:
         await h.start(plan.id, bad)
     assert exc.value.code == "member_excluded"
+
+
+async def test_the_cascade_waits_for_a_status_move_on_a_member_it_reaches(
+    h: Harness,
+):
+    """Two sessions: an observation holds a downstream member's task row
+    with its completion not yet committed. The exclusion cascade locks the
+    rows it may reach (``FOR NO KEY UPDATE``, ``task_id`` order) before it
+    reads a status, so it waits, then sees the member COMPLETED and leaves
+    it — rather than excluding it on the status read before the commit."""
+    up = item("Up")
+    down = item("Down", upstreams=[up])
+    _, plan = await h.planned([down], [up, down])
+    async with h.sf() as held:
+        task_pk = await member_task_pk(held, ENV, plan.id, down.task_id)
+        await transition_task(
+            held,
+            ENV,
+            task_pk=task_pk,
+            plan_id=None,
+            transition=Transition(
+                TransitionKind.OBSERVE_COMPLETE, observed_at=utcnow()
+            ),
+            now=utcnow(),
+        )
+        excluding = asyncio.create_task(h.exclude(plan.id, up))
+        assert await h.blocked_or_done(excluding)
+        await held.commit()
+    result = await excluding
+    assert result.excluded == [up.task_id]
+    members = await h.members(plan.id)
+    assert members[down.task_id]["excluded_at"] is None
+    assert (await h.task(down))["status"] == "completed"
 
 
 async def test_exclusion_on_a_superseded_plan_is_refused(h: Harness):
