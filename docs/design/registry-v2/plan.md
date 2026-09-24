@@ -220,8 +220,14 @@ assignee the maintainer.
       cascade, discovery failure as exclusion; `builds stop`, orphans, the
       rate limit and the creation quota at the v2 route boundary; the
       coordinator's rulings of 2026-09-24) done, PR #383, no `xfail` left
-      on the server side; step 4 (SDK v2 client, reactive worker path, fake
-      registry, `test_reactive_e2e`) pending.
+      on the server side; step 3c (wake-up flags on `build_wake`, so a
+      claim in flight no longer hides its build's wake-up; the read routes
+      the SDK client calls: `GET /builds`, `GET /plans/{id}/roots`,
+      `GET /tasks/{id}` and task artifacts; attempt and interruption counts
+      on the frontier; `/activate` records `modal_app_id` and `image_id`;
+      seals serialise with activation, a renewal locks its limit slots)
+      done, PR #385; step 4 (live: SDK v2 client, reactive worker path,
+      fake registry, `test_reactive_e2e`) next.
 - [ ] I1 — v2 schema
 - [ ] I2 — Registration service
 - [ ] I3 — Frontier and transitions

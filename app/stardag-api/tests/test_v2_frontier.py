@@ -257,3 +257,54 @@ async def test_a_build_that_is_not_running_hands_out_no_work(h: Harness):
     assert exc.value.code == "build_not_running"
     assert exc.value.detail["build_status"] == "failed"
     assert (await h.task(ready))["status"] == "pending"
+
+
+# --------------------------------------------------------------------------
+# Attempt counts (D9: counted from the ledger)
+# --------------------------------------------------------------------------
+
+
+def _counts(members) -> dict[str, tuple[int, int]]:
+    return {m.task_id: (m.attempts, m.interruptions) for m in members}
+
+
+async def test_runnable_and_running_items_carry_attempt_counts(h: Harness):
+    """Per member: ``attempts`` = executions of the task under any of the
+    build's plans (a replacement plan does not reset the budget), and
+    ``interruptions`` = those released or ended interrupted/preempted.
+    Another build's executions of the same task are not counted."""
+    from uuid import uuid4
+
+    from stardag_api.services.transitions import Transition
+
+    deployment = await h.new_deployment()
+    t = item("T")
+    build, plan = await h.planned([t], [t], deployment_id=deployment, seal=True)
+    _, other = await h.planned([t], [t], deployment_id=deployment)
+
+    frontier = await h.frontier(build)
+    assert _counts(frontier.runnable) == {t.task_id: (0, 0)}
+
+    first = await h.start(plan.id, t)
+    await h.transition(plan.id, t, Transition.fail(first, "boom"))
+    await h.transition(plan.id, t, Transition.retry())
+    second = await h.start(plan.id, t)
+    await h.transition(plan.id, t, Transition.interrupt(second, "sigterm"))
+    assert _counts((await h.frontier(build)).runnable) == {t.task_id: (2, 1)}
+
+    # Another build runs it: not this build's attempt.
+    third = await h.start(other.id, t)
+    await h.transition(other.id, t, Transition.interrupt(third, "sigterm"))
+    assert _counts((await h.frontier(build)).runnable) == {t.task_id: (2, 1)}
+
+    # A replacement plan of the same build keeps counting the old plan's.
+    replacement = await h.plan(build, deployment, [t], settings={"S": "2"})
+    await h.register(replacement.id, [t])
+    await h.seal(replacement.id)
+    fourth = uuid4()
+    await h.start(replacement.id, t, fourth)
+    frontier = await h.frontier(build)
+    assert frontier.plan_id == replacement.id and not frontier.runnable
+    assert _counts(frontier.running) == {t.task_id: (3, 1)}
+    # Discovery jobs carry no counts (they are not scheduled executions).
+    assert all(m.attempts == 0 for m in frontier.discovery_jobs)

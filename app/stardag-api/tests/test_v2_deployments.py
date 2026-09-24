@@ -272,3 +272,110 @@ async def test_deployments_and_settings_over_http(client: AsyncClient, h: Harnes
     )
     assert reserved.status_code == 400
     assert reserved.json()["detail"]["code"] == "reserved_settings_key"
+
+
+# --------------------------------------------------------------------------
+# Currency checks serialise with activation (the app lock)
+# --------------------------------------------------------------------------
+
+
+def _app_lock_key(app_name: str) -> str:
+    return f"deployment:{ENV}:modal:{app_name}"
+
+
+async def test_a_seal_waits_for_an_activation_in_flight(
+    h: Harness, async_engine: AsyncEngine
+):
+    """D3's activation holds the app lock exclusively until it commits; a
+    seal of a plan under D2 checks currency under the same lock (shared),
+    so it waits, then sees D3 current and is refused — it cannot seal D2's
+    plan after D3's activation committed."""
+    d2 = await h.new_deployment(app_name="svc")
+    d3 = await h.new_deployment(app_name="svc", activated=False)
+    root = item("Root")
+    _, plan = await h.planned([root], [root], deployment_id=d2)
+
+    async with async_engine.connect() as activation:
+        await activation.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": _app_lock_key("svc")},
+        )
+        await activation.execute(
+            text("UPDATE deployment SET activated_at = now() WHERE id = :d"),
+            {"d": d3},
+        )
+        sealing = asyncio.create_task(h.seal(plan.id))
+        await asyncio.sleep(0.3)
+        assert not sealing.done(), "the seal must wait for the activation"
+        await activation.commit()
+
+    with pytest.raises(Conflict) as exc:
+        await asyncio.wait_for(sealing, 10)
+    assert exc.value.code == "deployment_not_current"
+
+
+async def test_an_activation_waits_for_a_currency_check_in_flight(
+    h: Harness, async_engine: AsyncEngine
+):
+    """The other side: activation takes the app lock exclusively, so a
+    seal holding it shared (to its commit) is waited for."""
+    d3 = await h.new_deployment(app_name="svc", activated=False)
+    async with async_engine.connect() as seal:
+        await seal.execute(
+            text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"),
+            {"k": _app_lock_key("svc")},
+        )
+
+        async def activate() -> deployments.DeploymentState:
+            async with h.sf() as s:
+                return await deployments.activate_deployment(s, ENV, d3)
+
+        activating = asyncio.create_task(activate())
+        await asyncio.sleep(0.3)
+        assert not activating.done(), "the activation must wait for the seal"
+        await seal.commit()
+    state = await asyncio.wait_for(activating, 10)
+    assert state.activated_at is not None and state.is_current
+
+
+async def test_activation_records_what_the_finished_deploy_knows(
+    client: AsyncClient,
+):
+    """``/activate {modal_app_id?, image_id?}``: the body is optional (the
+    old empty call still activates); a given value fills a NULL column and
+    must match a recorded one (409 ``deployment_activation_conflict``,
+    nothing written); a re-sent identical activation is a no-op."""
+    created = await client.post(
+        "/api/v2/deployments",
+        json={
+            "id": str(uuid4()),
+            "kind": "modal",
+            "app_name": "svc",
+            "code_id": "c1",
+            "image_id": "im-1",
+        },
+    )
+    assert created.status_code == 200, created.text
+    path = f"/api/v2/deployments/{created.json()['id']}/activate"
+
+    clash = await client.post(path, json={"image_id": "im-2"})
+    assert clash.status_code == 409
+    assert clash.json()["detail"]["code"] == "deployment_activation_conflict"
+    assert clash.json()["detail"]["fields"] == ["image_id"]
+
+    body = {"modal_app_id": "ap-123", "image_id": "im-1"}
+    activated = await client.post(path, json=body)
+    assert activated.status_code == 200, activated.text
+    row = activated.json()
+    assert row["activated_at"] is not None and row["is_current"]
+    assert (row["modal_app_id"], row["image_id"]) == ("ap-123", "im-1")
+    again = await client.post(path, json=body)
+    assert again.json()["activated_at"] == row["activated_at"]
+    assert (await client.post(path)).status_code == 200
+
+    empty = await client.post(
+        "/api/v2/deployments",
+        json={"id": str(uuid4()), "kind": "modal", "app_name": "svc", "code_id": "c2"},
+    )
+    bare = await client.post(f"/api/v2/deployments/{empty.json()['id']}/activate")
+    assert bare.status_code == 200 and bare.json()["modal_app_id"] is None

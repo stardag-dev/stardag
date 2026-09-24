@@ -175,6 +175,50 @@ _EXCLUSION_CASCADE = text(
 ).columns(task_id=String, task_pk=Uuid)
 
 
+#: Every member reachable downstream, within the plan, from ``:seed`` or an
+#: already-excluded member — whatever the statuses. A superset of what the
+#: cascade can reach, so it can be locked before the cascade reads any
+#: status.
+_EXCLUSION_REACH = text(
+    """
+    WITH RECURSIVE reach(instance_id) AS (
+        SELECT m.instance_id
+        FROM plan_member m
+        WHERE m.plan_id = :plan
+          AND (m.task_pk = :seed OR m.excluded_at IS NOT NULL)
+        UNION
+        SELECT d.instance_id
+        FROM reach r
+        JOIN task_instance_dependency e ON e.upstream_instance_id = r.instance_id
+        JOIN plan_member d
+          ON d.plan_id = :plan AND d.instance_id = e.downstream_instance_id
+    )
+    SELECT m.task_pk
+    FROM reach r
+    JOIN plan_member m ON m.plan_id = :plan AND m.instance_id = r.instance_id
+    """
+).columns(task_pk=Uuid)
+
+
+async def _lock_reach(
+    session: AsyncSession, environment_id: UUID, plan_id: UUID, seed: UUID
+) -> None:
+    """Lock the task rows the cascade may read, ``FOR NO KEY UPDATE`` in
+    ``task_id`` order (after the build: build → task), so that no claim,
+    report or observation moves one of them between the cascade's status
+    read and the membership update — an excluded member cannot be claimed
+    once the exclusion commits, nor a completion be excluded behind it."""
+    pks = (
+        await session.scalars(_EXCLUSION_REACH, {"plan": plan_id, "seed": seed})
+    ).all()
+    await session.execute(
+        select(Task.id)
+        .where(Task.environment_id == environment_id, Task.id.in_(pks))
+        .order_by(Task.task_id)
+        .with_for_update(key_share=True)
+    )
+
+
 async def exclude_member(
     session: AsyncSession,
     environment_id: UUID,
@@ -210,6 +254,7 @@ async def exclude_member(
                 plan_id=str(plan.id),
             )
         task_pk = await member_task_pk(session, environment_id, plan.id, task_id)
+        await _lock_reach(session, environment_id, plan.id, task_pk)
         clock = EventClock(utc_now())
         excluded: list[str] = []
         first = await _exclude(session, plan, [task_pk], reason, at=clock.now)

@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stardag_api.models import (
     Build,
     BuildStatus,
+    BuildWake,
     EventType,
     Execution,
     Plan,
@@ -106,6 +107,10 @@ async def create_build(
         )
         session.add(build)
         await session.flush()
+        # The wake-up flags' row, born with the build (models/build_wake.py).
+        session.add(
+            BuildWake(build_id=build.id, environment_id=environment_id, created_at=now)
+        )
         await event_log.append(
             session,
             [

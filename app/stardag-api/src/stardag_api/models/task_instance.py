@@ -84,6 +84,8 @@ class TaskInstance(EnvironmentScopedMixin, Base):
             "settings_hash",
             "task_pk",
         ),
+        # The 24-hour creation quota counts an environment's recent rows.
+        Index("ix_task_instance_environment_created", "environment_id", "created_at"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=generate_uuid7)

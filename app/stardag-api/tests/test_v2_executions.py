@@ -7,6 +7,7 @@ creation quota counts ``task_instance`` rows).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from uuid import uuid4
 
@@ -15,9 +16,15 @@ from httpx import AsyncClient
 
 from stardag_api.config import limits_settings
 from stardag_api.limits import _rate_limiter
-from stardag_api.services import builds, executions
+from stardag_api.services import builds, executions, registration
+from stardag_api.services.registration_chunk import register_items
 from stardag_api.services.errors import TooManyRequests
-from tests.v2_support import ENV, Harness, item, observed
+from stardag_api.services.transitions import (
+    Transition,
+    member_task_pk,
+    transition_task,
+)
+from tests.v2_support import ENV, Harness, item, observed, utcnow
 
 
 @pytest.fixture
@@ -131,6 +138,79 @@ async def test_the_creation_quota_counts_inserted_instances_only(
         await h.register(plan.id, [item("One"), item("More")])
     assert exc.value.code == "creation_quota_exceeded"
     assert exc.value.detail["requested"] == 2
+    assert await h.count("task_instance") == instance_quota
+
+
+@pytest.mark.parametrize("first", ["complete", "stop"])
+async def test_a_stop_racing_an_end_decides_on_the_execution_after_the_lock(
+    h: Harness, first: str
+):
+    """Two sessions: a completion (or another stop) holds the task row
+    with the execution's end not yet committed, while a stop arrives. The
+    stop reads only the execution's keys before the task lock and the
+    execution itself after it, so it sees the end and is an idempotent
+    no-op — not a second stop recorded, nor a completion overwritten."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    winner = (
+        Transition.complete(execution)
+        if first == "complete"
+        else Transition.stop(execution)
+    )
+    async with h.sf() as held:
+        task_pk = await member_task_pk(held, ENV, plan.id, t.task_id)
+        await transition_task(
+            held,
+            ENV,
+            task_pk=task_pk,
+            plan_id=plan.id,
+            transition=winner,
+            now=utcnow(),
+        )
+        stopping = asyncio.create_task(_stopped(h, execution))
+        assert await h.blocked_or_done(stopping)
+        await held.commit()
+    outcome = await stopping
+    assert not outcome.applied
+    ledger = await h.execution(execution)
+    if first == "complete":
+        assert ledger["outcome"] == "completed"
+        assert (await h.task(t))["status"] == "completed"
+    else:
+        assert ledger["outcome"] == "stopped"
+        assert (await h.task(t))["status"] == "cancelled"
+    stops = await h.events(t, types=["task_cancelled"])
+    assert len(stops) == (1 if first == "stop" else 0)
+
+
+async def test_two_concurrent_chunks_cannot_both_pass_the_creation_quota(
+    h: Harness, instance_quota: int
+):
+    """Two sessions: a chunk has inserted two instances and passed the
+    quota, uncommitted, when a second chunk inserts two more. Each alone is
+    within the quota; together they are over it. The count-and-commit is
+    serialised per environment (an advisory lock), so the second waits,
+    counts the first's rows too, and is refused."""
+    root = item("Root")
+    _, plan = await h.planned([root], [root])  # 1 of 3
+    async with h.sf() as held:
+        state = await registration.get_plan(held, ENV, plan.id)
+        await registration.lock_build(held, ENV, state.build_id, shared=True)
+        await register_items(
+            held,
+            ENV,
+            state,
+            [item("A1"), item("A2")],
+            as_roots=False,
+            now=utcnow(),
+        )
+        second = asyncio.create_task(h.register(plan.id, [item("B1"), item("B2")]))
+        assert await h.blocked_or_done(second)
+        await held.commit()
+    with pytest.raises(TooManyRequests) as exc:
+        await second
+    assert exc.value.code == "creation_quota_exceeded"
     assert await h.count("task_instance") == instance_quota
 
 

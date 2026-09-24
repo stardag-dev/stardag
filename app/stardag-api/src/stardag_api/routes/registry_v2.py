@@ -41,6 +41,7 @@ from stardag_api.schemas_v2 import (
 from stardag_api.routes.registry_v2_builds import router as builds_router
 from stardag_api.routes.registry_v2_executions import router as executions_router
 from stardag_api.routes.registry_v2_guard import v2_write_guard
+from stardag_api.routes.registry_v2_reads import router as reads_router
 from stardag_api.routes.registry_v2_scope import router as scope_router
 from stardag_api.routes.registry_v2_wakeups import router as wakeups_router
 from stardag_api.services import (
@@ -304,5 +305,6 @@ async def renew_claim(task_id: str, body: RenewRequest, db: Db, auth: Auth):
 
 router.include_router(builds_router)
 router.include_router(executions_router)
+router.include_router(reads_router)
 router.include_router(scope_router)
 router.include_router(wakeups_router)

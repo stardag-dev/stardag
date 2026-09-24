@@ -71,6 +71,7 @@ async def test_static_path_over_http(client: AsyncClient, h: Harness):
     assert frontier["sealed"] and not frontier["plan_complete"]
     (runnable,) = frontier["runnable"]
     assert runnable["task_id"] == leaf.task_id and runnable["body"] == leaf.body
+    assert (runnable["attempts"], runnable["interruptions"]) == (0, 0)
 
     execution = str(uuid4())
     base = f"/plans/{plan['id']}/members"

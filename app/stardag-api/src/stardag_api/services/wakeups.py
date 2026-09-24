@@ -18,10 +18,17 @@ write that can change a build's frontier. So the wake-up is split in two:
   handed out once per :data:`WAKE_HANDOUT_WINDOW` by stamping
   ``tick_requested_at``, so N concurrent askers produce one spawn.
 
-Build rows are flagged ``FOR NO KEY UPDATE SKIP LOCKED``: a task transition
-holds a task row lock, and every lifecycle path takes build then tasks, so
-waiting here would invert that order. A build locked by someone else is
-being moved by a lifecycle call and needs no wake-up from this write.
+The flags live on ``build_wake`` (one row per build), not on ``build``: a
+claiming start holds its build row ``FOR SHARE`` while it holds a task row,
+so a flagger — itself inside a task transition — could neither wait for
+the build row (the lock order is build → task; waiting would deadlock
+against the claim's task lock) nor ``SKIP LOCKED`` it without losing the
+wake-up of every build with a claim in flight. Flagging reads ``build``
+without a lock and locks only ``build_wake`` rows, ``FOR NO KEY UPDATE SKIP
+LOCKED`` in build-id order; those rows are locked only by other flaggers,
+``notify`` and ``wake-candidates``, each for one short statement and none
+while waiting on anything else, so a skipped row is one whose flag another
+writer is setting at that moment.
 
 The scheduler lease is two owner-checked columns on ``build``: at most one
 tick drives a build; a lapsed lease is taken over by the next acquire.
@@ -40,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stardag_api.models import (
     Build,
     BuildStatus,
+    BuildWake,
     Plan,
     PlanMember,
     Task,
@@ -89,22 +97,25 @@ async def _flag(
     exclude_build_id: UUID | None,
     now: datetime,
 ) -> None:
+    # The build row is read, never locked (see the module docstring); only
+    # the wake rows are.
     targets = (
-        select(Build.id)
+        select(BuildWake.build_id)
+        .join(Build, Build.id == BuildWake.build_id)
         .where(
-            Build.id.in_(build_ids),
-            Build.environment_id == environment_id,
+            BuildWake.build_id.in_(build_ids),
+            BuildWake.environment_id == environment_id,
             Build.status == BuildStatus.RUNNING,
             Build.reactive_app_name.is_not(None),
         )
-        .order_by(Build.id)
-        .with_for_update(key_share=True, skip_locked=True)
+        .order_by(BuildWake.build_id)
+        .with_for_update(of=BuildWake, key_share=True, skip_locked=True)
     )
     if exclude_build_id is not None:
-        targets = targets.where(Build.id != exclude_build_id)
+        targets = targets.where(BuildWake.build_id != exclude_build_id)
     await session.execute(
-        update(Build)
-        .where(Build.id.in_(targets))
+        update(BuildWake)
+        .where(BuildWake.build_id.in_(targets))
         .values(needs_tick_at=now)
         .execution_options(synchronize_session=False)
     )
@@ -181,9 +192,22 @@ def _lease_live(build: Build, now: datetime) -> bool:
     )
 
 
+async def _build(session: AsyncSession, environment_id: UUID, build_id: UUID) -> Build:
+    """The build row, read without a lock and re-read from the database."""
+    build = await session.scalar(
+        select(Build)
+        .where(Build.environment_id == environment_id, Build.id == build_id)
+        .execution_options(populate_existing=True)
+    )
+    if build is None:
+        raise NotFound("unknown_build", f"no build {build_id}", build_id=str(build_id))
+    return build
+
+
 async def _locked_build(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> Build:
+    """The build row ``FOR NO KEY UPDATE``: the lease writers only."""
     build = await session.scalar(
         select(Build)
         .where(Build.environment_id == environment_id, Build.id == build_id)
@@ -193,6 +217,25 @@ async def _locked_build(
     if build is None:
         raise NotFound("unknown_build", f"no build {build_id}", build_id=str(build_id))
     return build
+
+
+async def _locked_wake(
+    session: AsyncSession, environment_id: UUID, build_id: UUID
+) -> BuildWake:
+    """The build's wake row ``FOR NO KEY UPDATE`` (waited for: its holders
+    hold it for one statement and wait on nothing)."""
+    wake = await session.scalar(
+        select(BuildWake)
+        .where(
+            BuildWake.environment_id == environment_id,
+            BuildWake.build_id == build_id,
+        )
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
+    if wake is None:
+        raise NotFound("unknown_build", f"no build {build_id}", build_id=str(build_id))
+    return wake
 
 
 async def notify(
@@ -210,23 +253,26 @@ async def notify(
     call must never see the build flagged and unstamped), and the lease is
     read **after** that commit: ``scheduler_live`` then means the lease was
     still held once the flag was durable, so its holder cannot exit without
-    seeing it. If it was, the stamp is put back.
+    seeing it. If it was, the stamp is put back. Only the wake row is
+    locked; the build row is read.
     """
     async with transaction(session):
-        build = await _locked_build(session, environment_id, build_id)
+        wake = await _locked_wake(session, environment_id, build_id)
+        build = await _build(session, environment_id, build_id)
         now = utc_now()
         running = build.status == BuildStatus.RUNNING
         if running:
-            build.needs_tick_at = now
-        previous_stamp = build.tick_requested_at
+            wake.needs_tick_at = now
+        previous_stamp = wake.tick_requested_at
         stamped = can_spawn and running
         if stamped:
-            build.tick_requested_at = now
+            wake.tick_requested_at = now
     async with transaction(session):
-        build = await _locked_build(session, environment_id, build_id)
+        wake = await _locked_wake(session, environment_id, build_id)
+        build = await _build(session, environment_id, build_id)
         live = _lease_live(build, utc_now())
-        if live and stamped and build.tick_requested_at == now:
-            build.tick_requested_at = previous_stamp
+        if live and stamped and wake.tick_requested_at == now:
+            wake.tick_requested_at = previous_stamp
     return NotifyState(build_id=build_id, needs_tick=running, scheduler_live=live)
 
 
@@ -234,14 +280,16 @@ async def read_notify(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> NotifyState:
     """The flag, one row, nothing derived (a lingering tick's poll)."""
-    build = await session.scalar(
-        select(Build).where(
-            Build.environment_id == environment_id, Build.id == build_id
+    needs_tick_at = await session.scalar(
+        select(BuildWake.needs_tick_at).where(
+            BuildWake.environment_id == environment_id,
+            BuildWake.build_id == build_id,
         )
     )
-    if build is None:
-        raise NotFound("unknown_build", f"no build {build_id}", build_id=str(build_id))
-    return NotifyState(build_id=build_id, needs_tick=build.needs_tick_at is not None)
+    if needs_tick_at is None:
+        # Unflagged, or no such build: tell the two apart only then.
+        await _build(session, environment_id, build_id)
+    return NotifyState(build_id=build_id, needs_tick=needs_tick_at is not None)
 
 
 async def clear_notify(
@@ -250,8 +298,8 @@ async def clear_notify(
     """Clear the flag: a tick does this right before computing the frontier,
     so a notify landing mid-tick re-sets it and is never lost."""
     async with transaction(session):
-        build = await _locked_build(session, environment_id, build_id)
-        build.needs_tick_at = None
+        wake = await _locked_wake(session, environment_id, build_id)
+        wake.needs_tick_at = None
     return NotifyState(build_id=build_id, needs_tick=False)
 
 
@@ -270,36 +318,44 @@ async def wake_candidates(
     """Hand out flagged RUNNING reactive builds with no live lease, not
     handed out within :data:`WAKE_HANDOUT_WINDOW`, oldest flag first (at
     most :data:`MAX_WAKE_CANDIDATES`). Each returned build is stamped
-    ``tick_requested_at`` in this transaction, rows taken ``SKIP LOCKED``,
-    so concurrent callers get disjoint answers."""
+    ``tick_requested_at`` in this transaction, its wake row taken ``SKIP
+    LOCKED``, so concurrent callers get disjoint answers.
+
+    The build row (status, lease) is read, not locked: a lease being
+    acquired concurrently may not be seen yet, and the tick spawned for it
+    finds the lease held and exits — one spare container, bounded by the
+    hand-out window, where locking would put the build row back in the
+    flagging path."""
     async with transaction(session):
         now = utc_now()
         limit = max(1, min(limit, MAX_WAKE_CANDIDATES))
-        chosen = (
-            await session.scalars(
-                select(Build)
+        rows = (
+            await session.execute(
+                select(BuildWake, Build.reactive_app_name)
+                .join(Build, Build.id == BuildWake.build_id)
                 .where(
-                    Build.environment_id == environment_id,
+                    BuildWake.environment_id == environment_id,
+                    BuildWake.needs_tick_at.is_not(None),
+                    BuildWake.tick_requested_at.is_(None)
+                    | (BuildWake.tick_requested_at < now - WAKE_HANDOUT_WINDOW),
                     Build.status == BuildStatus.RUNNING,
                     Build.reactive_app_name.is_not(None),
-                    Build.needs_tick_at.is_not(None),
-                    Build.tick_requested_at.is_(None)
-                    | (Build.tick_requested_at < now - WAKE_HANDOUT_WINDOW),
                     Build.scheduler_lease_until.is_(None)
                     | (Build.scheduler_lease_until <= now),
                 )
-                .order_by(Build.needs_tick_at, Build.id)
+                .order_by(BuildWake.needs_tick_at, BuildWake.build_id)
                 .limit(limit)
-                .with_for_update(key_share=True, skip_locked=True)
+                .with_for_update(of=BuildWake, key_share=True, skip_locked=True)
             )
         ).all()
-        for build in chosen:
-            build.tick_requested_at = now
-        return [
-            WakeCandidate(build_id=b.id, reactive_app_name=b.reactive_app_name)
-            for b in chosen
-            if b.reactive_app_name is not None
-        ]
+        chosen: list[WakeCandidate] = []
+        for wake, app_name in rows:
+            wake.tick_requested_at = now
+            if app_name is not None:
+                chosen.append(
+                    WakeCandidate(build_id=wake.build_id, reactive_app_name=app_name)
+                )
+        return chosen
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.config import limits_settings
@@ -35,6 +35,17 @@ async def charge_instances(
     limit = limits_settings.max_task_instances_per_environment_24h
     if limit is None or inserted == 0:
         return
+    # Serialise count-and-commit per environment: two chunks inserting at
+    # once would otherwise each count only their own uncommitted rows and
+    # both pass. The lock is taken after this chunk's insert and held to its
+    # commit, so a waiting chunk's count (a fresh READ COMMITTED snapshot)
+    # includes the rows of the one it waited for. A chunk waiting here has
+    # only inserted rows (tasks, instances), and a conflict on those is met
+    # before this point, so the holder does not wait on the waiter.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"quota:task_instance:{environment_id}"},
+    )
     count = await session.scalar(
         select(func.count())
         .select_from(TaskInstance)

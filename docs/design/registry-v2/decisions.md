@@ -358,3 +358,41 @@ NULL`, where v1 compared it with the status time). The `preempted`
   make an overlap safe, so the guard keys on the build, not the values.
   The cost is more containers — a lingering tick now holds one of its own
   — accepted.
+
+## Implementation notes, I0 step 3c (2026-09-24)
+
+- **The wake-up flags move to `build_wake`.** Step 3a's round made a
+  claiming start hold its build row `FOR SHARE` (so a terminal transition
+  or a delete is a synchronisation point for claims). Flagging set
+  `needs_tick_at` on the build row `FOR NO KEY UPDATE SKIP LOCKED`, which
+  conflicts with `FOR SHARE`: every build with a claim in flight was
+  skipped and its wake-up lost until the watchdog. Blocking instead would
+  deadlock (the flagger holds a task row; the claim holds the build and
+  wants its task row). `needs_tick_at` and `tick_requested_at` are now on
+  `build_wake` (one row per build, created with it, cascaded with it);
+  flagging, `notify`, `DELETE …/notify` and `wake-candidates` lock only
+  those rows and read `build` unlocked. `wake-candidates` therefore reads
+  the lease without the build lock: a lease being acquired concurrently can
+  be missed, which costs one spawned tick that finds the lease held and
+  exits, bounded by the hand-out window. The v2 migration is amended in
+  place (never deployed).
+- **Currency checks serialise with activation** (a #382 finding, carried):
+  `/activate` locked only its deployment row, so a seal (or resume's
+  reactivation) under D2 could read D2 as current while D3's activation was
+  committing, and seal after it. Both now take the per-`(environment, kind,
+app)` advisory lock that create uses: activation exclusively, the checks
+  shared (they do not wait for each other) and held to their commit.
+- **A renewal locks its limit rows** (a #382 finding, carried):
+  `claim/renew` extended the expiry without the limit rows, so a claim on a
+  shared key could count the holder as lapsed (old expiry), take the slot,
+  and leave two live holders once the renewal committed. The renewal now
+  locks the task's limit rows `FOR UPDATE` in key order (after the task
+  row, as a claim does) and re-reads the clock before extending.
+- **Attempt counts on the frontier.** `runnable` and `running` items carry
+  `attempts` and `interruptions`, counted per request from the ledger (D9)
+  over **all** of the build's plans: a rollover to a new plan is the same
+  request, and resetting the budget there would let a deploy loop a
+  failing task forever. Another build's executions of the same task are
+  not counted (its budget is its own). Discovery jobs carry none. The
+  quota count's `task_instance (environment_id, created_at)` index, noted
+  missing in step 3b, now exists.

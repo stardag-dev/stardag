@@ -4,6 +4,7 @@ from stardag_api.models.api_key import ApiKey
 from stardag_api.models.base import Base, TimestampMixin
 from stardag_api.models.build import Build
 from stardag_api.models.build_tick_summary import BuildTickSummary
+from stardag_api.models.build_wake import BuildWake
 from stardag_api.models.concurrency_limit import (
     EnvironmentConcurrencyLimit,
     TaskLimitKey,
@@ -42,6 +43,7 @@ __all__ = [
     "Build",
     "BuildStatus",
     "BuildTickSummary",
+    "BuildWake",
     "ClaimOutcome",
     "Deployment",
     "DeploymentKind",
