@@ -10,11 +10,9 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Query
 
-from stardag_api.auth import SdkAuth, require_sdk_auth
-from stardag_api.db import get_db
+from stardag_api.routes.registry_v2._common import Auth, Db
 from stardag_api.schemas_v2 import (
     BuildResponse,
     LeaseResponse,
@@ -30,8 +28,6 @@ from stardag_api.services import reactive, wakeups
 
 router = APIRouter(tags=["registry-v2"])
 
-Db = Annotated[AsyncSession, Depends(get_db)]
-Auth = Annotated[SdkAuth, Depends(require_sdk_auth)]
 Owner = Annotated[str, Query(min_length=1, max_length=64)]
 LeaseTtl = Annotated[
     int,

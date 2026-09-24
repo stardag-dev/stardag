@@ -3,8 +3,9 @@ limit (``LIMITS_MAX_REQUESTS_PER_MINUTE``), carried over from v1.
 
 A router-level dependency of the v2 router, so no write route can be added
 without it; reads (``GET``/``HEAD``) are not limited. Disabled unless the
-setting is configured. The 24-hour creation quota is charged in the
-registration service, where the inserted rows are known.
+setting is configured. The 24-hour creation quotas are charged in the
+services that insert the rows (registration, artifact upload), where the
+inserted rows are known.
 """
 
 from __future__ import annotations

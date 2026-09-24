@@ -39,12 +39,16 @@ class LimitsSettings(BaseSettings):
     # rows, the table a non-significant field can inflate. Charged only for
     # rows actually inserted.
     max_task_instances_per_environment_24h: Annotated[int, Field(ge=1)] | None = None
+    # Per-environment 24h creation quota of task_artifact rows (v1's
+    # per-workspace artifact count, re-implemented on the v2 pattern).
+    max_artifacts_per_environment_24h: Annotated[int, Field(ge=1)] | None = None
 
     # Structural limits
     max_dependency_ids_per_task: Annotated[int, Field(ge=1)] | None = None
     max_artifacts_per_task: Annotated[int, Field(ge=1)] | None = None
 
-    # Tenancy quotas (enforced in routes/workspaces.py)
+    # Tenancy quotas (enforced in routes/workspaces.py and
+    # routes/workspace_environments.py)
     max_workspaces_per_user: Annotated[int, Field(ge=1)] | None = None
     max_environments_per_workspace: Annotated[int, Field(ge=1)] | None = None
 

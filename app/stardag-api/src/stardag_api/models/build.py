@@ -208,6 +208,10 @@ class Build(EnvironmentScopedMixin, Base):
     # ``external_id`` of the user who triggered the current status, when it
     # came from a manual override. NULL for machine-driven transitions.
     status_triggered_by_user_id: Mapped[str | None] = mapped_column(String(255))
+    # Why the build is FAILED: the message of the BUILD_FAILED that produced
+    # the current status. NULL for every other status, so a build resumed or
+    # completed after a failure does not keep explaining it.
+    error_message: Mapped[str | None] = mapped_column(Text)
     # True iff the event that produced the current status was BUILD_RESUMED.
     is_resumed: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()

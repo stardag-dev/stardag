@@ -49,7 +49,13 @@ from stardag_api.services.registration import lock_build
 from stardag_api.services.transition_types import ACTIONABLE_STATUSES
 from stardag_api.services.tx import transaction
 
-__all__ = ["ACTIONABLE_STATUSES", "Frontier", "FrontierMember", "get_frontier"]
+__all__ = [
+    "ACTIONABLE_STATUSES",
+    "Frontier",
+    "FrontierMember",
+    "attempt_counts",
+    "get_frontier",
+]
 
 
 @dataclass(frozen=True)
@@ -153,7 +159,7 @@ async def get_frontier(
         bodies = await _bodies(
             session, [r.instance_id for r in (*runnable, *discovery, *running)]
         )
-        counts = await _attempts(
+        counts = await attempt_counts(
             session, build_id, [r.task_pk for r in (*runnable, *running)]
         )
         return Frontier(
@@ -216,7 +222,7 @@ async def _bodies(
     return {instance_id: body for instance_id, body in rows.tuples()}
 
 
-async def _attempts(
+async def attempt_counts(
     session: AsyncSession, build_id: UUID, task_pks: list[UUID]
 ) -> dict[UUID, tuple[int, int]]:
     """Per task: (attempts, interruptions) over the executions of **any** of

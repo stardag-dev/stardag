@@ -37,6 +37,10 @@ MAX_CLAIM_TTL_SECONDS = 24 * 3600
 PREEMPT_RESTART_GRACE = timedelta(seconds=900)
 
 
+#: The outcomes an operator end (``/executions/{id}/stopped``) records.
+OPERATOR_END_OUTCOMES = (ExecutionOutcome.STOPPED, ExecutionOutcome.LOST)
+
+
 class TransitionKind(str, enum.Enum):
     START = "start"
     COMPLETE = "complete"
@@ -63,6 +67,8 @@ class TransitionKind(str, enum.Enum):
 class Transition:
     kind: TransitionKind
     execution_id: UUID | None = None
+    #: An operator end's recorded outcome (``stopped`` or ``lost``).
+    outcome: ExecutionOutcome | None = None
     claim: bool = False
     claim_ttl_seconds: int | None = None
     executor: str | None = None
@@ -141,8 +147,14 @@ class Transition:
         return cls(TransitionKind.CANCEL)
 
     @classmethod
-    def stop(cls, execution_id: UUID) -> Transition:
-        return cls(TransitionKind.STOP, execution_id=execution_id)
+    def stop(
+        cls,
+        execution_id: UUID,
+        outcome: ExecutionOutcome = ExecutionOutcome.STOPPED,
+    ) -> Transition:
+        if outcome not in OPERATOR_END_OUTCOMES:
+            raise ValueError(f"not an operator end: {outcome}")
+        return cls(TransitionKind.STOP, execution_id=execution_id, outcome=outcome)
 
     @classmethod
     def release(cls, reason: str) -> Transition:

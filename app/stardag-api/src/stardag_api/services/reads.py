@@ -1,17 +1,16 @@
-"""Reads the SDK needs beyond the frontier: the watchdog's build listing,
-a plan's roots for rollover, and a completion with its instances.
+"""Reads of builds, tasks and the event log (plans: ``plan_reads.py``).
 
 - ``GET /builds`` (:func:`list_builds`): builds of the caller's environment,
   most recently active first, filtered by status and reactive app — the
-  watchdog's "RUNNING builds owned by app X".
-- ``GET /plans/{id}/roots`` (:func:`plan_roots`): the plan's root members
-  with their instance bodies, which a rolling-over tick rehydrates under its
-  own code and re-hashes against ``build.root_task_ids`` (design.md,
-  "Rollover", step 2).
+  watchdog's "RUNNING builds owned by app X" — a page at a time, with the
+  total the filters match.
 - ``GET /tasks/{task_id}`` (:func:`get_task`): a ``task`` row holds no
   parameters, so a completion is returned with its **instances** — each a
   body under one scope — newest first. Which body to rehydrate is the
-  caller's choice (they are different constructions of one promise).
+  caller's choice (they are different constructions of one promise). The
+  claim's holder is named by plan and build.
+- ``GET /tasks`` (:func:`list_tasks`): completions by status, most recent
+  status change first, a page at a time (triage).
 - ``GET /tasks/{task_id}/events`` and ``GET /builds/{id}/events``
   (:func:`list_events`): the append-only log, oldest first. The status
   columns are one row per task, overwritten by whoever wrote last; the log
@@ -28,7 +27,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import Select, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -36,18 +35,26 @@ from stardag_api.models import (
     BuildStatus,
     Event,
     EventType,
-    PlanMember,
+    Plan,
     Task,
     TaskInstance,
     TaskStatus,
 )
 from stardag_api.services.builds import get_build
 from stardag_api.services.errors import NotFound
-from stardag_api.services.frontier import FrontierMember
-from stardag_api.services.registration import get_plan
+from stardag_api.services.paging import decode_cursor, encode_cursor
 
 #: Bounds of one listing.
 MAX_LIST_LIMIT = 500
+
+
+@dataclass(frozen=True)
+class BuildPage:
+    builds: list[Build]
+    #: Builds matching the filters, over every page.
+    total: int
+    #: Pass back as ``cursor`` for the next page; None on the last one.
+    next_cursor: str | None
 
 
 async def list_builds(
@@ -57,70 +64,41 @@ async def list_builds(
     status: BuildStatus | None = None,
     reactive_app_name: str | None = None,
     limit: int = 100,
-) -> list[Build]:
-    """Builds, most recently active first (``ix_build_environment_status``
-    serves a status filter with this order)."""
-    stmt = select(Build).where(Build.environment_id == environment_id)
+    cursor: str | None = None,
+) -> BuildPage:
+    """Builds, most recently active first, a page at a time
+    (``ix_build_environment_status`` serves a status filter with this
+    order). ``total`` counts every build the filters match."""
+    limit = max(1, min(limit, MAX_LIST_LIMIT))
+    filters = [Build.environment_id == environment_id]
     if status is not None:
-        stmt = stmt.where(Build.status == status)
+        filters.append(Build.status == status)
     if reactive_app_name is not None:
-        stmt = stmt.where(Build.reactive_app_name == reactive_app_name)
-    stmt = stmt.order_by(Build.last_active_at.desc(), Build.id.desc()).limit(
-        max(1, min(limit, MAX_LIST_LIMIT))
+        filters.append(Build.reactive_app_name == reactive_app_name)
+    total = await session.scalar(
+        select(func.count()).select_from(Build).where(*filters)
     )
-    return list((await session.scalars(stmt)).all())
-
-
-@dataclass(frozen=True)
-class PlanRoots:
-    plan_id: UUID
-    build_id: UUID
-    deployment_id: UUID
-    settings_hash: str
-    roots: list[FrontierMember]
-
-
-async def plan_roots(
-    session: AsyncSession, environment_id: UUID, plan_id: UUID
-) -> PlanRoots:
-    """The plan's root members with their instance bodies, in ``task_id``
-    order (excluded roots included: an excluded root has already failed the
-    build, and rollover compares the whole request)."""
-    plan = await get_plan(session, environment_id, plan_id)
-    rows = (
-        await session.execute(
-            select(
-                Task.task_id,
-                PlanMember.task_pk,
-                PlanMember.instance_id,
-                TaskInstance.instance_hash,
-                TaskInstance.body,
-                Task.status,
+    stmt = select(Build).where(*filters)
+    if cursor is not None:
+        at, after_id = decode_cursor(cursor)
+        stmt = stmt.where(tuple_(Build.last_active_at, Build.id) < (at, after_id))
+    rows = list(
+        (
+            await session.scalars(
+                stmt.order_by(Build.last_active_at.desc(), Build.id.desc()).limit(
+                    limit + 1
+                )
             )
-            .select_from(PlanMember)
-            .join(TaskInstance, TaskInstance.id == PlanMember.instance_id)
-            .join(Task, Task.id == PlanMember.task_pk)
-            .where(PlanMember.plan_id == plan.id, PlanMember.is_root.is_(True))
-            .order_by(Task.task_id)
-        )
-    ).all()
-    return PlanRoots(
-        plan_id=plan.id,
-        build_id=plan.build_id,
-        deployment_id=plan.deployment_id,
-        settings_hash=plan.settings_hash,
-        roots=[
-            FrontierMember(
-                task_id=r.task_id,
-                task_pk=r.task_pk,
-                instance_id=r.instance_id,
-                instance_hash=r.instance_hash,
-                status=r.status,
-                is_root=True,
-                body=r.body,
-            )
-            for r in rows
-        ],
+        ).all()
+    )
+    more = len(rows) > limit
+    rows = rows[:limit]
+    return BuildPage(
+        builds=rows,
+        total=total or 0,
+        next_cursor=(
+            encode_cursor(rows[-1].last_active_at, rows[-1].id) if more else None
+        ),
     )
 
 
@@ -148,8 +126,38 @@ class TaskView:
     completed_at: datetime | None
     error_message: str | None
     claim_expires_at: datetime | None
+    #: The claim's holder, while RUNNING (live or lapsed): the plan it was
+    #: granted through, and that plan's build.
+    claim_plan_id: UUID | None
+    claim_build_id: UUID | None
+    #: The current execution (the claim's, while RUNNING).
     execution_id: UUID | None
     instances: list[InstanceView] = field(default_factory=list)
+
+    @classmethod
+    def of(
+        cls,
+        task: Task,
+        claim_build_id: UUID | None,
+        instances: list[InstanceView] | None = None,
+    ) -> TaskView:
+        return cls(
+            task_id=task.task_id,
+            task_namespace=task.task_namespace,
+            task_name=task.task_name,
+            version=task.version,
+            output_uri=task.output_uri,
+            status=task.status,
+            status_at=task.status_at,
+            started_at=task.started_at,
+            completed_at=task.completed_at,
+            error_message=task.error_message,
+            claim_expires_at=task.claim_expires_at,
+            claim_plan_id=task.claim_plan_id,
+            claim_build_id=claim_build_id,
+            execution_id=task.execution_id,
+            instances=instances or [],
+        )
 
 
 async def get_task(
@@ -157,13 +165,16 @@ async def get_task(
 ) -> TaskView:
     """A completion in the caller's environment and its instances, newest
     first (at most ``limit``)."""
-    task = await session.scalar(
-        select(Task).where(
-            Task.environment_id == environment_id, Task.task_id == task_id
+    row = (
+        await session.execute(
+            _with_claim_build(select(Task)).where(
+                Task.environment_id == environment_id, Task.task_id == task_id
+            )
         )
-    )
-    if task is None:
+    ).one_or_none()
+    if row is None:
         raise NotFound("unknown_task", f"no task {task_id}", task_id=task_id)
+    task, claim_build_id = row._tuple()
     instances = (
         await session.scalars(
             select(TaskInstance)
@@ -175,19 +186,9 @@ async def get_task(
             .limit(max(1, min(limit, MAX_LIST_LIMIT)))
         )
     ).all()
-    return TaskView(
-        task_id=task.task_id,
-        task_namespace=task.task_namespace,
-        task_name=task.task_name,
-        version=task.version,
-        output_uri=task.output_uri,
-        status=task.status,
-        status_at=task.status_at,
-        started_at=task.started_at,
-        completed_at=task.completed_at,
-        error_message=task.error_message,
-        claim_expires_at=task.claim_expires_at,
-        execution_id=task.execution_id,
+    return TaskView.of(
+        task,
+        claim_build_id,
         instances=[
             InstanceView(
                 id=i.id,
@@ -200,6 +201,63 @@ async def get_task(
             )
             for i in instances
         ],
+    )
+
+
+def _with_claim_build(stmt: Select[tuple[Task]]) -> Select[tuple[Task, UUID | None]]:
+    """``stmt`` over ``task`` with the claim-holding plan's build alongside."""
+    return stmt.add_columns(Plan.build_id).outerjoin(
+        Plan, Plan.id == Task.claim_plan_id
+    )
+
+
+@dataclass(frozen=True)
+class TaskPage:
+    tasks: list[TaskView]
+    next_cursor: str | None
+
+
+async def list_tasks(
+    session: AsyncSession,
+    environment_id: UUID,
+    *,
+    status: TaskStatus | None = None,
+    limit: int = 100,
+    cursor: str | None = None,
+) -> TaskPage:
+    """Completions, most recent status change first, a page at a time,
+    optionally of one status — triage's "what is FAILED / RUNNING here"
+    (``ix_task_environment_status``). Without instances: ``GET
+    /tasks/{task_id}`` carries those. ``status_at`` is written at
+    registration and by every transition, so every task has one."""
+    limit = max(1, min(limit, MAX_LIST_LIMIT))
+    stmt = _with_claim_build(select(Task)).where(
+        Task.environment_id == environment_id, Task.status_at.is_not(None)
+    )
+    if status is not None:
+        stmt = stmt.where(Task.status == status)
+    if cursor is not None:
+        at, after_id = decode_cursor(cursor)
+        stmt = stmt.where(tuple_(Task.status_at, Task.id) < (at, after_id))
+    rows = (
+        (
+            await session.execute(
+                stmt.order_by(Task.status_at.desc(), Task.id.desc()).limit(limit + 1)
+            )
+        )
+        .tuples()
+        .all()
+    )
+    more = len(rows) > limit
+    page = [TaskView.of(t, build_id) for t, build_id in rows[:limit]]
+    last = rows[limit - 1][0] if more else None
+    return TaskPage(
+        tasks=page,
+        next_cursor=(
+            encode_cursor(last.status_at, last.id)
+            if last is not None and last.status_at is not None
+            else None
+        ),
     )
 
 
@@ -272,13 +330,14 @@ async def list_events(
 
 
 __all__ = [
+    "BuildPage",
     "EventView",
     "InstanceView",
     "MAX_LIST_LIMIT",
-    "PlanRoots",
+    "TaskPage",
     "TaskView",
     "get_task",
     "list_builds",
     "list_events",
-    "plan_roots",
+    "list_tasks",
 ]

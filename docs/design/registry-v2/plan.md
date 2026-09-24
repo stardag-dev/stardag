@@ -149,7 +149,7 @@ section below; Linear issues (next section) group them.
 | I2  | server               | **Registration service** (`services/registration.py`): plans lookup-or-create, chunked `POST /plans/{id}/members`, `/seal`, `/members/{task_id}/yield`, `instance_conflict`, the flag, idempotency tests (STA-48/51/54 patterns), scope-consistency of edges                                                                                                                                                                                                                                                                                                                                                                                   | I1                                 |
 | I3  | server               | **Frontier and transitions**: closure step + runnable/discovery-job/running queries over `plan_member`; skip-blocked and exclusion cascade; one `transition_task()` with the authority rule for every event, one terminal report per execution, lapsed-claim takeover; `execution` ledger writes (two ends); observation-driven invalidation (`observed_at` guard, no operator route); `plan_complete` recomputed in `/complete`                                                                                                                                                                                                               | I1                                 |
 | I4  | server               | **Deployments, builds, wake-ups, reads**: client-minted deployments with `kind`; `settings`; build lifecycle releasing claims on `complete`, `fail` and `cancel` (`exit-early` releases nothing); wake-ups over membership; `builds stop`/orphans over executions; read routes (instances, plans, executions, graph over instance edges); delete every v1 compat shim; `/api/v2` prefix, `/api/v1` removed                                                                                                                                                                                                                                     | I1                                 |
-| I5  | server               | **Extract what stays** from `routes/builds.py` into services (the ~50% kept), so the v2 file is not 5,000 lines (absorbs STA-71)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | I2–I4                              |
+| I5  | server               | **Server leftovers**: the reads the CLI and UI need (a plan, a build's plans, the plan graph, a task's executions, a deployment, tasks by status, build-list paging, the claim on the task, the build's failure reason); the `lost` execution outcome; the 24-hour artifact quota; every module ≤ 800 lines, routes one module per resource (absorbs STA-71; the v1 `routes/builds.py` it was written against is already deleted)                                                                                                                                                                                                              | I2–I4                              |
 | I6  | SDK core             | `StardagField(significant)`; two hashes on `BaseTask`; remove `significance`, `hash_exclude` and `build_config.py` (`compat_default` stays, D12), the ContextVar transport, `RegistryTooOldError` gate; instance body dump and rehydration; nested-model `significant`; discovery with `InstanceConflictError`; the instance hash as the hash of the canonical body, sets sorted in the body dump, the round-trip stability check (`UnstableSerializationError`) at registration; the instance/task-object vocabulary in the docstrings of `BaseTask`, `task_from_registry_data` and the registry client; `task_uuid5_namespace_provider` kept | design approved (parallel with I1) |
 | I7  | SDK engines + Modal  | v2 registry client; plan-based registration (chunks + seal) and `/yield` in both engines, same order; tick: discovery jobs, deployment-id rollover, `superseded`; executor passes `STARDAG_PLAN_ID` + `settings` env, drops `STARDAG_BUILD_CONFIG`/`STARDAG_SCOPE_KEY`; `stardag modal deploy` mints and bakes `STARDAG_DEPLOYMENT_ID`, creates before and activates after the deploy; local deployments lookup-or-create; hybrid drivers and `reactive_discovery="local"` plan under the app's current deployment (D13)                                                                                                                       | I2–I4, I6                          |
 | I8  | CLI                  | `stardag build` (STA-70: roots from `module:attr`, `--settings KEY=VALUE`, `--app`); `builds stop --not-in-current-plan`; `executions list`; `deployments list` with `kind`; `tasks check` (runs `complete()` locally and reports the observation); `plans show`; `tasks show` surfaces `TASK_STRUCTURE_DIVERGED`                                                                                                                                                                                                                                                                                                                              | I4, I7                             |
@@ -275,7 +275,23 @@ assignee the maintainer.
 - [ ] I2 — Registration service
 - [ ] I3 — Frontier and transitions
 - [ ] I4 — Deployments, builds, wake-ups, reads
-- [ ] I5 — Extract what stays
+- [ ] I5 — Server leftovers (in review, draft PR #390, stacked on #386).
+      Reads: `GET /plans/{id}` (lifecycle, scope with the deployment
+      resolved, member counts by status, excluded apart);
+      `GET /builds/{id}/plans`; `GET /plans/{id}/graph` (the shape the UI's
+      `fetchPlanGraph` assumed, plus `instance_hash`, `attempts`,
+      `interruptions`); `GET /tasks/{id}/executions`;
+      `GET /deployments/{id}`; `GET /tasks?status=&limit=&cursor=`;
+      build-list paging (`cursor`, `limit`, `total`); `claim_plan_id` and
+      `claim_build_id` on the task, `error_message` on the build, `build_id`
+      on ledger rows. `POST /executions/{id}/stopped {outcome: "lost"}`. The
+      24-hour artifact quota per environment. Extraction: routes under
+      `routes/registry_v2/` one module per resource, `routes/workspaces.py`
+      split in three, the read schemas in `schemas_v2_reads.py`, plan reads
+      in `services/plan_reads.py`; every module under 800 lines. Not done:
+      no route for a bare observation (`tasks check --report`, I8) — an
+      observation outside registration has no plan to name, which is a
+      design question, not a leftover.
 - [ ] I6 — SDK core (in progress — hashing and field layer done; I7 pending)
 - [ ] I7 — SDK engines + Modal (PR #384 merged). The client, both
       engines, the tick, the worker and `stardag modal deploy` run on
@@ -283,7 +299,7 @@ assignee the maintainer.
       route the client calls is served (step 3c, step 4); proven live in I0
       step 4. Left to I8: `builds list/stop/cleanup`, `tasks`,
       `concurrency-limits` as CLI commands.
-- [ ] I8 — CLI (in review, draft PR against `v2`). `stardag build`
+- [x] I8 — CLI (merged, PR #387). `stardag build`
       (roots from `module:attr`, `--settings`, `--app`, `--reactive`,
       `--resume`, `--dry-run`); `builds` list, show, frontier, ticks,
       stop, cancel, complete and fail, `stop` over the execution ledger with
@@ -291,7 +307,7 @@ assignee the maintainer.
       `deployments list` (`stardag modal deployments` is its Modal alias);
       `tasks show/check/retry/cancel/exclude`. Client reads added:
       `build_list`, `plan_roots_info`, `task_list_artifacts`, all on served
-      routes. Open server-contract items: no `GET /plans/{id}` (timestamps
+      routes. Server-contract items served by I5 (#390): `GET /plans/{id}`, the event read, outcome `lost`; still not served by decision (D7): a route for a bare observation. Original notes: no `GET /plans/{id}` (timestamps
       and member counts are known only for the active plan, via the
       frontier), no event read (`tasks show` cannot surface
       `TASK_STRUCTURE_DIVERGED`), no route for a bare observation

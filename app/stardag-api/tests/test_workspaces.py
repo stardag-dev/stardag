@@ -556,7 +556,7 @@ async def test_create_environment_quota(
             # None (default): cap is not enforced. The fixture already
             # created one "default" environment in this workspace.
             with patch(
-                "stardag_api.routes.workspaces.limits_settings",
+                "stardag_api.routes.workspace_environments.limits_settings",
                 LimitsSettings(max_environments_per_workspace=None),
             ):
                 r1 = await client.post(
@@ -568,7 +568,7 @@ async def test_create_environment_quota(
             # Cap of 2: the workspace now has 2 environments (default + Two),
             # so the next create must return 403.
             with patch(
-                "stardag_api.routes.workspaces.limits_settings",
+                "stardag_api.routes.workspace_environments.limits_settings",
                 LimitsSettings(max_environments_per_workspace=2),
             ):
                 r2 = await client.post(
