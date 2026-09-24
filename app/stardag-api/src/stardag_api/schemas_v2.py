@@ -501,3 +501,92 @@ class StoppedRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     outcome: Literal["stopped"] = "stopped"
+
+
+# ---------------------------------------------------------------------------
+# Reads the SDK needs: builds, plan roots, tasks, artifacts
+# ---------------------------------------------------------------------------
+
+
+class BuildListResponse(BaseModel):
+    builds: list[BuildResponse]
+
+
+class PlanRootsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    plan_id: UUID
+    build_id: UUID
+    deployment_id: UUID
+    settings_hash: str
+    roots: list[FrontierMemberResponse]
+
+
+class TaskInstanceResponse(BaseModel):
+    """One instance of a completion: its body under one scope."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    deployment_id: UUID
+    settings_hash: str
+    instance_hash: str
+    body: dict[str, Any]
+    expanded_at: datetime | None
+    created_at: datetime
+
+
+class TaskResponse(BaseModel):
+    """A completion (``task``: identity and global state, no parameters)
+    with its instances in the caller's environment, newest first."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    task_id: str
+    task_namespace: str
+    task_name: str
+    version: str | None
+    output_uri: str | None
+    status: TaskStatus
+    status_at: datetime | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None
+    claim_expires_at: datetime | None
+    execution_id: UUID | None
+    instances: list[TaskInstanceResponse]
+
+
+class ArtifactItem(BaseModel):
+    """One artifact, as the SDK dumps it. Body format (v1's): markdown as
+    ``{"content": "<markdown>"}``, json as the data dict."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=255)
+    body: dict[str, Any]
+
+
+class ArtifactUploadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: The execution that produced them, when known. Informational:
+    #: artifacts belong to the promise, whichever execution wrote them.
+    execution_id: UUID | None = None
+    artifacts: list[ArtifactItem] = Field(max_length=100)
+
+
+class TaskArtifactResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    task_id: str
+    artifact_type: str
+    name: str
+    body: Any
+    created_at: datetime
+
+
+class TaskArtifactListResponse(BaseModel):
+    artifacts: list[TaskArtifactResponse]

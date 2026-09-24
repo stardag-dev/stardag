@@ -484,7 +484,10 @@ table, plus `TASK_INVALIDATED`, `TASK_EXCLUDED`, `TASK_OBSERVED_COMPLETE`,
 
 ### Peripheral tables, re-pointed
 
-`task_artifact.task_pk` → `task` (artifacts belong to the promise).
+`task_artifact.task_pk` → `task` (artifacts belong to the promise); they
+are uploaded through the member that produced them, `POST
+/plans/{plan_id}/members/{task_id}/artifacts`, upserted per `(task, type,
+name)` as in v1, and read by `GET /tasks/{task_id}/artifacts`.
 `task_limit_key.task_pk` → `task`, written **at claim time from the claiming
 instance** and replaced on every claim (limit-key selection may read
 non-significant fields, so it is per instance; a slot is a limit key plus a
