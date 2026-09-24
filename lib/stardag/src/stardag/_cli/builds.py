@@ -1,8 +1,8 @@
 """``stardag builds``: list, inspect and end builds (registry v2).
 
-    stardag builds list [--status S] [--app A]  # GET /builds
+    stardag builds list [--status S] [--app A] [--cursor C]  # GET /builds
     stardag builds show <build-id>        # the build, its active plan and counts
-    stardag builds frontier <build-id>    # discovery jobs / runnable / running
+    stardag builds frontier <build-id>    # the three lists, needs-tick, counts
     stardag builds ticks <build-id>       # what each scheduler tick decided
     stardag builds stop <build-id>        # stop unended executions, then cancel
     stardag builds cancel <build-id>      # release the build's claims
@@ -34,7 +34,6 @@ from stardag._cli._output import (
     parse_uuid,
     short,
     stamp,
-    task_label,
 )
 from stardag._cli._registry_ctx import (
     _ENV_OPTION,
@@ -44,9 +43,10 @@ from stardag._cli._registry_ctx import (
     console,
     error_console,
 )
+from stardag._cli.builds_frontier import builds_frontier, builds_ticks
 from stardag._cli.builds_stop import builds_stop
 from stardag.exceptions import NotFoundError, StardagError
-from stardag.registry import BuildFrontier, BuildInfo, FrontierMember
+from stardag.registry import BuildFrontier, BuildInfo
 
 app = typer.Typer(
     help="List, inspect, stop and end builds in an environment.",
@@ -54,6 +54,8 @@ app = typer.Typer(
 )
 
 app.command("stop")(builds_stop)
+app.command("frontier")(builds_frontier)
+app.command("ticks")(builds_ticks)
 
 _BUILD_ID = typer.Argument(..., help="Build ID")
 
@@ -76,45 +78,67 @@ def builds_list(
         "cancelled.",
     ),
     app_name: Optional[str] = typer.Option(
-        None, "--app", help="Only builds reactively scheduled by this app."
+        None,
+        "--app",
+        "--reactive-app",
+        help="Only builds reactively scheduled by this app.",
     ),
     limit: int = typer.Option(50, "--limit", "-n", min=1, max=500),
+    cursor: Optional[str] = typer.Option(
+        None,
+        "--cursor",
+        help="Start after the previous page (the cursor it printed as next).",
+    ),
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
     json_output: bool = JSON_OPTION,
 ) -> None:
-    """List builds, most recently active first.
+    """List builds, most recently active first, a page at a time.
 
-    Reads ``GET /builds``. Writes nothing.
+    Reads ``GET /builds`` (``total`` counts every match; pass the printed
+    next cursor back as ``--cursor``). Writes nothing.
     """
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        builds = registry.build_list(
-            status=status, reactive_app_name=app_name, limit=limit
+        page = registry.build_list_page(
+            status=status, reactive_app_name=app_name, limit=limit, cursor=cursor
         )
     except StardagError as e:
         _fail(e)
     finally:
         registry.close()
     if json_output:
-        emit_json({"builds": [b.model_dump(mode="json") for b in builds]})
+        emit_json(page.model_dump(mode="json"))
         return
-    if not builds:
-        console.print("No builds match.")
+    if not page.builds:
+        console.print(f"No builds match (total {page.total}).")
         return
-    table = Table(title="Builds (most recently active first)")
-    for col in ("Build ID", "Name", "Status", "Reactive app", "Roots", "Created"):
+    table = Table(title="Builds (by last activity, most recent first)")
+    for col in (
+        "Build ID",
+        "Name",
+        "Status",
+        "Reactive app",
+        "Roots",
+        "Last active",
+        "Created",
+    ):
         table.add_column(col)
-    for b in builds:
+    for b in page.builds:
         table.add_row(
             str(b.id),
             b.name or "-",
             b.status or "-",
             b.reactive_app_name or "-",
             str(len(b.root_task_ids)),
+            stamp(b.last_active_at),
             stamp(b.created_at),
         )
     console.print(table)
+    shown = f"Showing {len(page.builds)} of {page.total}."
+    if page.next_cursor:
+        shown += f" Next page: --cursor {page.next_cursor}"
+    console.print(f"[dim]{shown}[/dim]")
 
 
 # -----------------------------------------------------------------------------
@@ -154,8 +178,9 @@ def builds_show(
     stardag_env: Optional[str] = _ENV_OPTION,
     json_output: bool = JSON_OPTION,
 ) -> None:
-    """Show one build: status, roots, its active plan (deployment, settings)
-    and the counts that say where it stands.
+    """Show one build: status (with the failure reason for a FAILED one),
+    last activity, roots, its active plan (deployment, settings) and the
+    counts that say where it stands.
 
     Reads ``GET /builds/{id}``, ``GET /builds/{id}/frontier``,
     ``GET /settings/{hash}`` and ``GET /builds/{id}/executions``. Writes
@@ -194,12 +219,15 @@ def _render_build(build: BuildInfo, plan: dict[str, Any] | None = None) -> None:
     table.add_column("Value")
     table.add_row("Name", build.name or "-")
     table.add_row("Status", build.status or "-")
+    if build.error_message:
+        table.add_row("Error", build.error_message)
     if build.is_resumed:
         table.add_row("Resumed", "yes")
     table.add_row("Description", build.description or "-")
     table.add_row("Created", stamp(build.created_at))
     table.add_row("Started", stamp(build.started_at))
     table.add_row("Completed", stamp(build.completed_at))
+    table.add_row("Last active", stamp(build.last_active_at))
     table.add_row(
         "Reactive app", build.reactive_app_name or "- (not reactively scheduled)"
     )
@@ -239,120 +267,6 @@ def _render_build(build: BuildInfo, plan: dict[str, Any] | None = None) -> None:
 
 
 # -----------------------------------------------------------------------------
-# frontier / ticks
-# -----------------------------------------------------------------------------
-
-
-def _render_members(title: str, members: list[FrontierMember]) -> None:
-    if not members:
-        return
-    table = Table(title=title)
-    table.add_column("Task ID")
-    table.add_column("Task")
-    table.add_column("Status")
-    table.add_column("Root")
-    for member in members:
-        table.add_row(
-            member.task_id,
-            task_label(member.body),
-            member.status,
-            "yes" if member.is_root else "",
-        )
-    console.print(table)
-
-
-@app.command("frontier")
-def builds_frontier(
-    build_id: str = _BUILD_ID,
-    stardag_profile: Optional[str] = _PROFILE_OPTION,
-    stardag_env: Optional[str] = _ENV_OPTION,
-    json_output: bool = JSON_OPTION,
-) -> None:
-    """Show a build's active plan as a scheduler tick sees it.
-
-    Reads ``GET /builds/{id}/frontier`` (which runs the closure step first).
-    """
-    parsed = _parse_build_id(build_id)
-    registry = _resolve_registry(stardag_profile, stardag_env)
-    try:
-        frontier = registry.build_get_frontier(parsed)
-    except StardagError as e:
-        _fail(e)
-    finally:
-        registry.close()
-    if json_output:
-        emit_json(frontier.model_dump(mode="json"))
-        return
-    summary = Table(title=f"Frontier of build {frontier.build_id}", show_header=False)
-    summary.add_column("Field", style="bold")
-    summary.add_column("Value")
-    summary.add_row("Build status", frontier.build_status or "-")
-    summary.add_row(
-        "Reactive app", frontier.reactive_app_name or "- (not reactively scheduled)"
-    )
-    summary.add_row("Plan", str(frontier.plan_id) if frontier.plan_id else "- (none)")
-    summary.add_row(
-        "Deployment", str(frontier.deployment_id) if frontier.deployment_id else "-"
-    )
-    summary.add_row("Settings", frontier.settings_hash or "-")
-    summary.add_row("Sealed", "yes" if frontier.sealed else "no")
-    summary.add_row("Plan complete", "yes" if frontier.plan_complete else "no")
-    summary.add_row("Discovery jobs", str(len(frontier.discovery_jobs)))
-    summary.add_row("Runnable", str(len(frontier.runnable)))
-    summary.add_row("Running", str(len(frontier.running)))
-    console.print(summary)
-    _render_members("Discovery jobs", frontier.discovery_jobs)
-    _render_members("Runnable", frontier.runnable)
-    _render_members("Running", frontier.running)
-    if frontier.closure is not None and frontier.closure.conflicts:
-        conflicts = ", ".join(c.task_id for c in frontier.closure.conflicts)
-        console.print(f"[bold red]Closure conflicts:[/bold red] {conflicts}")
-
-
-@app.command("ticks")
-def builds_ticks(
-    build_id: str = _BUILD_ID,
-    stardag_profile: Optional[str] = _PROFILE_OPTION,
-    stardag_env: Optional[str] = _ENV_OPTION,
-    limit: int = typer.Option(
-        20, "--limit", "-n", min=1, max=200, help="Summaries to show (newest first)."
-    ),
-    json_output: bool = JSON_OPTION,
-) -> None:
-    """Show the reactive scheduler's own account of its recent ticks.
-
-    Reads ``GET /builds/{id}/tick-summaries``.
-    """
-    parsed = _parse_build_id(build_id)
-    registry = _resolve_registry(stardag_profile, stardag_env)
-    try:
-        summaries = registry.build_list_tick_summaries(parsed, limit=limit)
-    except StardagError as e:
-        _fail(e)
-    finally:
-        registry.close()
-    if json_output:
-        emit_json({"summaries": [s.model_dump(mode="json") for s in summaries]})
-        return
-    if not summaries:
-        console.print(f"No tick summaries recorded for build {build_id}.")
-        console.print("\n[dim]Only reactively-scheduled builds report them.[/dim]")
-        return
-    table = Table(title=f"Tick summaries for build {build_id} (newest first)")
-    table.add_column("When")
-    table.add_column("Outcome")
-    table.add_column("Detail")
-    for record in summaries:
-        detail = ", ".join(
-            f"{k}={v}"
-            for k, v in sorted(record.summary.items())
-            if k != "outcome" and v not in (0, None)
-        )
-        table.add_row(stamp(record.created_at), record.outcome, detail or "-")
-    console.print(table)
-
-
-# -----------------------------------------------------------------------------
 # cancel / complete / fail
 # -----------------------------------------------------------------------------
 
@@ -363,6 +277,7 @@ def builds_cancel(
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
     yes: bool = YES_OPTION,
+    json_output: bool = JSON_OPTION,
 ) -> None:
     """Cancel a build: release the claims its plans hold, and stop there.
 
@@ -375,14 +290,23 @@ def builds_cancel(
     """
     parsed = _parse_build_id(build_id)
     if not yes:
+        if json_output:
+            error_console.print(
+                "[bold red]Error:[/bold red] refusing to prompt in --json mode; "
+                "pass --yes to confirm."
+            )
+            raise typer.Exit(1)
         typer.confirm(f"Cancel build {build_id}?", abort=True)
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        registry.build_cancel(parsed)
+        build = registry.build_cancel(parsed)
     except StardagError as e:
         _fail(e)
     finally:
         registry.close()
+    if json_output:
+        emit_json(build.model_dump(mode="json"))
+        return
     console.print(f"[green]Cancelled build[/green] {build_id}")
     console.print(
         "[dim]Its claims were released, so its tasks are available to the next "

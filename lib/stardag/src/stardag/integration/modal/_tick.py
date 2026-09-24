@@ -63,6 +63,9 @@ _TICK_KWARGS_ALLOWED = (
     "max_spawns_per_tick",
     # How many times a pass tries to spawn a claimed execution.
     "max_attempts",
+    # How many interruptions a task may have in the build before the tick
+    # fails it instead of restarting it.
+    "max_interruptions",
     # Completion checks in flight while a discovery job walks: a property
     # of the target backend this build's tasks write to.
     "max_concurrent_discover",

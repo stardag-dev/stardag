@@ -115,6 +115,7 @@ def limits_set(
     ),
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
+    json_output: bool = JSON_OPTION,
 ) -> None:
     """Create or update a named concurrency limit (upsert).
 
@@ -133,6 +134,9 @@ def limits_set(
     finally:
         registry.close()
 
+    if json_output:
+        emit_json({"key": key, "max_concurrent": max_concurrent})
+        return
     console.print(
         f"[green]Set concurrency limit[/green] {key} -> max_concurrent={max_concurrent}"
     )
@@ -144,6 +148,7 @@ def limits_delete(
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
     yes: bool = YES_OPTION,
+    json_output: bool = JSON_OPTION,
 ) -> None:
     """Delete a named concurrency limit (the key becomes unlimited).
 
@@ -151,6 +156,12 @@ def limits_delete(
     there is none).
     """
     if not yes:
+        if json_output:
+            error_console.print(
+                "[bold red]Error:[/bold red] refusing to prompt in --json mode; "
+                "pass --yes to confirm."
+            )
+            raise typer.Exit(1)
         typer.confirm(
             f"Delete concurrency limit '{key}'? The key will become unlimited.",
             abort=True,
@@ -164,6 +175,9 @@ def limits_delete(
     finally:
         registry.close()
 
+    if json_output:
+        emit_json({"key": key, "deleted": True})
+        return
     console.print(f"[green]Deleted concurrency limit '{key}'.[/green]")
 
 

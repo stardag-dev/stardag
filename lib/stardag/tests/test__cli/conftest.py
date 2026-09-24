@@ -20,10 +20,12 @@ from stardag.utils.testing.helper_tasks import SyncOnlyTask
 CLI_MODULES = (
     "builds",
     "builds_stop",
+    "builds_frontier",
     "executions",
     "plans",
     "deployments",
     "tasks",
+    "tasks_actions",
     "limits",
 )
 

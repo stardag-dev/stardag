@@ -16,6 +16,10 @@ of the build's active plan, after the server's closure step:
   execution detached, and records its ref with a non-claiming start. The
   frontier is a hint and the claim is the decision: a refusal is counted,
   not an error.
+  An INTERRUPTED member whose ``interruptions`` reached
+  ``TickConfig.max_interruptions`` is not spawned: the tick claims it and
+  records a failure naming the count (the spawn-failure path, without the
+  spawn), so the build's fail mode decides.
 - **running** — under a live claim, whoever holds it. Nothing to do: a
   worker that dies stops reporting and its claim lapses, and a lapsed claim
   is listed as runnable and taken over by the next claiming start.
@@ -336,6 +340,72 @@ async def _spawn(
     result.spawned.append(member.task_id)
 
 
+# The claim a budget-exhausted member is failed under lives for one request.
+_EXHAUSTED_CLAIM_TTL_SECONDS = 60
+
+
+def interruptions_exhausted(member: FrontierMember, config: "TickConfig") -> bool:
+    """Whether an interrupted member has spent its interruption budget.
+
+    Only an INTERRUPTED member is gated: an operator's ``retry`` (which
+    makes it PENDING) is honoured with one more execution, and an
+    interruption of that one fails it again, since the count is over the
+    whole build.
+    """
+    return (
+        member.status == "interrupted"
+        and member.interruptions >= config.max_interruptions
+    )
+
+
+async def _fail_exhausted(
+    member: FrontierMember,
+    *,
+    plan_id: UUID,
+    registry: RegistryABC,
+    config: "TickConfig",
+    summary: "TickSummary",
+    result: PassResult,
+    lease_lost: "LeaseLost",
+) -> None:
+    """Fail an interrupted member at its interruption budget instead of
+    restarting it: a claim (the registry fails only the execution holding
+    a task's claim), then its failure with a message naming the count. No
+    container is spawned. The build's fail mode takes it from there."""
+    if _stop_for_lost_lease(lease_lost, result):
+        return
+    execution_id = new_id()
+    try:
+        await registry.member_start_aio(
+            plan_id,
+            member.task_id,
+            execution_id=execution_id,
+            claim=True,
+            claim_ttl_seconds=_EXHAUSTED_CLAIM_TTL_SECONDS,
+        )
+    except APIError as e:
+        if e.code == "plan_superseded":
+            result.superseded = True
+            return
+        if e.code in _CLAIM_DENIED_CODES:
+            result.claim_denied += 1
+            summary.claim_denied += 1
+            return
+        raise
+    result.acted = True
+    message = (
+        f"Interrupted {member.interruptions} times in this build, which "
+        f"reaches TickConfig.max_interruptions={config.max_interruptions}; "
+        "not restarted. `stardag tasks retry` runs it once more; a new build "
+        "starts a new count."
+    )
+    logger.error(f"Task {member.task_id} of plan {plan_id}: {message}")
+    await registry.member_fail_aio(
+        plan_id, member.task_id, execution_id=execution_id, error_message=message
+    )
+    summary.interruptions_exhausted += 1
+
+
 async def act_on_frontier(
     frontier: BuildFrontier,
     *,
@@ -396,8 +466,31 @@ async def act_on_frontier(
                 return result
             logger.info(f"Plan {plan_id} not sealable yet: {e}")
 
+    exhausted = [m for m in frontier.runnable if interruptions_exhausted(m, config)]
+    if exhausted:
+        await run_bounded(
+            [
+                partial(
+                    _fail_exhausted,
+                    member,
+                    plan_id=plan_id,
+                    registry=registry,
+                    config=config,
+                    summary=summary,
+                    result=result,
+                    lease_lost=lost,
+                )
+                for member in exhausted
+            ],
+            semaphore,
+        )
+        if result.lease_lost or result.superseded:
+            return result
+
     loaded: list[tuple[BaseTask, FrontierMember]] = []
     for member in frontier.runnable:
+        if interruptions_exhausted(member, config):
+            continue
         if _stop_for_lost_lease(lost, result):
             return result
         try:

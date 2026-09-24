@@ -432,8 +432,10 @@ over the build's plans (index `execution (task_pk, plan_id)`). The frontier
 carries them on its `runnable` and `running` items — `attempts` (executions
 of the task under any of the build's plans, so a replacement plan does not
 reset the budget) and `interruptions` (those released or ended
-`interrupted`, or ended `preempted`) — for the tick's retry and
-interruption budgets.
+`interrupted`, or ended `preempted`). The tick applies its interruption
+budget to `interruptions` (`TickConfig.max_interruptions`: an INTERRUPTED
+member at the cap is failed with the count, not restarted); it retries
+nothing on `attempts`, since a FAILED member is the fail mode's.
 
 Registering the same instance again is a no-op (`ON CONFLICT DO NOTHING …
 RETURNING`, STA-48's pattern; the event write is gated on the `RETURNING`,

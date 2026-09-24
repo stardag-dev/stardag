@@ -2,9 +2,10 @@
 ``frontier``, ``ticks`` and ``cancel`` (``stop`` and the lifecycle
 commands against the in-memory registry are in ``test_builds_stop.py`` and
 ``test_v2_commands.py``). The registry client is mocked at
-``stardag._cli.builds._resolve_registry``."""
+``stardag._cli.builds._resolve_registry`` (and ``builds_frontier``'s)."""
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from unittest import mock
 from uuid import uuid4
@@ -33,8 +34,15 @@ def _mock_registry(**methods):
     return registry
 
 
+@contextmanager
 def _patch_resolve(registry):
-    return mock.patch("stardag._cli.builds._resolve_registry", return_value=registry)
+    with (
+        mock.patch("stardag._cli.builds._resolve_registry", return_value=registry),
+        mock.patch(
+            "stardag._cli.builds_frontier._resolve_registry", return_value=registry
+        ),
+    ):
+        yield
 
 
 def _build(**overrides) -> BuildInfo:

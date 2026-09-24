@@ -4,6 +4,9 @@ One row per ``stardag modal deploy`` (``kind=modal``), plus one per local
 code id a local build planned under (``kind=local``). An app's **current**
 deployment is its activated Modal row with the highest generation; local
 rows are never current (design.md, "The deterministic scope").
+
+    stardag deployments list [--app A] [--kind modal|local] [--current]
+    stardag deployments show <deployment-id>
 """
 
 from typing import Optional, cast
@@ -11,7 +14,7 @@ from typing import Optional, cast
 import typer
 from rich.table import Table
 
-from stardag._cli._output import JSON_OPTION, emit_json, short, stamp
+from stardag._cli._output import JSON_OPTION, emit_json, parse_uuid, short, stamp
 from stardag._cli._registry_ctx import (
     _ENV_OPTION,
     _PROFILE_OPTION,
@@ -110,3 +113,42 @@ def deployments_list(
     finally:
         registry.close()
     render_deployments(rows, json_output=json_output)
+
+
+@app.command("show")
+def deployments_show(
+    deployment_id: str = typer.Argument(..., help="Deployment ID"),
+    stardag_profile: Optional[str] = _PROFILE_OPTION,
+    stardag_env: Optional[str] = _ENV_OPTION,
+    json_output: bool = JSON_OPTION,
+) -> None:
+    """Show one deployment: kind, app, generation, code id, image and Modal
+    app ids, when it was deployed and activated, and whether it is its
+    app's current one.
+
+    Reads ``GET /deployments/{id}``. Writes nothing.
+    """
+    parsed = parse_uuid(deployment_id, "deployment ID")
+    registry = _resolve_registry(stardag_profile, stardag_env)
+    try:
+        d = registry.deployment_get(parsed)
+    except StardagError as e:
+        _fail(e)
+    finally:
+        registry.close()
+    if json_output:
+        emit_json(d.model_dump(mode="json"))
+        return
+    table = Table(title=f"Deployment {d.id}", show_header=False)
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Kind", d.kind)
+    table.add_row("App", d.app_name)
+    table.add_row("Generation", str(d.generation))
+    table.add_row("Code id", d.code_id)
+    table.add_row("Image id", d.image_id or "-")
+    table.add_row("Modal app id", d.modal_app_id or "-")
+    table.add_row("Deployed", stamp(d.deployed_at))
+    table.add_row("Activated", stamp(d.activated_at) if d.activated_at else "no")
+    table.add_row("Current", "yes" if d.is_current else "no")
+    console.print(table)

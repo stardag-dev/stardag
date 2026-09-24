@@ -95,6 +95,19 @@ class BuildInfo(_Response):
     executor_metadata: dict[str, Any] | None = None
     reactive_app_name: str | None = None
     reactive_tick_kwargs: dict[str, Any] | None = None
+    #: Why the build is FAILED (its last ``BUILD_FAILED``'s message); None
+    #: for any other status.
+    error_message: str | None = None
+
+
+class BuildListPage(_Response):
+    """``GET /builds``: one page, most recently active first. ``total``
+    counts every build the filters match; ``next_cursor`` is passed back as
+    ``cursor`` for the next page (None on the last one)."""
+
+    builds: list[BuildInfo] = Field(default_factory=list)
+    total: int = 0
+    next_cursor: str | None = None
 
 
 class PlanInfo(_Response):
@@ -118,6 +131,24 @@ class PlanInfo(_Response):
     @property
     def active(self) -> bool:
         return self.activated_at is not None and self.superseded_at is None
+
+
+class PlanDetail(PlanInfo):
+    """``GET /plans/{id}`` (and each item of ``GET /builds/{id}/plans``): a
+    plan's lifecycle, its scope with the deployment resolved, and member
+    counts. ``member_counts`` holds the non-excluded members by their
+    task's global status; ``excluded_count`` counts the given-up ones
+    apart. Served for a superseded plan too."""
+
+    deployment: DeploymentInfo | None = None
+    created_at: datetime | None = None
+    is_active: bool = False
+    #: Not served by the read (only a create answers it): out of dumps.
+    created: bool = Field(default=False, exclude=True)
+    member_count: int = 0
+    root_count: int = 0
+    excluded_count: int = 0
+    member_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class ResumeResult(_Response):
@@ -150,7 +181,16 @@ class MembersResult(_Response):
 
 class FrontierMember(_Response):
     """A member of the active plan as the frontier lists it, with the
-    instance body a tick rehydrates the task object from."""
+    instance body a tick rehydrates the task object from.
+
+    ``attempts`` and ``interruptions`` are served on ``runnable`` and
+    ``running`` items only (zero elsewhere), counted from the execution
+    ledger over **all** of the build's plans (design.md D9): ``attempts``
+    is every execution of the task under the build, ``interruptions`` those
+    whose claim was released ``interrupted`` or which ended ``interrupted``
+    or ``preempted``. The tick applies ``TickConfig.max_interruptions`` to
+    ``interruptions``.
+    """
 
     task_id: str
     instance_id: UUID | None = None
@@ -158,6 +198,8 @@ class FrontierMember(_Response):
     status: str
     is_root: bool = False
     body: dict[str, Any] = Field(default_factory=dict)
+    attempts: int = 0
+    interruptions: int = 0
 
 
 class PlanRoots(_Response):
@@ -258,6 +300,7 @@ class ExecutionInfo(_Response):
 
     id: UUID
     task_id: str | None = None
+    build_id: UUID | None = None
     plan_id: UUID | None = None
     instance_id: UUID | None = None
     executor: str | None = None
@@ -308,8 +351,13 @@ class TaskInfo(_Response):
     completed_at: datetime | None = None
     error_message: str | None = None
     claim_expires_at: datetime | None = None
+    #: The claim's holder while RUNNING (live or lapsed): the plan it was
+    #: granted through, and that plan's build. None otherwise.
+    claim_plan_id: UUID | None = None
+    claim_build_id: UUID | None = None
     #: The execution the task's claim names (live or lapsed), if any.
     execution_id: UUID | None = None
+    #: Filled by ``task_get`` only; ``task_list`` items carry none.
     instances: list["TaskInstanceInfo"] = Field(default_factory=list)
 
     @property
@@ -318,6 +366,31 @@ class TaskInfo(_Response):
         no parameters — an instance does — so a caller not asking for a
         specific scope (``from_registry``) takes the newest as its default."""
         return self.instances[0].body if self.instances else None
+
+
+class TaskListPage(_Response):
+    """``GET /tasks``: one page of completions, most recent status change
+    first, without instances."""
+
+    tasks: list[TaskInfo] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
+class EventInfo(_Response):
+    """One row of the append-only event log (``GET /tasks/{id}/events``).
+    ``report_applied`` is False for a report that was recorded but refused:
+    history, not state."""
+
+    id: UUID | None = None
+    event_type: str
+    created_at: datetime | None = None
+    build_id: UUID | None = None
+    plan_id: UUID | None = None
+    execution_id: UUID | None = None
+    task_id: str | None = None
+    report_applied: bool = True
+    error_message: str | None = None
+    event_metadata: dict[str, Any] | None = None
 
 
 class TaskArtifactInfo(_Response):
@@ -438,14 +511,17 @@ class TickSummaryRecord(_Response):
 __all__ = [
     "BuildFrontier",
     "BuildInfo",
+    "BuildListPage",
     "BuildNotifyResult",
     "ClosureConflict",
     "ClosureOutcome",
     "DeploymentInfo",
     "DeploymentKind",
+    "EventInfo",
     "ExecutionInfo",
     "FrontierMember",
     "MembersResult",
+    "PlanDetail",
     "PlanInfo",
     "PlanRoots",
     "RegistrationItem",
@@ -456,8 +532,12 @@ __all__ = [
     "TaskArtifactInfo",
     "TaskInfo",
     "TaskInstanceInfo",
+    "TaskListPage",
     "TickSummaryRecord",
     "TransitionResult",
     "WakeCandidate",
     "YieldResult",
 ]
+
+
+PlanDetail.model_rebuild()

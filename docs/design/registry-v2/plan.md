@@ -299,7 +299,24 @@ assignee the maintainer.
       `/api/v2`; `build_config.py` is gone and `settings` replaces it. Every
       route the client calls is served (step 3c, step 4); proven live in I0
       step 4. Left to I8: `builds list/stop/cleanup`, `tasks`,
-      `concurrency-limits` as CLI commands.
+      `concurrency-limits` as CLI commands. Audit follow-up (STA-108, PR
+      #400): the tick read nothing of the frontier's per-member
+      `attempts`/`interruptions`, and INTERRUPTED is actionable, so a task
+      asking to be resumed on every run was restarted forever;
+      `TickConfig.max_interruptions` (default 20) is back and applied to
+      `interruptions` (at the cap: a claim, then `TASK_FAILED` naming the
+      count, no spawn; the fail mode decides). A FAILED member is not
+      retried by the tick, as designed; `max_attempts` covers only a failed
+      spawn. The fake counts both as the server does. Not bounded by
+      anything: a worker that dies without reporting (its claim lapses and
+      is taken over, which counts an attempt but not an interruption), and
+      a preemption whose restart never arrives (a preempt report is not an
+      end, so no execution ever ends `preempted`; the claim lapses the same
+      way). Whether `attempts` should cap those is open. The client reads
+      the CLI needed (`plan_get`, `build_list_plans`, `build_list_page`,
+      `task_list`, `task_list_executions`, `task_events`,
+      `deployment_get`, `error_message`, the claim holder) are added in the
+      same PR.
 - [x] I8 — CLI (merged, PR #387). `stardag build`
       (roots from `module:attr`, `--settings`, `--app`, `--reactive`,
       `--resume`, `--dry-run`); `builds` list, show, frontier, ticks,
@@ -308,14 +325,29 @@ assignee the maintainer.
       `deployments list` (`stardag modal deployments` is its Modal alias);
       `tasks show/check/retry/cancel/exclude`. Client reads added:
       `build_list`, `plan_roots_info`, `task_list_artifacts`, all on served
-      routes. Server-contract items served by I5 (#390): `GET /plans/{id}`, the event read, outcome `lost`; still not served by decision (D7): a route for a bare observation. Original notes: no `GET /plans/{id}` (timestamps
-      and member counts are known only for the active plan, via the
-      frontier), no event read (`tasks show` cannot surface
-      `TASK_STRUCTURE_DIVERGED`), no route for a bare observation
-      (`tasks check --report` is refused). `concurrency-limits` was
+      routes. Server-contract items served by I5 (#390) and consumed since
+      the STA-108 audit follow-up (PR #400): `GET /plans/{id}` and
+      `GET /builds/{id}/plans` (`plans show` on any plan, `plans list`,
+      counts and roots in `builds frontier`), the task event read
+      (`tasks show` lists the last events and calls out
+      `TASK_STRUCTURE_DIVERGED`), `GET /tasks` (`tasks list`, status and
+      paging only: v1's age and name filters need server work),
+      `GET /tasks/{id}/executions` (`tasks show` and
+      `executions list --task`), `GET /deployments/{id}`
+      (`deployments show`), build-list
+      paging and `error_message` (`builds list --cursor`, `builds show`),
+      the claim holder on the task (`tasks retry/cancel` default `--build`
+      to it). Outcome `lost` was consumed by `builds stop --mark-lost`
+      here. Still not served, by decision (D7): a route for a bare
+      observation, so `tasks check --report` is accepted only to be
+      refused (exit 1). `concurrency-limits` was
       dropped by omission here (the server routes and client methods
       existed; only the CLI module was missing) and restored in STA-108
-      (`list [--holders]`, `set`, `delete`, `holders`; no `evict`).
+      (`list [--holders]`, `set`, `delete`, `holders`; no `evict`). Also
+      restored in the audit follow-up (#400): the confirmation prompt and
+      `--yes` on `tasks retry/cancel`, `builds stop --namespace`, and
+      `--json` on the last three commands without it (`builds cancel`,
+      `concurrency-limits set/delete`).
 - [x] I9 — UI (merged, PR #388). Every registry call
       is on `/api/v2`; scope keys, `build_config`, phantoms, external
       blockers and `/locks` are gone. Builds list, the build view over the

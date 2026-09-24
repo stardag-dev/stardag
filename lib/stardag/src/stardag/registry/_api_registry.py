@@ -12,11 +12,11 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from stardag.registry._api_http import HTTPTransport, Request
+from stardag.registry._api_http import Request
+from stardag.registry._api_reads import APIRegistryReads
 from stardag.registry._api_routes import (
     _artifacts_body,
     _build_create_req,
-    _build_list_req,
     _build_get_req,
     _build_resume_req,
     _build_transition_req,
@@ -39,7 +39,6 @@ from stardag.registry._api_routes import (
     _skip_blocked_req,
     _start_req,
     _stopped_req,
-    _task_artifacts_req,
     _wake_candidates_req,
     _yield_req,
 )
@@ -62,9 +61,6 @@ from stardag.registry._models import (
     SchedulerLeaseResult,
     SettingsInfo,
     StopOutcome,
-    TaskArtifactInfo,
-    TaskInfo,
-    TickSummaryRecord,
     TransitionResult,
     WakeCandidate,
     YieldResult,
@@ -81,7 +77,7 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 
 
-class APIRegistry(HTTPTransport, RegistryABC):
+class APIRegistry(APIRegistryReads, RegistryABC):
     """The v2 registry over HTTP.
 
     Stateless with respect to builds (every call names its build, plan or
@@ -89,7 +85,8 @@ class APIRegistry(HTTPTransport, RegistryABC):
     singleton through ``registry_provider``.
 
     Authentication: an API key (explicit, or ``STARDAG_API_KEY``) or the
-    browser-login JWT of the active profile.
+    browser-login JWT of the active profile. The inspecting reads are in
+    :class:`~stardag.registry._api_reads.APIRegistryReads`.
     """
 
     # -- builds ---------------------------------------------------------------
@@ -187,23 +184,6 @@ class APIRegistry(HTTPTransport, RegistryABC):
 
     async def build_exit_early_aio(self, build_id: UUID) -> BuildInfo:
         return await self.acall(_build_transition_req(build_id, "exit-early"))
-
-    def build_list(
-        self,
-        *,
-        status: str | None = None,
-        reactive_app_name: str | None = None,
-        limit: int = 100,
-    ) -> list[BuildInfo]:
-        return self.call(_build_list_req(status, reactive_app_name, limit))
-
-    def build_list_running(
-        self, *, reactive_app_name: str | None = None, limit: int = 100
-    ) -> list[UUID]:
-        builds = self.build_list(
-            status="running", reactive_app_name=reactive_app_name, limit=limit
-        )
-        return [b.id for b in builds]
 
     def build_get_frontier(self, build_id: UUID) -> BuildFrontier:
         return self.call(_frontier_req(build_id))
@@ -523,19 +503,6 @@ class APIRegistry(HTTPTransport, RegistryABC):
     ) -> TransitionResult:
         return self.call(_stopped_req(execution_id, outcome))
 
-    def task_get(self, task_id: str) -> TaskInfo:
-        return self.call(
-            Request(
-                "GET",
-                f"/tasks/{task_id}",
-                TaskInfo.model_validate,
-                operation=f"Get task {task_id}",
-            )
-        )
-
-    def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
-        return self.call(_task_artifacts_req(task_id))
-
     def _artifacts_req(
         self,
         plan_id: UUID,
@@ -808,22 +775,3 @@ class APIRegistry(HTTPTransport, RegistryABC):
         self, build_id: UUID, summary: Mapping[str, Any]
     ) -> None:
         await self.acall(self._tick_summary_req(build_id, summary))
-
-    def build_list_tick_summaries(
-        self, build_id: UUID, *, limit: int = 20
-    ) -> list[TickSummaryRecord]:
-        def parse(payload: Any) -> list[TickSummaryRecord]:
-            return [
-                TickSummaryRecord.model_validate(s)
-                for s in (payload or {}).get("summaries", [])
-            ]
-
-        return self.call(
-            Request(
-                "GET",
-                f"/builds/{build_id}/tick-summaries",
-                parse,
-                params={"limit": str(limit)},
-                operation=f"List tick summaries of build {build_id}",
-            )
-        )

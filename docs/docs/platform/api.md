@@ -132,6 +132,7 @@ and [Build & Execution](../concepts/build-execution.md#the-registry-as-a-ledger-
 POST /api/v2/deployments                     # Record a deployment (before the Modal deploy)
 POST /api/v2/deployments/{id}/activate       # Mark it live (after the deploy succeeds)
 GET  /api/v2/deployments                     # List deployments (?app_name=, ?current=true)
+GET  /api/v2/deployments/{id}                # One deployment (is_current marks the app's current one)
 GET  /api/v2/settings/{settings_hash}        # Read a stored settings body
 PUT  /api/v2/concurrency-limits/{key}        # Create or replace a named limit
 DELETE /api/v2/concurrency-limits/{key}      # Remove a named limit
@@ -142,8 +143,9 @@ GET  /api/v2/concurrency-limits              # List named limits (?include_holde
 
 ```
 POST   /api/v2/builds                           # Create a build (root_task_ids required)
-GET    /api/v2/builds                           # List builds
-GET    /api/v2/builds/{build_id}                # Get a build
+GET    /api/v2/builds                           # List builds, most recently active first (?status, ?reactive_app_name, ?limit, ?cursor; total, next_cursor)
+GET    /api/v2/builds/{build_id}                # Get a build (error_message on a FAILED one)
+GET    /api/v2/builds/{build_id}/plans          # Every plan of the build, newest generation first (as GET /plans/{id})
 POST   /api/v2/builds/{build_id}/complete       # Complete (recomputes plan_complete)
 POST   /api/v2/builds/{build_id}/fail           # Fail
 POST   /api/v2/builds/{build_id}/cancel         # Cancel (releases every plan's claims)
@@ -164,7 +166,9 @@ closure](../concepts/build-execution.md#the-plan-roots-discovery-closure).
 
 ```
 POST /api/v2/builds/{build_id}/plans                              # Create/reuse a plan; register unexpanded roots
+GET  /api/v2/plans/{plan_id}                                       # Lifecycle, scope with the deployment, member counts by status (excluded apart); superseded plans too
 GET  /api/v2/plans/{plan_id}/roots                                 # The plan's root instances
+GET  /api/v2/plans/{plan_id}/graph                                 # Every member (status, admission, exclusion, attempts, interruptions) and the instance edges between them
 POST /api/v2/plans/{plan_id}/members                               # Register a chunk (static or discovery-job result)
 POST /api/v2/plans/{plan_id}/seal                                  # Verify and seal (activates a replacement plan)
 POST /api/v2/plans/{plan_id}/members/{task_id}/start               # Claiming start
@@ -186,9 +190,11 @@ POST /api/v2/tasks/{task_id}/claim/renew                           # Renew an in
 ### Tasks (`/api/v2`)
 
 ```
-GET /api/v2/tasks/{task_id}              # The task: status, claim, current execution
+GET /api/v2/tasks                        # Tasks, most recent status change first (?status, ?limit, ?cursor; next_cursor)
+GET /api/v2/tasks/{task_id}              # The task: status, claim (claim_plan_id, claim_build_id), current execution, instances
+GET /api/v2/tasks/{task_id}/executions   # Its executions across builds, newest first (?include_ended, default true; ?limit)
 GET /api/v2/tasks/{task_id}/artifacts    # This task's artifacts
-GET /api/v2/tasks/{task_id}/events       # This task's event log
+GET /api/v2/tasks/{task_id}/events       # This task's event log, oldest first (?limit, at most 500)
 ```
 
 ### Executions and wake-ups (`/api/v2`)

@@ -149,9 +149,7 @@ class PlansMixin(RegistryState):
             )
             if self._admit(plan, instance, admitted_by, is_root=as_roots):
                 counts["members_admitted"] += 1
-                self.events.append(
-                    Event("TASK_PENDING", item.task_id, plan.build_id, plan.id)
-                )
+                self.log(Event("TASK_PENDING", item.task_id, plan.build_id, plan.id))
             elif as_roots:
                 members[item.task_id].is_root = True
             self._observe(plan, self.tasks[item.task_id], item, counts)
@@ -201,7 +199,7 @@ class PlansMixin(RegistryState):
                 self.move(task, "completed")
                 task.completed_at = self.now()
                 counts["completed"] += 1
-                self.events.append(
+                self.log(
                     Event(
                         "TASK_OBSERVED_COMPLETE", task.task_id, plan.build_id, plan.id
                     )
@@ -212,9 +210,7 @@ class PlansMixin(RegistryState):
             self.move(task, "pending")
             task.completed_at = None
             counts["invalidated"] += 1
-            self.events.append(
-                Event("TASK_INVALIDATED", task.task_id, plan.build_id, plan.id)
-            )
+            self.log(Event("TASK_INVALIDATED", task.task_id, plan.build_id, plan.id))
 
     def _check_settings(self, settings: Mapping[str, str]) -> None:
         for key, value in settings.items():
@@ -285,6 +281,7 @@ class PlansMixin(RegistryState):
                 default=0,
             )
             plan = PlanRow(plan_id, build_id, deployment_id, shash, generation)
+            plan.created_at = self.now()
             if generation == 1:
                 plan.activated_at = self.now()
             self.plans[plan_id] = plan
@@ -354,8 +351,18 @@ class PlansMixin(RegistryState):
 
     # -- the frontier -------------------------------------------------------------------
 
-    def _frontier_member(self, member: MemberRow) -> FrontierMember:
+    def _frontier_member(
+        self, member: MemberRow, *, counts_for: UUID | None = None
+    ) -> FrontierMember:
+        """A member as the frontier lists it; ``counts_for`` (a build id)
+        adds the ledger counts, as the server does on runnable and running
+        items only."""
         instance = self.instances[member.instance_id]
+        attempts, interruptions = (
+            self.attempt_counts(counts_for, member.task_id)
+            if counts_for is not None
+            else (0, 0)
+        )
         return FrontierMember(
             task_id=member.task_id,
             instance_id=instance.id,
@@ -363,7 +370,29 @@ class PlansMixin(RegistryState):
             status=self.tasks[member.task_id].status,
             is_root=member.is_root,
             body=dict(instance.body),
+            attempts=attempts,
+            interruptions=interruptions,
         )
+
+    def attempt_counts(self, build_id: UUID, task_id: str) -> tuple[int, int]:
+        """``(attempts, interruptions)`` of a task over the executions of
+        **any** of the build's plans (D9; the server's
+        ``services/frontier.attempt_counts``): an interruption is an
+        execution whose claim was released ``interrupted`` or which ended
+        ``interrupted`` or ``preempted``, counted once."""
+        plan_ids = {p.id for p in self.plans.values() if p.build_id == build_id}
+        rows = [
+            e
+            for e in self.executions.values()
+            if e.task_id == task_id and e.plan_id in plan_ids
+        ]
+        interrupted = sum(
+            1
+            for e in rows
+            if e.claim_outcome == "interrupted"
+            or e.outcome in ("interrupted", "preempted")
+        )
+        return len(rows), interrupted
 
     def _blocked(self, instance: InstanceRow) -> bool:
         return any(
@@ -400,12 +429,12 @@ class PlansMixin(RegistryState):
                 task.status == "running" and not live
             )
             if live:
-                running.append(self._frontier_member(member))
+                running.append(self._frontier_member(member, counts_for=build_id))
             elif not instance.expanded:
                 if task.status != "completed":
                     discovery.append(self._frontier_member(member))
             elif actionable and not self._blocked(instance):
-                runnable.append(self._frontier_member(member))
+                runnable.append(self._frontier_member(member, counts_for=build_id))
         return BuildFrontier(
             **base,
             plan_id=plan.id,
@@ -533,7 +562,7 @@ class PlansMixin(RegistryState):
             task.claim_expires_at = now + ttl
             task.error_message = None
             self.move(task, "running", flag_except=plan.build_id)
-            self.events.append(
+            self.log(
                 Event("TASK_STARTED", task_id, plan.build_id, plan_id, execution_id)
             )
             return _outcome(task)
@@ -560,7 +589,7 @@ class PlansMixin(RegistryState):
         execution.ended_at = self.now()
         execution.outcome = outcome
         if task.execution_id != execution_id or execution.claim_released_at is not None:
-            self.events.append(
+            self.log(
                 Event(
                     outcome.upper(),
                     task_id,
@@ -568,6 +597,7 @@ class PlansMixin(RegistryState):
                     plan_id,
                     execution_id,
                     applied=False,
+                    error_message=error_message,
                 )
             )
             raise refuse("execution_not_current")
@@ -576,11 +606,18 @@ class PlansMixin(RegistryState):
         if status == "completed":
             task.completed_at = self.now()
             task.error_message = None
-        elif status == "failed":
+        elif status in ("failed", "interrupted"):
+            # As the server: assigned unconditionally, so a previous
+            # failure's text never explains this one.
             task.error_message = error_message
-        self.events.append(
+        self.log(
             Event(
-                f"TASK_{status.upper()}", task_id, plan.build_id, plan_id, execution_id
+                f"TASK_{status.upper()}",
+                task_id,
+                plan.build_id,
+                plan_id,
+                execution_id,
+                error_message=error_message,
             )
         )
         return _outcome(task)

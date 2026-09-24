@@ -68,7 +68,7 @@ class YieldMixin(PlansMixin):
                 if child_id not in parent.upstreams:
                     parent.upstreams[child_id] = True
                     edges += 1
-            self.events.append(
+            self.log(
                 Event("TASK_YIELDED", task_id, plan.build_id, plan_id, execution_id)
             )
             if suspend:

@@ -86,6 +86,24 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   present** in a warm container, so discovery saw it complete and never
   invalidated it. Each discovery walk begins an observation fence, and a
   mounted-volume hit older than it reloads the volume once per walk.
+- **Restored: `TickConfig.max_interruptions` (default 20).** An
+  INTERRUPTED member is actionable, so a task that asks to be resumed on
+  every run was restarted forever. The frontier's per-member
+  `interruptions` (counted from the execution ledger over the build's plans)
+  is now read: at the cap the tick claims the member without spawning it
+  and records `TASK_FAILED` naming the count, and the build's fail mode
+  applies. `FrontierMember` gains `attempts` and `interruptions`. A FAILED
+  member is still never retried by the tick (the fail mode decides);
+  `max_attempts` still covers only a failed spawn. Also accepted in
+  `tick_kwargs`.
+- **New: client reads on routes the server already served.**
+  `RegistryABC.plan_get` (`GET /plans/{id}`), `build_list_plans`,
+  `build_list_page` (cursor paging with `total` and `next_cursor`),
+  `task_list` (`GET /tasks`, status filter and paging),
+  `task_list_executions` (`include_ended`), `task_events` and
+  `deployment_get`; `BuildInfo.error_message`, `TaskInfo.claim_plan_id` /
+  `claim_build_id` and `ExecutionInfo.build_id`. The in-memory registry
+  serves them with the server's shapes and orderings.
 - **Fixed: a watchdog sweep landing on a lingering tick was dropped.** A
   tick refused the scheduler lease now flags the build before exiting
   `lease_held`, so the holder acts on it (or a successor is spawned if the
@@ -215,9 +233,32 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   `--no-cancel`), `--mark-lost` ends executions it cannot stop as `lost`.
 - **New: `stardag executions list`, `stardag plans show`, `stardag
 deployments list`** (`stardag modal deployments` stays as an alias).
-- **Changed: `stardag tasks`** — `show`, new `check` (runs `complete()`
-  locally and prints the observation; reports nothing), `retry`, `cancel`,
-  new `exclude`. `tasks list` is removed.
+- **Changed: `stardag tasks`** — `list`, `show`, new `check` (runs
+  `complete()` locally and prints the observation; reports nothing),
+  `retry`, `cancel`, new `exclude`.
+- **Changed: `stardag tasks retry` and `tasks cancel` ask for confirmation**
+  again (v1's prompt), skipped with `--yes`; `--json` without `--yes` is
+  refused rather than prompting. `--build` is now optional: it defaults to
+  the build holding the task's claim (`claim_build_id` from `GET
+/tasks/{id}`) and stays an override; a task holding no claim (a FAILED
+  one) still needs it.
+- **New: the CLI on the v2 reads.** `tasks list` (`--status`, `--limit`,
+  `--cursor`; v1's `--older-than`, `--name` and `--namespace` need server
+  support and are not offered); `tasks show` names the claim's holder (plan
+  and build), lists the task's executions (`--include-ended`) and its last
+  events (`--events N`), calling out every `TASK_STRUCTURE_DIVERGED`;
+  `builds show` shows the failure reason and `last_active_at`; `builds
+list` pages (`--cursor`, prints `total` and the next cursor), shows
+  `last_active_at`, and takes `--reactive-app` as an alias of `--app`;
+  `builds frontier` shows "Needs tick" (the wake-up flag, read without
+  clearing it), member counts by status, roots completed out of total, and
+  attempts/interruptions per runnable and running member; `plans show`
+  works on a superseded plan (lifecycle, deployment, counts) and new `plans
+list --build`; new `deployments show`; `executions list --task` and
+  `--include-ended`; `builds stop --namespace` (v1's prefix filter, read per
+  listed task). `builds cancel` and `concurrency-limits set/delete` gain
+  `--json`, so every registry-backed command takes it. The usage block in
+  `stardag --help`'s module docstring lists every command and flag.
 - **Removed: `stardag builds cleanup`.**
 - **Restored: `stardag concurrency-limits`** (`list [--holders]`, `set`,
   `delete`, `holders`) — dropped by omission between two v2 work packages
@@ -227,6 +268,18 @@ deployments list`** (`stardag modal deployments` stays as an alias).
   `list`/`holders` carry `in_use` and, with `--holders`, holder detail from
   one call (`GET /concurrency-limits?include_holders=true`), not one extra
   request per key as in v1.
+- **Docs: `configuration/cli.md` matches the CLI** — `plans show` reads
+  any plan, `tasks check --report` is described as what it is (accepted,
+  then refused with exit 1), the `--json` claim now holds and names the
+  commands outside it, the "Durations" grammar for `--older-than` is back,
+  and the new commands and flags are documented. `platform/api.md` lists
+  the served reads it missed (`GET /plans/{id}`, `/plans/{id}/graph`,
+  `/builds/{id}/plans`, `GET /tasks`, `/tasks/{id}/executions`,
+  `/deployments/{id}`). `DEV_README.md`, `reference/exceptions.md` and the
+  self-hosting troubleshooting no longer describe v1's minimum-SDK gate
+  (`SDKVersionUnsupportedError`, `426`): v2 has no version check in either
+  direction, and a mismatched SDK and server fail on the first missing
+  route (`NotFoundError`, `is_missing_route_error`).
 - `stardag modal deploy` records the deployment before the deploy and
   activates it after; a failed create or activation exits non-zero.
 - **Changed: a failed `stardag build` prints its summary.** Build id,

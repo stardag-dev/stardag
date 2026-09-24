@@ -135,6 +135,55 @@ class TestStop:
         from_id.assert_not_called()
         assert "excluded by a filter" in result.output
 
+    def test_a_namespace_filter_selects_by_prefix(self, fake_registry, running_build):
+        """v1's ``--namespace``: a prefix of the task's namespace, read per
+        listed task from ``GET /tasks/{id}`` (the ledger rows carry none)."""
+        leaf = str(running_build.leaf.id)
+        fake_registry.tasks[leaf].task_namespace = "acme.features"
+        for prefix, selected in (("acme", 1), ("acme.features", 1), ("acme.lab", 0)):
+            result = runner.invoke(
+                app,
+                [
+                    "stop",
+                    str(running_build.build_id),
+                    "--namespace",
+                    prefix,
+                    "--dry-run",
+                    "--json",
+                ],
+            )
+            assert result.exit_code == 0, result.output
+            payload = json.loads(result.stdout)
+            assert len(payload["selected"]) == selected, prefix
+            assert len(payload["excluded_by_filter"]) == 1 - selected
+
+    def test_without_namespace_no_task_is_read(self, fake_registry, running_build):
+        with mock.patch.object(fake_registry, "task_get") as task_get:
+            runner.invoke(app, ["stop", str(running_build.build_id), "--dry-run"])
+        task_get.assert_not_called()
+
+
+class TestFilters:
+    def _execution(self, task_id: str = "t1") -> ExecutionInfo:
+        return ExecutionInfo.model_validate({"id": str(new_id()), "task_id": task_id})
+
+    def test_namespace_is_a_prefix_and_an_unknown_one_never_matches(self):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        spaces = {"t1": "acme.features"}
+        execution = self._execution()
+        assert _stop.Filters(namespace="acme").matches(
+            execution, now=now, namespaces=spaces
+        )
+        assert not _stop.Filters(namespace="acme.labels").matches(
+            execution, now=now, namespaces=spaces
+        )
+        assert not _stop.Filters(namespace="acme").matches(
+            self._execution("t2"), now=now, namespaces=spaces
+        )
+        assert _stop.Filters(namespace="acme").any_set
+
 
 class TestMarkLost:
     def _without_call_id(self, fake_registry, running_build):

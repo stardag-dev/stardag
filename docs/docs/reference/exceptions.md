@@ -9,7 +9,7 @@ StardagError
 ├── APIError
 │   ├── AuthenticationError
 │   ├── AuthorizationError
-│   ├── SDKVersionUnsupportedError
+│   ├── NotFoundError
 │   └── TokenExpiredError
 ├── ResumableInterruption
 ├── ExecutionCancelled
@@ -76,36 +76,22 @@ Raised when authenticated but not authorized:
 - Wrong workspace/environment
 - Resource access denied
 
-### SDKVersionUnsupportedError
+### NotFoundError
 
 ```python
-from stardag import SDKVersionUnsupportedError
+from stardag.exceptions import NotFoundError
 ```
 
-Raised when the registry refuses the request because this SDK is older than
-the minimum version that registry supports (HTTP `426 Upgrade Required`).
+Raised on a 404: a build, plan, task or deployment that does not exist in
+the environment (`code` names which, e.g. `unknown_plan`), or a route the
+registry does not serve.
 
-Every request the SDK makes carries its version in an
-`X-Stardag-SDK-Version` header, which is what lets a registry answer this
-way at all. Nothing is enforced unless the registry is configured with a
-minimum; by default any SDK version is accepted.
-
-`message` is the server's own sentence — it names both versions and the
-exact upgrade command — and `sdk_version` / `minimum_sdk_version` carry the
-same two versions for programmatic use:
-
-```python
-try:
-    sd.build(task, registry=registry)
-except SDKVersionUnsupportedError as e:
-    print(e.message)  # e.g. 'pip install --upgrade "stardag>=X"'
-    print(e.sdk_version, "->", e.minimum_sdk_version)
-```
-
-The reverse direction — a **new** SDK against an **old** registry — is not a
-supported combination; upgrade both together. It surfaces as a clear
-"this registry does not support …, upgrade stardag-api" error from whichever
-command needs an endpoint the registry does not have.
+The last case is what an SDK and a registry from different release lines
+look like. There is no version check in either direction: the SDK and the
+registry are upgraded together, and a v2 SDK against a v1 registry (or the
+reverse) fails on its first call with a `NotFoundError` whose `detail` is
+FastAPI's `"Not Found"`. `stardag.exceptions.is_missing_route_error(e)`
+tells that apart from a missing resource. Upgrade the other side.
 
 ### TokenExpiredError
 

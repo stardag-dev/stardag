@@ -40,6 +40,17 @@ class TickConfig:
     # else is recovered by the registry: a worker that dies lets its claim
     # lapse, and a lapsed claim is taken over by the next claiming start.
     max_attempts: int = 2
+    # How many interruptions a task may have within this build before the
+    # tick stops restarting it. An INTERRUPTED member is actionable (the
+    # platform ended an execution that asked to be resumed), so without a
+    # cap a task that times out on every run would be restarted forever.
+    # Counted by the registry from the execution ledger over all of the
+    # build's plans (the frontier's ``interruptions``, design.md D9). At
+    # the cap the tick does not spawn the member: it records a TASK_FAILED
+    # naming the count, and the build's fail mode applies. Set generously:
+    # 20 resumes of a long training run is a plausible afternoon, 20
+    # identical timeouts of a hung task a clear signal and a bounded bill.
+    max_interruptions: int = 20
     # In-flight bound for the pass's per-task work (claims, spawns, ref
     # records, discovery jobs' registrations).
     max_concurrent_actions: int = DEFAULT_MAX_CONCURRENCY
@@ -85,6 +96,9 @@ class TickSummary:
     # Claimed executions whose spawn failed max_attempts times, recorded as
     # the execution's failure.
     spawn_failed: int = 0
+    # Interrupted members this tick failed instead of restarting, because
+    # their interruptions reached max_interruptions.
+    interruptions_exhausted: int = 0
     # Discovery jobs this tick completed (an unexpanded member expanded and
     # registered with its closure).
     discovered: int = 0
