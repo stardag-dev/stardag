@@ -160,6 +160,8 @@ class TestDeployments:
         rows = json.loads(result.stdout)["deployments"]
         assert {r["kind"] for r in rows} == {"modal"}
         assert [r["id"] for r in rows if r["is_current"]] == [str(new)]
+        # A listing row carries no "created" (only a create call answers it).
+        assert all("created" not in r for r in rows)
         table = invoke("deployments", "list")
         assert "current" in table.output and "local" in table.output
 

@@ -350,7 +350,8 @@ class DeploymentInfo(_Response):
     activated after the deploy succeeded) or a local code id
     (``kind="local"``, born activated). "Current" for an app is the
     activated row with the highest generation. ``created`` is set only by
-    the create call that inserted the row (a listing does not carry it)."""
+    the create call that inserted the row; a listing does not carry it, so
+    it is left out of dumps (a listing row never shows ``created: false``)."""
 
     id: UUID
     kind: str
@@ -362,7 +363,7 @@ class DeploymentInfo(_Response):
     deployed_at: datetime | None = None
     activated_at: datetime | None = None
     is_current: bool = False
-    created: bool = False
+    created: bool = Field(default=False, exclude=True)
 
 
 class SettingsInfo(_Response):

@@ -419,7 +419,7 @@ class _SequentialEngine:
             task_count=self.count,
             build_id=self.session.build_id,
             error=error,
-            failed_task=self.failures[0][0] if self.failures and error else None,
+            failed_task=next((t for t, f in self.failures if f is error), None),
         )
 
     def _stopped_summary(self) -> BuildSummary:
