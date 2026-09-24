@@ -9,6 +9,7 @@ import type {
   Build,
   BuildFrontier,
   BuildListResponse,
+  BuildNotify,
   BuildStatus,
   BuildTickSummaryListResponse,
   ConcurrencyLimit,
@@ -185,6 +186,17 @@ export async function fetchBuildExecutions(
     "Failed to fetch executions",
   );
   return data.executions;
+}
+
+/** Whether a wake-up is queued for the build (`needs_tick`). */
+export function fetchBuildNotify(
+  buildId: string,
+  environmentId: string,
+): Promise<BuildNotify> {
+  return getJson(
+    url(`/builds/${buildId}/notify`, environmentId),
+    "Failed to read the build's wake-up flag",
+  );
 }
 
 // ---- Build overrides ----

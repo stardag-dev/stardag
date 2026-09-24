@@ -112,6 +112,12 @@ export interface BuildListResponse {
   next_cursor: string | null;
 }
 
+/** `GET /builds/{id}/notify`: whether a wake-up is queued for the build. */
+export interface BuildNotify {
+  build_id: string;
+  needs_tick: boolean;
+}
+
 // ---- The frontier: what a scheduler tick sees of the active plan ----
 
 export interface FrontierMember {

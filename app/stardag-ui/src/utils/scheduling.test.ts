@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BuildFrontier, FrontierItem } from "../types/task";
-import { schedulingState } from "./scheduling";
+import { orderedCounts, schedulingState } from "./scheduling";
 
 const RUNNING: FrontierItem = {
   task_id: "t",
@@ -51,9 +51,31 @@ describe("schedulingState", () => {
     expect(schedulingState(frontier(), "failed")).toBe("settled");
   });
 
+  it("is settled, not complete, on a terminal build with a complete plan", () => {
+    // "The next tick completes the build" is wrong on a failed or
+    // cancelled one: no tick acts on it.
+    expect(schedulingState(frontier({ plan_complete: true }), "cancelled")).toBe(
+      "settled",
+    );
+  });
+
+  it("is waking, not stalled, when a wake-up is queued", () => {
+    expect(schedulingState(frontier(), "running", true)).toBe("waking");
+  });
+
   it("is progressing with anything running", () => {
     expect(schedulingState(frontier({ running: [RUNNING] }), "running")).toBe(
       "progressing",
     );
+  });
+});
+
+describe("orderedCounts", () => {
+  it("drops zeros and lists what needs attention first", () => {
+    expect(orderedCounts({ completed: 4, pending: 0, failed: 1, running: 2 })).toEqual([
+      ["running", 2],
+      ["failed", 1],
+      ["completed", 4],
+    ]);
   });
 });

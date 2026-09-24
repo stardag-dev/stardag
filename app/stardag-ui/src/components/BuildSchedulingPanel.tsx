@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchBuildPlans, fetchBuildTickSummaries } from "../api/registry";
+import {
+  fetchBuildNotify,
+  fetchBuildPlans,
+  fetchBuildTickSummaries,
+} from "../api/registry";
 import type {
   BuildFrontier,
   BuildStatus,
@@ -9,12 +13,17 @@ import type {
   PlanDetail,
 } from "../types/task";
 import { memberLabel } from "../utils/instances";
-import { schedulingState, type SchedulingState } from "../utils/scheduling";
+import {
+  orderedCounts,
+  schedulingState,
+  type SchedulingState,
+} from "../utils/scheduling";
 import { BuildPlans } from "./BuildPlans";
 import { Modal } from "./Modal";
 import { StatusBadge } from "./StatusBadge";
 import { TickSummaryTrail } from "./TickSummaryTrail";
 import { ResultBanner } from "./ui/ResultBanner";
+import { Spinner } from "./ui/Spinner";
 import { ToolbarButton } from "./ui/ToolbarButton";
 
 // Enough ticks to see a repeating outcome without becoming a log viewer.
@@ -146,7 +155,27 @@ export function BuildSchedulingPanel({
       });
   }, [open, buildId, environmentId, refreshToken]);
 
-  const state = schedulingState(frontier, buildStatus);
+  // A reactive build that looks stalled may simply have a wake-up queued:
+  // the next tick re-evaluates it. Read the flag only then, and with every
+  // refresh, so the toolbar dot does not cry wolf.
+  const [wake, setWake] = useState<{ key: string; pending: boolean } | null>(null);
+  const idleStalled = schedulingState(frontier, buildStatus) === "stalled";
+  const reactive = Boolean(frontier?.reactive_app_name);
+  const wakeKey = `${environmentId}:${buildId}:${refreshToken}`;
+  useEffect(() => {
+    if (!idleStalled || !reactive) return;
+    let stale = false;
+    fetchBuildNotify(buildId, environmentId)
+      .then((r) => !stale && setWake({ key: wakeKey, pending: r.needs_tick }))
+      .catch(() => !stale && setWake({ key: wakeKey, pending: false }));
+    return () => {
+      stale = true;
+    };
+  }, [idleStalled, reactive, buildId, environmentId, wakeKey]);
+  const wakeUpPending = wake?.key === wakeKey && wake.pending;
+
+  const state = schedulingState(frontier, buildStatus, wakeUpPending);
+  const activePlan = plans?.find((p) => p.is_active) ?? null;
   const conflicts = frontier?.closure?.conflicts ?? [];
   const unhealthy =
     frontierError !== null || state === "stalled" || conflicts.length > 0;
@@ -212,18 +241,15 @@ export function BuildSchedulingPanel({
             </ResultBanner>
           )}
           {!frontier ? (
-            !frontierError && (
-              <p role="status" className="text-sm text-gray-600 dark:text-gray-400">
-                Reading this build&rsquo;s frontier…
-              </p>
-            )
+            !frontierError && <Spinner>Reading this build&rsquo;s frontier…</Spinner>
           ) : !frontier.plan_id ? (
             <p className="text-sm text-gray-700 dark:text-gray-300">
               This build has no active plan yet: its first registration has not landed.
             </p>
           ) : (
             <>
-              <StateLine state={state} frontier={frontier} />
+              <StateLine state={state} frontier={frontier} buildStatus={buildStatus} />
+              {activePlan && <MemberCounts plan={activePlan} />}
               {conflicts.length > 0 && (
                 <ResultBanner tone="error">
                   {conflicts.length} closure conflict{conflicts.length === 1 ? "" : "s"}
@@ -277,27 +303,66 @@ export function BuildSchedulingPanel({
   );
 }
 
+/**
+ * The active plan's members by their task's global status
+ * (`member_counts`, from the plan read), excluded ones apart — v1's
+ * status-count chips.
+ */
+function MemberCounts({ plan }: { plan: PlanDetail }) {
+  const counts = orderedCounts(plan.member_counts);
+  if (counts.length === 0 && plan.excluded_count === 0) return null;
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1"
+      aria-label="Active plan members by status"
+    >
+      {counts.map(([status, count]) => (
+        <span
+          key={status}
+          className="inline-flex items-baseline gap-1 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+        >
+          <span>{status}</span>
+          <span className="font-medium">{count}</span>
+        </span>
+      ))}
+      {plan.excluded_count > 0 && (
+        <span
+          className="inline-flex items-baseline gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+          title="Given up on: not scheduled, and not gating the build"
+        >
+          <span>excluded</span>
+          <span className="font-medium">{plan.excluded_count}</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
 function StateLine({
   state,
   frontier,
+  buildStatus,
 }: {
   state: SchedulingState;
   frontier: BuildFrontier;
+  buildStatus: BuildStatus;
 }) {
   const text =
     state === "complete"
       ? "Every member of the active plan is satisfied; the next tick completes the build."
-      : state === "stalled"
-        ? frontier.reactive_app_name
-          ? "Nothing runnable, running or awaiting discovery, and the plan is not complete — needs intervention."
-          : "Nothing runnable, running or awaiting discovery, and this build is not reactively scheduled."
-        : state === "settled"
-          ? `Nothing is runnable or running; the build is ${
-              frontier.build_status ?? "not running"
-            }.`
-          : frontier.sealed
-            ? "Progressing."
-            : "Progressing. The plan is not sealed yet: its static phase is still being stated.";
+      : state === "waking"
+        ? "Nothing runnable, running or awaiting discovery right now, but a wake-up is queued: the next tick re-evaluates the build."
+        : state === "stalled"
+          ? frontier.reactive_app_name
+            ? "Nothing runnable, running or awaiting discovery, no wake-up queued, and the plan is not complete — needs intervention."
+            : "Nothing runnable, running or awaiting discovery, and this build is not reactively scheduled."
+          : state === "settled"
+            ? frontier.plan_complete
+              ? `Every member of the active plan is satisfied; the build is recorded as ${buildStatus}, so no tick acts on it.`
+              : `The build is recorded as ${buildStatus}, so no tick acts on it.`
+            : frontier.sealed
+              ? "Progressing."
+              : "Progressing. The plan is not sealed yet: its static phase is still being stated.";
   return (
     <div className="flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
       {state === "stalled" && (

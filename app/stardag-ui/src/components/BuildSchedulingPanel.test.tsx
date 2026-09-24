@@ -4,10 +4,11 @@ import type { BuildFrontier, Deployment, PlanDetail } from "../types/task";
 
 vi.mock("../api/registry", () => ({
   fetchBuildPlans: vi.fn(),
+  fetchBuildNotify: vi.fn(),
   fetchBuildTickSummaries: vi.fn(async () => ({ build_id: "b", summaries: [] })),
 }));
 
-import { fetchBuildPlans } from "../api/registry";
+import { fetchBuildNotify, fetchBuildPlans } from "../api/registry";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
 
 function deployment(generation: number, isCurrent: boolean): Deployment {
@@ -101,5 +102,76 @@ describe("BuildSchedulingPanel", () => {
     ).toBeInTheDocument();
     expect(within(old).queryByText("active")).not.toBeInTheDocument();
     expect(vi.mocked(fetchBuildPlans)).toHaveBeenCalledWith("b", "env-1");
+  });
+
+  function renderPanel(
+    props: Partial<Parameters<typeof BuildSchedulingPanel>[0]> = {},
+  ) {
+    return render(
+      <BuildSchedulingPanel
+        buildId="b"
+        environmentId="env-1"
+        buildStatus="running"
+        frontier={frontier}
+        frontierError={null}
+        {...props}
+      />,
+    );
+  }
+
+  it("shows the active plan's members by status, as v1's chips", async () => {
+    vi.mocked(fetchBuildPlans).mockResolvedValue([
+      plan(2, {
+        is_active: true,
+        member_counts: { completed: 4, running: 1, pending: 0 },
+        excluded_count: 2,
+      }),
+    ]);
+    renderPanel({ frontier: { ...frontier, running: [] } });
+    fireEvent.click(screen.getByRole("button", { name: "Plans and scheduling" }));
+    const chips = await screen.findByLabelText("Active plan members by status");
+    expect(chips.textContent).toBe("running1completed4excluded2");
+  });
+
+  it("shows a spinner while the plans and the frontier are read", () => {
+    vi.mocked(fetchBuildPlans).mockReturnValue(new Promise(() => {}));
+    renderPanel({ frontier: null });
+    fireEvent.click(screen.getByRole("button", { name: "Plans and scheduling" }));
+    const reading = screen.getAllByRole("status");
+    expect(reading.map((r) => r.textContent)).toEqual([
+      "Reading this build’s plans…",
+      "Reading this build’s frontier…",
+    ]);
+  });
+
+  it("does not say 'needs intervention' while a wake-up is queued", async () => {
+    vi.mocked(fetchBuildPlans).mockResolvedValue([]);
+    vi.mocked(fetchBuildNotify).mockResolvedValue({ build_id: "b", needs_tick: true });
+    renderPanel({ frontier: { ...frontier, reactive_app_name: "etl" } });
+    fireEvent.click(screen.getByRole("button", { name: "Plans and scheduling" }));
+    expect(await screen.findByText(/a wake-up is queued/)).toBeInTheDocument();
+    expect(screen.queryByText(/needs intervention/)).not.toBeInTheDocument();
+    expect(vi.mocked(fetchBuildNotify)).toHaveBeenCalledWith("b", "env-1");
+  });
+
+  it("says 'needs intervention' when no wake-up is queued", async () => {
+    vi.mocked(fetchBuildPlans).mockResolvedValue([]);
+    vi.mocked(fetchBuildNotify).mockResolvedValue({ build_id: "b", needs_tick: false });
+    renderPanel({ frontier: { ...frontier, reactive_app_name: "etl" } });
+    fireEvent.click(screen.getByRole("button", { name: "Plans and scheduling" }));
+    expect(await screen.findByText(/needs intervention/)).toBeInTheDocument();
+  });
+
+  it("never says the next tick completes a failed or cancelled build", async () => {
+    vi.mocked(fetchBuildPlans).mockResolvedValue([]);
+    renderPanel({
+      buildStatus: "cancelled",
+      frontier: { ...frontier, plan_complete: true, build_status: "cancelled" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Plans and scheduling" }));
+    expect(
+      await screen.findByText(/recorded as cancelled, so no tick acts on it/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/next tick completes/)).not.toBeInTheDocument();
   });
 });
