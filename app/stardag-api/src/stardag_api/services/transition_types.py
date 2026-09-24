@@ -17,7 +17,8 @@ from stardag_api.models import ClaimOutcome, EventType, ExecutionOutcome, TaskSt
 from stardag_api.services.errors import BadRequest
 
 #: Statuses a member can be started from (plus RUNNING with a lapsed claim).
-#: FAILED is absent: the fail mode decides (a retry makes it PENDING).
+#: FAILED is absent: the fail mode decides (a retry makes it PENDING). The
+#: frontier lists by it and a claiming start refuses by it.
 ACTIONABLE_STATUSES = (
     TaskStatus.PENDING,
     TaskStatus.SUSPENDED,

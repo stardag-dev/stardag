@@ -176,6 +176,7 @@ async def yield_batch(
                     as_roots=False,
                     now=clock.now,
                     dynamic=set(yielded),
+                    from_yield=True,
                 )
                 edges = await _dynamic_edges(
                     session, environment_id, plan, parent_instance, yielded

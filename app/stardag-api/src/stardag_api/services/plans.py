@@ -216,7 +216,16 @@ async def closure(
 async def close_plan(
     session: AsyncSession, environment_id: UUID, plan: Plan, *, now: datetime
 ) -> ClosureResult:
-    """:func:`closure` inside the caller's transaction."""
+    """:func:`closure` inside the caller's transaction.
+
+    Takes the build row lock (``FOR NO KEY UPDATE``, as plan creation and
+    sealing do) before reading or admitting anything, so the lock order is
+    the registration one — build, then plan, then task rows. Admitting
+    first and locking the build only to fail it over a conflict would hold
+    ``plan_member`` inserts while waiting for a lock that a plan retry
+    holds while it waits on those same rows.
+    """
+    await lock_build(session, environment_id, plan.build_id)
     reached = (await session.execute(_REACHABLE_NON_MEMBERS, {"plan": plan.id})).all()
     if not reached:
         return ClosureResult(admitted=0)

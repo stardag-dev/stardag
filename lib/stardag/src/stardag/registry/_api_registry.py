@@ -3120,12 +3120,16 @@ def _get_task_data_for_registration(
 ) -> dict:
     """Helper to serialize task data for registration API call.
 
-    ``task_data`` is the task's **registry-mode** dump: every identity
-    parameter, none of the ``dependencies_only`` / ``execution_only`` ones.
-    It is therefore a pure function of the task id, and a rehydrated task
-    reads its non-identity values from the build config wherever it is
-    rehydrated — which is what makes the pickle and registry-data paths
-    agree.
+    Registration records an **instance**: a registry row holding one
+    construction of the task under the build's deterministic scope (the
+    Python object being registered is a *task object*). ``task_data`` is the
+    instance body, ``task.instance_body()`` — every field, significant or
+    not, defaults included — parsed from the same canonical JSON that
+    ``task.instance_hash`` hashes, so what is stored is exactly what was
+    hashed. It is **not** a function of the task id: two instances of one
+    task id may differ in their ``significant=False`` fields. The instance
+    hash is not an identifier on its own; the registry keys the row by the
+    scope and the hash together.
 
     ``limit_keys`` maps task ids to the named concurrency-limit keys the
     task runs under; when the task has an entry it is sent, so the registry
@@ -3140,7 +3144,6 @@ def _get_task_data_for_registration(
     """
     # Avoid circular import:
     from stardag._core.base_task import flatten_task_struct  # noqa: F401
-    from stardag.base_model import CONTEXT_MODE_KEY
 
     # Extract output_uri if the task has a FileSystemTarget target with a uri
     output_uri: str | None = None
@@ -3158,9 +3161,7 @@ def _get_task_data_for_registration(
         "task_id": str(task.id),
         "task_namespace": task.get_namespace(),
         "task_name": task.get_name(),
-        "task_data": task.model_dump(
-            mode="json", context={CONTEXT_MODE_KEY: "registry"}
-        ),
+        "task_data": task.instance_body(),
         "version": task.version,
         "output_uri": output_uri,
         **(

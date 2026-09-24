@@ -14,7 +14,10 @@ rules, in one place:
   A claiming start names its plan and a client-minted execution id; the same
   execution retrying a granted start is a no-op, checked *before* the plan
   (S36); otherwise COMPLETED is 409 ``task_already_completed``, a live claim
-  409 ``task_already_running``, an inactive plan 409 ``plan_superseded``, and
+  409 ``task_already_running``, any other status outside ACTIONABLE (FAILED:
+  the fail mode decides, through ``retry``) 409 ``task_not_actionable``, an
+  inactive plan 409 ``plan_superseded``, a
+  build that is not RUNNING 409 ``build_not_running``, and
   an upstream not COMPLETED — re-read under a share lock, so an invalidation
   in flight is waited for — 409 ``upstream_incomplete`` (S39). A lapsed claim
   is taken over (``claim_outcome = taken_over``, S21).
@@ -44,6 +47,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
+    Build,
+    BuildStatus,
     ClaimOutcome,
     EventType,
     Execution,
@@ -59,6 +64,7 @@ from stardag_api.services.claim_limits import full_limits, replace_limit_keys
 from stardag_api.services.errors import Conflict, NotFound, RecordedConflict
 from stardag_api.services.transition_reports import ReportSteps
 from stardag_api.services.transition_types import (
+    ACTIONABLE_STATUSES,
     DEFAULT_CLAIM_TTL_SECONDS,
     MAX_CLAIM_TTL_SECONDS,
     REPORTS,
@@ -71,6 +77,7 @@ from stardag_api.services.tx import transaction
 from stardag_api.services.wakeups import flag_after_transition
 
 __all__ = [
+    "ACTIONABLE_STATUSES",
     "DEFAULT_CLAIM_TTL_SECONDS",
     "MAX_CLAIM_TTL_SECONDS",
     "Transition",
@@ -280,6 +287,16 @@ class _Step(ReportSteps):
                 "another execution holds a live claim on the task",
                 task_id=t.task_id,
             )
+        # A lapsed RUNNING claim is taken over below; anything else outside
+        # ACTIONABLE (FAILED) is not a claiming start's to decide.
+        if t.status != TaskStatus.RUNNING and t.status not in ACTIONABLE_STATUSES:
+            raise Conflict(
+                "task_not_actionable",
+                f"the task is {t.status.value.upper()}; it is started again"
+                " only after a retry",
+                task_id=t.task_id,
+                status=t.status.value,
+            )
         if await self.session.get(Execution, eid) is not None:
             raise Conflict(
                 "execution_superseded",
@@ -294,6 +311,21 @@ class _Step(ReportSteps):
                 "plan_superseded",
                 "the plan is not the build's active plan",
                 plan_id=str(plan.id),
+            )
+        # A plain read, not a lock: the build row is locked before task rows
+        # elsewhere (plan creation observing its roots), so locking it here,
+        # after the task row, could deadlock. A start racing the build's end
+        # is left to that end, which releases the claims held by the build's
+        # plans (design.md, "The runnable rule"; the build lifecycle routes).
+        build_status = await self.session.scalar(
+            select(Build.status).where(Build.id == plan.build_id)
+        )
+        if build_status != BuildStatus.RUNNING:
+            raise Conflict(
+                "build_not_running",
+                "the plan's build is not RUNNING; it hands out no more work",
+                build_id=str(plan.build_id),
+                build_status=build_status.value if build_status else None,
             )
         member = await self.session.scalar(
             select(PlanMember).where(

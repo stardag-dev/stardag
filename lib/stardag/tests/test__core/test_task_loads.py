@@ -1,6 +1,5 @@
 from typing import Annotated
 
-import warnings
 
 import pytest
 from pydantic import ValidationError
@@ -64,7 +63,7 @@ class LoadsIntTask(TargetTask[LoadableTarget[int]]):
 class LoadsStrTaskWithAnnotation(TargetTask[LoadableTarget[str]]):
     """Task with annotated fields - should be compatible with SubClass[TargetTask[...]]."""
 
-    data: Annotated[str, StardagField(significance="execution_only")] = "annotated"
+    data: Annotated[str, StardagField(significant=False)] = "annotated"
 
     def run(self) -> None:
         self.target().save(self.data)
@@ -232,23 +231,19 @@ class ContainerTaskLoadsInt(BaseTask):
         pass
 
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
+class ContainerWithAnnotatedField(BaseTask):
+    """Container with an annotated TaskLoads field.
 
-    class ContainerWithAnnotatedField(BaseTask):
-        """Container with an annotated TaskLoads field.
+    A non-significant field, passed at init below like any other.
+    """
 
-        ``hash_exclude`` rather than ``significance``: the field is passed at
-        init below, which only the deprecated option allows.
-        """
+    task: Annotated[TaskLoads[str], StardagField(significant=False)]
 
-        task: Annotated[TaskLoads[str], StardagField(hash_exclude=True)]
+    def complete(self) -> bool:
+        return True
 
-        def complete(self) -> bool:
-            return True
-
-        def run(self) -> None:
-            pass
+    def run(self) -> None:
+        pass
 
 
 # =============================================================================

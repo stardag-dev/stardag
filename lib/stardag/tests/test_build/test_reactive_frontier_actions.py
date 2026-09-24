@@ -970,6 +970,7 @@ class TestRehydration:
         assert summary.terminal_status == "completed"
         assert summary.failed_recorded == 0
 
+    @pytest.mark.xfail(reason="v2: I7", strict=True)
     async def test_level_2_values_come_from_the_config_installed_here(self):
         """The property that replaced the store's rebind-on-load rule.
 
@@ -988,9 +989,7 @@ class TestRehydration:
         class Configured(sd.Task[int]):
             __namespace__ = "frontier_tests"
             key: str
-            width: typing.Annotated[
-                int, StardagField(significance="dependencies_only")
-            ] = 4
+            width: typing.Annotated[int, StardagField(significant=False)] = 4
 
             def run(self) -> None:
                 pass

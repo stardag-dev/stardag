@@ -227,7 +227,7 @@ assignee the maintainer.
 - [ ] I3 — Frontier and transitions
 - [ ] I4 — Deployments, builds, wake-ups, reads
 - [ ] I5 — Extract what stays
-- [ ] I6 — SDK core
+- [ ] I6 — SDK core (in progress — hashing and field layer done; I7 pending)
 - [ ] I7 — SDK engines + Modal
 - [ ] I8 — CLI
 - [ ] I9 — UI

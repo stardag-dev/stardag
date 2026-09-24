@@ -3,6 +3,7 @@ import asyncio
 import base64
 import functools
 import inspect
+import json
 import logging
 from abc import abstractmethod
 from collections import abc as collections_abc
@@ -29,7 +30,7 @@ from pydantic import ConfigDict, Field, SerializationInfo, model_validator
 from typing_extensions import TypeAlias, Union
 
 from stardag._core.target_base import TargetType
-from stardag._core.task_id import _get_task_id_from_jsonable
+from stardag._core.task_id import _get_task_id_from_jsonable, instance_hash_of_body
 from stardag.base_model import CONTEXT_MODE_KEY
 from stardag.polymorphic import PolymorphicRoot
 from stardag.target._base import LoadedT_co
@@ -117,6 +118,30 @@ class BaseTask(
     PolymorphicRoot,
     metaclass=abc.ABCMeta,
 ):
+    """The base of every task class.
+
+    A subclass declares a task's parameters as pydantic fields. An object of
+    it is a **task object**; what the registry stores is an **instance** — a
+    row holding one construction of a task under a deterministic scope. One
+    task object planned under two scopes is two instances; one instance
+    rehydrates into any number of task objects.
+
+    A task has two identities:
+
+    - :attr:`id`, the **task id**: a hash of the class (namespace, name),
+      ``version`` and every *significant* field
+      (``StardagField(significant=True)``, the default). It is the promise
+      about output — completion and the execution claim are global on it —
+      and it names the target.
+    - :attr:`instance_hash`: the hash of the canonical instance body, i.e.
+      of **all** fields, defaults included. It answers "how exactly was this
+      task constructed", and is meaningful only together with the scope it
+      is registered under.
+
+    Two task objects with one task id and different instance hashes are two
+    ways of asking for one completion; a plan may hold only one of them.
+    """
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         frozen=True,
@@ -359,12 +384,48 @@ class BaseTask(
 
     @cached_property
     def id(self) -> UUID:
+        """The task id: the completion identity.
+
+        uuid5 over the canonical hash-mode dump — the class discriminators,
+        ``version`` and every significant field; a field whose value equals
+        its ``compat_default`` is dropped, and a nested task contributes its
+        own task id. Custom serializers may special-case the ``"hash"`` mode:
+        that is the user's control over completion identity.
+        """
         return UUID(
             self.model_dump(
                 mode="json",
                 context={CONTEXT_MODE_KEY: "hash"},
             )["id"]
         )
+
+    @cached_property
+    def _instance_body_json(self) -> str:
+        from stardag._core.instance import canonical_instance_body_json
+
+        return canonical_instance_body_json(self)
+
+    def instance_body(self) -> dict[str, Any]:
+        """The instance body: the registry-mode dump of every field, defaults
+        included, nested tasks as their full bodies — parsed from the same
+        canonical JSON that :attr:`instance_hash` hashes, so what is sent is
+        exactly what was hashed. A fresh dict on every call.
+        """
+        return json.loads(self._instance_body_json)
+
+    @cached_property
+    def instance_hash(self) -> UUID:
+        """The hash of the canonical instance body (all parameters).
+
+        Not an identifier on its own: an instance is a registry row keyed by
+        its scope *and* this hash, so the same hash under two scopes is two
+        instances. Use :attr:`id` for "which task", and the scope together
+        with this for "which instance". Has no hash mode of its own; custom
+        serializers affect it only through ordinary serialization, which
+        must be stable (see
+        ``stardag._core.instance.check_serialization_stability``).
+        """
+        return instance_hash_of_body(self._instance_body_json)
 
     def _hash_mode_finalize(self, data: dict[str, Any], info: SerializationInfo) -> Any:
         """Make hash mode serialization of tasks a container of just their ID."""
@@ -406,13 +467,27 @@ class BaseTask(
     ) -> "BaseTask":
         """Instantiate the task from the registry.
 
+        Validated in compat mode, same as ``task_from_registry_data``: the
+        recomputed task id is checked against the requested one, so a
+        removed or renamed significant field — dropped by compat mode's
+        lenient rules for non-significant fields — cannot silently return a
+        task with a different completion identity than the one asked for.
+
         Args:
             id: The UUID (or string representation) of the task to load.
             registry: An optional registry instance to use for loading metadata. If not
                 provided, the default registry from `registry_provider` will be used.
         Returns:
-            An AliasTask instance referencing the specified task.
+            The reconstructed task object.
+
+        Raises:
+            TaskRehydrationError: The recomputed task id does not match the
+                requested one.
         """
+        # Local import: rehydrate.py imports base_task at module level, so
+        # this must stay a lazy, in-method import to avoid a circular import
+        # at module load time.
+        from stardag._core.rehydrate import TaskRehydrationError
         from stardag.registry import registry_provider
 
         if isinstance(id, str):
@@ -421,7 +496,16 @@ class BaseTask(
         registry = registry or registry_provider.get()
         metadata = registry.task_get_metadata(id)
 
-        return cls.model_validate(metadata.body, context={CONTEXT_MODE_KEY: "compat"})
+        task = cls.model_validate(metadata.body, context={CONTEXT_MODE_KEY: "compat"})
+        if task.id != metadata.id:
+            raise TaskRehydrationError(
+                f"Rehydrated task id {task.id} does not match the requested "
+                f"id {metadata.id} — a field's serialization is likely not "
+                "losslessly round-trippable, or a significant field the "
+                "class no longer declares was silently dropped by compat "
+                "mode's lenient rules for non-significant fields."
+            )
+        return task
 
 
 def auto_namespace(scope: str):
