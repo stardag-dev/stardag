@@ -48,6 +48,8 @@ class TransitionKind(str, enum.Enum):
     # Scheduling decisions that name no execution.
     SKIP = "skip"
     CANCEL = "cancel"
+    # An operator (``builds stop``) reports it ended an execution.
+    STOP = "stop"
     RENEW = "renew"
     # Written by registration, from a driver's observation of the target.
     OBSERVE_COMPLETE = "observe_complete"
@@ -136,6 +138,10 @@ class Transition:
     @classmethod
     def cancel(cls) -> Transition:
         return cls(TransitionKind.CANCEL)
+
+    @classmethod
+    def stop(cls, execution_id: UUID) -> Transition:
+        return cls(TransitionKind.STOP, execution_id=execution_id)
 
     @classmethod
     def release(cls, reason: str) -> Transition:

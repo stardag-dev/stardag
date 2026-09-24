@@ -243,6 +243,8 @@ async def _dispatch(step: _Step) -> TransitionOutcome:
         return await step.skip()
     if kind is TransitionKind.CANCEL:
         return await step.cancel()
+    if kind is TransitionKind.STOP:
+        return await step.stop()
     if kind is TransitionKind.RENEW:
         return await step.renew()
     if kind is TransitionKind.OBSERVE_COMPLETE:

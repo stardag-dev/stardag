@@ -18,7 +18,13 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from stardag_api.models import ClaimOutcome, EventType, Plan, TaskStatus
+from stardag_api.models import (
+    ClaimOutcome,
+    EventType,
+    ExecutionOutcome,
+    Plan,
+    TaskStatus,
+)
 from stardag_api.services.errors import Conflict, RecordedConflict
 from stardag_api.services.transition_step import StepBase
 from stardag_api.services.transition_types import (
@@ -197,6 +203,34 @@ class ReportSteps(StepBase):
         await self.close_claim(ClaimOutcome.CANCELLED)
         self.move(TaskStatus.CANCELLED)
         await self.record(EventType.TASK_CANCELLED, execution_id=execution_id)
+        await self.session.flush()
+        return self.outcome(applied=True)
+
+    async def stop(self) -> TransitionOutcome:
+        """An operator stopped the execution (``builds stop``), or the
+        backend reports its container gone: the ledger end ``ended_at``,
+        ``outcome = stopped``. Idempotent: an execution that already ended
+        is left as it ended. If it still holds the task's claim (live or
+        lapsed), nothing will ever report for it, so the claim is released
+        too — ``claim_outcome = cancelled``, the task CANCELLED, which is
+        ACTIONABLE for every build holding it."""
+        t, eid = self.task, self.execution_id()
+        execution = await self.named_execution(EventType.TASK_CANCELLED, eid)
+        if execution.ended_at is not None:
+            return self.outcome(applied=False)
+        execution.ended_at = self.now
+        execution.outcome = ExecutionOutcome.STOPPED
+        holds = t.execution_id == eid and execution.claim_released_at is None
+        if holds:
+            assert t.status == TaskStatus.RUNNING, t.status
+            await self.close_claim(ClaimOutcome.CANCELLED)
+            self.move(TaskStatus.CANCELLED)
+        await self.record(
+            EventType.TASK_CANCELLED,
+            execution_id=eid,
+            report_applied=holds,
+            metadata={"stopped": True},
+        )
         await self.session.flush()
         return self.outcome(applied=True)
 

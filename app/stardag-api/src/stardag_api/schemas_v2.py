@@ -9,12 +9,18 @@ route converts and does nothing else.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from stardag_api.models.enums import BuildStatus, DeploymentKind, TaskStatus
+from stardag_api.models.enums import (
+    BuildStatus,
+    ClaimOutcome,
+    DeploymentKind,
+    ExecutionOutcome,
+    TaskStatus,
+)
 
 
 class RegistrationItem(BaseModel):
@@ -458,3 +464,40 @@ class ExclusionResponse(BaseModel):
     plan_id: UUID
     excluded: list[str]
     build_failed: bool
+
+
+# ---------------------------------------------------------------------------
+# Executions: builds stop and orphans
+# ---------------------------------------------------------------------------
+
+
+class ExecutionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    task_id: str
+    plan_id: UUID
+    instance_id: UUID
+    executor: str | None
+    executor_ref: str | None
+    executor_metadata: dict[str, Any] | None
+    started_at: datetime
+    claim_released_at: datetime | None
+    claim_outcome: ClaimOutcome | None
+    ended_at: datetime | None
+    outcome: ExecutionOutcome | None
+    #: False for an orphan: its plan is not the build's active plan.
+    in_current_plan: bool
+
+
+class ExecutionListResponse(BaseModel):
+    build_id: UUID
+    executions: list[ExecutionResponse]
+
+
+class StoppedRequest(BaseModel):
+    """What ``builds stop`` reports having stopped."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["stopped"] = "stopped"

@@ -88,7 +88,11 @@ app.include_router(registry_v2_router, prefix="/api/v2")
 @app.exception_handler(RegistryError)
 async def registry_error_handler(_: Request, exc: RegistryError) -> JSONResponse:
     """A v2 service refusal: its status code, and its code and detail."""
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.to_dict()})
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.to_dict()},
+        headers=exc.headers,
+    )
 
 
 @app.get("/health")

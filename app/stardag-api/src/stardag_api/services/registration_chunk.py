@@ -33,6 +33,7 @@ from stardag_api.schemas_v2 import RegistrationItem
 from stardag_api.services import event_log
 from stardag_api.services.errors import BadRequest, Conflict
 from stardag_api.services.event_log import EventClock
+from stardag_api.services.quotas import charge_instances
 from stardag_api.services.transitions import (
     Transition,
     TransitionKind,
@@ -136,6 +137,7 @@ async def register_items(
 
     await _insert_tasks(session, environment_id, chunk)
     await _insert_instances(session, environment_id, chunk)
+    await charge_instances(session, environment_id, chunk.instances_created, now=now)
     admitted = await _admit_items(
         session, environment_id, chunk, as_roots=as_roots, dynamic=dynamic
     )

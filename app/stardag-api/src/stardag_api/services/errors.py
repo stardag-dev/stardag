@@ -31,6 +31,11 @@ class RegistryError(Exception):
     def to_dict(self) -> dict[str, Any]:
         return {"code": self.code, "message": self.message, **self.detail}
 
+    @property
+    def headers(self) -> dict[str, str] | None:
+        """Response headers the refusal carries (none by default)."""
+        return None
+
 
 class BadRequest(RegistryError):
     """The request is wrong on its own terms (400)."""
@@ -54,3 +59,16 @@ class RecordedConflict(Conflict):
     """A 409 whose record (a refused-report event, a ledger end) is already
     in the session: :func:`stardag_api.services.tx.transaction` commits it
     before the refusal propagates."""
+
+
+class TooManyRequests(RegistryError):
+    """A guardrail refused the request (429): the per-workspace rate limit
+    (``rate_limited``, with ``Retry-After``) or a 24-hour creation quota
+    (``creation_quota_exceeded``)."""
+
+    status_code = 429
+
+    @property
+    def headers(self) -> dict[str, str] | None:
+        retry_after = self.detail.get("retry_after")
+        return None if retry_after is None else {"Retry-After": str(retry_after)}
