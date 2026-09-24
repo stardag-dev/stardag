@@ -133,6 +133,12 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   `executor` (the mode), `executor_ref` (`hostname:pid`) and
   `executor_metadata` (host, pid, Python version) on the execution row, as
   Modal executions record their call (`TaskExecutorABC.get_executor_details`).
+- **New: `publish.yml` and `publish-server-image.yml` also publish a
+  release candidate** (`vX.Y.ZrcN` / `server-vX.Y.ZrcN`), marked
+  pre-release on GitHub and never moving the server image's `:latest` tag.
+  `DEFAULT_SERVER_VERSION` (`_modal_app.py`) points `stardag self-host up`
+  at a v2 release candidate while this line is still in flight; see
+  DEV_README.md "Pre-release".
 
 ### Server
 

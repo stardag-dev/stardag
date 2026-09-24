@@ -113,6 +113,7 @@ async def version():
     DEV_README.md "Releasing the Server"):
 
     - ``X.Y.Z`` - a release build (from a ``server-vX.Y.Z`` tag)
+    - ``X.Y.ZrcN`` - a pre-release build (from a ``server-vX.Y.ZrcN`` tag)
     - ``X.Y.Z+N.g<sha>`` - a non-release build, N commits past the
       nearest release tag (semver build metadata)
     - ``0.0.0+g<sha>`` - a build with no release tag reachable

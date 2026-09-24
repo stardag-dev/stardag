@@ -416,6 +416,33 @@ def test_upgrade_version_unparseable_recorded_version_is_kept(
     assert _resolve_upgrade_server_version("myapp", None) == "some-custom-tag"
 
 
+def test_upgrade_version_rc_default_beats_older_final(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A pre-release SDK default (e.g. "0.6.0rc1") still parses and still
+    rolls a deployment on an older final release forward — the rc suffix
+    must not make `_parse_semver` give up and freeze the deployment."""
+    monkeypatch.setattr(
+        "stardag._cli.selfhost.DEFAULT_SERVER_VERSION", "0.6.0rc1", raising=False
+    )
+    store: dict = {"server_version": "0.5.0"}
+    _patch_meta_dict(monkeypatch, store)
+    assert _resolve_upgrade_server_version("myapp", None) == "0.6.0rc1"
+
+
+def test_upgrade_version_rc_default_does_not_beat_newer_final(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A final release of the *same* X.Y.Z outranks its own rc: a deployment
+    already on "0.6.0" is not rolled back to a "0.6.0rc1" SDK default."""
+    monkeypatch.setattr(
+        "stardag._cli.selfhost.DEFAULT_SERVER_VERSION", "0.6.0rc1", raising=False
+    )
+    store: dict = {"server_version": "0.6.0"}
+    _patch_meta_dict(monkeypatch, store)
+    assert _resolve_upgrade_server_version("myapp", None) == "0.6.0"
+
+
 def test_generate_jwt_keypair_pem():
     private_pem, public_pem = _generate_jwt_keypair()
     assert private_pem.startswith("-----BEGIN PRIVATE KEY-----")

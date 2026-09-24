@@ -21,6 +21,7 @@ the Modal environments where your DAG apps run.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -274,16 +275,25 @@ SERVER_TAG_PREFIX = "server-v"
 SERVER_RELEASES_API = "https://api.github.com/repos/stardag-dev/stardag/releases"
 
 
-def _parse_semver(version: str) -> tuple[int, int, int] | None:
-    """Parse 'X.Y.Z' into a comparable tuple; None for anything else."""
-    parts = version.split(".")
-    if len(parts) != 3:
+def _parse_semver(version: str) -> tuple[int, int, int, int, int] | None:
+    """Parse 'X.Y.Z' or 'X.Y.ZrcN' into a comparable tuple; None for anything
+    else.
+
+    The last two elements order a release candidate before its own final
+    release and rc's of the same X.Y.Z against each other: a final release
+    is ``(..., 1, 0)``, ``X.Y.ZrcN`` is ``(..., 0, N)`` — so, for equal
+    ``(major, minor, patch)``, any rc sorts below the final and a higher rc
+    number sorts above a lower one. Callers that need the bare ``X.Y.Z``
+    (e.g. to rebuild a tag) take the first three elements, not the tuple as
+    a whole.
+    """
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:rc(\d+))?", version)
+    if match is None:
         return None
-    try:
-        major, minor, patch = (int(p) for p in parts)
-    except ValueError:
-        return None
-    return major, minor, patch
+    major, minor, patch, rc = match.groups()
+    if rc is None:
+        return int(major), int(minor), int(patch), 1, 0
+    return int(major), int(minor), int(patch), 0, int(rc)
 
 
 def _latest_released_server_version() -> str:
@@ -351,7 +361,7 @@ def _latest_released_server_version() -> str:
         )
         raise typer.Exit(1)
 
-    return ".".join(str(part) for part in max(versions))
+    return ".".join(str(part) for part in max(versions)[:3])
 
 
 def _resolve_version_keyword(server_version: str | None) -> str | None:
