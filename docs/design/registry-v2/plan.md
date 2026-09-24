@@ -228,7 +228,16 @@ assignee the maintainer.
 - [ ] I4 — Deployments, builds, wake-ups, reads
 - [ ] I5 — Extract what stays
 - [ ] I6 — SDK core (in progress — hashing and field layer done; I7 pending)
-- [ ] I7 — SDK engines + Modal
+- [ ] I7 — SDK engines + Modal (in review, draft PR against `v2`). The
+      client, both engines, the tick, the worker and `stardag modal deploy`
+      run on `/api/v2`, against the step-3b routes; `build_config.py` is
+      gone and `settings` replaces it. Coded against routes the registry
+      does not serve yet, each marked **(assumed)** in
+      `registry/_api_routes.py` / `_api_registry.py`: `GET /builds`
+      (running, by reactive app: the watchdog), `GET /plans/{id}/roots`
+      (root bodies for rollover), `GET /tasks/{id}` (`from_registry`),
+      `POST /tasks/{id}/artifacts`. Left to I8: `builds list/stop/cleanup`,
+      `tasks`, `concurrency-limits`. The live tier is I0 step 4.
 - [ ] I8 — CLI
 - [ ] I9 — UI
 - [ ] I10 — tests

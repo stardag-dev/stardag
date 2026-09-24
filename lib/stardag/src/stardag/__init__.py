@@ -53,13 +53,6 @@ from stardag._core.task_loads import TaskLoads
 from stardag._version import __version__
 from stardag._core.instance import check_serialization_stability
 from stardag.base_model import StardagBaseModel, StardagField
-from stardag.build_config import (
-    BuildConfigError,
-    UnknownTaskClassError,
-    build_config_scope,
-    get_build_config,
-    set_build_config,
-)
 from stardag.build import build, build_aio, build_sequential, build_sequential_aio
 from stardag.cancellation import cancellation_requested
 from stardag.config import config_provider
@@ -69,8 +62,6 @@ from stardag.exceptions import (
     AuthorizationError,
     ExecutionCancelled,
     InstanceConflictError,
-    RegistryTooOldError,
-    SDKVersionUnsupportedError,
     StardagError,
     ResumableInterruption,
     TokenExpiredError,
@@ -94,11 +85,6 @@ from stardag.target import (
 )
 
 __all__ = [
-    "BuildConfigError",
-    "UnknownTaskClassError",
-    "build_config_scope",
-    "get_build_config",
-    "set_build_config",
     "__version__",
     "AliasedMetadata",
     "AliasTask",
@@ -135,8 +121,6 @@ __all__ = [
     "UnstableSerializationError",
     "check_serialization_stability",
     "ResumableInterruption",
-    "RegistryTooOldError",
-    "SDKVersionUnsupportedError",
     "StardagError",
     "StardagBaseModel",
     "StardagField",

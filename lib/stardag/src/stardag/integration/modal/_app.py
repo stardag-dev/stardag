@@ -13,61 +13,34 @@ this package's ``__init__`` for a map of those modules.
 
 from __future__ import annotations
 
-import inspect
-import json
 import logging
 import typing
 import warnings
 from uuid import UUID
 
 import modal
-from modal.exception import NotFoundError as ModalNotFoundError
 
-from stardag import BaseTask
-from stardag.build import BuildSummary
-from stardag.build._scope import (
-    STARDAG_CODE_ID_ENV,
+from stardag.build._deployment import (
     code_id as _process_code_id,
 )
+from stardag.build._registration import new_id
 from stardag.build._task_modules import (
-    TaskModulesError,
     expand_task_module_patterns,
-    import_task_modules,
-    set_declared_task_module_patterns,
     validate_task_module_patterns,
-)
-from stardag.build_config import (
-    UnknownTaskClassError,
-    canonical_structure_config,
-    jsonable_build_config,
 )
 from stardag.exceptions import StardagError
 from stardag.integration.modal._bootstrap import (
     ReactiveDiscovery,
-    _advise_uncovered_root_task_modules,
-    _fail_build_best_effort,
-    run_reactive_bootstrap,
 )
 from stardag.integration.modal._builder import _default_build
 from stardag.integration.modal._container_setup import (
     ContainerSetup,
-    _run_container_setup,
     _validate_container_setup,
     _validate_serialized_callable,
-)
-from stardag.integration.modal._limit_keys import set_deployed_limit_key_selector
-from stardag.integration.modal._logging import _setup_logging
-from stardag.integration.modal._metadata import (
-    MODAL_EXECUTOR_NAME,
-    STARDAG_MODAL_WORKSPACE_ENV,
-    _get_modal_environment,
-    _get_modal_workspace,
 )
 from stardag.integration.modal._protocols import (
     BuildFunction,
     RunFunction,
-    _callable_accepts_env_overrides,
-    _RunFunctionWithEnv,
 )
 from stardag.integration.modal._runner import _default_run
 from stardag.integration.modal._selector import (
@@ -76,58 +49,22 @@ from stardag.integration.modal._selector import (
 )
 from stardag.integration.modal._settings import (
     FunctionSettings,
-    InputConcurrency,
-    _prepare_function_settings,
 )
-from stardag.integration.modal._target import get_default_volume_mount_path
 from stardag.integration.modal._tick import (
     LimitKeySelector,
-    _run_deployed_tick_aio,
-    _run_watchdog_sweep,
-    _tick_function_timeout_seconds,
-    _TickDeployment,
-    _validate_tick_kwargs,
 )
+from stardag.integration.modal._functions import (
+    _auto_mounted_volumes,
+    _infer_task_module_patterns,
+    _register_functions,
+    _resolve_extra_secrets,
+)
+from stardag.integration.modal._trigger import _Triggering
 from stardag.integration.modal._volumes import (
-    TargetRootsVolumes,
     get_target_roots_volumes,
 )
-from stardag.registry._base import NoOpRegistry, registry_provider
-from stardag.utils.env import temp_env_vars
 
 logger = logging.getLogger(__name__)
-
-
-# How many scheduler ticks one container may serve at once, unless the app
-# says otherwise via ``tick_settings``.
-#
-# **Why the tick and nothing else.** A tick is almost entirely I/O wait: it
-# reads the frontier, spawns, and then polls on a sleep until its linger
-# deadline. One container per tick is therefore close to the worst possible
-# packing — and the linger that makes reactive scheduling efficient (one
-# resident scheduler driving level after level, instead of a cold start per
-# level) is precisely what keeps those containers alive. Sharing makes the
-# linger nearly free. No other function in the app has that shape: workers
-# run user code and may be CPU- or GPU-bound, the builder runs a whole
-# build, and the bootstrap walks a DAG.
-#
-# **Not ``tick_watchdog``**, even though it shares ``tick_settings``. It is
-# a separate Modal function with its own containers and receives one input
-# per ``watchdog_period_minutes``, so concurrency would change nothing in
-# the steady state; and it is a ``def``, which Modal would serve on
-# threads — the exact hazard ``_modal_tick`` is async to avoid.
-#
-# **Why 10, and why bounded at all.** Concurrency is not free per tick: each
-# holds up to ``TickConfig.max_concurrent_actions`` in-flight registry
-# calls, and a share of one HTTP connection pool (see
-# ``APIRegistry``'s async limits, sized against this number). Ten is enough
-# that the linger stops driving container count at the scale reactive builds
-# actually run at, and small enough that one container's loss is bounded.
-#
-# ``target_inputs`` is deliberately unset: it would have Modal provision a
-# further container rather than pack up to the max, which is the opposite of
-# the point here.
-_TICK_CONCURRENCY: InputConcurrency = {"max_inputs": 10}
 
 
 class FinalizeResult(typing.NamedTuple):
@@ -151,112 +88,7 @@ class FinalizeResult(typing.NamedTuple):
     task_modules: list[str] = []
 
 
-class BuildTriggerResult(typing.NamedTuple):
-    """Result of :meth:`StardagApp.build_trigger`.
-
-    Attributes:
-        build_id: The registry build id minted (or reused) at the trigger
-            point. Pass it back to ``build_trigger(..., build_id=...)`` to
-            re-attach/resume the same build.
-        function_call: The Modal ``FunctionCall`` handle for the one
-            invocation this trigger spawned — the ``build`` function for a
-            resident build, and the ``bootstrap`` function for a reactive
-            one. The exception is ``reactive_discovery="local"``, which
-            discovers on the triggering machine and therefore has no
-            bootstrap to spawn: the handle is the first ``tick`` instead.
-            Call ``.get()`` to block on the result if needed.
-
-            For reactive builds the bootstrap call is the honest handle:
-            it is what the trigger actually spawned, and it is the call
-            whose failure means the build never started (it discovers the
-            DAG, persists it, arms the build and spawns the first tick —
-            see :func:`run_reactive_bootstrap`). It is *not* a handle on
-            the build: a reactive build outlives it by design, and its
-            result is the bootstrap summary, not a ``BuildSummary``. It
-            previously carried the first tick's call, which resolved as
-            soon as that tick lingered out and said nothing about whether
-            the DAG had been registered at all.
-    """
-
-    build_id: UUID
-    function_call: typing.Any
-
-
-def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
-    """Infer ``task_modules`` from the module that constructs the app.
-
-    The default declaration is "the root package of the module defining
-    this app, recursively" — which is right far more often than not: an
-    app and the tasks it schedules almost always live in the same
-    distribution, and a whole-package wildcard costs only import time.
-
-    Inference is impossible for a module that is not part of a package —
-    ``__main__``, or a loose script that Modal loads as a top-level module.
-    Such a module isn't importable in a container under a stable name in
-    the first place, so a pattern derived from it would be a lie. We warn
-    and opt out, rather than baking in a module list that would fail to
-    import in every tick container. An app that opts out (here or with
-    ``task_modules=[]``) is resident-only: a reactive trigger on it is
-    refused, because a scheduler tick would have no way to rebuild a
-    single one of its tasks.
-
-    Args:
-        _depth: Stack frames back to the user's call site (``__init__``'s
-            caller by default). Not part of the public contract.
-    """
-    # Frames hold their locals and globals alive and participate in
-    # reference cycles, so the walk is scoped and the references dropped
-    # rather than left for the collector — this runs in long-lived
-    # scheduler containers.
-    frame = inspect.currentframe()
-    try:
-        for _ in range(_depth):
-            frame = frame.f_back if frame is not None else None
-        module_name = frame.f_globals.get("__name__") if frame is not None else None
-        package = frame.f_globals.get("__package__") if frame is not None else None
-    finally:
-        del frame
-    if not module_name or module_name == "__main__" or not package:
-        logger.warning(
-            "Could not infer StardagApp(task_modules=...): the app is "
-            f"defined in {module_name or 'an unknown module'!r}, which is "
-            "not part of an importable package. This app can only run "
-            "RESIDENT builds — build_trigger(reactive=True) will be "
-            "refused, because a scheduler tick rebuilds every task it "
-            "schedules from registry data and can only do that for a "
-            "class whose module it has imported. Declare the modules "
-            'explicitly — e.g. task_modules=["my_pkg.tasks.*"] — or pass '
-            "task_modules=[] to silence this warning."
-        )
-        return ()
-    return (f"{module_name.split('.')[0]}.*",)
-
-
-def _validate_build_config_at_trigger(
-    build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]],
-) -> None:
-    """Fail a misconfigured trigger here, before a build exists for it.
-
-    The deployment validates the config again when it fixes the build's
-    scope, and a failure there is recorded as BUILD_FAILED — but that is a
-    build minted, spawned and failed remotely, read back from the registry,
-    for a typo the caller could have been told about synchronously. A
-    misspelled field, an identity field or an invalid value is a
-    :class:`BuildConfigError` right here. A class this process has not
-    imported is the one thing it cannot judge (the trigger need not import
-    every configured upstream; the bootstrap does), so that case passes
-    through to the deployment, which has the final word.
-    """
-    try:
-        canonical_structure_config(build_config)
-    except UnknownTaskClassError as e:
-        logger.debug(
-            f"build_config not fully checked at the trigger ({e}); the "
-            "deployment's bootstrap validates it against every task module."
-        )
-
-
-class StardagApp:
+class StardagApp(_Triggering):
     """Wrapper around modal.App for Stardag task execution.
 
     StardagApp manages the Modal app and its functions for building and
@@ -330,12 +162,12 @@ class StardagApp:
         Args:
             modal_app_or_name: Either a modal.App instance or a string name.
                 If a string, a new modal.App will be created with that name.
-                One live deployment per name, as on Modal: a redeploy
-                replaces the code every new spawn lands on, and a running
-                build rolls over to it at its next scheduler tick (see
-                ``docs/design/scope-keyed-dependency-structure.md``). A
-                branch or experiment that must not take over production is
-                simply another app name.
+                One live deployment per name, as on Modal: every
+                ``stardag modal deploy`` is a new deployment (a new scope),
+                and a running reactive build rolls over to it at its next
+                scheduler tick (``docs/design/registry-v2/design.md``,
+                "Rollover"). A branch or experiment that must not take over
+                production is simply another app name.
             build_function: Callable registered as the Modal "build" function.
                 Must match the ``BuildFunction`` protocol:
                 ``(tasks, worker_selector, app_name) -> BuildSummary | None``.
@@ -620,8 +452,10 @@ class StardagApp:
             assert isinstance(modal_app_or_name, modal.App)
             assert modal_app_or_name.name is not None
             self.modal_app = modal_app_or_name
-        # Minted at finalize(): the code identity baked into the deployment.
+        # The code identity recorded with the deployment, and the
+        # deployment's id, baked into every function at finalize().
         self._code_id: str | None = None
+        self._deployment_id: UUID | None = None
 
         # `is not None` rather than truthiness: a selector is an arbitrary
         # callable, and one whose class defines __bool__/__len__ falsey
@@ -757,117 +591,23 @@ class StardagApp:
 
     @property
     def code_id(self) -> str:
-        """The code identity of this process, minted once (see
-        ``stardag.build._scope.code_id``). Baked into the deployment at
-        :meth:`finalize`, so every container of it answers the same."""
+        """The code identity of this process (``STARDAG_CODE_ID``, else the
+        clean git SHA, else a one-off uuid), recorded with the deployment."""
         if self._code_id is None:
             self._code_id = _process_code_id()
         return self._code_id
 
+    @property
+    def deployment_id(self) -> UUID:
+        """The id of the deployment this app object finalizes into: minted
+        by ``stardag modal deploy`` (and registered before the deploy), or
+        here on first use. Baked into every function as
+        ``STARDAG_DEPLOYMENT_ID``."""
+        if self._deployment_id is None:
+            self._deployment_id = new_id()
+        return self._deployment_id
+
     # --- finalize (deploy) ---
-
-    @staticmethod
-    def _auto_mounted_volumes(
-        target_roots_volumes: TargetRootsVolumes,
-    ) -> tuple[dict[str, str], dict[str, modal.Volume]]:
-        """Auto-mount mapping for the target roots' Modal volumes.
-
-        Returns ``(volume_mounts, auto_volumes)``: ``mount_path ->
-        volume_name`` for the env var that tells targets to use local I/O,
-        and ``mount_path -> Volume`` for the Modal function settings.
-        """
-        volume_mounts: dict[str, str] = {}
-        auto_volumes: dict[str, modal.Volume] = {}
-        for vol_name, vol in target_roots_volumes.by_volume_name.items():
-            mount_path = str(get_default_volume_mount_path(vol_name))
-            volume_mounts[mount_path] = vol_name
-            auto_volumes[mount_path] = vol
-        return volume_mounts, auto_volumes
-
-    def _validate_api_key_secret(self) -> None:
-        """Fail deploy with a clear error if the named API-key secret is absent.
-
-        Best-effort: only a definitive not-found errors out; no Modal
-        context / auth just skips the check so offline finalize and unit
-        tests aren't broken.
-        """
-        assert self.stardag_api_key_secret is not None
-        try:
-            self.stardag_api_key_secret.hydrate()
-        except ModalNotFoundError as e:
-            name = self._api_key_secret_name
-            secret_name_flag = (
-                "" if name == "stardag-api-key" else f" --secret-name {name}"
-            )
-            raise StardagError(
-                f"StardagApp.stardag_api_key_secret refers to a Modal "
-                f"secret named {name!r} that does not exist in the "
-                f"current Modal environment. Run "
-                f"`stardag modal stardag-api-key create"
-                f"{secret_name_flag}` to mint a Stardag API key and "
-                f"sync it into a Modal secret of that name, so the "
-                f"deployed functions can authenticate to the "
-                f"registry. If you supply the API key another way, or "
-                f"set it per function, pass stardag_api_key_secret="
-                f"None."
-            ) from e
-        except Exception as e:  # noqa: BLE001 - best-effort validation
-            logger.debug(
-                f"Could not validate stardag_api_key_secret "
-                f"{self._api_key_secret_name!r} (no Modal context?); "
-                f"proceeding: {e}"
-            )
-
-    def _resolve_extra_secrets(
-        self,
-        extra_secrets: list[modal.Secret] | None,
-        volume_mounts: dict[str, str],
-    ) -> list[modal.Secret]:
-        """The secrets injected into *every* function this app registers.
-
-        Order matters and is preserved: the caller's own secrets first,
-        then the deploy-resolved ones. Later secrets win on conflicting
-        env vars in Modal, and the earliest occurrence wins the name-based
-        de-duplication in ``_prepare_function_settings``.
-        """
-        extra_secrets = list(extra_secrets or [])
-
-        # Inject volume mount config as env var so ModalMountedVolumeFileTarget
-        # is used
-        if volume_mounts:
-            extra_secrets.append(
-                modal.Secret.from_dict(
-                    {"STARDAG_MODAL_VOLUME_MOUNTS": json.dumps(volume_mounts)}
-                )
-            )
-        # Bake the Modal workspace into every function's env. It's needed for
-        # the UI's Modal dashboard deep links (executor metadata), but the
-        # only way to resolve it — the Modal token — exists in this deploy
-        # process, NOT in the deployed containers. Resolve it here (or use
-        # the explicit override) and propagate it so containers don't have to
-        # (and can't) look it up. Best-effort: if it can't be resolved, deep
-        # links degrade gracefully (the UI shows env only).
-        deploy_workspace = self.modal_workspace or _get_modal_workspace()
-        if deploy_workspace:
-            extra_secrets.append(
-                modal.Secret.from_dict({STARDAG_MODAL_WORKSPACE_ENV: deploy_workspace})
-            )
-        # The code identity, minted here and baked into every function, so
-        # the bootstrap, every tick and every worker of this deployment
-        # derive one and the same structure scope — the first half of the
-        # scope key every edge they register carries.
-        extra_secrets.append(
-            modal.Secret.from_dict({STARDAG_CODE_ID_ENV: self.code_id})
-        )
-        # The registry API-key secret is injected into every function (build,
-        # workers, tick, watchdog) — all of them talk to the registry. It's
-        # the ONLY secret propagated across functions; per-function
-        # `secrets` stay function-local.
-        if self.stardag_api_key_secret is not None:
-            if self._api_key_secret_name is not None:
-                self._validate_api_key_secret()
-            extra_secrets.append(self.stardag_api_key_secret)
-        return extra_secrets
 
     def _check_worker_routing(self) -> None:
         """Check at deploy that tasks can reach the workers being deployed.
@@ -949,6 +689,7 @@ class StardagApp:
         *,
         extra_secrets: list[modal.Secret] | None = None,
         create_volumes_if_missing: bool = True,
+        deployment_id: UUID | None = None,
     ) -> FinalizeResult:
         """Finalize the app by creating Modal functions.
 
@@ -965,6 +706,10 @@ class StardagApp:
                 This is where profile-based environment variables are injected.
             create_volumes_if_missing: Whether to create Modal volumes for
                 target roots if they don't exist.
+            deployment_id: The deployment's id, minted and registered by
+                ``stardag modal deploy`` before the deploy; minted here if
+                not given (such a deployment is unknown to the registry
+                until it is recorded, so its ticks cannot plan).
 
         Returns:
             FinalizeResult with created volumes, function names, mount info,
@@ -977,6 +722,8 @@ class StardagApp:
         """
         if self._is_finalized:
             raise RuntimeError("StardagApp has already been finalized")
+        if deployment_id is not None:
+            self._deployment_id = deployment_id
 
         self._check_worker_routing()
 
@@ -984,8 +731,8 @@ class StardagApp:
         target_roots_volumes = get_target_roots_volumes(
             create_if_missing=create_volumes_if_missing
         )
-        volume_mounts, auto_volumes = self._auto_mounted_volumes(target_roots_volumes)
-        extra_secrets = self._resolve_extra_secrets(extra_secrets, volume_mounts)
+        volume_mounts, auto_volumes = _auto_mounted_volumes(target_roots_volumes)
+        extra_secrets = _resolve_extra_secrets(self, extra_secrets, volume_mounts)
 
         # Expand the declared task-module patterns to a concrete, sorted
         # module list ONCE, here, and bake it into the deployed functions
@@ -999,250 +746,13 @@ class StardagApp:
         task_module_patterns = self.task_modules
         task_modules = expand_task_module_patterns(task_module_patterns)
 
-        def register(
-            name: str,
-            settings: FunctionSettings,
-            *,
-            default_concurrency: InputConcurrency | None = None,
-            never_concurrent: bool = False,
-            **extra: typing.Any,
-        ):
-            """Register one function on the Modal app under ``name``.
-
-            ``default_concurrency`` is stardag's opinion about how this
-            particular function should be packed, applied only when the
-            app's own settings say nothing — see the ``tick`` registration
-            below, which is the one function that has one.
-
-            ``never_concurrent`` refuses input concurrency for this
-            function whatever the settings say. Needed because settings
-            are shared: ``tick`` and ``tick_watchdog`` are registered from
-            one ``tick_settings``, so an app that packs its tick would
-            otherwise pack a sync watchdog too — onto Modal's *threads*,
-            which is the hazard the async tick exists to avoid.
-            """
-            prepared = _prepare_function_settings(
-                settings,
-                extra_secrets=extra_secrets,
-                auto_volumes=auto_volumes,
-            )
-            decorate = self.modal_app.function(
-                **{**prepared.kwargs, "name": name, "serialized": True, **extra}
-            )
-            # Input concurrency is a decorator rather than a `function()`
-            # keyword (Modal moved it in April 2025), so it is applied to
-            # the callable first and `function()` registers the result.
-            concurrency = (
-                None
-                if never_concurrent
-                else prepared.concurrency or default_concurrency
-            )
-            if concurrency is None:
-                return decorate
-
-            def decorate_concurrent(fn):
-                return decorate(modal.concurrent(**concurrency)(fn))
-
-            return decorate_concurrent
-
-        # Wrap callables in real functions for Modal compatibility.
-        # Modal's is_async() only accepts inspect.isfunction()-compatible objects,
-        # not callable class instances. The wrappers delegate to the actual callable
-        # and are what get serialized/sent to Modal.
-        #
-        # Every wrapper below opens with _run_container_setup(container_setup):
-        # it is the app's one chance to prepare a container, and the top of
-        # the wrapper is the only place common to all five functions that
-        # runs before any stardag work. _run_container_setup no-ops when the
-        # app supplied no hook, and after the first input in this container.
-        container_setup = self.container_setup
-        build_fn = self._build_function
-
-        def _modal_build(
-            tasks: typing.Sequence[BaseTask] | BaseTask,
-            worker_selector: WorkerSelector,
-            app_name: str,
-            build_kwargs: dict[str, typing.Any] | None = None,
-        ) -> BuildSummary | None:
-            _run_container_setup(container_setup)
-            # The deployed module list, imported before the builder hashes
-            # the build's structure scope: that hash validates every class
-            # the build config names, and a configured upstream discovered
-            # dynamically may live in a module the roots (which arrive by
-            # value) never import. Same list and same reasons as the tick.
-            if task_modules:
-                set_declared_task_module_patterns(task_module_patterns)
-                import_task_modules(task_modules)
-            return build_fn(tasks, worker_selector, app_name, build_kwargs=build_kwargs)
-
-        run_fn = self._run_function
-        limit_key_selector = self.limit_key_selector
-        # The ``RunFunction`` protocol gained an optional ``env_overrides``
-        # parameter. Older custom run functions implemented the protocol with a
-        # bare ``(task)`` signature, so only forward ``env_overrides`` to those
-        # that accept it; otherwise apply the overrides in the wrapper.
-        run_fn_accepts_env = _callable_accepts_env_overrides(run_fn)
-
-        def _modal_run(
-            task: BaseTask, *, env_overrides: dict[str, str] | None = None
-        ) -> typing.Any:
-            _run_container_setup(container_setup)
-            # Publish the app's task-module patterns for the worker-side
-            # code that needs them but is nowhere near the app object:
-            # _WorkerLifecycleReporter._register_dynamic_deps checks the
-            # coverage of dynamically yielded deps, which the trigger's
-            # pre-flight cannot see. The worker does not IMPORT the
-            # modules: its task arrived by value (self-importing) and its
-            # dynamic deps were just constructed by user code, so their
-            # classes are registered by definition.
-            set_declared_task_module_patterns(task_module_patterns)
-            # Likewise the app's concurrency-limit key selector, so the
-            # dynamic deps a worker registers carry their keys.
-            set_deployed_limit_key_selector(limit_key_selector)
-            if run_fn_accepts_env:
-                run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)
-                return run_fn_with_env(task, env_overrides=env_overrides)
-            with temp_env_vars(env_overrides or {}):
-                return run_fn(task)
-
-        register("build", self._builder_settings)(_modal_build)
-        function_names = ["build"]
-
-        for worker_name, settings in self._worker_settings.items():
-            func_name = f"worker_{worker_name}"
-            register(func_name, settings)(_modal_run)
-            function_names.append(func_name)
-
-        # Reactive scheduler tick (see stardag.build.run_tick_aio). Spawned
-        # by build_trigger(reactive=True), by workers finishing tasks, and
-        # by the optional watchdog below. Idempotent and single-flighted —
-        # safe to invoke at any time; no-ops on non-reactive builds.
-        #
-        # Everything the deployed tick needs from deploy time is bundled
-        # here and closed over; the body lives in _tick._run_deployed_tick_aio.
-        app_name = self.name
-        tick_deployment = _TickDeployment(
-            app_name=app_name,
-            worker_selector=self.worker_selector,
-            limit_key_selector=self.limit_key_selector,
-            modal_workspace=self.modal_workspace,
-            worker_timeouts=self._worker_timeouts(),
-            tick_timeout_seconds=_tick_function_timeout_seconds(
-                self._tick_settings, self._builder_settings
-            ),
-            task_modules=tuple(task_modules),
+        function_names = _register_functions(
+            self,
+            extra_secrets=extra_secrets,
+            auto_volumes=auto_volumes,
             task_module_patterns=task_module_patterns,
+            task_modules=task_modules,
         )
-
-        # ``async def`` on purpose, and load-bearing. Modal serves
-        # concurrent inputs to an async function as asyncio tasks on ONE
-        # event loop, and to a sync one on threads — and a tick on its own
-        # thread would run its own ``asyncio.run``, i.e. its own loop.
-        # ``APIRegistry`` is a process-wide singleton whose ``async_client``
-        # is cached per loop and *closed and rebuilt* whenever the running
-        # loop differs, so two threaded ticks would tear down each other's
-        # in-flight HTTP client. Awaiting the body here keeps every tick in
-        # the container on one loop and therefore on one client, which is
-        # what makes sharing a container safe rather than merely allowed.
-        async def _modal_tick(
-            build_id: str,
-            tick_kwargs: dict[str, typing.Any] | None = None,
-        ) -> dict[str, typing.Any]:
-            _run_container_setup(container_setup)
-            return await _run_deployed_tick_aio(
-                build_id, tick_kwargs, deployment=tick_deployment
-            )
-
-        # tick/watchdog default to builder_settings when tick_settings is
-        # not given; the api-key secret is in extra_secrets so they get
-        # registry credentials regardless of which settings apply.
-        tick_settings = self._tick_settings or self._builder_settings
-        register("tick", tick_settings, default_concurrency=_TICK_CONCURRENCY)(
-            _modal_tick
-        )
-        function_names.append("tick")
-
-        # Reactive bootstrap (see run_reactive_bootstrap). Spawned by
-        # build_trigger(reactive=True) with the root tasks BY VALUE —
-        # cloudpickled into the call exactly as build_spawn passes
-        # ``tasks=`` to the builder — so the DAG is walked here, next to
-        # the mounted target root, instead of on the triggering machine.
-        def _modal_bootstrap(
-            build_id: str,
-            tasks: typing.Sequence[BaseTask] | BaseTask,
-            tick_kwargs: dict[str, typing.Any] | None = None,
-            build_config: dict[str, dict[str, typing.Any]] | None = None,
-        ) -> dict[str, typing.Any]:
-            _run_container_setup(container_setup)
-            _setup_logging()
-            build_uuid = UUID(build_id)
-            task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
-            registry = registry_provider.get()
-            try:
-                result = run_reactive_bootstrap(
-                    build_uuid,
-                    task_list,
-                    registry=registry,
-                    app_name=app_name,
-                    tick_kwargs=tick_kwargs,
-                    # The DEPLOYED module list, frozen here alongside the
-                    # tick's. The trigger does not supply it, which is what
-                    # makes the rehydration pre-flight compare the DAG
-                    # against what the ticks will actually import rather
-                    # than against the caller's local app definition.
-                    task_module_patterns=task_module_patterns,
-                    limit_key_selector=tick_deployment.limit_key_selector,
-                    build_config=build_config,
-                )
-            except BaseException as e:
-                # The trigger handed this container a RUNNING build and
-                # returned. Nothing else will notice it died, so a failed
-                # bootstrap must not leave an orphan RUNNING build.
-                _fail_build_best_effort(registry, build_uuid, e)
-                raise
-            # The tick handle is process-local; only the summary crosses
-            # back to the caller as the Modal return value.
-            return result.summary
-
-        register("bootstrap", self._bootstrap_settings or self._builder_settings)(
-            _modal_bootstrap
-        )
-        function_names.append("bootstrap")
-
-        # Always deployed, scheduled only when a period is set. The sweep is
-        # a capability of the app — "tick every running build I own" — and
-        # whether it runs on a timer is a separate, cost-driven decision.
-        # Deploying it unconditionally is what makes a full sweep one click
-        # (or one `modal run`) away on an app that runs no cron, which is
-        # the answer to "then how do I recover a stalled build?" when the
-        # watchdog is left off.
-        def _modal_tick_watchdog() -> None:
-            _run_container_setup(container_setup)
-            _setup_logging()
-            # The sweep spawns one `tick` per build and returns; it does not
-            # run them here. The app name is both the listing's scope and
-            # where each tick is spawned — see _run_watchdog_sweep.
-            _run_watchdog_sweep(registry_provider.get(), app_name)
-
-        # `never_concurrent`, not merely "no default": it shares
-        # `tick_settings` with the tick, so a declared value would reach it
-        # too. This is its own Modal function with its own containers,
-        # receiving one input per watchdog period, so packing would change
-        # nothing in the steady state — while quietly opting a `def` into
-        # Modal's *threaded* concurrency, which is the hazard
-        # `_modal_tick` is a coroutine to avoid. Modal accepts a sync
-        # function with `@modal.concurrent` and a `schedule` without
-        # complaint, so nothing downstream would have caught it.
-        watchdog_schedule: dict[str, typing.Any] = (
-            {"schedule": modal.Period(minutes=self.watchdog_period_minutes)}
-            if self.watchdog_period_minutes is not None
-            else {}
-        )
-        register(
-            "tick_watchdog", tick_settings, never_concurrent=True, **watchdog_schedule
-        )(_modal_tick_watchdog)
-        function_names.append("tick_watchdog")
-
         self._is_finalized = True
 
         return FinalizeResult(
@@ -1251,458 +761,6 @@ class StardagApp:
             volume_mounts=volume_mounts,
             auto_volumes=auto_volumes,
             task_modules=task_modules,
-        )
-
-    # --- Running builds on the deployed app ---
-
-    def build_spawn(
-        self,
-        tasks: typing.Sequence[BaseTask] | BaseTask,
-        worker_selector: WorkerSelector | None = None,
-        *,
-        build_kwargs: dict[str, typing.Any] | None = None,
-    ):
-        """Spawn a build job on a deployed Modal app (non-blocking).
-
-        This method looks up the deployed "build" function by name and spawns
-        a new execution. Use this for fire-and-forget builds.
-
-        Args:
-            tasks: A single root task or a sequence of root tasks to build.
-            worker_selector: Optional override for worker selection.
-            build_kwargs: Optional kwargs forwarded to the remote build function
-                (e.g. ``{"fail_mode": FailMode.CONTINUE}``). The
-                default ``Builder`` passes these to :func:`stardag.build`.
-
-        Returns:
-            A Modal FunctionCall handle for the spawned build.
-
-        Example:
-            handle = stardag_app.build_spawn(my_task)
-            # Or multiple roots:
-            handle = stardag_app.build_spawn([task_a, task_b])
-            # Optionally wait for result:
-            result = handle.get()
-        """
-        build_function = modal.Function.from_name(
-            app_name=self.name,
-            name="build",
-        )
-        return build_function.spawn(
-            tasks=tasks,
-            worker_selector=worker_selector or self.worker_selector,
-            app_name=self.name,
-            build_kwargs=build_kwargs,
-        )
-
-    def build_trigger(
-        self,
-        tasks: typing.Sequence[BaseTask] | BaseTask,
-        worker_selector: WorkerSelector | None = None,
-        *,
-        build_kwargs: dict[str, typing.Any] | None = None,
-        build_id: UUID | None = None,
-        description: str | None = None,
-        reactive: bool = False,
-        tick_kwargs: dict[str, typing.Any] | None = None,
-        build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]]
-        | None = None,
-    ) -> BuildTriggerResult:
-        """Trigger a build with a registry build id minted at the trigger point.
-
-        Unlike :meth:`build_spawn` — where the build id is created *inside*
-        the Modal build container — this method first creates (or reuses) the
-        build in the registry from the calling process, then spawns the
-        deployed build function with ``resume_build_id`` set to it. As a
-        result:
-
-        - Any restart of the build function (Modal retry after preemption, a
-          manual re-trigger with the returned ``build_id``) **resumes the
-          same build** instead of creating a new one: already-completed task
-          targets are detected during discovery and skipped.
-        - The build appears in the registry immediately, before the Modal
-          container has started.
-
-        Set ``retries`` in the app's ``builder_settings`` to let Modal
-        automatically re-run (and thereby resume) the build function after
-        infrastructure failures.
-
-        Requires registry credentials in the calling process (the active
-        stardag profile), in addition to Modal credentials. If no registry is
-        configured, use :meth:`build_spawn` instead.
-
-        Args:
-            tasks: A single root task or a sequence of root tasks to build.
-            worker_selector: Optional override for worker selection.
-            build_kwargs: Optional kwargs forwarded to the remote build
-                function (must not contain ``resume_build_id``; it is set by
-                this method).
-            build_id: Existing build id to re-attach to (e.g. from a previous
-                ``build_trigger`` call). If None, a new build is created.
-            description: Optional description for the new build (ignored when
-                ``build_id`` is given).
-            reactive: **Experimental.** Schedule the build reactively (no
-                resident orchestrator): the deployed ``bootstrap`` function
-                discovers the DAG, registers it and persists the task
-                objects *inside Modal*, then short-lived scheduler *ticks*
-                (spawned by the bootstrap, by workers finishing tasks, and
-                by the optional watchdog) drive the build — see
-                ``stardag.build.run_tick_aio`` for semantics and current
-                limitations. Requires the app to be deployed with this
-                stardag version (the ``bootstrap`` and ``tick`` functions
-                and self-reporting workers) and registry credentials in the
-                calling process — but **no target-root access**: this call
-                mints the build, registers the roots and spawns, and
-                performs no target I/O at all (unless the app opted out
-                with ``reactive_discovery="local"``). Re-trigger with the
-                returned ``build_id`` to wake a stalled build or add new
-                root tasks to it.
-            tick_kwargs: Optional kwargs for the reactive ``TickConfig``
-                (e.g. ``{"linger_seconds": 30}``).
-            build_config: The build's config — ``{"<namespace>.<Name>":
-                {"<field>": value}}`` for the tasks' ``dependencies_only`` /
-                ``execution_only`` fields (see ``StardagField.significance``).
-                Fixed for the build's life and stored in the registry; the
-                deployment installs it before it constructs or rehydrates any
-                task, so a value set here reaches every task of the build
-                and nothing else does.
-        Returns:
-            BuildTriggerResult with the ``build_id`` and the spawned Modal
-            ``FunctionCall`` handle (the ``build`` function, or the
-            ``bootstrap`` function when ``reactive=True``).
-        """
-        merged_kwargs = dict(build_kwargs or {})
-        if "resume_build_id" in merged_kwargs:
-            raise TypeError(
-                "build_kwargs must not contain 'resume_build_id'; pass "
-                "build_id=... to build_trigger instead"
-            )
-        if reactive and merged_kwargs:
-            raise TypeError(
-                "build_kwargs are not supported with reactive=True (there is "
-                "no resident build function); use tick_kwargs for TickConfig "
-                "options"
-            )
-        if reactive and worker_selector is not None:
-            raise TypeError(
-                "worker_selector overrides are not supported with "
-                "reactive=True: later scheduler ticks (worker wake-ups, "
-                "watchdog) always use the app's deployed worker_selector, so "
-                "a per-trigger override would change routing mid-build. "
-                "Configure the selector on StardagApp instead."
-            )
-        if reactive:
-            tick_kwargs = _validate_tick_kwargs(tick_kwargs)
-            if not self.task_modules:
-                # Refused here, before a build id is minted: a scheduler
-                # tick rebuilds every task it schedules from the registry's
-                # stored task_data, and can only resolve a class whose
-                # defining module it has imported. With no task modules it
-                # imports none, so this app's every reactive build would
-                # fail its first tick, task by task. Resident builds are
-                # unaffected — they hold the real objects.
-                raise TaskModulesError(
-                    "build_trigger(reactive=True) needs task_modules, and "
-                    f"this app ({self.name!r}) has none. A reactive "
-                    "scheduler tick reconstructs every task from registry "
-                    "data and can resolve only classes whose modules it "
-                    'imported. Pass task_modules=["my_pkg.tasks.*"] to '
-                    "StardagApp (the default infers it from the app's own "
-                    "package, which is not possible for an app defined in "
-                    "__main__ or a loose script — see the warning at "
-                    "construction), or use a resident build "
-                    "(build_spawn / build_trigger without reactive=True)."
-                )
-        if build_config:
-            _validate_build_config_at_trigger(build_config)
-            # Stored with the build and forwarded to every worker as JSON,
-            # so it takes its JSON form here, before it leaves this process.
-            build_config = jsonable_build_config(build_config)
-
-        registry = registry_provider.get()
-        # A configured registry is needed to mint a new build id, and
-        # always in reactive mode: the registry IS the scheduler state,
-        # and the roots are registered here before anything is spawned.
-        if (build_id is None or reactive) and isinstance(registry, NoOpRegistry):
-            raise RuntimeError(
-                "build_trigger requires a configured registry to mint the "
-                "build id at the trigger point (run 'stardag auth login' "
-                "or configure an API key). Use build_spawn to trigger a "
-                "build without local registry credentials."
-            )
-        task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
-        explicit_build_id = build_id is not None
-        if (
-            explicit_build_id
-            and build_config is None
-            and not isinstance(registry, NoOpRegistry)
-        ):
-            assert build_id is not None
-            # A re-trigger by id without a config means "the build's own":
-            # the registry keeps a build's config for its life, and the
-            # bootstrap or resident build would otherwise plan under the
-            # bare config and be refused for a build that was configured.
-            stored = registry.build_get(build_id).build_config
-            if stored:
-                build_config = stored
-        app_name = self.name
-        executor_metadata = self._build_executor_metadata(
-            reactive=reactive, app_name=app_name
-        )
-        if build_id is None:
-            build_id = registry.build_start(
-                root_tasks=task_list,
-                description=description,
-                executor_metadata=executor_metadata,
-                build_config=build_config,
-            )
-
-        if reactive:
-            return self._trigger_reactive(
-                task_list,
-                build_id=build_id,
-                registry=registry,
-                tick_kwargs=tick_kwargs,
-                is_retrigger=explicit_build_id,
-                executor_metadata=executor_metadata,
-                build_config=build_config,
-                app_name=app_name,
-            )
-
-        merged_kwargs["resume_build_id"] = build_id
-        if build_config is not None:
-            merged_kwargs["build_config"] = dict(build_config)
-        build_function = modal.Function.from_name(
-            app_name=app_name,
-            name="build",
-        )
-        function_call = build_function.spawn(
-            tasks=tasks,
-            worker_selector=worker_selector or self.worker_selector,
-            app_name=app_name,
-            build_kwargs=merged_kwargs,
-        )
-        return BuildTriggerResult(build_id=build_id, function_call=function_call)
-
-    def _build_executor_metadata(
-        self, *, reactive: bool, app_name: str | None = None
-    ) -> dict[str, typing.Any]:
-        """Build-level executor metadata for a trigger (best-effort).
-
-        ``function_name`` is the function the trigger actually spawns, not
-        the one that does most of the work afterwards: operator and UI
-        surfaces render it as "what was invoked", and a reactive build
-        discovered in Modal is spawned as ``bootstrap`` (which then arms the
-        build and spawns the first tick). Naming ``tick`` there would send a
-        reader looking through the wrong function's logs for the failure
-        that stopped the build from starting.
-        """
-        if not reactive:
-            spawned = "build"
-        elif self.reactive_discovery == "local":
-            # Local discovery skips the bootstrap and spawns the first tick
-            # directly, so `tick` is the honest answer in that mode.
-            spawned = "tick"
-        else:
-            spawned = "bootstrap"
-        metadata: dict[str, typing.Any] = {
-            "kind": MODAL_EXECUTOR_NAME,
-            "app_name": app_name or self.name,
-            "function_name": spawned,
-            "reactive": reactive,
-        }
-        try:
-            workspace = self.modal_workspace or _get_modal_workspace()
-            if workspace:
-                metadata["workspace"] = workspace
-            environment = _get_modal_environment()
-            if environment:
-                metadata["environment"] = environment
-        except Exception:
-            logger.debug(
-                "Failed to resolve Modal workspace/environment for "
-                "build executor metadata",
-                exc_info=True,
-            )
-        return metadata
-
-    def _trigger_reactive(
-        self,
-        task_list: list[BaseTask],
-        *,
-        build_id: UUID,
-        registry: typing.Any,
-        tick_kwargs: dict[str, typing.Any] | None,
-        is_retrigger: bool,
-        executor_metadata: dict[str, typing.Any] | None = None,
-        build_config: typing.Mapping[str, typing.Mapping[str, typing.Any]]
-        | None = None,
-        app_name: str | None = None,
-    ) -> BuildTriggerResult:
-        """Reactive trigger: register the roots, then spawn ``bootstrap``.
-
-        Everything expensive happens in Modal. What is left here is the
-        work that either costs no target I/O or must precede any spawn:
-
-        - mint (or resume) the build, so it exists before a container does;
-        - register the roots server-side. This is genuinely free of target
-          I/O — ``_get_task_data_for_registration`` reads ``target().uri``,
-          which *constructs* a URI and performs no existence check;
-        - spawn ``bootstrap`` with the roots **by value** (cloudpickled
-          into the call, exactly as :meth:`build_spawn` passes ``tasks=``
-          to the builder) and return.
-
-        The DAG walk, the rehydration pre-flight, the reactive marker and
-        the first tick all live in the bootstrap container — see
-        :func:`run_reactive_bootstrap`, which
-        also documents the ordering guarantee that keeps a tick from ever
-        seeing a partially-registered DAG. Triggering is therefore fast
-        and touches no target root, which for a ``modalvol://`` root is
-        the difference between one spawn and one rate-limited volume API
-        call per task in the DAG.
-
-        With ``StardagApp(reactive_discovery="local")`` the very same
-        :func:`run_reactive_bootstrap` runs here instead, against the
-        local app's task-module list. Everything below — ordering,
-        failure handling, re-trigger semantics — is identical either way;
-        only the machine changes.
-
-        Re-triggering an existing build id is fully supported:
-
-        - The build is *resumed* (BUILD_RESUMED) so a terminal build —
-          including a FAILED one — becomes RUNNING again and ticks act on
-          it (they bail on terminal statuses otherwise).
-        - The passed roots are appended to the build's ``root_task_ids``
-          server-side, so terminal detection covers them (previously,
-          completion of the original roots would strand re-triggered
-          subtrees silently).
-        - Previously failed/cancelled/skipped tasks in the (re-)discovered
-          DAG are reset to pending (``retry_failed``, applied by the
-          bootstrap's discovery) — the retry path for reactive builds.
-        - The reactive metadata is updated in the registry: because the
-          registry is mutable (unlike an immutable target root), a
-          re-trigger MAY change ``tick_kwargs`` (a bare re-trigger with no
-          explicit tick_kwargs preserves the existing ones).
-
-        ``tick_kwargs`` ride along to the bootstrap, which persists them in
-        the build's ``reactive_tick_kwargs`` so that EVERY tick — including
-        worker wake-ups and watchdog sweeps, which spawn with only the
-        build id — runs with the same configuration.
-
-        **No orphan RUNNING builds.** Once this trigger knows the build is
-        RUNNING, any failure before the bootstrap is airborne records a
-        terminal BUILD_FAILED before propagating. The arming point is
-        deliberate: on a re-trigger the build may still be *terminal* until
-        ``build_resume`` succeeds, and failing a build that this trigger
-        never managed to resume would be a lie about which attempt died.
-        Failures on the other side of the spawn are the bootstrap's to
-        report, and it does.
-        """
-        root_ids = [str(t.id) for t in task_list]
-        app_name = app_name or self.name
-        if is_retrigger:
-            # Un-terminal the build (no-op on a fresh/running build).
-            # Deliberately OUTSIDE the failure guard below: until this
-            # succeeds the build may still be terminal, and marking a
-            # terminal build failed on behalf of a resume that never
-            # landed would misattribute someone else's outcome.
-            #
-            # A re-trigger carries the same build config; a different one
-            # is refused by the registry (a build has one config for its
-            # life). No scope is named here: the bootstrap, which knows the
-            # deployment's code id, plans the build under it and moves the
-            # scope if the code changed since.
-            registry.build_resume(
-                build_id,
-                executor_metadata=executor_metadata,
-                build_config=build_config,
-            )
-        # From here the build is RUNNING (fresh builds since build_start,
-        # re-triggers since the resume above) and this trigger owns it.
-        try:
-            if is_retrigger:
-                # Register the (possibly new) roots BEFORE the bootstrap is
-                # spawned, so a concurrent tick can't complete-and-terminal
-                # the build on the old root set while the new subtree is
-                # still being discovered.
-                registry.build_add_roots(build_id, root_ids)
-            if self.reactive_discovery == "local":
-                # No advisory here: the authoritative check is about to
-                # run in this very process, microseconds from now. Two
-                # messages saying overlapping things would be noise.
-                return BuildTriggerResult(
-                    build_id=build_id,
-                    function_call=run_reactive_bootstrap(
-                        build_id,
-                        task_list,
-                        registry=registry,
-                        app_name=app_name,
-                        tick_kwargs=tick_kwargs,
-                        build_config=build_config,
-                        task_module_patterns=self.task_modules,
-                        limit_key_selector=self.limit_key_selector,
-                    ).tick_call,
-                )
-            # Early, roots-only advisory (see the function's docstring):
-            # additive feedback in the operator's terminal, never the
-            # coverage check itself — that one runs over the full
-            # discovered DAG inside run_reactive_bootstrap. Only worth
-            # emitting when the real check lands in another process's
-            # logs, i.e. exactly here.
-            _advise_uncovered_root_task_modules(task_list, self.task_modules)
-            bootstrap_function = modal.Function.from_name(
-                app_name=app_name, name="bootstrap"
-            )
-            # ``build_config`` only when given: a deployment predating the
-            # keyword would reject an unexpected argument, and a build with
-            # no config needs none.
-            function_call = bootstrap_function.spawn(
-                build_id=str(build_id),
-                tasks=task_list,
-                tick_kwargs=tick_kwargs,
-                **({"build_config": dict(build_config)} if build_config else {}),
-            )
-        except BaseException as e:
-            _fail_build_best_effort(registry, build_id, e)
-            raise
-        return BuildTriggerResult(build_id=build_id, function_call=function_call)
-
-    def build_remote(
-        self,
-        tasks: typing.Sequence[BaseTask] | BaseTask,
-        worker_selector: WorkerSelector | None = None,
-        *,
-        build_kwargs: dict[str, typing.Any] | None = None,
-    ):
-        """Run a build on a deployed Modal app (blocking).
-
-        This method looks up the deployed "build" function by name and runs
-        it synchronously. Use this when you need to wait for the build result.
-
-        Args:
-            tasks: A single root task or a sequence of root tasks to build.
-            worker_selector: Optional override for worker selection.
-            build_kwargs: Optional kwargs forwarded to the remote build function
-                (e.g. ``{"fail_mode": FailMode.CONTINUE}``). The
-                default ``Builder`` passes these to :func:`stardag.build`.
-
-        Returns:
-            The result of the build.
-
-        Example:
-            result = stardag_app.build_remote(my_task)
-            # Or multiple roots:
-            result = stardag_app.build_remote([task_a, task_b])
-        """
-        build_function = modal.Function.from_name(
-            app_name=self.name,
-            name="build",
-        )
-        return build_function.remote(
-            tasks=tasks,
-            worker_selector=worker_selector or self.worker_selector,
-            app_name=self.name,
-            build_kwargs=build_kwargs,
         )
 
     def local_entrypoint(self, *args, **kwargs):

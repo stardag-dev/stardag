@@ -263,7 +263,14 @@ alike — a selector is user code and may not redirect a worker's reports.
 Values are
 applied in a scoped `temp_env_vars` around the run in workers and ticks, and
 for the duration of the build in a resident driver (two concurrent
-`sd.build()` calls in one process with different settings are refused). The
+`sd.build()` calls in one process with different settings are refused).
+**A process applying settings serves one build at a time**: deployed ticks
+and workers run one input per container and scale by containers (a declared
+`max_concurrent_inputs` above one on them is refused at deploy), and
+`settings_applied` refuses a second build entering while another build's
+settings are installed, so a misconfiguration fails loudly rather than
+running under the wrong build's values. The cost is more containers — a
+lingering tick holds one of its own — accepted. The
 docs say "read at run time, not import time", because warm containers import
 before they know the build. Two names it is deliberately not: `env_overrides`,
 which remains the worker selector's per-task env fixed at deploy; and the

@@ -7,10 +7,12 @@ from pathlib import Path
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 from stardag.target._factory import _target_roots_override
 from stardag.testing._env import temp_env_vars
+from stardag.testing._registry import InMemoryRegistry
 
 __all__ = [
-    "temp_env_vars",
+    "InMemoryRegistry",
     "target_roots_override",
+    "temp_env_vars",
     "test_harness",
 ]
 

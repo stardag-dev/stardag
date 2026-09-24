@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import typing
 from typing import Annotated
-from uuid import uuid4
 
 import pytest
 
@@ -17,11 +16,9 @@ from stardag.build import (
     build_aio,
     build_sequential,
     build_sequential_aio,
-    discover_and_register_aio,
 )
+from stardag.build._registration import walk_aio
 from stardag.target import InMemoryFileTarget
-
-from tests.test_build.reactive_fakes import FakeReactiveRegistry
 
 
 class ConflictLeaf(sd.Task[int]):
@@ -149,11 +146,11 @@ class TestStaticConflict:
             await build_aio(_static_conflict(), registry=noop_registry)
         _assert_static_paths(_the_conflict(excinfo))
 
-    async def test_reactive_discovery(self):
-        root = _static_conflict()
-        registry = FakeReactiveRegistry(root_task_ids=[str(root.id)])
+    async def test_the_walk_every_driver_shares(self):
+        """The bootstrap, a tick's discovery job and a worker's yield walk
+        with the same function the resident engines do."""
         with pytest.raises(BaseException) as excinfo:
-            await discover_and_register_aio(registry, uuid4(), root)
+            await walk_aio(_static_conflict())
         _assert_static_paths(_the_conflict(excinfo))
 
     def test_the_same_instance_twice_is_fine(self, noop_registry):

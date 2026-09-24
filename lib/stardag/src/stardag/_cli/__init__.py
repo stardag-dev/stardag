@@ -25,27 +25,13 @@ Usage:
     stardag environment target-roots remove <name> [--env <env>]
     stardag environment target-roots set <name=uri ...> [--json <json>] [--env <env>]
 
-    stardag builds list [--status running] [--reactive-app name] [--older-than 24h]
     stardag builds show <build-id> [--json]
     stardag builds frontier <build-id> [--json]
     stardag builds ticks <build-id> [--limit N] [--json]
-    stardag builds stop <build-id> [--worker name] [--executor modal]
-        [--namespace prefix] [--older-than 30m] [--task-id id ...]
-        [--dry-run] [--yes] [--json]
     stardag builds cancel <build-id> [--yes]
-    stardag builds cleanup [--older-than 24h] [--build-id id ...] [--apply] [--yes]
-
-    stardag tasks list [--status running] [--older-than 1h] [--json]
-    stardag tasks cancel <build-id> <task-id> [--yes]
-    stardag tasks retry <build-id> <task-id> [--yes]
-
-    stardag concurrency-limits list [--holders] [-p profile] [-e env]
-    stardag concurrency-limits set <key> <max_concurrent> [-p profile] [-e env]
-    stardag concurrency-limits delete <key> [--yes] [-p profile] [-e env]
-    stardag concurrency-limits holders <key> [--limit N] [-p profile] [-e env]
-    stardag concurrency-limits evict <key> <task_id> [--yes] [-p profile] [-e env]
 
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
+    stardag modal deployments [--app name] [--current]
     stardag modal stardag-api-key create [--modal-env env] [-w workspace] [-e env] [-p profile]
 
     stardag self-host up [--neon-api-key key] [--auth-mode local|oidc]
@@ -57,8 +43,8 @@ Usage:
     stardag self-host destroy [--delete-secrets] [--server-modal-env env]
 
 Machine-readable output:
-    The registry-backed read commands (`builds list/show/frontier/ticks`,
-    `builds cleanup`, `tasks list`) take `--json`. In that mode stdout
+    The registry-backed read commands (`builds show/frontier/ticks`) take
+    `--json`. In that mode stdout
     carries exactly one JSON document — the SDK's model of the API
     payload — and every hint, warning and prompt goes to stderr, so
     piping to `jq` is safe.
@@ -72,7 +58,7 @@ Configuration:
 
 import typer
 
-from stardag._cli import auth, builds, config, environment, limits, tasks
+from stardag._cli import auth, builds, config, environment
 
 # Main CLI app
 app = typer.Typer(
@@ -86,8 +72,6 @@ app.add_typer(auth.app, name="auth")
 app.add_typer(config.app, name="config")
 app.add_typer(environment.app, name="environment")
 app.add_typer(builds.app, name="builds")
-app.add_typer(tasks.app, name="tasks")
-app.add_typer(limits.app, name="concurrency-limits")
 
 # Add modal subcommand only if modal is installed
 try:

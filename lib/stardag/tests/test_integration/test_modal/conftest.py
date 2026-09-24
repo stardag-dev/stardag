@@ -59,7 +59,13 @@ def hermetic_modal_executor_metadata(monkeypatch):
     Tests exercising the resolution logic itself override these
     monkeypatches explicitly.
     """
-    from stardag.integration.modal import _app, _executor, _metadata
+    from stardag.integration.modal import (
+        _app,
+        _executor,
+        _functions,
+        _metadata,
+        _trigger,
+    )
 
     async def _fake_workspace_aio():
         return "test-workspace"
@@ -85,7 +91,7 @@ def hermetic_modal_executor_metadata(monkeypatch):
         their callers, so patching only the definition site would leave
         those call sites resolving the real function.
         """
-        for module in (_metadata, _executor, _app):
+        for module in (_metadata, _executor, _app, _functions, _trigger):
             if hasattr(module, name):
                 monkeypatch.setattr(module, name, value)
 

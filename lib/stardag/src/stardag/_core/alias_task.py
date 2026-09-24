@@ -105,8 +105,8 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
 
             registry = registry_provider.get()
 
-        metadata = registry.task_get_metadata(id)
-        if metadata.output_uri is None:
+        info = registry.task_get(str(id))
+        if info.output_uri is None:
             raise ValueError(
                 f"Cannot create AliasTask for task {id} without a FileSystemTarget "
                 "output."
@@ -114,9 +114,9 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
 
         return cls(
             aliased=AliasedMetadata(
-                id=metadata.id,
-                uri=metadata.output_uri,
-                body=metadata.body,
+                id=UUID(info.task_id),
+                uri=info.output_uri,
+                body=info.body,
             )
         )
 
