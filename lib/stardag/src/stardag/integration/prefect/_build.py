@@ -36,7 +36,7 @@ from stardag._core.base_task import (
     flatten_task_struct,
 )
 from stardag.build import FailMode, TaskExecutionError, TaskExecutorABC
-from stardag.build._base import in_process_executor_details
+from stardag.build._base import BuildStopped, in_process_executor_details
 from stardag.build._registration import walk_aio, yield_batches
 from stardag.build._session import ResidentSession
 from stardag.exceptions import APIError
@@ -133,6 +133,11 @@ class _PrefectTaskRunWrapper:
         )
         if outcome.kind == "completed":
             return None
+        if outcome.kind == "build_stopped":
+            # Not this task's failure: nothing is reported against it (no
+            # claim was taken), and the flow's closing ``finish`` finds the
+            # build terminal and leaves its status standing.
+            raise BuildStopped(outcome.message)
         if outcome.kind != "granted":
             raise RuntimeError(outcome.message)
         execution_id = outcome.execution_id
