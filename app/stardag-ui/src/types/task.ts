@@ -421,3 +421,31 @@ export interface TaskArtifact {
 export interface TaskArtifactListResponse {
   artifacts: TaskArtifact[];
 }
+
+// ---- Concurrency limits ----
+
+/** A task occupying a slot of a limit key: a live claim. */
+export interface ConcurrencyLimitHolder {
+  task_id: string;
+  task_name: string;
+  // The claim's holder: the plan it was granted through, and its build.
+  build_id: string;
+  plan_id: string;
+  execution_id: string | null;
+  // When the claim was granted ("running since").
+  started_at: string | null;
+}
+
+export interface ConcurrencyLimit {
+  key: string;
+  // 0 refuses every claim carrying the key.
+  max_concurrent: number;
+  // Slots occupied by live claims.
+  in_use: number;
+  // Present when read with `include_holders=true`.
+  holders?: ConcurrencyLimitHolder[] | null;
+}
+
+export interface ConcurrencyLimitListResponse {
+  limits: ConcurrencyLimit[];
+}

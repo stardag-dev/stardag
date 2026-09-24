@@ -11,6 +11,8 @@ import type {
   BuildListResponse,
   BuildStatus,
   BuildTickSummaryListResponse,
+  ConcurrencyLimit,
+  ConcurrencyLimitListResponse,
   Deployment,
   DeploymentKind,
   DeploymentListResponse,
@@ -362,4 +364,57 @@ export function fetchSettings(
     url(`/settings/${settingsHash}`, environmentId),
     "Failed to fetch settings",
   );
+}
+
+// ---- Concurrency limits ----
+
+function limitUrl(key: string, environmentId: string) {
+  return url(`/concurrency-limits/${encodeURIComponent(key)}`, environmentId);
+}
+
+/**
+ * The environment's named limits, each with how many slots live claims
+ * occupy — and, with `includeHolders`, which tasks occupy them.
+ */
+export async function fetchConcurrencyLimits(
+  environmentId: string,
+  includeHolders = false,
+): Promise<ConcurrencyLimit[]> {
+  const data = await getJson<ConcurrencyLimitListResponse>(
+    url(
+      "/concurrency-limits",
+      environmentId,
+      includeHolders ? { include_holders: "true" } : {},
+    ),
+    "Failed to fetch concurrency limits",
+  );
+  return data.limits;
+}
+
+/** Create or replace the cap on `key`. */
+export async function setConcurrencyLimit(
+  key: string,
+  maxConcurrent: number,
+  environmentId: string,
+): Promise<{ key: string; max_concurrent: number }> {
+  const response = await fetchWithAuth(limitUrl(key, environmentId), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_concurrent: maxConcurrent }),
+  });
+  if (!response.ok) throw await toError(response, "Failed to save concurrency limit");
+  return response.json() as Promise<{ key: string; max_concurrent: number }>;
+}
+
+/** Remove the cap on `key`: the key becomes unlimited. */
+export async function deleteConcurrencyLimit(
+  key: string,
+  environmentId: string,
+): Promise<void> {
+  const response = await fetchWithAuth(limitUrl(key, environmentId), {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw await toError(response, "Failed to delete concurrency limit");
+  }
 }
