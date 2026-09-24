@@ -454,8 +454,7 @@ setting it alone is refused at deploy.
 **Per-build knobs** (`tick_kwargs`, persisted with the build so every tick
 shares them): `linger_seconds` (default 120), `poll_interval_seconds` (3),
 `fail_mode`, `max_attempts` (2), `max_interruptions` (20),
-`worker_report_grace_seconds` (30), `max_concurrent_actions` (50),
-`max_spawns_per_tick` (derived). Callables —
+`max_concurrent_actions` (50), `max_spawns_per_tick` (derived). Callables —
 `worker_selector`, `limit_key_selector` — are deployed-app configuration,
 never per-trigger.
 
@@ -728,19 +727,31 @@ else's claim — see [Build & Execution](../concepts/build-execution.md#shared-t
 **Task retries: `retries=` and `max_attempts` are not the same knob.**
 `FunctionSettings(retries=N)` on a worker is Modal's own retry policy: it
 covers an exception raised _inside_ the container, and it is the right tool
-for that. It cannot cover a spawn that failed before the container existed,
-a container Modal killed (OOM, timeout), or a preempted worker — from
-Modal's side there is nothing to retry, and from the build's side those
-used to end a `FAIL_FAST` build outright.
+for that. It cannot cover a spawn that failed before the container ever
+existed — from Modal's side there is nothing to retry.
 
-Reactive ticks therefore carry `TickConfig.max_attempts` (default **2**), a
-per-task budget on how many executions the _scheduler_ starts in one build
-round. It applies only to failures a tick records itself — a failed spawn,
-an execution Modal reports as failed, and a task whose execution claim
-lapsed with no ref left to probe (the preemption/OOM shape). A task that
-simply raises never reaches it: the worker self-reports the failure, which
-is what `retries=` is for. Set the two together — `retries=` for flaky task
-code, `max_attempts` for flaky infrastructure:
+`TickConfig.max_attempts` (default **2**) covers exactly that one case: how
+many times, within a single claim, the tick tries to start the container
+before giving up and recording the failure once. It is not a persisted
+budget — nothing about it is tracked across ticks, so there is no "still
+under budget" state for a retry to restore. Two failure shapes that look
+similar are **not** covered by it at all:
+
+- **A worker that died with no restart coming** (OOM, a crash, a
+  network partition, or a timeout nothing caught). Its claim simply
+  lapses on its TTL, and the next claiming start takes the execution
+  over as a fresh attempt — uncapped; whether it should be is an open
+  question (`docs/design/registry-v2/plan.md`). This is **not** the same
+  as a preemption, which keeps its claim across Modal's own restart on
+  the same call id — see [Preemption and
+  timeouts](#preemption-and-timeouts).
+- **A task that raises inside the container.** The worker self-reports
+  the failure, and the tick never retries a `FAILED` task automatically
+  — the build's `fail_mode` decides, and only a retry (below) gives it
+  another try. This is what `retries=` is for.
+
+Set the two together — `retries=` for flaky task code, `max_attempts` for
+a spawn that keeps failing before any container starts:
 
 ```{.python notest}
 app.build_trigger(
@@ -749,28 +760,32 @@ app.build_trigger(
 ```
 
 `max_attempts=1` restores the previous behaviour (record the failure, never
-respawn).
+retry the spawn).
 
-**A build that ran out of attempts is recovered by re-triggering it.** The
-budget is scoped to a build _round_, and re-triggering an existing build id
-records `BUILD_RESUMED` ahead of its discovery retries, so every task
-starts the new round at zero:
+**A `FAILED` task is recovered by retrying it — a bare retry works just as
+well as a re-trigger.** `stardag tasks retry <task-id> --build <build-id>`
+(or the UI's Retry) moves it back to `PENDING`, and the next tick claims
+and spawns it fresh with its own `max_attempts` budget; there is no stale
+"already at budget" state that would make the scheduler refuse it again.
+`--build` is required here: it defaults to the build holding the task's
+claim, and a `FAILED` task holds none. Re-triggering an existing build id
+does the same for every not-complete member at once and records
+`BUILD_RESUMED`:
 
 ```{.python notest}
-# Resets the attempt budget and re-runs what failed. Optionally raise the
-# budget for the new round at the same time.
+# Resets every FAILED member to PENDING and re-runs it. Optionally raise
+# max_attempts at the same time.
 app.build_trigger(
     root_task, build_id=result.build_id, reactive=True,
     tick_kwargs={"max_attempts": 4},
 )
 ```
 
-A **bare** retry does not do this. Clicking Retry in the UI flips the task
-to pending without starting a new round, so on a task already at budget
-the retry succeeds and the scheduler
-still refuses to start it. The tick logs that case explicitly, names the
-re-trigger, and fails the task again rather than leaving it pending and
-inert. See
+Neither path resets `max_interruptions`: that budget is counted from the
+execution ledger over every plan the build has ever had, so a retry — bare
+or via re-trigger — buys an interrupted task exactly one more execution
+before the cap fails it again; only a **new build** starts the count at
+zero. See
 [Retries and interruptions](../concepts/modal-orchestration.md#retries-and-interruptions).
 
 ### Settings: per-build configuration without touching the task id
@@ -1014,19 +1029,20 @@ Three things carry it:
 #### What happens if you _don't_ catch it
 
 Nothing to configure, and this is the part worth understanding: **an
-interruption you do not catch is a failure.** The execution dies, a
-scheduler tick notices, and the task is retried under the ordinary
-`TickConfig.max_attempts` (default 2) like any other failure.
+interruption you do not catch leaves the execution to die with no report
+at all** — the same shape as a container Modal kills outright, or a worker
+that crashes. Recovery goes through the claim, not through `max_attempts`:
+the claim's TTL (the executor's own `timeout` plus a fixed grace) is what a
+later tick waits out before treating the execution as lapsed and taking it
+over as a fresh attempt. `max_attempts` covers only a spawn that fails
+before any container starts (see "Task retries" above); a lapsed-claim
+takeover like this one is not bounded by it, or by anything else today —
+an open question, tracked in `docs/design/registry-v2/plan.md`.
 
-A tick that notices first waits for you, though. Modal ends a cancelled
-input the moment the cancel is issued, so a probe can see the call gone
-while your `except` block is still checkpointing — and calling that a
-failure would spend an attempt on an interruption you were in the middle
-of reporting. So the probe holds its verdict for
-`TickConfig.worker_report_grace_seconds` (default 30) and records a
-failure only if nothing arrives. Raise it if your checkpoints take longer
-than that; the only cost of a larger value is how long a build waits
-before healing a worker that died without a word.
+There is no separate probe or report-grace knob to raise here. The claim's
+built-in grace is generous specifically so an `except` block that is still
+checkpointing when Modal ends the input has time to report before the
+registry would call the claim lapsed.
 
 That is deliberate. Letting an interruption propagate means the task had no
 plan for one, which leaves exactly two possibilities — it hung, or the
@@ -1058,14 +1074,13 @@ failures and fail the build for the one reason it was built to survive.
 
 #### The knobs, and how they multiply
 
-| knob                                     | covers                                                                          |
-| ---------------------------------------- | ------------------------------------------------------------------------------- |
-| `FunctionSettings(timeout=)`             | how long one execution attempt may run                                          |
-| `FunctionSettings(retries=)`             | exceptions raised inside the container, and timeouts                            |
-| `FunctionSettings(nonpreemptible=)`      | opts out of reclamation entirely (3× CPU/memory price; no GPU)                  |
-| `TickConfig.max_attempts`                | failures a tick records itself — spawn failures, dead executions                |
-| `TickConfig.max_interruptions`           | how many times a task may ask to be resumed                                     |
-| `TickConfig.worker_report_grace_seconds` | how long a tick waits for your report before calling a dead execution a failure |
+| knob                                | covers                                                          |
+| ----------------------------------- | --------------------------------------------------------------- |
+| `FunctionSettings(timeout=)`        | how long one execution attempt may run                          |
+| `FunctionSettings(retries=)`        | exceptions raised inside the container, and timeouts            |
+| `FunctionSettings(nonpreemptible=)` | opts out of reclamation entirely (3× CPU/memory price; no GPU)  |
+| `TickConfig.max_attempts`           | a claimed execution's spawn failing before any container starts |
+| `TickConfig.max_interruptions`      | how many times a task may ask to be resumed                     |
 
 They **multiply**, which is easy to miss: a worker with `retries=3` running
 a task allowed 20 interruptions can consume up to 80 container attempts.

@@ -92,8 +92,9 @@ tick (short-lived, single-flighted per build):
   acquire the build's scheduler lease (held → exit)
   loop:
     clear the build's wake-up flag; read the frontier
-    act: spawn ready tasks detached (claim first), probe running ones,
-         heal completions, record failures and retry within budget
+    act: spawn ready tasks detached (claim first), leave live claims
+         alone (a lapsed one is runnable again), heal completions,
+         retry a failed spawn within its own budget
     terminal? → complete / fail the build (cancelling live executions)
     acted? → re-read immediately; else linger on the wake-up flag
   on the way out: re-read the flag before and after releasing the lease
@@ -126,12 +127,24 @@ can live to finish. Truncation re-reads immediately; it is never a stall.
 
 ### Retries and interruptions
 
-A tick retries the failures no backend can retry for you — a spawn that
-never produced a container, an execution Modal killed or lost — up to
-`TickConfig.max_attempts` (default 2) per task per **round** (a round
-starts at each re-trigger). An exception _inside_ your task is reported by
-the worker as `FAILED` and never reaches this budget; that is what Modal's
-own `retries=` is for.
+A tick retries only the one failure no backend can retry for you — a spawn
+that fails before any container starts — up to `TickConfig.max_attempts`
+(default 2) within that single claim; nothing about the budget persists
+across ticks. Three other failure shapes bypass it entirely, distinct from
+each other and from it:
+
+- **A worker that dies with no restart coming** (OOM, a crash, a timeout
+  nothing caught) simply lets its claim lapse, and the next claiming
+  start takes the execution over as a fresh attempt — uncapped, an open
+  design question (`docs/design/registry-v2/plan.md`).
+- **A preemption is not the same.** Modal restarts the execution itself,
+  on the same call id, and the worker keeps its claim across the restart
+  — see below.
+- **An exception _inside_ your task.** The worker reports it `FAILED`
+  itself, and the tick never retries a `FAILED` task automatically — the
+  build's `fail_mode` decides, and only `stardag tasks retry` or a
+  re-trigger (not Modal's own `retries=`, which never touches registry
+  state) moves it back to `PENDING`.
 
 A task past its `timeout` that caught the interruption, checkpointed and
 raised `ResumableInterruption` is recorded `INTERRUPTED` and resumed, up to
@@ -149,13 +162,11 @@ for a preemption and `InputCancellation` for a timeout, and only the first
 restarts.
 
 And it comes from the **worker**, which is the only thing that knows. A
-tick probing a running task sees whether the execution still exists, not
-what ended it, and a cancelled input stops existing while the container is
-still checkpointing. So a probe that finds an execution gone holds its
-verdict for `TickConfig.worker_report_grace_seconds` (default 30) and
-records a failure only if no report arrives. The worker's classification
-wins wherever it makes one; the probe is the fallback for the execution
-that ends without a word.
+tick never probes a running task for what ended it: a live claim is left
+alone, whoever holds it, and a lapsed claim is simply runnable again — no
+probe, no report-grace knob, no reaper. The claim's own TTL (the
+executor's timeout plus a fixed grace) is what already gives a worker time
+to report before the registry would call its execution gone.
 
 ### Wake-ups: how a build with no process learns something changed
 
