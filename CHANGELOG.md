@@ -4,6 +4,193 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased — v2 line]
+
+> **TODO(Anders):** the version numbers (SDK and server image) and the
+> release date replace this heading's placeholder. The `[Unreleased]` entry
+> below is v1-line work; whether it ships as a last v1 release first or
+> folds into this line is also yours to decide. #387 (CLI), #389 (live
+> scenarios) and #390 (server reads, `lost`, artifact quota) were open when
+> this entry was drafted: re-check their items against what merged.
+
+A new release line of the SDK, the registry server, the CLI and the UI
+together, on new registry entities: **task** (a completion and its claim),
+**task instance** (a task as constructed under a scope, with its parameter
+body and its dependency edges), **plan** (one build's request under one
+scope), **deployment** and the **execution** ledger. Fully breaking: no data
+migration (an existing registry starts empty), no compatibility with v1
+SDKs or servers in either direction. The design is
+`docs/design/registry-v2/design.md`; the principles it rests on are
+`docs/design/principles.md`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for
+the migration and the operator notes.
+
+### SDK
+
+- **Breaking: one flag replaces the significance levels.**
+  `StardagField(significant: bool = True)`. A `significant=False` field is
+  an ordinary parameter, passed at init and stored on the instance body; it
+  is out of the task id and in the instance hash. `StardagField(
+significance=...)` and `StardagField(hash_exclude=...)` are removed and
+  raise `TypeError` naming the replacement; `Significance` is removed from
+  the public API. `compat_default` stays, on significant fields only, and so
+  do custom `"hash"`-mode serializers: user control over hashing is on the
+  task id only.
+- **New: `BaseTask.instance_hash`** (and `BaseTask.instance_body()`): uuid5
+  over the canonical JSON of all fields, defaults included, nested tasks as
+  their full body. It is the hash of the body the registry stores. Sets are
+  sorted in the registry-mode dump as well as in hash mode.
+- **New: `sd.check_serialization_stability(task)` and
+  `sd.UnstableSerializationError`.** At registration, each distinct instance
+  is round-tripped once (`dump(validate(dump(x))) == dump(x)`, task id
+  unchanged); a field that moves fails the build at the trigger, naming it.
+- **New: `sd.InstanceConflictError`.** Two different constructions of one
+  task id in one discovery pass fail the build at the trigger, naming the
+  differing fields and both construction paths. One plan holds one instance
+  per task id.
+- **Breaking: `settings` replaces the build config.** `sd.build(settings=...)`
+  and `build_trigger(settings=...)` take a flat `dict[str, str]` applied as
+  environment variables in every process of the build, and part of the
+  build's scope. `STARDAG_*` and `MODAL_*` keys are refused. Removed:
+  `build_config`, `sd.build_config_scope`, `sd.get_build_config`,
+  `sd.set_build_config`, the ContextVar transport and the
+  `STARDAG_BUILD_CONFIG` / `STARDAG_SCOPE_KEY` variables.
+- **New: `stardag.build.SettingsError`.** A process applying settings serves
+  one build at a time; a second build entering while another build's
+  settings are installed raises it. Deployed ticks, workers and the
+  bootstrap run one input per container, and a `max_concurrent_inputs`
+  above one on them is refused at deploy.
+- **Breaking: the registry client speaks `/api/v2` only.** `APIRegistry` and
+  `RegistryABC` are rewritten around plans: plan create, members registered
+  in post-order chunks, seal, and one `/yield` per dynamic-dependency batch
+  with a client-minted `batch_id`. Build, plan, execution, deployment and
+  batch ids are client-minted uuid7s. Refusals surface as `APIError` with
+  `.code`; 429 `rate_limited` is retried per `Retry-After`. Removed:
+  `RegistryTooOldError`, `SDKVersionUnsupportedError`, `ScopeMismatchError`,
+  `BuildConfigMismatchError`, the version gate and the `/locks` client.
+- **New: deployments as scope.** `stardag modal deploy` mints
+  `STARDAG_DEPLOYMENT_ID` and bakes it into the app's secret, replacing the
+  code id in that role. A local build plans under a `local` deployment
+  looked up by code id (`STARDAG_CODE_ID`, else a clean git SHA, else a
+  fresh id). A hybrid `sd.build()` whose tasks run on a Modal app, and
+  `reactive_discovery="local"`, plan under the app's current deployment.
+- **Changed: every execution claims.** In-process (thread and process pool)
+  executions hold a claim with a TTL that the resident driver renews; the
+  distributed lock is gone. The resident engine yields without suspending.
+- **Changed: rollover by deployment id.** A tick whose deployment differs
+  from the active plan's re-plans the build if its deployment is the app's
+  current one, and exits `superseded` otherwise.
+- **Changed: rehydration.** Strict for significant fields (the task id must
+  match), lenient for the rest: an unknown non-significant key is dropped
+  with a warning, a missing one takes the class default.
+- **Fixed: a mounted Modal Volume could serve a deleted target as
+  present** in a warm container, so discovery saw it complete and never
+  invalidated it. Each discovery walk begins an observation fence, and a
+  mounted-volume hit older than it reloads the volume once per walk.
+
+### Server
+
+- **Breaking: new schema, no data migration.** One migration drops the v1
+  core tables (including `distributed_locks`) and creates `task`,
+  `deployment`, `settings`, `task_instance`, `task_instance_dependency`,
+  `plan`, `plan_member`, `execution`, `build_wake` and the re-pointed
+  `event`, `task_artifact` and `task_limit_key`. Downgrade raises.
+  **PostgreSQL 15 or newer** is required (SQLite is not supported), and the
+  API suite runs on Postgres.
+- **Breaking: the registry routes move to `/api/v2`.** Every `/api/v1`
+  registry route (builds, tasks, search, deployments, locks, concurrency
+  limits, tick summaries) is removed, and so is the SDK version gate. Authentication, workspaces, environments, target
+  roots and `/api/v1/version` stay under `/api/v1`. The `/locks` routes are
+  gone: the claim is the only mutual exclusion, and in-process claims renew
+  through `POST …/tasks/{task_id}/claim/renew`.
+- **New: plans.** `POST /builds/{id}/plans`, chunked `POST
+/plans/{id}/members`, `/seal`, and `POST
+/plans/{id}/members/{task_id}/yield`; the frontier (runnable, discovery
+  jobs, running, with attempt and interruption counts from the ledger) over
+  the active plan. Registration is insert-if-absent throughout; conflicts
+  are 409s with a code (`instance_conflict`, `instance_body_conflict`,
+  `task_identity_conflict`, `root_instance_conflict`,
+  `deployment_mismatch`, `not_claim_holder`, `upstream_incomplete`, …).
+- **New: one `transition_task()` for every task event**, with one authority
+  rule: a report is applied while it names the task's current execution,
+  lapsed or not, and is late once that execution's claim was released. At
+  most one terminal report per execution. A claiming start re-checks
+  upstream completion under the task lock.
+- **New: the execution ledger.** One row per claim granted, with the server's
+  end (`claim_released_at`, `claim_outcome`) and the execution's own end
+  (`ended_at`, `outcome`). `GET /builds/{id}/executions
+[?not_in_current_plan=true]` lists unended and orphaned executions; `POST
+/executions/{id}/stopped` ends one (outcome `stopped`, or `lost` for one
+  that could not be stopped) and releases a claim it still holds.
+- **New: deployments.** `POST /deployments` (client-minted id,
+  server-assigned generation) before the deploy, `POST
+/deployments/{id}/activate` after it; `GET /deployments` marks the current
+  Modal deployment per app. Local deployments are created activated and are
+  never current.
+- **New: settings.** Stored by content hash, validated at the server
+  (`reserved_settings_key`), read at `GET /settings/{hash}`.
+- **Changed: invalidation follows the world only.** The one path out of
+  COMPLETED is discovery observing the target missing (`TASK_INVALIDATED`,
+  with the `observed_at` guard); there is no operator route.
+- **Changed: a build's terminal transition releases its claims** (complete,
+  fail and cancel alike, tasks set CANCELLED, which is actionable for other
+  builds); `exit-early` releases nothing. Exclusion cascades downstream
+  within the plan, and an excluded root fails the build.
+- **Changed: wake-up flags move to `build_wake`**, so flagging never locks
+  the build row a claim holds.
+- **New: read routes.** `GET /builds` (status and app filters, cursor
+  paging), `GET /plans/{id}`, `GET /builds/{id}/plans`, `GET
+/plans/{id}/graph`, `GET /plans/{id}/roots`, `GET /tasks` and `GET
+/tasks/{id}` (with its instances, claim plan and build), `GET
+/tasks/{id}/executions`, `GET /tasks/{id}/events`, `GET
+/builds/{id}/events`, `GET /deployments/{id}`, artifacts through the
+  member, `PUT/GET/DELETE /concurrency-limits/{key}`.
+- **Changed: guardrails.** The rate limit applies to every v2 write route.
+  The 24-hour creation quotas are per environment and charged only for rows
+  a request inserted: `LIMITS_MAX_TASK_INSTANCES_PER_ENVIRONMENT_24H` (429
+  `creation_quota_exceeded`) and `LIMITS_MAX_ARTIFACTS_PER_ENVIRONMENT_24H`
+  (429 `artifact_creation_limit`). The four per-workspace settings
+  (`LIMITS_MAX_{BUILDS,TASKS,EVENTS,ARTIFACTS}_PER_WORKSPACE_24H`) are not
+  read by the v2 routes.
+
+### CLI
+
+- **New: `stardag build <module:attr ...>`** — roots from a task object, a
+  list, a zero-argument callable or a task class with `--param KEY=VALUE`;
+  `--settings KEY=VALUE` (repeatable), `--app module:attr` (with
+  `--reactive`), `--resume`, `--dry-run`.
+- **Changed: `stardag builds`** — `list`, `show`, `frontier`, `ticks`,
+  `cancel`, and new `complete [--force]` and `fail`. **`builds stop`** lists
+  the build's unended executions from the ledger, stops the Modal calls it
+  can identify, reports each one stopped, and cancels the build unless
+  `--no-cancel`; `--not-in-current-plan` selects orphans (and implies
+  `--no-cancel`), `--mark-lost` ends executions it cannot stop as `lost`.
+- **New: `stardag executions list`, `stardag plans show`, `stardag
+deployments list`** (`stardag modal deployments` stays as an alias).
+- **Changed: `stardag tasks`** — `show`, new `check` (runs `complete()`
+  locally and prints the observation; reports nothing), `retry`, `cancel`,
+  new `exclude`. `tasks list` is removed.
+- **Removed: `stardag concurrency-limits`** (the whole group) and
+  `stardag builds cleanup`.
+- `stardag modal deploy` records the deployment before the deploy and
+  activates it after; a failed create or activation exits non-zero.
+
+### UI
+
+- **Changed: every call is on `/api/v2`.** Scope keys, `build_config`,
+  phantom tasks, external blockers and lock views are gone.
+- **Changed: the build view follows the active plan** — plan header
+  (deployment, generation, settings, sealed), members, the DAG over instance
+  edges (dynamic edges dashed, excluded members muted), the frontier with
+  attempt counts, settings and deployment in the build info, and the stop
+  list over the ledger with orphans marked.
+- **New: the task page** (`/tasks/:task_id`) — status, the claim (live or
+  lapsed, current execution), remedies through the viewed build's plan, the
+  task's instances under their scopes with the parameters they differ in,
+  executions and artifacts.
+- **New: the deployments page** — every generation per app, current marked.
+- **Removed:** the task explorer and search, claim triage, bulk cancel and
+  the concurrency-limits admin page.
+
 ## [Unreleased]
 
 ### SDK
