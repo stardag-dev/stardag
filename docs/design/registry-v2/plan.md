@@ -271,11 +271,12 @@ assignee the maintainer.
       process, and the tick re-checks its lease after discovery and after
       the executor-metadata await.
 
-- [ ] I1 — v2 schema
-- [ ] I2 — Registration service
-- [ ] I3 — Frontier and transitions
-- [ ] I4 — Deployments, builds, wake-ups, reads
-- [ ] I5 — Server leftovers (in review, draft PR #390, stacked on #386).
+- [x] I1 — v2 schema (merged in I0 steps 1–3, PRs #380/#382/#383/#385)
+- [x] I2 — Registration service (merged, same PRs)
+- [x] I3 — Frontier and transitions (merged, same PRs)
+- [x] I4 — Deployments, builds, wake-ups, reads (merged, same PRs; reads
+      completed by I5)
+- [x] I5 — Server leftovers (merged, PR #390).
       Reads: `GET /plans/{id}` (lifecycle, scope with the deployment
       resolved, member counts by status, excluded apart);
       `GET /builds/{id}/plans`; `GET /plans/{id}/graph` (the shape the UI's
@@ -292,8 +293,8 @@ assignee the maintainer.
       no route for a bare observation (`tasks check --report`, I8) — an
       observation outside registration has no plan to name, which is a
       design question, not a leftover.
-- [ ] I6 — SDK core (in progress — hashing and field layer done; I7 pending)
-- [ ] I7 — SDK engines + Modal (PR #384 merged). The client, both
+- [x] I6 — SDK core (merged, PR #381: hashing and field layer)
+- [x] I7 — SDK engines + Modal (merged, PR #384). The client, both
       engines, the tick, the worker and `stardag modal deploy` run on
       `/api/v2`; `build_config.py` is gone and `settings` replaces it. Every
       route the client calls is served (step 3c, step 4); proven live in I0
@@ -312,21 +313,19 @@ assignee the maintainer.
       frontier), no event read (`tasks show` cannot surface
       `TASK_STRUCTURE_DIVERGED`), no route for a bare observation
       (`tasks check --report` is refused).
-- [ ] I9 — UI (in review, draft PR #388 against `v2`). Every registry call
+- [x] I9 — UI (merged, PR #388). Every registry call
       is on `/api/v2`; scope keys, `build_config`, phantoms, external
       blockers and `/locks` are gone. Builds list, the build view over the
       active plan (plan header, members, DAG over instance edges, frontier,
       settings and deployment in build info), the stop list over
       `GET /builds/{id}/executions` with orphans, the task page (claim,
       instances under their scopes, artifacts) and a deployments page.
-      Coded against one route the registry does not serve, marked
-      **(assumed)** in `api/registry.ts`: `GET /plans/{id}/graph` (members
-      and instance edges); until it lands the view shows roots plus the
-      frontier and says it is partial. Removed for want of a v2 route: task
+      `GET /plans/{id}/graph` was coded first and served by I5 (#390), so
+      the plan view is over members and instance edges. Removed for want of a v2 route: task
       search/explorer, claim triage, bulk cancel, concurrency limits; the
       build failure reason and the task event log (so
       `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
-- [ ] I10 — tests (PR #389, draft). One registry-live module per `live`
+- [x] I10 — tests (merged, PR #389). One registry-live module per `live`
       row of the design's scenario table, each run serially green against a
       provisioned v2 registry; S3 stays `test_rollover`. The scenario table
       in `design.md` is unchanged; this is the mapping.
@@ -384,11 +383,10 @@ assignee the maintainer.
       deploy. Nothing sleeps; shrinking those windows is the lever.
       The docker-compose e2e tier (`integration-tests/tests`) is re-pointed to v2 in PR #391 (merged).
 
-- [ ] I11 — docs. Two halves, two branches. Principles and release notes
-      drafted, in review (PR #392): `docs/design/principles.md`, the v2
+- [x] I11 — docs (merged: PR #392 and PR #393). Principles and release
+      notes (PR #392): `docs/design/principles.md`, the v2
       entries in `CHANGELOG.md` and `RELEASE_NOTES.md`; versioning
-      TODO(Anders). User docs under `docs/docs/` in review (draft PR
-      against `v2`, #393): `concepts/parameters.md`,
+      TODO(Anders). User docs under `docs/docs/` (PR #393): `concepts/parameters.md`,
       `concepts/build-execution.md`, `concepts/modal-orchestration.md`
       ("Deployments and code versions"), `how-to/evolve-dags.md`,
       `how-to/integrate-modal.md`, `platform/api.md` rewritten for the v2
@@ -396,7 +394,15 @@ assignee the maintainer.
       fixes; `configuration/cli.md` updated to the full v2 CLI merged in
       I8 (#387). `docs/design/README.md` and `DEV_README.md` needed no
       change.
-- [ ] I12 — release
+- [ ] I12 — release. Everything above is merged into `v2`; this is the
+      only open package and it needs Anders' calls: the SDK and server
+      version numbers and the release date (the `TODO(Anders)` markers in
+      `CHANGELOG.md` and `RELEASE_NOTES.md`); whether the v1 `[Unreleased]`
+      changelog section ships as a last v1 release first; the order server
+      image → prod deploy (per-deploy approval) → SDK tag; a manual UI pass
+      against a live v2 registry, which nobody has done; two pre-existing
+      `mkdocs build --strict` warnings; then marking draft PR #378
+      (`v2` → `main`) ready and merging it once.
 
 ## Delivery steps
 
