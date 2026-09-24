@@ -90,12 +90,13 @@ Selecting a task opens its detail pane next to the table.
 A task page (`/tasks/<task id>`, or the link icon in a build's detail pane)
 shows one completion:
 
-- **Status and claim**: the global status, and while it runs, whether the
-  claim is live or lapsed, which execution holds it and **which build** —
-  a link to that build. A claim can be released from here, addressed to
-  the build that holds it, by any workspace member; the release is
-  recorded on the task's event log, and it stops nothing — the worker
-  finds out at its next checkpoint. A failed, cancelled or interrupted
+- **Status and claim**: the global status, and while it runs one line —
+  _Claim live until_ or _Claim lapsed at_ a time. **Manage** opens the
+  claim: **which build** holds it (a link to that build), its plan, the
+  execution and its executor ids, and the expiry. A claim can be released
+  from there, addressed to the build that holds it, by any workspace
+  member; the release is recorded on the task's event log, and it stops
+  nothing — the worker finds out at its next checkpoint. A failed, cancelled or interrupted
   task can be reset to pending.
 - **Executions**: every execution of the task across builds, newest first,
   ended ones included — executor, worker, how it ended or what became of
