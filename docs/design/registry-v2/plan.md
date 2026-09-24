@@ -283,7 +283,19 @@ assignee the maintainer.
       route the client calls is served (step 3c, step 4); proven live in I0
       step 4. Left to I8: `builds list/stop/cleanup`, `tasks`,
       `concurrency-limits` as CLI commands.
-- [ ] I8 — CLI
+- [ ] I8 — CLI (in review, draft PR against `v2`). `stardag build`
+      (roots from `module:attr`, `--settings`, `--app`, `--reactive`,
+      `--resume`, `--dry-run`); `builds` list, show, frontier, ticks,
+      stop, cancel, complete and fail, `stop` over the execution ledger with
+      `--not-in-current-plan`; `executions list`; `plans show`;
+      `deployments list` (`stardag modal deployments` is its Modal alias);
+      `tasks show/check/retry/cancel/exclude`. Client reads added:
+      `build_list`, `plan_roots_info`, `task_list_artifacts`, all on served
+      routes. Open server-contract items: no `GET /plans/{id}` (timestamps
+      and member counts are known only for the active plan, via the
+      frontier), no event read (`tasks show` cannot surface
+      `TASK_STRUCTURE_DIVERGED`), no route for a bare observation
+      (`tasks check --report` is refused).
 - [ ] I9 — UI (in review, draft PR #388 against `v2`). Every registry call
       is on `/api/v2`; scope keys, `build_config`, phantoms, external
       blockers and `/locks` are gone. Builds list, the build view over the
@@ -299,16 +311,18 @@ assignee the maintainer.
       build failure reason and the task event log (so
       `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
 - [ ] I10 — tests. docker-compose e2e tier re-pointed to v2 (STA-110).
-- [ ] I11 — user docs in review (draft PR against `v2`): `concepts/parameters.md`,
+- [ ] I11 — docs. Two halves, two branches. Principles and release notes
+      drafted, in review (PR #392): `docs/design/principles.md`, the v2
+      entries in `CHANGELOG.md` and `RELEASE_NOTES.md`; versioning
+      TODO(Anders). User docs under `docs/docs/` in review (draft PR
+      against `v2`, #393): `concepts/parameters.md`,
       `concepts/build-execution.md`, `concepts/modal-orchestration.md`
       ("Deployments and code versions"), `how-to/evolve-dags.md`,
-      `how-to/integrate-modal.md`, `platform/api.md` rewritten for the
-      v2 entities; `concepts/dependencies.md`/`concepts/index.md` minor
-      fixes; `configuration/cli.md`'s build/task/concurrency-limit
-      sections cut to the four commands the v2 CLI currently ships.
-      `docs/design/README.md` and `DEV_README.md` needed no change.
-      `principles.md`/`CHANGELOG.md`/`RELEASE_NOTES.md` are a separate
-      session's half of I11.
+      `how-to/integrate-modal.md`, `platform/api.md` rewritten for the v2
+      entities; `concepts/dependencies.md`/`concepts/index.md` minor
+      fixes; `configuration/cli.md` updated to the full v2 CLI merged in
+      I8 (#387). `docs/design/README.md` and `DEV_README.md` needed no
+      change.
 - [ ] I12 — release
 
 ## Delivery steps

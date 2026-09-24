@@ -816,6 +816,15 @@ reuses the settings of the build's active plan, as a bare re-trigger
 always has; passing `settings={}` explicitly means "no settings", which is
 a different scope from one that had some.
 
+From the CLI, `stardag build` takes the same argument as repeatable
+`--settings KEY=VALUE` pairs, both for a resident build and, with `--app`,
+for a trigger:
+
+```sh
+stardag build my_pkg.pipeline:root --app my_pkg.app:app --reactive \
+    --settings NUM_THREADS=8
+```
+
 ### `stardag modal deploy`: two steps, before and after
 
 _Why a redeploy is safe for running builds: [Evolve a DAG
@@ -848,18 +857,22 @@ continues — see [Deployments and code
 versions](../concepts/modal-orchestration.md#deployments-and-code-versions)
 for the mechanism.
 
-### Cancelling a build: `stardag builds cancel`
+### Cancelling a build vs. stopping its executions
 
 `stardag builds cancel <build-id>` releases the build's claims
 immediately, making its tasks available to any other build that wants
 them. It reaches no container: a worker still running notices at its own
 next checkpoint (see [Cancelling
 work](../concepts/build-execution.md#cancelling-work-the-worker-asks-nothing-reaches-in)).
-Ending the containers themselves rather than waiting for them to notice —
-what [Builds stop over
-executions](../concepts/build-execution.md#builds-stop-over-executions)
-describes — is a separate, human-driven action over the build's
-executions.
+
+To end the containers themselves rather than waiting for them to notice,
+`stardag builds stop <build-id>` stops each of the build's live Modal
+calls, reports it, and only then cancels the build — see [Stopping a
+build's executions](../configuration/cli.md#stopping-a-builds-executions).
+`--not-in-current-plan` narrows it to orphans left behind by a
+[rollover](../concepts/modal-orchestration.md#deployments-and-code-versions)
+or a re-trigger under new settings, without touching the build's current
+work.
 
 ### Preemption and timeouts
 

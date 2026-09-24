@@ -350,12 +350,14 @@ Ending the containers themselves is a separate, human decision over the
 build's **executions** — the ledger of attempts, one row per claim
 granted — because a claim can move on while a container someone forgot
 about keeps running. An execution with no report of having ended yet
-(`ended_at IS NULL`) is exactly the list a "stop this build's containers"
-action needs, stopped before the build itself is cancelled, so nothing is
-left holding a claim that outlives its own container. Deleting a build is
-refused while any of its executions is still unended, or any of its plans
-holds a live claim, for the same reason: the ledger must never be
-cascaded away under a worker that may still report.
+(`ended_at IS NULL`) is exactly the list `stardag builds stop` acts on: it
+stops each one's container and reports it before the build itself is
+cancelled, so nothing is left holding a claim that outlives its own
+container — see [Stopping a build's
+executions](../configuration/cli.md#stopping-a-builds-executions).
+Deleting a build is refused while any of its executions is still
+unended, or any of its plans holds a live claim, for the same reason: the
+ledger must never be cascaded away under a worker that may still report.
 
 ### Concurrency limits across builds
 

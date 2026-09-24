@@ -342,32 +342,93 @@ See `stardag environment target-roots --help` for full options (e.g. `--env` to 
 
 ## Build Commands
 
-`stardag builds` answers "what does the registry actually think the state
-is?" — one build's status and roots, its active plan as a scheduler tick
-would see it, and the reasoning behind its recent reactive ticks.
+`stardag build` starts (or resumes) a build; `stardag builds` inspects and
+ends them; `stardag executions`, `stardag plans`, `stardag deployments`
+and `stardag tasks` inspect and act on the entities underneath one.
+
+### Starting a build: `stardag build`
 
 === "Active venv"
 
     ```sh
-    stardag builds show <build-id> [--json]
-    stardag builds frontier <build-id> [--json]
-    stardag builds ticks <build-id> [--limit N] [--json]
-    stardag builds cancel <build-id> [--yes]
+    stardag build <ref> [<ref> ...] [--param KEY=VALUE ...]
+        [--settings KEY=VALUE ...] [--app module:attr] [--reactive]
+        [--resume <build-id>] [--description TEXT] [--dry-run] [--json]
     ```
 
 === "uv run ..."
 
     ```sh
+    uv run stardag build <ref> [<ref> ...] [--param KEY=VALUE ...]
+        [--settings KEY=VALUE ...] [--app module:attr] [--reactive]
+        [--resume <build-id>] [--description TEXT] [--dry-run] [--json]
+    ```
+
+Each `<ref>` is `module:attr` or `path/file.py:attr`, naming — in that
+module — a task object, a list of task objects, a zero-argument callable
+returning either, or a task class (constructed from `--param KEY=VALUE`,
+each value parsed as JSON when it parses, else taken as a string).
+
+- Without `--app`: runs `sd.build` in this process, against the configured
+  registry (or none), planning under this process's local deployment.
+- With `--app module:attr` (naming a `StardagApp`, as for
+  `stardag modal deploy`): calls `build_trigger` on it instead — mints (or
+  resumes) the build here and spawns the deployed function that drives it.
+  `--reactive` needs `--app`: it schedules with short-lived ticks rather
+  than the resident `build` function.
+- `--settings KEY=VALUE` (repeatable) sets a build-wide environment
+  variable for every process of the build — see
+  [Settings](../how-to/integrate-modal.md#settings-per-build-configuration-without-touching-the-task-id).
+  `STARDAG_*` / `MODAL_*` keys are refused. `--resume <build-id>` with no
+  `--settings` reuses the build's stored settings.
+- `--dry-run` discovers the DAG locally and prints what a build would
+  plan — which tasks, whether each is already complete, how many upstream
+  edges each has — without creating a build or writing to the registry.
+  With `--resume` and no `--settings` it first reads (only reads) the
+  resumed build's stored settings, so the local walk matches what the
+  resumed build would actually see.
+
+### Inspecting and ending builds: `stardag builds`
+
+=== "Active venv"
+
+    ```sh
+    stardag builds list [--status S] [--app NAME] [--limit N] [--json]
+    stardag builds show <build-id> [--json]
+    stardag builds frontier <build-id> [--json]
+    stardag builds ticks <build-id> [--limit N] [--json]
+    stardag builds stop <build-id> [--not-in-current-plan]
+        [--executor NAME] [--worker NAME] [--older-than 30m]
+        [--task-id ID ...] [--no-cancel] [--mark-lost] [--dry-run]
+        [--yes] [--json]
+    stardag builds cancel <build-id> [--yes]
+    stardag builds complete <build-id> [--force] [--json]
+    stardag builds fail <build-id> [--message TEXT] [--yes] [--json]
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run stardag builds list [--status S] [--app NAME] [--limit N] [--json]
     uv run stardag builds show <build-id> [--json]
     uv run stardag builds frontier <build-id> [--json]
     uv run stardag builds ticks <build-id> [--limit N] [--json]
+    uv run stardag builds stop <build-id> [--not-in-current-plan]
+        [--executor NAME] [--worker NAME] [--older-than 30m]
+        [--task-id ID ...] [--no-cancel] [--mark-lost] [--dry-run]
+        [--yes] [--json]
     uv run stardag builds cancel <build-id> [--yes]
+    uv run stardag builds complete <build-id> [--force] [--json]
+    uv run stardag builds fail <build-id> [--message TEXT] [--yes] [--json]
     ```
 
 All commands accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
 profile / environment other than the active one.
 
-- `builds show` — one build: status, roots, reactive metadata.
+- `builds list` — builds, most recently active first (`--status`, `--app`
+  filter on a reactively-scheduled build's owning app).
+- `builds show` — one build: status, roots, reactive metadata, and its
+  active plan's deployment, settings and outstanding counts.
 - `builds frontier` — the build's active plan as a scheduler tick sees it,
   after the registry's closure step: members to expand (discovery jobs),
   members to claim (runnable), members under a live claim (running) — see
@@ -375,14 +436,23 @@ profile / environment other than the active one.
 - `builds ticks` — the scheduler's own account of its recent ticks, crashed
   ones included. Reactive builds are driven by many short-lived ticks, each in
   its own container; this is where their reasoning is kept.
+- `builds stop` — end the build's containers, not just its claims (see
+  [Stopping a build's executions](#stopping-a-builds-executions) below).
 - `builds cancel` — release the claims held by every one of the build's
   plans and stop there. **Nothing is stopped**: the released tasks go to
   `CANCELLED` (actionable, so any other build holding them runs them), and
   a worker still running exits at its next cooperative checkpoint, or runs
   to completion if its `run()` has none — its report is recorded as late.
+- `builds complete` — mark a build `COMPLETED`; refused (`plan_incomplete`)
+  unless the active plan is sealed and every non-excluded member is
+  `COMPLETED`, unless `--force` (which never overrides a missing seal or
+  an excluded root). Releases any claim the build still holds.
+- `builds fail` — mark a build `FAILED`, recording `--message`. Releases
+  the build's claims, like `cancel`; stops nothing.
 
-`--json` writes exactly one JSON document to stdout on the read-only
-commands; every hint and prompt goes to stderr, so piping is safe:
+`--json` writes exactly one JSON document to stdout on every command
+(after acting, for a write); every hint, warning and prompt goes to
+stderr, so piping is safe:
 
 ```sh
 stardag builds frontier <build-id> --json | jq '.runnable | length'
@@ -414,6 +484,107 @@ partitions of its members:
 An empty frontier with the build still `running` and no discovery jobs
 either means the plan is not yet sealed, or every member is settled —
 `plan_complete` distinguishes the two.
+
+### Stopping a build's executions
+
+`builds cancel` releases claims and reaches no container — a worker still
+running notices at its own next checkpoint, or runs to completion.
+`stardag builds stop <build-id>` is the command for ending the containers
+themselves: it reads `GET /builds/{id}/executions` (the ledger's rows
+with no end reported — exact regardless of what has happened to their
+claims), cancels each one's Modal call, reports every one it stopped, and
+only then cancels the build.
+
+```sh
+stardag builds stop <build-id> --dry-run   # list what would be stopped; write nothing
+stardag builds stop <build-id>             # stop, report, then cancel the build
+```
+
+Filters compose and narrow the selection: `--executor modal`, `--worker
+NAME`, `--older-than 2h`, `--task-id <id>` (repeatable). Anything a filter
+excludes keeps running once the build is cancelled — it simply no longer
+holds a claim.
+
+- `--no-cancel` stops and reports the selected executions but leaves the
+  build running on its active plan.
+- `--not-in-current-plan` selects only **orphans** — executions started
+  under a plan that is no longer the build's active one (after a rollover
+  or a re-trigger under new settings) — and **implies `--no-cancel`**: the
+  build keeps running on its current plan; only the stray executions of
+  its old one are stopped.
+- `--mark-lost` additionally ends any selected execution that has no call
+  id to cancel, with outcome `lost`, after its own confirmation. No report
+  from a marked-lost execution is ever applied afterwards — if it is in
+  fact still running, its result is discarded.
+- Only Modal executions can be cancelled from here; one running in a
+  driver's own process, or whose spawn has not yet reported a call id, is
+  listed with the reason and left alone (re-run to catch the latter once
+  its container is up).
+
+`stardag executions list --build <build-id>` shows the same unended-
+executions list on its own, without acting on it.
+
+## Plan, Deployment and Task Commands
+
+=== "Active venv"
+
+    ```sh
+    stardag plans show <plan-id> [--json]
+    stardag deployments list [--app NAME] [--kind modal|local]
+        [--current] [--limit N] [--json]
+    stardag tasks show <task-id> [--json]
+    stardag tasks check <task-id> --module MODULE [--json]
+    stardag tasks retry <task-id> --build <build-id> [--json]
+    stardag tasks cancel <task-id> --build <build-id> [--json]
+    stardag tasks exclude <plan-id> <task-id> --reason TEXT [--yes] [--json]
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run stardag plans show <plan-id> [--json]
+    uv run stardag deployments list [--app NAME] [--kind modal|local]
+        [--current] [--limit N] [--json]
+    uv run stardag tasks show <task-id> [--json]
+    uv run stardag tasks check <task-id> --module MODULE [--json]
+    uv run stardag tasks retry <task-id> --build <build-id> [--json]
+    uv run stardag tasks cancel <task-id> --build <build-id> [--json]
+    uv run stardag tasks exclude <plan-id> <task-id> --reason TEXT [--yes] [--json]
+    ```
+
+- `plans show` — a plan's build, scope (deployment + settings), roots,
+  and — only while it is its build's active plan — whether it is sealed
+  and what is outstanding. A superseded or not-yet-sealed plan reports
+  those as unknown: the registry serves no per-plan read for them.
+- `deployments list` — every recorded deployment, newest first
+  (`--app`, `--kind`, `--current` filter; `--current` keeps one row per
+  app). A `modal` row with no `Activated` timestamp is a deploy whose
+  record was created but whose activation never landed — re-run
+  `stardag modal deploy`. Shares its listing with `stardag modal
+deployments`.
+- `tasks show` — one task's global status and claim, every instance the
+  registry holds of it (one per scope it was constructed under, newest
+  first), and its artifacts.
+- `tasks check <task-id> --module <import path>` — rehydrate the task's
+  newest instance in this process (importing `--module`, repeatable, to
+  resolve its class) and run `complete()` locally, printing the
+  observation next to the registry's recorded status. Writes nothing: the
+  registry only follows the world when a build's own discovery observes a
+  target (see
+  [Invalidation](../concepts/build-execution.md#invalidation-the-registry-follows-the-world)),
+  so there is no `--report` flag here — trigger a build to make the
+  observation count.
+- `tasks retry` — reset a failed (or otherwise ended) task to `PENDING`
+  under the named build's active plan, so its next tick or driver runs it
+  again. Refused on `COMPLETED` or under a live claim.
+- `tasks cancel` — release the claim the named build holds on one task
+  (`CANCELLED`, actionable elsewhere). Nothing is stopped; `builds stop
+--task-id` stops the execution itself.
+- `tasks exclude <plan-id> <task-id>` — give up on one task within one
+  plan: excludes it and its downstream closure (short of `COMPLETED`
+  members) from that plan's scheduling and completion check, recording
+  `--reason`. The task's global status is untouched, so other builds
+  holding it are unaffected; an excluded root fails the build.
 
 ## Environment Variables
 

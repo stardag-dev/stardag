@@ -90,6 +90,7 @@ class BuildInfo(_Response):
     created_at: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    last_active_at: datetime | None = None
     is_resumed: bool = False
     executor_metadata: dict[str, Any] | None = None
     reactive_app_name: str | None = None
@@ -157,6 +158,17 @@ class FrontierMember(_Response):
     status: str
     is_root: bool = False
     body: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlanRoots(_Response):
+    """``GET /plans/{id}/roots``: a plan's scope and its root members, with
+    the instance bodies a rollover rehydrates."""
+
+    plan_id: UUID
+    build_id: UUID
+    deployment_id: UUID
+    settings_hash: str
+    roots: list[FrontierMember] = Field(default_factory=list)
 
 
 class ClosureConflict(_Response):
@@ -306,12 +318,29 @@ class TaskInfo(_Response):
         return self.instances[0].body if self.instances else None
 
 
+class TaskArtifactInfo(_Response):
+    """One artifact of a task (``GET /tasks/{task_id}/artifacts``);
+    artifacts belong to the completion, not to a plan or execution."""
+
+    id: UUID | None = None
+    task_id: str
+    artifact_type: str
+    name: str
+    body: Any = None
+    created_at: datetime | None = None
+
+
 # -----------------------------------------------------------------------------
 # Deployments and settings
 # -----------------------------------------------------------------------------
 
 
 DeploymentKind = Literal["modal", "local"]
+
+#: What an operator reports on ``POST /executions/{id}/stopped``: ``stopped``
+#: (the CLI cancelled the call) or ``lost`` (it could not, and gives up on
+#: it: no report of that execution will ever be applied).
+StopOutcome = Literal["stopped", "lost"]
 
 
 class DeploymentInfo(_Response):
@@ -388,10 +417,13 @@ __all__ = [
     "FrontierMember",
     "MembersResult",
     "PlanInfo",
+    "PlanRoots",
     "RegistrationItem",
     "ResumeResult",
     "SchedulerLeaseResult",
     "SettingsInfo",
+    "StopOutcome",
+    "TaskArtifactInfo",
     "TaskInfo",
     "TaskInstanceInfo",
     "TickSummaryRecord",

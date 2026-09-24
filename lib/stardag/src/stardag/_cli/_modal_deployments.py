@@ -14,15 +14,23 @@ console = Console()
 error_console = Console(stderr=True)
 
 
-def _deployment_registry(consequence: str = "deployment not recorded"):
+def _deployment_registry(
+    consequence: str = "deployment not recorded", *, json_output: bool = False
+):
     """The configured registry, or None (with a notice) when there is none
     to record the deployment in -- or, for ``stardag modal deployments``,
-    to list from."""
+    to list from.
+
+    With ``json_output``, the notice goes to stderr instead of stdout, so a
+    caller emitting a JSON document on stdout for this case still keeps
+    stdout to exactly that document (``--json`` contract, ``_output.py``).
+    """
     from stardag.registry import is_noop_registry, registry_provider
 
     registry = registry_provider.get()
     if is_noop_registry(registry):
-        console.print(f"[dim]No registry configured; {consequence}.[/dim]")
+        out = error_console if json_output else console
+        out.print(f"[dim]No registry configured; {consequence}.[/dim]")
         return None
     return registry
 
@@ -86,31 +94,24 @@ def deployments(
     current: bool = typer.Option(
         False, "--current", help="Only each app's current deployment."
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit the API payload as JSON on stdout."
+    ),
 ) -> None:
     """List the Modal deployments recorded in the registry, newest first.
 
-    One row per ``stardag modal deploy``; an app's current deployment is its
-    activated one with the highest generation, and running reactive builds
-    roll over to it at their next scheduler tick. A row with no activation
-    is a deploy whose record was created but never activated.
+    An alias of ``stardag deployments list --kind modal``. Reads
+    ``GET /deployments``; writes nothing. An app's current deployment is
+    its activated one with the highest generation, and running reactive
+    builds roll over to it at their next scheduler tick. A row with no
+    activation is a deploy whose record was created but never activated.
     """
-    from rich.table import Table
+    from stardag._cli.deployments import render_deployments
 
-    registry = _deployment_registry("no deployments to list")
+    registry = _deployment_registry("no deployments to list", json_output=json_output)
     if registry is None:
+        if json_output:
+            render_deployments([], json_output=True)
         return
     rows = registry.deployment_list(kind="modal", app_name=app_name, current=current)
-    table = Table(title="Deployments")
-    for col in ("App", "Deployment", "Gen", "Code id", "Deployed", "Activated", ""):
-        table.add_column(col)
-    for d in rows:
-        table.add_row(
-            d.app_name,
-            str(d.id),
-            str(d.generation),
-            d.code_id[:12],
-            d.deployed_at.isoformat(timespec="seconds") if d.deployed_at else "-",
-            d.activated_at.isoformat(timespec="seconds") if d.activated_at else "-",
-            "[green]current[/green]" if d.is_current else "",
-        )
-    console.print(table)
+    render_deployments(rows, json_output=json_output)
