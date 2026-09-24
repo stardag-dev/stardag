@@ -192,8 +192,38 @@ def test_concurrent_acquires_grant_exactly_one() -> None:
             "were granted; the build row's FOR UPDATE must serialize them "
             "down to exactly one"
         )
-        # Every denial reports the winner's expiry: same row, same value.
-        assert {r.expires_at for r in denied} == {held[0].expires_at}
+        # Every denial reports the expiry stored on the row that refused it:
+        # one row read under one lock, so one value across all of them.
+        denied_expiries = {r.expires_at for r in denied}
+        assert len(denied_expiries) == 1, (
+            f"round {round_no}: the denials disagree on the holder's expiry "
+            f"({sorted(map(str, denied_expiries))}); they read one row"
+        )
+        (denied_until,) = denied_expiries
+        granted_until = held[0].expires_at
+        assert denied_until is not None and granted_until is not None, (
+            f"round {round_no}: a grant or a refusal by a live lease carried no expiry"
+        )
+        # And that value is the winner's grant -- normally equal to the
+        # expiry the winner echoes, but not necessarily, so the assertion is
+        # the one direction nothing legitimate can produce.
+        #
+        # This asserted equality until a live run showed it is not what the
+        # server promises. The SDK's transport retries a request whose
+        # response was lost, and an acquire retried by the owner already
+        # holding the lease is granted again with a fresh ``now + ttl`` ("a
+        # retried acquire is not a lost race", ``acquire_lease``): the
+        # denials then report the first grant and the winner echoes the
+        # second. Seen live: all twelve responses were logged by the server
+        # within the same second, a thirteenth acquire arrived 31s later
+        # (the 30s client timeout, then the retry), and the winner's echoed
+        # expiry was 31s past the one the eleven denials reported. A denial
+        # reporting a *later* expiry than the winner's, on the other hand,
+        # would mean it was refused by a lease the winner never held.
+        assert denied_until <= granted_until, (
+            f"round {round_no}: the denials reported an expiry of "
+            f"{denied_until}, later than the winner's own {granted_until}"
+        )
 
         winner = owners[results.index(held[0])]
         loser = next(o for o in owners if o != winner)
