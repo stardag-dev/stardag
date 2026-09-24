@@ -92,8 +92,9 @@ tick (short-lived, single-flighted per build):
   acquire the build's scheduler lease (held → exit)
   loop:
     clear the build's wake-up flag; read the frontier
-    act: spawn ready tasks detached (claim first), probe running ones,
-         heal completions, record failures and retry within budget
+    act: spawn ready tasks detached (claim first), leave live claims
+         alone (a lapsed one is runnable again), heal completions,
+         retry a failed spawn within its own budget
     terminal? → complete / fail the build (cancelling live executions)
     acted? → re-read immediately; else linger on the wake-up flag
   on the way out: re-read the flag before and after releasing the lease
@@ -129,17 +130,21 @@ can live to finish. Truncation re-reads immediately; it is never a stall.
 A tick retries only the one failure no backend can retry for you — a spawn
 that fails before any container starts — up to `TickConfig.max_attempts`
 (default 2) within that single claim; nothing about the budget persists
-across ticks. Two other failure shapes bypass it entirely, and are not
-each other: a worker that dies with no restart coming (OOM, a crash, a
-timeout nothing caught) simply lets its claim lapse, and the next claiming
-start takes the execution over as a fresh attempt, uncapped (an open
-design question, `docs/design/registry-v2/plan.md`) — **not** the same as
-a **preemption**, which keeps its claim across Modal's own restart, below.
-An exception _inside_ your task is a third shape: the worker reports it
-`FAILED` itself, and the tick never retries a `FAILED` task automatically
-— the build's `fail_mode` decides, and only `stardag tasks retry` or a
-re-trigger (not Modal's own `retries=`, which never touches registry
-state) moves it back to `PENDING`.
+across ticks. Three other failure shapes bypass it entirely, distinct from
+each other and from it:
+
+- **A worker that dies with no restart coming** (OOM, a crash, a timeout
+  nothing caught) simply lets its claim lapse, and the next claiming
+  start takes the execution over as a fresh attempt — uncapped, an open
+  design question (`docs/design/registry-v2/plan.md`).
+- **A preemption is not the same.** Modal restarts the execution itself,
+  on the same call id, and the worker keeps its claim across the restart
+  — see below.
+- **An exception _inside_ your task.** The worker reports it `FAILED`
+  itself, and the tick never retries a `FAILED` task automatically — the
+  build's `fail_mode` decides, and only `stardag tasks retry` or a
+  re-trigger (not Modal's own `retries=`, which never touches registry
+  state) moves it back to `PENDING`.
 
 A task past its `timeout` that caught the interruption, checkpointed and
 raised `ResumableInterruption` is recorded `INTERRUPTED` and resumed, up to
