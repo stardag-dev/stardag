@@ -8,17 +8,26 @@ names its scenario and the rule that decides it.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.services import builds
 from stardag_api.services.errors import BadRequest, Conflict
 from stardag_api.services.transitions import Transition
-from tests.v2_support import ENV, Harness, item, task_ids, unexpanded
+from tests.v2_support import (
+    ENV,
+    Harness,
+    item,
+    observed,
+    task_ids,
+    unexpanded,
+)
 
 
 @pytest.fixture
@@ -365,3 +374,123 @@ async def test_build_lifecycle_over_http(client: AsyncClient, h: Harness):
 
     missing = await client.post("/api/v2/builds", json={"root_task_ids": []})
     assert missing.status_code == 422
+
+
+# --------------------------------------------------------------------------
+# /complete runs the closure step
+# --------------------------------------------------------------------------
+
+
+async def test_complete_admits_what_another_plan_made_reachable_since_the_seal(
+    h: Harness,
+):
+    """``/complete`` runs the closure step before it recomputes the
+    predicate: a plan sealed holding X (COMPLETED, unexpanded), then
+    another plan in its scope expands X with an edge to a pending U. U is
+    now reachable and must gate completion rather than be missed."""
+    deployment = await h.new_deployment()
+    u = item("U")
+    x = item("X", upstreams=[u])
+    build, plan = await h.planned(
+        [x], [observed(unexpanded(x), True)], deployment_id=deployment, seal=True
+    )
+    await h.planned(
+        [item("RB", upstreams=[x])], [u, observed(x, True)], deployment_id=deployment
+    )
+
+    with pytest.raises(Conflict) as exc:
+        await _call(h, builds.complete_build, build)
+    assert (exc.value.code, exc.value.detail["reason"]) == (
+        "plan_incomplete",
+        "members_incomplete",
+    )
+    assert exc.value.detail["task_ids"] == [u.task_id]
+    assert (await h.build(build))["status"] == "running"
+    # The refusal rolls its admission back; the frontier's closure step
+    # admits U for the worker that runs it.
+    assert u.task_id in task_ids((await h.frontier(build)).runnable)
+    await h.run(plan.id, u)
+    assert (await _call(h, builds.complete_build, build)).status == "completed"
+
+
+async def test_complete_fails_the_build_on_a_closure_conflict(h: Harness):
+    """A conflict the closure step of ``/complete`` finds fails the build
+    (committed) and refuses completion with ``instance_conflict``, as on
+    ``/seal``."""
+    deployment = await h.new_deployment()
+    u1 = item("U", extra={"mode": "fast"})
+    u2 = item("U", extra={"mode": "slow"})
+    x = item("X", upstreams=[u2])
+    root = item("RA", upstreams=[item("U", extra={"mode": "fast"}), x])
+    build, plan = await h.planned(
+        [root], [u1, observed(unexpanded(x), True), root], deployment_id=deployment
+    )
+    await h.run(plan.id, u1)
+    await h.run(plan.id, root)
+    await h.seal(plan.id)
+    await h.planned(
+        [item("RB", upstreams=[x])], [u2, observed(x, True)], deployment_id=deployment
+    )
+
+    with pytest.raises(Conflict) as exc:
+        await _call(h, builds.complete_build, build)
+    assert exc.value.code == "instance_conflict"
+    assert (await h.build(build))["status"] == "failed"
+
+
+# --------------------------------------------------------------------------
+# Claims synchronise on the build row
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ending", ["cancel", "delete"])
+async def test_a_claim_waits_for_a_terminal_transition_or_delete_in_flight(
+    h: Harness, async_engine: AsyncEngine, ending: str
+):
+    """A claiming start takes the build row ``FOR SHARE`` before its task
+    row, so a terminal transition or a delete holding the build ``FOR NO
+    KEY UPDATE`` — its release loop or its live-work guard already run —
+    is waited for, and the start then reads the new status and is refused
+    ``build_not_running``. Without it the start would read RUNNING and
+    commit a claim the build's end never saw: a finished build holding a
+    live claim, or a delete cascading a just-created execution away."""
+    root = item("Root")
+    build, plan = await h.planned([root], [root], seal=True)
+
+    async with async_engine.connect() as ender:
+        await ender.execute(
+            text("SELECT 1 FROM build WHERE id = :b FOR NO KEY UPDATE"),
+            {"b": build},
+        )
+        starting = asyncio.create_task(h.start(plan.id, root))
+        await asyncio.sleep(0.3)
+        assert not starting.done(), "the claim must wait for the build's end"
+        if ending == "cancel":
+            await ender.execute(
+                text("UPDATE build SET status = 'cancelled' WHERE id = :b"),
+                {"b": build},
+            )
+        else:
+            await ender.execute(text("DELETE FROM build WHERE id = :b"), {"b": build})
+        await ender.commit()
+
+    with pytest.raises(Conflict) as exc:
+        await asyncio.wait_for(starting, 10)
+    assert exc.value.code == "build_not_running"
+    assert await h.count("execution") == 0
+    assert (await h.task(root))["status"] == "pending"
+
+
+async def test_claims_share_the_build_lock(h: Harness, async_engine: AsyncEngine):
+    """Claims do not serialise with each other, nor with member chunks:
+    another transaction holding the build ``FOR SHARE`` does not block a
+    claiming start."""
+    root = item("Root")
+    build, plan = await h.planned([root], [root], seal=True)
+    async with async_engine.connect() as other:
+        await other.execute(
+            text("SELECT 1 FROM build WHERE id = :b FOR SHARE"), {"b": build}
+        )
+        await asyncio.wait_for(h.start(plan.id, root, uuid4()), 5)
+        await other.rollback()
+    assert (await h.task(root))["status"] == "running"

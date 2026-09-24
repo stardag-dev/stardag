@@ -250,9 +250,15 @@ async def test_a_report_comes_through_the_plan_holding_the_claim(h: Harness):
         assert exc.value.code == "not_claim_holder"
         assert exc.value.detail["claim_plan_id"] == str(plan_a.id)
     await h.lapse_claim(t)
-    with pytest.raises(Conflict) as exc:
-        await h.transition(plan_b.id, t, Transition.fail(execution, "boom"))
-    assert exc.value.code == "not_claim_holder"
+    for transition in (
+        # The self-report start decides the plan before the live-claim
+        # refusal: a lapsed, unreleased claim still names its execution.
+        Transition.start(execution, claim=False, executor="x"),
+        Transition.fail(execution, "boom"),
+    ):
+        with pytest.raises(Conflict) as exc:
+            await h.transition(plan_b.id, t, transition)
+        assert exc.value.code == "not_claim_holder"
 
     assert (await h.task(t))["status"] == "running"
     assert (await h.execution(execution))["ended_at"] is None

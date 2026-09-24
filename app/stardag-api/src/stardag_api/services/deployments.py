@@ -251,27 +251,49 @@ async def create_deployment(
         if not app_name:
             raise BadRequest("app_name_required", "a Modal deployment names its app")
         existing = await session.get(Deployment, deployment_id)
-        if existing is not None:
-            _check_same(existing, environment_id, kind, app_name, code_id)
-            return DeploymentState.of(existing)
-        await _lock_app(session, environment_id, kind, app_name)
-        now = utc_now()
-        row = Deployment(
-            id=deployment_id,
-            environment_id=environment_id,
-            kind=kind,
-            app_name=app_name,
-            code_id=code_id,
-            image_id=image_id,
-            modal_app_id=modal_app_id,
-            # The registry's clock, not the CLI's (I4).
-            deployed_at=now,
-            generation=await _next_generation(session, environment_id, kind, app_name),
-            created_at=now,
+        if existing is None:
+            await _lock_app(session, environment_id, kind, app_name)
+            now = utc_now()
+            # Insert-on-conflict by id: a concurrent create of the same
+            # client-minted id (a retry, possibly naming another app, so
+            # under another app lock) is waited for on the primary key and
+            # then found, rather than raising a unique-key error. The
+            # generation is computed but only takes effect if this call
+            # inserts.
+            inserted = await session.scalar(
+                pg_insert(Deployment)
+                .values(
+                    id=deployment_id,
+                    environment_id=environment_id,
+                    kind=kind,
+                    app_name=app_name,
+                    code_id=code_id,
+                    image_id=image_id,
+                    modal_app_id=modal_app_id,
+                    # The registry's clock, not the CLI's (I4).
+                    deployed_at=now,
+                    generation=await _next_generation(
+                        session, environment_id, kind, app_name
+                    ),
+                    created_at=now,
+                )
+                .on_conflict_do_nothing(index_elements=[Deployment.id])
+                .returning(Deployment.id)
+            )
+            row = await session.scalar(
+                select(Deployment)
+                .where(Deployment.id == deployment_id)
+                .execution_options(populate_existing=True)
+            )
+            assert row is not None
+            if inserted is not None:
+                return DeploymentState.of(row, created=True)
+            existing = row
+        _check_same(existing, environment_id, kind, app_name, code_id)
+        current = await current_deployment_id(
+            session, environment_id, existing.kind, existing.app_name
         )
-        session.add(row)
-        await session.flush()
-        return DeploymentState.of(row, created=True)
+        return DeploymentState.of(existing, is_current=current == existing.id)
 
 
 def _check_same(

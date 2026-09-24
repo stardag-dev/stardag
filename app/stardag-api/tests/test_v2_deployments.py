@@ -12,6 +12,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.models import DeploymentKind
 from stardag_api.services import deployments
@@ -145,6 +147,53 @@ async def test_concurrent_creates_get_distinct_generations(h: Harness):
     starts get five distinct generations, no unique-key error."""
     created = await asyncio.gather(*(_create(h) for _ in range(5)))
     assert sorted(d.generation for d in created) == [1, 2, 3, 4, 5]
+
+
+async def test_a_resent_create_reports_whether_the_row_is_current(h: Harness):
+    """A re-sent (idempotent) Modal create reports ``is_current`` as of the
+    read, as a local lookup does: true once the row is the app's highest
+    activated generation, false once a later one is activated."""
+    d = await _create(h)
+    assert not (await _create(h, deployment_id=d.id)).is_current
+    await _activate(h, d.id)
+    again = await _create(h, deployment_id=d.id)
+    assert (again.is_current, again.created) == (True, False)
+    await _activate(h, (await _create(h, code_id="newer")).id)
+    assert not (await _create(h, deployment_id=d.id)).is_current
+
+
+@pytest.mark.parametrize("app_name", ["svc", "other"])
+async def test_a_create_racing_one_for_the_same_id_finds_its_row(
+    h: Harness, async_engine: AsyncEngine, app_name: str
+):
+    """Two creates of one client-minted id, the first uncommitted when the
+    second runs (under another app lock if it names another app): the
+    second waits on the primary key and finds the row — returned when the
+    fields agree, 409 ``deployment_id_conflict`` when they differ — never a
+    unique-key error."""
+    deployment_id = uuid4()
+    async with async_engine.connect() as first:
+        await first.execute(
+            text(
+                "INSERT INTO deployment (id, environment_id, kind, app_name,"
+                " code_id, deployed_at, generation) VALUES (:id, :env, 'modal',"
+                " 'svc', 'abc', now(), 1)"
+            ),
+            {"id": deployment_id, "env": ENV},
+        )
+        second = asyncio.create_task(
+            _create(h, deployment_id=deployment_id, app_name=app_name)
+        )
+        await asyncio.sleep(0.3)
+        await first.commit()
+    if app_name == "svc":
+        found = await asyncio.wait_for(second, 10)
+        assert (found.id, found.generation, found.created) == (deployment_id, 1, False)
+    else:
+        with pytest.raises(Conflict) as exc:
+            await asyncio.wait_for(second, 10)
+        assert exc.value.code == "deployment_id_conflict"
+        assert exc.value.detail["fields"] == ["app_name"]
 
 
 async def test_a_modal_deployment_names_its_id_and_app(h: Harness):
