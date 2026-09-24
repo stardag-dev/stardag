@@ -100,9 +100,9 @@ async def health_check():
     return {"status": "healthy"}
 
 
-@app.get("/api/v1/version")
+@app.get("/api/v2/version")
 async def version():
-    """Server + API package versions.
+    """Server + API package versions (unauthenticated, like ``/health``).
 
     ``server_version`` is the release version of the combined server
     (API + UI) image, injected via the STARDAG_SERVER_VERSION environment

@@ -229,10 +229,13 @@ async def test_deployments_and_settings_over_http(client: AsyncClient, h: Harnes
     body = {"id": deployment_id, "kind": "modal", "app_name": "svc", "code_id": "c1"}
     created = await client.post("/api/v2/deployments", json=body)
     assert created.status_code == 200 and created.json()["generation"] == 1
+    assert created.json()["created"]
     activated = await client.post(f"/api/v2/deployments/{deployment_id}/activate")
     assert activated.json()["is_current"]
     listed = await client.get("/api/v2/deployments", params={"current": True})
     assert [d["id"] for d in listed.json()["deployments"]] == [deployment_id]
+    # "created" answers a lookup-or-create; a listing row carries no such fact.
+    assert "created" not in listed.json()["deployments"][0]
 
     local = await client.post(
         "/api/v2/deployments", json={"kind": "local", "code_id": "c1"}

@@ -21,6 +21,7 @@ from sqlalchemy import select
 from stardag_api.models import (
     ClaimOutcome,
     EventType,
+    Execution,
     ExecutionOutcome,
     Plan,
     TaskStatus,
@@ -255,10 +256,17 @@ class ReportSteps(StepBase):
             await lock_held_limits(self.session, self.environment_id, t.id)
             self.now = max(self.now, utc_now())
         if t.execution_id != eid or not self.live:
+            # How the claim ended, so the holder can say why it lost it
+            # (``released``: its build stopped; ``taken_over``: another
+            # execution took a lapsed claim); None while it merely lapsed.
+            claim_outcome = await self.session.scalar(
+                select(Execution.claim_outcome).where(Execution.id == eid)
+            )
             raise Conflict(
                 "claim_not_held",
                 "only the execution holding the live claim can renew it",
                 execution_id=str(eid),
+                claim_outcome=claim_outcome.value if claim_outcome else None,
             )
         t.claim_expires_at = self.now + claim_ttl(self.transition.claim_ttl_seconds)
         await self.session.flush()

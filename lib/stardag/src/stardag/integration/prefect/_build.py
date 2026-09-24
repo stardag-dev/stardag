@@ -35,7 +35,17 @@ from stardag._core.base_task import (
     _has_custom_run_aio,
     flatten_task_struct,
 )
-from stardag.build import FailMode, TaskExecutionError, TaskExecutorABC
+from stardag.build import (
+    ExecutionMode,
+    FailMode,
+    TaskExecutionError,
+    TaskExecutorABC,
+)
+from stardag.build._base import (
+    BuildStopped,
+    ExecutorDetails,
+    in_process_executor_details,
+)
 from stardag.build._registration import walk_aio, yield_batches
 from stardag.build._session import ResidentSession
 from stardag.exceptions import APIError
@@ -124,10 +134,15 @@ class _PrefectTaskRunWrapper:
         outcome = await self.session.claim(
             task,
             claim_ttl_seconds=self.session.claim_config.in_process_ttl_seconds,
-            executor_metadata=None,
+            executor=await self._executor_details(task),
         )
         if outcome.kind == "completed":
             return None
+        if outcome.kind == "build_stopped":
+            # Not this task's failure: nothing is reported against it (no
+            # claim was taken), and the flow's closing ``finish`` finds the
+            # build terminal and leaves its status standing.
+            raise BuildStopped(outcome.message)
         if outcome.kind != "granted":
             raise RuntimeError(outcome.message)
         execution_id = outcome.execution_id
@@ -180,6 +195,24 @@ class _PrefectTaskRunWrapper:
             await self.session.fail(task, execution_id, str(e))
             # Re-raised in every fail mode, so Prefect marks the task failed.
             raise
+
+    async def _executor_details(self, task: BaseTask) -> ExecutorDetails:
+        """Best-effort, like the resident engine's: a failure to describe
+        the executor never fails the claim."""
+        if self.task_executor is None:
+            # As ``_execute_locally`` runs it: async on the loop, sync in a
+            # thread — the execution modes the concurrent executor records.
+            mode = (
+                ExecutionMode.ASYNC_MAIN_LOOP
+                if _has_custom_run_aio(task)
+                else ExecutionMode.SYNC_THREAD
+            )
+            return in_process_executor_details(mode.value)
+        try:
+            return await self.task_executor.get_executor_details(task)
+        except Exception:
+            logger.debug(f"Executor details failed for {task.id}", exc_info=True)
+            return ExecutorDetails()
 
     async def _stop_renewal(self, task: BaseTask) -> None:
         renewal = self.renewals.pop(task.id, None)

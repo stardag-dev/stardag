@@ -329,5 +329,15 @@ def tasks_exclude(
     console.print(f"Excluded {len(result.excluded)} member(s) from plan {plan_id}:")
     for excluded in result.excluded:
         console.print(f"  {excluded}")
-    if result.build_failed:
-        console.print("[bold red]A root was excluded: the build failed.[/bold red]")
+    if result.roots_excluded:
+        roots = ", ".join(result.roots_excluded)
+        if result.build_failed:
+            console.print(
+                f"[bold red]This exclusion reached root(s) {roots}: the build "
+                "failed.[/bold red]"
+            )
+        else:
+            console.print(
+                f"[bold yellow]This exclusion reached root(s) {roots}; the "
+                "build was already terminal and is unchanged.[/bold yellow]"
+            )

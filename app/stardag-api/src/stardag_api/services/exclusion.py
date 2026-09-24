@@ -18,7 +18,8 @@ plan, so a walk only ever steps between members.
   and has an excluded upstream that is not COMPLETED — otherwise that
   downstream would be neither runnable nor excluded. A COMPLETED member
   blocks nobody, so the cascade neither passes through nor starts from one.
-  An excluded root fails the build: the request cannot be met.
+  An excluded root fails the build: the request cannot be met. The result
+  names the roots *this* call excluded, and whether it failed the build.
 - A **failed discovery job** (the class cannot be imported, or
   ``requires()`` raised) is an exclusion with ``discovery_failed`` and the
   error: a property of this plan's code, not of the promise.
@@ -37,6 +38,7 @@ from sqlalchemy import String, Uuid, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
+    BuildStatus,
     EventType,
     ExclusionReason,
     Plan,
@@ -77,7 +79,11 @@ class ExclusionResult:
     #: Task ids excluded by this call (the member first, then its cascade,
     #: in ``task_id`` order); empty on a re-delivery.
     excluded: list[str] = field(default_factory=list)
-    #: A root of the plan is excluded, so the build is FAILED.
+    #: The plan's roots this call excluded (the member itself, or reached by
+    #: its cascade), in ``task_id`` order; empty when this call reached none.
+    roots_excluded: list[str] = field(default_factory=list)
+    #: This call failed the build (it excluded a root of a build that was not
+    #: already terminal).
     build_failed: bool = False
 
 
@@ -117,9 +123,17 @@ async def skip_blocked(
 ) -> SkipBlockedResult:
     """Skip the active plan's members blocked by a failed, cancelled or
     skipped upstream, in one transaction. Idempotent: a re-delivery finds
-    them SKIPPED and skips nothing."""
+    them SKIPPED and skips nothing.
+
+    A no-op on a CANCELLED or COMPLETED build: skipping is failure
+    propagation, and a build that did not fail has none to propagate (its
+    release left the claimed tasks CANCELLED, which the walk would
+    otherwise read as blockers). A FAILED build is still walked — a tick
+    fails the build first and skips after."""
     async with transaction(session):
         build = await lock_build(session, environment_id, build_id)
+        if build.status in (BuildStatus.CANCELLED, BuildStatus.COMPLETED):
+            return SkipBlockedResult(plan_id=None)
         plan = await active_plan(session, build.id)
         if plan is None:
             return SkipBlockedResult(plan_id=None)
@@ -292,38 +306,40 @@ async def exclude_member(
                 )
                 excluded.extend(row.task_id for row in cascade)
 
-        roots = (
-            await session.scalars(
-                select(Task.task_id)
-                .join(PlanMember, PlanMember.task_pk == Task.id)
-                .where(
-                    PlanMember.plan_id == plan.id,
-                    PlanMember.is_root,
-                    PlanMember.excluded_at.is_not(None),
+        roots = set(
+            (
+                await session.scalars(
+                    select(Task.task_id)
+                    .join(PlanMember, PlanMember.task_pk == Task.id)
+                    .where(PlanMember.plan_id == plan.id, PlanMember.is_root)
                 )
-                .order_by(Task.task_id)
-            )
-        ).all()
-        if roots and first:
-            await fail_locked_build(
+            ).all()
+        )
+        roots_now = sorted(roots.intersection(excluded))
+        build_failed = False
+        if roots_now:
+            build_failed = await fail_locked_build(
                 session,
                 build,
                 at=clock.tick(),
                 error_message=(
                     f"root_excluded: the build's request cannot be met; root(s)"
-                    f" {', '.join(roots)} excluded after {task_id} was excluded"
+                    f" {', '.join(roots_now)} excluded after {task_id} was excluded"
                     f" ({reason.value})"
                     + (f": {error_message}" if error_message else "")
                 ),
                 metadata={
                     "reason": "root_excluded",
                     "plan_id": str(plan.id),
-                    "root_task_ids": list(roots),
+                    "root_task_ids": roots_now,
                     "excluded_task_id": task_id,
                 },
             )
         return ExclusionResult(
-            plan_id=plan.id, excluded=excluded, build_failed=bool(roots)
+            plan_id=plan.id,
+            excluded=excluded,
+            roots_excluded=roots_now,
+            build_failed=build_failed,
         )
 
 

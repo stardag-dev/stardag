@@ -72,13 +72,14 @@ Two prefixes, for two different sets of entities:
   deployments, settings and executions. Everything in this section lives
   under `/api/v2`.
 
-### Health Check
+### Health and version
 
 ```
-GET /health
+GET /health                     # API status
+GET /api/v2/version             # server_version ("dev" from source) and api_version
 ```
 
-Returns API status.
+Neither needs authentication.
 
 ### Authentication
 
@@ -243,6 +244,7 @@ below the table).
 | `task_not_skippable`             | 409    | `skip` against a result (COMPLETED, FAILED, CANCELLED) it must not overwrite                                                                      |
 | `not_claim_holder`               | 409    | A report or single-task action came through a plan that is not the claim holder                                                                   |
 | `build_not_running`              | 409    | A claiming start against a build that is not RUNNING                                                                                              |
+| `build_terminal`                 | 409    | `complete`/`fail`/`cancel`/`exit-early` on a COMPLETED, FAILED or CANCELLED build; recorded, not applied (`resume` is the way out)                |
 | `deployment_mismatch`            | 409    | A worker's `STARDAG_DEPLOYMENT_ID` differs from its plan's                                                                                        |
 | `deployment_activation_conflict` | 409    | `/activate` disagrees with a value already recorded                                                                                               |
 | `local_deployment_conflict`      | 409    | A `local` lookup names another app for a recorded code id                                                                                         |

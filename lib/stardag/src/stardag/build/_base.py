@@ -10,6 +10,9 @@ This module contains:
 
 from __future__ import annotations
 
+import os
+import platform
+import socket
 import traceback as tb_module
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -29,7 +32,7 @@ from typing import (
 from uuid import UUID
 
 from stardag import BaseTask, TaskStruct
-from stardag.exceptions import APIError
+from stardag.exceptions import APIError, StardagError
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +82,10 @@ class BuildExitStatus(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"
     EXIT_EARLY = "exit_early"  # All remaining tasks claimed by other builds
+    # The registry stopped handing this build work: it is no longer RUNNING
+    # (cancelled by an operator, or made terminal by another hand). The
+    # engine stopped without writing a build status of its own.
+    STOPPED = "stopped"
 
 
 @dataclass
@@ -106,6 +113,12 @@ class TaskCount:
         )
 
 
+class BuildStopped(StardagError):
+    """The registry stopped handing the build work: it is no longer RUNNING
+    (an operator cancelled it, or another hand ended it). Carried as the
+    ``error`` of a ``STOPPED`` summary; the engine wrote no build status."""
+
+
 class BuildFailed(Exception):
     """Raised by :meth:`BuildSummary.raise_on_failure` when a build has failed."""
 
@@ -124,10 +137,13 @@ class BuildSummary:
     task_count: TaskCount
     build_id: UUID | None = None
     error: BaseException | None = None
+    #: The first task that failed, when the failure was a task's.
+    failed_task: BaseTask | None = None
 
     def raise_on_failure(self) -> None:
-        """Raise :class:`BuildFailed` if the build status is ``FAILURE``."""
-        if self.status == BuildExitStatus.FAILURE:
+        """Raise :class:`BuildFailed` if the build status is ``FAILURE`` or
+        ``STOPPED`` (the build ended without producing its roots)."""
+        if self.status in (BuildExitStatus.FAILURE, BuildExitStatus.STOPPED):
             raise BuildFailed(self)
 
     def __repr__(self) -> str:
@@ -153,9 +169,17 @@ class BuildSummary:
             lines.append(f"  Skipped: {tc.skipped}")
         if tc.pending > 0:
             lines.append(f"  Pending: {tc.pending}")
+        if self.failed_task is not None:
+            lines.append(f"  Failed task: {describe_task(self.failed_task)}")
         if self.error:
             lines.append(f"  Error: {self.error}")
         return "\n".join(lines)
+
+
+def describe_task(task: BaseTask) -> str:
+    """``namespace.Name (task id)``, for one-line messages."""
+    name = f"{task.get_namespace()}.{task.get_name()}".lstrip(".")
+    return f"{name} ({task.id})"
 
 
 class FailMode(StrEnum):
@@ -279,6 +303,37 @@ class DetachedHandle:
     executor_metadata: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class ExecutorDetails:
+    """What the claiming start records on the execution ledger row — the one
+    place these live: the backend (``executor``), a reference identifying
+    the execution's process or call (``executor_ref``) and descriptive
+    metadata. Any of them may be unknown at claim time (a detached
+    execution's call id exists only after the spawn, and is recorded by its
+    start)."""
+
+    executor: str | None = None
+    executor_ref: str | None = None
+    executor_metadata: dict[str, Any] | None = None
+
+
+def in_process_executor_details(kind: str) -> ExecutorDetails:
+    """Details of an execution in this process: ``executor`` is ``kind``
+    (the execution mode, or ``"sequential"``), ``executor_ref`` is
+    ``hostname:pid``, the metadata the Python version and host."""
+    hostname = socket.gethostname()
+    pid = os.getpid()
+    return ExecutorDetails(
+        executor=kind,
+        executor_ref=f"{hostname}:{pid}",
+        executor_metadata={
+            "hostname": hostname,
+            "pid": pid,
+            "python_version": platform.python_version(),
+        },
+    )
+
+
 class TaskExecutorABC(ABC):
     """Abstract base for task executors.
 
@@ -324,6 +379,12 @@ class TaskExecutorABC(ABC):
         """Descriptive executor metadata for executions of ``task``, without
         starting anything (stamped on the claiming start). Best-effort."""
         return None
+
+    async def get_executor_details(self, task: BaseTask) -> ExecutorDetails:
+        """What the claiming start records for an execution of ``task``
+        (see :class:`ExecutorDetails`). Default: the metadata only; an
+        in-process executor also names itself and this process."""
+        return ExecutorDetails(executor_metadata=await self.get_executor_metadata(task))
 
     def execution_timeout_seconds(self, task: BaseTask) -> float | None:
         """Wall-clock limit this backend enforces on an execution of
@@ -452,6 +513,12 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
     async def get_executor_metadata(self, task: BaseTask) -> dict[str, Any] | None:
         executor = self._executor_for(task)
         return None if executor is None else await executor.get_executor_metadata(task)
+
+    async def get_executor_details(self, task: BaseTask) -> ExecutorDetails:
+        executor = self._executor_for(task)
+        if executor is None:
+            return ExecutorDetails()
+        return await executor.get_executor_details(task)
 
     def execution_timeout_seconds(self, task: BaseTask) -> float | None:
         executor = self._executor_for(task)

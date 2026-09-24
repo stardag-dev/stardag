@@ -167,6 +167,8 @@ class TestDeployments:
         rows = json.loads(result.stdout)["deployments"]
         assert {r["kind"] for r in rows} == {"modal"}
         assert [r["id"] for r in rows if r["is_current"]] == [str(new)]
+        # A listing row carries no "created" (only a create call answers it).
+        assert all("created" not in r for r in rows)
         table = invoke("deployments", "list")
         assert "current" in table.output and "local" in table.output
 
@@ -319,4 +321,23 @@ class TestTasks:
         assert result.exit_code == 0, result.output
         payload = json.loads(result.stdout)
         assert payload["excluded"] == [str(running_build.root.id)]
+        assert payload["roots_excluded"] == [str(running_build.root.id)]
         assert payload["build_failed"] is True
+
+    def test_exclude_reports_what_this_call_did(self, fake_registry, running_build):
+        """Once a root is excluded, excluding another member no longer says
+        "a root was excluded: the build failed" — the message follows the
+        call, not the plan."""
+        root, leaf = running_build.root.id, running_build.leaf.id
+        first = invoke(
+            "tasks", "exclude", running_build.plan_id, root, "--reason", "x", "--yes"
+        )
+        assert first.exit_code == 0, first.output
+        assert f"reached root(s) {root}: the build failed" in first.output
+
+        later = invoke(
+            "tasks", "exclude", running_build.plan_id, leaf, "--reason", "y", "--yes"
+        )
+        assert later.exit_code == 0, later.output
+        assert "Excluded 1 member(s)" in later.output
+        assert "root" not in later.output and "failed" not in later.output

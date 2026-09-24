@@ -282,12 +282,14 @@ class YieldResult(_Response):
 
 
 class ExclusionResult(_Response):
-    """What an exclusion did: the task ids it took out of the plan (the
-    member and its downstream closure), and whether that failed the build
-    (an excluded root)."""
+    """What one exclusion call did: the task ids it took out of the plan
+    (the member and its downstream closure; empty on a re-delivery), the
+    plan's roots among them, and whether this call failed the build (it
+    excluded a root of a build not already terminal)."""
 
     plan_id: UUID
     excluded: list[str] = Field(default_factory=list)
+    roots_excluded: list[str] = Field(default_factory=list)
     build_failed: bool = False
 
 
@@ -418,7 +420,9 @@ class DeploymentInfo(_Response):
     """One deployment: a ``stardag modal deploy`` (``kind="modal"``,
     activated after the deploy succeeded) or a local code id
     (``kind="local"``, born activated). "Current" for an app is the
-    activated row with the highest generation."""
+    activated row with the highest generation. ``created`` is set only by
+    the create call that inserted the row; a listing does not carry it, so
+    it is left out of dumps (a listing row never shows ``created: false``)."""
 
     id: UUID
     kind: str
@@ -430,7 +434,7 @@ class DeploymentInfo(_Response):
     deployed_at: datetime | None = None
     activated_at: datetime | None = None
     is_current: bool = False
-    created: bool = False
+    created: bool = Field(default=False, exclude=True)
 
 
 class SettingsInfo(_Response):

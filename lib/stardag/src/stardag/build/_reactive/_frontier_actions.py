@@ -61,6 +61,9 @@ _CLAIM_DENIED_CODES = frozenset(
         "upstream_incomplete",
         "member_excluded",
         "execution_superseded",
+        # The build stopped (an operator cancel) after the frontier was read:
+        # the next frontier shows it terminal, and the tick ends there.
+        "build_not_running",
     }
 )
 
