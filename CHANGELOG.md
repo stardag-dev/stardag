@@ -26,6 +26,7 @@ the migration and the operator notes.
 
 ### SDK
 
+- **Breaking: Python 3.11 or newer; 3.10 support removed.**
 - **Breaking: one flag replaces the significance levels.**
   `StardagField(significant: bool = True)`. A `significant=False` field is
   an ordinary parameter, passed at init and stored on the instance body; it

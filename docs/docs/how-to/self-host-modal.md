@@ -22,7 +22,7 @@ cover a low-traffic deployment).
 ## Quickstart
 
 **Prerequisites:** ~10 minutes, a GitHub/Google account for sign-ups, and
-[uv](https://docs.astral.sh/uv/) (or plain Python ≥ 3.10 + pip).
+[uv](https://docs.astral.sh/uv/) (or plain Python ≥ 3.11 + pip).
 
 ### 1. Create a Modal account and token
 
@@ -51,7 +51,7 @@ that via the API (Postgres 16, project name `stardag`).
 uvx --from "stardag[selfhost]" stardag self-host up
 ```
 
-(Any Python ≥ 3.10 works — the prebuilt image is deployed by reference, so
+(Any Python ≥ 3.11 works — the prebuilt image is deployed by reference, so
 the CLI's interpreter is independent of the image's.)
 
 The command walks you through the rest interactively:
@@ -168,7 +168,7 @@ The image is then built from the checkout: the UI is compiled with npm
 inside the Modal image build (no local Node needed) and the API package is
 installed from source. In this mode the function bodies are serialized with
 the CLI's interpreter, so the image's Python is matched to it automatically
-(any Python ≥ 3.10 works). `upgrade --from-source` redeploys after local
+(any Python ≥ 3.11 works). `upgrade --from-source` redeploys after local
 changes or a `git pull`.
 
 ## Auth mode: `local` (default)
@@ -302,7 +302,7 @@ equivalent):
   match it. If you see it, drop any `--python`/`python_version` override so
   the image tracks your interpreter. The default prebuilt path is deployed
   by reference (not serialized), so it is immune to this and runs under any
-  Python ≥ 3.10.
+  Python ≥ 3.11.
 - **`Modal authentication not set up`** — run `uvx modal token new`.
 - **`Neon API key rejected`** — create a key at
   [console.neon.tech/app/settings/api-keys](https://console.neon.tech/app/settings/api-keys).

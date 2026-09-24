@@ -35,7 +35,7 @@ See [CLA.md](app/CLA.md) for the full agreement. By submitting a PR to `app/`, y
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - Node.js 22.22.2+ (for UI development). CI runs the latest 22.x. The
   floor is the highest one the lockfile declares — `jsdom` 30's
