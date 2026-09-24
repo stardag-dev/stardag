@@ -427,11 +427,13 @@ def _scenario_apps() -> list[tuple[str, str]]:
     success.
     """
     from .dag_app import APP_NAME as DAG_APP
+    from .lapse_app import APP_NAME as LAPSE_APP
     from .watchdog_app import APP_NAME as WATCHDOG_APP
 
     return [
         (f"{__package__}.dag_app", DAG_APP),
         (f"{__package__}.watchdog_app", WATCHDOG_APP),
+        (f"{__package__}.lapse_app", LAPSE_APP),
     ]
 
 
@@ -470,18 +472,19 @@ def _loggable_apps() -> list[str]:
     """Every app whose logs are worth having, which is not the deployed set.
 
     `_scenario_apps` drives deploy *and* stop, so an app may only be in it
-    if provisioning owns its lifecycle. `registry-live-rollover` does not
-    qualify -- ``test_rollover`` deploys it itself, twice, under two code
-    ids -- but it runs real workers, and a red rollover scenario with no
-    worker logs is the case this dump exists for. Hence a separate list,
+    if provisioning owns its lifecycle. The rollover apps do not qualify --
+    each rollover scenario deploys its own, several times, under several
+    code ids (``_rollover.ROLLOVER_APP_NAMES``) -- but they run real workers,
+    and a red rollover scenario with no worker logs is the case this dump
+    exists for. Hence a separate list,
     with the difference stated rather than left to be noticed.
     """
-    from .rollover_app import APP_NAME as ROLLOVER_APP
+    from ._rollover import ROLLOVER_APP_NAMES
 
     return [
         DEFAULT_REGISTRY_APP,
         *(name for _, name in _scenario_apps()),
-        ROLLOVER_APP,
+        *ROLLOVER_APP_NAMES.values(),
     ]
 
 

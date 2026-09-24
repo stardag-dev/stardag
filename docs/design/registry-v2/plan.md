@@ -326,7 +326,64 @@ assignee the maintainer.
       search/explorer, claim triage, bulk cancel, concurrency limits; the
       build failure reason and the task event log (so
       `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
-- [ ] I10 — tests. docker-compose e2e tier re-pointed to v2 (STA-110).
+- [ ] I10 — tests (PR #389, draft). One registry-live module per `live`
+      row of the design's scenario table, each run serially green against a
+      provisioned v2 registry; S3 stays `test_rollover`. The scenario table
+      in `design.md` is unchanged; this is the mapping.
+
+      | Scenario | Test                                                   | Outcome |
+      | -------- | ------------------------------------------------------ | ------- |
+      | S1       | `test_s1_scopes_diverge_on_structure`                  | green   |
+      | S3       | `test_rollover` (must-still-hold)                      | green   |
+      | S5       | `test_s5_deleted_target_is_invalidated`                | green   |
+      | S6       | `test_s6_redeploy_without_change`                      | green   |
+      | S7       | `test_s7_old_deployment_yield_after_switch`            | green   |
+      | S8       | `test_s8_settings_scopes`                              | green   |
+      | S14      | `test_s14_resume_under_new_settings`                   | green   |
+      | S20      | `test_s20_root_identity_changed_at_rollover`           | green   |
+      | S21      | `test_s21_dead_worker_claim_is_taken_over`             | green   |
+      | S22      | `test_s22_closure_admits_a_withdrawn_yield`            | green   |
+      | S24      | `test_s24_distinct_instances_do_not_share_yields`      | green   |
+      | S26      | `test_s26_hybrid_driver_plans_under_the_app`           | green   |
+      | S33      | `test_s33_seal_refuses_a_superseded_rollover`          | green   |
+      | S37      | `test_s37_deploy_recorded_late`                        | green   |
+      | —        | `test_builds_stop` (on `stardag builds stop`, #387)    | green   |
+
+      S8, S22 and S24 replace the deleted `test_structure_scope_static/_dyn`.
+      One product defect, SDK layer, found by S5 in CI: a Modal Volume
+      mounted into a warm container served a deleted target as present (a
+      hit never reloaded), so a bootstrap reusing such a container observed
+      it complete and the completion was never invalidated. A walk now
+      begins an observation fence (`stardag.target._freshness`), and a
+      mounted-volume hit older than it reloads once per volume per walk;
+      pinned by unit tests in `test__target_reload.py`, and S5 now runs its
+      sticky half first so the invalidating build meets that warm view. The
+      other red runs were harness or scenario assumptions (a stale deployed
+      image; an S7 expectation of one restart where the design gives two
+      executions under the new plan, since the restart yields again into
+      its own plan; S6 counting rows from a previous attempt). Three things are synthesised
+      and say so in their docstrings: S21's short claim (the dying worker
+      renews its own claim down to seconds through `claim/renew`; a real
+      detached TTL is timeout + 15 min); S33's D2 tick (the SDK's own
+      `roll_over_aio` run in-process under D2's id, D3 deployed for real
+      just before its seal — two live ticks of two deployments cannot be
+      timed); S37's missing activation (the real CLI with its activation
+      step replaced). S21 and S37 recover through a watchdog sweep, by
+      design: a lapse or a re-sent record flags nothing, and a lingering
+      tick polls the flag, not the frontier.
+
+      Harness: `lapse_app` (a third provisioned app, so a sweep reaches only
+      its own builds); the rollover app named per scenario by the deploying
+      process (`_rollover.ROLLOVER_APP_NAMES`, collected by the log dump),
+      with an optional root variant baked into its image (S20);
+      `_targets.delete_target`; ledger helpers attributing an execution to
+      a build. CI: the full tier green in one attempt (33 passed, the
+      `builds stop` skip) in 10m47s; an earlier attempt under contention took
+      ~14 min. The long poles are S7 and
+      `test_rollover`, each paying several pre-yield windows sized to a
+      deploy. Nothing sleeps; shrinking those windows is the lever.
+      The docker-compose e2e tier (`integration-tests/tests`) is re-pointed to v2 in PR #391 (merged).
+
 - [ ] I11 — docs. Principles and release notes drafted, in review (PR
       #392): `docs/design/principles.md`, the v2 entries in `CHANGELOG.md`
       and `RELEASE_NOTES.md`; versioning TODO(Anders). The user docs under

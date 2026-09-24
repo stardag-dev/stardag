@@ -181,6 +181,53 @@ def ledger(deployment: Deployment, build_id: Any) -> list[dict[str, Any]]:
     return list(response.json()["executions"])
 
 
+def executions_of(
+    deployment: Deployment, task_id: Any, *build_ids: Any
+) -> list[dict[str, Any]]:
+    """Every execution of one task across the given builds' ledgers.
+
+    Each row is tagged ``"build_id"`` with the build whose ledger listed it,
+    so a scenario can say *whose* execution ran a shared completion -- the
+    question every cross-build scenario turns on.
+    """
+    wanted = str(task_id)
+    rows: list[dict[str, Any]] = []
+    for build_id in build_ids:
+        for execution in ledger(deployment, build_id):
+            if str(execution.get("task_id")) == wanted:
+                rows.append({**execution, "build_id": str(build_id)})
+    return rows
+
+
+def spawned_of(
+    deployment: Deployment, task_id: Any, *build_ids: Any
+) -> list[dict[str, Any]]:
+    """``executions_of``, ref-bearing only: the containers actually submitted.
+
+    See ``spawned_executions`` for why a claim without a ref is not a spawn.
+    """
+    return [
+        e
+        for e in executions_of(deployment, task_id, *build_ids)
+        if e.get("executor_ref") is not None
+    ]
+
+
+def describe_ledger(rows: Iterable[dict[str, Any]], **labels: Any) -> str:
+    """Ledger rows as lines, for an assertion message; ``labels`` as above."""
+    named = {str(value): name for name, value in labels.items()}
+    lines = []
+    for row in rows:
+        build = str(row.get("build_id"))
+        lines.append(
+            f"  {str(row.get('task_id'))[:8]} exec {str(row.get('id'))[:8]} "
+            f"(build {named.get(build, build)}, plan {str(row.get('plan_id'))[:8]}) "
+            f"ref={row.get('executor_ref')!r} claim={row.get('claim_outcome')!r} "
+            f"outcome={row.get('outcome')!r}"
+        )
+    return "\n".join(lines) or "  (no executions)"
+
+
 @dataclass(frozen=True)
 class CurrentExecution:
     """The execution a task's claim names now, and whose it is.

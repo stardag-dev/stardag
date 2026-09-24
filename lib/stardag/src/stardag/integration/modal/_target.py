@@ -42,6 +42,7 @@ from stardag.target import (
     RemoteFileTarget,
 )
 from stardag.utils.resource_provider import resource_provider
+from stardag.target._freshness import observation_fence
 
 logger = logging.getLogger(__name__)
 
@@ -202,10 +203,11 @@ _volume_reload_locks: dict[str, threading.Lock] = {}
 _volume_reload_aio_locks: dict[tuple[str, int], asyncio.Lock] = {}
 
 
-def _ensure_fresh_volume(volume_name: str) -> None:
+def _ensure_fresh_volume(volume_name: str, *, since: float | None = None) -> None:
     """Ensure the local view of the volume reflects writes committed before
-    this call started. Concurrent calls coalesce onto one reload."""
-    started = time.monotonic()
+    this call started (or before ``since``, a monotonic time). Concurrent
+    calls coalesce onto one reload."""
+    started = time.monotonic() if since is None else since
     # Fast path: a reload was issued at-or-after we started → covers us.
     if _volume_last_reload_issued.get(volume_name, 0.0) >= started:
         return
@@ -223,9 +225,11 @@ def _ensure_fresh_volume(volume_name: str) -> None:
         _volume_last_reload_issued[volume_name] = issued_at
 
 
-async def _ensure_fresh_volume_aio(volume_name: str) -> None:
+async def _ensure_fresh_volume_aio(
+    volume_name: str, *, since: float | None = None
+) -> None:
     """Async variant of :func:`_ensure_fresh_volume`."""
-    started = time.monotonic()
+    started = time.monotonic() if since is None else since
     if _volume_last_reload_issued.get(volume_name, 0.0) >= started:
         return
     # Key the lock by (volume, current loop) so that a fresh ``asyncio.run()``
@@ -276,17 +280,39 @@ class ModalMountedVolumeFileTarget(LocalFileTarget):
     def _post_write_hook(self) -> None:
         self.volume.commit()
 
-    # --- Lazy reload on read-miss ---
+    # --- Lazy reload on read-miss, and on a hit older than the walk ---
+    #
+    # A miss always reloads, so a write another container committed before
+    # the call is seen -- never skipped because an earlier reload "covered"
+    # a walk: the fence is process-global and outlives the walk that set it,
+    # so a warm worker judging its yielded children would read a stale miss
+    # as "incomplete" and suspend on children that had finished (seen live:
+    # a parent suspending a second time with every child COMPLETED). A *hit*
+    # is trusted only if the view was refreshed since the current walk
+    # began (``observation_fence``): a warm container's view can still hold
+    # a file another process deleted, and a walk that reported it present
+    # would keep a completion the world no longer has (S5). One reload per
+    # volume per walk, coalesced like any other.
+
+    def _hit_is_fresh(self) -> bool:
+        fence = observation_fence()
+        return _volume_last_reload_issued.get(self._volume_name, 0.0) >= fence
 
     def exists(self) -> bool:
         if self.path.exists():
-            return True
+            if self._hit_is_fresh():
+                return True
+            _ensure_fresh_volume(self._volume_name, since=observation_fence())
+            return self.path.exists()
         _ensure_fresh_volume(self._volume_name)
         return self.path.exists()
 
     async def exists_aio(self) -> bool:
         if self.path.exists():
-            return True
+            if self._hit_is_fresh():
+                return True
+            await _ensure_fresh_volume_aio(self._volume_name, since=observation_fence())
+            return self.path.exists()
         await _ensure_fresh_volume_aio(self._volume_name)
         return self.path.exists()
 
