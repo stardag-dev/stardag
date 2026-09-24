@@ -298,6 +298,9 @@ class TestEndpointAccess:
         """Test that protected endpoints return 401 without auth."""
         endpoints = [
             "/api/v2/builds",
+            # A task read with no credentials must be refused before the id is
+            # looked up, so an unknown id is the right probe: 401, never 404.
+            "/api/v2/tasks/does-not-exist",
             "/api/v1/ui/me",
         ]
 
