@@ -19,8 +19,21 @@ the harness.** A lapse writes nothing, so no build is flagged, and a
 lingering tick polls the flag rather than the frontier: time-based wake-ups
 belong to the watchdog (design.md, "What carries over"). The scenario waits
 until the registry itself lists the member as runnable -- RUNNING with a
-lapsed claim, the ACTIONABLE rule's own judgement -- and then drives one
-sweep of ``lapse_app``, whose builds are this scenario's alone.
+lapsed claim, the ACTIONABLE rule's own judgement -- and then drives
+sweeps of ``lapse_app``, whose builds are this scenario's alone.
+
+**Sweeps, plural, because the watchdog is periodic.** A sweep's tick that
+finds the scheduler lease held exits without acting, on the premise that
+the holder will. A *lingering* holder will not: it polls the flag, and a
+lapse sets none. The tick that spawned ``DiesOnce`` lingers
+``linger_seconds`` after its last spawn while the claim lapses
+``LAPSE_SECONDS`` after it, so the first sweep can land inside that window
+-- and one CI run did, to the second: the sweep's tick was refused the
+lease at the moment the lingering tick released it and exited, and the
+build then sat RUNNING for the rest of the wait. In production the next
+period recovers it, so the scenario drives the next period too, every
+scheduler-lease TTL (the longest any holder can keep a sweep out) until
+the takeover is on the ledger, and only then waits for the build.
 
 The alternatives this rules out: a lapsed claim that is never taken over
 (the task RUNNING forever, the build stalled), and a takeover that rewrites
@@ -30,6 +43,7 @@ came).
 
 from __future__ import annotations
 
+import time
 import uuid
 
 import pytest
@@ -57,7 +71,12 @@ pytestmark = [
 # lapse is short; the sweep that follows is what the wait is for.
 LAPSE_SECONDS = 20
 LAPSE_TIMEOUT_SECONDS = 300
-BUILD_TIMEOUT_SECONDS = 600
+# Watchdog periods driven before giving up on the takeover. The first sweep
+# normally suffices; a second is needed only when the first lands while the
+# spawning tick still lingers with the lease.
+MAX_SWEEPS = 4
+# After the takeover, only the replacement's run and the root are left.
+BUILD_TIMEOUT_SECONDS = 300
 
 
 def test_s21_a_dead_worker_lapsed_claim_is_taken_over(deployment: Deployment) -> None:
@@ -94,9 +113,34 @@ def test_s21_a_dead_worker_lapsed_claim_is_taken_over(deployment: Deployment) ->
     first = executions_of(deployment, dies.id, build_id)
     assert len(first) == 1 and first[0]["ended_at"] is None, describe_ledger(first)
 
-    run_watchdog_sweep(
-        app_name=APP_NAME, modal_environment=deployment.modal_environment
-    )
+    # Sized from the lease, not guessed: a sweep's tick is kept out only by a
+    # live scheduler lease, and no holder keeps one past its TTL without
+    # renewing it -- which a lingering tick stops doing when it exits.
+    from stardag.build._reactive._lease import _LEASE_TTL_SECONDS
+
+    def _taken_over() -> bool:
+        return len(executions_of(deployment, dies.id, build_id)) >= 2
+
+    sweeps = 0
+    while not _taken_over():
+        assert sweeps < MAX_SWEEPS, (
+            f"{sweeps} watchdog sweep(s), one every {_LEASE_TTL_SECONDS}s, "
+            "and the lapsed claim was never taken over.\n"
+            f"{describe(build_id)}\n"
+            f"{describe_ledger(executions_of(deployment, dies.id, build_id))}"
+        )
+        run_watchdog_sweep(
+            app_name=APP_NAME, modal_environment=deployment.modal_environment
+        )
+        sweeps += 1
+        deadline = time.monotonic() + _LEASE_TTL_SECONDS
+        while time.monotonic() < deadline and not _taken_over():
+            time.sleep(5)
+    if sweeps > 1:
+        print(
+            f"[harness] build {build_id}: takeover after {sweeps} watchdog "
+            "sweeps; the earlier one(s) found the lease held"
+        )
 
     status = wait_for_terminal(build_id, timeout=BUILD_TIMEOUT_SECONDS)
     rows = executions_of(deployment, dies.id, build_id)

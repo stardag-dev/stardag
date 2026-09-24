@@ -441,6 +441,99 @@ class TestLeaseAndHandshake:
         assert summary.outcome == "lease_held"
         assert not registry.called("member_start")
 
+    async def test_a_tick_refused_the_lease_leaves_the_build_flagged(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Whatever sent the refused tick is handed to the holder as a flag:
+        a lingering holder polls the flag, not the frontier, so a
+        time-based cause (a lapsed claim) would otherwise be dropped. The
+        holder is live, so nothing is spawned."""
+        registry = InMemoryRegistry()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"f-{new_id()}")])
+        registry.scheduler_lease_acquire(build_id, owner_id="holder", ttl_seconds=60)
+        registry.builds[build_id].needs_tick = False
+        spawned: list[tuple[UUID, str]] = []
+        config = TickConfig(
+            linger_seconds=0.5,
+            poll_interval_seconds=0.01,
+            spawn_tick=lambda b, a: spawned.append((b, a)),
+        )
+        summary = await _tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry), config
+        )
+        assert summary.outcome == "lease_held"
+        assert registry.builds[build_id].needs_tick is True
+        assert spawned == [] and summary.successor_spawned == 0
+
+    async def test_a_holder_gone_by_the_flag_gets_a_successor(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The holder released the lease between the refusal and the flag,
+        so its exit handshake may already have read the flag clear: the
+        refused tick spawns a successor, as a worker's notify would."""
+
+        class HolderLeaves(InMemoryRegistry):
+            def build_notify(self, build_id, *, can_spawn=True):
+                self.scheduler_lease_release(build_id, owner_id="holder")
+                return super().build_notify(build_id, can_spawn=can_spawn)
+
+        registry = HolderLeaves()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"g-{new_id()}")])
+        registry.scheduler_lease_acquire(build_id, owner_id="holder", ttl_seconds=60)
+        spawned: list[tuple[UUID, str]] = []
+        config = TickConfig(
+            linger_seconds=0.5,
+            poll_interval_seconds=0.01,
+            spawn_tick=lambda b, a: spawned.append((b, a)),
+        )
+        summary = await _tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry), config
+        )
+        assert summary.outcome == "lease_held"
+        assert spawned == [(build_id, "app")]
+        assert summary.successor_spawned == 1
+
+    async def test_an_unknown_scheduler_state_gets_a_successor(
+        self, default_in_memory_fs_target: Target
+    ):
+        """``scheduler_live`` unknown is treated as gone, as a worker's
+        notify treats it: a redundant tick is cheap, a missing one stalls."""
+
+        class LeaseUnknown(InMemoryRegistry):
+            def build_notify(self, build_id, *, can_spawn=True):
+                result = super().build_notify(build_id, can_spawn=can_spawn)
+                return result.model_copy(update={"scheduler_live": None})
+
+        registry = LeaseUnknown()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"u-{new_id()}")])
+        registry.scheduler_lease_acquire(build_id, owner_id="holder", ttl_seconds=60)
+        spawned: list[tuple[UUID, str]] = []
+        config = TickConfig(
+            linger_seconds=0.5,
+            poll_interval_seconds=0.01,
+            spawn_tick=lambda b, a: spawned.append((b, a)),
+        )
+        summary = await _tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry), config
+        )
+        assert summary.outcome == "lease_held"
+        assert spawned == [(build_id, "app")]
+
+    async def test_a_failed_flag_does_not_change_the_outcome(
+        self, default_in_memory_fs_target: Target
+    ):
+        class NotifyDown(InMemoryRegistry):
+            def build_notify(self, build_id, *, can_spawn=True):
+                raise ConnectionError("registry unreachable")
+
+        registry = NotifyDown()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"n-{new_id()}")])
+        registry.scheduler_lease_acquire(build_id, owner_id="holder", ttl_seconds=60)
+        summary = await _tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry)
+        )
+        assert summary.outcome == "lease_held"
+
     async def test_a_flag_set_at_the_deadline_extends_the_linger(
         self, default_in_memory_fs_target: Target
     ):
