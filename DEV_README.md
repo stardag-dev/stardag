@@ -206,8 +206,31 @@ for the run. What the scenarios there assert:
 | `test_wide_fan_out`         | A layer wider than one pass may spawn — throttle, or stall?                             |
 | `test_scheduler_lease_live` | Does the lease serialize on real Postgres, and lapse on the real clock?                 |
 
-**Two apps are deployed, not one.** `registry-live-dag` runs everything
-except the watchdog sweep, which gets `registry-live-watchdog` to itself.
+The v2 design's scenario checklist (`docs/design/registry-v2/design.md`)
+names a test tier per scenario; the `live` rows each have a module named
+after the scenario id (the must-still-hold scenarios above keep their
+names). `plan.md`, I10, holds the mapping and each one's status.
+
+| Scenario             | The question it answers                                                                        |
+| -------------------- | ---------------------------------------------------------------------------------------------- |
+| `test_s1_*`          | Two scopes shape one completion differently — is it run once, from the claimant's own body?    |
+| `test_rollover` (S3) | A redeploy mid-build — does the build follow the live deployment?                              |
+| `test_s5_*`          | A completed target is deleted — does the next build observe it, invalidate, and re-run it?     |
+| `test_s6_*`          | A redeploy of unchanged code — a new scope, and nothing runs twice?                            |
+| `test_s7_*`          | An old deployment's worker yields after the switch — accepted, and restarted on new code?      |
+| `test_s8_*`          | Two settings scopes share a completion — one `task`, two instances, one execution?             |
+| `test_s14_*`         | A resume under new settings — a new plan in the same build, completions reused?                |
+| `test_s20_*`         | New code changes a root's id — is the build failed rather than silently re-planned?            |
+| `test_s21_*`         | A worker dies unreported — is its lapsed claim taken over, its ledger row left unended?        |
+| `test_s22_*`         | The yielding build is cancelled — does a scope-mate's closure admit the children and run them? |
+| `test_s24_*`         | Two instances of one completion in one scope — do they (correctly) not share yields?           |
+| `test_s26_*`         | A local driver with Modal workers — does it plan under the app's current deployment?           |
+| `test_s33_*`         | Two new deployments roll one build over — is the older one's seal refused?                     |
+| `test_s37_*`         | A deploy whose activation never landed — do its ticks stand down until the record is re-sent?  |
+
+**Several apps are deployed, not one.** `registry-live-dag` runs everything
+except the scenarios that drive a watchdog sweep: the sweep itself gets
+`registry-live-watchdog` to itself.
 The sweep lists running builds scoped by _reactive app name_, so a sweep
 driven against the shared app would spawn ticks for whatever else was
 running at that moment — waking the dormant builds that four other
@@ -215,7 +238,16 @@ scenarios assert cannot be woken by anything but the mechanism they test.
 They would not fail; they would quietly stop meaning anything. The
 environment stays shared, because it is the unit of teardown; only the app
 name separates them, and the image is identical so the extra deploy is
-seconds.
+seconds. A third, `registry-live-lapse`, exists for the same reason: a
+lapsed claim flags nothing, so S21's recovery is a watchdog sweep, which
+must reach that scenario's builds and no one else's.
+
+**The rollover scenarios deploy an app each**, several times, under several
+code ids (`_rollover.ROLLOVER_APP_NAMES`): a deploy moves every running
+build of its app to the new code, so two of them sharing an app would roll
+each other over. The deploying process names the app through
+`REGISTRY_LIVE_ROLLOVER_APP_NAME`; provisioning does not own those apps, but
+the log dump collects them.
 
 **The registry runs its own Postgres inside its own Modal container.** There
 is no database account to create, nothing to provision and nothing to clean
@@ -329,8 +361,9 @@ by hand while the other tier was still running. The artifact holds both marker
 files, one record per timeout with its boot probe — plus a JSON sidecar of the
 same facts, which is what the join reads, so rewriting a sentence in the record
 cannot silently break it — `verdicts.txt`, each attempt's pytest output, and
-`modal app logs` for all four apps — the registry, both scenario apps and the
-one `test_rollover` deploys for itself — with timestamps and container ids. The
+`modal app logs` for every app — the registry, the three provisioned scenario
+apps and the ones the rollover scenarios deploy for themselves — with
+timestamps and container ids. The
 registry's access log reports `duration` and `execution` separately per
 request, which is the line-level form of the same question — time spent queued
 against time spent in the handler.
