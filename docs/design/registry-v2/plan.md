@@ -349,8 +349,9 @@ assignee the maintainer.
       process (`_rollover.ROLLOVER_APP_NAMES`, collected by the log dump),
       with an optional root variant baked into its image (S20);
       `_targets.delete_target`; ledger helpers attributing an execution to
-      a build. CI budget: an attempt took ~14 min with the 32 scenarios
-      concurrent (over the ~10 min target); the long poles are S7 and
+      a build. CI: the full tier green in one attempt (33 passed, the
+      `builds stop` skip) in 10m47s; an earlier attempt under contention took
+      ~14 min. The long poles are S7 and
       `test_rollover`, each paying several pre-yield windows sized to a
       deploy. Nothing sleeps; shrinking those windows is the lever.
 
