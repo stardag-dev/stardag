@@ -4,7 +4,17 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.26.0] — 2026-09-24
+
+**Released together with `server-v0.5.0`, server first.** Unlike 0.25.0,
+this pairing is not optional: a 0.26.0 SDK against `server-v0.4.0` no
+longer drains cancels itself while that server releases claims on neither
+`/cancel` nor `/fail`, so a terminal build would hold its tasks' claims and
+their concurrency-limit slots until expiry. `server-v0.5.0` also carries the
+`### Registry API` and `### UI` entries listed under 0.25.0 below, which
+were merged then but shipped with no image: the idempotent claim's server
+half and the `Stop running tasks` panel. This is the last release of the
+v1 line; v2 follows as a new major.
 
 ### SDK
 
