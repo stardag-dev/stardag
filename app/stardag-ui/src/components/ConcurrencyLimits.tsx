@@ -16,6 +16,11 @@ interface ConcurrencyLimitsProps {
   onOpenTask?: (taskId: string) => void;
 }
 
+// The routes carry the key as a path segment, where a "/" (even encoded)
+// becomes a separator and the request 404s.
+const KEY_SLASH_MESSAGE =
+  'A key cannot contain "/": the registry addresses a limit by its key in the URL path';
+
 const HEADER =
   "px-4 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400";
 const SUB_HEADER =
@@ -60,6 +65,15 @@ export function ConcurrencyLimits({
   // A slow response from a previous environment must not overwrite the
   // current one's state.
   const epochRef = useRef(0);
+  // The environment on screen now. A mutation started under another one
+  // must neither reload nor write state when it completes: its handler
+  // closes over the old environment, and a reload from it would bump the
+  // epoch and land the old environment's limits on the new one's page.
+  const environmentRef = useRef(environmentId);
+  useEffect(() => {
+    environmentRef.current = environmentId;
+  }, [environmentId]);
+  const stillOn = (env: string) => environmentRef.current === env;
 
   // Environments can share key names: nothing expanded or selected in one
   // survives a switch (adjusted during render, before any fetch).
@@ -84,7 +98,7 @@ export function ConcurrencyLimits({
     if (!environmentId) return;
     try {
       const fetched = await fetchConcurrencyLimits(environmentId, true);
-      if (!fresh()) return;
+      if (!fresh() || !stillOn(environmentId)) return;
       setLimits(fetched);
       setError(null);
     } catch (err) {
@@ -114,14 +128,21 @@ export function ConcurrencyLimits({
       setActionError("Enter a key and a max concurrency of 0 or more");
       return;
     }
+    if (key.includes("/")) {
+      setActionError(KEY_SLASH_MESSAGE);
+      return;
+    }
+    const env = environmentId;
     setCreating(true);
     setActionError(null);
     try {
-      await setConcurrencyLimit(key, max, environmentId);
+      await setConcurrencyLimit(key, max, env);
+      if (!stillOn(env)) return;
       setNewKey("");
       setNewMax("1");
       await loadLimits();
     } catch (err) {
+      if (!stillOn(env)) return;
       setActionError(err instanceof Error ? err.message : "Failed to create limit");
     } finally {
       setCreating(false);
@@ -135,13 +156,16 @@ export function ConcurrencyLimits({
       setActionError("Max concurrency must be an integer of 0 or more");
       return;
     }
+    const env = environmentId;
     setSaving(true);
     setActionError(null);
     try {
-      await setConcurrencyLimit(key, max, environmentId);
+      await setConcurrencyLimit(key, max, env);
+      if (!stillOn(env)) return;
       setEditingKey(null);
       await loadLimits();
     } catch (err) {
+      if (!stillOn(env)) return;
       setActionError(err instanceof Error ? err.message : "Failed to update limit");
     } finally {
       setSaving(false);
@@ -156,12 +180,15 @@ export function ConcurrencyLimits({
       )
     )
       return;
+    const env = environmentId;
     setActionError(null);
     try {
-      await deleteConcurrencyLimit(key, environmentId);
+      await deleteConcurrencyLimit(key, env);
+      if (!stillOn(env)) return;
       if (expandedKey === key) setExpandedKey(null);
       await loadLimits();
     } catch (err) {
+      if (!stillOn(env)) return;
       setActionError(err instanceof Error ? err.message : "Failed to delete limit");
     }
   };

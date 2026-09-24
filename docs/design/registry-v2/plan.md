@@ -328,7 +328,7 @@ assignee the maintainer.
       search/explorer, claim triage, bulk cancel, concurrency limits; the
       build failure reason and the task event log (so
       `TASK_STRUCTURE_DIVERGED`) have no field or route to read.
-      Follow-up (maintainer feedback against the v1 UI, this PR): restored
+      Follow-up (maintainer feedback against the v1 UI, PR #399): restored
       builds-list pagination over the cursor and `total`, the "Idle for"
       filter (the one server change: `GET /builds?idle_for_seconds=`,
       running builds whose `last_active_at` is at least that old — a

@@ -4,9 +4,10 @@ import { BreadcrumbProvider } from "../context/BreadcrumbContext";
 import type { ConcurrencyLimit } from "../types/task";
 
 const role = vi.hoisted(() => ({ current: "admin" as "admin" | "member" }));
+const env = vi.hoisted(() => ({ current: "env-1" }));
 vi.mock("../context/EnvironmentContext", () => ({
   useEnvironment: () => ({
-    activeEnvironment: { id: "env-1" },
+    activeEnvironment: { id: env.current },
     activeWorkspaceRole: role.current,
   }),
 }));
@@ -51,16 +52,17 @@ const limits: ConcurrencyLimit[] = [
 ];
 
 function renderPage(onSelectBuild = vi.fn()) {
-  render(
+  const view = render(
     <BreadcrumbProvider>
       <ConcurrencyLimits onSelectBuild={onSelectBuild} />
     </BreadcrumbProvider>,
   );
-  return { onSelectBuild };
+  return { onSelectBuild, view };
 }
 
 beforeEach(() => {
   role.current = "admin";
+  env.current = "env-1";
   vi.mocked(fetchConcurrencyLimits).mockReset().mockResolvedValue(limits);
   vi.mocked(setConcurrencyLimit).mockClear();
   vi.mocked(deleteConcurrencyLimit).mockClear();
@@ -126,5 +128,46 @@ describe("ConcurrencyLimits", () => {
     expect(screen.queryByRole("button", { name: "Add limit" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
     expect(screen.queryByTitle("Edit max concurrency")).not.toBeInTheDocument();
+  });
+
+  it("refuses a key with a slash, which the key's URL path cannot carry", async () => {
+    renderPage();
+    await screen.findByText("gpu");
+    fireEvent.change(screen.getByLabelText("Key"), { target: { value: "a/b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add limit" }));
+    expect(await screen.findByText(/cannot contain "\/"/)).toBeInTheDocument();
+    expect(vi.mocked(setConcurrencyLimit)).not.toHaveBeenCalled();
+  });
+
+  it("does not reload the old environment when a mutation lands after a switch", async () => {
+    let resolveSet: (v: { key: string; max_concurrent: number }) => void = () => {};
+    vi.mocked(setConcurrencyLimit).mockImplementationOnce(
+      () => new Promise((resolve) => (resolveSet = resolve)),
+    );
+    const { view } = renderPage();
+    await screen.findByText("gpu");
+    fireEvent.change(screen.getByLabelText("Key"), { target: { value: "io" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add limit" }));
+
+    env.current = "env-2";
+    vi.mocked(fetchConcurrencyLimits).mockResolvedValue([
+      { key: "other", max_concurrent: 1, in_use: 0, holders: [] },
+    ]);
+    view.rerender(
+      <BreadcrumbProvider>
+        <ConcurrencyLimits />
+      </BreadcrumbProvider>,
+    );
+    await screen.findByText("other");
+    const callsBefore = vi.mocked(fetchConcurrencyLimits).mock.calls.length;
+    resolveSet({ key: "io", max_concurrent: 1 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(vi.mocked(fetchConcurrencyLimits).mock.calls.length).toBe(callsBefore);
+    expect(
+      vi
+        .mocked(fetchConcurrencyLimits)
+        .mock.calls.every((c, i) => i === 0 || c[0] === "env-2"),
+    ).toBe(true);
+    expect(screen.getByText("other")).toBeInTheDocument();
   });
 });

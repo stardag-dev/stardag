@@ -368,7 +368,19 @@ export function fetchSettings(
 
 // ---- Concurrency limits ----
 
+/**
+ * The routes take the key as a `/{key}` path segment, where a `/` is a
+ * separator even percent-encoded (the server decodes it before routing),
+ * so such a key is refused here rather than sent to 404.
+ */
 function limitUrl(key: string, environmentId: string) {
+  if (key.includes("/")) {
+    throw new RegistryError(
+      `A concurrency-limit key cannot contain "/": ${key}`,
+      400,
+      "invalid_limit_key",
+    );
+  }
   return url(`/concurrency-limits/${encodeURIComponent(key)}`, environmentId);
 }
 

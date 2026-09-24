@@ -90,16 +90,22 @@ describe("registry API", () => {
     expect(url.pathname).toBe("/api/v2/concurrency-limits");
     expect(url.searchParams.get("include_holders")).toBe("true");
 
-    respond(200, { key: "a/b", max_concurrent: 0 });
-    await setConcurrencyLimit("a/b", 0, "env-1");
+    respond(200, { key: "gpu:a", max_concurrent: 0 });
+    await setConcurrencyLimit("gpu:a", 0, "env-1");
     url = new URL(mocked.mock.calls[1][0] as string);
-    expect(url.pathname).toBe("/api/v2/concurrency-limits/a%2Fb");
+    expect(url.pathname).toBe("/api/v2/concurrency-limits/gpu%3Aa");
     const init = mocked.mock.calls[1][1] as RequestInit;
     expect(init.method).toBe("PUT");
     expect(JSON.parse(init.body as string)).toEqual({ max_concurrent: 0 });
 
     mocked.mockResolvedValueOnce(new Response(null, { status: 204 }));
-    await deleteConcurrencyLimit("a/b", "env-1");
+    await deleteConcurrencyLimit("gpu:a", "env-1");
     expect((mocked.mock.calls[2][1] as RequestInit).method).toBe("DELETE");
+
+    // A "/" would be a path separator on the server even encoded.
+    await expect(setConcurrencyLimit("a/b", 1, "env-1")).rejects.toMatchObject({
+      code: "invalid_limit_key",
+    });
+    expect(mocked).toHaveBeenCalledTimes(3);
   });
 });
