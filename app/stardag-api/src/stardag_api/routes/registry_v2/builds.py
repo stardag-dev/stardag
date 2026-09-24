@@ -186,6 +186,17 @@ async def list_builds(
     auth: Auth,
     status: BuildStatus | None = None,
     reactive_app_name: Annotated[str | None, Query(max_length=64)] = None,
+    idle_for_seconds: Annotated[
+        int | None,
+        Query(
+            ge=60,
+            description=(
+                "Only builds still RUNNING whose last lifecycle change "
+                "(`last_active_at`) is at least this many seconds old. "
+                "Combines with no status or status=running only."
+            ),
+        ),
+    ] = None,
     limit: Limit = 100,
     cursor: Cursor = None,
 ):
@@ -194,6 +205,7 @@ async def list_builds(
         auth.environment_id,
         status=status,
         reactive_app_name=reactive_app_name,
+        idle_for_seconds=idle_for_seconds,
         limit=limit,
         cursor=cursor,
     )

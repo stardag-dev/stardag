@@ -93,3 +93,37 @@ describe("BuildsList", () => {
     await waitFor(() => expect(screen.queryByText(/^Page /)).not.toBeInTheDocument());
   });
 });
+
+describe("BuildsList idle filter", () => {
+  it("sends idle_for_seconds and blocks the statuses the server refuses", async () => {
+    mocked.mockResolvedValue(page(["a"], 1, null));
+    renderList();
+    await screen.findByText("build a");
+
+    fireEvent.change(screen.getByLabelText("Filter by time since last activity"), {
+      target: { value: "86400" },
+    });
+    await waitFor(() =>
+      expect(mocked.mock.lastCall?.[1]).toMatchObject({ idleForSeconds: 86400 }),
+    );
+    expect(await screen.findByText("1 build running, idle ≥ 24h")).toBeInTheDocument();
+    const failed = screen.getByRole("option", {
+      name: "Failed — not idle-filterable",
+    }) as HTMLOptionElement;
+    expect(failed.disabled).toBe(true);
+    const running = screen.getByRole("option", {
+      name: "Running",
+    }) as HTMLOptionElement;
+    expect(running.disabled).toBe(false);
+  });
+
+  it("disables the idle filter while a finished status is selected", async () => {
+    mocked.mockResolvedValue(page(["a"], 1, null));
+    renderList();
+    await screen.findByText("build a");
+    fireEvent.change(screen.getByLabelText("Filter by build status"), {
+      target: { value: "completed" },
+    });
+    expect(screen.getByLabelText("Filter by time since last activity")).toBeDisabled();
+  });
+});

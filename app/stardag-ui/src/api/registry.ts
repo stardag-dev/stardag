@@ -100,6 +100,9 @@ async function postJson<T>(
 export interface BuildFilters {
   status?: BuildStatus;
   reactiveAppName?: string;
+  // Running builds with no lifecycle change for at least this long (>= 60).
+  // The server implies RUNNING and refuses any other status alongside it.
+  idleForSeconds?: number;
   // Page size, 1..500 on the server.
   limit?: number;
   // The previous page's `next_cursor`; absent for the first page.
@@ -119,6 +122,7 @@ export function fetchBuilds(
   const query: Record<string, string> = {};
   if (filters.status) query.status = filters.status;
   if (filters.reactiveAppName) query.reactive_app_name = filters.reactiveAppName;
+  if (filters.idleForSeconds) query.idle_for_seconds = String(filters.idleForSeconds);
   if (filters.limit) query.limit = String(filters.limit);
   if (filters.cursor) query.cursor = filters.cursor;
   return getJson<BuildListResponse>(

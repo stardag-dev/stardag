@@ -31,6 +31,7 @@ describe("registry API", () => {
     await fetchBuilds("env-1", {
       status: "running",
       reactiveAppName: "app",
+      idleForSeconds: 3600,
       limit: 50,
       cursor: "c1",
     });
@@ -40,6 +41,7 @@ describe("registry API", () => {
       environment_id: "env-1",
       status: "running",
       reactive_app_name: "app",
+      idle_for_seconds: "3600",
       limit: "50",
       cursor: "c1",
     });

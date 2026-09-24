@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.services.transitions import Transition
@@ -288,3 +288,51 @@ async def test_build_list_pages_carry_the_total(client: AsyncClient, h: Harness)
     assert sorted(seen) == sorted(str(b) for b in builds)
     running = await _get(client, "/builds", status="running", limit=1)
     assert running["total"] == 4 and running["next_cursor"] is not None
+
+
+async def test_build_list_idle_filter(client: AsyncClient, h: Harness):
+    """``GET /builds?idle_for_seconds=``: running builds whose last lifecycle
+    change is at least that old — a finished build is never idle — paged
+    and counted like any other filter; any status but ``running`` is a
+    contradiction (400), and the floor is a minute (422)."""
+    t = item("T")
+    stale, fresh, stale_done, stale_other = [
+        (await h.planned([t], [t]))[0] for _ in range(4)
+    ]
+    await client.post(f"/api/v2/builds/{stale_done}/cancel")
+    async with h.sf() as s:
+        await s.execute(
+            text(
+                "UPDATE build SET last_active_at = now() - interval '2 hours'"
+                " WHERE id IN (:a, :b, :c)"
+            ),
+            {"a": stale, "b": stale_done, "c": stale_other},
+        )
+        await s.commit()
+
+    idle = await _get(client, "/builds", idle_for_seconds=3600)
+    assert idle["total"] == 2
+    assert {b["id"] for b in idle["builds"]} == {str(stale), str(stale_other)}
+    assert str(fresh) not in {b["id"] for b in idle["builds"]}
+
+    first = await _get(client, "/builds", idle_for_seconds=3600, limit=1)
+    assert first["total"] == 2 and first["next_cursor"] is not None
+    second = await _get(
+        client, "/builds", idle_for_seconds=3600, limit=1, cursor=first["next_cursor"]
+    )
+    assert second["next_cursor"] is None
+    assert {first["builds"][0]["id"], second["builds"][0]["id"]} == {
+        str(stale),
+        str(stale_other),
+    }
+
+    assert (await _get(client, "/builds", idle_for_seconds=3 * 3600))["total"] == 0
+    running = await _get(client, "/builds", idle_for_seconds=3600, status="running")
+    assert running["total"] == 2
+
+    refused = await client.get(
+        "/api/v2/builds", params={"idle_for_seconds": 3600, "status": "cancelled"}
+    )
+    assert refused.status_code == 400
+    assert refused.json()["detail"]["code"] == "idle_requires_running"
+    assert await _status(client, "/builds", idle_for_seconds=59) == 422
