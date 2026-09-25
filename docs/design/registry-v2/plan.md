@@ -468,8 +468,7 @@ assignee the maintainer.
       change.
 - [x] Examples — `lib/stardag-examples` and the standalone Modal example
       ported to the v2 SDK and pinned to the published `stardag>=0.27.0rc1`
-      (STA-112); a follow-up relocks both pins to `>=0.27.0` once the
-      release is on PyPI.
+      (STA-112), relocked to `>=0.27.0` once the release was on PyPI.
 - [ ] I12 — release. Everything above is merged into `v2`; this is the
       only open package and it needs Anders' calls: the SDK and server
       version numbers and the release date (the `TODO(Anders)` markers in

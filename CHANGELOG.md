@@ -390,8 +390,7 @@ stop --mark-lost` frees a slot held by a gone execution).
 ### Examples
 
 - `lib/stardag-examples` and the standalone Modal example ported to v2 and
-  pinned to the v2 line (`stardag>=0.27.0rc1`; a follow-up relocks to
-  `>=0.27.0` once the release is on PyPI):
+  pinned to the v2 line (`stardag>=0.27.0`):
   settings replace the ML pipeline's build config, the global-lock
   benchmark option is gone, the walkthrough uses `/api/v2`, and the tests
   no longer reach a configured registry.
