@@ -17,8 +17,8 @@ class Range(sd.Task[list[int]]):
     start: Annotated[int, sd.StardagField(compat_default=0)]
     step: Annotated[int, sd.StardagField(compat_default=1)]
 
-    # Parameters with no effect on output can be excluded from the hash
-    verbose: Annotated[bool, sd.StardagField(hash_exclude=True)] = False
+    # Parameters with no effect on output can be left out of the task id
+    verbose: Annotated[bool, sd.StardagField(significant=False)] = False
 
     def run(self):
         if self.verbose:
