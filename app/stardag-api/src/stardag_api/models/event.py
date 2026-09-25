@@ -1,103 +1,126 @@
-"""Event model for immutable append-only event log."""
+"""``event``: the append-only log.
+
+Events are never updated. ``build_id``, ``plan_id`` and ``execution_id`` are
+``ON DELETE SET NULL``, not CASCADE: deleting a build must not erase the
+history the global status was folded from. ``report_applied`` and
+``batch_id`` are typed columns — facts queries depend on are never JSON
+flags.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, JSON, String, Text, Uuid
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKeyConstraint,
+    Index,
+    Text,
+    Uuid,
+    text,
+    true,
+)
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
-from stardag_api.models.base import Base, generate_uuid7, utc_now
-from stardag_api.models.enums import EventType
+from stardag_api.models.base import (
+    Base,
+    EnvironmentScopedMixin,
+    generate_uuid7,
+    pg_enum,
+)
+from stardag_api.models.enums import BUILD_EVENT_TYPES, EventType
 
-if TYPE_CHECKING:
-    from stardag_api.models.build import Build
-    from stardag_api.models.task import Task
+_BUILD_EVENT_LABELS = ", ".join(f"'{t.value}'" for t in BUILD_EVENT_TYPES)
 
 
-class Event(Base):
-    """IMMUTABLE append-only event log.
+class Event(EnvironmentScopedMixin, Base):
+    """One recorded fact: a build lifecycle step, a task transition, a report.
 
-    All state changes are recorded as events. Task and Build status
-    are derived from the latest relevant event.
-
-    Every event has a build_id. Most events also have a task_id
-    (task-level events), but build-level events (BUILD_STARTED, etc.)
-    may not have a task_id.
+    ``task_pk`` is NULL for build-level events; ``plan_id`` is NULL for
+    build-level events (CHECK) and for events of no plan; ``build_id`` is
+    NULL for events that belong to no build, and after the build is deleted.
     """
 
-    __tablename__ = "events"
+    __tablename__ = "event"
+    # The three pointer FKs are DEFERRABLE INITIALLY DEFERRED. Deleting a
+    # build reaches one event row along all three (build -> SET NULL; build
+    # -> plan -> SET NULL; build -> plan -> member -> execution -> SET
+    # NULL). Once the first action has rewritten the row, Postgres
+    # re-checks the row's other FKs, and an immediate check fails on an
+    # execution already deleted whose own SET NULL has not run yet.
+    # Deferred to commit, every action has run by the time anything is
+    # checked.
     __table_args__ = (
-        Index("ix_events_build_created", "build_id", "created_at"),
-        Index("ix_events_task_created", "task_id", "created_at"),
-        Index("ix_events_type_created", "event_type", "created_at"),
-        Index("ix_events_build_task_type", "build_id", "task_id", "event_type"),
-        # Plan membership per scope: "which tasks did this build register
-        # under the scope it is currently planned under" is a seek here.
-        Index("ix_events_build_scope", "build_id", "scope_key"),
+        CheckConstraint(
+            f"plan_id IS NULL OR event_type NOT IN ({_BUILD_EVENT_LABELS})",
+            name="ck_event_build_level_has_no_plan",
+        ),
+        ForeignKeyConstraint(
+            ["environment_id", "build_id"],
+            ["build.environment_id", "build.id"],
+            name="fk_event_build",
+            ondelete="SET NULL (build_id)",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["environment_id", "task_pk"],
+            ["task.environment_id", "task.id"],
+            name="fk_event_task",
+        ),
+        ForeignKeyConstraint(
+            ["environment_id", "plan_id"],
+            ["plan.environment_id", "plan.id"],
+            name="fk_event_plan",
+            ondelete="SET NULL (plan_id)",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["environment_id", "execution_id"],
+            ["execution.environment_id", "execution.id"],
+            name="fk_event_execution",
+            ondelete="SET NULL (execution_id)",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        Index("ix_event_build_created", "build_id", "created_at"),
+        Index("ix_event_task_created", "task_pk", "created_at"),
+        Index("ix_event_environment_created", "environment_id", "created_at"),
+        Index("ix_event_plan", "plan_id"),
+        Index("ix_event_execution", "execution_id"),
+        # A /yield batch is applied once per execution: two concurrent
+        # retries cannot both miss the lookup.
+        Index(
+            "uq_event_execution_batch",
+            "execution_id",
+            "batch_id",
+            unique=True,
+            postgresql_where=text("batch_id IS NOT NULL"),
+        ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        Uuid,
-        primary_key=True,
-        default=generate_uuid7,
-    )
-
-    # Always required - every event belongs to a build
-    build_id: Mapped[UUID] = mapped_column(
-        Uuid,
-        ForeignKey("builds.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    # Optional - task-level events have this, build-level events may not
-    task_id: Mapped[UUID | None] = mapped_column(
-        Uuid,
-        ForeignKey("tasks.id", ondelete="CASCADE"),
-        nullable=True,
-        index=True,
-    )
-
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=generate_uuid7)
+    build_id: Mapped[UUID | None] = mapped_column(Uuid)
+    task_pk: Mapped[UUID | None] = mapped_column(Uuid)
+    plan_id: Mapped[UUID | None] = mapped_column(Uuid)
+    execution_id: Mapped[UUID | None] = mapped_column(Uuid)
     event_type: Mapped[EventType] = mapped_column(
-        String(32),
-        nullable=False,
-        index=True,
+        pg_enum(EventType, "event_type"), nullable=False
     )
-
-    # Event timestamp (when the event occurred)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        nullable=False,
-        index=True,
+    # False for a report that was recorded but refused (a late report, a
+    # second terminal report, a stale execution): it is history, not state.
+    report_applied: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
     )
-
-    # The structure scope the event was made under. For a registration
-    # event (TASK_PENDING / TASK_REFERENCED) that is the scope the
-    # registering code evaluated the edges in, and plan membership reads
-    # only these: a build's plan under its current scope is the set of
-    # tasks registered into it under that scope, and nothing else — a task
-    # registered under an earlier scope has its gating edges in that scope
-    # only, so counting it in the current plan would let it run ungated.
-    # Every other task event carries the build's scope at the time it
-    # landed (set by ``transition_task``), which the fold copies into
-    # ``tasks.latest_status_scope_key`` as the task's provenance scope.
-    # NULL only on events written before scopes existed.
-    scope_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
-
-    # Optional error message for failure events
+    # Client-minted id of one /yield batch (TASK_YIELDED).
+    batch_id: Mapped[UUID | None] = mapped_column(Uuid)
     error_message: Mapped[str | None] = mapped_column(Text)
+    event_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
-    # Additional event data (flexible JSON). JSONB on Postgres so future
-    # queries inside event_metadata don't reparse text on each row scan.
-    event_metadata: Mapped[dict | None] = mapped_column(
-        JSON().with_variant(JSONB(), "postgresql"),
-    )
-
-    # Relationships
-    build: Mapped[Build] = relationship(back_populates="events")
-    task: Mapped[Task | None] = relationship(back_populates="events")
+    # Re-declared only to type it for readers; the mixin supplies the column.
+    created_at: Mapped[datetime]

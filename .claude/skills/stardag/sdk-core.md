@@ -1,4 +1,4 @@
-# SDK Core: Tasks, Dependencies & Build
+# SDK Core: Tasks, Dependencies, Parameters & Build
 
 ## Task Hierarchy
 
@@ -86,8 +86,8 @@ Reference a task output that was produced elsewhere:
 
 ```python
 remote_task = sd.AliasTask[pd.DataFrame].from_registry(
-    id="abc123...",  # accepts str or UUID
-    registry=registry,
+    id="abc123...",  # a task id, str or UUID
+    registry=registry,  # optional; default is the configured registry
 )
 data = remote_task.load()
 ```
@@ -212,40 +212,73 @@ await sd.build_sequential_aio(task)  # Async
 
 ### Build Options
 
-All build functions accept these optional parameters:
+All four build functions share these keyword arguments:
 
 ```python
-sd.build(
+from stardag.build import FailMode
+
+summary = sd.build(
     task,
-    on_registry_failure="warn",  # "warn" (default) or "raise"
-    register_all=False,          # True: register all tasks (even already-complete deps)
+    settings={"MYAPP_THREADS": "8"},  # build-wide env vars (see "Settings" below)
+    fail_mode=FailMode.CONTINUE,      # default FAIL_FAST
+    raise_on_failure=False,           # default True: FAIL_FAST re-raises the task's error
+    on_registry_failure="warn",       # default "raise"; "warn" rides out a registry outage
+    register_all=False,               # True: register complete deps too (full graph in the UI)
+    description="nightly",
 )
-
-# raise_on_failure() for quick error propagation
-summary = sd.build(task)
-summary.raise_on_failure()  # raises BuildFailed on FAILURE status
+summary.raise_on_failure()            # raises BuildFailed on a FAILURE summary
+print(summary.build_id)
 ```
 
-- **`on_registry_failure`**: Controls whether registry errors propagate (`"raise"`) or are logged as warnings (`"warn"`, default).
-- **`register_all`**: When `True`, discovery recurses into already-complete dependencies, ensuring all tasks in the DAG are registered in the registry for complete graph visibility.
+- **`resume_build_id=`**: resume an existing build. Its plan for the same scope is reused,
+  completed targets are observed, failed members reset. With `settings` omitted, the build's
+  stored settings are reused; `settings={}` explicitly means none.
+- **`limit_key_selector=`**: maps a task to the registry concurrency-limit key(s) it competes
+  on (limits that hold across builds; see below).
+- **`claim_config=`** (`stardag.build.ClaimConfig`): how claims are waited on and renewed.
+- **`registry=`**: default is the configured registry; with none (`NoOpRegistry`) the build is
+  purely local — no plan, no claims.
+- **`on_registry_failure="warn"`** carries on through a registry _outage_; a _refusal_ (an
+  instance conflict, a reserved settings key) always raises.
 
-### Global Concurrency Lock
+### Settings: build-wide values that are not parameters
 
-For coordinating distributed builds across multiple processes/machines:
+`settings` is a flat `Mapping[str, str]` of environment variables applied for the build's
+duration in every process of it — the resident driver here, and on Modal the bootstrap, every
+tick and every worker. Use it for a thread count, a feature flag, an endpoint: anything you
+would rather not make a task parameter.
 
 ```python
-from stardag.build import GlobalLockConfig
+from pydantic_settings import BaseSettings
 
-sd.build(task, global_lock_config=GlobalLockConfig(enabled=True))
+
+class RunSettings(BaseSettings):
+    myapp_threads: int  # required: a missing setting fails loudly
+
+sd.build(root, settings={"MYAPP_THREADS": "8"})
 ```
 
-Requires a configured Registry API connection.
+- **The contract: settings may change structure and execution, never output.** Completion is
+  global, so a setting that changed output would let one build reuse another's different
+  result. Anything that affects output is a significant parameter.
+- **Read settings at run time** (in `run()` / `requires()`), not at import: a warm container
+  imports before it knows its build.
+- **Nothing validates the keys.** A misspelled key is an environment variable nothing reads;
+  use a settings class with required fields so a missing one fails.
+- Keys starting `STARDAG_` or `MODAL_` are refused (`SettingsError`) before a build exists.
+  Settings are not for credentials.
+- One settings owner per process: concurrent `sd.build()` calls with _different_ settings in
+  one process raise `SettingsError`.
+- Settings are the second half of the build's **scope** `(deployment, settings)`: a re-trigger
+  under new settings plans a new scope.
+- Same knob elsewhere: `app.build_trigger(root, settings={...})` on Modal, and
+  `stardag build mypkg.dags:root --settings MYAPP_THREADS=8` on the CLI.
 
 ### Concurrency Limits
 
-Throttle how many tasks **execute** concurrently in a build, independent of the
-executor (applies uniformly to local, Modal, and routed executors). Two knobs,
-combinable:
+Two kinds, combinable.
+
+**Build-local** — `ConcurrencyConfig` caps how much one build process submits at once:
 
 ```python
 from stardag.build import ConcurrencyConfig
@@ -263,28 +296,24 @@ sd.build(
 )
 ```
 
-- **`max_concurrent_tasks`**: overall cap on simultaneously executing tasks.
-  Composes with (is the min of) any executor-internal worker limits.
-- **`limits` + `key_selector`**: per-group caps. `key_selector` may return
-  `None`, a single name, or a sequence of names (a task can be subject to
-  several limits at once). Returning a name not present in `limits` raises
-  `ValueError`. Limit values must be `>= 1`.
-- A slot is held only while a task is _actively executing_: it is released when
-  a task suspends on its own dynamic deps and re-acquired on resume (unlike the
-  global lock, which is held across suspension).
-- These limits are currently **build-local**. The `ConcurrencyLimiter` protocol
-  is the seam for a future registry-backed/global implementation configured
-  from the Stardag API/UI — passing `concurrency_limiter=...` overrides
-  `concurrency_config`.
+A slot is held only while a task is actively executing (released while it is suspended on
+its own dynamic deps). `concurrency_limiter=...` overrides `concurrency_config`.
+
+**Across builds** — named limits configured per environment in the registry
+(`stardag concurrency-limits set <key> <max_concurrent>`) hold for every build, process and
+scheduling mode. A task competes for a key when `limit_key_selector` (on `sd.build`, or on
+`StardagApp` for reactive builds) returns it; the check is atomic with the claim.
 
 ### Build Behavior
 
-1. Discovers all dependencies recursively from root task(s)
-2. Checks `complete()` for each task — skips if already done
-3. Executes tasks in dependency order (concurrent by default)
-4. Handles dynamic dependencies (tasks that yield new deps during run)
-5. Deadlock detection in sequential builds (raises `RuntimeError` if stuck)
-6. In FAIL_FAST mode, task exceptions propagate to the caller immediately
+1. Walks the DAG from the root task(s), stopping at complete tasks (target exists)
+2. With a registry: registers a **plan** — roots first, then the walk in chunks, then sealed
+3. Every execution **claims** its task first, so two builds never run one task at once; a
+   loser waits on or re-attaches to the winner, and a lapsed claim is taken over
+4. Runs tasks in dependency order (concurrent by default) and handles dynamic dependencies
+5. A walk that fails (an `InstanceConflictError`, a `requires()` that raises, an
+   `UnstableSerializationError`) fails before any build exists
+6. In `FAIL_FAST` mode the failing task's exception propagates (unless `raise_on_failure=False`)
 
 ## Type System
 
@@ -304,30 +333,68 @@ sd.build(
 - Pydantic models: Any `BaseModel` subclass (JSON serialization)
 - Custom classes: Pickle serialization (fallback)
 
-### StardagField for Parameter Control
+### Parameters: significant and non-significant
+
+Every field is **significant** by default: part of `task.id`, so it names the output. Mark a
+field `significant=False` when it changes only how the work is done, or which upstreams are
+required or yielded — never the output:
 
 ```python
 from typing import Annotated
 
-class MyTask(sd.Task[int]):
-    # Identity (default): part of the task ID, passed at init
-    important_param: int
+import stardag as sd
 
-    # Dependencies-only: changes what is required/yielded, not the output.
-    # Read from the build config, never passed at init; part of the
-    # build's structure scope.
-    partition_size: Annotated[int, sd.StardagField(significance="dependencies_only")] = 100
 
-    # Execution-only: how the work is done. Read from the build config,
-    # never passed at init; not part of any hash.
-    num_threads: Annotated[int, sd.StardagField(significance="execution_only")] = 4
+class Aggregate(sd.Task[int]):
+    period: str                                                        # significant
+    partition_size: Annotated[int, sd.StardagField(significant=False)] = 100
+    num_threads: Annotated[int, sd.StardagField(significant=False)] = 4
+
+    def run(self):
+        self._save(len(self.period))
+
+
+a = Aggregate(period="2024-01", partition_size=500)  # both kinds passed at init
+assert a.id == Aggregate(period="2024-01").id        # same output, same task id
 ```
 
-Supply levels 2/3 per build: `sd.build(root, build_config={"ns.MyTask":
-{"partition_size": 500}})`, `app.build_trigger(root, build_config=...)`,
-or `with sd.build_config_scope({...}):` in tests. Passing them at init
-raises. `hash_exclude=True` is deprecated (DeprecationWarning; maps to
-`execution_only` but still allows init).
+- Both kinds are **ordinary parameters**: passed at init, stored on the registry's task
+  instance, rehydrated from it.
+- `StardagField(significance=...)` and `StardagField(hash_exclude=...)` were **removed** and
+  raise `TypeError`. The rename to `significant=False` moves no task id.
+- `compat_default` is for adding a **significant** field without re-keying existing tasks: a
+  value equal to it is dropped from the hash (and a missing field on rehydration takes it).
+  Invalid on a non-significant field.
+
+```python
+class Report(sd.Task[str]):
+    period: str
+    # Added later: tasks built before it existed keep their ids.
+    currency: Annotated[str, sd.StardagField(compat_default="EUR")] = "EUR"
+
+    def run(self):
+        self._save(f"{self.period} in {self.currency}")
+```
+
+### The two hashes
+
+| Hash                 | Covers                                           | Answers                                       |
+| -------------------- | ------------------------------------------------ | --------------------------------------------- |
+| `task.id`            | namespace, name, version, **significant** fields | "Is this output done?" — global, every build  |
+| `task.instance_hash` | the same plus every **non-significant** field    | "How exactly was it constructed?" — per scope |
+
+Completion, the execution claim and the target path key on `task.id`. The registry stores each
+construction under a scope as a **task instance** (keyed on `instance_hash`).
+
+Two task objects may share a task id and differ in non-significant fields — but **one build
+plans one instance per task id**: constructing both in one DAG raises `InstanceConflictError`
+at discovery, naming the differing fields.
+
+**Serialization stability.** At registration each distinct instance is round-tripped once; a
+field whose dump is not a fixed point (a naive vs aware datetime, a custom serializer that
+drops precision, a non-deterministic float) raises `UnstableSerializationError`. Sets are
+sorted for you; non-finite floats are refused. Run the same check in a test with
+`sd.check_serialization_stability(task)`.
 
 ### Task ID Determinism
 
@@ -336,9 +403,13 @@ Task IDs are UUID-5 computed from:
 - Namespace
 - Task name
 - Version
-- All parameter values (recursively, including upstream task IDs)
+- Every **significant** parameter value (recursively; a nested task appears by its own task
+  id, so it contributes only its significant identity)
 
-Same parameters → same ID → same output path → skips re-execution.
+Same significant parameters → same ID → same output path → skips re-execution. To change
+what a task produces, change its task id (bump `__version__` or add/change a significant
+parameter); downstream ids follow on their own. Nothing marks a completed task incomplete by
+fiat: delete its target and build again.
 
 ## Versioning
 

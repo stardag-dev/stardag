@@ -34,131 +34,129 @@ def test_deploy_reaches_module_import():
     assert "Error importing module" in result.output
 
 
-class TestRecordDeployment:
-    """Every deploy is recorded: one row per (app, code id), Modal's own
-    notion of a deployment. The Modal app id rides along when the deploy
-    reported one; nothing else is derived from it."""
+class TestDeploymentRecord:
+    """Every deploy is one deployment row: created **before** the deploy under
+    the id the app baked into its secret, activated **after** it. A failure
+    of either exits non-zero, with the remedy."""
 
-    def _run(self, modal_app_id):
+    def _app(self):
         from unittest.mock import MagicMock
+        from uuid import uuid4
 
-        from stardag._cli.modal import _record_deployment
-        from stardag.registry import NoOpRegistry, registry_provider
+        return MagicMock(code_id="c" * 40, deployment_id=uuid4())
 
-        recorded: list[tuple[str, str, str | None]] = []
+    def test_create_records_the_baked_id_and_activate_makes_it_current(self):
+        from stardag._cli._modal_deployments import (
+            _activate_deployment,
+            _create_deployment,
+        )
+        from stardag.testing import InMemoryRegistry
 
-        class FakeRegistry(NoOpRegistry):
-            def deployment_record(self, *, app_name, code_id, modal_app_id=None):
-                recorded.append((app_name, code_id, modal_app_id))
-                return None
+        registry = InMemoryRegistry()
+        stardag_app = self._app()
+        _create_deployment(registry, stardag_app, "myapp")
+        (created,) = registry.calls_to("deployment_create")
+        assert created["deployment_id"] == stardag_app.deployment_id
+        assert (created["kind"], created["app_name"], created["code_id"]) == (
+            "modal",
+            "myapp",
+            "c" * 40,
+        )
+        assert (
+            registry.deployment_list(kind="modal", app_name="myapp", current=True) == []
+        )
+        _activate_deployment(
+            registry, stardag_app.deployment_id, "myapp", modal_app_id="ap-123"
+        )
+        (current,) = registry.deployment_list(
+            kind="modal", app_name="myapp", current=True
+        )
+        assert current.id == stardag_app.deployment_id
+        # What only the finished deploy knows is recorded on activation.
+        assert current.modal_app_id == "ap-123"
 
-        stardag_app = MagicMock(code_id="c" * 40)
-        with registry_provider.override(FakeRegistry()):
-            _record_deployment(stardag_app, "myapp", modal_app_id=modal_app_id)
-        return recorded
-
-    def test_a_deploy_is_recorded_under_the_app_name(self):
-        assert self._run("ap-123") == [("myapp", "c" * 40, "ap-123")]
-
-    def test_a_registry_that_keeps_no_records_is_a_notice_not_a_failure(self):
-        """The RegistryABC default returns None: nothing was recorded, so
-        the operator is told no build will roll over to this code — but a
-        custom registry without deployment records is not a broken deploy."""
-        from unittest.mock import MagicMock, patch
-
-        from stardag._cli import modal as cli_modal
-        from stardag.registry import NoOpRegistry, registry_provider
-
-        class KeepsNoRecords(NoOpRegistry):
-            def deployment_record(self, *, app_name, code_id, modal_app_id=None):
-                return None
-
-        with (
-            registry_provider.override(KeepsNoRecords()),
-            patch.object(cli_modal, "console") as console,
-        ):
-            cli_modal._record_deployment(
-                MagicMock(code_id="c" * 40), "myapp", modal_app_id=None
-            )
-        (printed,) = [str(c.args[0]) for c in console.print.call_args_list]
-        assert "does not record deployments" in printed
-        assert "will not roll over" in printed
-
-    def test_without_a_modal_app_id_the_record_still_lands(self):
-        assert self._run(None) == [("myapp", "c" * 40, None)]
-
-    def test_a_recording_failure_fails_the_deploy(self):
-        """The record is what a tick consults before rolling a build over,
-        so a deploy that could not record is a deploy no build will follow:
-        the command says so and exits 1, with the remedy (re-run, it is
-        idempotent)."""
-        from unittest.mock import MagicMock
-
+    @pytest.mark.parametrize("step", ["create", "activate"])
+    def test_a_failure_exits_non_zero(self, step):
         import typer
 
-        from stardag._cli.modal import _record_deployment
-        from stardag.registry import NoOpRegistry, registry_provider
+        from stardag._cli._modal_deployments import (
+            _activate_deployment,
+            _create_deployment,
+        )
+        from stardag.testing import InMemoryRegistry
 
-        class FailingRegistry(NoOpRegistry):
-            def deployment_record(self, *, app_name, code_id, modal_app_id=None):
+        class Failing(InMemoryRegistry):
+            def deployment_create(self, **kwargs):
+                if step == "create":
+                    raise ConnectionError("registry unreachable")
+                return super().deployment_create(**kwargs)
+
+            def deployment_activate(
+                self, deployment_id, *, modal_app_id=None, image_id=None
+            ):
                 raise ConnectionError("registry unreachable")
 
-        with registry_provider.override(FailingRegistry()):
-            with pytest.raises(typer.Exit) as excinfo:
-                _record_deployment(
-                    MagicMock(code_id="c" * 40), "myapp", modal_app_id="ap-1"
-                )
+        registry = Failing()
+        stardag_app = self._app()
+        with pytest.raises(typer.Exit) as excinfo:
+            _create_deployment(registry, stardag_app, "myapp")
+            _activate_deployment(registry, stardag_app.deployment_id, "myapp")
         assert excinfo.value.exit_code == 1
 
-    def test_without_a_registry_nothing_is_recorded_and_nothing_fails(self):
-        from unittest.mock import MagicMock
-
-        from stardag._cli.modal import _record_deployment
+    def test_without_a_registry_nothing_is_recorded(self):
+        from stardag._cli._modal_deployments import _deployment_registry
         from stardag.registry import NoOpRegistry, registry_provider
 
         with registry_provider.override(NoOpRegistry()):
-            _record_deployment(MagicMock(code_id="c" * 40), "myapp", modal_app_id=None)
+            assert _deployment_registry() is None
 
 
 class TestDeploymentsListing:
-    """``stardag modal deployments`` lists what the registry recorded, newest
-    first, and marks the current one per app."""
+    """``stardag modal deployments`` lists what the registry recorded and
+    marks each app's current one."""
 
-    def test_lists_newest_first_with_the_current_marked(self):
-        from datetime import datetime, timezone
-        from uuid import uuid4
+    def test_lists_with_the_current_marked(self):
+        from stardag.registry import registry_provider
+        from stardag.testing import InMemoryRegistry
+
+        registry = InMemoryRegistry()
+        old = registry.add_deployment(kind="modal", app_name="myapp", code_id="a" * 40)
+        new = registry.add_deployment(kind="modal", app_name="myapp", code_id="b" * 40)
+        assert old != new
+        with registry_provider.override(registry):
+            result = CliRunner(env={"COLUMNS": "240"}).invoke(
+                app, ["deployments", "--app", "myapp"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "bbbbbbbbbbbb" in result.output
+        assert "aaaaaaaaaaaa" in result.output
+        assert "current" in result.output
+        (listed,) = registry.calls_to("deployment_list")
+        assert listed["app_name"] == "myapp"
+
+    def test_without_a_registry_it_returns_with_the_notice(self):
+        """Through ``_deployment_registry()``, like ``modal deploy``: the
+        no-op registry has no ``deployment_list`` to call."""
+        from stardag.registry import NoOpRegistry, registry_provider
+
+        with registry_provider.override(NoOpRegistry()):
+            result = CliRunner(env={"COLUMNS": "240"}).invoke(app, ["deployments"])
+        assert result.exit_code == 0, result.output
+        assert "No registry configured; no deployments to list." in result.output
+        assert "Deployments" not in result.output
+
+    def test_without_a_registry_json_still_emits_a_json_document(self):
+        """``--json`` keeps its contract even with no registry configured:
+        stdout carries exactly ``{"deployments": []}``, and the notice moves
+        to stderr instead of corrupting stdout with prose."""
+        import json
 
         from stardag.registry import NoOpRegistry, registry_provider
-        from stardag.registry._base import DeploymentInfo
 
-        rows = [
-            DeploymentInfo(
-                id=uuid4(),
-                app_name="myapp",
-                code_id="b" * 40,
-                deployed_at=datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc),
-                current=True,
-                modal_app_id="ap-new",
-            ),
-            DeploymentInfo(
-                id=uuid4(),
-                app_name="myapp",
-                code_id="a" * 40,
-                deployed_at=datetime(2026, 9, 19, 11, 0, tzinfo=timezone.utc),
-            ),
-        ]
-        asked: list[str | None] = []
-
-        class FakeRegistry(NoOpRegistry):
-            def deployment_list(self, *, app_name=None):
-                asked.append(app_name)
-                return rows
-
-        with registry_provider.override(FakeRegistry()):
-            result = runner.invoke(app, ["deployments", "--app", "myapp"])
+        with registry_provider.override(NoOpRegistry()):
+            result = CliRunner(env={"COLUMNS": "240"}).invoke(
+                app, ["deployments", "--json"]
+            )
         assert result.exit_code == 0, result.output
-        assert asked == ["myapp"]
-        assert result.output.index("bbbbbbbbbbbb") < result.output.index("aaaaaaaaaaaa")
-        assert "current" in result.output
-        assert "ap-new" in result.output
-        assert "gc" not in [c.name for c in app.registered_commands]
+        assert json.loads(result.stdout) == {"deployments": []}
+        assert "No registry configured" in result.stderr

@@ -1,542 +1,262 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Task } from "../types/task";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { PlanMember, Task } from "../types/task";
+import { tooltipOf } from "../test/tooltip";
+import { MEMBERSHIP_HELP } from "../utils/membership";
 
-let mockWorkspaceRole: "owner" | "admin" | "member" | null = "admin";
-vi.mock("../context/EnvironmentContext", () => ({
-  useEnvironment: () => ({
-    activeEnvironment: { id: "env-1", slug: "default", name: "default" },
-    activeWorkspaceRole: mockWorkspaceRole,
+vi.mock("../api/registry", () => ({
+  fetchTask: vi.fn(),
+  fetchTaskArtifacts: vi.fn(async () => ({ artifacts: [] })),
+  fetchTaskEvents: vi.fn(async () => []),
+  EVENT_LIST_LIMIT: 500,
+  fetchTaskExecutions: vi.fn(async () => []),
+  TASK_EXECUTION_LIMIT: 100,
+  fetchDeployments: vi.fn(async () => []),
+  fetchDeployment: vi.fn(async () => {
+    throw new Error("404");
   }),
 }));
+vi.mock("./TaskClaimPanel", () => ({ TaskClaimPanel: () => null }));
 
-vi.mock("../api/tasks", () => ({
-  cancelTask: vi.fn(),
-  retryTask: vi.fn(),
-  fetchTaskArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
-  fetchTaskEvents: vi.fn().mockResolvedValue([]),
-}));
+import { fetchTask, fetchTaskEvents, fetchTaskExecutions } from "../api/registry";
+import type { Execution } from "../types/task";
+import { TaskDetail } from "./TaskDetail";
 
-import { cancelTask } from "../api/tasks";
-import { CLAIM_ACTION_LABELS } from "../utils/claims";
-import { ModalExecutionCallRef, ModalExecutionDetails, TaskDetail } from "./TaskDetail";
-
-const fullMetadata = {
-  kind: "modal",
-  app_name: "my-app",
-  workspace: "my-workspace",
-  environment: "staging",
-  function_name: "worker_default",
-  app_id: "ap-123",
-  function_id: "fu-456",
-};
-
-// Deep-link URLs for fullMetadata (kept in one place for readability).
-const ENV_URL = "https://modal.com/apps/my-workspace/staging";
-const APP_URL = "https://modal.com/apps/my-workspace/staging/ap-123";
-const FUNC_URL = `${APP_URL}?activeTab=functions&functionId=fu-456`;
-const CALL_URL = `${FUNC_URL}&functionSection=calls&fcId=fc-789`;
-
-describe("ModalExecutionCallRef", () => {
-  it("links the call ref to a genuine call-level URL (new tab)", () => {
-    render(<ModalExecutionCallRef metadata={fullMetadata} executorRef="fc-789" />);
-    const link = screen.getByRole("link", { name: "fc-789" });
-    expect(link).toHaveAttribute("href", CALL_URL);
-    expect(link).toHaveAttribute("target", "_blank");
-    expect(link).toHaveAttribute("rel", "noopener noreferrer");
-  });
-
-  it("copies the raw fc id via its copy button", async () => {
-    const user = userEvent.setup();
-    render(<ModalExecutionCallRef metadata={fullMetadata} executorRef="fc-789" />);
-    const copyButtons = screen.getAllByRole("button", {
-      name: /copy to clipboard/i,
-    });
-    expect(copyButtons).toHaveLength(1);
-    await user.click(copyButtons[0]);
-    expect(await window.navigator.clipboard.readText()).toBe("fc-789");
-  });
-
-  it("renders the call ref as plain text (never the app page) when function_id is missing", async () => {
-    const user = userEvent.setup();
-    // app_name/app_id resolvable but NO function_id: modalFunctionCallUrl
-    // would fall back to the app page, which must not become a clickable call
-    // ref. It renders as plain text but keeps its copy button.
-    render(
-      <ModalExecutionCallRef
-        metadata={{
-          kind: "modal",
-          workspace: "my-workspace",
-          environment: "staging",
-          app_name: "my-app",
-          app_id: "ap-123",
-        }}
-        executorRef="fc-789"
-      />,
-    );
-    expect(screen.queryByRole("link")).not.toBeInTheDocument();
-    expect(screen.getByText("fc-789")).toBeInTheDocument();
-    const copyButtons = screen.getAllByRole("button", {
-      name: /copy to clipboard/i,
-    });
-    expect(copyButtons).toHaveLength(1);
-    await user.click(copyButtons[0]);
-    expect(await window.navigator.clipboard.readText()).toBe("fc-789");
-  });
-
-  it("renders for kind-less metadata (legacy, treated as modal)", () => {
-    render(
-      <ModalExecutionCallRef metadata={{ app_name: "my-app" }} executorRef="fc-1" />,
-    );
-    expect(screen.getByText("fc-1")).toBeInTheDocument();
-  });
-
-  it("renders nothing for an explicitly non-modal kind", () => {
-    const { container } = render(
-      <ModalExecutionCallRef
-        metadata={{ kind: "k8s", app_name: "my-app" }}
-        executorRef="ref-1"
-      />,
-    );
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  it("renders nothing when there is no call ref", () => {
-    const { container } = render(
-      <ModalExecutionCallRef metadata={fullMetadata} executorRef={null} />,
-    );
-    expect(container).toBeEmptyDOMElement();
-  });
-});
-
-describe("ModalExecutionDetails", () => {
-  it("lists every captured identifier verbatim once expanded", async () => {
-    const user = userEvent.setup();
-    render(<ModalExecutionDetails metadata={fullMetadata} executorRef="fc-789" />);
-
-    // Collapsed by default.
-    expect(screen.queryByText("ap-123")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /more details/i }));
-
-    // Every captured value appears; the redundant `kind` is not shown.
-    for (const value of [
-      "my-app",
-      "my-workspace",
-      "staging",
-      "worker_default",
-      "ap-123",
-      "fu-456",
-      "fc-789", // function-call ref
-    ]) {
-      expect(screen.getByText(value)).toBeInTheDocument();
-    }
-    expect(screen.queryByText("modal")).not.toBeInTheDocument();
-    expect(screen.queryByText("Kind")).not.toBeInTheDocument();
-  });
-
-  it("groups names then ids with a divider only when both groups are present", async () => {
-    const user = userEvent.setup();
-    const { container } = render(
-      <ModalExecutionDetails metadata={fullMetadata} executorRef="fc-789" />,
-    );
-    await user.click(screen.getByRole("button", { name: /more details/i }));
-
-    // Row labels reflect the name/id split.
-    for (const label of [
-      "Workspace",
-      "Environment",
-      "App",
-      "Function",
-      "App ID",
-      "Function ID",
-      "Call ref",
-    ]) {
-      expect(screen.getByText(label)).toBeInTheDocument();
-    }
-    // Divider between the two groups.
-    expect(container.querySelector("hr")).toBeInTheDocument();
-  });
-
-  it("links each value to its Modal level; workspace stays plain text", async () => {
-    const user = userEvent.setup();
-    render(<ModalExecutionDetails metadata={fullMetadata} executorRef="fc-789" />);
-    await user.click(screen.getByRole("button", { name: /more details/i }));
-
-    // Workspace has no meaningful standalone URL → plain text, not a link.
-    expect(screen.getByText("my-workspace").closest("a")).toBeNull();
-
-    // Every other value is a best-effort deep link (new tab) to its level.
-    const cases: [string, string][] = [
-      ["staging", ENV_URL],
-      ["my-app", APP_URL],
-      ["worker_default", FUNC_URL],
-      ["ap-123", APP_URL],
-      ["fu-456", FUNC_URL],
-      ["fc-789", CALL_URL],
-    ];
-    for (const [value, href] of cases) {
-      const link = screen.getByRole("link", { name: value });
-      expect(link).toHaveAttribute("href", href);
-      expect(link).toHaveAttribute("target", "_blank");
-      expect(link).toHaveAttribute("rel", "noopener noreferrer");
-    }
-  });
-
-  it("falls back to plain text (still with copy) when a value's URL can't be built", async () => {
-    const user = userEvent.setup();
-    // Only app_name, no workspace → modalAppUrl is null, so App is plain text.
-    render(
-      <ModalExecutionDetails
-        metadata={{ kind: "modal", app_name: "my-app" }}
-        executorRef={null}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: /more details/i }));
-
-    expect(screen.queryByRole("link")).not.toBeInTheDocument();
-    expect(screen.getByText("my-app").closest("a")).toBeNull();
-    // Copy button is present regardless of whether the value links.
-    expect(
-      screen.getByRole("button", { name: /copy to clipboard/i }),
-    ).toBeInTheDocument();
-  });
-
-  it("renders only the fields that are present, without a divider for one group", async () => {
-    const user = userEvent.setup();
-    const { container } = render(
-      <ModalExecutionDetails
-        metadata={{ kind: "modal", app_name: "my-app" }}
-        executorRef={null}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: /more details/i }));
-
-    expect(screen.getByText("my-app")).toBeInTheDocument();
-    // The one present field renders with its row label.
-    expect(screen.getByText("App")).toBeInTheDocument();
-    // Absent metadata fields and the missing call ref must not render.
-    expect(screen.queryByText("Workspace")).not.toBeInTheDocument();
-    expect(screen.queryByText("App ID")).not.toBeInTheDocument();
-    expect(screen.queryByText("Call ref")).not.toBeInTheDocument();
-    // Only the names group is present → no divider.
-    expect(container.querySelector("hr")).not.toBeInTheDocument();
-  });
-
-  it("renders nothing when no identifiers are present", () => {
-    const { container } = render(
-      <ModalExecutionDetails metadata={null} executorRef={null} />,
-    );
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  it("renders nothing for an explicitly non-modal kind", () => {
-    // The block's labels ("App", "Function ID", …) are Modal-specific, so it
-    // must not surface identifiers from a non-modal executor as Modal fields.
-    const { container } = render(
-      <ModalExecutionDetails
-        metadata={{ kind: "k8s", app_name: "some-pod", function_id: "fu-x" }}
-        executorRef="ref-1"
-      />,
-    );
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  it("renders for kind-less metadata (legacy, treated as modal)", async () => {
-    const user = userEvent.setup();
-    render(
-      <ModalExecutionDetails metadata={{ app_name: "my-app" }} executorRef={null} />,
-    );
-    await user.click(screen.getByRole("button", { name: /more details/i }));
-    expect(screen.getByText("my-app")).toBeInTheDocument();
-  });
-
-  it("renders the function call id even without any metadata", async () => {
-    const user = userEvent.setup();
-    render(<ModalExecutionDetails metadata={null} executorRef="fc-789" />);
-    await user.click(screen.getByRole("button", { name: /more details/i }));
-    expect(screen.getByText("fc-789")).toBeInTheDocument();
-  });
-
-  it("copies an identifier to the clipboard", async () => {
-    const user = userEvent.setup();
-    render(<ModalExecutionDetails metadata={fullMetadata} executorRef="fc-789" />);
-    await user.click(screen.getByRole("button", { name: /more details/i }));
-
-    // Copy the Call ref (last copy button in the disclosure list).
-    const copyButtons = screen.getAllByRole("button", {
-      name: /copy to clipboard/i,
-    });
-    await user.click(copyButtons[copyButtons.length - 1]);
-    expect(await window.navigator.clipboard.readText()).toBe("fc-789");
-  });
-});
-
-// ---- Claim holder ----
-
-const VIEWED_BUILD = "99999999-aaaa-bbbb-cccc-dddddddddddd";
-const HOLDER_BUILD = "11111111-2222-3333-4444-555555555555";
-const HOUR = 3600 * 1000;
+const TASK_ID = "df0c8b03-fab2-5ddd-9743-09fb4a634cf5";
 
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
-    id: "pk-1",
-    task_id: "tid-grind-beans",
-    environment_id: "env-1",
-    task_namespace: "",
-    task_name: "GrindBeans",
-    task_data: {},
+    task_id: TASK_ID,
+    task_namespace: "demo",
+    task_name: "Train",
     version: null,
     output_uri: null,
-    created_at: new Date(Date.now() - 5 * HOUR).toISOString(),
-    status: "running",
-    started_at: new Date(Date.now() - 4 * HOUR).toISOString(),
+    status: "pending",
+    status_at: null,
+    started_at: null,
     completed_at: null,
     error_message: null,
-    artifact_count: 0,
-    latest_status: "running",
-    latest_status_at: new Date(Date.now() - 4 * HOUR).toISOString(),
-    latest_status_build_id: HOLDER_BUILD,
+    claim_expires_at: null,
+    claim_plan_id: null,
+    claim_build_id: null,
+    execution_id: null,
+    instances: [
+      {
+        id: "i-1",
+        deployment_id: "dep-1",
+        settings_hash: "11406eac-39d0-5b1b-9423-cfb4a1454543",
+        instance_hash: "h".repeat(16),
+        body: { __namespace: "demo", __name: "Train", epochs: 3 },
+        expanded_at: "2026-09-24T00:00:02Z",
+        created_at: "2026-09-24T00:00:02Z",
+      },
+    ],
     ...overrides,
   };
 }
 
-describe("TaskDetail claim holder", () => {
-  beforeEach(() => {
-    mockWorkspaceRole = "admin";
-  });
+const member: PlanMember = {
+  task_id: TASK_ID,
+  instance_id: "i-1",
+  instance_hash: "h".repeat(16),
+  task_namespace: "demo",
+  task_name: "Train",
+  status: "pending",
+  is_root: false,
+  admitted_by: "closure",
+  excluded_at: null,
+  excluded_reason: null,
+  attempts: 0,
+  interruptions: 0,
+};
 
-  afterEach(() => {
-    vi.clearAllMocks();
-  });
+beforeEach(() => {
+  vi.mocked(fetchTask).mockResolvedValue(makeTask());
+});
 
-  it("states the holder and how long in one line, not a callout", async () => {
-    const onStatusBuildClick = vi.fn();
-    const user = userEvent.setup();
+describe("TaskDetail", () => {
+  it("shows the plan membership in the header, with the same explanations", async () => {
     render(
       <TaskDetail
-        task={makeTask()}
-        buildId={VIEWED_BUILD}
-        onClose={() => {}}
-        onTaskCancelled={() => {}}
-        onStatusBuildClick={onStatusBuildClick}
+        taskId={TASK_ID}
+        environmentId="env-1"
+        context={{ buildId: "b", planId: "p", planInstanceId: "i-1", member }}
       />,
     );
-
-    // A fact about the task, in the same voice as the rest of the pane —
-    // the amber callout read as an error about a task that is usually
-    // fine.
-    expect(screen.getByText(/which holds its claim/)).toBeInTheDocument();
-    expect(screen.getByText(/4h 00m/)).toBeInTheDocument();
-    expect(screen.getByText(/not the build you are viewing/)).toBeInTheDocument();
-    expect(screen.queryByText("Execution claim held by another build")).toBeNull();
-
-    await user.click(screen.getByRole("button", { name: HOLDER_BUILD.slice(0, 8) }));
-    expect(onStatusBuildClick).toHaveBeenCalledWith(HOLDER_BUILD);
+    await screen.findByRole("heading", { name: /demo\.Train/ });
+    const header = screen.getByText("In this plan:").parentElement!;
+    expect(tooltipOf(within(header).getByText("closure"))).toBe(
+      MEMBERSHIP_HELP.closure,
+    );
   });
 
-  // Everything explanatory moved into the dialog, so the pane carries one
-  // plain button and the reasoning arrives when someone acts on it.
-  it("keeps the explanation in the dialog, not the pane", async () => {
-    const user = userEvent.setup();
+  it("shows no membership outside a build", async () => {
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    await screen.findByRole("heading", { name: /demo\.Train/ });
+    expect(screen.queryByText("In this plan:")).not.toBeInTheDocument();
+  });
+
+  it("links to the task page from an icon next to the header", async () => {
+    const open = vi.fn();
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" onOpenTaskPage={open} />);
+    const heading = await screen.findByRole("heading", { name: /demo\.Train/ });
+    const link = within(heading.parentElement!).getByRole("button", {
+      name: "Open task page",
+    });
+    fireEvent.click(link);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no task-page link on the task page itself", async () => {
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    await screen.findByRole("heading", { name: /demo\.Train/ });
+    expect(screen.queryByRole("button", { name: "Open task page" })).toBeNull();
+  });
+
+  it("opens the full event log over the task's events", async () => {
+    vi.mocked(fetchTaskEvents).mockResolvedValue([
+      {
+        id: "e1",
+        event_type: "task_pending",
+        created_at: "2026-09-24T00:00:00Z",
+        build_id: "01a0c5c3-f18e-7d22-bcaf-add71bd0287c",
+        plan_id: "p",
+        execution_id: null,
+        task_id: TASK_ID,
+        report_applied: true,
+        error_message: null,
+        event_metadata: null,
+      },
+      {
+        id: "e2",
+        event_type: "task_structure_diverged",
+        created_at: "2026-09-24T00:00:01Z",
+        build_id: "01a0c5c3-f18e-7d22-bcaf-add71bd0287c",
+        plan_id: "p",
+        execution_id: "0199aaaa-bbbb",
+        task_id: TASK_ID,
+        report_applied: false,
+        error_message: null,
+        event_metadata: { added: ["x"] },
+      },
+    ]);
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "See full event log" }));
+    expect(vi.mocked(fetchTaskEvents)).toHaveBeenCalledWith(TASK_ID, "env-1");
+    expect(await screen.findByText("Structure Diverged")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+    expect(screen.getByText("not applied")).toBeInTheDocument();
+    expect(screen.getByText("1 field")).toHaveAttribute(
+      "title",
+      JSON.stringify({ added: ["x"] }, null, 2),
+    );
+  });
+
+  it("jumps to an event's build from the event log's Build column", async () => {
+    const BUILD = "01a0c5c3-f18e-7d22-bcaf-add71bd0287c";
+    vi.mocked(fetchTaskEvents).mockResolvedValue([
+      {
+        id: "e1",
+        event_type: "task_started",
+        created_at: "2026-09-24T00:00:00Z",
+        build_id: BUILD,
+        plan_id: "p",
+        execution_id: null,
+        task_id: TASK_ID,
+        report_applied: true,
+        error_message: null,
+        event_metadata: null,
+      },
+    ]);
+    const onOpenBuild = vi.fn();
+    render(
+      <TaskDetail taskId={TASK_ID} environmentId="env-1" onOpenBuild={onOpenBuild} />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "See full event log" }));
+    fireEvent.click(await screen.findByRole("button", { name: "…1bd0287c" }));
+    expect(onOpenBuild).toHaveBeenCalledWith(BUILD);
+  });
+
+  it("lists every execution across builds, ended ones included", async () => {
+    const OTHER = "01a0c5c3-f18e-7d22-bcaf-00000000cccc";
+    const base: Execution = {
+      id: "0199aaaa-0000-7000-8000-000000000001",
+      task_id: TASK_ID,
+      build_id: "b",
+      plan_id: "p",
+      instance_id: "i-1",
+      executor: "modal",
+      executor_ref: "fc-01ABC",
+      executor_metadata: {
+        kind: "modal",
+        workspace: "ws",
+        environment: "main",
+        app_name: "app",
+        function_name: "worker_gpu",
+      },
+      started_at: "2026-09-24T00:00:00Z",
+      claim_released_at: null,
+      claim_outcome: null,
+      ended_at: null,
+      outcome: null,
+      in_current_plan: true,
+    };
+    vi.mocked(fetchTaskExecutions).mockResolvedValue([
+      base,
+      {
+        ...base,
+        id: "0199aaaa-0000-7000-8000-000000000002",
+        build_id: OTHER,
+        executor: null,
+        executor_ref: "fc-02DEF",
+        ended_at: "2026-09-24T00:05:00Z",
+        outcome: "failed",
+        claim_outcome: "failed",
+        claim_released_at: "2026-09-24T00:05:00Z",
+        in_current_plan: false,
+      },
+    ]);
+    const onOpenBuild = vi.fn();
     render(
       <TaskDetail
-        task={makeTask()}
-        buildId={VIEWED_BUILD}
-        onClose={() => {}}
-        onTaskCancelled={() => {}}
+        taskId={TASK_ID}
+        environmentId="env-1"
+        context={{ buildId: "b", planId: "p", planInstanceId: "i-1", member }}
+        onOpenBuild={onOpenBuild}
       />,
     );
+    expect(await screen.findByText("Executions (2)")).toBeInTheDocument();
+    expect(vi.mocked(fetchTaskExecutions)).toHaveBeenCalledWith(TASK_ID, "env-1");
+    expect(screen.getByText("this build")).toBeInTheDocument();
+    expect(screen.getByText("running, holds the claim")).toBeInTheDocument();
+    expect(screen.getByText("ended failed")).toBeInTheDocument();
+    // The executor falls back to the metadata kind, as the CLI reads it.
+    expect(screen.getAllByText("⚡ Modal")).toHaveLength(2);
+    expect(screen.getByText("fc-02DEF")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "…0000cccc" }));
+    expect(onOpenBuild).toHaveBeenCalledWith(OTHER);
+    // The Modal ids table, one click away.
+    fireEvent.click(screen.getAllByRole("button", { name: "More details" })[0]);
+    expect(screen.getByText("Workspace")).toBeInTheDocument();
+  });
 
-    expect(screen.queryByText(/a second one starts beside it/i)).toBeNull();
+  it("lists executions on the task page too, with no build in view", async () => {
+    vi.mocked(fetchTaskExecutions).mockResolvedValue([]);
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    expect(await screen.findByText("Executions (0)")).toBeInTheDocument();
+    expect(screen.getByText(/No execution recorded/)).toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole("button", { name: "Release claim and retry…" }));
-
+  it("says the executions could not be read rather than that there are none", async () => {
+    vi.mocked(fetchTaskExecutions).mockRejectedValueOnce(new Error("503"));
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
     expect(
-      await screen.findByText(/so that build retries it on its next tick/i),
+      await screen.findByText(/Could not read this task.s executions: 503/),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        /if the worker is still running, a second one starts beside it/i,
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it("addresses the release to the holding build, not the one on screen", async () => {
-    vi.mocked(cancelTask).mockResolvedValue("cancelled");
-    const onTaskCancelled = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <TaskDetail
-        task={makeTask()}
-        buildId={VIEWED_BUILD}
-        onClose={() => {}}
-        onTaskCancelled={onTaskCancelled}
-      />,
-    );
-
-    // The plain Cancel button is gone entirely: it addressed the viewed
-    // build, and on a running task it duplicated this action without
-    // saying what it did.
-    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Release claim and retry…" }));
-    await user.click(
-      screen.getAllByRole("button", { name: "Release claim and retry" }).slice(-1)[0],
-    );
-
-    await waitFor(() =>
-      expect(cancelTask).toHaveBeenCalledWith(HOLDER_BUILD, "tid-grind-beans", "env-1"),
-    );
-    expect(onTaskCancelled).toHaveBeenCalled();
-  });
-
-  // The stop list selects on a recorded holder and the stoppable
-  // statuses, so a suspended task never appears in it — pointing someone
-  // there for one is a dead end.
-  it("does not point at Stop for a task the stop list cannot select", async () => {
-    render(
-      <TaskDetail
-        task={makeTask({ status: "suspended", latest_status: "suspended" })}
-        buildId={VIEWED_BUILD}
-        onClose={() => {}}
-        onTaskCancelled={() => {}}
-      />,
-    );
-
-    expect(
-      screen.queryByText(/To stop what is running, use Build controls/),
-    ).toBeNull();
-    // The claim action is still offered: a suspended task holds one.
-    expect(
-      screen.getByRole("button", { name: `${CLAIM_ACTION_LABELS.release}…` }),
-    ).toBeInTheDocument();
-    // And it is the *only* one. SUSPENDED is the one status for which
-    // `availableClaimActions` returns two, so it is the only place a
-    // second button could come back without anything else changing.
-    expect(
-      screen.queryByRole("button", { name: CLAIM_ACTION_LABELS.retry }),
-    ).toBeNull();
-  });
-
-  it("points at the build-level stop where a task-level one would be", async () => {
-    render(
-      <TaskDetail
-        task={makeTask()}
-        buildId={VIEWED_BUILD}
-        onClose={() => {}}
-        onTaskCancelled={() => {}}
-      />,
-    );
-
-    expect(
-      screen.getByText(/To stop what is running, use Build controls/),
-    ).toBeInTheDocument();
-  });
-
-  it("hides the action from non-admin members but keeps the status line", async () => {
-    mockWorkspaceRole = "member";
-    render(
-      <TaskDetail
-        task={makeTask()}
-        buildId={VIEWED_BUILD}
-        onClose={() => {}}
-        onTaskCancelled={() => {}}
-      />,
-    );
-
-    expect(screen.getByText(/which holds its claim/)).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Release claim and retry…" }),
-    ).toBeNull();
-    expect(screen.getByText(/requires the workspace admin role/)).toBeInTheDocument();
-  });
-
-  // The task explorer renders this pane with no build context, where
-  // "not cross-build" is true by construction — so an admin gate written
-  // as `!crossBuild` would fall open exactly where the user has least
-  // context about whose work they are releasing.
-  // A legacy row: RUNNING with no recorded holder. Before the fallback,
-  // this had no action at all — while `BuildView` counted it as a held
-  // claim and withheld Mark completed, so the UI refused to finish the
-  // build because of a claim it offered no way to release.
-  it("addresses an unrecorded holder to the build in view", async () => {
-    vi.mocked(cancelTask).mockResolvedValue("cancelled");
-    const user = userEvent.setup();
-    const orphan = makeTask();
-    delete (orphan as Partial<Task>).latest_status_build_id;
-    delete (orphan as Partial<Task>).status_build_id;
-
-    render(
-      <TaskDetail
-        task={orphan}
-        buildId={VIEWED_BUILD}
-        onClose={() => {}}
-        onTaskCancelled={() => {}}
-      />,
-    );
-
-    // And it does not invent the one fact that is missing.
-    expect(
-      screen.getByText(/The build holding its claim was not recorded/),
-    ).toBeInTheDocument();
-
-    await user.click(
-      screen.getByRole("button", { name: `${CLAIM_ACTION_LABELS.release}…` }),
-    );
-    await user.click(
-      screen.getAllByRole("button", { name: CLAIM_ACTION_LABELS.release }).slice(-1)[0],
-    );
-    await waitFor(() =>
-      expect(cancelTask).toHaveBeenCalledWith(VIEWED_BUILD, "tid-grind-beans", "env-1"),
-    );
-  });
-
-  it("offers nothing for an unrecorded holder with no build in view", async () => {
-    const orphan = makeTask();
-    delete (orphan as Partial<Task>).latest_status_build_id;
-    delete (orphan as Partial<Task>).status_build_id;
-
-    render(<TaskDetail task={orphan} onClose={() => {}} onTaskCancelled={() => {}} />);
-
-    // Correct rather than unfortunate: there is no build to address.
-    expect(
-      screen.queryByRole("button", { name: `${CLAIM_ACTION_LABELS.release}…` }),
-    ).toBeNull();
-  });
-
-  it("still requires admin when there is no build in view", async () => {
-    mockWorkspaceRole = "member";
-    render(
-      <TaskDetail task={makeTask()} onClose={() => {}} onTaskCancelled={() => {}} />,
-    );
-
-    expect(
-      screen.queryByRole("button", { name: "Release claim and retry…" }),
-    ).toBeNull();
-    expect(screen.getByText(/requires the workspace admin role/)).toBeInTheDocument();
-  });
-
-  it("says nothing about claims for a task that holds none", async () => {
-    render(
-      <TaskDetail
-        task={makeTask({ status: "completed", latest_status: "completed" })}
-        buildId={VIEWED_BUILD}
-        onClose={() => {}}
-        onTaskCancelled={() => {}}
-      />,
-    );
-    expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
-    expect(screen.queryByText(/execution claim/i)).not.toBeInTheDocument();
-  });
-
-  it("reports the holder without cross-build wording when no build is in view", async () => {
-    // The task explorer renders this panel with no build context.
-    render(
-      <TaskDetail task={makeTask()} onClose={() => {}} onTaskCancelled={() => {}} />,
-    );
-    expect(await screen.findByText(/which holds its claim/)).toBeInTheDocument();
-    expect(screen.queryByText(/not the build you are viewing/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No execution recorded/)).not.toBeInTheDocument();
+    vi.mocked(fetchTaskExecutions).mockResolvedValue([]);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText(/No execution recorded/)).toBeInTheDocument();
+    expect(screen.queryByText(/Could not read/)).not.toBeInTheDocument();
   });
 });

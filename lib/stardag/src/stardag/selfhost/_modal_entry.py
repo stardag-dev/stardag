@@ -30,13 +30,22 @@ API_REMOTE_DIR = "/opt/stardag/api"
 UI_DIST_REMOTE_DIR = "/opt/stardag/ui"
 
 
-def migrate() -> str:
-    """Run ``alembic upgrade head`` inside the server container."""
+def migrate(accept_data_loss: bool = False) -> str:
+    """Run ``alembic upgrade head`` inside the server container.
+
+    ``accept_data_loss`` sets ``STARDAG_ACCEPT_V2_DATA_LOSS=1`` for this run
+    only: the registry v2 migration refuses to drop v1 rows without it.
+    """
+    import os
     import subprocess
 
+    env = dict(os.environ)
+    if accept_data_loss:
+        env["STARDAG_ACCEPT_V2_DATA_LOSS"] = "1"
     result = subprocess.run(
         ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
         cwd=API_REMOTE_DIR,
+        env=env,
         capture_output=True,
         text=True,
     )

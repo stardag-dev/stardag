@@ -340,377 +340,390 @@ Target roots are managed under `stardag environment target-roots`. Changes are a
 
 See `stardag environment target-roots --help` for full options (e.g. `--env` to target a specific environment).
 
-## Build & Task Commands
+## Build Commands
 
-`stardag builds` and `stardag tasks` answer "what does the scheduler actually
-think the state is?" — listing builds, showing a build's scheduling frontier
-(including upstreams held by _other_ builds), and cleaning up builds that were
-abandoned by a process that died.
+`stardag build` starts (or resumes) a build; `stardag builds` inspects and
+ends them; `stardag executions`, `stardag plans`, `stardag deployments`
+and `stardag tasks` inspect and act on the entities underneath one.
+
+### Starting a build: `stardag build`
 
 === "Active venv"
 
     ```sh
-    stardag builds list [--status running] [--reactive-app NAME] [--older-than 24h]
-    stardag builds show <build-id>
-    stardag builds frontier <build-id>
-    stardag builds ticks <build-id> [--limit N]
-    stardag builds stop <build-id> [--worker NAME] [--executor modal]
-        [--namespace PREFIX] [--older-than 30m] [--task-id ID ...]
-        [--dry-run] [--yes] [--json]
-    stardag builds cancel <build-id> [--yes]
-    stardag builds cleanup [--older-than 24h] [--build-id ID ...] [--apply] [--yes]
-
-    stardag tasks list [--status running] [--older-than 1h]
-    stardag tasks cancel <build-id> <task-id> [--yes]
-    stardag tasks retry <build-id> <task-id> [--yes]
+    stardag build <ref> [<ref> ...] [--param KEY=VALUE ...]
+        [--settings KEY=VALUE ...] [--app module:attr] [--reactive]
+        [--resume <build-id>] [--description TEXT] [--dry-run] [--json]
     ```
 
 === "uv run ..."
 
     ```sh
-    uv run stardag builds list [--status running] [--older-than 24h]
-    uv run stardag builds show <build-id>
-    uv run stardag builds frontier <build-id>
-    uv run stardag builds ticks <build-id> [--limit N]
-    uv run stardag builds stop <build-id> [--worker NAME] [--executor modal]
-        [--namespace PREFIX] [--older-than 30m] [--task-id ID ...]
-        [--dry-run] [--yes] [--json]
-    uv run stardag builds cancel <build-id> [--yes]
-    uv run stardag builds cleanup [--older-than 24h] [--apply] [--yes]
-
-    uv run stardag tasks list [--status running] [--older-than 1h]
-    uv run stardag tasks cancel <build-id> <task-id> [--yes]
-    uv run stardag tasks retry <build-id> <task-id> [--yes]
+    uv run stardag build <ref> [<ref> ...] [--param KEY=VALUE ...]
+        [--settings KEY=VALUE ...] [--app module:attr] [--reactive]
+        [--resume <build-id>] [--description TEXT] [--dry-run] [--json]
     ```
 
-All commands accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
-profile / environment other than the active one.
+Each `<ref>` is `module:attr` or `path/file.py:attr`, naming — in that
+module — a task object, a list of task objects, a zero-argument callable
+returning either, or a task class (constructed from `--param KEY=VALUE`,
+each value parsed as JSON when it parses, else taken as a string).
 
-- `builds list` — builds most recently active first, with each build's _last
-  activity_ and how long it has been idle.
-- `builds show` — one build: status, roots, reactive metadata, liveness.
-- `builds frontier` — what a reactive scheduler tick sees: which tasks it would
-  act on, which executions it would probe, and which upstreams are holding the
-  build back (see [Reading the frontier](#reading-the-frontier)).
+- Without `--app`: runs `sd.build` in this process, against the configured
+  registry (or none), planning under this process's local deployment.
+- With `--app module:attr` (naming a `StardagApp`, as for
+  `stardag modal deploy`): calls `build_trigger` on it instead — mints (or
+  resumes) the build here and spawns the deployed function that drives it.
+  `--reactive` needs `--app`: it schedules with short-lived ticks rather
+  than the resident `build` function.
+- `--settings KEY=VALUE` (repeatable) sets a build-wide environment
+  variable for every process of the build — see
+  [Settings](../how-to/integrate-modal.md#settings-per-build-configuration-without-touching-the-task-id).
+  `STARDAG_*` / `MODAL_*` keys are refused. `--resume <build-id>` with no
+  `--settings` reuses the build's stored settings.
+- `--dry-run` discovers the DAG locally and prints what a build would
+  plan — which tasks, whether each is already complete, how many upstream
+  edges each has — without creating a build or writing to the registry.
+  With `--resume` and no `--settings` it first reads (only reads) the
+  resumed build's stored settings, so the local walk matches what the
+  resumed build would actually see.
+
+### Inspecting and ending builds: `stardag builds`
+
+=== "Active venv"
+
+    ```sh
+    stardag builds list [--status S] [--app NAME | --reactive-app NAME]
+        [--limit N] [--cursor C] [--json]
+    stardag builds show <build-id> [--json]
+    stardag builds frontier <build-id> [--json]
+    stardag builds ticks <build-id> [--limit N] [--json]
+    stardag builds stop <build-id> [--not-in-current-plan]
+        [--executor NAME] [--worker NAME] [--namespace NS] [--older-than 30m]
+        [--task-id ID ...] [--no-cancel] [--mark-lost] [--dry-run]
+        [--yes] [--json]
+    stardag builds cancel <build-id> [--yes] [--json]
+    stardag builds complete <build-id> [--force] [--json]
+    stardag builds fail <build-id> [--message TEXT] [--yes] [--json]
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run stardag builds list [--status S] [--app NAME | --reactive-app NAME]
+        [--limit N] [--cursor C] [--json]
+    uv run stardag builds show <build-id> [--json]
+    uv run stardag builds frontier <build-id> [--json]
+    uv run stardag builds ticks <build-id> [--limit N] [--json]
+    uv run stardag builds stop <build-id> [--not-in-current-plan]
+        [--executor NAME] [--worker NAME] [--namespace NS] [--older-than 30m]
+        [--task-id ID ...] [--no-cancel] [--mark-lost] [--dry-run]
+        [--yes] [--json]
+    uv run stardag builds cancel <build-id> [--yes] [--json]
+    uv run stardag builds complete <build-id> [--force] [--json]
+    uv run stardag builds fail <build-id> [--message TEXT] [--yes] [--json]
+    ```
+
+All of these accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
+profile / environment other than the active one. `stardag build` above is
+the exception: it takes only `-p/--stardag-profile` (no `--stardag-env`
+option).
+
+- `builds list` — builds, most recently active first, a page at a time.
+  The table shows each build's `Last active` time, which is the order.
+  `--status` filters by status; `--app` (alias `--reactive-app`) keeps the
+  builds a given app schedules reactively. The footer says how many of the
+  `total` matches are shown and prints the cursor of the next page: pass
+  it back as `--cursor` (`--json` carries `total` and `next_cursor`).
+- `builds show` — one build: status, the failure reason of a `FAILED`
+  build, last activity, roots, reactive metadata, and its active plan's
+  deployment, settings and outstanding counts.
+- `builds frontier` — the build's active plan as a scheduler tick sees it,
+  after the registry's closure step: members to expand (discovery jobs),
+  members to claim (runnable), members under a live claim (running) — see
+  [Reading the frontier](#reading-the-frontier).
 - `builds ticks` — the scheduler's own account of its recent ticks, crashed
   ones included. Reactive builds are driven by many short-lived ticks, each in
   its own container; this is where their reasoning is kept.
-- `builds stop` — end a build that is still running something: stop its live
-  executions, then cancel it (see
-  [Stopping a build that is still running](#stopping-a-build-that-is-still-running)).
-- `builds cancel` — cancel one build: its claims are released, and nothing
-  is stopped. For a build you believe is already dead; use `builds stop`
-  for one whose containers are still running.
-- `builds cleanup` — find and cancel abandoned builds (see
-  [Cleaning up abandoned builds](#cleaning-up-abandoned-builds)).
-- `tasks list` — tasks by their environment-global status. `--status running`
-  is the claim-holder question.
-- `tasks cancel` / `tasks retry` — release a claim, or reset a
-  failed/cancelled/skipped/suspended task to `PENDING`.
-
-### Durations
-
-`--older-than` takes one number and one optional unit — `s`, `m`, `h`, `d` or
-`w`; a bare number is seconds. `24h`, `90m`, `3d`, `2w`. Compound forms
-(`1h30m`) and fractions (`1.5h`) are not accepted, and the minimum for a build
-staleness threshold is 60 seconds.
-
-The filter is applied **server-side** — by the same predicate the reaper and
-`builds cleanup` use, so a build that `builds list --older-than 24h` shows is
-a build `builds cleanup --older-than 24h` would act on. Paging and totals stay
-exact, and with the filter set the server orders stalest-first.
-
-On `builds list` the filter **implies** `--status running`, whether or not
-you pass it: idleness only means anything for a build that has not
-finished. A completed build has no activity by definition and always
-will, so including terminal builds would fill a staleness listing with
-history — sorted stalest-first, which is to say the oldest completed
-builds above the running ones you are looking for. Pairing `--older-than`
-with any other status is therefore a contradiction rather than a narrower
-query, and is rejected.
-
-If the registry is older than the CLI it will silently ignore the filter — the
-command detects that (a returned build newer than the cutoff, or one with no
-activity timestamp at all) and prints a warning on stderr saying the results
-are unfiltered. It does **not** quietly filter the page itself: the server
-already paginated and counted without the filter, so a local cut would drop
-rows from a page chosen wrong and under-report exactly the oldest builds.
+- `builds stop` — end the build's containers, not just its claims (see
+  [Stopping a build's executions](#stopping-a-builds-executions) below).
+- `builds cancel` — release the claims held by every one of the build's
+  plans and stop there. **Nothing is stopped**: the released tasks go to
+  `CANCELLED` (actionable, so any other build holding them runs them), and
+  a worker still running exits at its next cooperative checkpoint, or runs
+  to completion if its `run()` has none — its report is recorded as late.
+- `builds complete` — mark a build `COMPLETED`; refused (`plan_incomplete`)
+  unless the active plan is sealed and every non-excluded member is
+  `COMPLETED`, unless `--force` (which never overrides a missing seal or
+  an excluded root). Releases any claim the build still holds.
+- `builds fail` — mark a build `FAILED`, recording `--message`. Releases
+  the build's claims, like `cancel`; stops nothing.
 
 ### JSON output
 
-`--json` is available on the read-only commands — `builds list`,
-`builds show`, `builds frontier`, `builds ticks`, `tasks list` and
-`builds cleanup`, whose default dry run writes nothing — and on
-`builds stop`, which is **not** read-only: it emits its selection and then
-stops and cancels. In that mode **stdout carries exactly one JSON document
-and nothing else**; every hint, warning and prompt goes to stderr, so
-piping is safe:
+Every command from `stardag build` through `stardag tasks` and
+`stardag concurrency-limits` takes `--json`. It writes exactly one JSON
+document to stdout (after acting, for a write); every hint, warning and
+prompt goes to stderr, so piping is safe:
 
 ```sh
-stardag builds list --status running --json | jq -r '.builds[] | .id'
+stardag builds frontier <build-id> --json | jq '.runnable | length'
 ```
 
-The document is the SDK's model of the API payload: the same field names and
-nesting as the REST response, minus any field this SDK version does not model.
-`builds cleanup --json --apply` requires `--yes`, since it cannot prompt
-without contaminating the output.
-
-`builds stop --json` writes its document **after** it has acted, not
-before, so the document is a statement about what happened rather than
-about what was intended. On a real run it carries the selection
-(`selected`, `excluded_by_filter`) plus `stop_results` — one entry per
-call, with `stopped` and any `error` — `stopped_count` and
-`build_cancelled`. With `--dry-run` it carries the selection and
-`dry_run: true`, and nothing has happened.
-
-A run that aborts partway — `modal` not importable, the cancel refused —
-writes **no document at all** and exits non-zero. So stdout being empty is
-the honest signal that nothing completed, and `stop_results` is where a
-partial stop shows up: the build is still cancelled when an individual
-call could not be reached, and that entry says so. Check the exit code
-first either way; a document is not a claim that every call died.
+The document is the SDK's model of the API payload — the same field names
+and nesting as the REST response, minus any field this SDK version does
+not model — plus, on the commands that combine reads (`builds show`,
+`builds frontier`, `plans show`, `tasks show`), the extra keys they
+compute. A write that would ask for confirmation refuses to prompt in
+`--json` mode: pass `--yes` with it. The commands outside the registry
+groups (`auth`, `config`, `environment`, `modal deploy`, `self-host`) do
+not take `--json`; `stardag environment target-roots set --json` is an
+input flag (the roots as a JSON string), not this output mode.
 
 ### Reading the frontier
 
-`builds frontier` is the command for a build that is not progressing. Besides
-the actionable/running partitions, it renders the build's **external
-blockers**: tasks of this build held back by an upstream whose current status
-_another_ build produced.
+`builds frontier` is the command for a build that is not progressing. It
+shows the active plan's `deployment`, `settings` hash, whether it is
+`sealed`, whether the registry considers it `plan_complete`, and three
+partitions of its members:
 
-That case is easy to hit and hard to see any other way. Task rows and their
-dependency edges are per **environment**, not per build, so an upstream that
-some other build left `RUNNING` gates this build's tasks while contributing
-nothing to the counts this build can see. The command names the blocking task
-(namespace and name, not just an id), its status, how long it has been in it,
-and the build that owns it.
+- **Discovery jobs** — members whose instance has never been expanded
+  (`requires()` not yet evaluated under this scope). A tick rehydrates
+  each one and registers what it finds.
+- **Runnable** — members whose upstreams are all `COMPLETED` and whose
+  status is actionable (`PENDING`, `SUSPENDED`, `INTERRUPTED`,
+  `CANCELLED`, `SKIPPED`, or `RUNNING` with a lapsed claim).
+- **Running** — members currently `RUNNING` under a live claim, whoever
+  holds it. Task state is global to the environment, so this can be a
+  claim another build took out on a shared task; this build's next tick
+  waits for it to move rather than treating it as a problem (see [Build &
+  Execution](../concepts/build-execution.md#shared-tasks-across-builds)).
 
-A build's plan includes every dependency that was not complete when it was
-discovered, so the blocker is usually this build's own task — the **In this
-build** column says which. Either way, what happens next is a function of the
-blocker's **status** rather than of which build produced it:
+Runnable and running members carry their `Attempts` and `Interruptions`
+in this build, counted by the registry from the execution ledger over all
+of the build's plans. A member whose interruptions reach
+`TickConfig.max_interruptions` (default 20) is failed by the next tick
+rather than restarted, and a member whose claim lapsed with its attempts at
+`TickConfig.max_executions` (default 20) is failed rather than taken over.
 
-- `running` — another build holds the execution claim. It resolves when that
-  build finishes the task or the claim expires.
-- `cancelled` — a revocation of permission to run, not a verdict on the task.
-  This build's next tick resets it and runs it itself, bounded by the per-task
-  attempt budget: a shared task another build's fail-fast cancelled is still
-  this build's to run.
-- `suspended` — the owning build is working through the dynamic dependencies
-  the task yielded. It resolves as that build progresses them.
-- `failed`, `skipped` — results. A tick leaves them to this build's
-  `fail_mode` rather than overriding the policy you chose, so **re-trigger the
-  build** to reset them and run them here.
+Above the lists, the summary also shows:
 
-One case needs a hand: a blocker still `running` after its execution claim has
-expired. No build is claiming it, and a `running` task is not schedulable, so
-release the claim first — either from the blocking build's scheduling panel in
-the UI ("Release claim" on the blocker) or with:
+- **Needs tick** — the build's wake-up flag (`GET /builds/{id}/notify`,
+  read without clearing it): something changed that a tick has not acted
+  on yet. A reactive build that says `yes` here for long, with nothing
+  running, has no tick coming; the watchdog sweep is what picks it up.
+- **Members** — the plan's non-excluded members by their task's status,
+  with the excluded ones counted apart (`GET /plans/{id}`).
+- **Roots** — how many of the plan's roots are `COMPLETED`, out of all of
+  them.
 
-```bash
-stardag tasks cancel <owned-by-build> <blocking-task-id>
-```
+An empty frontier with the build still `running` and no discovery jobs
+either means the plan is not yet sealed, or every member is settled —
+`plan_complete` distinguishes the two.
 
-Use the build from the **Owned by build** column, not the stalled build. The id
-you pass becomes the task's new status owner, so cancelling it under the
-stalled build makes that build own the `cancelled` status — at which point the
-task drops out of its external-blocker list and its next tick no longer treats
-it as something to reset. The UI action fills the owning build in for you.
+### Stopping a build's executions
 
-One important caveat the output states explicitly: the registry computes the
-blocker list **only for a build with nothing actionable and nothing running**.
-An empty list therefore means "not externally blocked _or_ not stalled" — for
-a build that is merely progressing, `builds frontier` says the list was not
-evaluated rather than claiming there are no blockers.
-
-### Cleaning up abandoned builds
-
-A build's status is derived from its build-level events, so a build whose
-orchestrator died without emitting a terminal event stays `RUNNING` forever —
-interrupted local runs, crashed CI jobs, failed triggers. Each one keeps
-holding whatever execution claims and concurrency-limit slots its tasks had at
-the moment it vanished, and a claim held by a dead build denies that task to
-every future build in the environment.
-
-The end-to-end workflow:
+`builds cancel` releases claims and reaches no container — a worker still
+running notices at its own next checkpoint, or runs to completion.
+`stardag builds stop <build-id>` is the command for ending the containers
+themselves: it reads `GET /builds/{id}/executions` (the ledger's rows
+with no end reported — exact regardless of what has happened to their
+claims), cancels each one's Modal call, reports every one it stopped, and
+only then cancels the build.
 
 ```sh
-# 1. Find them: running builds with no activity for a day.
-stardag builds list --status running --older-than 24h
-
-# 2. Inspect one before acting on the batch.
-stardag builds show <build-id>
-
-# 3. See what it is holding — and, if it is stalled, what is holding it.
-stardag builds frontier <build-id>
-
-# 4. Or ask the question claim-first: who holds a claim, and since when?
-stardag tasks list --status running --older-than 24h
-
-# 5. Dry run (the default): exactly what would be cancelled, and why
-#    anything named was skipped. Writes nothing.
-stardag builds cleanup --older-than 24h
-
-# 6. Apply (prompts for confirmation).
-stardag builds cleanup --older-than 24h --apply
-
-# ...or unattended, e.g. from a timer.
-stardag builds cleanup --older-than 24h --apply --yes
+stardag builds stop <build-id> --dry-run   # list what would be stopped; write nothing
+stardag builds stop <build-id>             # stop, report, then cancel the build
 ```
 
-Notes on step 5/6:
+Filters compose and narrow the selection: `--executor modal`, `--worker
+NAME`, `--namespace NS` (tasks whose namespace starts with `NS`; the
+ledger rows name the task, so each listed task's namespace is read from
+`GET /tasks/{id}`), `--older-than 2h` (executions started at least that
+long ago — see [Durations](#durations)), `--task-id <id>` (repeatable).
+Anything a filter excludes keeps running once the build is cancelled — it
+simply no longer holds a claim.
 
-- **`--apply` is the only thing that makes `cleanup` act.** `-y/--yes` only
-  skips the confirmation prompt — `cleanup -y` on its own is still a dry run.
-  On a command that reports by default, `-y` alone must not become a cascade
-  of cancellations.
-- **The selection is the server's, both times.** The dry run and the real run
-  send the same filter to the same endpoint, so what you review is what you
-  get.
-- **Idleness is measured on activity**, not on the column the list is ordered
-  by — task events deliberately do not touch that column, so filtering on it
-  would call a build that has been running tasks for three days "idle".
-- **Cascade is on by default** for `cleanup`: releasing leaked claims is the
-  point of a cleanup pass, and these builds are dead by selection — nothing is
-  running to be stopped first. (A single live build is the opposite case, and
-  is what `builds stop` is for.)
-- **Reactive builds are excluded** unless you pass `--include-reactive` or
-  `--reactive-app NAME`. A reactive build is quiet between ticks by design, and
-  already has a watchdog for the case where it wedges.
-- Only `RUNNING` builds are ever eligible, which makes the operation
-  idempotent — safe to re-run, and safe to put on a timer.
-- If the output says the result was truncated, more builds matched than
-  `--limit` allowed; run it again.
+- `--no-cancel` stops and reports the selected executions but leaves the
+  build running on its active plan.
+- `--not-in-current-plan` selects only **orphans** — executions started
+  under a plan that is no longer the build's active one (after a rollover
+  or a re-trigger under new settings) — and **implies `--no-cancel`**: the
+  build keeps running on its current plan; only the stray executions of
+  its old one are stopped.
+- `--mark-lost` additionally ends any selected execution that has no call
+  id to cancel, with outcome `lost`, after its own confirmation and
+  warning. If it still holds the task's claim, the claim is released as
+  `cancelled` and the task set CANCELLED. No report from a marked-lost
+  execution is ever applied afterwards — if it is in fact still running,
+  its end is recorded but discarded, and its result is not applied.
+- Only Modal executions can be cancelled from here; one running in a
+  driver's own process, or whose spawn has not yet reported a call id, is
+  listed with the reason and left alone (re-run to catch the latter once
+  its container is up).
 
-`stardag builds cleanup` cannot stop anything that is still executing: like
-every other status write it rewrites the registry's view, and a worker whose
-task is cancelled keeps running until it notices (a completion that lands
-afterwards wins). Clean up builds you believe are dead; for one that is still
-working, see below.
+`stardag executions list --build <build-id>` shows the same unended-
+executions list on its own, without acting on it.
 
-### Stopping a build that is still running
+### Durations
 
-**Stop first, cancel second.** That order is the entire point of
-`stardag builds stop`, and doing it the other way round is the mistake the
-command exists to prevent.
+`--older-than` takes one number and one optional unit — `s`, `m`, `h`, `d`
+or `w`; a bare number is seconds: `90s`, `90m`, `24h`, `3d`, `2w`. Case is
+ignored. Compound forms (`1h30m`), fractions (`1.5h`), months and years are
+not accepted, and neither is zero (a zero threshold would match
+everything, including work that just started).
 
-Cancelling a build releases the execution claims its tasks hold. That is what
-lets the next build take those tasks over — and it can do so within seconds,
-long before anything has stopped the containers the cancelled build started.
-From that instant the task row names _somebody else's_ execution, so every
-query about the present gives the wrong answer: acting on it either misses the
-container you meant to stop or kills one you do not own.
+On `builds stop` the filter is applied by the CLI to the listed
+executions' `started_at`: an execution whose start time is unknown never
+matches.
 
-While the claims are still held, none of that is possible. The task row names
-this build, which is all the command needs to know the execution is yours. What
-it says about the execution itself — the executor, the call id — is best-effort
-and can be absent; that decides whether a row can be stopped, never whether it
-is listed:
+## Plan, Deployment, Execution and Task Commands
 
-```sh
-# 1. What is this build actually running? Nothing is stopped or cancelled.
-stardag builds stop <build-id> --dry-run
+=== "Active venv"
 
-# 2. Stop those calls, then cancel the build (in that order).
-stardag builds stop <build-id>
-```
+    ```sh
+    stardag plans show <plan-id> [--json]
+    stardag plans list --build <build-id> [--json]
+    stardag deployments list [--app NAME] [--kind modal|local]
+        [--current] [--limit N] [--json]
+    stardag deployments show <deployment-id> [--json]
+    stardag executions list (--build <build-id> [--not-in-current-plan] |
+        --task <task-id>) [--include-ended] [--json]
+    stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
+    stardag tasks show <task-id> [--include-ended] [--events N] [--json]
+    stardag tasks check <task-id> --module MODULE [--json]
+    stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
+    stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
+    stardag tasks exclude <plan-id> <task-id> --reason TEXT [--yes] [--json]
+    ```
 
-It prints one row per execution — task id, `namespace.Name`, executor, call
-ref, worker and how long it has been running — then asks for confirmation,
-cancels each Modal call, reports each one, and only then cancels the build.
+=== "uv run ..."
 
-**Filters** narrow what gets stopped. They compose, and the command it runs is
-exactly what the list showed:
+    ```sh
+    uv run stardag plans show <plan-id> [--json]
+    uv run stardag plans list --build <build-id> [--json]
+    uv run stardag deployments list [--app NAME] [--kind modal|local]
+        [--current] [--limit N] [--json]
+    uv run stardag deployments show <deployment-id> [--json]
+    uv run stardag executions list (--build <build-id> [--not-in-current-plan] |
+        --task <task-id>) [--include-ended] [--json]
+    uv run stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
+    uv run stardag tasks show <task-id> [--include-ended] [--events N] [--json]
+    uv run stardag tasks check <task-id> --module MODULE [--json]
+    uv run stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
+    uv run stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
+    uv run stardag tasks exclude <plan-id> <task-id> --reason TEXT [--yes] [--json]
+    ```
 
-```sh
-stardag builds stop <build-id> --worker gpu          # one worker's calls
-stardag builds stop <build-id> --namespace acme      # a namespace prefix
-stardag builds stop <build-id> --older-than 2h       # long-running ones
-stardag builds stop <build-id> --task-id <id> --task-id <id>
-```
-
-Anything a filter excludes **keeps running** once the build is cancelled — it
-simply no longer holds a claim, so its result still lands if it finishes
-(`COMPLETED` is sticky). That is usually what you want when you are stopping
-one runaway worker; it is not what you want if you meant to stop everything.
-The confirmation prompt says how many are being left.
-
-Things worth knowing:
-
-- **What the list is exact about is ownership, not stoppability.** Every
-  execution it names is this build's and none has been taken over; but a task
-  claimed moments ago has no call id on its row until its spawn reports one, so
-  it is listed and marked not stoppable rather than dropped. Re-run the command
-  to catch those once their containers are up.
-- **A row with no executor at all is ambiguous, and says so.** Both a task the
-  build ran in its own process and a claim whose executor details were not
-  recorded look the same from the registry. Neither can be stopped right now,
-  but only one of them ever will be — re-run, and anything still listed without
-  a call id is running in the build's own process.
-- **Only Modal executions can be stopped from here.** Anything else is listed —
-  so nothing is invisible — and marked "not stoppable here". Stardag reaches
-  Modal and nothing else, and the registry reaches no backend at all.
-- **The Modal profile matters.** The call ids are resolved with whatever
-  credentials the active Modal profile provides, so a call started in another
-  workspace is simply not found. The command prints the workspaces the listed
-  executions were started in; check yours matches.
-- **Hard kills are the Modal dashboard's job.** A cancelled function call that
-  ignores the cancellation, or a container that has stopped responding, is
-  outside what stardag can reach. Each call in the registry UI's
-  **Stop running tasks** panel links straight to its Modal dashboard page.
-- **The registry UI shows the same list** on the build page, with the same
-  filters and the exact command to copy — whatever the filters are set to is
-  what the command carries, and ticking individual rows turns into
-  `--task-id`. It never stops anything itself: the server cannot reach Modal,
-  and deliberately never will.
-- `--dry-run` writes nothing at all — not the stop, not the cancel.
-- An execution that ends between the list and the stop is not an error. The
-  cancel is idempotent, and an already-finished call reports as stopped.
-
-For a build you believe is **already dead** — an orchestrator that crashed, a
-CI job that was killed — there is nothing to stop, and `stardag builds cancel`
-(or `builds cleanup`, for a batch) is the command.
+- `plans show` — any plan, active or superseded (`GET /plans/{id}`): its
+  build and generation, lifecycle (created, activated, sealed,
+  superseded), scope (the deployment, resolved, and the settings), member
+  counts by status with the excluded ones apart, and its roots; for the
+  build's active plan, also whether it is complete and what is
+  outstanding.
+- `plans list --build <build-id>` — every plan of a build, newest
+  generation first, with lifecycle and counts (`GET /builds/{id}/plans`):
+  the history of its rollovers and re-triggers.
+- `deployments list` — every recorded deployment, newest first
+  (`--app`, `--kind`, `--current` filter; `--current` keeps one row per
+  app). A `modal` row with no `Activated` timestamp is a deploy whose
+  record was created but whose activation never landed — re-run
+  `stardag modal deploy`. Shares its listing with `stardag modal
+deployments`.
+- `deployments show <deployment-id>` — one deployment: kind, app,
+  generation, code id, image and Modal app ids, deployed and activated
+  times, and whether it is its app's current one.
+- `executions list` — the execution ledger: a build's executions
+  (`--build`) or one task's across builds, newest first (`--task`). By
+  default only those with no end reported — what `builds stop` would act
+  on; `--include-ended` lists every execution granted, with its outcome.
+  `--not-in-current-plan` (with `--build`) keeps the orphans.
+- `tasks list` — the environment's tasks, most recent status change
+  first, a page at a time (`--status` filters; pass the printed cursor
+  back as `--cursor`). `--status running` answers "who holds what": the
+  `Claim (build)` column names the build holding each claim. v1's
+  `--older-than`, `--name` and `--namespace` filters are not offered: the
+  registry's task list filters by status only.
+- `tasks show` — one task's global status and the claim's holder (plan and
+  build, live or lapsed), every instance the registry holds of it (one per
+  scope it was constructed under, newest first), its executions across
+  builds (`--include-ended` for all of them, not only the unended), its
+  last events (`--events N`, default 10, from the first 500 the registry
+  serves), and its artifacts. Every `TASK_STRUCTURE_DIVERGED` event — an
+  expanded instance that declared new static edges within its scope, which
+  the registry appends and records rather than refuses — is called out
+  above the event table, with its detail.
+- `tasks check <task-id> --module <import path>` — rehydrate the task's
+  newest instance in this process (importing `--module`, repeatable, to
+  resolve its class) and run `complete()` locally, printing the
+  observation next to the registry's recorded status. Writes nothing: the
+  registry only follows the world when a build's own discovery observes a
+  target (see
+  [Invalidation](../concepts/build-execution.md#invalidation-the-registry-follows-the-world)).
+  The command accepts `--report`, but only to refuse it: it exits 1 with
+  a message saying to trigger a build instead, because there is no route
+  for a bare observation outside a build's discovery.
+- `tasks retry` — reset a failed (or otherwise ended) task to `PENDING`
+  under the build's active plan, so its next tick or driver runs it
+  again. Refused on `COMPLETED` or under a live claim.
+- `tasks cancel` — release the claim the build holds on one task
+  (`CANCELLED`, actionable elsewhere). Nothing is stopped; `builds stop
+--task-id` stops the execution itself.
+- For both `retry` and `cancel`, `--build` defaults to the build holding
+  the task's claim (`claim_build_id` from `GET /tasks/{id}`) and remains
+  an override; a task that holds no claim (a `FAILED` one, typically)
+  needs `--build`. Both ask for confirmation, naming the task and the
+  build, unless `--yes`.
+- `tasks exclude <plan-id> <task-id>` — give up on one task within one
+  plan: excludes it and its downstream closure (short of `COMPLETED`
+  members) from that plan's scheduling and completion check, recording
+  `--reason`. The task's global status is untouched, so other builds
+  holding it are unaffected; an excluded root fails the build.
 
 ## Concurrency Limit Commands
 
 Named concurrency limits cap how many tasks tagged with a given key may run
 concurrently across all builds in an environment. The SDK tags tasks with keys;
 the cap lives server-side in the registry and is enforced atomically when a task
-starts. Manage them with `stardag concurrency-limits` (or in the registry UI:
-workspace admin → Concurrency Limits).
+starts. Manage them with `stardag concurrency-limits` or the
+`GET/PUT/DELETE /api/v2/concurrency-limits` routes directly (see
+[Platform: API](../platform/api.md)) — the registry UI has no
+concurrency-limits admin page in v2.
 
 === "Active venv"
 
     ```sh
-    stardag concurrency-limits list [--holders]
-    stardag concurrency-limits set <key> <max_concurrent>
-    stardag concurrency-limits delete <key> [--yes]
-    stardag concurrency-limits holders <key> [--limit N]
-    stardag concurrency-limits evict <key> <task_id> [--yes]
+    stardag concurrency-limits list [--holders] [--json]
+    stardag concurrency-limits set <key> <max_concurrent> [--json]
+    stardag concurrency-limits delete <key> [--yes] [--json]
+    stardag concurrency-limits holders <key> [--limit N] [--json]
     ```
 
 === "uv run ..."
 
     ```sh
-    uv run stardag concurrency-limits list [--holders]
-    uv run stardag concurrency-limits set <key> <max_concurrent>
-    uv run stardag concurrency-limits delete <key> [--yes]
-    uv run stardag concurrency-limits holders <key> [--limit N]
-    uv run stardag concurrency-limits evict <key> <task_id> [--yes]
+    uv run stardag concurrency-limits list [--holders] [--json]
+    uv run stardag concurrency-limits set <key> <max_concurrent> [--json]
+    uv run stardag concurrency-limits delete <key> [--yes] [--json]
+    uv run stardag concurrency-limits holders <key> [--limit N] [--json]
     ```
 
 All commands accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
 profile / environment other than the active one.
 
-- `list` — show each key and its `max_concurrent` (`--holders` adds the current
-  holder count, one extra call per key).
-- `set` — create or update a limit (upsert; `max_concurrent` must be ≥ 1).
+- `list` — show each key, its `max_concurrent` and how many slots are
+  currently `in_use` (`--holders` adds a table of each key's current
+  holders, from the same call — no extra request per key).
+- `set` — create or update a limit (upsert; `max_concurrent` must be ≥ 0;
+  `0` blocks the key entirely).
 - `delete` — remove a limit so the key becomes unlimited.
-- `holders` — list the RUNNING tasks currently holding slots of a key
-  (oldest-running first), with task id/name, running-since and executor.
-- `evict` — record `TASK_FAILED` for a RUNNING holder to free leaked slots.
-  Only evict holders whose process you know is dead: the server cannot verify
-  liveness, so evicting a live worker leaves the cap oversubscribed until it
-  finishes.
+- `holders` — list the tasks currently holding slots of a key (a live
+  claim), oldest-running first, with task id/name, build and execution.
+  A key with no configured limit is not listed here — configure one first.
+
+There is no `evict`. A v2 slot is released by ending the execution that
+holds it: for a holder whose worker is gone, `stardag builds stop
+--mark-lost` is the recovery path, not a concurrency-limits command.
 
 See `stardag concurrency-limits --help` for full options.
 

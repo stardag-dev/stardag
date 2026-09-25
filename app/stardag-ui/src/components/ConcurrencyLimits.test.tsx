@@ -1,270 +1,173 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BreadcrumbProvider } from "../context/BreadcrumbContext";
-import { ConcurrencyLimits } from "./ConcurrencyLimits";
+import type { ConcurrencyLimit } from "../types/task";
 
-let mockEnvironmentId = "env-1";
-let mockWorkspaceRole: "owner" | "admin" | "member" | null = "admin";
+const role = vi.hoisted(() => ({ current: "admin" as "admin" | "member" }));
+const env = vi.hoisted(() => ({ current: "env-1" }));
 vi.mock("../context/EnvironmentContext", () => ({
   useEnvironment: () => ({
-    activeEnvironment: {
-      id: mockEnvironmentId,
-      slug: "default",
-      name: "default",
-    },
-    activeWorkspaceRole: mockWorkspaceRole,
+    activeEnvironment: { id: env.current },
+    activeWorkspaceRole: role.current,
   }),
 }));
-
-vi.mock("../api/concurrencyLimits", () => ({
+vi.mock("../api/registry", () => ({
   fetchConcurrencyLimits: vi.fn(),
-  fetchConcurrencyLimitHolders: vi.fn(),
-  upsertConcurrencyLimit: vi.fn(),
-  deleteConcurrencyLimit: vi.fn(),
-  evictConcurrencyLimitHolder: vi.fn(),
+  setConcurrencyLimit: vi.fn(async () => ({ key: "k", max_concurrent: 1 })),
+  deleteConcurrencyLimit: vi.fn(async () => {}),
 }));
-
-vi.mock("../api/tasks", () => ({
-  fetchTask: vi.fn(),
-  fetchTaskArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
-  fetchTaskEvents: vi.fn().mockResolvedValue([]),
-  cancelTask: vi.fn(),
+vi.mock("./TaskDetail", () => ({
+  TaskDetail: ({ taskId }: { taskId: string }) => (
+    <div data-testid="detail">{taskId}</div>
+  ),
 }));
 
 import {
-  evictConcurrencyLimitHolder,
-  fetchConcurrencyLimitHolders,
+  deleteConcurrencyLimit,
   fetchConcurrencyLimits,
-  upsertConcurrencyLimit,
-} from "../api/concurrencyLimits";
+  setConcurrencyLimit,
+} from "../api/registry";
+import { ConcurrencyLimits } from "./ConcurrencyLimits";
 
-const holder = {
-  task_id: "task-abc-123456",
-  task_namespace: "",
-  task_name: "TrainModel",
-  latest_status_at: "2026-01-01T10:00:00Z",
-  latest_executor: "modal",
-  latest_executor_ref: "fc-123",
-  latest_executor_metadata: {
-    kind: "modal",
-    app_name: "my-app",
-    workspace: "my-workspace",
-    app_id: "ap-123",
-    function_id: "fu-456",
+const BUILD_ID = "01a0c5c3-f18e-7d22-bcaf-add71bd0287c";
+const TASK_ID = "df0c8b03-fab2-5ddd-9743-09fb4a634cf5";
+
+const limits: ConcurrencyLimit[] = [
+  {
+    key: "gpu",
+    max_concurrent: 2,
+    in_use: 1,
+    holders: [
+      {
+        task_id: TASK_ID,
+        task_name: "Train",
+        build_id: BUILD_ID,
+        plan_id: "plan-1",
+        execution_id: "0199aaaa-bbbb-cccc",
+        started_at: "2026-09-24T00:00:00Z",
+      },
+    ],
   },
-};
+  { key: "db", max_concurrent: 5, in_use: 0, holders: [] },
+];
 
-function renderPage() {
-  return render(
+function renderPage(onSelectBuild = vi.fn()) {
+  const view = render(
     <BreadcrumbProvider>
-      <ConcurrencyLimits />
+      <ConcurrencyLimits onSelectBuild={onSelectBuild} />
     </BreadcrumbProvider>,
   );
+  return { onSelectBuild, view };
 }
 
+beforeEach(() => {
+  role.current = "admin";
+  env.current = "env-1";
+  vi.mocked(fetchConcurrencyLimits).mockReset().mockResolvedValue(limits);
+  vi.mocked(setConcurrencyLimit).mockClear();
+  vi.mocked(deleteConcurrencyLimit).mockClear();
+});
+
 describe("ConcurrencyLimits", () => {
-  beforeEach(() => {
-    mockEnvironmentId = "env-1";
-    mockWorkspaceRole = "admin";
-    vi.mocked(fetchConcurrencyLimits).mockResolvedValue([
-      { key: "gpu", max_concurrent: 2 },
-    ]);
-    vi.mocked(fetchConcurrencyLimitHolders).mockResolvedValue({
-      key: "gpu",
-      holders: [holder],
-      total: 1,
-    });
-  });
-
-  afterEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("lists limits with holder counts", async () => {
+  it("lists each key with its cap and occupied slots, holders included", async () => {
     renderPage();
-
     expect(await screen.findByText("gpu")).toBeInTheDocument();
-    expect(screen.getByText("2")).toBeInTheDocument();
-    // Holder count fetched with limit=1
-    await waitFor(() =>
-      expect(fetchConcurrencyLimitHolders).toHaveBeenCalledWith("gpu", "env-1", 1),
-    );
-    expect(await screen.findByText("1")).toBeInTheDocument();
+    expect(vi.mocked(fetchConcurrencyLimits)).toHaveBeenCalledWith("env-1", true);
+    const toggles = screen.getAllByTitle("Show current slot holders");
+    expect(toggles.map((t) => t.textContent)).toEqual(["1", "0"]);
   });
 
-  it("drops stale responses from a previous environment", async () => {
-    // env-1's limits fetch resolves LATE — after the user has switched to
-    // env-2 — and must not overwrite env-2's state.
-    let resolveEnv1: (limits: { key: string; max_concurrent: number }[]) => void;
-    vi.mocked(fetchConcurrencyLimits).mockImplementation((envId: string) => {
-      if (envId === "env-1") {
-        return new Promise((resolve) => {
-          resolveEnv1 = resolve;
-        });
-      }
-      return Promise.resolve([{ key: "env2-key", max_concurrent: 3 }]);
-    });
+  it("drills into a key's holders, without evict, pointing at builds stop", async () => {
+    const { onSelectBuild } = renderPage();
+    await screen.findByText("gpu");
+    fireEvent.click(screen.getAllByTitle("Show current slot holders")[0]);
+    expect(screen.getByText("Train")).toBeInTheDocument();
+    expect(screen.getByText("0199aaaa")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /evict/i })).not.toBeInTheDocument();
+    expect(screen.getByText("stardag builds stop --mark-lost")).toBeInTheDocument();
 
-    const { rerender } = renderPage();
-    // env-1 load in flight; switch environments and re-render.
-    mockEnvironmentId = "env-2";
-    rerender(
-      <BreadcrumbProvider>
-        <ConcurrencyLimits />
-      </BreadcrumbProvider>,
-    );
-    expect(await screen.findByText("env2-key")).toBeInTheDocument();
-
-    // The slow env-1 response lands now: it must be dropped.
-    resolveEnv1!([{ key: "stale-env1-key", max_concurrent: 9 }]);
-    await waitFor(() =>
-      expect(screen.queryByText("stale-env1-key")).not.toBeInTheDocument(),
-    );
-    expect(screen.getByText("env2-key")).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle(`Open build ${BUILD_ID}`));
+    expect(onSelectBuild).toHaveBeenCalledWith(BUILD_ID);
+    fireEvent.click(screen.getByText("Train"));
+    expect(screen.getByTestId("detail")).toHaveTextContent(TASK_ID);
   });
 
-  it("creates a limit via the form", async () => {
-    vi.mocked(upsertConcurrencyLimit).mockResolvedValue({
-      key: "db",
-      max_concurrent: 5,
-    });
-    const user = userEvent.setup();
+  it("creates, edits and deletes limits as an admin", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     renderPage();
     await screen.findByText("gpu");
 
-    await user.type(screen.getByPlaceholderText("e.g. gpu"), "db");
-    const maxInput = screen.getByLabelText("Max concurrent");
-    await user.clear(maxInput);
-    await user.type(maxInput, "5");
-    await user.click(screen.getByRole("button", { name: "Add limit" }));
-
-    await waitFor(() =>
-      expect(upsertConcurrencyLimit).toHaveBeenCalledWith("db", 5, "env-1"),
-    );
-  });
-
-  it("drills into holders and evicts one after confirmation", async () => {
-    vi.mocked(evictConcurrencyLimitHolder).mockResolvedValue({
-      task_id: holder.task_id,
-      status: "failed",
+    fireEvent.change(screen.getByLabelText("Key"), { target: { value: "io" } });
+    fireEvent.change(screen.getByLabelText("Max concurrent"), {
+      target: { value: "0" },
     });
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-
-    const user = userEvent.setup();
-    renderPage();
-    await screen.findByText("gpu");
-
-    // Expand the holders drill-down
-    await user.click(await screen.findByTitle("Show current slot holders"));
-    expect(await screen.findByText("TrainModel")).toBeInTheDocument();
-    // Executor badge + Modal deep link render for the holder
-    expect(screen.getByText("⚡ Modal")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "View on Modal" })).toHaveAttribute(
-      "href",
-      "https://modal.com/apps/my-workspace/main/ap-123" +
-        "?activeTab=functions&functionId=fu-456&functionSection=calls&fcId=fc-123",
-    );
-
-    await user.click(screen.getByRole("button", { name: "Evict" }));
-    expect(confirmSpy).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Add limit" }));
     await waitFor(() =>
-      expect(evictConcurrencyLimitHolder).toHaveBeenCalledWith(
-        "gpu",
-        holder.task_id,
-        "env-1",
-      ),
+      expect(vi.mocked(setConcurrencyLimit)).toHaveBeenCalledWith("io", 0, "env-1"),
     );
 
-    confirmSpy.mockRestore();
-  });
-
-  it("does not evict when the confirm dialog is declined", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-
-    const user = userEvent.setup();
-    renderPage();
-    await screen.findByText("gpu");
-    await user.click(await screen.findByTitle("Show current slot holders"));
-    await screen.findByText("TrainModel");
-
-    await user.click(screen.getByRole("button", { name: "Evict" }));
-    expect(confirmSpy).toHaveBeenCalled();
-    expect(evictConcurrencyLimitHolder).not.toHaveBeenCalled();
-
-    confirmSpy.mockRestore();
-  });
-
-  it("surfaces an evict failure as an action error", async () => {
-    vi.mocked(evictConcurrencyLimitHolder).mockRejectedValue(
-      new Error("Failed to evict holder: Not Found"),
-    );
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-
-    const user = userEvent.setup();
-    renderPage();
-    await screen.findByText("gpu");
-    await user.click(await screen.findByTitle("Show current slot holders"));
-    await screen.findByText("TrainModel");
-
-    await user.click(screen.getByRole("button", { name: "Evict" }));
-    expect(
-      await screen.findByText("Failed to evict holder: Not Found"),
-    ).toBeInTheDocument();
-    // The holder row is still rendered and actionable after the failure.
-    expect(screen.getByRole("button", { name: "Evict" })).toBeEnabled();
-
-    confirmSpy.mockRestore();
-  });
-
-  it("does not show a previous environment's holder count for a same-named key", async () => {
-    // env-1's "gpu" has 5 holders; env-2 also has a "gpu" key but its
-    // count fetch fails — env-2's row must show the unknown marker, not 5.
-    vi.mocked(fetchConcurrencyLimitHolders).mockImplementation(
-      (_key: string, envId: string) => {
-        if (envId === "env-1") {
-          return Promise.resolve({ key: "gpu", holders: [], total: 5 });
-        }
-        return Promise.reject(new Error("count fetch failed"));
-      },
-    );
-
-    const { rerender } = renderPage();
-    expect(await screen.findByText("5")).toBeInTheDocument();
-
-    mockEnvironmentId = "env-2";
-    rerender(
-      <BreadcrumbProvider>
-        <ConcurrencyLimits />
-      </BreadcrumbProvider>,
-    );
-    // env-2's limits load (same "gpu" key) with the count fetch failing:
-    // the row must show the unknown marker, never env-1's count.
-    await waitFor(() => {
-      expect(screen.getByTitle("Show current slot holders")).toHaveTextContent("—");
+    fireEvent.click(screen.getAllByTitle("Edit max concurrency")[0]);
+    fireEvent.change(screen.getByLabelText("Max concurrent for gpu"), {
+      target: { value: "3" },
     });
-    expect(screen.queryByText("5")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(vi.mocked(setConcurrencyLimit)).toHaveBeenCalledWith("gpu", 3, "env-1"),
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[1]);
+    await waitFor(() =>
+      expect(vi.mocked(deleteConcurrencyLimit)).toHaveBeenCalledWith("db", "env-1"),
+    );
   });
 
-  it("hides limit and holder mutations from non-admin members", async () => {
-    mockWorkspaceRole = "member";
-    const user = userEvent.setup();
+  it("offers no mutations to a workspace member", async () => {
+    role.current = "member";
     renderPage();
-
-    // Limits and holder counts are still viewable...
-    expect(await screen.findByText("gpu")).toBeInTheDocument();
-    expect(await screen.findByText("1")).toBeInTheDocument();
-    expect(screen.getByText("2")).toBeInTheDocument();
-
-    // ...but create/edit/delete are not.
+    await screen.findByText("gpu");
     expect(screen.queryByRole("button", { name: "Add limit" })).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText("e.g. gpu")).not.toBeInTheDocument();
-    expect(screen.queryByTitle("Edit max concurrency")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Edit max concurrency")).not.toBeInTheDocument();
+  });
 
-    // The holders drill-down still works, without the Evict action.
-    await user.click(await screen.findByTitle("Show current slot holders"));
-    expect(await screen.findByText("TrainModel")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Evict" })).not.toBeInTheDocument();
+  it("refuses a key with a slash, which the key's URL path cannot carry", async () => {
+    renderPage();
+    await screen.findByText("gpu");
+    fireEvent.change(screen.getByLabelText("Key"), { target: { value: "a/b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add limit" }));
+    expect(await screen.findByText(/cannot contain "\/"/)).toBeInTheDocument();
+    expect(vi.mocked(setConcurrencyLimit)).not.toHaveBeenCalled();
+  });
+
+  it("does not reload the old environment when a mutation lands after a switch", async () => {
+    let resolveSet: (v: { key: string; max_concurrent: number }) => void = () => {};
+    vi.mocked(setConcurrencyLimit).mockImplementationOnce(
+      () => new Promise((resolve) => (resolveSet = resolve)),
+    );
+    const { view } = renderPage();
+    await screen.findByText("gpu");
+    fireEvent.change(screen.getByLabelText("Key"), { target: { value: "io" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add limit" }));
+
+    env.current = "env-2";
+    vi.mocked(fetchConcurrencyLimits).mockResolvedValue([
+      { key: "other", max_concurrent: 1, in_use: 0, holders: [] },
+    ]);
+    view.rerender(
+      <BreadcrumbProvider>
+        <ConcurrencyLimits />
+      </BreadcrumbProvider>,
+    );
+    await screen.findByText("other");
+    const callsBefore = vi.mocked(fetchConcurrencyLimits).mock.calls.length;
+    resolveSet({ key: "io", max_concurrent: 1 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(vi.mocked(fetchConcurrencyLimits).mock.calls.length).toBe(callsBefore);
+    expect(
+      vi
+        .mocked(fetchConcurrencyLimits)
+        .mock.calls.every((c, i) => i === 0 || c[0] === "env-2"),
+    ).toBe(true);
+    expect(screen.getByText("other")).toBeInTheDocument();
   });
 });

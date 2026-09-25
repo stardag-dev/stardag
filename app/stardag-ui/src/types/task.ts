@@ -1,16 +1,33 @@
+/**
+ * Wire types of the `/api/v2` registry routes the UI reads.
+ *
+ * They mirror `stardag_api/schemas_v2.py`. Vocabulary, kept apart
+ * everywhere (design.md, "Two hashes, one flag"):
+ *
+ * - a **task** is a completion, keyed by `task_id`: its global status and
+ *   claim. It holds no parameters.
+ * - an **instance** is a registry row, one construction of a task under a
+ *   scope `(deployment_id, settings_hash)`: its body holds the parameters.
+ *   `instance_hash` is never an identifier on its own — the UI addresses an
+ *   instance by its row id, and shows the hash only next to its scope.
+ * - a **plan** is one request of a build under one scope; exactly one plan
+ *   per build is active.
+ * - an **execution** is one attempt at a task, under one plan, from one
+ *   instance: the ledger.
+ */
+
 export type TaskStatus =
-  | "unregistered"
   | "pending"
   | "running"
   | "suspended"
   // Execution taken away by the platform (function timeout, reclaimed
-  // container). Not a failure and not terminal — the scheduler will
-  // start it again.
+  // container). Not a failure and not terminal; holds no claim.
   | "interrupted"
   | "completed"
   | "failed"
   | "skipped"
   | "cancelled";
+
 export type BuildStatus =
   | "pending"
   | "running"
@@ -19,23 +36,41 @@ export type BuildStatus =
   | "cancelled"
   | "exit_early";
 
-// Descriptive metadata about the executor backend that ran a task or
-// triggered a build (recorded on TASK_STARTED / build creation events).
-// For Modal executions: {kind: "modal", app_name, workspace, environment,
-// function_name, app_id, function_id} — every key is optional (older SDKs
-// may record a subset), so consumers must handle missing fields (see
-// utils/modalLinks.ts).
+export type DeploymentKind = "modal" | "local";
+
+/** How an execution's claim ended; written by the server. */
+export type ClaimOutcome =
+  | "completed"
+  | "failed"
+  | "suspended"
+  | "interrupted"
+  | "cancelled"
+  | "taken_over"
+  | "lapsed"
+  | "released";
+
+/** How an execution itself ended; written only by its own report or a stop. */
+export type ExecutionOutcome =
+  | "completed"
+  | "failed"
+  | "suspended"
+  | "interrupted"
+  | "preempted"
+  | "stopped"
+  // An operator end for an execution that cannot be stopped: no report of
+  // it will ever be applied.
+  | "lost";
+
+// Descriptive metadata about the executor backend that ran an execution or
+// triggered a build. For Modal: {kind: "modal", app_name, workspace,
+// environment, function_name, app_id, function_id} — every key optional,
+// so consumers must handle missing fields (see utils/modalLinks.ts).
 export interface ExecutorMetadata {
   kind?: string;
   app_name?: string;
   workspace?: string;
   environment?: string;
   function_name?: string;
-  // Modal object ids captured at execution time (best-effort; absent on
-  // data recorded before the SDK started capturing them). Used to build
-  // stop/redeploy-proof dashboard deep links — see utils/modalLinks.ts.
-  //   app_id      — Modal App object id, "ap-…"
-  //   function_id — Modal Function object id, "fu-…"
   app_id?: string;
   function_id?: string;
   // Build-level only: true when triggered in reactive (tick-scheduled) mode
@@ -43,224 +78,186 @@ export interface ExecutorMetadata {
   [key: string]: unknown;
 }
 
-// User info for manual status triggers
-export interface StatusTriggeredByUser {
-  id: string;
-  email: string;
-  display_name: string | null;
-}
+// ---- Builds ----
 
-// Build entity
 export interface Build {
   id: string;
-  environment_id: string;
-  user_id: string | null;
   name: string;
   description: string | null;
-  commit_hash: string | null;
+  status: BuildStatus;
+  // The request at completion-id level, stable across rollover.
   root_task_ids: string[];
   created_at: string;
-  status: BuildStatus;
   started_at: string | null;
   completed_at: string | null;
-  // Why a `failed` build failed, as recorded server-side on its BUILD_FAILED
-  // event. Null for every other status — the reason is reported while the
-  // build is failed and not afterwards. Optional in the type so responses
-  // from a server predating the field deserialize cleanly.
-  latest_error_message?: string | null;
-  // User who triggered the status change (for manual overrides)
-  status_triggered_by_user: StatusTriggeredByUser | null;
-  // True iff the latest build-level event is BUILD_RESUMED — set when
-  // the SDK reused this build via sd.build(resume_build_id=...). Used
-  // by the UI to render "running (resumed)" instead of plain "running".
-  // Optional in the type so older API responses (without the field)
-  // deserialize without runtime errors.
-  is_resumed?: boolean;
-  // Executor-descriptive metadata of the trigger that created the build
-  // (e.g. the Modal app of a build_trigger call). Optional: absent on
-  // older API responses and null for builds without a recorded trigger
-  // executor.
-  executor_metadata?: ExecutorMetadata | null;
-  // Reactive-scheduling owner: the app whose ticks drive this build. Null
-  // for ordinary (resident) builds — its presence is the reactive marker.
-  reactive_app_name?: string | null;
-  // The structure scope this build's dependency edges live in:
-  // `<code_id>:<config_hash>`, or the server's synthetic `build:<id>` for
-  // a build that never set one. Optional: absent on older servers.
-  scope_key?: string | null;
-  // `{"<namespace>.<Name>": {"<field>": value}}` — the build config the
-  // tasks' dependencies_only / execution_only fields are read from. Null
-  // or absent means no overrides.
-  build_config?: Record<string, Record<string, unknown>> | null;
-  // ---- Liveness. Two different numbers; do not confuse them. ----
-  //
-  // `last_active_at` is the column the API orders the build list by. It is
-  // bumped by build-level LIFECYCLE transitions only (resume, complete,
-  // fail, cancel, exit-early, roots appended) — never by task events — so
-  // it is NOT an activity signal: a build that has been running tasks for
-  // three days still reports its BUILD_STARTED timestamp here.
-  //
-  // `last_activity_at` is the activity signal: the newest of the build's
-  // whole event stream (task events included), its `last_active_at`, and
-  // any pending scheduler wake-up. This is what the stale-build reaper
-  // measures idleness against, so it is the one to show and filter on.
-  // Both are optional: absent on API responses predating them.
-  last_active_at?: string | null;
-  last_activity_at?: string | null;
-}
-
-// Response of POST /builds/{id}/cancel — a superset of Build. The cascade
-// fields name the tasks whose claims the cancel released, and they are
-// populated even though this client never passes `cascade`: a cancel now
-// always releases, and the parameter is an accepted no-op. They used to
-// be empty here for that reason, so do not read "empty" as "nothing
-// happened".
-//
-// Stopping the containers is still separate, and still the operator's:
-// only their own credentials reach the execution backend, which is what
-// `stardag builds stop` is for.
-export interface BuildCancelResult extends Build {
-  cascaded_task_ids: string[];
-  cascaded_task_count: number;
-}
-
-// Why bulk-cancel did not act on an explicitly requested build id. Kept as
-// a union of the reasons the API documents today, widened to `string` at
-// the response boundary so an unknown future reason still renders.
-export type BulkCancelSkipReason =
-  | "not_found"
-  | "not_running"
-  | "reactive"
-  | "not_idle"
-  | "limit_reached";
-
-// Body of POST /builds/bulk-cancel. At least one of `build_ids` /
-// `idle_for_seconds` is required — the API answers 422 otherwise.
-export interface BulkCancelBuildsRequest {
-  build_ids?: string[];
-  // Idleness measured against `last_activity_at`, not `last_active_at`.
-  idle_for_seconds?: number;
-  reactive_app_name?: string | null;
-  include_reactive?: boolean;
-  // Also cancel the tasks each build *owns* — RUNNING, SUSPENDED or
-  // INTERRUPTED, and only where that build produced the current status —
-  // releasing the execution claims and concurrency slots they hold. The
-  // ownership scope is what keeps it from declaring another build's live
-  // worker dead; see `services.claims.BUILD_OWNED_STATUSES`.
-  cascade?: boolean;
-  dry_run?: boolean;
-  limit?: number;
-  reason?: string | null;
-}
-
-export interface CancelledBuildRef {
-  build_id: string;
-  name: string;
-  last_activity_at: string | null;
+  // Bumped by build lifecycle transitions only, not by task events.
+  last_active_at: string;
+  is_resumed: boolean;
+  // External id of the user behind a manual status change.
+  status_triggered_by_user_id: string | null;
+  executor_metadata: ExecutorMetadata | null;
+  // The app whose ticks drive this build; null for a resident build.
   reactive_app_name: string | null;
-  cascaded_task_ids: string[];
-}
-
-export interface BulkCancelBuildsResponse {
-  dry_run: boolean;
-  builds: CancelledBuildRef[];
-  build_count: number;
-  task_count: number;
-  // build_id -> reason (see BulkCancelSkipReason).
-  skipped: Record<string, string>;
-  // More builds matched the filter than `limit` allowed; call again.
-  truncated: boolean;
+  reactive_tick_kwargs: Record<string, unknown> | null;
+  // Why the build is FAILED (its last BUILD_FAILED's message); null for
+  // any other status.
+  error_message: string | null;
 }
 
 export interface BuildListResponse {
   builds: Build[];
+  // Matching the filters, over every page.
   total: number;
-  page: number;
-  page_size: number;
+  // Pass back as `cursor` for the next page; null on the last one.
+  next_cursor: string | null;
 }
 
-// ---- Build frontier: what a scheduler tick sees ----
-
-// A task in a build's scheduling frontier. Statuses are the task's *global*
-// (environment-wide) status, not "its status in this build".
-export interface FrontierTaskRef {
-  task_id: string;
-  latest_status: TaskStatus;
-  latest_executor?: string | null;
-  latest_executor_ref?: string | null;
-  latest_executor_metadata?: ExecutorMetadata | null;
-  latest_status_at?: string | null;
+/** `GET /builds/{id}/notify`: whether a wake-up is queued for the build. */
+export interface BuildNotify {
+  build_id: string;
+  needs_tick: boolean;
 }
 
-/**
- * An upstream *outside* this build that holds one of its tasks back.
- *
- * Task rows and their dependency edges are per environment, not per build,
- * so an upstream left non-COMPLETED by some other build still gates this
- * build's downstream tasks — silently, since such an upstream need not be
- * part of this build's task set at all.
- */
-export interface FrontierExternalBlocker {
-  // The blocked task — always a member of THIS build's task set.
+// ---- The frontier: what a scheduler tick sees of the active plan ----
+
+export interface FrontierMember {
   task_id: string;
-  // The blocker. Identity is spelled out because the viewer may never have
-  // seen this task. `blocking_task_namespace` is "" for the default namespace.
-  blocking_task_id: string;
-  blocking_task_namespace: string;
-  blocking_task_name: string;
-  // Never "completed" (a completed upstream does not gate anything).
-  blocking_status: TaskStatus;
-  // When the blocker entered that status, and the build whose event put it
-  // there. The build id is null only for rows predating status
-  // denormalisation — with it, there is nothing to address a remedy to.
-  blocking_status_at?: string | null;
-  blocking_status_build_id?: string | null;
-  // Whether the blocker is also part of THIS build's task set. False is the
-  // pathological case: this build has never registered it and can only wait
-  // for whoever owns it. True still blocks, but the task is at least visible
-  // in this build's own table.
-  blocking_in_build: boolean;
+  instance_id: string;
+  instance_hash: string;
+  // The task's global status, not "its status in this plan".
+  status: TaskStatus;
+  is_root: boolean;
+  // All parameters, registry-mode dump; `__namespace` / `__name` included.
+  body: Record<string, unknown>;
+}
+
+/** A runnable or running member, with the counts the tick budgets on. */
+export interface FrontierItem extends FrontierMember {
+  // Executions of the task under any of the build's plans.
+  attempts: number;
+  // Those that ended interrupted or preempted.
+  interruptions: number;
+}
+
+export interface ClosureConflict {
+  task_id: string;
+  member_instance_id: string;
+  other_instance_id: string;
+  fields: string[];
+}
+
+export interface Closure {
+  admitted: number;
+  conflicts: ClosureConflict[];
+  build_failed: boolean;
 }
 
 export interface BuildFrontier {
   build_id: string;
-  build_status: BuildStatus;
-  // A scheduler wake-up is pending for this build.
-  needs_tick: boolean;
-  root_task_ids: string[];
-  roots: FrontierTaskRef[];
-  // Global status -> count, over every task the build has events for.
-  status_counts: Record<string, number>;
-  actionable: FrontierTaskRef[];
-  running: FrontierTaskRef[];
-  /**
-   * Always empty from a current server: dependency edges are scoped to the
-   * build's structure scope and a stalled build re-closes its plan over
-   * them, so a gate can no longer point outside the plan. Kept on the wire
-   * (and rendered defensively) for servers predating scoped edges, where it
-   * listed upstreams held outside the build once it had stalled.
-   */
-  blocked_by_external: FrontierExternalBlocker[];
-  // The blocker list is capped (it is a diagnostic, not a work queue — a
-  // truncated list still proves "waiting, not stuck").
-  blocked_by_external_truncated: boolean;
-  reactive_app_name?: string | null;
-  reactive_tick_kwargs?: Record<string, unknown> | null;
-  // See `Build.scope_key` / `Build.build_config`.
-  scope_key?: string | null;
-  build_config?: Record<string, Record<string, unknown>> | null;
+  // Null when the build has no active plan yet.
+  plan_id: string | null;
+  deployment_id: string | null;
+  settings_hash: string | null;
+  sealed: boolean;
+  plan_complete: boolean;
+  build_status: BuildStatus | null;
+  reactive_app_name: string | null;
+  reactive_tick_kwargs: Record<string, unknown> | null;
+  runnable: FrontierItem[];
+  discovery_jobs: FrontierMember[];
+  running: FrontierItem[];
+  closure: Closure | null;
+}
+
+/**
+ * One of a build's plans, as `GET /builds/{id}/plans` lists them (newest
+ * generation first): lifecycle, scope with its deployment, member counts.
+ */
+export interface PlanDetail {
+  id: string;
+  build_id: string;
+  deployment_id: string;
+  deployment: Deployment;
+  settings_hash: string;
+  // Server-assigned per build, monotonic.
+  generation: number;
+  created_at: string;
+  // The build's active plan from here (the first on create, a
+  // replacement on seal).
+  activated_at: string | null;
+  // The static phase is fully stated and verified.
+  sealed_at: string | null;
+  // Set when a replacement plan activated.
+  superseded_at: string | null;
+  is_active: boolean;
+  member_count: number;
+  root_count: number;
+  // Given-up members; counted apart from `member_counts`.
+  excluded_count: number;
+  // Non-excluded members by their task's global status.
+  member_counts: Partial<Record<TaskStatus, number>>;
+}
+
+export interface PlanListResponse {
+  build_id: string;
+  plans: PlanDetail[];
+}
+
+// ---- Plan membership and edges: `GET /plans/{id}/graph` ----
+
+export type AdmittedBy = "root" | "static" | "dynamic" | "closure";
+export type ExclusionReason = "operator" | "discovery_failed" | "upstream_excluded";
+
+/**
+ * One member of a plan, as `GET /plans/{plan_id}/graph` returns it
+ * (`PlanGraphMemberResponse`): `plan_member`'s columns joined to the
+ * task's identity and global status, plus the attempt/interruption counts
+ * the frontier carries for a runnable member.
+ */
+export interface PlanMember {
+  task_id: string;
+  instance_id: string;
+  instance_hash: string;
+  task_namespace: string;
+  task_name: string;
+  status: TaskStatus;
+  is_root: boolean;
+  admitted_by: AdmittedBy;
+  excluded_at: string | null;
+  excluded_reason: ExclusionReason | null;
+  // Executions of the task under any of the build's plans, and those of
+  // them that ended interrupted or preempted (as on the frontier).
+  attempts: number;
+  interruptions: number;
+}
+
+/** An instance edge, `task_instance_dependency`, between two members. */
+export interface PlanEdge {
+  upstream_instance_id: string;
+  downstream_instance_id: string;
+  is_dynamic: boolean;
+}
+
+export interface PlanGraph {
+  plan_id: string;
+  build_id: string;
+  deployment_id: string;
+  settings_hash: string;
+  members: PlanMember[];
+  edges: PlanEdge[];
 }
 
 // ---- Persisted reactive-scheduler tick summaries ----
 
 // Why a tick did (or did not) do anything. Widened to `string` at the
-// response boundary so an outcome a newer server adds still renders.
+// response boundary so an outcome a newer SDK adds still renders.
 export type TickOutcome =
   | "not_reactive"
   | "lease_held"
   | "terminal"
   | "lingered_out"
-  | "foreign_app";
+  | "foreign_app"
+  | "superseded";
 
 export interface BuildTickSummary {
   id: string;
@@ -269,9 +266,9 @@ export interface BuildTickSummary {
   outcome: string;
   /**
    * The tick's own summary, verbatim and **deliberately open**: the SDK
-   * grows counters (`spawned`, `claim_denied`, `limit_denied`, …) faster
-   * than this UI ships. Render known keys with a label and unknown ones
-   * generically — never drop what you don't recognise.
+   * grows counters faster than this UI ships. Render known keys with a
+   * label and unknown ones generically — never drop what you don't
+   * recognise.
    */
   summary: Record<string, unknown>;
   created_at: string;
@@ -282,171 +279,138 @@ export interface BuildTickSummaryListResponse {
   summaries: BuildTickSummary[];
 }
 
-// Task with status (from build context)
-export interface Task {
+// ---- Tasks and instances ----
+
+/** One instance of a completion: its body under one scope. */
+export interface TaskInstance {
   id: string;
+  deployment_id: string;
+  settings_hash: string;
+  instance_hash: string;
+  body: Record<string, unknown>;
+  // The closure flag: requires() evaluated under this scope.
+  expanded_at: string | null;
+  created_at: string;
+}
+
+/** A completion with its instances in the environment, newest first. */
+export interface Task {
   task_id: string;
-  environment_id: string;
   task_namespace: string;
   task_name: string;
-  task_data: Record<string, unknown>;
   version: string | null;
-  // Output URI (path to task output if it has a FileSystemTarget)
   output_uri: string | null;
-  created_at: string;
   status: TaskStatus;
+  status_at: string | null;
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
-  artifact_count: number;
-  // Artifact data - mapping of artifact_name -> body_json (populated when artifact columns requested)
-  artifact_data?: Record<string, Record<string, unknown>>;
-  // Lock status - true if task is waiting for a global lock held by another build
-  waiting_for_lock?: boolean;
-  // Build where the status-determining event occurred (for cross-build indicators)
-  status_build_id?: string;
-  // Git commit hash from the event that determined the current status
-  commit_hash?: string | null;
-  // Always false: placeholder ("phantom") rows no longer exist — an edge
-  // may only name a registered task. Kept for responses from older servers.
-  is_phantom?: boolean;
-  // Executor identity of the most recent TASK_STARTED event. Optional:
-  // absent on older API responses, null for tasks never started via an
-  // executor that records it.
-  latest_executor?: string | null;
-  latest_executor_ref?: string | null;
-  latest_executor_metadata?: ExecutorMetadata | null;
-  // ---- Global (environment-wide) status, i.e. "who holds the claim". ----
-  //
-  // A task row is unique per (environment_id, task_id), so `latest_status`
-  // is NOT "the status within some build": a task left RUNNING by any build
-  // denies the execution claim to every other build that needs it, until
-  // something moves it. These three answer "who is holding this claim, and
-  // since when":
-  //
-  //   latest_status          — the environment-wide status.
-  //   latest_status_at       — when it entered that status ("running since").
-  //   latest_status_build_id — the build whose event produced it: the claim
-  //                            holder. Null only on rows predating status
-  //                            denormalisation.
-  //
-  // `GET /tasks` returns these; `GET /tasks/search` does not (it reports the
-  // same status under `status` / `status_build_id` and has no timestamp), so
-  // claim triage reads the former. All optional — purely additive over the
-  // older response shape.
-  latest_status?: TaskStatus | null;
-  latest_status_at?: string | null;
-  latest_status_build_id?: string | null;
-  // When the claim lapses, and — if the platform said it was restarting
-  // this execution itself — when it said so. A preemption shortens the
-  // expiry to a restart-sized grace, so the pair reads as "a restart is
-  // due by then". `latest_preempted_at > latest_status_at` is the test
-  // for "still outstanding": the restart records its own start, which
-  // moves `latest_status_at` past it. See restartExpected in utils/claims.
-  latest_status_expires_at?: string | null;
-  latest_preempted_at?: string | null;
+  // The claim: live while status is running and this is in the future.
+  claim_expires_at: string | null;
+  // The claim's holder while RUNNING (live or lapsed): the plan it was
+  // granted through, and that plan's build.
+  claim_plan_id: string | null;
+  claim_build_id: string | null;
+  // The current execution (the claim's, while running).
+  execution_id: string | null;
+  instances: TaskInstance[];
 }
 
-export interface TaskListResponse {
-  tasks: Task[];
-  total: number;
-  page: number;
-  page_size: number;
+// ---- The event log ----
+
+// Widened to `string` at the boundary so a type a newer server adds renders.
+export type EventType = string;
+
+/** One row of the append-only log (`GET /tasks/{id}/events`), oldest first. */
+export interface TaskEvent {
+  id: string;
+  event_type: EventType;
+  created_at: string;
+  // Null for an event with no build (an operator invalidate).
+  build_id: string | null;
+  plan_id: string | null;
+  execution_id: string | null;
+  task_id: string | null;
+  // False for a report that was recorded but refused: history, not state.
+  report_applied: boolean;
+  error_message: string | null;
+  event_metadata: Record<string, unknown> | null;
 }
 
-// Graph structures
-export interface TaskNode {
+export interface EventListResponse {
+  events: TaskEvent[];
+}
+
+// ---- Executions ----
+
+export interface Execution {
   id: string;
   task_id: string;
-  task_name: string;
-  task_namespace: string;
-  status: TaskStatus;
-  artifact_count: number;
+  build_id: string;
+  plan_id: string;
+  instance_id: string;
+  executor: string | null;
+  executor_ref: string | null;
+  executor_metadata: ExecutorMetadata | null;
+  started_at: string;
+  claim_released_at: string | null;
+  claim_outcome: ClaimOutcome | null;
+  ended_at: string | null;
+  outcome: ExecutionOutcome | null;
+  // False for an orphan: its plan is not the build's active plan.
+  in_current_plan: boolean;
 }
 
-export interface TaskEdge {
-  source: string; // upstream task internal id
-  target: string; // downstream task internal id
-  is_dynamic?: boolean; // true if the edge was yielded dynamically at runtime
-  // The structure scope (code version + structure config) the edge was
-  // registered in; null for rows predating scopes.
-  scope_key?: string | null;
-  // The edge's scope differs from the focal tasks' provenance scope: the
-  // graph hopped code versions here.
-  is_cross_scope?: boolean;
+export interface ExecutionListResponse {
+  build_id: string;
+  executions: Execution[];
 }
 
-export interface TaskGraphResponse {
-  nodes: TaskNode[];
-  edges: TaskEdge[];
+/** `GET /tasks/{id}/executions`: across builds, newest first. */
+export interface TaskExecutionListResponse {
+  task_id: string;
+  executions: Execution[];
 }
 
-export interface TaskNodeExtended extends TaskNode {
-  is_primary: boolean;
-  traversal_depth: number;
-  // Provenance scope: the scope of the build that produced this node's
-  // current status, i.e. the scope its upstream edges are read from. Null
-  // when no build has touched the task yet.
-  scope_key?: string | null;
-}
+// ---- Deployments and settings ----
 
-export interface GroupSummary {
-  group_id: string;
-  task_name: string;
-  task_namespace: string;
-  count: number;
-  sample_task_ids: string[];
-  depth: number;
-  status: TaskStatus;
-  downstream_task_pks: string[];
-}
-
-export interface TaskEdgeExtended {
-  source: string;
-  target: string;
-  is_dynamic?: boolean;
-  scope_key?: string | null;
-  is_cross_scope?: boolean;
-}
-
-// ---- Deployments ----
-
-/**
- * One deployed code version of one app, as the registry records it at
- * `stardag modal deploy` — the same thing a Modal deployment is. The
- * newest row for an app is its current deployment.
- */
 export interface Deployment {
   id: string;
-  environment_id: string;
+  kind: DeploymentKind;
   app_name: string;
   code_id: string;
+  image_id: string | null;
+  modal_app_id: string | null;
+  // Server-assigned, monotonic per (kind, app_name).
+  generation: number;
   deployed_at: string;
-  // Modal's own app id (`ap-…`), when the deploy could record it; what a
-  // dashboard link needs.
-  modal_app_id?: string | null;
-  // Whether this is the app's newest deployment. Optional: older servers
-  // may not compute it.
-  current?: boolean;
+  // NULL rows are never current and cannot host a plan.
+  activated_at: string | null;
+  is_current: boolean;
 }
 
 export interface DeploymentListResponse {
   deployments: Deployment[];
 }
 
-export interface TaskGraphExtendedResponse {
-  nodes: TaskNodeExtended[];
-  edges: TaskEdgeExtended[];
-  groups: GroupSummary[];
-  truncated: boolean;
-  total_upstream_count: number;
-  total_downstream_count: number;
+export interface Settings {
+  hash: string;
+  body: Record<string, string>;
 }
 
-// Task artifacts
+// ---- Transitions ----
+
+export interface TransitionResponse {
+  applied: boolean;
+  status: TaskStatus;
+  execution_id: string | null;
+  claim_expires_at: string | null;
+}
+
+// ---- Task artifacts ----
+
 export type TaskArtifactType = "markdown" | "json";
 
-// Body is always a dict stored in body_json
 // - markdown: { content: "<markdown string>" }
 // - json: the actual JSON data dict
 export interface TaskArtifact {
@@ -462,49 +426,30 @@ export interface TaskArtifactListResponse {
   artifacts: TaskArtifact[];
 }
 
-// Event types
-export type EventType =
-  | "build_started"
-  | "build_completed"
-  | "build_failed"
-  | "build_cancelled"
-  | "build_exit_early"
-  | "task_pending"
-  | "task_referenced"
-  | "task_started"
-  | "task_suspended"
-  | "task_interrupted"
-  | "task_preempted"
-  | "task_resumed"
-  | "task_waiting_for_lock"
-  | "task_completed"
-  | "task_failed"
-  | "task_skipped"
-  | "task_cancelled";
+// ---- Concurrency limits ----
 
-export interface TaskEvent {
-  id: string;
+/** A task occupying a slot of a limit key: a live claim. */
+export interface ConcurrencyLimitHolder {
+  task_id: string;
+  task_name: string;
+  // The claim's holder: the plan it was granted through, and its build.
   build_id: string;
-  task_id: string | null;
-  event_type: EventType;
-  created_at: string;
-  // The build's structure scope when the event was recorded: for a
-  // registration event (pending, referenced) the scope it planned under,
-  // which is what plan membership reads; for a status event the scope that
-  // becomes the task's provenance. Absent on older servers.
-  scope_key?: string | null;
-  error_message: string | null;
-  event_metadata: Record<string, unknown> | null;
+  plan_id: string;
+  execution_id: string | null;
+  // When the claim was granted ("running since").
+  started_at: string | null;
 }
 
-// Task with filter/DAG context
-export interface TaskWithContext extends Task {
-  isFilterMatch: boolean;
+export interface ConcurrencyLimit {
+  key: string;
+  // 0 refuses every claim carrying the key.
+  max_concurrent: number;
+  // Slots occupied by live claims.
+  in_use: number;
+  // Present when read with `include_holders=true`.
+  holders?: ConcurrencyLimitHolder[] | null;
 }
 
-// Type guard for extended graph response
-export function isExtendedResponse(
-  graph: TaskGraphResponse | TaskGraphExtendedResponse,
-): graph is TaskGraphExtendedResponse {
-  return "groups" in graph;
+export interface ConcurrencyLimitListResponse {
+  limits: ConcurrencyLimit[];
 }

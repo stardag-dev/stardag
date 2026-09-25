@@ -4,12 +4,7 @@ import pickle
 import typing
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
-
-try:
-    from typing import Self
-except ImportError:
-    from typing_extensions import Self
+from typing import AsyncGenerator, Self
 
 from pydantic import PydanticSchemaGenerationError, TypeAdapter
 

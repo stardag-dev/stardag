@@ -1,2144 +1,676 @@
-"""Unit tests for APIRegistry helpers."""
+"""The v2 HTTP client (``APIRegistry``): every route is sent to ``/api/v2``
+with the server's body shape, answers parse into the SDK's models, and the
+server's refusals surface with their ``detail.code``.
+
+The client is driven through ``httpx.MockTransport``; the server contract
+itself (``app/stardag-api/src/stardag_api/schemas_v2.py``) is what the
+bodies here mirror.
+"""
 
 from __future__ import annotations
 
 import gzip
 import json
-from types import SimpleNamespace
+import typing
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 
-from stardag._version import __version__
-from stardag.exceptions import (
-    APIError,
-    NotFoundError,
-    SDKVersionUnsupportedError,
-    is_missing_route_error,
-)
-from stardag.registry._api_registry import (
+from stardag.exceptions import APIError, NotFoundError, execution_not_wanted
+from stardag.registry import APIRegistry, RegistrationItem
+from stardag.registry._api_http import (
     _GZIP_REQUEST_THRESHOLD_BYTES,
-    APIRegistry,
-    _maybe_gzip_json_body,
+    gzip_json_body,
 )
-from stardag.registry._http_client import SDK_VERSION_HEADER
+
+Handler = typing.Callable[[httpx.Request], httpx.Response]
+
+NOW = datetime(2026, 9, 24, tzinfo=timezone.utc)
 
 
-class TestMaybeGzipJsonBody:
-    """Decision boundary for the gzip-on-request behaviour."""
+class _Recorder:
+    def __init__(self, responses: dict[tuple[str, str], typing.Any] | None = None):
+        self.requests: list[httpx.Request] = []
+        self.responses = responses or {}
 
-    def test_none_body_returns_no_content(self):
-        content, headers = _maybe_gzip_json_body(None)
-        assert content is None
-        assert headers == {}
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        key = (request.method, request.url.path)
+        body = self.responses.get(key, {})
+        if isinstance(body, httpx.Response):
+            return body
+        return httpx.Response(200, json=body)
 
-    def test_small_body_is_not_gzipped(self):
-        body = {"task_id": "x", "task_name": "y"}
-        content, headers = _maybe_gzip_json_body(body)
-        assert content is not None
-        assert len(content) < _GZIP_REQUEST_THRESHOLD_BYTES
-        assert headers == {"Content-Type": "application/json"}
-        # Round-trips as JSON without decompression.
-        assert json.loads(content) == body
+    def body(self, index: int = -1) -> typing.Any:
+        request = self.requests[index]
+        content = request.content
+        if request.headers.get("Content-Encoding") == "gzip":
+            content = gzip.decompress(content)
+        return json.loads(content) if content else None
 
-    def test_large_body_is_gzipped(self):
-        # Build a body well above the threshold with repeated structure
-        # (representative of bulk-register payloads).
-        body = {
-            "tasks": [
-                {
-                    "task_id": f"task-{i:08d}",
-                    "task_namespace": "demo.namespace",
-                    "task_name": "RepeatedTask",
-                    "task_data": {"index": i, "label": "x" * 32},
-                    "dependency_task_ids": [],
-                }
-                for i in range(50)
-            ]
+
+def _registry(handler: Handler) -> APIRegistry:
+    registry = APIRegistry(api_url="https://registry.test", api_key="sk-test")
+    registry._client = httpx.Client(transport=httpx.MockTransport(handler))
+    return registry
+
+
+def _item(
+    task_id: str = "t1", *, upstreams: list[str] | None = None
+) -> RegistrationItem:
+    return RegistrationItem(
+        task_id=task_id,
+        task_namespace="ns",
+        task_name="T",
+        version="1",
+        output_uri="memory://x",
+        instance_hash=f"h-{task_id}",
+        body={"__namespace": "ns", "__name": "T"},
+        declared_upstreams=upstreams,
+        observed_complete=False,
+        observed_at=NOW,
+    )
+
+
+BUILD = {"id": str(uuid4()), "name": "b", "status": "running", "root_task_ids": ["t1"]}
+PLAN = {
+    "id": str(uuid4()),
+    "build_id": BUILD["id"],
+    "deployment_id": str(uuid4()),
+    "settings_hash": "abc",
+    "generation": 1,
+    "created": True,
+}
+TRANSITION = {"applied": True, "status": "running", "execution_id": str(uuid4())}
+
+
+class TestRoutes:
+    def test_build_create_sends_the_request_and_a_client_minted_id(self):
+        recorder = _Recorder({("POST", "/api/v2/builds"): BUILD})
+        registry = _registry(recorder)
+        build_id = uuid4()
+        info = registry.build_create(
+            root_task_ids=["t2", "t1", "t1"],
+            build_id=build_id,
+            description="d",
+            executor_metadata={"kind": "modal"},
+        )
+        assert info.id == UUID(BUILD["id"])
+        assert recorder.body() == {
+            "id": str(build_id),
+            "description": "d",
+            "root_task_ids": ["t1", "t2"],
+            "executor_metadata": {"kind": "modal"},
         }
-        content, headers = _maybe_gzip_json_body(body)
-        assert content is not None
-        assert headers["Content-Type"] == "application/json"
-        assert headers["Content-Encoding"] == "gzip"
-        # Decompresses back to the original JSON.
-        assert json.loads(gzip.decompress(content)) == body
-        # And actually saved bytes — repeated keys/structure should
-        # compress well below the original.
-        original_bytes = json.dumps(body, separators=(",", ":")).encode()
-        assert len(content) < len(original_bytes) // 2, (
-            f"Expected at least 2x compression on a structured bulk "
-            f"payload; got {len(original_bytes)} -> {len(content)}"
+
+    def test_plan_create_carries_the_scope_and_the_roots(self):
+        recorder = _Recorder({("POST", f"/api/v2/builds/{BUILD['id']}/plans"): PLAN})
+        registry = _registry(recorder)
+        plan_id, deployment_id = uuid4(), uuid4()
+        plan = registry.plan_create(
+            UUID(BUILD["id"]),
+            plan_id=plan_id,
+            deployment_id=deployment_id,
+            settings={"A": "1"},
+            roots=[_item()],
+        )
+        assert plan.created and plan.generation == 1
+        body = recorder.body()
+        assert body["plan_id"] == str(plan_id)
+        assert body["deployment_id"] == str(deployment_id)
+        assert body["settings"] == {"A": "1"}
+        (root,) = body["roots"]
+        assert root["declared_upstreams"] is None
+        assert root["observed_at"] == "2026-09-24T00:00:00Z"
+        # The item carries exactly the server's fields (it forbids others).
+        assert set(root) == {
+            "task_id",
+            "task_namespace",
+            "task_name",
+            "version",
+            "output_uri",
+            "instance_hash",
+            "body",
+            "declared_upstreams",
+            "observed_complete",
+            "observed_at",
+        }
+
+    def test_members_seal_and_frontier(self):
+        plan_id, build_id = uuid4(), uuid4()
+        recorder = _Recorder(
+            {
+                ("POST", f"/api/v2/plans/{plan_id}/members"): {"tasks_created": 2},
+                ("POST", f"/api/v2/plans/{plan_id}/seal"): PLAN,
+                ("GET", f"/api/v2/builds/{build_id}/frontier"): {
+                    "build_id": str(build_id),
+                    "plan_id": str(plan_id),
+                    "sealed": True,
+                    "runnable": [
+                        {
+                            "task_id": "t1",
+                            "instance_hash": "h",
+                            "status": "interrupted",
+                            "attempts": 3,
+                            "interruptions": 2,
+                        }
+                    ],
+                    "future_field": "ignored",
+                },
+            }
+        )
+        registry = _registry(recorder)
+        result = registry.plan_register_members(
+            plan_id, [_item(), _item("t2", upstreams=["h-t1"])]
+        )
+        assert result.tasks_created == 2
+        assert [i["task_id"] for i in recorder.body()["items"]] == ["t1", "t2"]
+        registry.plan_seal(plan_id)
+        frontier = registry.build_get_frontier(build_id)
+        assert frontier.sealed and frontier.runnable[0].task_id == "t1"
+        # The ledger counts the tick's interruption budget reads (D9).
+        assert (frontier.runnable[0].attempts, frontier.runnable[0].interruptions) == (
+            3,
+            2,
         )
 
-    def test_threshold_exact_boundary(self):
-        # Construct a payload whose serialised size is exactly at the
-        # threshold to verify the strict-less-than boundary
-        # (``< threshold`` => raw, ``>= threshold`` => gzipped).
-        # The ``key`` value is sized so the final dump hits the boundary.
-        target = _GZIP_REQUEST_THRESHOLD_BYTES
-        # ``{"k":"<padding>"}``: braces+quotes+colon+commas = 8 bytes
-        # of overhead (no commas here, just `{"k":""}` = 8 bytes).
-        padding_len = target - len('{"k":""}')
-        body = {"k": "x" * padding_len}
-        encoded = json.dumps(body, separators=(",", ":")).encode()
-        assert len(encoded) == target, "size-control assumption broke"
-        content, headers = _maybe_gzip_json_body(body)
-        # At the threshold we DO compress.
-        assert headers.get("Content-Encoding") == "gzip"
-        assert content is not None and gzip.decompress(content) == encoded
+    def test_a_claiming_start_and_a_non_claiming_one(self):
+        plan_id = uuid4()
+        path = f"/api/v2/plans/{plan_id}/members/t1/start"
+        recorder = _Recorder({("POST", path): TRANSITION})
+        registry = _registry(recorder)
+        execution_id = uuid4()
+        registry.member_start(
+            plan_id,
+            "t1",
+            execution_id=execution_id,
+            claim_ttl_seconds=900,
+            executor_metadata={"kind": "modal"},
+            limit_keys=["b", "a", "a"],
+        )
+        assert recorder.body() == {
+            "execution_id": str(execution_id),
+            "claim": True,
+            "claim_ttl_seconds": 900,
+            "executor_metadata": {"kind": "modal"},
+            "limit_keys": ["a", "b"],
+        }
+        registry.member_start(
+            plan_id,
+            "t1",
+            execution_id=execution_id,
+            claim=False,
+            executor="modal",
+            executor_ref="fc-1",
+        )
+        assert recorder.body() == {
+            "execution_id": str(execution_id),
+            "claim": False,
+            "executor": "modal",
+            "executor_ref": "fc-1",
+        }
 
+    def test_reports_name_their_execution(self):
+        plan_id, execution_id = uuid4(), uuid4()
+        recorder = _Recorder(
+            {
+                ("POST", f"/api/v2/plans/{plan_id}/members/t1/complete"): TRANSITION,
+                ("POST", f"/api/v2/plans/{plan_id}/members/t1/fail"): TRANSITION,
+            }
+        )
+        registry = _registry(recorder)
+        registry.member_complete(plan_id, "t1", execution_id=execution_id)
+        assert recorder.body() == {"execution_id": str(execution_id)}
+        registry.member_fail(
+            plan_id, "t1", execution_id=execution_id, error_message="x"
+        )
+        assert recorder.body() == {
+            "execution_id": str(execution_id),
+            "error_message": "x",
+        }
 
-class TestAPIRegistryGzipsWireFormat:
-    """End-to-end check that ``APIRegistry`` *actually* emits gzipped
-    bytes on the wire for bulk-register payloads — not just that the
-    helper function would, if invoked. Uses ``httpx.MockTransport`` to
-    capture the outgoing request before it hits the network.
-    """
+    def test_a_yield_carries_its_batch_and_its_deployment(self):
+        plan_id, execution_id, deployment_id, batch_id = (
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            uuid4(),
+        )
+        recorder = _Recorder(
+            {
+                ("POST", f"/api/v2/plans/{plan_id}/members/p/yield"): {
+                    "members": {"members_admitted": 1},
+                    "dynamic_edges_created": 1,
+                    "status": "suspended",
+                }
+            }
+        )
+        result = _registry(recorder).member_yield(
+            plan_id,
+            "p",
+            execution_id=execution_id,
+            deployment_id=deployment_id,
+            batch_id=batch_id,
+            items=[_item()],
+            yielded=["h-t1"],
+            suspend=True,
+        )
+        assert result.status == "suspended" and result.dynamic_edges_created == 1
+        body = recorder.body()
+        assert (body["batch_id"], body["deployment_id"], body["suspend"]) == (
+            str(batch_id),
+            str(deployment_id),
+            True,
+        )
+        assert body["yielded"] == ["h-t1"]
 
-    def _make_registry_and_capture(self):
-        """Build an APIRegistry whose sync httpx client points at a
-        MockTransport that records every outgoing request. Returns
-        (registry, captured_requests_list)."""
-        import httpx
+    def test_claim_renewal(self):
+        execution_id = uuid4()
+        recorder = _Recorder({("POST", "/api/v2/tasks/t1/claim/renew"): TRANSITION})
+        _registry(recorder).claim_renew(
+            "t1", execution_id=execution_id, claim_ttl_seconds=120
+        )
+        assert recorder.body() == {
+            "execution_id": str(execution_id),
+            "claim_ttl_seconds": 120,
+        }
 
-        from stardag.registry._api_registry import APIRegistry
+    def test_a_task_read_carries_its_claim_state(self):
+        """``GET /tasks/{id}``: the server's ``TaskResponse`` — status,
+        timestamps and the execution the claim names — parses whole."""
+        execution_id = uuid4()
+        recorder = _Recorder(
+            {
+                ("GET", "/api/v2/tasks/t1"): {
+                    "task_id": "t1",
+                    "task_namespace": "ns",
+                    "task_name": "T",
+                    "version": "1",
+                    "output_uri": "memory://x",
+                    "status": "running",
+                    "status_at": NOW.isoformat(),
+                    "started_at": NOW.isoformat(),
+                    "completed_at": None,
+                    "error_message": None,
+                    "claim_expires_at": NOW.isoformat(),
+                    "execution_id": str(execution_id),
+                    "instances": [],
+                }
+            }
+        )
+        task = _registry(recorder).task_get("t1")
+        assert (task.status, task.execution_id) == ("running", execution_id)
+        assert task.started_at == NOW and task.claim_expires_at == NOW
 
-        captured: list[httpx.Request] = []
+    def test_concurrency_limits(self):
+        recorder = _Recorder(
+            {
+                ("DELETE", "/api/v2/concurrency-limits/gpu"): httpx.Response(204),
+                ("GET", "/api/v2/concurrency-limits"): {
+                    "limits": [{"key": "gpu", "max_concurrent": 2}]
+                },
+            }
+        )
+        registry = _registry(recorder)
+        registry.concurrency_limit_set("gpu", 2)
+        assert recorder.requests[-1].method == "PUT"
+        assert recorder.body() == {"max_concurrent": 2}
+        assert registry.concurrency_limit_list() == {"gpu": 2}
+        registry.concurrency_limit_delete("gpu")
+        assert recorder.requests[-1].url.path == "/api/v2/concurrency-limits/gpu"
+
+    def test_concurrency_limits_detailed(self):
+        """``concurrency_limit_list_detailed`` sends ``include_holders``
+        only when asked, and parses ``in_use``/``holders`` into the client
+        models — the seam ``stardag concurrency-limits list``/``holders``
+        run on, which the CLI's own tests exercise against the in-memory
+        registry rather than this HTTP layer."""
+        build_id, plan_id, execution_id = uuid4(), uuid4(), uuid4()
+        requests: list[httpx.Request] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            captured.append(request)
-            # Realistic bulk-register response shape (one TaskResponse per
-            # task in payload), enough for APIRegistry to consider the
-            # call successful.
-            decompressed_body = (
-                gzip.decompress(request.content)
-                if request.headers.get("content-encoding") == "gzip"
-                else request.content
+            requests.append(request)
+            with_holders = request.url.params.get("include_holders") == "true"
+            holders = (
+                [
+                    {
+                        "task_id": "t1",
+                        "task_name": "T",
+                        "build_id": str(build_id),
+                        "plan_id": str(plan_id),
+                        "execution_id": str(execution_id),
+                        "started_at": NOW.isoformat(),
+                    }
+                ]
+                if with_holders
+                else None
             )
-            payload = json.loads(decompressed_body)
-            tasks = payload.get("tasks", [])
-            from uuid import uuid4
-
             return httpx.Response(
-                201,
+                200,
                 json={
-                    "tasks": [
+                    "limits": [
                         {
-                            "id": str(uuid4()),
-                            "task_id": t["task_id"],
-                            "environment_id": "00000000-0000-0000-0000-000000000003",
-                            "task_namespace": t.get("task_namespace", ""),
-                            "task_name": t["task_name"],
-                            "task_data": t["task_data"],
-                            "version": None,
-                            "output_uri": None,
-                            "created_at": "2026-04-30T00:00:00+00:00",
-                            "is_phantom": False,
+                            "key": "gpu",
+                            "max_concurrent": 2,
+                            "in_use": 1,
+                            "holders": holders,
                         }
-                        for t in tasks
                     ]
                 },
             )
 
-        # Instantiate APIRegistry with explicit creds so it doesn't
-        # depend on environment variables. Override the inner httpx
-        # client with our MockTransport-backed one.
-        registry = APIRegistry(
-            api_url="http://test.invalid",
-            api_key="test-key",
-        )
-        registry._client = httpx.Client(
-            transport=httpx.MockTransport(handler),
-            auth=registry._auth,
-        )
-        return registry, captured
-
-    def _make_fake_task(self, task_id: str, task_data: dict):
-        """Produce an object that ``_get_task_data_for_registration``
-        accepts. Avoids spinning up a real Task subclass — we only need
-        the fields the helper reads. ``id`` is set per-instance so a
-        batch of fake tasks has 50 distinct UUIDs (otherwise a class-
-        attribute UUID would make the bulk gzip test silently exercise
-        50 *identical* tasks, which is not the realistic payload we
-        want to compress)."""
-        from uuid import uuid4
-
-        class _Fake:
-            version = ""
-
-            def __init__(self, tid, td):
-                self.id = uuid4()
-                self._tid = tid
-                self._td = td
-
-            def get_namespace(self):
-                return "test"
-
-            def get_name(self):
-                return "FakeTask"
-
-            def model_dump(self, mode="json", **kwargs):
-                return self._td
-
-            def requires(self):
-                return ()
-
-        return _Fake(task_id, task_data)
-
-    def test_large_bulk_register_uses_gzip_on_wire(self):
-        registry, captured = self._make_registry_and_capture()
-
-        # 50 tasks × ~150 bytes serialised each ≈ 7.5KB > 1KB threshold.
-        tasks = [
-            self._make_fake_task(
-                f"big-task-{i:04d}",
-                {"index": i, "label": "x" * 64, "extra": "padding-" * 8},
-            )
-            for i in range(50)
-        ]
-        registry.task_register_bulk(
-            build_id=__import__("uuid").UUID("00000000-0000-0000-0000-000000000001"),
-            tasks=tasks,  # type: ignore[arg-type]
-        )
-
-        assert len(captured) == 1
-        request = captured[0]
-        assert request.headers.get("content-encoding") == "gzip", (
-            f"Expected Content-Encoding: gzip on big bulk request; "
-            f"headers were {dict(request.headers)}"
-        )
-        # SDK opts into the slim ``id_only=true`` response shape since
-        # it doesn't read the response body — this saves ~10× on
-        # response size at the server.
-        assert request.url.params.get("id_only") == "true", (
-            f"Expected id_only=true on bulk register request; "
-            f"params were {dict(request.url.params)}"
-        )
-        # Decompressed body round-trips back to JSON with all 50 tasks,
-        # each carrying a distinct task_id (UUID per-instance — proves
-        # we're really compressing a batch of unique tasks, not 50
-        # copies of one).
-        decoded = json.loads(gzip.decompress(request.content))
-        assert len(decoded["tasks"]) == 50
-        sent_ids = {t["task_id"] for t in decoded["tasks"]}
-        assert len(sent_ids) == 50
-
-    def test_small_single_register_does_not_gzip(self):
-        registry, captured = self._make_registry_and_capture()
-
-        task = self._make_fake_task("small-task", {"x": 1})
-        registry.task_register(
-            build_id=__import__("uuid").UUID("00000000-0000-0000-0000-000000000001"),
-            task=task,  # type: ignore[arg-type]
-        )
-
-        assert len(captured) == 1
-        request = captured[0]
-        # Tiny payload — gzip overhead would be a net loss, so no
-        # Content-Encoding header.
-        assert "content-encoding" not in {k.lower() for k in request.headers.keys()}, (
-            f"Did not expect gzip on a single small task; headers were "
-            f"{dict(request.headers)}"
-        )
-        # Body is plain JSON (not gzip-prefixed bytes).
-        decoded = json.loads(request.content)
-        assert "task_id" in decoded
-        assert decoded["task_name"] == "FakeTask"
-
-
-class TestIsRouteNotFound:
-    """Narrow-404 detection used by task_add_dependencies for backward compat."""
-
-    def test_fastapi_default_is_missing_route_error(self):
-        """FastAPI's default unknown-path response: detail == 'Not Found'."""
-        err = NotFoundError("op: resource not found", detail="Not Found")
-        assert is_missing_route_error(err) is True
-
-    def test_build_not_found_is_not_route(self):
-        """An app-level 'Build not found' must NOT be treated as route-missing."""
-        err = NotFoundError("op: resource not found", detail="Build not found")
-        assert is_missing_route_error(err) is False
-
-    def test_task_not_registered_is_not_route(self):
-        err = NotFoundError(
-            "op: resource not found",
-            detail="Task abc not registered in this environment",
-        )
-        assert is_missing_route_error(err) is False
-
-    def test_none_detail_is_not_route(self):
-        err = NotFoundError("op: resource not found", detail=None)
-        assert is_missing_route_error(err) is False
-
-    def test_empty_detail_is_not_route(self):
-        err = NotFoundError("op: resource not found", detail="")
-        assert is_missing_route_error(err) is False
-
-    def test_structured_detail_is_not_route(self):
-        # When detail is a dict stringified by _handle_response_error
-        err = NotFoundError(
-            "op: resource not found", detail="{'error_code': 'X', 'message': 'Y'}"
-        )
-        assert is_missing_route_error(err) is False
-
-    def test_accepts_notfounderror_only(self):
-        # Signature sanity: helper takes NotFoundError; APIError with a 404 status
-        # is unusual but we don't check status_code, only detail.
-        err = APIError("misc", status_code=500, detail="Not Found")
-        # The helper reads .detail directly, so a non-NotFoundError would still
-        # return True if detail matches — not our concern; call sites only pass
-        # NotFoundError. This test documents the contract.
-        assert is_missing_route_error(err) is True  # type: ignore[arg-type]
-
-
-class TestTaskSkip404Swallow:
-    """``task_skip`` / ``task_skip_aio`` swallow FastAPI's ``Not Found`` 404
-    with a warning so a new SDK against an old API (no ``/skip`` route)
-    does not fail builds on every fail-fast / blocked-dep path. Genuine
-    app-level 404s (e.g. unknown build_id) must still propagate.
-    """
-
-    def _make_registry_and_handler(self, response_factory):
-        """Build an APIRegistry with the sync httpx client routed to handler.
-
-        For async tests the caller must additionally inject the mock
-        AsyncClient *inside the test coroutine* (so the captured loop
-        matches the lazy-init check in ``_get_async_client``):
-
-            import asyncio, httpx
-            registry._async_client = httpx.AsyncClient(
-                transport=httpx.MockTransport(response_factory),
-                auth=registry._auth,
-            )
-            registry._async_client_loop = asyncio.get_running_loop()
-        """
-        import httpx
-
-        from stardag.registry._api_registry import APIRegistry
-
-        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        registry._client = httpx.Client(
-            transport=httpx.MockTransport(response_factory),
-            auth=registry._auth,
-        )
-        return registry
-
-    @staticmethod
-    def _inject_async_mock(registry, response_factory):
-        import asyncio
-        import httpx
-
-        registry._async_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(response_factory),
-            auth=registry._auth,
-        )
-        registry._async_client_loop = asyncio.get_running_loop()
-
-    def _fake_task(self):
-        from uuid import uuid4
-
-        class _Fake:
-            id = uuid4()
-
-            def get_namespace(self):
-                return "test"
-
-            def get_name(self):
-                return "FakeTask"
-
-        return _Fake()
-
-    def test_sync_route_missing_404_is_swallowed(self, caplog):
-        """Old API: detail == 'Not Found' → warn + return, no exception."""
-        import httpx
-        import logging
-        from uuid import UUID
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._make_registry_and_handler(handler)
-        task = self._fake_task()
-
-        with caplog.at_level(logging.WARNING):
-            # Should NOT raise.
-            registry.task_skip(
-                build_id=UUID("00000000-0000-0000-0000-000000000001"),
-                task=task,  # type: ignore[arg-type]
-            )
-
-        assert any(
-            "does not support POST /skip" in rec.message for rec in caplog.records
-        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
-
-    def test_sync_app_level_404_propagates(self):
-        """New API: detail == 'Build not found' → raise NotFoundError as usual."""
-        import httpx
-        from uuid import UUID
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Build not found"})
-
-        registry = self._make_registry_and_handler(handler)
-        task = self._fake_task()
-
-        with pytest.raises(NotFoundError):
-            registry.task_skip(
-                build_id=UUID("00000000-0000-0000-0000-000000000001"),
-                task=task,  # type: ignore[arg-type]
-            )
-
-    @pytest.mark.asyncio
-    async def test_aio_route_missing_404_is_swallowed(self, caplog):
-        """Async path: detail == 'Not Found' → warn + return."""
-        import httpx
-        import logging
-        from uuid import UUID
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._make_registry_and_handler(handler)
-        self._inject_async_mock(registry, handler)
-        task = self._fake_task()
-
-        with caplog.at_level(logging.WARNING):
-            await registry.task_skip_aio(
-                build_id=UUID("00000000-0000-0000-0000-000000000001"),
-                task=task,  # type: ignore[arg-type]
-            )
-
-        assert any(
-            "does not support POST /skip" in rec.message for rec in caplog.records
-        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
-
-    @pytest.mark.asyncio
-    async def test_aio_app_level_404_propagates(self):
-        """Async path: app-level 404 propagates."""
-        import httpx
-        from uuid import UUID
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Build not found"})
-
-        registry = self._make_registry_and_handler(handler)
-        self._inject_async_mock(registry, handler)
-        task = self._fake_task()
-
-        with pytest.raises(NotFoundError):
-            await registry.task_skip_aio(
-                build_id=UUID("00000000-0000-0000-0000-000000000001"),
-                task=task,  # type: ignore[arg-type]
-            )
-
-
-class TestTaskInterrupt404Swallow:
-    """``task_interrupt`` against a server with no ``/interrupt`` route.
-
-    The degradation here matters more than most, and it is the reason the
-    fallback is *silence* rather than ``task_fail``. Recording nothing is
-    precisely how the SDK behaved before interruptions existed: the task
-    stays RUNNING, its execution dies, and a later scheduler pass records a
-    retryable failure. Recording a **failure** instead would turn a version
-    skew into permanently failed builds — the exact outcome this whole
-    feature removes.
-
-    Genuine app-level 404s must still propagate, or a typo'd build id would
-    look like an old server.
-    """
-
-    def _registry(self, response_factory):
-        import httpx
-
-        from stardag.registry._api_registry import APIRegistry
-
-        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        registry._client = httpx.Client(
-            transport=httpx.MockTransport(response_factory),
-            auth=registry._auth,
-        )
-        return registry
-
-    @staticmethod
-    def _inject_async_mock(registry, response_factory):
-        import asyncio
-
-        import httpx
-
-        registry._async_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(response_factory),
-            auth=registry._auth,
-        )
-        registry._async_client_loop = asyncio.get_running_loop()
-
-    def _fake_task(self):
-        from uuid import uuid4
-
-        class _Fake:
-            id = uuid4()
-
-            def get_namespace(self):
-                return "test"
-
-            def get_name(self):
-                return "FakeTask"
-
-        return _Fake()
-
-    BUILD_ID = "00000000-0000-0000-0000-000000000001"
-
-    def test_sync_route_missing_404_is_swallowed(self, caplog):
-        import logging
-        from uuid import UUID
-
-        import httpx
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._registry(handler)
-
-        with caplog.at_level(logging.WARNING):
-            registry.task_interrupt(
-                build_id=UUID(self.BUILD_ID),
-                task=self._fake_task(),  # type: ignore[arg-type]
-                reason="timed out",
-            )
-
-        assert any(
-            "does not support POST /interrupt" in rec.message for rec in caplog.records
-        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
-
-    def test_sync_app_level_404_propagates(self):
-        from uuid import UUID
-
-        import httpx
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Build not found"})
-
-        registry = self._registry(handler)
-
-        with pytest.raises(NotFoundError):
-            registry.task_interrupt(
-                build_id=UUID(self.BUILD_ID),
-                task=self._fake_task(),  # type: ignore[arg-type]
-            )
-
-    @pytest.mark.asyncio
-    async def test_aio_route_missing_404_is_swallowed(self, caplog):
-        import logging
-        from uuid import UUID
-
-        import httpx
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._registry(handler)
-        self._inject_async_mock(registry, handler)
-
-        with caplog.at_level(logging.WARNING):
-            await registry.task_interrupt_aio(
-                build_id=UUID(self.BUILD_ID),
-                task=self._fake_task(),  # type: ignore[arg-type]
-            )
-
-        assert any(
-            "does not support POST /interrupt" in rec.message for rec in caplog.records
-        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
-
-    @pytest.mark.asyncio
-    async def test_aio_app_level_404_propagates(self):
-        from uuid import UUID
-
-        import httpx
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Build not found"})
-
-        registry = self._registry(handler)
-        self._inject_async_mock(registry, handler)
-
-        with pytest.raises(NotFoundError):
-            await registry.task_interrupt_aio(
-                build_id=UUID(self.BUILD_ID),
-                task=self._fake_task(),  # type: ignore[arg-type]
-            )
-
-    def test_the_reason_rides_as_a_query_param(self):
-        """Not a body: the route has none, matching ``/fail``."""
-        from uuid import UUID
-
-        import httpx
-
-        seen = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen["url"] = str(request.url)
-            return httpx.Response(200, json={"task_id": "t", "status": "interrupted"})
-
-        registry = self._registry(handler)
-        registry.task_interrupt(
-            build_id=UUID(self.BUILD_ID),
-            task=self._fake_task(),  # type: ignore[arg-type]
-            reason="hit the 300s timeout",
-        )
-
-        assert "/interrupt?" in seen["url"]
-        assert "reason=hit+the+300s+timeout" in seen["url"]
-
-    def test_preempt_route_missing_404_is_swallowed(self, caplog):
-        """Same degradation for ``/preempt``, and here it costs even less:
-        the event releases nothing and starts nothing, so an old server
-        loses only the ability to notice a restart that never came before
-        the full claim lapses — i.e. exactly the old behaviour."""
-        import logging
-        from uuid import UUID
-
-        import httpx
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._registry(handler)
-
-        with caplog.at_level(logging.WARNING):
-            registry.task_preempt(
-                build_id=UUID(self.BUILD_ID),
-                task=self._fake_task(),  # type: ignore[arg-type]
-                reason="preempted",
-            )
-
-        assert any(
-            "does not support POST /preempt" in rec.message for rec in caplog.records
-        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
-
-    def test_preempt_app_level_404_propagates(self):
-        from uuid import UUID
-
-        import httpx
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Build not found"})
-
-        registry = self._registry(handler)
-
-        with pytest.raises(NotFoundError):
-            registry.task_preempt(
-                build_id=UUID(self.BUILD_ID),
-                task=self._fake_task(),  # type: ignore[arg-type]
-            )
-
-    @pytest.mark.asyncio
-    async def test_aio_preempt_route_missing_404_is_swallowed(self, caplog):
-        import logging
-        from uuid import UUID
-
-        import httpx
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._registry(handler)
-        self._inject_async_mock(registry, handler)
-
-        with caplog.at_level(logging.WARNING):
-            await registry.task_preempt_aio(
-                build_id=UUID(self.BUILD_ID),
-                task=self._fake_task(),  # type: ignore[arg-type]
-            )
-
-        assert any(
-            "does not support POST /preempt" in rec.message for rec in caplog.records
-        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
-
-    def test_the_preempt_reason_rides_as_a_query_param(self):
-        from uuid import UUID
-
-        import httpx
-
-        seen = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen["url"] = str(request.url)
-            return httpx.Response(200, json={"task_id": "t", "status": "running"})
-
-        registry = self._registry(handler)
-        registry.task_preempt(
-            build_id=UUID(self.BUILD_ID),
-            task=self._fake_task(),  # type: ignore[arg-type]
-            reason="preempted 12.0s in",
-        )
-
-        assert "/preempt?" in seen["url"]
-        assert "reason=preempted+12.0s+in" in seen["url"]
-
-
-class TestBuildResume404Swallow:
-    """``build_resume`` / ``build_resume_aio`` follow the same backward-
-    compat 404 pattern as ``task_skip``: an old API that does not yet
-    expose the ``/builds/{id}/resume`` route returns FastAPI's default
-    ``Not Found`` body, which the SDK swallows with a warning so resumed
-    builds keep working (just without the registry-side status flip).
-    Genuine app-level 404s (e.g. unknown build_id) still propagate.
-    """
-
-    def _make_registry_and_handler(self, response_factory):
-        import httpx
-
-        from stardag.registry._api_registry import APIRegistry
-
-        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        registry._client = httpx.Client(
-            transport=httpx.MockTransport(response_factory),
-            auth=registry._auth,
-        )
-        return registry
-
-    @staticmethod
-    def _inject_async_mock(registry, response_factory):
-        import asyncio
-        import httpx
-
-        registry._async_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(response_factory),
-            auth=registry._auth,
-        )
-        registry._async_client_loop = asyncio.get_running_loop()
-
-    def test_sync_route_missing_404_is_swallowed(self, caplog):
-        """Old API: detail == 'Not Found' → warn + return, no exception."""
-        import httpx
-        import logging
-        from uuid import UUID
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._make_registry_and_handler(handler)
-
-        with caplog.at_level(logging.WARNING):
-            registry.build_resume(UUID("00000000-0000-0000-0000-000000000001"))
-
-        assert any(
-            "does not support POST" in rec.message and "/resume" in rec.message
-            for rec in caplog.records
-        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
-
-    def test_sync_app_level_404_propagates(self):
-        """New API: detail == 'Build not found' → raise NotFoundError."""
-        import httpx
-        from uuid import UUID
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Build not found"})
-
-        registry = self._make_registry_and_handler(handler)
-
-        with pytest.raises(NotFoundError):
-            registry.build_resume(UUID("00000000-0000-0000-0000-000000000001"))
-
-    @pytest.mark.asyncio
-    async def test_aio_route_missing_404_is_swallowed(self, caplog):
-        """Async path: detail == 'Not Found' → warn + return."""
-        import httpx
-        import logging
-        from uuid import UUID
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._make_registry_and_handler(handler)
-        self._inject_async_mock(registry, handler)
-
-        with caplog.at_level(logging.WARNING):
-            await registry.build_resume_aio(
-                UUID("00000000-0000-0000-0000-000000000001")
-            )
-
-        assert any(
-            "does not support POST" in rec.message and "/resume" in rec.message
-            for rec in caplog.records
-        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
-
-    @pytest.mark.asyncio
-    async def test_aio_app_level_404_propagates(self):
-        """Async path: app-level 404 propagates."""
-        import httpx
-        from uuid import UUID
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Build not found"})
-
-        registry = self._make_registry_and_handler(handler)
-        self._inject_async_mock(registry, handler)
-
-        with pytest.raises(NotFoundError):
-            await registry.build_resume_aio(
-                UUID("00000000-0000-0000-0000-000000000001")
-            )
-
-
-class TestConcurrencyLimitPathEncoding:
-    """Concurrency-limit keys / task ids are URL-encoded per path segment.
-
-    A key created from the UI may contain ``/`` or other reserved
-    characters; interpolating it raw into the URL path would break routing
-    (a ``/`` splits into extra path segments) or hit the wrong endpoint.
-    Each embedded segment must be percent-encoded with ``safe=""`` so even
-    ``/`` is escaped.
-    """
-
-    def _make_registry_and_capture(self):
-        import httpx
-
-        from stardag.registry._api_registry import APIRegistry
-
-        captured: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured.append(request)
-            return httpx.Response(200, json={"ok": True, "holders": [], "total": 0})
-
-        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        registry._client = httpx.Client(
-            transport=httpx.MockTransport(handler),
-            auth=registry._auth,
-        )
-        return registry, captured
-
-    @staticmethod
-    def _encoded_path(request) -> str:
-        # ``url.path`` percent-decodes for display; ``raw_path`` preserves the
-        # bytes actually put on the wire (and appends the query string, which
-        # we strip here). This is what proves the segment was encoded.
-        return request.url.raw_path.decode().split("?", 1)[0]
-
-    def test_set_encodes_key_segment(self):
-        registry, captured = self._make_registry_and_capture()
-        registry.concurrency_limit_set("a/b c#d", 3)
-        assert len(captured) == 1
-        # The raw key never appears verbatim; ``/`` and other reserved chars
-        # are percent-encoded so the whole key stays a single path segment.
-        assert (
-            self._encoded_path(captured[0])
-            == "/api/v1/concurrency-limits/a%2Fb%20c%23d"
-        )
-
-    def test_delete_encodes_key_segment(self):
-        registry, captured = self._make_registry_and_capture()
-        registry.concurrency_limit_delete("a/b")
-        assert self._encoded_path(captured[0]) == "/api/v1/concurrency-limits/a%2Fb"
-
-    def test_holders_encodes_key_segment(self):
-        registry, captured = self._make_registry_and_capture()
-        registry.concurrency_limit_holders("a/b")
-        assert (
-            self._encoded_path(captured[0])
-            == "/api/v1/concurrency-limits/a%2Fb/holders"
-        )
-
-    def test_evict_encodes_both_segments(self):
-        registry, captured = self._make_registry_and_capture()
-        registry.concurrency_limit_evict("a/b", "id/1")
-        assert (
-            self._encoded_path(captured[0])
-            == "/api/v1/concurrency-limits/a%2Fb/holders/id%2F1/evict"
-        )
-
-
-class _CapturingRegistry:
-    """An APIRegistry whose sync client is a MockTransport recorder.
-
-    Shared by the operator-surface tests below: they are all about what
-    goes on the wire (query params, request body, path) and what comes
-    back off it (model parsing), so a canned response plus the captured
-    request is the whole fixture.
-    """
-
-    def __init__(
-        self,
-        response_json: dict | None = None,
-        status_code: int = 200,
-        response_text: str | None = None,
-    ):
-        import httpx
-
-        from stardag.registry._api_registry import APIRegistry
-
-        self.requests: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            self.requests.append(request)
-            # `response_text` models a body that is not JSON at all — a
-            # proxy or gateway answering on the server's behalf.
-            if response_text is not None:
-                return httpx.Response(status_code, text=response_text)
-            return httpx.Response(status_code, json=response_json or {})
-
-        self.registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        # Swap the *transport*, not the whole client: default headers (auth,
-        # SDK version, User-Agent) are configured on the client the SDK
-        # builds, so replacing it would leave these tests asserting against a
-        # client the SDK never constructs.
-        self.registry.client._transport = httpx.MockTransport(handler)
-
-    @property
-    def request(self):
-        assert len(self.requests) == 1, f"expected 1 request, got {len(self.requests)}"
-        return self.requests[0]
-
-
-_BUILD_ID = "11111111-1111-1111-1111-111111111111"
-_OTHER_BUILD_ID = "22222222-2222-2222-2222-222222222222"
-
-
-class TestBuildList:
-    """``GET /builds`` — filters go server-side, unknown fields are ignored."""
-
-    def _page(self, **build_overrides):
-        build = {
-            "id": _BUILD_ID,
-            "name": "spring-otter-42",
-            "status": "running",
-            "last_active_at": "2026-07-01T10:00:00+00:00",
-            "last_activity_at": "2026-07-04T11:30:00+00:00",
-            # A field this SDK version does not model: forward compatibility
-            # requires it to be ignored, not to raise.
-            "some_future_field": {"nested": True},
+        registry = _registry(handler)
+
+        bare = registry.concurrency_limit_list_detailed()
+        assert "include_holders" not in requests[-1].url.params
+        (limit,) = bare
+        assert (limit.key, limit.max_concurrent, limit.in_use) == ("gpu", 2, 1)
+        assert limit.holders is None
+
+        detailed = registry.concurrency_limit_list_detailed(include_holders=True)
+        assert requests[-1].url.params.get("include_holders") == "true"
+        (limit,) = detailed
+        assert limit.holders is not None
+        (holder,) = limit.holders
+        assert holder.task_id == "t1"
+        assert holder.task_name == "T"
+        assert holder.build_id == build_id
+        assert holder.plan_id == plan_id
+        assert holder.execution_id == execution_id
+        assert holder.started_at == NOW
+
+    def test_deployments(self):
+        deployment_id = uuid4()
+        row = {
+            "id": str(deployment_id),
+            "kind": "modal",
+            "app_name": "app",
+            "code_id": "sha",
+            "generation": 3,
+            "is_current": True,
         }
-        build.update(build_overrides)
-        return {"builds": [build], "total": 7, "page": 2, "page_size": 5}
-
-    def test_filters_ride_as_query_params(self):
-        cap = _CapturingRegistry(self._page())
-        result = cap.registry.build_list(
-            page=2,
-            page_size=5,
-            status="running",
-            reactive_app_name="my-app",
-            idle_for_seconds=86400,
-        )
-        params = cap.request.url.params
-        assert params["page"] == "2"
-        assert params["page_size"] == "5"
-        assert params["status"] == "running"
-        assert params["reactive_app_name"] == "my-app"
-        assert params["idle_for_seconds"] == "86400"
-        assert result.total == 7
-        assert result.page == 2
-        assert result.builds[0].name == "spring-otter-42"
-
-    def test_unset_filters_are_omitted(self):
-        cap = _CapturingRegistry(self._page())
-        cap.registry.build_list()
-        params = cap.request.url.params
-        assert "status" not in params
-        assert "reactive_app_name" not in params
-        assert "idle_for_seconds" not in params
-
-    def test_unknown_response_fields_are_ignored(self):
-        cap = _CapturingRegistry(self._page())
-        result = cap.registry.build_list()
-        build = result.builds[0]
-        assert not hasattr(build, "some_future_field")
-        # Both liveness timestamps are parsed and kept distinct.
-        assert build.last_active_at is not None
-        assert build.last_activity_at is not None
-        assert build.last_active_at != build.last_activity_at
-
-    def test_missing_liveness_fields_default_to_none(self):
-        """An older server sends neither timestamp; parsing must not fail."""
-        cap = _CapturingRegistry(
+        recorder = _Recorder(
             {
-                "builds": [{"id": _BUILD_ID, "name": "old-server-build"}],
-                "total": 1,
-                "page": 1,
-                "page_size": 20,
+                ("POST", "/api/v2/deployments"): row,
+                ("POST", f"/api/v2/deployments/{deployment_id}/activate"): row,
+                ("GET", "/api/v2/deployments"): {"deployments": [row]},
             }
         )
-        build = cap.registry.build_list().builds[0]
-        assert build.last_activity_at is None
-        assert build.status is None
-
-
-class TestBuildListRunning:
-    """The watchdog sweep must filter server-side, not client-side."""
-
-    def test_passes_status_running_to_the_server(self):
-        cap = _CapturingRegistry(
-            {
-                "builds": [{"id": _BUILD_ID, "name": "b1", "status": "running"}],
-                "total": 1,
-                "page": 1,
-                "page_size": 100,
-            }
+        registry = _registry(recorder)
+        registry.deployment_create(
+            kind="modal", code_id="sha", deployment_id=deployment_id, app_name="app"
         )
-        running = cap.registry.build_list_running(limit=10)
-        assert running == [UUID(_BUILD_ID)]
-        # Server-side filter: the sweep must not page an unfiltered list and
-        # match in Python, or an environment full of non-running builds can
-        # starve it of the running ones it exists to find.
-        assert cap.request.url.params["status"] == "running"
+        assert recorder.body() == {
+            "id": str(deployment_id),
+            "kind": "modal",
+            "app_name": "app",
+            "code_id": "sha",
+        }
+        registry.deployment_activate(deployment_id, modal_app_id="ap-1")
+        assert recorder.body() == {"modal_app_id": "ap-1"}
+        registry.deployment_activate(deployment_id)
+        assert recorder.body() in (None, {})
+        (listed,) = registry.deployment_list(kind="modal", app_name="app", current=True)
+        assert listed.generation == 3 and listed.is_current
+        assert recorder.requests[-1].url.params["current"] == "true"
 
-    def test_stops_paging_on_a_short_page(self):
-        cap = _CapturingRegistry(
+    def test_resume_names_the_scope(self):
+        build_id, deployment_id = uuid4(), uuid4()
+        recorder = _Recorder(
             {
-                "builds": [{"id": _BUILD_ID, "name": "b1", "status": "running"}],
-                "total": 1,
-                "page": 1,
-                "page_size": 100,
-            }
-        )
-        cap.registry.build_list_running(limit=100)
-        assert len(cap.requests) == 1
-
-
-class TestBuildCancelCascade:
-    def test_cascade_param_and_parsed_result(self):
-        cap = _CapturingRegistry(
-            {
-                "id": _BUILD_ID,
-                "name": "spring-otter-42",
-                "cascaded_task_ids": ["task-a", "task-b"],
-                "cascaded_task_count": 2,
-            }
-        )
-        result = cap.registry.build_cancel(UUID(_BUILD_ID), cascade=True)
-        assert cap.request.url.params["cascade"] == "true"
-        assert result is not None
-        assert result.cascaded_task_ids == ["task-a", "task-b"]
-
-    def test_cascade_omitted_by_default(self):
-        cap = _CapturingRegistry({"id": _BUILD_ID, "name": "b"})
-        result = cap.registry.build_cancel(UUID(_BUILD_ID))
-        assert "cascade" not in cap.request.url.params
-        # A server predating the cascade returns no cascade fields; they
-        # default, which reads as "nothing was cascaded".
-        assert result is not None
-        assert result.cascaded_task_ids == []
-        assert result.cascaded_task_count == 0
-
-
-class TestBuildBulkCancel:
-    def _response(self, **overrides):
-        payload = {
-            "dry_run": True,
-            "builds": [
-                {
-                    "build_id": _BUILD_ID,
-                    "name": "spring-otter-42",
-                    "last_activity_at": "2026-07-01T10:00:00+00:00",
-                    "cascaded_task_ids": ["task-a"],
+                ("POST", f"/api/v2/builds/{build_id}/resume"): {
+                    "build": BUILD,
+                    "plan": None,
                 }
-            ],
-            "build_count": 1,
-            "task_count": 1,
-            "skipped": {_OTHER_BUILD_ID: "not_running"},
-            "truncated": True,
-        }
-        payload.update(overrides)
-        return payload
-
-    def test_body_carries_only_the_filters_that_were_set(self):
-        cap = _CapturingRegistry(self._response())
-        cap.registry.build_bulk_cancel(idle_for_seconds=86400, dry_run=True)
-        body = json.loads(cap.request.content)
-        assert body["idle_for_seconds"] == 86400
-        assert body["dry_run"] is True
-        # Defaults the caller did not touch are still sent explicitly (the
-        # SDK's defaults and the server's must not silently diverge), but
-        # unset optional filters are absent so the server decides.
-        assert body["cascade"] is True
-        assert "build_ids" not in body
-        assert "reactive_app_name" not in body
-        assert "reason" not in body
-
-    def test_build_ids_are_stringified(self):
-        cap = _CapturingRegistry(self._response())
-        cap.registry.build_bulk_cancel(build_ids=[UUID(_BUILD_ID), _OTHER_BUILD_ID])
-        body = json.loads(cap.request.content)
-        assert body["build_ids"] == [_BUILD_ID, _OTHER_BUILD_ID]
-
-    def test_result_is_parsed_including_skipped_and_truncated(self):
-        cap = _CapturingRegistry(self._response())
-        result = cap.registry.build_bulk_cancel(idle_for_seconds=60)
-        assert result.dry_run is True
-        assert result.build_count == 1
-        assert result.task_count == 1
-        assert result.skipped == {_OTHER_BUILD_ID: "not_running"}
-        assert result.truncated is True
-        assert result.builds[0].cascaded_task_ids == ["task-a"]
-
-
-class TestTaskList:
-    def _response(self, **overrides):
-        payload = {
-            "tasks": [
-                {
-                    "id": "33333333-3333-3333-3333-333333333333",
-                    "task_id": "task-abc",
-                    "task_namespace": "demo.pipeline",
-                    "task_name": "TrainModel",
-                    "latest_status": "running",
-                    "latest_status_at": "2026-07-04T09:00:00+00:00",
-                    "latest_status_build_id": _OTHER_BUILD_ID,
-                }
-            ],
-            "total": 1,
-            "page": 1,
-            "page_size": 20,
-        }
-        payload.update(overrides)
-        return payload
-
-    def test_status_is_a_repeated_query_param(self):
-        """A dict cannot express two values for one key; a pair list can."""
-        cap = _CapturingRegistry(self._response())
-        cap.registry.task_list(status=["running", "suspended"])
-        assert cap.request.url.params.get_list("status") == ["running", "suspended"]
-
-    def test_status_older_than_is_sent_as_iso8601(self):
-        from datetime import datetime, timezone
-
-        cap = _CapturingRegistry(self._response())
-        cutoff = datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc)
-        cap.registry.task_list(status_older_than=cutoff)
-        assert (
-            cap.request.url.params["status_older_than"] == "2026-07-04T09:00:00+00:00"
-        )
-
-    def test_claim_holder_fields_are_parsed(self):
-        cap = _CapturingRegistry(self._response())
-        task = cap.registry.task_list(status=["running"]).tasks[0]
-        assert task.latest_status == "running"
-        assert task.latest_status_at is not None
-        assert str(task.latest_status_build_id) == _OTHER_BUILD_ID
-
-    def test_unset_filters_are_omitted(self):
-        cap = _CapturingRegistry(self._response())
-        cap.registry.task_list()
-        params = cap.request.url.params
-        assert "status" not in params
-        assert "status_older_than" not in params
-        assert "task_name" not in params
-
-
-class TestTaskByIdEndpoints:
-    """Cancel/retry addressed by id hit the same routes as the task-object variants."""
-
-    def test_cancel_by_id_path(self):
-        cap = _CapturingRegistry({})
-        cap.registry.task_cancel_by_id(UUID(_BUILD_ID), "task-abc")
-        assert (
-            cap.request.url.path == f"/api/v1/builds/{_BUILD_ID}/tasks/task-abc/cancel"
-        )
-
-    def test_retry_by_id_path(self):
-        cap = _CapturingRegistry({})
-        cap.registry.task_retry_by_id(UUID(_BUILD_ID), "task-abc")
-        assert (
-            cap.request.url.path == f"/api/v1/builds/{_BUILD_ID}/tasks/task-abc/retry"
-        )
-
-
-class TestTickSummaries:
-    def test_report_posts_the_summary_verbatim(self):
-        cap = _CapturingRegistry(
-            {
-                "id": "44444444-4444-4444-4444-444444444444",
-                "build_id": _BUILD_ID,
-                "outcome": "terminal",
-                "summary": {"outcome": "terminal"},
-                "created_at": "2026-07-04T09:00:00+00:00",
-            },
-            status_code=201,
-        )
-        summary = {"outcome": "terminal", "spawned": 3, "some_future_counter": 1}
-        cap.registry.build_report_tick_summary(UUID(_BUILD_ID), summary)
-        assert cap.request.url.path == f"/api/v1/builds/{_BUILD_ID}/tick-summaries"
-        # The body is the summary as given — the server stores unknown keys
-        # verbatim, which is what lets the SDK grow the summary without a
-        # server release.
-        assert json.loads(cap.request.content) == summary
-
-    def test_list_parses_records_with_open_summaries(self):
-        cap = _CapturingRegistry(
-            {
-                "build_id": _BUILD_ID,
-                "summaries": [
-                    {
-                        "id": "44444444-4444-4444-4444-444444444444",
-                        "build_id": _BUILD_ID,
-                        "outcome": "lingered_out",
-                        "summary": {
-                            "outcome": "lingered_out",
-                            "some_future_counter": 7,
-                        },
-                        "created_at": "2026-07-04T09:00:00+00:00",
-                    }
-                ],
             }
         )
-        records = cap.registry.build_list_tick_summaries(UUID(_BUILD_ID), limit=5)
-        assert cap.request.url.params["limit"] == "5"
-        assert len(records) == 1
-        assert records[0].outcome == "lingered_out"
-        # The blob is kept whole, unknown keys included.
-        assert records[0].summary["some_future_counter"] == 7
-
-
-class TestSDKVersionHeader:
-    """The SDK announces its version on every registry request.
-
-    This ships before anything reads it, and that is the point: a server
-    can only tell an SDK "you are too old" if that SDK was already
-    identifying itself when it was released. A release that goes out silent
-    is permanently un-diagnosable — no later server change fixes it
-    retroactively. Hence these tests guard a header nothing enforces yet.
-    """
-
-    def test_sync_request_carries_version_and_user_agent(self):
-        cap = _CapturingRegistry({"build_id": _BUILD_ID, "summaries": []})
-        cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
-
-        headers = cap.request.headers
-        assert headers[SDK_VERSION_HEADER] == __version__
-        # User-Agent is for humans reading logs; the server keys on the
-        # dedicated header, so this only has to name the SDK and version.
-        assert headers["user-agent"].startswith(f"stardag/{__version__}")
-
-    @pytest.mark.asyncio
-    async def test_async_request_carries_version_and_user_agent(self):
-        import httpx
-
-        from stardag.registry._api_registry import APIRegistry
-
-        captured: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured.append(request)
-            return httpx.Response(200, json={})
-
-        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        # Touch the property inside the coroutine so the lazily-built client
-        # binds to *this* loop, then swap only its transport (see
-        # ``_CapturingRegistry``).
-        registry.async_client._transport = httpx.MockTransport(handler)
-        await registry.build_add_roots_aio(UUID(_BUILD_ID), ["root-task-1"])
-
-        assert len(captured) == 1
-        headers = captured[0].headers
-        assert headers[SDK_VERSION_HEADER] == __version__
-        assert headers["user-agent"].startswith(f"stardag/{__version__}")
-
-    def test_version_header_survives_per_request_headers(self):
-        """Per-request headers must not clobber the client's defaults.
-
-        POSTs with a body pass their own Content-Type (and Content-Encoding
-        when gzipped); httpx merges those *over* the client defaults, so the
-        identification headers have to survive the merge.
-        """
-        cap = _CapturingRegistry({})
-        cap.registry.build_add_roots(UUID(_BUILD_ID), ["root-task-1"])
-
-        headers = cap.request.headers
-        assert headers["content-type"] == "application/json"
-        assert headers[SDK_VERSION_HEADER] == __version__
-
-
-class TestSDKVersionUnsupported:
-    """426 Upgrade Required → a typed error carrying the server's own words."""
-
-    _DETAIL = {
-        "error_code": "SDK_VERSION_UNSUPPORTED",
-        "message": (
-            "This Stardag server requires stardag SDK 2.0.0 or newer, but "
-            "this request came from stardag 1.2.3. Upgrade with: "
-            'pip install --upgrade "stardag>=2.0.0"'
-        ),
-        "sdk_version": "1.2.3",
-        "minimum_sdk_version": "2.0.0",
-    }
-
-    def test_raises_typed_error_with_the_servers_message_verbatim(self):
-        cap = _CapturingRegistry({"detail": self._DETAIL}, status_code=426)
-
-        with pytest.raises(SDKVersionUnsupportedError) as excinfo:
-            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
-
-        err = excinfo.value
-        # Verbatim, not paraphrased: the server knows both versions and the
-        # exact upgrade command, and a second wording here would drift.
-        assert err.message == self._DETAIL["message"]
-        assert self._DETAIL["message"] in str(err)
-        assert err.sdk_version == "1.2.3"
-        assert err.minimum_sdk_version == "2.0.0"
-        assert err.status_code == 426
-        assert err.payload == self._DETAIL
-
-    def test_is_an_api_error_so_cli_error_paths_catch_it(self):
-        # Every registry-backed CLI command funnels StardagError into a
-        # friendly exit; a 426 must not escape as a traceback.
-        cap = _CapturingRegistry({"detail": self._DETAIL}, status_code=426)
-        with pytest.raises(APIError):
-            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
-
-    def test_unstructured_426_still_gets_the_typed_error(self):
-        # e.g. a proxy's own 426, with no structured detail. Better a
-        # generic upgrade sentence than an opaque APIError.
-        cap = _CapturingRegistry({"detail": "Upgrade Required"}, status_code=426)
-        with pytest.raises(SDKVersionUnsupportedError) as excinfo:
-            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
-        assert excinfo.value.minimum_sdk_version is None
-        assert "Upgrade Required" in str(excinfo.value)
-
-    def test_a_non_json_426_still_surfaces_the_body(self):
-        """A proxy's 426 has no JSON at all, so there is no `detail` key to
-        read — and that is precisely when the upstream's own words are the
-        only clue about which hop rejected the request. Losing them to the
-        generic sentence sends the reader to the wrong server."""
-        cap = _CapturingRegistry(
-            status_code=426,
-            response_text="nginx: client SDK too old for this gateway",
+        result = _registry(recorder).build_resume(
+            build_id, deployment_id=deployment_id, settings={"A": "1"}
         )
-        with pytest.raises(SDKVersionUnsupportedError) as excinfo:
-            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
-        assert "nginx: client SDK too old for this gateway" in str(excinfo.value)
+        assert result.plan is None
+        assert recorder.body() == {
+            "deployment_id": str(deployment_id),
+            "settings": {"A": "1"},
+        }
 
-
-class TestNotifyReadFallback:
-    """``GET /builds/{id}/notify`` against a server that does not have it.
-
-    The path exists on such a server for POST and DELETE, so the miss comes
-    back as **405**, not the missing-route 404 — and the fallback has to be
-    latched, because this runs on the linger poll of every lingering build
-    and a doomed request per poll is the cost the endpoint removes.
-    """
-
-    def _registry(self, handler):
-        """Swap the *transport*, not the whole client.
-
-        Default headers (auth, SDK version, User-Agent) are configured on
-        the client the SDK builds, so replacing it would leave these tests
-        asserting against a client the SDK never constructs — the reason
-        ``_CapturingRegistry`` gives for the same choice.
-        """
-        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        registry.async_client._transport = httpx.MockTransport(handler)
-        return registry
-
-    async def test_the_flag_round_trips_from_the_route(self, monkeypatch):
-        """The happy path, which nothing else covers — and the reason it
-        matters is the latch below: a wrong path or verb yields FastAPI's
-        404, which is indistinguishable from an old server, so a typo would
-        silently read the frontier for the life of the process with every
-        test still green. So assert the method and the path, not just the
-        answer.
-        """
-        from stardag.registry import _api_registry
-
-        monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
-        seen: list[tuple[str, str]] = []
-        answer = {"needs_tick": False}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen.append((request.method, request.url.path))
-            return httpx.Response(200, json=answer)
-
-        registry = self._registry(handler)
+    def test_the_scheduler_lease_and_notify(self):
         build_id = uuid4()
+        lease = f"/api/v2/builds/{build_id}/scheduler-lease"
+        notify = f"/api/v2/builds/{build_id}/notify"
+        recorder = _Recorder(
+            {
+                ("POST", lease): {"build_id": str(build_id), "held": True},
+                ("DELETE", lease): {"build_id": str(build_id), "held": False},
+                ("POST", notify): {
+                    "build_id": str(build_id),
+                    "needs_tick": True,
+                    "scheduler_live": True,
+                },
+            }
+        )
+        registry = _registry(recorder)
+        assert registry.scheduler_lease_acquire(
+            build_id, owner_id="o", ttl_seconds=60
+        ).held
+        assert dict(recorder.requests[-1].url.params) == {
+            "owner_id": "o",
+            "ttl_seconds": "60",
+        }
+        # The release answers whether the caller held it (the server's
+        # LeaseResponse): a lost tick's release is visibly a no-op.
+        assert registry.scheduler_lease_release(build_id, owner_id="o").held is False
+        assert registry.build_notify(build_id, can_spawn=False).scheduler_live is True
+        assert recorder.requests[-1].url.params["can_spawn"] == "false"
 
-        assert (await registry.build_get_notify_aio(build_id)).needs_tick is False
-        answer["needs_tick"] = True
-        assert (await registry.build_get_notify_aio(build_id)).needs_tick is True
+    def test_the_exclusions_skip_blocked_and_the_execution_ledger(self):
+        plan_id, build_id, execution_id = uuid4(), uuid4(), uuid4()
+        exclusion = {
+            "plan_id": str(plan_id),
+            "excluded": ["t1", "t2"],
+            "build_failed": False,
+        }
+        recorder = _Recorder(
+            {
+                (
+                    "POST",
+                    f"/api/v2/plans/{plan_id}/members/t1/discovery-failed",
+                ): exclusion,
+                ("POST", f"/api/v2/plans/{plan_id}/members/t1/exclude"): exclusion,
+                ("POST", f"/api/v2/builds/{build_id}/skip-blocked"): {
+                    "plan_id": str(plan_id),
+                    "skipped": ["t3"],
+                },
+                ("GET", f"/api/v2/builds/{build_id}/executions"): {
+                    "build_id": str(build_id),
+                    "executions": [
+                        {
+                            "id": str(execution_id),
+                            "task_id": "t1",
+                            "plan_id": str(plan_id),
+                            "instance_id": str(uuid4()),
+                            "executor": "modal",
+                            "executor_ref": "fc-1",
+                            "executor_metadata": None,
+                            "started_at": NOW.isoformat(),
+                            "claim_released_at": None,
+                            "claim_outcome": None,
+                            "ended_at": None,
+                            "outcome": None,
+                            "in_current_plan": False,
+                        }
+                    ],
+                },
+                ("POST", f"/api/v2/executions/{execution_id}/stopped"): TRANSITION,
+            }
+        )
+        registry = _registry(recorder)
+        result = registry.member_discovery_failed(plan_id, "t1", error="boom")
+        assert result.excluded == ["t1", "t2"]
+        assert recorder.body() == {"error": "boom"}
+        registry.member_exclude(plan_id, "t1")
+        assert recorder.body() == {}
+        assert registry.build_skip_blocked(build_id) == ["t3"]
+        (execution,) = registry.build_list_executions(
+            build_id, not_in_current_plan=True
+        )
+        assert execution.still_wanted and not execution.in_current_plan
+        assert recorder.requests[-1].url.params["not_in_current_plan"] == "true"
+        registry.build_list_executions(build_id, include_ended=True)
+        assert recorder.requests[-1].url.params["include_ended"] == "true"
+        assert "not_in_current_plan" not in recorder.requests[-1].url.params
+        registry.execution_report_stopped(execution_id)
+        assert recorder.body() == {"outcome": "stopped"}
+        registry.execution_report_stopped(execution_id, outcome="lost")
+        assert recorder.body() == {"outcome": "lost"}
 
-        assert seen == [
-            ("GET", f"/api/v1/builds/{build_id}/notify"),
-            ("GET", f"/api/v1/builds/{build_id}/notify"),
+    def test_the_scheduling_decisions_carry_no_execution(self):
+        plan_id = uuid4()
+        recorder = _Recorder(
+            {
+                ("POST", f"/api/v2/plans/{plan_id}/members/t1/{action}"): TRANSITION
+                for action in ("skip", "cancel", "retry")
+            }
+        )
+        registry = _registry(recorder)
+        registry.member_skip(plan_id, "t1")
+        registry.member_cancel(plan_id, "t1")
+        registry.member_retry(plan_id, "t1")
+        assert [r.url.path.rsplit("/", 1)[-1] for r in recorder.requests] == [
+            "skip",
+            "cancel",
+            "retry",
         ]
+        assert all(not r.content for r in recorder.requests)
 
-    async def test_an_unparseable_answer_reads_as_unset(self, monkeypatch):
-        """Unparseable must mean "no", and this is not a nicety.
 
-        A fabricated "yes" makes the linger loop clear the flag, re-read the
-        frontier, be told yes again, and never exit — while holding and
-        renewing the build's scheduler lease, so nothing else can drive that
-        build for the life of the container. Note the trigger is wider than
-        corruption: every field of ``BuildNotifyResult`` has a default, so a
-        bare ``{}`` validates cleanly to the model default.
-        """
-        from stardag.registry import _api_registry
+class TestReads:
+    """The reads the CLI adds: the build listing, a plan's roots with its
+    scope, and a task's artifacts."""
 
-        monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
-
-        for body in ({}, {"needsTick": True}, {"needs_tick": "yes-ish"}):
-            registry = self._registry(
-                lambda request, b=body: httpx.Response(200, json=b)
-            )
-            result = await registry.build_get_notify_aio(uuid4())
-            assert result.needs_tick is False, body
-
-    async def test_a_missing_build_propagates_and_does_not_latch(self, monkeypatch):
-        """The discrimination the latch turns on: a *resource* 404 is a real
-        error, a *route* 404 is version skew. Getting this wrong would
-        disable the cheap read for the whole process on the first request
-        for a deleted build."""
-        from stardag.exceptions import NotFoundError
-        from stardag.registry import _api_registry
-
-        monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
-
-        registry = self._registry(
-            lambda request: httpx.Response(404, json={"detail": "Build not found"})
-        )
-
-        with pytest.raises(NotFoundError):
-            await registry.build_get_notify_aio(uuid4())
-        assert _api_registry._notify_read_route_missing is False
-
-    async def test_405_falls_back_to_the_frontier_and_latches(self, monkeypatch):
-        from stardag.registry import _api_registry
-
-        monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
-
-        requested: list[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requested.append(f"{request.method} {request.url.path}")
-            return httpx.Response(405, json={"detail": "Method Not Allowed"})
-
-        registry = self._registry(handler)
-        frontier_calls: list[UUID] = []
-
-        async def fake_frontier(build_id):
-            frontier_calls.append(build_id)
-            return SimpleNamespace(needs_tick=True)
-
-        registry.build_get_frontier_aio = fake_frontier  # type: ignore[method-assign]
-
+    def test_build_list_filters_and_the_running_listing_uses_it(self):
         build_id = uuid4()
-        first = await registry.build_get_notify_aio(build_id)
-        second = await registry.build_get_notify_aio(build_id)
+        build = {"id": str(build_id), "status": "running", "root_task_ids": ["t"]}
+        recorder = _Recorder({("GET", "/api/v2/builds"): {"builds": [build]}})
+        registry = _registry(recorder)
+        (listed,) = registry.build_list(status="failed", reactive_app_name="app")
+        assert listed.id == build_id
+        params = recorder.requests[-1].url.params
+        assert (params["status"], params["reactive_app_name"]) == ("failed", "app")
+        assert registry.build_list_running() == [build_id]
+        assert recorder.requests[-1].url.params["status"] == "running"
 
-        assert first.needs_tick is True
-        assert second.needs_tick is True
-        assert frontier_calls == [build_id, build_id], "both answered by the frontier"
-        assert len(requested) == 1, (
-            "the missing route must be latched, not re-probed on every poll: "
-            f"{requested}"
+    def test_plan_roots_carry_the_scope(self):
+        plan_id, build_id, deployment_id = uuid4(), uuid4(), uuid4()
+        root = {"task_id": "t", "instance_hash": "h", "status": "pending"}
+        recorder = _Recorder(
+            {
+                ("GET", f"/api/v2/plans/{plan_id}/roots"): {
+                    "plan_id": str(plan_id),
+                    "build_id": str(build_id),
+                    "deployment_id": str(deployment_id),
+                    "settings_hash": "s",
+                    "roots": [root],
+                }
+            }
+        )
+        registry = _registry(recorder)
+        info = registry.plan_roots_info(plan_id)
+        assert (info.build_id, info.deployment_id) == (build_id, deployment_id)
+        assert [r.task_id for r in registry.plan_roots(plan_id)] == ["t"]
+
+    def test_task_artifacts(self):
+        artifact = {
+            "id": str(uuid4()),
+            "task_id": "t",
+            "artifact_type": "markdown",
+            "name": "report",
+            "body": {"content": "# hi"},
+            "created_at": NOW.isoformat(),
+        }
+        recorder = _Recorder(
+            {("GET", "/api/v2/tasks/t/artifacts"): {"artifacts": [artifact]}}
+        )
+        (listed,) = _registry(recorder).task_list_artifacts("t")
+        assert (listed.artifact_type, listed.name) == ("markdown", "report")
+
+
+class TestErrors:
+    def _refusing(self, status: int, detail: typing.Any) -> APIRegistry:
+        return _registry(
+            lambda request: httpx.Response(status, json={"detail": detail})
         )
 
-    async def test_a_real_error_is_not_swallowed(self, monkeypatch):
-        """Only a missing *route* falls back. A 500, or a 404 for a build
-        that does not exist, is a real failure and must propagate — silently
-        degrading to the frontier would hide it for the life of the process.
-        """
-        from stardag.exceptions import APIError
-        from stardag.registry import _api_registry
-
-        monkeypatch.setattr(_api_registry, "_notify_read_route_missing", False)
-
-        registry = self._registry(
-            lambda request: httpx.Response(500, json={"detail": "boom"})
+    def test_a_refusal_carries_its_code(self):
+        registry = self._refusing(
+            409,
+            {"code": "instance_conflict", "message": "two instances", "fields": ["w"]},
         )
+        with pytest.raises(APIError) as excinfo:
+            registry.plan_register_members(uuid4(), [_item()])
+        assert excinfo.value.code == "instance_conflict"
+        assert excinfo.value.status_code == 409
+        assert (excinfo.value.payload or {})["fields"] == ["w"]
+        assert "two instances" in str(excinfo.value)
 
-        with pytest.raises(APIError):
-            await registry.build_get_notify_aio(uuid4())
-        assert _api_registry._notify_read_route_missing is False
-
-
-class TestSchedulerLeaseCalls:
-    """`_lease_call` — the least-tested and most-reasoned-about path.
-
-    Its version-skew latch disables single-flighting for the registry that
-    latched it, so what can and cannot latch it is the whole question.
-    """
-
-    def _registry(self, handler):
-        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        registry.async_client._transport = httpx.MockTransport(handler)
-        return registry
-
-    async def test_acquire_renew_release_round_trip(self):
-        seen: list[tuple[str, str]] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen.append((request.method, request.url.path))
-            return httpx.Response(
-                200, json={"held": True, "expires_at": "2026-01-01T00:00:00Z"}
-            )
-
-        r = self._registry(handler)
-        bid = uuid4()
-        assert (
-            await r.build_acquire_scheduler_lease_aio(bid, owner_id="t", ttl_seconds=60)
-        ).held is True
-        assert (
-            await r.build_renew_scheduler_lease_aio(bid, owner_id="t", ttl_seconds=60)
-        ).held is True
-        assert (await r.build_release_scheduler_lease_aio(bid, owner_id="t")).held
-
-        path = f"/api/v1/builds/{bid}/scheduler-lease"
-        assert seen == [("POST", path), ("PUT", path), ("DELETE", path)]
-
-    async def test_a_malformed_held_grants_rather_than_denies(self):
-        """A 200 whose ``held`` is missing or not a boolean is malformed,
-        and malformed must degrade to *grant*. ``payload.get("held")``
-        would quietly turn a missing key into ``held=False`` and coercion
-        would do the same to ``0`` — denying anyone the build for as long
-        as the server misbehaves."""
-        for body in (
-            {"expires": "not-the-shape"},  # no `held` at all
-            {"held": 0},  # falsy non-boolean: coercion would deny
-            {"held": "no"},  # truthy string: coercion would fake a grant
-        ):
-            r = self._registry(lambda request, b=body: httpx.Response(200, json=b))
-            result = await r.build_acquire_scheduler_lease_aio(
-                uuid4(), owner_id="t", ttl_seconds=60
-            )
-            assert result.held is True, body
-            assert r._scheduler_lease_route_missing is False, (
-                "malformed is not version skew; the next call must probe again"
-            )
-
-    async def test_a_denied_acquire_is_reported_not_raised(self):
-        r = self._registry(lambda request: httpx.Response(200, json={"held": False}))
-        result = await r.build_acquire_scheduler_lease_aio(
-            uuid4(), owner_id="t", ttl_seconds=60
-        )
-        assert result.held is False
-
-    async def test_405_latches_and_then_grants(self):
-        """An older server has no lease routes. Granting is the honest
-        fallback — duplicate ticks are idempotent, and task starts stay
-        arbitrated by the execution claim — but it must be latched, since a
-        tick asks on acquire, on every renew, and on release."""
-        requests: list[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests.append(request.method)
-            return httpx.Response(405, json={"detail": "Method Not Allowed"})
-
-        r = self._registry(handler)
-        for _ in range(3):
-            assert (
-                await r.build_acquire_scheduler_lease_aio(
-                    uuid4(), owner_id="t", ttl_seconds=60
-                )
-            ).held is True
-        assert len(requests) == 1, f"re-probed instead of latching: {requests}"
-
-    async def test_a_missing_build_propagates_and_does_not_latch(self):
-        """The discrimination the latch turns on. A *resource* 404 is a real
-        error; latching on it would disable single-flighting for this
-        registry for good, on the first request for a deleted build."""
-        r = self._registry(
-            lambda request: httpx.Response(404, json={"detail": "Build not found"})
-        )
-        with pytest.raises(NotFoundError):
-            await r.build_acquire_scheduler_lease_aio(
-                uuid4(), owner_id="t", ttl_seconds=60
-            )
-        assert r._scheduler_lease_route_missing is False
-
-    async def test_a_server_error_propagates_and_does_not_latch(self):
-        r = self._registry(lambda request: httpx.Response(500, json={"detail": "boom"}))
-        with pytest.raises(APIError):
-            await r.build_acquire_scheduler_lease_aio(
-                uuid4(), owner_id="t", ttl_seconds=60
-            )
-        assert r._scheduler_lease_route_missing is False
-
-    async def test_the_latch_is_per_registry_not_per_process(self):
-        """Two registries in one process may point at different servers."""
-        old = self._registry(
-            lambda request: httpx.Response(405, json={"detail": "Method Not Allowed"})
-        )
-        new = self._registry(lambda request: httpx.Response(200, json={"held": False}))
-
-        await old.build_acquire_scheduler_lease_aio(
-            uuid4(), owner_id="t", ttl_seconds=60
-        )
-        assert old._scheduler_lease_route_missing is True
-
-        result = await new.build_acquire_scheduler_lease_aio(
-            uuid4(), owner_id="t", ttl_seconds=60
-        )
-        assert new._scheduler_lease_route_missing is False
-        assert result.held is False, "the other registry's latch leaked"
-
-
-class TestAsyncClientUnderConcurrentCallers:
-    """The invariant that lets scheduler ticks share a Modal container.
-
-    ``registry_provider`` hands out one process-wide ``APIRegistry``, and
-    its ``async_client`` is cached **per event loop**: a call from a
-    different loop rebuilds it and closes the previous one. That is fine
-    while one caller owns the process, and actively destructive once
-    several do — which is exactly what input concurrency introduces.
-
-    Modal decides the shape: an ``async def`` gets its concurrent inputs as
-    asyncio tasks on one loop, a ``def`` gets them on threads, each
-    running its own ``asyncio.run``. So "the deployed tick is async" and
-    "ticks may share a container" are one decision, and this class pins
-    both halves of it — the safe shape and the hazard it avoids — because
-    neither is visible until two ticks actually overlap.
-    """
-
-    @staticmethod
-    def _registry() -> APIRegistry:
-        return APIRegistry(api_url="http://test.invalid", api_key="test-key")
-
-    def test_concurrent_callers_on_one_loop_share_one_stable_client(self):
-        """The async tick's world: N ticks, one loop, one client.
-
-        Each "tick" reads the client, yields (as a real one does on every
-        await), and reads it again. All four reads must be the same object,
-        and it must still be open — a rebuild would have closed it under
-        whoever was mid-request.
-        """
-        import asyncio
-
-        registry = self._registry()
-
-        async def fake_tick() -> list[httpx.AsyncClient]:
-            first = registry.async_client
-            await asyncio.sleep(0)
-            return [first, registry.async_client]
-
-        async def main() -> None:
-            reads: list[list[httpx.AsyncClient]] = await asyncio.gather(
-                *(fake_tick() for _ in range(4))
-            )
-
-            clients = {id(client) for tick_reads in reads for client in tick_reads}
-            assert len(clients) == 1, (
-                "ticks sharing a container must share one async client; a "
-                "rebuild closes the client another tick is using"
-            )
-            assert not reads[0][0].is_closed
-
-            # Asserted and closed inside the loop, not after it. An
-            # AsyncClient belongs to the loop it was built on and can only
-            # be closed from there, so a test that returns one and tidies
-            # up afterwards has no way to close it at all.
-            await registry.aclose()
-
-        asyncio.run(main())
-
-    def test_callers_on_separate_loops_rebuild_and_close_the_shared_client(
-        self,
-    ):
-        """The sync tick's world, and why the deployed tick is not that.
-
-        Threaded concurrency gives each input its own ``asyncio.run`` and
-        therefore its own loop, so the second caller's first property access
-        tears down the first caller's client mid-flight. Asserted rather
-        than merely described: if Modal or ``APIRegistry`` ever stopped
-        behaving this way, making the tick async would have stopped being
-        load-bearing, and that is worth being told about.
-        """
-        import asyncio
-        import threading
-
-        registry = self._registry()
-        clients: dict[str, httpx.AsyncClient] = {}
-        first_read = threading.Event()
-        b_done = threading.Event()
-
-        # The rendezvous waits are deliberately unbounded, and the threads
-        # daemons. A bounded wait would let a thread that never
-        # rendezvoused carry on into the reads below and fail one of the
-        # real assertions, which would then be describing a coordination
-        # failure in the language of a client-caching bug. Unbounded, a
-        # thread that cannot proceed simply does not finish, and the one
-        # bound that matters — `join(timeout=...)` plus `is_alive()` — says
-        # exactly that. `daemon=True` is what keeps such a thread from
-        # holding the interpreter open at exit.
-        def caller_a():
-            async def body():
-                clients["a"] = registry.async_client
-                first_read.set()
-                # Wait for B to touch the property from its own loop.
-                await asyncio.get_running_loop().run_in_executor(None, b_done.wait)
-                clients["a_again"] = registry.async_client
-
-            asyncio.run(body())
-
-        def caller_b():
-            async def body():
-                first_read.wait()
-                clients["b"] = registry.async_client
-
-            asyncio.run(body())
-            b_done.set()
-
-        thread_a = threading.Thread(target=caller_a, daemon=True)
-        thread_b = threading.Thread(target=caller_b, daemon=True)
-        thread_a.start()
-        thread_b.start()
-        thread_a.join(timeout=10)
-        thread_b.join(timeout=10)
-
-        # The two survivors are deliberately left unclosed. Each belongs to
-        # a loop that has since ended, so there is nowhere to close them
-        # from — which is the hazard this test exists to describe, not an
-        # oversight in the test. Nothing leaks in practice: no request is
-        # ever issued here, so no connection is ever opened, and the suite
-        # is clean under `-W error::ResourceWarning`.
-
-        # Before reading `clients`: a thread still alive means the two
-        # never rendezvoused, and every assertion below would otherwise
-        # fail with a KeyError that says nothing about what went wrong.
-        assert not thread_a.is_alive() and not thread_b.is_alive(), (
-            "a caller thread did not finish; the two never rendezvoused"
-        )
-        assert clients["b"] is not clients["a"], (
-            "a second event loop rebuilds the cached client — this is the "
-            "thrash the deployed tick is async to avoid"
-        )
-        assert clients["a_again"] is not clients["a"], (
-            "and A's next read gets a third client, so the one it was "
-            "using mid-tick was replaced underneath it"
-        )
-        # The destructive half, and the reason this is a bug rather than
-        # wasted allocation: the displaced client is closed, so a request
-        # already in flight on it fails.
-        assert clients["a"].is_closed, (
-            "the displaced client was left open — the hazard here is that "
-            "it is closed under a caller mid-request"
-        )
-
-
-class TestScopeRequiresANewServer:
-    """A server that predates structure scopes is refused, not degraded.
-
-    Such a server gates every build over environment-global edges — the
-    very thing scopes exist to prevent — and it ignores unknown fields
-    silently, so its silence is the only evidence. The release order is
-    server first, then SDK; the reverse is a :class:`RegistryTooOldError`.
-    """
-
-    @staticmethod
-    def _registry(handler):
-        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        registry._client = httpx.Client(
-            transport=httpx.MockTransport(handler), auth=registry._auth
-        )
-        return registry
-
-    @staticmethod
-    def _inject_async(registry, handler):
-        import asyncio
-
-        registry._async_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), auth=registry._auth
-        )
-        registry._async_client_loop = asyncio.get_running_loop()
-
-    def test_missing_scope_route_is_a_too_old_server(self):
-        from stardag.exceptions import RegistryTooOldError
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.method == "PUT" and request.url.path.endswith("/scope")
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError, match="predates structure scopes"):
-            registry.build_set_scope(uuid4(), scope_key="code:cfg")
-
-    def test_missing_deployments_route_is_a_too_old_server(self):
-        """Recording a deployment is what lets builds follow a redeploy, so
-        a server without the route is refused, not skipped — the deploy
-        command fails on it like on any recording failure."""
-        from stardag.exceptions import RegistryTooOldError
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.method == "POST"
-            assert request.url.path.endswith("/deployments")
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError, match="predates deployments"):
-            registry.deployment_record(app_name="app", code_id="c" * 40)
-
-    def test_a_resource_404_on_the_scope_route_is_still_not_found(self):
-        from stardag.exceptions import RegistryTooOldError
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Build not found"})
-
-        registry = self._registry(handler)
+    def test_a_404_is_a_not_found_with_its_payload(self):
+        registry = self._refusing(404, {"code": "unknown_build", "message": "no build"})
         with pytest.raises(NotFoundError) as excinfo:
-            registry.build_set_scope(uuid4(), scope_key="code:cfg")
-        assert not isinstance(excinfo.value, RegistryTooOldError)
+            registry.build_get(uuid4())
+        assert excinfo.value.code == "unknown_build"
 
-    @pytest.mark.asyncio
-    async def test_missing_scope_route_is_a_too_old_server_aio(self):
-        from stardag.exceptions import RegistryTooOldError
+    @pytest.mark.parametrize(
+        "code,wanted",
+        [
+            ("execution_not_current", False),
+            ("execution_superseded", False),
+            ("unknown_execution", False),
+            ("not_claim_holder", False),
+            ("task_already_running", True),
+        ],
+    )
+    def test_a_report_refused_for_a_moved_claim_means_stop(self, code, wanted):
+        registry = self._refusing(409, {"code": code, "message": code})
+        with pytest.raises(APIError) as excinfo:
+            registry.member_complete(uuid4(), "t", execution_id=uuid4())
+        assert execution_not_wanted(excinfo.value) is (not wanted)
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Not Found"})
 
-        registry = self._registry(handler)
-        self._inject_async(registry, handler)
-        with pytest.raises(RegistryTooOldError):
-            await registry.build_set_scope_aio(uuid4(), scope_key="code:cfg")
+class TestGzip:
+    def test_small_bodies_are_plain_and_large_ones_gzipped(self):
+        content, headers = gzip_json_body({"a": 1})
+        assert headers == {"Content-Type": "application/json"}
+        assert json.loads(content or b"") == {"a": 1}
+        large = {"items": [{"k": "x" * 40, "i": i} for i in range(100)]}
+        content, headers = gzip_json_body(large)
+        assert headers["Content-Encoding"] == "gzip"
+        assert json.loads(gzip.decompress(content or b"")) == large
+        assert _GZIP_REQUEST_THRESHOLD_BYTES == 1024
 
-    def test_build_start_that_does_not_echo_the_scope_is_a_too_old_server(self):
-        """An old server accepts the body and drops the field it does not
-        know; the missing echo is the tell."""
-        from stardag.exceptions import RegistryTooOldError
-
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError, match="POST /builds"):
-            registry.build_start(root_tasks=[], scope_key="code:cfg")
-
-    def test_build_start_refused_for_no_echo_fails_the_committed_build(self):
-        """The server has committed the build by the time its echo is
-        checked; a refusal must not leave it RUNNING with no driver."""
-        from stardag.exceptions import RegistryTooOldError
-
-        build_id = uuid4()
-        seen: list[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen.append(f"{request.method} {request.url.path}")
-            if request.url.path.endswith("/fail"):
-                return httpx.Response(200, json={"id": str(build_id)})
-            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError):
-            registry.build_start(root_tasks=[], scope_key="code:cfg")
-        assert seen == [
-            "POST /api/v1/builds",
-            f"POST /api/v1/builds/{build_id}/fail",
-        ]
-
-    def test_build_start_refusal_survives_a_failing_fail_call(self):
-        from stardag.exceptions import RegistryTooOldError
-
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path.endswith("/fail"):
-                return httpx.Response(500, json={"detail": "boom"})
-            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError):
-            registry.build_start(root_tasks=[], scope_key="code:cfg")
-
-    @pytest.mark.asyncio
-    async def test_build_start_aio_refused_for_no_echo_fails_the_committed_build(self):
-        from stardag.exceptions import RegistryTooOldError
-
-        build_id = uuid4()
-        seen: list[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen.append(f"{request.method} {request.url.path}")
-            if request.url.path.endswith("/fail"):
-                return httpx.Response(200, json={"id": str(build_id)})
-            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
-
-        registry = self._registry(handler)
-        self._inject_async(registry, handler)
-        with pytest.raises(RegistryTooOldError):
-            await registry.build_start_aio(root_tasks=[], scope_key="code:cfg")
-        assert seen[-1] == f"POST /api/v1/builds/{build_id}/fail"
-
-    def test_build_start_echoing_another_scope_is_refused(self):
-        """A server that knows the field adopts it or 409s; one that answers
-        some other scope would gate the build under a scope this SDK never
-        registers edges in, so the build must not proceed."""
-        from stardag.exceptions import RegistryTooOldError
-
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                201,
-                json={
-                    "id": str(build_id),
-                    "name": "b",
-                    "scope_key": f"build:{build_id}",
-                },
-            )
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError, match="answered structure scope"):
-            registry.build_start(root_tasks=[], scope_key="code:cfg")
-
-    def test_build_start_with_the_scope_echoed_proceeds(self):
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            body = json.loads(request.content)
-            assert body["scope_key"] == "code:cfg"
-            return httpx.Response(
-                201, json={"id": str(build_id), "name": "b", "scope_key": "code:cfg"}
-            )
-
-        registry = self._registry(handler)
-        assert registry.build_start(root_tasks=[], scope_key="code:cfg") == build_id
-
-    def test_scope_put_echoing_another_scope_is_refused(self):
-        """The route exists, but the answer is not the scope just sent: the
-        bootstrap would register edges in a scope the server does not gate
-        on, so the build must not proceed."""
-        from stardag.exceptions import RegistryTooOldError
-
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200, json={"id": str(build_id), "scope_key": f"build:{build_id}"}
-            )
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError, match="answered structure scope"):
-            registry.build_set_scope(build_id, scope_key="code:cfg")
-
-    def test_scope_put_that_drops_the_config_is_refused(self):
-        """Scope echoed, config not: every later tick reads the config from
-        the server, so this build would run at the defaults."""
-        from stardag.exceptions import RegistryTooOldError
-
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            body = json.loads(request.content)
-            assert body["build_config"] == {"ns.T": {"width": 3}}
-            return httpx.Response(
-                200, json={"id": str(build_id), "scope_key": "code:cfg"}
-            )
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError, match="did not keep the build config"):
-            registry.build_set_scope(
-                build_id, scope_key="code:cfg", build_config={"ns.T": {"width": 3}}
-            )
-
-    def test_scope_put_echoing_scope_and_config_proceeds(self):
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={
-                    "id": str(build_id),
-                    "scope_key": "code:cfg",
-                    "build_config": {"ns.T": {"width": 3}},
-                },
-            )
-
-        registry = self._registry(handler)
-        registry.build_set_scope(
-            build_id, scope_key="code:cfg", build_config={"ns.T": {"width": 3}}
+    def test_a_large_chunk_goes_out_gzipped(self):
+        plan_id = uuid4()
+        recorder = _Recorder({("POST", f"/api/v2/plans/{plan_id}/members"): {}})
+        _registry(recorder).plan_register_members(
+            plan_id, [_item(f"t{i}") for i in range(50)]
         )
+        assert recorder.requests[-1].headers["Content-Encoding"] == "gzip"
+        assert len(recorder.body()["items"]) == 50
 
-    @pytest.mark.asyncio
-    async def test_scope_put_aio_that_drops_the_config_is_refused(self):
-        from stardag.exceptions import RegistryTooOldError
 
-        build_id = uuid4()
+async def test_the_async_methods_send_the_same_requests():
+    plan_id = uuid4()
+    recorder = _Recorder(
+        {("POST", f"/api/v2/plans/{plan_id}/members/t1/complete"): TRANSITION}
+    )
+    registry = APIRegistry(api_url="https://registry.test", api_key="sk-test")
+    import asyncio
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200, json={"id": str(build_id), "scope_key": "code:cfg"}
-            )
-
-        registry = self._registry(handler)
-        self._inject_async(registry, handler)
-        with pytest.raises(RegistryTooOldError, match="did not keep the build config"):
-            await registry.build_set_scope_aio(
-                build_id, scope_key="code:cfg", build_config={"ns.T": {"width": 3}}
-            )
-
-    def test_build_start_echoing_scope_and_config_proceeds(self):
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                201,
-                json={
-                    "id": str(build_id),
-                    "name": "b",
-                    "scope_key": "code:cfg",
-                    "build_config": {"ns.T": {"width": 3}},
-                },
-            )
-
-        registry = self._registry(handler)
-        assert (
-            registry.build_start(
-                root_tasks=[], scope_key="code:cfg", build_config={"ns.T": {"width": 3}}
-            )
-            == build_id
-        )
-
-    @pytest.mark.parametrize("echo", [{}, None, "missing"])
-    def test_build_start_that_drops_a_claimed_config_is_refused(self, echo):
-        from stardag.exceptions import RegistryTooOldError
-
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            data = {"id": str(build_id), "name": "b", "scope_key": "code:cfg"}
-            if echo != "missing":
-                data["build_config"] = echo
-            return httpx.Response(201, json=data)
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError, match="did not keep the build config"):
-            registry.build_start(
-                root_tasks=[], scope_key="code:cfg", build_config={"ns.T": {"width": 3}}
-            )
-
-    def test_build_start_without_a_config_claim_checks_no_config(self):
-        """No config sent: whatever the server echoes for it is not judged.
-        ``None`` and ``{}`` are one config, so an empty claim is not a claim."""
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                201,
-                json={
-                    "id": str(build_id),
-                    "name": "b",
-                    "scope_key": "code:cfg",
-                    "build_config": {"whatever": {"x": 1}},
-                },
-            )
-
-        registry = self._registry(handler)
-        assert registry.build_start(root_tasks=[], scope_key="code:cfg") == build_id
-
-    def test_build_start_without_a_scope_claim_accepts_any_scope(self):
-        """No scope sent, nothing to echo: the server's own (synthetic)
-        scope is fine, and the echo check applies only to a claim that
-        was actually made."""
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                201,
-                json={
-                    "id": str(build_id),
-                    "name": "b",
-                    "scope_key": f"build:{build_id}",
-                },
-            )
-
-        registry = self._registry(handler)
-        assert registry.build_start(root_tasks=[]) == build_id
-
-    def test_build_start_without_a_scope_claim_still_needs_a_scoped_server(self):
-        """A scope-aware server assigns every build a scope and answers
-        with it, so a start answered with none is a pre-scope server —
-        refused here, at the trigger, rather than by the deployment's
-        bootstrap after it has registered environment-global edges. The
-        committed build is failed, as for a refused claim."""
-        from stardag.exceptions import RegistryTooOldError
-
-        build_id = uuid4()
-        failed: list[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path.endswith("/fail"):
-                failed.append(request.url.path)
-                return httpx.Response(200, json={"id": str(build_id)})
-            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError, match="predates structure scopes"):
-            registry.build_start(root_tasks=[])
-        assert len(failed) == 1
-
-    @pytest.mark.asyncio
-    async def test_build_start_aio_without_a_scope_claim_still_needs_a_scoped_server(
-        self,
-    ):
-        from stardag.exceptions import RegistryTooOldError
-
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path.endswith("/fail"):
-                return httpx.Response(200, json={"id": str(build_id)})
-            return httpx.Response(201, json={"id": str(build_id), "name": "b"})
-
-        registry = self._registry(handler)
-        self._inject_async(registry, handler)
-        with pytest.raises(RegistryTooOldError, match="predates structure scopes"):
-            await registry.build_start_aio(root_tasks=[])
-
-    @pytest.mark.asyncio
-    async def test_build_start_aio_that_does_not_echo_the_scope(self):
-        from stardag.exceptions import RegistryTooOldError
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(201, json={"id": str(uuid4()), "name": "b"})
-
-        registry = self._registry(handler)
-        self._inject_async(registry, handler)
-        with pytest.raises(RegistryTooOldError):
-            await registry.build_start_aio(root_tasks=[], scope_key="code:cfg")
-
-    def test_resume_that_does_not_echo_the_scope_is_a_too_old_server(self):
-        from stardag.exceptions import RegistryTooOldError
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"id": str(uuid4()), "status": "running"})
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError, match="/resume"):
-            registry.build_resume(uuid4(), scope_key="code:cfg")
-
-    def test_resume_with_the_scope_echoed_proceeds(self):
-        build_id = uuid4()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.params["scope_key"] == "code:cfg"
-            return httpx.Response(
-                200, json={"id": str(build_id), "scope_key": "code:cfg"}
-            )
-
-        registry = self._registry(handler)
-        registry.build_resume(build_id, scope_key="code:cfg")
-
-    def test_resume_route_missing_with_a_scope_claim_is_a_too_old_server(self):
-        """The old missing-route tolerance stands only for a resume that
-        claims no scope (nothing scoped is lost then)."""
-        from stardag.exceptions import RegistryTooOldError
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, json={"detail": "Not Found"})
-
-        registry = self._registry(handler)
-        with pytest.raises(RegistryTooOldError):
-            registry.build_resume(uuid4(), scope_key="code:cfg")
-        # No claim: swallowed with a warning, as before.
-        registry.build_resume(uuid4())
-
-    @pytest.mark.asyncio
-    async def test_resume_aio_that_does_not_echo_the_scope(self):
-        from stardag.exceptions import RegistryTooOldError
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"id": str(uuid4())})
-
-        registry = self._registry(handler)
-        self._inject_async(registry, handler)
-        with pytest.raises(RegistryTooOldError):
-            await registry.build_resume_aio(uuid4(), scope_key="code:cfg")
+    registry._async_client = httpx.AsyncClient(transport=httpx.MockTransport(recorder))
+    registry._async_client_loop = asyncio.get_running_loop()
+    execution_id = uuid4()
+    await registry.member_complete_aio(plan_id, "t1", execution_id=execution_id)
+    assert recorder.body() == {"execution_id": str(execution_id)}
+    assert (
+        recorder.requests[-1].url.path == f"/api/v2/plans/{plan_id}/members/t1/complete"
+    )

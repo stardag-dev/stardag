@@ -25,27 +25,47 @@ Usage:
     stardag environment target-roots remove <name> [--env <env>]
     stardag environment target-roots set <name=uri ...> [--json <json>] [--env <env>]
 
-    stardag builds list [--status running] [--reactive-app name] [--older-than 24h]
+    stardag build <module:attr ...> [--param k=v] [--settings K=V ...]
+        [--app module:attr [--reactive]] [--resume <build-id>] [--description D]
+        [--dry-run] [--json]
+
+    stardag builds list [--status S] [--app A | --reactive-app A] [--limit N]
+        [--cursor C] [--json]
     stardag builds show <build-id> [--json]
     stardag builds frontier <build-id> [--json]
     stardag builds ticks <build-id> [--limit N] [--json]
-    stardag builds stop <build-id> [--worker name] [--executor modal]
-        [--namespace prefix] [--older-than 30m] [--task-id id ...]
-        [--dry-run] [--yes] [--json]
-    stardag builds cancel <build-id> [--yes]
-    stardag builds cleanup [--older-than 24h] [--build-id id ...] [--apply] [--yes]
+    stardag builds stop <build-id> [--not-in-current-plan] [--no-cancel]
+        [--executor E] [--worker W] [--namespace NS] [--older-than D]
+        [--task-id T ...] [--mark-lost] [--dry-run] [--yes] [--json]
+    stardag builds cancel <build-id> [--yes] [--json]
+    stardag builds complete <build-id> [--force] [--json]
+    stardag builds fail <build-id> [--message M] [--yes] [--json]
 
-    stardag tasks list [--status running] [--older-than 1h] [--json]
-    stardag tasks cancel <build-id> <task-id> [--yes]
-    stardag tasks retry <build-id> <task-id> [--yes]
+    stardag executions list (--build <build-id> [--not-in-current-plan] |
+        --task <task-id>) [--include-ended] [--json]
+    stardag plans show <plan-id> [--json]
+    stardag plans list --build <build-id> [--json]
+    stardag deployments list [--app A] [--kind modal|local] [--current]
+        [--limit N] [--json]
+    stardag deployments show <deployment-id> [--json]
 
-    stardag concurrency-limits list [--holders] [-p profile] [-e env]
-    stardag concurrency-limits set <key> <max_concurrent> [-p profile] [-e env]
-    stardag concurrency-limits delete <key> [--yes] [-p profile] [-e env]
-    stardag concurrency-limits holders <key> [--limit N] [-p profile] [-e env]
-    stardag concurrency-limits evict <key> <task_id> [--yes] [-p profile] [-e env]
+    stardag concurrency-limits list [--holders] [--json]
+    stardag concurrency-limits set <key> <max_concurrent> [--json]
+    stardag concurrency-limits delete <key> [--yes] [--json]
+    stardag concurrency-limits holders <key> [--limit N] [--json]
+
+    stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
+    stardag tasks show <task-id> [--include-ended] [--events N] [--json]
+    stardag tasks check <task-id> --module <import path> [--json]
+    stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
+    stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
+    stardag tasks exclude <plan-id> <task-id> --reason R [--yes] [--json]
+
+    Each of these registry-backed commands takes -p/--stardag-profile and
+    -e/--stardag-env (`stardag build` takes -p only).
 
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
+    stardag modal deployments [--app name] [--current] [--json]
     stardag modal stardag-api-key create [--modal-env env] [-w workspace] [-e env] [-p profile]
 
     stardag self-host up [--neon-api-key key] [--auth-mode local|oidc]
@@ -57,8 +77,8 @@ Usage:
     stardag self-host destroy [--delete-secrets] [--server-modal-env env]
 
 Machine-readable output:
-    The registry-backed read commands (`builds list/show/frontier/ticks`,
-    `builds cleanup`, `tasks list`) take `--json`. In that mode stdout
+    Every command from `stardag build` to `stardag tasks` above (the
+    registry-backed ones) takes `--json`. In that mode stdout
     carries exactly one JSON document — the SDK's model of the API
     payload — and every hint, warning and prompt goes to stderr, so
     piping to `jq` is safe.
@@ -72,7 +92,18 @@ Configuration:
 
 import typer
 
-from stardag._cli import auth, builds, config, environment, limits, tasks
+from stardag._cli import (
+    auth,
+    builds,
+    config,
+    deployments,
+    environment,
+    executions,
+    limits,
+    plans,
+    tasks,
+)
+from stardag._cli.build import build_command
 
 # Main CLI app
 app = typer.Typer(
@@ -86,8 +117,12 @@ app.add_typer(auth.app, name="auth")
 app.add_typer(config.app, name="config")
 app.add_typer(environment.app, name="environment")
 app.add_typer(builds.app, name="builds")
+app.add_typer(executions.app, name="executions")
+app.add_typer(plans.app, name="plans")
+app.add_typer(deployments.app, name="deployments")
 app.add_typer(tasks.app, name="tasks")
 app.add_typer(limits.app, name="concurrency-limits")
+app.command("build")(build_command)
 
 # Add modal subcommand only if modal is installed
 try:

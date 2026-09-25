@@ -60,25 +60,23 @@ DEFAULT_JWT_SECRET = "server-jwt"
 DEFAULT_SERVER_MODAL_ENV = "stardag-host"
 
 SERVER_IMAGE_REPO = "ghcr.io/stardag-dev/stardag-server"
-# The server release this SDK version is tested against. Bumped at SDK
-# release time, in the release PR, once the `server-vX.Y.Z` image exists
-# — bumping it earlier points `self-host up` at an image that has not been
-# published.
+# The server release this SDK version is tested against. Bumped in the
+# release PR that the `server-vX.Y.Z` tag follows: the image is published
+# from that tag before the SDK is tagged, so no SDK on PyPI ever points at
+# an image that does not exist. Between the merge and the tag an SDK
+# installed from source resolves a tag that is not published yet; that
+# window is minutes and is the release procedure, not a state to support.
+# A release candidate (`server-vX.Y.ZrcN`) is a valid pin, same as a final
+# `server-vX.Y.Z`.
 #
-# **From STA-81 on, this pin is load-bearing rather than advisory.** It
-# used to be safe to lag: an older server simply ignored what it did not
-# understand and the newer feature lay inert. It no longer is. A current
-# SDK does not drain cancels, and a server predating STA-81 does not
-# release claims on `/cancel` or `/fail` — so the pair leaves a terminal
-# build holding its tasks' claims and their concurrency-limit slots until
-# they expire, which is worse than either version alone. That is why the
-# release order is server image first, and why this constant must move
-# with it.
-DEFAULT_SERVER_VERSION = "0.5.0"
+# 0.6.0 is the first v2 server; a v2 SDK refuses a v1 registry on its first
+# call, so this must never point below it. (v0.26.0/server-v0.5.0 was the
+# last release of the v1 line.)
+DEFAULT_SERVER_VERSION = "0.6.0"
 
 # Minimum client interpreter for from-source image builds (stardag-api's
 # requires-python; the image gets the client's version via add_python).
-MIN_IMAGE_PYTHON = (3, 10)
+MIN_IMAGE_PYTHON = (3, 11)
 
 
 def server_image_ref(version: str) -> str:
@@ -304,13 +302,18 @@ def _build_from_source_app(
     api_remote_dir = API_REMOTE_DIR
     ui_dist_remote_dir = UI_DIST_REMOTE_DIR
 
-    def _migrate_impl() -> str:
-        """Run alembic upgrade head inside the container."""
+    def _migrate_impl(accept_data_loss: bool = False) -> str:
+        """Run alembic upgrade head inside the container (see _modal_entry)."""
+        import os
         import subprocess
 
+        env = dict(os.environ)
+        if accept_data_loss:
+            env["STARDAG_ACCEPT_V2_DATA_LOSS"] = "1"
         result = subprocess.run(
             ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
             cwd=api_remote_dir,
+            env=env,
             capture_output=True,
             text=True,
         )

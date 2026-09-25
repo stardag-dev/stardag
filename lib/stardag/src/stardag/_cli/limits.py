@@ -1,20 +1,22 @@
-"""Named concurrency-limit management commands for the Stardag CLI.
+"""``stardag concurrency-limits``: named concurrency limits (registry v2).
 
-Named concurrency limits are configured *per environment in the
-registry*. The SDK only tags tasks with limit keys (see the Modal how-to
-guide); the cap itself lives server-side and is enforced atomically when a
-task starts, across all builds in the environment.
-
-These commands wrap the registry's ``/api/v1/concurrency-limits`` endpoints
-for the active stardag profile / environment (override with
-``-p/--stardag-profile`` and ``-e/--stardag-env``). They can also be
-managed in the registry UI: workspace admin -> Concurrency Limits.
+A limit caps how many tasks carrying a key may hold a **live claim** at
+once in an environment; the claiming start enforces it. The SDK only tags
+tasks with limit keys (see the Modal how-to guide) — the cap itself lives
+server-side. These commands wrap the registry's
+``GET/PUT/DELETE /api/v2/concurrency-limits`` routes for the active
+stardag profile/environment (override with ``-p/--stardag-profile`` and
+``-e/--stardag-env``).
 
     stardag concurrency-limits list [--holders]
     stardag concurrency-limits set <key> <max_concurrent>
     stardag concurrency-limits delete <key> [--yes]
     stardag concurrency-limits holders <key> [--limit N]
-    stardag concurrency-limits evict <key> <task_id> [--yes]
+
+There is no ``evict``. A v1 slot could be force-released by an admin; a v2
+slot is released by ending the execution that holds it — the operator
+recovery for a holder whose worker is gone is
+``stardag builds stop --mark-lost``, not a limits command.
 """
 
 from typing import Optional
@@ -22,9 +24,7 @@ from typing import Optional
 import typer
 from rich.table import Table
 
-# Shared by every registry-backed CLI group; imported into this module's
-# namespace so ``stardag._cli.limits._resolve_registry`` stays the patch
-# point tests use.
+from stardag._cli._output import JSON_OPTION, YES_OPTION, age, emit_json, short
 from stardag._cli._registry_ctx import (
     _ENV_OPTION,
     _PROFILE_OPTION,
@@ -34,11 +34,27 @@ from stardag._cli._registry_ctx import (
     error_console,
 )
 from stardag.exceptions import StardagError
+from stardag.registry import ConcurrencyLimitHolderInfo, ConcurrencyLimitInfo
 
 app = typer.Typer(
-    help="Manage named concurrency limits for an environment",
+    help="Manage named concurrency limits for an environment.",
     no_args_is_help=True,
 )
+
+
+def _render_holders(key: str, holders: list[ConcurrencyLimitHolderInfo]) -> None:
+    table = Table(title=f"Holders of '{key}' (oldest running first)")
+    for col in ("Task", "Task ID", "Build", "Execution", "Running for"):
+        table.add_column(col)
+    for h in holders:
+        table.add_row(
+            h.task_name,
+            short(h.task_id),
+            short(h.build_id),
+            short(h.execution_id),
+            age(h.started_at),
+        )
+    console.print(table)
 
 
 @app.command("list")
@@ -48,22 +64,26 @@ def limits_list(
     holders: bool = typer.Option(
         False,
         "--holders/--no-holders",
-        help="Also fetch each key's current holder count (one extra call per key).",
+        help="Also list each key's current holders (one table per key).",
     ),
+    json_output: bool = JSON_OPTION,
 ) -> None:
-    """List the environment's named concurrency limits."""
+    """List the environment's named concurrency limits, with how many
+    slots of each are in use.
+
+    Reads ``GET /concurrency-limits``. Writes nothing.
+    """
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        limits = registry.concurrency_limit_list()
-        holder_counts: dict[str, int] = {}
-        if holders:
-            for limit in limits:
-                data = registry.concurrency_limit_holders(limit["key"], limit=1)
-                holder_counts[limit["key"]] = data.get("total", 0)
+        limits = registry.concurrency_limit_list_detailed(include_holders=holders)
     except StardagError as e:
         _fail(e)
     finally:
         registry.close()
+
+    if json_output:
+        emit_json({"limits": [limit.model_dump(mode="json") for limit in limits]})
+        return
 
     if not limits:
         console.print("No concurrency limits configured for this environment.")
@@ -76,41 +96,49 @@ def limits_list(
     table = Table(title="Concurrency Limits")
     table.add_column("Key")
     table.add_column("Max concurrent", justify="right")
-    if holders:
-        table.add_column("Holders", justify="right")
+    table.add_column("In use", justify="right")
     for limit in limits:
-        row = [limit["key"], str(limit["max_concurrent"])]
-        if holders:
-            row.append(str(holder_counts.get(limit["key"], 0)))
-        table.add_row(*row)
+        table.add_row(limit.key, str(limit.max_concurrent), str(limit.in_use))
     console.print(table)
+
+    if holders:
+        for limit in limits:
+            if limit.holders:
+                _render_holders(limit.key, limit.holders)
 
 
 @app.command("set")
 def limits_set(
     key: str = typer.Argument(..., help="Concurrency-limit key"),
     max_concurrent: int = typer.Argument(
-        ..., help="Maximum tasks that may run concurrently for this key (>= 1)"
+        ..., help="Maximum tasks that may run concurrently for this key (>= 0)"
     ),
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
+    json_output: bool = JSON_OPTION,
 ) -> None:
-    """Create or update a named concurrency limit (upsert)."""
-    if max_concurrent < 1:
-        error_console.print("[bold red]Error:[/bold red] max_concurrent must be >= 1")
+    """Create or update a named concurrency limit (upsert).
+
+    Writes ``PUT /concurrency-limits/{key}``. ``max_concurrent=0`` blocks
+    the key entirely — every claiming start carrying it is refused.
+    """
+    if max_concurrent < 0:
+        error_console.print("[bold red]Error:[/bold red] max_concurrent must be >= 0")
         raise typer.Exit(1)
 
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        result = registry.concurrency_limit_set(key, max_concurrent)
+        registry.concurrency_limit_set(key, max_concurrent)
     except StardagError as e:
         _fail(e)
     finally:
         registry.close()
 
+    if json_output:
+        emit_json({"key": key, "max_concurrent": max_concurrent})
+        return
     console.print(
-        f"[green]Set concurrency limit[/green] "
-        f"{result['key']} -> max_concurrent={result['max_concurrent']}"
+        f"[green]Set concurrency limit[/green] {key} -> max_concurrent={max_concurrent}"
     )
 
 
@@ -119,12 +147,21 @@ def limits_delete(
     key: str = typer.Argument(..., help="Concurrency-limit key to delete"),
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt."
-    ),
+    yes: bool = YES_OPTION,
+    json_output: bool = JSON_OPTION,
 ) -> None:
-    """Delete a named concurrency limit (the key becomes unlimited)."""
+    """Delete a named concurrency limit (the key becomes unlimited).
+
+    Writes ``DELETE /concurrency-limits/{key}`` (404 ``unknown_limit`` if
+    there is none).
+    """
     if not yes:
+        if json_output:
+            error_console.print(
+                "[bold red]Error:[/bold red] refusing to prompt in --json mode; "
+                "pass --yes to confirm."
+            )
+            raise typer.Exit(1)
         typer.confirm(
             f"Delete concurrency limit '{key}'? The key will become unlimited.",
             abort=True,
@@ -138,6 +175,9 @@ def limits_delete(
     finally:
         registry.close()
 
+    if json_output:
+        emit_json({"key": key, "deleted": True})
+        return
     console.print(f"[green]Deleted concurrency limit '{key}'.[/green]")
 
 
@@ -149,80 +189,54 @@ def limits_holders(
     limit: int = typer.Option(
         100, "--limit", "-n", min=1, max=1000, help="Max holders to display."
     ),
+    json_output: bool = JSON_OPTION,
 ) -> None:
-    """List the RUNNING tasks currently holding slots of a key.
+    """List the tasks currently holding slots of a limit key.
 
-    Holders are shown oldest-running first (eviction candidates on top).
+    Reads ``GET /concurrency-limits?include_holders=true`` and picks out
+    this key. Holders are shown oldest-running first. A key with no
+    configured limit is not listed here at all (it is unlimited, and v2
+    tracks holders only against a configured key) — configure one first
+    with ``stardag concurrency-limits set``.
     """
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        data = registry.concurrency_limit_holders(key, limit=limit)
+        limits: list[ConcurrencyLimitInfo] = registry.concurrency_limit_list_detailed(
+            include_holders=True
+        )
     except StardagError as e:
         _fail(e)
     finally:
         registry.close()
 
-    holders = data.get("holders", [])
-    total = data.get("total", len(holders))
+    match = next((info for info in limits if info.key == key), None)
+    holders = list(match.holders or []) if match else []
+    total = len(holders)
+    shown = holders[:limit]
+
+    if json_output:
+        emit_json(
+            {
+                "key": key,
+                "max_concurrent": match.max_concurrent if match else None,
+                "total": total,
+                "holders": [h.model_dump(mode="json") for h in shown],
+            }
+        )
+        return
+
+    if match is None:
+        console.print(
+            f"No concurrency limit '{key}' is configured for this environment."
+        )
+        return
     if not holders:
         console.print(f"No current holders for concurrency limit '{key}'.")
         return
 
-    table = Table(title=f"Holders of '{key}' (total: {total})")
-    table.add_column("Task ID")
-    table.add_column("Task")
-    table.add_column("Running since")
-    table.add_column("Executor")
-    for h in holders:
-        name = h.get("task_name") or ""
-        namespace = h.get("task_namespace") or ""
-        qualified = f"{namespace}.{name}" if namespace else name
-        table.add_row(
-            h.get("task_id", ""),
-            qualified,
-            h.get("latest_status_at") or "-",
-            h.get("latest_executor") or "-",
-        )
-    console.print(table)
-    if total > len(holders):
+    _render_holders(key, shown)
+    if total > len(shown):
         console.print(
-            f"[dim]Showing {len(holders)} of {total} holders "
-            f"(raise --limit to see more).[/dim]"
+            f"[dim]Showing {len(shown)} of {total} holders "
+            "(raise --limit to see more).[/dim]"
         )
-
-
-@app.command("evict")
-def limits_evict(
-    key: str = typer.Argument(..., help="Concurrency-limit key"),
-    task_id: str = typer.Argument(..., help="Task ID of the holder to evict"),
-    stardag_profile: Optional[str] = _PROFILE_OPTION,
-    stardag_env: Optional[str] = _ENV_OPTION,
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt."
-    ),
-) -> None:
-    """Evict a RUNNING slot holder (records TASK_FAILED, freeing its slots).
-
-    Only evict holders whose process you know is dead: the server cannot
-    verify liveness, so evicting a task whose worker is still running leaves
-    the cap oversubscribed until that worker finishes.
-    """
-    if not yes:
-        typer.confirm(
-            f"Evict task '{task_id}' from concurrency limit '{key}'? "
-            "This records TASK_FAILED for it.",
-            abort=True,
-        )
-
-    registry = _resolve_registry(stardag_profile, stardag_env)
-    try:
-        result = registry.concurrency_limit_evict(key, task_id)
-    except StardagError as e:
-        _fail(e)
-    finally:
-        registry.close()
-
-    console.print(
-        f"[green]Evicted[/green] {result.get('task_id', task_id)} "
-        f"(status: {result.get('status', 'unknown')})"
-    )

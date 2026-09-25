@@ -1,29 +1,26 @@
 import type { TaskStatus } from "../types/task";
+import { shortBuildId } from "../utils/ids";
+import { Tooltip } from "./ui/Tooltip";
 
 interface StatusBadgeProps {
   status: TaskStatus;
   muted?: boolean;
-  waitingForLock?: boolean;
-  // Build where the status-determining event occurred
-  statusBuildId?: string;
-  // Current build being viewed (to detect cross-build status)
-  currentBuildId?: string;
-  // Callback when clicking on a cross-build status badge
-  onStatusBuildClick?: (buildId: string) => void;
+  // The build whose plan holds the task's claim (`claim_build_id`), and
+  // the build on screen. When they differ and `onOpenBuild` is given, the
+  // badge links to the holder (v1's cross-build status link).
+  holderBuildId?: string | null;
+  currentBuildId?: string | null;
+  onOpenBuild?: (buildId: string) => void;
 }
 
 // Skipped uses amber (warmer than pending's yellow) to be visible against
-// dark-blue table rows where it previously rendered near-invisible black-
-// on-dark, while staying distinct from pending which is plain yellow.
+// dark-blue table rows, while staying distinct from pending.
 const statusStyles: Record<TaskStatus, string> = {
-  unregistered:
-    "bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400 border border-dashed border-gray-400 dark:border-gray-500",
   pending: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
   running: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
   suspended: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300",
-  // Orange: adjacent to skipped's amber and pending's yellow — an
-  // interruption is in that family (nothing is wrong, nothing is done)
-  // rather than in failed's red.
+  // Orange: an interruption is in the pending/skipped family (nothing is
+  // wrong, nothing is done) rather than in failed's red.
   interrupted:
     "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300",
   completed: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
@@ -33,8 +30,6 @@ const statusStyles: Record<TaskStatus, string> = {
 };
 
 const statusStylesMuted: Record<TaskStatus, string> = {
-  unregistered:
-    "bg-gray-200/50 text-gray-500/60 dark:bg-gray-700/50 dark:text-gray-400/50",
   pending:
     "bg-yellow-100/50 text-yellow-800/60 dark:bg-yellow-900/20 dark:text-yellow-400/50",
   running: "bg-blue-100/50 text-blue-800/60 dark:bg-blue-900/20 dark:text-blue-400/50",
@@ -50,25 +45,6 @@ const statusStylesMuted: Record<TaskStatus, string> = {
   cancelled:
     "bg-gray-100/50 text-gray-800/60 dark:bg-gray-900/20 dark:text-gray-400/50",
 };
-
-function LockIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      fill="none"
-      stroke="currentColor"
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth={2}
-        d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
-      />
-    </svg>
-  );
-}
 
 function ExternalLinkIcon({ className }: { className?: string }) {
   return (
@@ -89,67 +65,67 @@ function ExternalLinkIcon({ className }: { className?: string }) {
   );
 }
 
+/**
+ * A task's global status. The status is the completion's, environment
+ * wide: it is the same in every build whose plan holds the task. What can
+ * belong to another build is the **claim**: a running task is held by one
+ * build (`claim_build_id`), and when that is not the build on screen the
+ * badge says so and — given `onOpenBuild` — jumps there (role=button,
+ * Enter/Space), as v1's did.
+ */
 export function StatusBadge({
   status,
   muted = false,
-  waitingForLock = false,
-  statusBuildId,
+  holderBuildId,
   currentBuildId,
-  onStatusBuildClick,
+  onOpenBuild,
 }: StatusBadgeProps) {
   const styles = muted ? statusStylesMuted : statusStyles;
-
-  // Check if status is from a different build
-  const isFromOtherBuild =
-    statusBuildId && currentBuildId && statusBuildId !== currentBuildId;
-
-  const isClickable = isFromOtherBuild && onStatusBuildClick;
-
-  let tooltip: string | undefined;
-  if (waitingForLock) {
-    tooltip = "Waiting for global lock";
-  } else if (isFromOtherBuild) {
-    tooltip = `${status} in build ${statusBuildId.slice(0, 8)}...${
-      isClickable ? " (click to view)" : ""
-    }`;
-  }
-
-  const handleClick = (e: React.MouseEvent) => {
-    // Stop propagation to prevent node click in DAG view
+  const otherHolder =
+    status === "running" && holderBuildId && holderBuildId !== currentBuildId
+      ? holderBuildId
+      : null;
+  const clickable = Boolean(otherHolder && onOpenBuild);
+  const open = (e: React.SyntheticEvent) => {
+    // Never also select the row or node the badge sits in.
     e.stopPropagation();
-    if (isClickable && statusBuildId) {
-      onStatusBuildClick(statusBuildId);
-    }
+    if (otherHolder && onOpenBuild) onOpenBuild(otherHolder);
   };
-
-  const baseClasses = `inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${styles[status]}`;
-  const clickableClasses = isClickable
-    ? "cursor-pointer hover:ring-2 hover:ring-offset-1 hover:ring-blue-400 dark:hover:ring-offset-gray-800"
-    : "";
-
   return (
-    <span
-      className={`${baseClasses} ${clickableClasses}`}
-      title={tooltip}
-      onClick={isClickable ? handleClick : undefined}
-      role={isClickable ? "button" : undefined}
-      tabIndex={isClickable ? 0 : undefined}
-      onKeyDown={
-        isClickable
-          ? (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.stopPropagation();
-                if (statusBuildId) {
-                  onStatusBuildClick(statusBuildId);
-                }
-              }
-            }
+    <Tooltip
+      content={
+        otherHolder
+          ? `${status} under build ${shortBuildId(otherHolder)}${
+              clickable ? " (click to view)" : ""
+            }`
           : undefined
       }
     >
-      {waitingForLock && <LockIcon className="h-3 w-3" />}
-      {isFromOtherBuild && !waitingForLock && <ExternalLinkIcon className="h-3 w-3" />}
-      {status}
-    </span>
+      <span
+        className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${
+          styles[status] ?? statusStyles.pending
+        } ${
+          clickable
+            ? "cursor-pointer hover:ring-2 hover:ring-blue-400 hover:ring-offset-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:ring-offset-gray-800"
+            : ""
+        }`}
+        role={clickable ? "button" : undefined}
+        tabIndex={clickable ? 0 : undefined}
+        onClick={clickable ? open : undefined}
+        onKeyDown={
+          clickable
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  open(e);
+                }
+              }
+            : undefined
+        }
+      >
+        {otherHolder && <ExternalLinkIcon className="h-3 w-3" />}
+        {status}
+      </span>
+    </Tooltip>
   );
 }

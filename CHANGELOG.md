@@ -4,6 +4,398 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.27.0] — 2026-09-25
+
+SDK `0.27.0` and server `server-v0.6.0`: the next minors, not a new major
+(the project is pre-1.0 and promises no compatibility yet), **breaking**
+all the same. The v1 line ended with 0.26.0 below.
+
+A new release line of the SDK, the registry server, the CLI and the UI
+together, on new registry entities: **task** (a completion and its claim),
+**task instance** (a task as constructed under a scope, with its parameter
+body and its dependency edges), **plan** (one build's request under one
+scope), **deployment** and the **execution** ledger. Fully breaking: no data
+migration (an existing registry starts empty), no compatibility with v1
+SDKs or servers in either direction. The design is
+`docs/design/registry-v2/design.md`; the principles it rests on are
+`docs/design/principles.md`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for
+the migration and the operator notes.
+
+### SDK
+
+- **Breaking: Python 3.11 or newer; 3.10 support removed.**
+- **Breaking: one flag replaces the significance levels.**
+  `StardagField(significant: bool = True)`. A `significant=False` field is
+  an ordinary parameter, passed at init and stored on the instance body; it
+  is out of the task id and in the instance hash. `StardagField(
+significance=...)` and `StardagField(hash_exclude=...)` are removed and
+  raise `TypeError` naming the replacement; `Significance` is removed from
+  the public API. `compat_default` stays, on significant fields only, and so
+  do custom `"hash"`-mode serializers: user control over hashing is on the
+  task id only.
+- **New: `BaseTask.instance_hash`** (and `BaseTask.instance_body()`): uuid5
+  over the canonical JSON of all fields, defaults included, nested tasks as
+  their full body. It is the hash of the body the registry stores. Sets are
+  sorted in the registry-mode dump as well as in hash mode.
+- **New: `sd.check_serialization_stability(task)` and
+  `sd.UnstableSerializationError`.** At registration, each distinct instance
+  is round-tripped once (`dump(validate(dump(x))) == dump(x)`, task id
+  unchanged); a field that moves fails the build at the trigger, naming it.
+- **New: `sd.InstanceConflictError`.** Two different constructions of one
+  task id in one discovery pass fail the build at the trigger, naming the
+  differing fields and both construction paths. One plan holds one instance
+  per task id.
+- **Breaking: `settings` replaces the build config.** `sd.build(settings=...)`
+  and `build_trigger(settings=...)` take a flat `dict[str, str]` applied as
+  environment variables in every process of the build, and part of the
+  build's scope, keyed by a settings hash that is a UUID5 like the task id
+  and instance hash. `STARDAG_*` and `MODAL_*` keys are refused. Removed:
+  `build_config`, `sd.build_config_scope`, `sd.get_build_config`,
+  `sd.set_build_config`, the ContextVar transport and the
+  `STARDAG_BUILD_CONFIG` / `STARDAG_SCOPE_KEY` variables.
+- **New: `stardag.build.SettingsError`.** A process applying settings serves
+  one build at a time; a second build entering while another build's
+  settings are installed raises it. Deployed ticks, workers and the
+  bootstrap run one input per container, and a `max_concurrent_inputs`
+  above one on them is refused at deploy.
+- **Breaking: the registry client speaks `/api/v2` only.** `APIRegistry` and
+  `RegistryABC` are rewritten around plans: plan create, members registered
+  in post-order chunks, seal, and one `/yield` per dynamic-dependency batch
+  with a client-minted `batch_id`. Build, plan, execution, deployment and
+  batch ids are client-minted uuid7s. Refusals surface as `APIError` with
+  `.code`; 429 `rate_limited` is retried per `Retry-After`. Removed:
+  `RegistryTooOldError`, `SDKVersionUnsupportedError`, `ScopeMismatchError`,
+  `BuildConfigMismatchError`, the version gate and the `/locks` client.
+- **New: deployments as scope.** `stardag modal deploy` mints
+  `STARDAG_DEPLOYMENT_ID` and bakes it into the app's secret, replacing the
+  code id in that role. A local build plans under a `local` deployment
+  looked up by code id (`STARDAG_CODE_ID`, else a clean git SHA, else a
+  fresh id). A hybrid `sd.build()` whose tasks run on a Modal app, and
+  `reactive_discovery="local"`, plan under the app's current deployment.
+- **Changed: every execution claims.** In-process (thread and process pool)
+  executions hold a claim with a TTL that the resident driver renews; the
+  distributed lock is gone. The resident engine yields without suspending.
+- **Changed: rollover by deployment id.** A tick whose deployment differs
+  from the active plan's re-plans the build if its deployment is the app's
+  current one, and exits `superseded` otherwise.
+- **Changed: rehydration.** Strict for significant fields (the task id must
+  match), lenient for the rest: an unknown non-significant key is dropped
+  with a warning, a missing one takes the class default.
+- **Fixed: a mounted Modal Volume could serve a deleted target as
+  present** in a warm container, so discovery saw it complete and never
+  invalidated it. Each discovery walk begins an observation fence, and a
+  mounted-volume hit older than it reloads the volume once per walk.
+- **Restored: `TickConfig.max_interruptions` (default 20).** An
+  INTERRUPTED member is actionable, so a task that asks to be resumed on
+  every run was restarted forever. The frontier's per-member
+  `interruptions` (counted from the execution ledger over the build's plans)
+  is now read: at the cap the tick claims the member without spawning it
+  and records `TASK_FAILED` naming the count, and the build's fail mode
+  applies. `FrontierMember` gains `attempts` and `interruptions`. A FAILED
+  member is still never retried by the tick (the fail mode decides);
+  `max_attempts` still covers only a failed spawn. Also accepted in
+  `tick_kwargs`.
+- **New: `TickConfig.max_executions` (default 20).** A RUNNING member whose
+  claim lapsed without a report (a worker that died, a preemption whose
+  restart never came) was taken over forever, one container per claim TTL;
+  at `attempts >= max_executions` the tick now fails it the same way, with
+  the count, instead. Also accepted in `tick_kwargs`.
+- **New: client reads on routes the server already served.**
+  `RegistryABC.plan_get` (`GET /plans/{id}`), `build_list_plans`,
+  `build_list_page` (cursor paging with `total` and `next_cursor`),
+  `task_list` (`GET /tasks`, status filter and paging),
+  `task_list_executions` (`include_ended`), `task_events` and
+  `deployment_get`; `BuildInfo.error_message`, `TaskInfo.claim_plan_id` /
+  `claim_build_id` and `ExecutionInfo.build_id`. The in-memory registry
+  serves them with the server's shapes and orderings.
+- **Fixed: a watchdog sweep landing on a lingering tick was dropped.** A
+  tick refused the scheduler lease now flags the build before exiting
+  `lease_held`, so the holder acts on it (or a successor is spawned if the
+  holder had already left); a lapsed claim no longer waits a full watchdog
+  period for its takeover.
+- **Changed: a driver whose build the registry stopped stops cleanly.**
+  When a claiming start is refused `build_not_running` (an operator
+  cancelled the build), `build`/`build_aio` and the sequential engines stop
+  — in-flight work cancelled, no member skipped, no `build_failed` written —
+  and return a new `BuildExitStatus.STOPPED` summary carrying a
+  `BuildStopped` error; a lifecycle report refused `build_terminal` does the
+  same. A refused claim renewal now says whether the build released the
+  claim or another execution took it over. A reactive tick counts such a
+  claim as denied and treats a refused `/complete` or `/fail` as the
+  status that stands, instead of ending in `error`.
+- **Changed: a failed build's reason names the failed task.** The message
+  written on `/fail` reads
+  `Task <name> (<id>) failed: <error>; N downstream member(s) blocked`,
+  N being what the registry skipped, instead of a `Deadlock: …` line with a
+  wrong count (continue mode now skips transitively blocked tasks before
+  checking for a deadlock). `BuildSummary.failed_task` names the task.
+- **New: `raise_on_failure=False`** on the four build functions returns the
+  `FAILURE` summary in fail-fast mode instead of raising the task's
+  exception.
+- **New: in-process executions record their executor.** The claiming start
+  of a thread-, process-, async- or sequential-mode execution sets
+  `executor` (the mode), `executor_ref` (`hostname:pid`) and
+  `executor_metadata` (host, pid, Python version) on the execution row, as
+  Modal executions record their call (`TaskExecutorABC.get_executor_details`).
+- **New: `publish.yml` and `publish-server-image.yml` also publish a
+  release candidate** (`vX.Y.ZrcN` / `server-vX.Y.ZrcN`), marked
+  pre-release on GitHub and never moving the server image's `:latest` tag.
+  `DEFAULT_SERVER_VERSION` (`_modal_app.py`) points `stardag self-host up`
+  at a v2 release candidate while this line is still in flight; see
+  DEV_README.md "Pre-release".
+- **Changed: every build entry point takes `settings: Mapping[str, str]`.**
+  `sd.build`, `build_aio`, `build_sequential` and `build_sequential_aio`
+  declared `dict[str, str]` while `build_trigger` and the registry took a
+  `Mapping`; any mapping (a `MappingProxyType`, say) now type-checks.
+- **Docs: the bundled agent skill (`.claude/skills/stardag/`) is rewritten
+  for v2**, and `RELEASE_NOTES.md` corrected: which routes a 0.6.0 registry
+  serves under `/api/v1` and `/api/v2`, that the `significant=False`
+  rename moves no task id, and that settings keys are not validated.
+
+### Server
+
+- **Breaking: new schema, no data migration.** One migration drops the v1
+  core tables (including `distributed_locks`) and creates `task`,
+  `deployment`, `settings`, `task_instance`, `task_instance_dependency`,
+  `plan`, `plan_member`, `execution`, `build_wake` and the re-pointed
+  `event`, `task_artifact` and `task_limit_key`. Concurrency limits are
+  among the dropped tables and must be set again. Downgrade raises.
+  **PostgreSQL 15 or newer** is required (SQLite is not supported), and the
+  API suite runs on Postgres.
+- **New: the v2 migration refuses to drop v1 data unasked.** With v1
+  `builds` or `tasks` rows present it raises unless
+  `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set for the run; an empty or fresh
+  database migrates without it. On the accepted path it logs the v1
+  `builds`/`tasks` counts it drops (Alembic's logger, INFO), so the
+  roll-out log records what went.
+- **New: `infra/aws-cdk/scripts/run-migrations.sh` takes `MIGRATION_ENV`**
+  (`NAME=VALUE` pairs, comma- or space-separated) as environment for the
+  migration task only, e.g. `MIGRATION_ENV="STARDAG_ACCEPT_V2_DATA_LOSS=1"`;
+  unset, the ECS override is unchanged.
+- **Breaking: the registry routes move to `/api/v2`.** Every `/api/v1`
+  registry route (builds, tasks, search, deployments, locks, concurrency
+  limits, tick summaries) is removed, and so is the SDK version gate. Authentication, workspaces, environments and target
+  roots stay under `/api/v1`; the version route moves to `GET
+/api/v2/version` (same fields, unauthenticated), and `/api/v1/version`
+  is removed. The `/locks` routes are
+  gone: the claim is the only mutual exclusion, and in-process claims renew
+  through `POST …/tasks/{task_id}/claim/renew`.
+- **New: plans.** `POST /builds/{id}/plans`, chunked `POST
+/plans/{id}/members`, `/seal`, and `POST
+/plans/{id}/members/{task_id}/yield`; the frontier (runnable, discovery
+  jobs, running, with attempt and interruption counts from the ledger) over
+  the active plan. Registration is insert-if-absent throughout; conflicts
+  are 409s with a code (`instance_conflict`, `instance_body_conflict`,
+  `task_identity_conflict`, `root_instance_conflict`,
+  `deployment_mismatch`, `not_claim_holder`, `upstream_incomplete`, …).
+- **New: one `transition_task()` for every task event**, with one authority
+  rule: a report is applied while it names the task's current execution,
+  lapsed or not, and is late once that execution's claim was released. At
+  most one terminal report per execution. A claiming start re-checks
+  upstream completion under the task lock.
+- **New: the execution ledger.** One row per claim granted, with the server's
+  end (`claim_released_at`, `claim_outcome`) and the execution's own end
+  (`ended_at`, `outcome`). `GET /builds/{id}/executions
+[?not_in_current_plan=true]` lists unended and orphaned executions; `POST
+/executions/{id}/stopped` ends one (outcome `stopped`, or `lost` for one
+  that could not be stopped) and releases a claim it still holds.
+- **New: deployments.** `POST /deployments` (client-minted id,
+  server-assigned generation) before the deploy, `POST
+/deployments/{id}/activate` after it; `GET /deployments` marks the current
+  Modal deployment per app. Local deployments are created activated and are
+  never current.
+- **New: settings.** Stored under a UUID5 of the body's canonical JSON,
+  computed by the server from the posted body (a client sends no hash),
+  validated there (`reserved_settings_key`), read at
+  `GET /settings/{hash}`.
+- **Changed: invalidation follows the world only.** The one path out of
+  COMPLETED is discovery observing the target missing (`TASK_INVALIDATED`,
+  with the `observed_at` guard); there is no operator route.
+- **Changed: a build's terminal transition releases its claims** (complete,
+  fail and cancel alike, tasks set CANCELLED, which is actionable for other
+  builds); `exit-early` releases nothing. Exclusion cascades downstream
+  within the plan, and an excluded root fails the build.
+- **Changed: a terminal build status is sticky.** A `complete`, `fail`,
+  `cancel` or `exit-early` against a COMPLETED, FAILED or CANCELLED build is
+  409 `build_terminal` and is recorded as its build event with
+  `report_applied = false`; `resume` is the way out. A cancelled build no
+  longer ends FAILED because its still-running driver reported a failure.
+- **Changed: `skip-blocked` is a no-op on a CANCELLED or COMPLETED build**,
+  so a driver racing an operator's cancel cannot skip the downstream of the
+  tasks the cancel released.
+- **Changed: the exclude response describes that call.** It gains
+  `roots_excluded` (the roots this exclusion cascaded to), and
+  `build_failed` now means this call failed the build.
+- **Changed: a refused claim renewal says how the claim ended**
+  (`claim_outcome`: `released` when the build stopped, `taken_over`, or
+  `null` while merely lapsed).
+- **Changed: deployment listings and `GET /deployments/{id}` drop `created`**, which only means
+  something on the create and activate responses.
+- **Changed: wake-up flags move to `build_wake`**, so flagging never locks
+  the build row a claim holds.
+- **New: read routes.** `GET /builds` (status, app and idle filters,
+  cursor paging, a total; `idle_for_seconds` keeps running builds with no
+  task or lifecycle activity for that long and refuses any other status, as
+  in v1), `GET /plans/{id}`, `GET /builds/{id}/plans`, `GET
+/plans/{id}/graph`, `GET /plans/{id}/roots`, `GET /tasks` and `GET
+/tasks/{id}` (with its instances, claim plan and build), `GET
+/tasks/{id}/executions`, `GET /tasks/{id}/events`, `GET
+/builds/{id}/events`, `GET /deployments/{id}`, artifacts through the
+  member, `PUT/GET/DELETE /concurrency-limits/{key}`.
+- **Changed: `last_active_at` moves on task activity, as it did in v1**, not
+  only on build create/resume/finish: every status change of a task a
+  RUNNING build's active plan holds bumps that build's `last_active_at`
+  too (best-effort, `SKIP LOCKED` — a locked build just misses the bump).
+- **Changed: guardrails.** The rate limit applies to every v2 write route.
+  The 24-hour creation quotas are per environment and charged only for rows
+  a request inserted: `LIMITS_MAX_TASK_INSTANCES_PER_ENVIRONMENT_24H` (429
+  `creation_quota_exceeded`) and `LIMITS_MAX_ARTIFACTS_PER_ENVIRONMENT_24H`
+  (429 `artifact_creation_limit`). The four per-workspace settings
+  (`LIMITS_MAX_{BUILDS,TASKS,EVENTS,ARTIFACTS}_PER_WORKSPACE_24H`) are not
+  read by the v2 routes.
+
+### CLI
+
+- **New: `stardag self-host up/upgrade --accept-data-loss`** sets
+  `STARDAG_ACCEPT_V2_DATA_LOSS=1` for that deploy's migration run.
+- **New: `stardag build <module:attr ...>`** — roots from a task object, a
+  list, a zero-argument callable or a task class with `--param KEY=VALUE`;
+  `--settings KEY=VALUE` (repeatable), `--app module:attr` (with
+  `--reactive`), `--resume`, `--dry-run`.
+- **Changed: `stardag builds`** — `list`, `show`, `frontier`, `ticks`,
+  `cancel`, and new `complete [--force]` and `fail`. **`builds stop`** lists
+  the build's unended executions from the ledger, stops the Modal calls it
+  can identify, reports each one stopped, and cancels the build unless
+  `--no-cancel`; `--not-in-current-plan` selects orphans (and implies
+  `--no-cancel`), `--mark-lost` ends executions it cannot stop as `lost`.
+- **New: `stardag executions list`, `stardag plans show`, `stardag
+deployments list`** (`stardag modal deployments` stays as an alias).
+- **Changed: `stardag tasks`** — `list`, `show`, new `check` (runs
+  `complete()` locally and prints the observation; reports nothing),
+  `retry`, `cancel`, new `exclude`.
+- **Changed: `stardag tasks retry` and `tasks cancel` ask for confirmation**
+  again (v1's prompt), skipped with `--yes`; `--json` without `--yes` is
+  refused rather than prompting. `--build` is now optional: it defaults to
+  the build holding the task's claim (`claim_build_id` from `GET
+/tasks/{id}`) and stays an override; a task holding no claim (a FAILED
+  one) still needs it.
+- **New: the CLI on the v2 reads.** `tasks list` (`--status`, `--limit`,
+  `--cursor`; v1's `--older-than`, `--name` and `--namespace` need server
+  support and are not offered); `tasks show` names the claim's holder (plan
+  and build), lists the task's executions (`--include-ended`) and its last
+  events (`--events N`), calling out every `TASK_STRUCTURE_DIVERGED`;
+  `builds show` shows the failure reason and `last_active_at`; `builds
+list` pages (`--cursor`, prints `total` and the next cursor), shows
+  `last_active_at`, and takes `--reactive-app` as an alias of `--app`;
+  `builds frontier` shows "Needs tick" (the wake-up flag, read without
+  clearing it), member counts by status, roots completed out of total, and
+  attempts/interruptions per runnable and running member; `plans show`
+  works on a superseded plan (lifecycle, deployment, counts) and new `plans
+list --build`; new `deployments show`; `executions list --task` and
+  `--include-ended`; `builds stop --namespace` (v1's prefix filter, read per
+  listed task). `builds cancel` and `concurrency-limits set/delete` gain
+  `--json`, so every registry-backed command takes it. The usage block in
+  `stardag --help`'s module docstring lists every command and flag.
+- **Removed: `stardag builds cleanup`.**
+- **Restored: `stardag concurrency-limits`** (`list [--holders]`, `set`,
+  `delete`, `holders`) — dropped by omission between two v2 work packages
+  (the server routes and client methods already existed); no `evict`, since
+  a v2 slot is released by ending its execution (`stardag builds stop
+--mark-lost` is the recovery path for a holder whose worker is gone).
+  `list`/`holders` carry `in_use` and, with `--holders`, holder detail from
+  one call (`GET /concurrency-limits?include_holders=true`), not one extra
+  request per key as in v1.
+- **Docs: `configuration/cli.md` matches the CLI** — `plans show` reads
+  any plan, `tasks check --report` is described as what it is (accepted,
+  then refused with exit 1), the `--json` claim now holds and names the
+  commands outside it, the "Durations" grammar for `--older-than` is back,
+  and the new commands and flags are documented. `platform/api.md` lists
+  the served reads it missed (`GET /plans/{id}`, `/plans/{id}/graph`,
+  `/builds/{id}/plans`, `GET /tasks`, `/tasks/{id}/executions`,
+  `/deployments/{id}`). `DEV_README.md`, `reference/exceptions.md` and the
+  self-hosting troubleshooting no longer describe v1's minimum-SDK gate
+  (`SDKVersionUnsupportedError`, `426`): v2 has no version check in either
+  direction, and a mismatched SDK and server fail on the first missing
+  route (`NotFoundError`, `is_missing_route_error`).
+- `stardag modal deploy` records the deployment before the deploy and
+  activates it after; a failed create or activation exits non-zero.
+- **Changed: a failed `stardag build` prints its summary.** Build id,
+  status, the failed task and its error, in text and in `--json`, with exit
+  code 1 — not the task's raw traceback (also for a `stopped` build).
+- **Changed: `stardag tasks exclude` reports what that call did** — which
+  roots it reached and whether it failed the build — instead of repeating
+  "a root was excluded" once any root had been.
+
+### UI
+
+- **Changed: every call is on `/api/v2`.** Scope keys, `build_config`,
+  phantom tasks, external blockers and lock views are gone.
+- **Changed: the build view follows the active plan** — members, the DAG
+  over instance edges (dynamic edges dashed, excluded members muted), the
+  frontier with attempt counts, settings and deployment in the build info,
+  and the stop list over the ledger with orphans marked. The build's plans
+  (deployment, generation, settings, activated/sealed/superseded, the
+  active one marked) are in the **"Plans and scheduling"** dialog, not
+  stacked above the DAG. The task table's **Membership** column (root,
+  static, dynamic, closure, excluded, attempts) explains each value on
+  hover, and the task panel's header shows the same facts.
+- **Restored from v1:** builds-list pagination with the total, the "Idle
+  for" filter, double-click-to-toggle auto-refresh, the plan graph's
+  collapse chevron, the task panel's link icon to the task page, the
+  expand-to-fullscreen icons on an instance and its parameters, "See full
+  event log" (over `GET /tasks/{id}/events`, where
+  `TASK_STRUCTURE_DIVERGED` is now visible), and the **Concurrency Limits**
+  page (holders from `include_holders=true`; no evict — `stardag builds
+stop --mark-lost` frees a slot held by a gone execution).
+- **New: the task page** (`/tasks/:task_id`) — status, the claim (live or
+  lapsed, current execution), remedies through the viewed build's plan, the
+  task's instances under their scopes with the parameters they differ in,
+  executions and artifacts.
+- **New: the deployments page** — every generation per app, current marked.
+- **Removed:** the task explorer and search (search over task parameters
+  returns in a later release), claim triage and bulk cancel.
+- **Fixed, from a v1 → v2 audit (#401):**
+  1. The stop dialog says what the printed command does per mode:
+     `--not-in-current-plan` stops orphans and does not cancel the build.
+  2. The stop list reads the executor as the CLI does, falling back to
+     `executor_metadata.kind`.
+  3. The builds list says it is ordered by last activity, not "newest
+     first".
+  4. A failed build's reason (`error_message`) is a banner again, collapsed
+     once the plan's roots have completed.
+  5. The task names the build holding its claim (a link), and a release is
+     addressed to that build's plan, from any view, by any workspace member.
+  6. The status badge and the event log's Build column jump to another
+     build.
+  7. A task's executions across builds, ended ones included, with the Modal
+     call id and identifiers (`GET /tasks/{id}/executions`).
+  8. A deployment past the list's first 500 is read by id
+     (`GET /deployments/{id}`) instead of shown as a bare id.
+  9. The scheduling dialog: status-count chips, "a wake-up is queued"
+     instead of "needs intervention" (`GET /builds/{id}/notify`), a
+     spinner while reading, and no "the next tick completes the build" on a
+     failed or cancelled build.
+  10. The plan graph's "route not served" fallback and its "Partial" note
+      are gone; a 404 is a missing plan.
+  11. The plan graph opens fullscreen (Esc to leave).
+  12. Wide fan-outs collapse into batch nodes (client-side, "Group after",
+      default 5), expandable.
+  13. The stop list shows task names and statuses, v1's safety copy, two
+      distinct no-command messages and a remedy for rows without a call id.
+  14. A direct load of `/<ws>/<env>/limits` lands on the Concurrency page
+      (pinned by a routing test).
+  15. The build view runs one refresh at a time.
+  16. `platform/ui.md` describes the v2 UI.
+
+### Examples
+
+- `lib/stardag-examples` and the standalone Modal example ported to v2 and
+  pinned to the v2 line (`stardag>=0.27.0rc1`; a follow-up relocks to
+  `>=0.27.0` once the release is on PyPI):
+  settings replace the ML pipeline's build config, the global-lock
+  benchmark option is gone, the walkthrough uses `/api/v2`, and the tests
+  no longer reach a configured registry.
+
 ## [0.26.0] — 2026-09-24
 
 **Released together with `server-v0.5.0`, server first.** Unlike 0.25.0,
@@ -14,7 +406,7 @@ their concurrency-limit slots until expiry. `server-v0.5.0` also carries the
 `### Registry API` and `### UI` entries listed under 0.25.0 below, which
 were merged then but shipped with no image: the idempotent claim's server
 half and the `Stop running tasks` panel. This is the last release of the
-v1 line; v2 follows as a new major.
+v1 line; v2 follows as the next minor, a breaking one.
 
 ### SDK
 

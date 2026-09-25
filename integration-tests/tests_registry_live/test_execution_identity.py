@@ -24,14 +24,19 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
-from stardag_integration_tests.registry_live._events import task_events
+from stardag_integration_tests.registry_live._events import (
+    current_execution,
+    ledger,
+    task_events,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
+from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     describe,
-    find_task,
     task_status,
     wait_for_task_status,
     wait_for_terminal,
@@ -45,8 +50,8 @@ pytestmark = [
     pytest.mark.timeout(900),
 ]
 
-# Long enough that the shared task is still RUNNING under A when the
-# cascade lands, and that B's own copy is still running when A's
+# Long enough that the shared task is still RUNNING under A when A's
+# cancel lands, and that B's own copy is still running when A's
 # superseded start arrives.
 SHARED_SLEEP_SECONDS = 60
 
@@ -95,52 +100,83 @@ def _call_outcome(ref: str) -> object:
 
 
 def test_a_retried_claim_is_granted_to_the_attempt_that_won_it() -> None:
+    from stardag.build._deployment import local_deployment_id_aio
+    from stardag.build._registration import new_id, registration_item
+    from stardag.exceptions import APIError
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.tasks import get_range
 
     salt = uuid.uuid4().hex
     task = get_range(limit=3, salt=salt)
+    task_id = str(task.id)
     registry = registry_provider.get()
 
-    build_id = registry.build_start([task], description="STA-50 retried claim")
-    registry.task_register(build_id, task)
+    # One sealed plan holding the task, as a build's static phase leaves it.
+    build = registry.build_create(
+        root_task_ids=[task_id], description="STA-50 retried claim"
+    )
+    observed_at = datetime.now(timezone.utc)
+
+    def _item(declared_upstreams):
+        return registration_item(
+            task,
+            declared_upstreams=declared_upstreams,
+            observed_complete=False,
+            observed_at=observed_at,
+        )
+
+    # Roots are admitted unexpanded; the walk's chunk expands them.
+    plan = registry.plan_create(
+        build.id,
+        plan_id=new_id(),
+        deployment_id=asyncio.run(local_deployment_id_aio(registry)),
+        settings={},
+        roots=[_item(None)],
+    )
+    registry.plan_register_members(plan.id, [_item([])])
+    registry.plan_seal(plan.id)
     execution_id = uuid.uuid4()
 
     async def _claim(eid: uuid.UUID):
-        return await registry.task_start_claim_aio(build_id, task, execution_id=eid)
+        return await registry.member_start_aio(
+            plan.id, task_id, execution_id=eid, claim=True
+        )
 
     first = asyncio.run(_claim(execution_id))
-    assert first.started, f"the first claim was denied: {first}"
-    assert first.execution_id == str(execution_id), (
-        "The registry did not echo the claim identity, so it predates the "
-        f"field and this scenario proves nothing: {first}"
+    assert first.execution_id == execution_id, (
+        "The registry did not echo the claim identity, so this scenario "
+        f"proves nothing: {first}"
     )
 
+    # A retried granted start is a no-op, never a refusal.
     retried = asyncio.run(_claim(execution_id))
-    assert retried.started, (
-        "A retried claim was refused, so a worker holding the claim would "
-        f"stand down from its own task: {retried}"
+    assert retried.execution_id == execution_id, (
+        "A retried claim was not answered as the attempt that holds it, so "
+        f"a worker holding the claim would stand down from its own task: "
+        f"{retried}"
     )
 
-    second_attempt = asyncio.run(_claim(uuid.uuid4()))
-    assert not second_attempt.started, (
-        "A genuine second attempt was granted while the claim was live, so "
-        f"the identity has cost the exactly-once guarantee: {second_attempt}"
+    with pytest.raises(APIError) as second_attempt:
+        asyncio.run(_claim(uuid.uuid4()))
+    assert second_attempt.value.status_code == 409, second_attempt.value
+    assert second_attempt.value.code == "task_already_running", (
+        "A genuine second attempt was not refused as a live claim: "
+        f"{second_attempt.value.payload!r}"
     )
-    assert second_attempt.denied_reason == "already_running"
-    assert second_attempt.execution_id == str(execution_id), (
-        "The denial did not name the claim that holds the task."
-    )
+    # The claim still names the attempt that won it.
+    assert registry.task_get(task_id).execution_id == execution_id
 
 
 # --- The worker carries the identity, and both rules that reads it -------
 
 
-def test_a_superseded_workers_start_cannot_take_the_task_back() -> None:
+def test_a_superseded_workers_start_cannot_take_the_task_back(
+    deployment: Deployment,
+) -> None:
     """STA-49, produced rather than simulated, against the real arbiter.
 
-    Build A claims and runs the shared task; a cascading cancel releases
-    A's claim -- which is what lets the next build have the task, and is
+    Build A claims and runs the shared task; cancelling A releases A's
+    claim -- which is what lets the next build have the task, and is
     exactly how the production incident began -- and B claims and runs its
     own execution. From that moment A's execution is superseded while A's
     container is, as far as anything here knows, still going: the server
@@ -149,7 +185,7 @@ def test_a_superseded_workers_start_cannot_take_the_task_back() -> None:
     **What is synthesised is only the last step**, A's worker checking in.
     A real one would need a Modal preemption whose restart arrives after
     the claim lapsed, which cannot be forced from a test. The start itself
-    is an ordinary non-claiming ``task_start``, byte for byte what that
+    is an ordinary non-claiming ``member_start``, byte for byte what that
     restarted worker sends, and the registry cannot tell the difference --
     which is the point. So this pins the *server rule under genuine
     concurrent takeover*; it is not an end-to-end preemption restart.
@@ -185,17 +221,18 @@ def test_a_superseded_workers_start_cannot_take_the_task_back() -> None:
     # The identity A's tick minted, read back off the row rather than
     # guessed: this is the value A's worker would repeat, and the whole
     # rule turns on it being the one the task no longer holds.
-    a_execution = find_task(shared_id, task_name="Slow").latest_execution_id
+    a_execution = registry.task_get(shared_id).execution_id
     assert a_execution is not None, (
         "A's claim recorded no execution identity, so this scenario would "
         "pass for the wrong reason -- a start with nothing to compare is "
         "accepted by design.\n" + describe(build_a)
     )
+    plan_a = registry.build_get_frontier(build_a).plan_id
+    assert plan_a is not None, describe(build_a)
 
-    cancelled = registry.build_cancel(build_a, cascade=True)
-    assert cancelled is not None
-    assert shared_id in cancelled.cascaded_task_ids, (
-        "The cascade did not release the shared task's claim, so there is "
+    registry.build_cancel(build_a)
+    assert task_status(shared.id) == "cancelled", (
+        "The cancel did not release the shared task's claim, so there is "
         f"no takeover to supersede anything.\n{describe(build_a)}"
     )
 
@@ -204,44 +241,58 @@ def test_a_superseded_workers_start_cannot_take_the_task_back() -> None:
         reactive=True,
         tick_kwargs={"linger_seconds": B_LINGER_SECONDS, "poll_interval_seconds": 3},
     ).build_id
+
     # Wait for the owner to be B, not merely for the task to be RUNNING:
     # A's own worker is alive and still talking, so a status-only wait can
     # return on A's execution.
+    def _held_by_b() -> bool:
+        current = current_execution(deployment, shared_id)
+        return (
+            current is not None
+            and current.status == "running"
+            and current.build_id == str(build_b)
+        )
+
     wait_until(
-        lambda: task_status(shared.id) == "running"
-        and find_task(shared_id, task_name="Slow").latest_status_build_id == build_b,
+        _held_by_b,
         build_id=build_b,
         timeout=STATUS_TIMEOUT_SECONDS,
         what=f"build {build_b} to claim the shared task",
     )
-    b_execution = find_task(shared_id, task_name="Slow").latest_execution_id
+    b_execution = registry.task_get(shared_id).execution_id
     assert b_execution is not None and b_execution != a_execution
 
     # A's restarted worker checks in, naming the execution it is.
     with pytest.raises(APIError) as refused:
-        registry.task_start(
-            build_a,
-            shared,
+        registry.member_start(
+            plan_a,
+            shared_id,
+            execution_id=a_execution,
+            claim=False,
             executor="modal",
             executor_ref="fc-a-restarted",
-            execution_id=a_execution,
         )
 
     assert refused.value.status_code == 409, refused.value
-    assert (refused.value.payload or {}).get("error_code") == "execution_superseded", (
+    assert refused.value.code == "execution_not_current", (
         f"refused for the wrong reason: {refused.value.payload!r}"
     )
 
-    row = find_task(shared_id, task_name="Slow")
-    assert row.latest_status_build_id == build_b, (
+    current = current_execution(deployment, shared_id)
+    assert current is not None and current.build_id == str(build_b), (
         "The superseded start took the task back from the build that holds "
         "it, which is the two-executions-of-one-task outcome claims exist "
         f"to prevent.\n{describe(build_a)}\n{describe(build_b)}"
     )
-    assert row.latest_execution_id == b_execution
-    assert row.latest_executor_ref != "fc-a-restarted", (
-        "The superseded start's reference was recorded over the live "
-        "holder's, so a later cancel would address the wrong container."
+    assert current.execution_id == str(b_execution)
+    refs = {
+        e["id"]: e.get("executor_ref")
+        for build in (build_a, build_b)
+        for e in ledger(deployment, build)
+    }
+    assert "fc-a-restarted" not in refs.values(), (
+        "The superseded start's reference was recorded on the ledger, so a "
+        "later stop would address a container that is not the holder's."
     )
 
     status_b = wait_for_terminal(build_b, timeout=BUILD_TIMEOUT_SECONDS)
@@ -250,7 +301,7 @@ def test_a_superseded_workers_start_cannot_take_the_task_back() -> None:
     )
 
 
-def test_a_cancelled_builds_worker_stops_itself(deployment) -> None:
+def test_a_cancelled_builds_worker_stops_itself(deployment: Deployment) -> None:
     """Cooperative cancellation, with nothing reaching into the container.
 
     Nothing calls Modal here. The cancel releases the task's claim and
@@ -268,15 +319,12 @@ def test_a_cancelled_builds_worker_stops_itself(deployment) -> None:
     now has nothing but its own checkpoint to end it, and the stronger
     case is the testable one.
 
-    Note which of the endpoint's three answers this exercises, because
-    the reason changed under it. A cancel now releases the build's claims
-    too, so the task is CANCELLED as well -- both facts are true at once,
-    written in one transaction. The endpoint evaluates the build first
-    (``routes/builds.py``: build status, then task status, then identity),
-    so the answer is deterministically ``build_not_running`` rather than a
-    race between two correct ones. ``superseded`` cannot fire here at all:
-    nothing takes the task over. The other two answers have their own unit
-    coverage.
+    What the checkpoint reads: the build's unended executions (``GET
+    /builds/{id}/executions``). A cancel releases the build's claims, so
+    this execution's ``claim_released_at`` is set in the same transaction
+    that makes the build CANCELLED -- ``still_wanted`` is false, and the
+    worker stops at its next checkpoint. Nothing takes the task over here;
+    that answer has its own unit coverage.
 
     Three assertions, failing from three directions. The call being
     **gone** catches a worker that ignored the answer -- it would still be
@@ -336,7 +384,7 @@ def test_a_cancelled_builds_worker_stops_itself(deployment) -> None:
         return sum(
             1
             for event in task_events(deployment, worker_task.id, missing_ok=True)
-            if event["event_type"] == "task_started"
+            if event["event_type"] == "task_started" and event["report_applied"]
         )
 
     wait_until(
@@ -345,8 +393,9 @@ def test_a_cancelled_builds_worker_stops_itself(deployment) -> None:
         timeout=STATUS_TIMEOUT_SECONDS,
         what="the worker to report its own start from inside the container",
     )
-    ref = find_task(str(worker_task.id), task_name="Cooperative").latest_executor_ref
-    assert ref is not None
+    current = current_execution(deployment, worker_task.id)
+    ref = current.executor_ref if current is not None else None
+    assert ref is not None, describe(build_id)
 
     registry.build_cancel(build_id)
 

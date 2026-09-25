@@ -33,12 +33,10 @@ failures live in the corners, not on the axes.
 
 from __future__ import annotations
 
-from uuid import UUID, uuid4
-
 import pytest
 
 try:
-    import modal  # noqa: F401
+    import modal
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
 
@@ -47,7 +45,7 @@ from modal.exception import InputCancellation
 import stardag as sd
 from stardag.integration.modal import MODAL_INTERRUPTIONS
 from stardag.integration.modal._metadata import (
-    STARDAG_BUILD_ID_ENV,
+    STARDAG_CLAIM_TTL_SECONDS_ENV,
     STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
 )
 from stardag.integration.modal._runner import (
@@ -57,75 +55,10 @@ from stardag.integration.modal._runner import (
     Runner,
     _classify_interruption,
 )
-from stardag.registry import NoOpRegistry, registry_provider
+from stardag.registry import registry_provider
+from stardag.testing import InMemoryRegistry
 from stardag.testing.modal._tasks import make_range
-
-
-class RecordingRegistry(NoOpRegistry):
-    def __init__(self) -> None:
-        super().__init__()
-        self.calls: list[tuple[str, dict]] = []
-
-    def task_start(
-        self,
-        build_id,
-        task,
-        executor=None,
-        executor_ref=None,
-        executor_metadata=None,
-        claim_ttl_seconds=None,
-        execution_id=None,
-    ) -> None:
-        self.calls.append(
-            (
-                "task_start",
-                {"executor_ref": executor_ref, "execution_id": execution_id},
-            )
-        )
-
-    def task_complete(self, build_id, task) -> None:
-        self.calls.append(("task_complete", {}))
-
-    def task_fail(self, build_id, task, error_message=None) -> None:
-        self.calls.append(("task_fail", {"error_message": error_message}))
-
-    def task_interrupt(
-        self, build_id, task, reason=None, executor_ref=None, execution_id=None
-    ) -> None:
-        self.calls.append(
-            (
-                "task_interrupt",
-                {
-                    "reason": reason,
-                    "executor_ref": executor_ref,
-                    "execution_id": execution_id,
-                },
-            )
-        )
-
-    def task_preempt(
-        self, build_id, task, reason=None, executor_ref=None, execution_id=None
-    ) -> None:
-        self.calls.append(
-            (
-                "task_preempt",
-                {
-                    "reason": reason,
-                    "executor_ref": executor_ref,
-                    "execution_id": execution_id,
-                },
-            )
-        )
-
-    def methods(self) -> list[str]:
-        return [m for (m, _) in self.calls]
-
-
-@pytest.fixture
-def registry():
-    instance = RecordingRegistry()
-    with registry_provider.override(instance):
-        yield instance
+from tests.test_integration.test_modal._planned import Planned, plan_and_claim
 
 
 @pytest.fixture(autouse=True)
@@ -133,11 +66,29 @@ def fake_call_id(monkeypatch):
     monkeypatch.setattr(modal, "current_function_call_id", lambda: "fc-1")
 
 
-def _env(build_id: UUID, timeout: float | None = None) -> dict[str, str]:
-    env = {STARDAG_BUILD_ID_ENV: str(build_id)}
+def _run(runner: Runner, timeout: float | None = None) -> Planned:
+    """Plan and claim a task, then run ``runner`` on it as the worker would,
+    re-raising whatever escapes; returns the plan for assertions."""
+    planned = plan_and_claim(make_range(limit=2))
+    env = planned.env()
     if timeout is not None:
         env[STARDAG_MODAL_FUNCTION_TIMEOUT_ENV] = str(timeout)
-    return env
+    planned_box.append(planned)
+    with registry_provider.override(planned.registry):
+        runner(planned.task, env_overrides=env)
+    return planned
+
+
+planned_box: list[Planned] = []
+
+
+@pytest.fixture(autouse=True)
+def _clear_box():
+    planned_box.clear()
+
+
+def _last() -> Planned:
+    return planned_box[-1]
 
 
 def _runner_raising(exception: BaseException) -> Runner:
@@ -480,62 +431,108 @@ class TestClassifyByExceptionChain:
 
 
 class TestRunnerReporting:
+    """What the worker reports, validated by the fake's seams: an interrupt
+    releases the claim and leaves the task INTERRUPTED (actionable); a
+    preemption keeps status and claim, pulls the expiry forward, and the
+    restart's non-claiming start under the same execution restores it."""
+
     def test_a_resumption_request_at_the_timeout_is_reported(
-        self, registry, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        """The one case that writes anything: the task asked, and nothing
+        """The one case that ends the execution: the task asked, and nothing
         else will restart a timed-out call."""
-        runner = _runner_raising(sd.ResumableInterruption("checkpointed"))
-
         with pytest.raises(BaseException):
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=0.0001))
+            _run(_runner_raising(sd.ResumableInterruption("checkpointed")), 0.0001)
 
-        assert registry.methods() == ["task_start", "task_interrupt"]
-        assert "resumed" in registry.calls[1][1]["reason"]
+        planned = _last()
+        assert planned.reports() == ["member_start", "member_interrupt"]
+        (interrupt,) = planned.registry.calls_to("member_interrupt")
+        assert interrupt["execution_id"] == planned.execution_id
+        assert "resumed" in interrupt["error_message"]
+        assert planned.registry.status_of(planned.task.id) == "interrupted"
+        assert planned.registry.executions[planned.execution_id].outcome == (
+            "interrupted"
+        )
 
     def test_a_preemption_records_the_preemption_and_gets_out_of_the_way(
-        self, registry, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        """The backend restarts the input on the same call id, faster than a
-        reschedule and keeping the claim — so a *terminal* event would be
-        worse. Recording the preemption is not terminal and releases
-        nothing: it is what makes a restart that never arrives visible."""
-        runner = _runner_raising(sd.ResumableInterruption("checkpointed"))
-
+        """The backend restarts the input on the same call id, keeping the
+        claim — so a terminal event would be worse. The preemption record
+        releases nothing: it makes a restart that never arrives visible."""
         with pytest.raises(KeyboardInterrupt) as caught:
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=600.0))
+            _run(_runner_raising(sd.ResumableInterruption("checkpointed")), 600.0)
 
         # Translated on the way out: an ordinary Exception leaving the
         # container is a task failure Modal will not restart.
         assert isinstance(caught.value.__cause__, sd.ResumableInterruption)
-        assert registry.methods() == ["task_start", "task_preempt"]
-        assert "preempted" in registry.calls[1][1]["reason"]
+        planned = _last()
+        assert planned.reports() == ["member_start", "member_preempt"]
+        task_row = planned.registry.tasks[planned.task_id]
+        assert task_row.status == "running"
+        assert task_row.execution_id == planned.execution_id
+        assert task_row.preempted_at is not None
+        assert planned.registry.executions[planned.execution_id].ended_at is None
+
+    def test_the_restart_after_a_preemption_reports_under_the_same_execution(
+        self, default_in_memory_fs_target
+    ):
+        """Not an end: the restarted input carries the same env, so its
+        start names the same execution — which restores the claim's TTL —
+        and its completion lands."""
+        with pytest.raises(KeyboardInterrupt):
+            _run(_runner_raising(sd.ResumableInterruption("checkpointed")), 600.0)
+        planned = _last()
+
+        preempted_expiry = planned.registry.tasks[planned.task_id].claim_expires_at
+        assert preempted_expiry is not None
+        env = {**planned.env(), STARDAG_CLAIM_TTL_SECONDS_ENV: "5000"}
+        restarted_at = planned.registry.now()
+
+        class Restart(Runner):
+            def run(self, task):
+                # Observed mid-run: the restart's start restored the claim to
+                # the forwarded TTL, not the registry default.
+                row = planned.registry.tasks[planned_task_id]
+                restored.append(row.claim_expires_at)
+                return super().run(task)
+
+        planned_task_id = planned.task_id
+        restored: list = []
+        with registry_provider.override(planned.registry):
+            assert Restart()(planned.task, env_overrides=env) is None
+
+        (expiry,) = restored
+        assert expiry > preempted_expiry
+        assert (expiry - restarted_at).total_seconds() == pytest.approx(5000, abs=5)
+        assert planned.registry.tasks[planned.task_id].preempted_at is None
+        assert planned.registry.status_of(planned.task.id) == "completed"
+        starts = planned.registry.calls_to(
+            "member_start", task_id=planned.task_id, claim=False
+        )
+        assert [s["execution_id"] for s in starts] == [planned.execution_id] * 2
 
     def test_the_documented_recipe_reports_a_timeout_not_a_preemption(
-        self, registry, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        """STA-44 end to end, through the recipe the docs actually tell
-        people to write. The declared timeout is far from elapsed, so the
-        old clock-based rule called this a preemption and wrote nothing;
-        the InputCancellation on the chain says otherwise."""
-        runner = _runner_checkpointing(InputCancellation("Input was cancelled"))
-
+        """STA-44 end to end, through the documented recipe: the declared
+        timeout is far from elapsed, but the InputCancellation on the chain
+        says no restart is coming."""
         with pytest.raises(BaseException):
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=86400.0))
+            _run(
+                _runner_checkpointing(InputCancellation("Input was cancelled")), 86400.0
+            )
 
-        assert registry.methods() == ["task_start", "task_interrupt"]
+        assert _last().reports() == ["member_start", "member_interrupt"]
 
     def test_the_documented_recipe_on_a_real_preemption(
-        self, registry, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        """The control for the test above: same recipe, same timing, the
-        other signal — and the opposite answer."""
-        runner = _runner_checkpointing(KeyboardInterrupt())
-
+        """The control: same recipe, same timing, the other signal."""
         with pytest.raises(KeyboardInterrupt):
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=86400.0))
+            _run(_runner_checkpointing(KeyboardInterrupt()), 86400.0)
 
-        assert registry.methods() == ["task_start", "task_preempt"]
+        assert _last().reports() == ["member_start", "member_preempt"]
 
     @pytest.mark.parametrize(
         "exception",
@@ -543,64 +540,49 @@ class TestRunnerReporting:
     )
     @pytest.mark.parametrize("timeout", [0.0001, 600.0])
     def test_an_uncaught_interruption_never_reports(
-        self, registry, default_in_memory_fs_target, exception, timeout
+        self, default_in_memory_fs_target, exception, timeout
     ):
-        """A task that did not ask to be resumed does not get resumed —
-        whether the timeout had fired or not. It ends as a failure via the
-        dead execution, which is the right answer for "it hung" and for
-        "your timeout is too small" alike."""
-        runner = _runner_raising(exception)
-
+        """A task that did not ask to be resumed does not get resumed; its
+        dead execution ends as a failure once the claim lapses."""
         with pytest.raises(BaseException):
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=timeout))
+            _run(_runner_raising(exception), timeout)
 
-        assert registry.methods() == ["task_start"]
+        planned = _last()
+        assert planned.reports() == ["member_start"]
+        assert planned.registry.status_of(planned.task.id) == "running"
 
-    def test_an_ordinary_exception_still_fails(
-        self, registry, default_in_memory_fs_target
-    ):
-        """The control: catching BaseException in the runner must not have
-        stopped real bugs being failures."""
-        runner = _runner_raising(RuntimeError("genuine bug"))
-
+    def test_an_ordinary_exception_still_fails(self, default_in_memory_fs_target):
         with pytest.raises(RuntimeError):
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=600.0))
+            _run(_runner_raising(RuntimeError("genuine bug")), 600.0)
 
-        assert registry.methods() == ["task_start", "task_fail"]
-        assert "genuine bug" in registry.calls[1][1]["error_message"]
+        planned = _last()
+        assert planned.reports() == ["member_start", "member_fail"]
+        (fail,) = planned.registry.calls_to("member_fail")
+        assert "genuine bug" in fail["error_message"]
 
     def test_the_reason_never_names_a_timeout_it_does_not_know(
-        self, registry, default_in_memory_fs_target
+        self, default_in_memory_fs_target
     ):
-        """A task may raise the request with no declared timeout forwarded.
-        The reason lands in a user-visible message, so it must not read
+        """The reason lands in a user-visible message, so it must not read
         "the worker function's Nones timeout"."""
-        runner = _runner_raising(sd.ResumableInterruption("checkpointed"))
-        # Raised bare, so the chain says nothing and the clock decides;
-        # a tiny declared timeout puts it on the branch that reports, which
-        # is where the reason string is built.
         with pytest.raises(BaseException):
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=0.0001))
+            _run(_runner_raising(sd.ResumableInterruption("checkpointed")), 0.0001)
 
-        reason = registry.calls[1][1]["reason"]
-        assert "None" not in reason
-        assert "0.0001s" in reason
+        (interrupt,) = _last().registry.calls_to("member_interrupt")
+        assert "None" not in interrupt["error_message"]
+        assert "0.0001s" in interrupt["error_message"]
 
-    def test_no_reporter_still_translates_the_escape(
-        self, registry, default_in_memory_fs_target
-    ):
-        """Without a build id there is nothing to report to — but the escape
-        translation is what earns the backend restart, so it must not be
-        conditional on reporting being configured.
-
-        A long declared timeout keeps this on the preemption branch; the
-        translation is what is under test, not the classification."""
+    def test_no_reporter_still_translates_the_escape(self, default_in_memory_fs_target):
+        """Without forwarded ids there is nothing to report to — but the
+        escape translation is what earns the backend restart."""
+        registry = InMemoryRegistry()
         runner = _runner_raising(sd.ResumableInterruption("checkpointed"))
 
-        with pytest.raises(KeyboardInterrupt):
-            runner(
-                make_range(limit=2),
-                env_overrides={STARDAG_MODAL_FUNCTION_TIMEOUT_ENV: "600"},
-            )
+        with registry_provider.override(registry):
+            with pytest.raises(KeyboardInterrupt):
+                runner(
+                    make_range(limit=2),
+                    env_overrides={STARDAG_MODAL_FUNCTION_TIMEOUT_ENV: "600"},
+                )
 
         assert registry.calls == []

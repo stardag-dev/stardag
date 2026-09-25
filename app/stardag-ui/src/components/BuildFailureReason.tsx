@@ -4,13 +4,14 @@ import { formatAbsoluteTime } from "../utils/time";
 
 interface BuildFailureReasonProps {
   status: BuildStatus;
-  /** `Build.latest_error_message` — the reason recorded on BUILD_FAILED. */
+  /** `Build.error_message` — the message of the BUILD_FAILED that produced
+   * the status; the server sends null for every other status. */
   message?: string | null;
   /** When the build reached its terminal state (`Build.completed_at`). */
   failedAt?: string | null;
   /**
-   * True when every root this build asked for has since completed (see
-   * `rootsSatisfied`). The reason is then a historical record rather than a
+   * True when every root of the build's active plan has since completed
+   * (see `rootsCompleted`). The reason is then a historical record rather than a
    * live problem, so it collapses instead of shouting.
    */
   superseded?: boolean;
@@ -20,18 +21,19 @@ interface BuildFailureReasonProps {
  * Why a failed build failed.
  *
  * Its own component, and not folded into the build header, because of when it
- * has to appear. The scheduling panel explains a build that is *stalled*, and
- * goes quiet the moment the build fails: failing runs `skip_blocked`, the
- * blocked tasks go terminal, and terminal tasks drop out of the frontier's
- * blocked-by query — so the list the panel renders empties exactly when the
- * user most wants it. The scheduler wrote the same explanation onto the
- * BUILD_FAILED event on its way out. This is that, kept on screen.
+ * has to appear. The scheduling dialog explains a build that is *stalled*, and
+ * goes quiet the moment the build fails: the frontier of a terminal build is
+ * empty, so what the dialog renders empties exactly when the user most wants
+ * it. The scheduler wrote the explanation onto the BUILD_FAILED event on its
+ * way out, and the build read carries it as `error_message`. This is that,
+ * kept on screen — the build info dialog repeats it as a field.
  *
  * Renders nothing unless the build is failed *and* a reason was recorded. Both
  * halves matter: a build resumed after failing is running again and must not
- * show the previous round's reason, and a server predating
- * `latest_error_message` omits the field rather than sending an empty one. The
- * presence check trims — a heading over nothing is worse than silence.
+ * show the previous round's reason (the server already clears it; this does
+ * not depend on that), and a `BUILD_FAILED` recorded without a message leaves
+ * nothing to say. The presence check trims — a heading over nothing is worse
+ * than silence.
  *
  * **Two registers.** Live, it is a red banner: something needs attention. Once
  * the roots have completed anyway (`superseded`), the same text is a *record* —

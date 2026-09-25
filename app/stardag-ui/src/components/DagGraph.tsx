@@ -17,14 +17,14 @@ import "@xyflow/react/dist/style.css";
 import Dagre from "@dagrejs/dagre";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
-import type {
-  TaskWithContext,
-  TaskGraphResponse,
-  TaskGraphExtendedResponse,
-  GroupSummary,
-} from "../types/task";
-import { isExtendedResponse } from "../types/task";
-import { reactFlowEdgeId } from "../utils/graphEdges";
+import {
+  type BatchExpansion,
+  DEFAULT_GROUP_AFTER,
+  expandedAt,
+  flowModel,
+  groupFlowModel,
+  type PlanView,
+} from "../utils/planGraph";
 import { BatchNode, type BatchNodeData } from "./BatchNode";
 import { LayoutToggle } from "./LayoutToggle";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
@@ -38,129 +38,70 @@ import {
 export type { LayoutDirection } from "./dagLayout";
 
 interface DagGraphProps {
-  tasks: TaskWithContext[];
-  graph: TaskGraphResponse | TaskGraphExtendedResponse | null;
+  // The plan's members and instance edges; one node per instance.
+  view: PlanView;
   selectedTaskId: string | null;
   onTaskClick: (taskId: string) => void;
-  buildId?: string;
-  onStatusBuildClick?: (buildId: string) => void;
+  // Task ids the table's filters exclude; drawn muted, not hidden.
+  mutedTaskIds?: Set<string>;
   defaultDirection?: LayoutDirection;
   direction?: LayoutDirection;
   onDirectionChange?: (direction: LayoutDirection) => void;
   positionCache?: React.MutableRefObject<PositionCache>;
+  // "Group after" (v1's per-type cap). Its control lives in the graph
+  // panel's header (see `GroupAfterControl`), as v1's did.
+  groupAfter?: number;
+  // The batches opened by a click; controlled when both are given, so the
+  // inline and the fullscreen graph share them and the header can offer
+  // "Regroup".
+  expansion?: BatchExpansion;
+  onExpansionChange?: (expansion: BatchExpansion) => void;
+  // Told how many batches are drawn, for the header's summary.
+  onBatchCountChange?: (count: number) => void;
 }
 
-const nodeTypes: NodeTypes = {
-  taskNode: TaskNode,
-  batchNode: BatchNode,
-};
+const nodeTypes: NodeTypes = { taskNode: TaskNode, batchNode: BatchNode };
 
-type TaskNodeType = Node<TaskNodeData>;
-type BatchNodeType = Node<BatchNodeData>;
-type AnyNodeType = TaskNodeType | BatchNodeType;
-
-// --- Node dimension constants ---
+type TaskNodeType = Node<TaskNodeData | BatchNodeData>;
 
 const NODE_MIN_WIDTH = 160;
 const NODE_MAX_WIDTH = 300;
 const NODE_HEIGHT = 90;
-const BATCH_NODE_MIN_WIDTH = 180;
-const BATCH_NODE_MAX_WIDTH = 320;
 const BATCH_NODE_HEIGHT = 100;
 const CHAR_WIDTH_ESTIMATE = 8;
 const NODE_PADDING = 40;
 
-function estimateNodeWidth(label: string, minWidth: number, maxWidth: number): number {
+function nodeWidth(label: string): number {
   const displayLength = Math.min(label.length, MAX_LABEL_CHARS);
   return Math.max(
-    minWidth,
-    Math.min(maxWidth, displayLength * CHAR_WIDTH_ESTIMATE + NODE_PADDING),
+    NODE_MIN_WIDTH,
+    Math.min(NODE_MAX_WIDTH, displayLength * CHAR_WIDTH_ESTIMATE + NODE_PADDING),
   );
 }
 
-function getNodeDimensions(node: AnyNodeType): { w: number; h: number } {
-  const isBatch = node.type === "batchNode";
-  const label = (node.data as { label: string }).label;
-  return {
-    w: isBatch
-      ? estimateNodeWidth(label, BATCH_NODE_MIN_WIDTH, BATCH_NODE_MAX_WIDTH)
-      : estimateNodeWidth(label, NODE_MIN_WIDTH, NODE_MAX_WIDTH),
-    h: isBatch ? BATCH_NODE_HEIGHT : NODE_HEIGHT,
-  };
-}
-
-// --- Edge color constants ---
-
-// Both static and dynamic deps share the same grey palette. Dynamic edges
-// are distinguished only by a static dash pattern (applied via
-// strokeDasharray in getEdgeStyle) and a hover tooltip (rendered by the
-// custom `dynamicEdge` React Flow edge type defined below). React Flow's
-// `animated: true` adds its own marching-ants dash to signal a running
-// target; that combines fine with the static dash here.
 const EDGE_COLORS = {
   dark: { normal: "#6b7280", muted: "#4b5563" },
   light: { normal: "#94a3b8", muted: "#d1d5db" },
 } as const;
 
 const DYNAMIC_EDGE_TOOLTIP =
-  "Dynamic dependency — yielded at runtime from the upstream task's run() generator.";
+  "Dynamic dependency — yielded at runtime from the downstream task's run() generator.";
 
-// An edge registered under a different structure scope than the focal
-// tasks' — the graph hopped code versions here. Drawn in a warm hue and
-// dotted so it reads as "history from another deployment", not as a live
-// edge of the build being viewed. Combined with a dynamic edge's dashes it
-// stays dotted: the hop matters more than how the edge was discovered.
-const CROSS_SCOPE_EDGE_COLORS = {
-  dark: "#d97706",
-  light: "#b45309",
-} as const;
-
-function crossScopeTooltip(scopeKey: string | null | undefined): string {
-  const short = scopeKey ? scopeKey.slice(0, 20) : "unknown";
-  return `Built under a different code version (scope ${short}) — this edge belongs to another deployment's structure.`;
-}
-
-function getEdgeStyle(
-  isMuted: boolean,
-  theme: string,
-  depthOpacity: number,
-  isDynamic: boolean = false,
-  isCrossScope: boolean = false,
-) {
+function edgeStyle(isMuted: boolean, theme: string, isDynamic: boolean) {
   const palette = theme === "dark" ? EDGE_COLORS.dark : EDGE_COLORS.light;
-  const crossScopeColor =
-    theme === "dark" ? CROSS_SCOPE_EDGE_COLORS.dark : CROSS_SCOPE_EDGE_COLORS.light;
   return {
-    stroke: isCrossScope ? crossScopeColor : isMuted ? palette.muted : palette.normal,
+    stroke: isMuted ? palette.muted : palette.normal,
     strokeWidth: isMuted ? 1.5 : 2,
-    opacity: isMuted ? depthOpacity * 0.7 : isCrossScope ? 0.85 : 1,
-    ...(isCrossScope
-      ? { strokeDasharray: "2 3" }
-      : isDynamic
-        ? { strokeDasharray: "6 4" }
-        : {}),
+    opacity: isMuted ? 0.7 : 1,
+    ...(isDynamic ? { strokeDasharray: "6 4" } : {}),
   };
 }
 
-// Custom edge used for dynamic and cross-scope deps: renders the default
-// bezier path plus an SVG <title> child and a wider invisible hit-path so
-// the native browser tooltip shows up when the user hovers the edge (a 2px
-// stroke is very narrow to hit).
-type DynamicEdgeData = { tooltip?: string };
-
-function DynamicEdge(props: EdgeProps<Edge<DynamicEdgeData>>) {
-  const {
-    id,
-    sourceX,
-    sourceY,
-    targetX,
-    targetY,
-    sourcePosition,
-    targetPosition,
-    style,
-    markerEnd,
-    data,
-  } = props;
+// A dynamic edge: the bezier path plus an SVG <title> and a wider
+// invisible hit-path, so the native tooltip shows on hover.
+function DynamicEdge(props: EdgeProps) {
+  const { id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition } =
+    props;
   const [edgePath] = getBezierPath({
     sourceX,
     sourceY,
@@ -169,11 +110,9 @@ function DynamicEdge(props: EdgeProps<Edge<DynamicEdgeData>>) {
     targetY,
     targetPosition,
   });
-  const tooltip = data?.tooltip ?? DYNAMIC_EDGE_TOOLTIP;
   return (
     <g>
-      <title>{tooltip}</title>
-      {/* Invisible wider path to make the edge easier to hover. */}
+      <title>{DYNAMIC_EDGE_TOOLTIP}</title>
       <path
         d={edgePath}
         fill="none"
@@ -181,26 +120,25 @@ function DynamicEdge(props: EdgeProps<Edge<DynamicEdgeData>>) {
         strokeWidth={12}
         pointerEvents="stroke"
       />
-      <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd} />
+      <BaseEdge
+        id={id}
+        path={edgePath}
+        style={props.style}
+        markerEnd={props.markerEnd}
+      />
     </g>
   );
 }
 
-const edgeTypes: EdgeTypes = {
-  dynamicEdge: DynamicEdge,
-};
+const edgeTypes: EdgeTypes = { dynamicEdge: DynamicEdge };
 
-// --- Layout helpers ---
-
-function getLayoutedElements(
-  nodes: AnyNodeType[],
+function layout(
+  nodes: TaskNodeType[],
   edges: Edge[],
   direction: LayoutDirection,
-): { nodes: AnyNodeType[]; edges: Edge[] } {
-  if (nodes.length === 0) return { nodes, edges };
-
+): TaskNodeType[] {
+  if (nodes.length === 0) return nodes;
   const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
-
   g.setGraph({
     rankdir: direction,
     nodesep: direction === "LR" ? 30 : 50,
@@ -208,54 +146,42 @@ function getLayoutedElements(
     marginx: 20,
     marginy: 20,
   });
-
-  const nodeSizes = new Map<string, { w: number; h: number }>();
-  nodes.forEach((node) => {
-    const size = getNodeDimensions(node);
-    nodeSizes.set(node.id, size);
-    g.setNode(node.id, { width: size.w, height: size.h });
-  });
-
-  edges.forEach((edge) => {
-    g.setEdge(edge.source, edge.target);
-  });
-
+  const heightOf = (node: TaskNodeType) =>
+    node.type === "batchNode" ? BATCH_NODE_HEIGHT : NODE_HEIGHT;
+  for (const node of nodes) {
+    g.setNode(node.id, {
+      width: nodeWidth(node.data.label),
+      height: heightOf(node),
+    });
+  }
+  for (const edge of edges) g.setEdge(edge.source, edge.target);
   Dagre.layout(g);
-
-  const layoutedNodes = nodes.map((node) => {
+  return nodes.map((node) => {
     const pos = g.node(node.id);
-    const size = nodeSizes.get(node.id)!;
     return {
       ...node,
       position: {
-        x: pos.x - size.w / 2,
-        y: pos.y - size.h / 2,
+        x: pos.x - nodeWidth(node.data.label) / 2,
+        y: pos.y - heightOf(node) / 2,
       },
     };
   });
-
-  return { nodes: layoutedNodes, edges };
 }
 
-function getDepthOpacity(depth: number): number {
-  if (depth === 0) return 1;
-  if (depth === 1) return 0.7;
-  return 0.5;
-}
-
-// --- Component ---
-
+/** The active plan as a graph over instance edges. */
 export function DagGraph({
-  tasks,
-  graph,
+  view,
   selectedTaskId,
   onTaskClick,
-  buildId,
-  onStatusBuildClick,
+  mutedTaskIds,
   defaultDirection = "LR",
   direction: controlledDirection,
   onDirectionChange: controlledOnDirectionChange,
   positionCache: externalPositionCache,
+  groupAfter = DEFAULT_GROUP_AFTER,
+  expansion: controlledExpansion,
+  onExpansionChange,
+  onBatchCountChange,
 }: DagGraphProps) {
   const { theme } = useTheme();
   const isControlled =
@@ -266,235 +192,163 @@ export function DagGraph({
   const direction = isControlled ? controlledDirection : localDirection;
   const setDirection = isControlled ? controlledOnDirectionChange : setLocalDirection;
 
-  // Cache of user-adjusted node positions per layout direction
-  // Use external cache if provided (shared across instances), otherwise local
   const localPositionCacheRef = useRef<PositionCache>(createPositionCache());
   const positionCacheRef = externalPositionCache ?? localPositionCacheRef;
 
-  // Build maps for lookups
-  const taskByTaskId = useMemo(
-    () => new Map(tasks.map((t) => [t.task_id, t])),
-    [tasks],
+  const [localExpansion, setLocalExpansion] = useState<BatchExpansion>({
+    cap: groupAfter,
+    ids: new Set(),
+  });
+  const expansionControlled =
+    controlledExpansion !== undefined && onExpansionChange !== undefined;
+  const expansion = expansionControlled ? controlledExpansion : localExpansion;
+  const setExpansion = expansionControlled ? onExpansionChange : setLocalExpansion;
+  const expandedIds = expandedAt(expansion, groupAfter);
+
+  const expand = useCallback(
+    (batchId: string) =>
+      setExpansion({
+        cap: groupAfter,
+        ids: new Set([...(expandedAt(expansion, groupAfter) ?? []), batchId]),
+      }),
+    [groupAfter, expansion, setExpansion],
   );
-  const taskByInternalId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
-  // Build depth map for extended responses
-  const nodeDepthMap = useMemo(() => {
-    const map = new Map<string, number>();
-    if (graph && isExtendedResponse(graph)) {
-      for (const node of graph.nodes) {
-        map.set(String(node.id), node.traversal_depth);
-      }
-      for (const group of graph.groups) {
-        map.set(group.group_id, group.depth);
-      }
+  const model = useMemo(() => flowModel(view), [view]);
+  const grouped = useMemo(() => {
+    const ids = new Set(expandedIds ?? []);
+    const first = groupFlowModel(model, groupAfter, ids);
+    // A task selected from the table must be visible: open its batch.
+    const holding = first.batches.find(
+      (b) => selectedTaskId !== null && b.taskIds.includes(selectedTaskId),
+    );
+    if (!holding) return first;
+    ids.add(holding.id);
+    return groupFlowModel(model, groupAfter, ids);
+  }, [model, groupAfter, expandedIds, selectedTaskId]);
+
+  const batchCount = grouped.batches.length;
+  useEffect(() => {
+    onBatchCountChange?.(batchCount);
+  }, [batchCount, onBatchCountChange]);
+
+  const { layoutedNodes, layoutedEdges } = useMemo(() => {
+    const statusById = new Map<string, string>(
+      model.nodes.map((n) => [n.id, n.status]),
+    );
+    for (const batch of grouped.batches) statusById.set(batch.id, batch.status);
+    const mutedIds = new Set(
+      model.nodes
+        .filter((n) => n.excluded || (mutedTaskIds?.has(n.taskId) ?? false))
+        .map((n) => n.id),
+    );
+    for (const batch of grouped.batches) {
+      if (batch.memberIds.every((id) => mutedIds.has(id))) mutedIds.add(batch.id);
     }
-    return map;
-  }, [graph]);
-
-  // Separate layout computation (expensive, resets positions) from data updates (cheap, preserves positions)
-  const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(() => {
-    if (!graph || graph.nodes.length === 0) {
-      return { nodes: [] as AnyNodeType[], edges: [] as Edge[] };
-    }
-
-    const extended = isExtendedResponse(graph);
-
-    // Create nodes from graph data (without selection state - that's applied separately)
-    const nodes: AnyNodeType[] = graph.nodes.map((graphNode) => {
-      const task = taskByTaskId.get(graphNode.task_id);
-      const depth = extended
-        ? (graphNode as { traversal_depth?: number }).traversal_depth ?? 0
-        : 0;
-      const isPrimary = extended
-        ? (graphNode as { is_primary?: boolean }).is_primary ?? true
-        : true;
-      const isFilterMatch = task?.isFilterMatch ?? isPrimary;
-
-      return {
-        id: String(graphNode.id),
-        type: "taskNode" as const,
-        position: { x: 0, y: 0 },
-        style: depth !== 0 ? { opacity: getDepthOpacity(Math.abs(depth)) } : undefined,
-        data: {
-          label: graphNode.task_name,
-          taskId: graphNode.task_id,
-          status: graphNode.status,
-          isSelected: false,
-          isFilterMatch,
-          direction,
-          hasArtifacts: graphNode.artifact_count > 0,
-          waitingForLock: task?.waiting_for_lock,
-          statusBuildId: task?.status_build_id,
-          currentBuildId: buildId,
-          onStatusBuildClick,
-          latestExecutor: task?.latest_executor,
-          latestExecutorRef: task?.latest_executor_ref,
-        },
-      } satisfies TaskNodeType;
-    });
-
-    // Add batch nodes for groups
-    const groups: GroupSummary[] = extended
-      ? (graph as TaskGraphExtendedResponse).groups
-      : [];
-    for (const group of groups) {
-      nodes.push({
-        id: group.group_id,
-        type: "batchNode" as const,
-        position: { x: 0, y: 0 },
-        style: { opacity: getDepthOpacity(group.depth) },
-        data: {
-          label: group.task_name,
-          count: group.count,
-          taskNamespace: group.task_namespace,
-          depth: group.depth,
-          status: group.status,
-          direction,
-        },
-      } satisfies BatchNodeType);
-    }
-
-    // Create edges from graph data
-    const nodeIdSet = new Set(nodes.map((n) => n.id));
-    const edges: Edge[] = graph.edges
-      .filter(
-        (graphEdge) =>
-          nodeIdSet.has(String(graphEdge.source)) &&
-          nodeIdSet.has(String(graphEdge.target)),
-      )
-      .map((graphEdge) => {
-        const sourceId = String(graphEdge.source);
-        const targetId = String(graphEdge.target);
-        const sourceTask = taskByInternalId.get(graphEdge.source);
-        const targetTask = taskByInternalId.get(graphEdge.target);
-        const sourceDepth = nodeDepthMap.get(sourceId) ?? 0;
-        const targetDepth = nodeDepthMap.get(targetId) ?? 0;
-        const maxAbsDepth = Math.max(Math.abs(sourceDepth), Math.abs(targetDepth));
-        const isMutedEdge =
-          maxAbsDepth > 0 ||
-          !(sourceTask?.isFilterMatch ?? true) ||
-          !(targetTask?.isFilterMatch ?? true);
-
-        const isDynamic = graphEdge.is_dynamic ?? false;
-        const isCrossScope = graphEdge.is_cross_scope ?? false;
-        // The custom edge type carries the hover tooltip; static in-scope
-        // deps use React Flow's default edge type.
-        const tooltip = isCrossScope
-          ? crossScopeTooltip(graphEdge.scope_key) +
-            (isDynamic ? ` ${DYNAMIC_EDGE_TOOLTIP}` : "")
-          : isDynamic
-            ? DYNAMIC_EDGE_TOOLTIP
-            : null;
-        return {
-          id: reactFlowEdgeId(graphEdge),
-          source: sourceId,
-          target: targetId,
-          animated: targetTask?.status === "running",
-          style: getEdgeStyle(
-            isMutedEdge,
-            theme,
-            getDepthOpacity(maxAbsDepth),
-            isDynamic,
-            isCrossScope,
-          ),
-          ...(tooltip ? { type: "dynamicEdge", data: { tooltip } } : {}),
-        };
-      });
-
-    return getLayoutedElements(nodes, edges, direction);
-  }, [
-    graph,
-    taskByTaskId,
-    taskByInternalId,
-    nodeDepthMap,
-    theme,
-    direction,
-    buildId,
-    onStatusBuildClick,
-  ]);
+    const batchNodes: TaskNodeType[] = grouped.batches.map((b) => ({
+      id: b.id,
+      type: "batchNode" as const,
+      position: { x: 0, y: 0 },
+      data: {
+        label: b.label,
+        taskType: b.taskType,
+        count: b.memberIds.length,
+        status: b.status,
+        isMuted: mutedIds.has(b.id),
+        direction,
+        onExpand: () => expand(b.id),
+      },
+    }));
+    const nodes: TaskNodeType[] = grouped.nodes.map((n) => ({
+      id: n.id,
+      type: "taskNode" as const,
+      position: { x: 0, y: 0 },
+      data: {
+        label: n.label,
+        taskId: n.taskId,
+        status: n.status,
+        isSelected: false,
+        isMuted: mutedIds.has(n.id),
+        excluded: n.excluded,
+        direction,
+      },
+    }));
+    nodes.push(...batchNodes);
+    const edges: Edge[] = grouped.edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      animated: statusById.get(e.target) === "running",
+      style: edgeStyle(
+        mutedIds.has(e.source) || mutedIds.has(e.target),
+        theme,
+        e.isDynamic,
+      ),
+      ...(e.isDynamic ? { type: "dynamicEdge" } : {}),
+    }));
+    return {
+      layoutedNodes: layout(nodes, edges, direction),
+      layoutedEdges: edges,
+    };
+  }, [model, grouped, mutedTaskIds, theme, direction, expand]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(layoutedEdges);
 
-  // Apply layout: use cached positions if available, otherwise dagre defaults.
-  // Also backfill uncached nodes so the cache is complete for other instances.
+  // Cached positions win over dagre's; uncached nodes are backfilled.
   useEffect(() => {
     const cache = positionCacheRef.current[direction];
-    const newNodes = layoutedNodes.map((node) => {
-      const cachedPos = cache.get(node.id);
-      const position = cachedPos ?? node.position;
-      if (!cachedPos) {
-        cache.set(node.id, { ...position });
-      }
-      return {
-        ...node,
-        position,
-        data: { ...node.data },
-      };
-    }) as AnyNodeType[];
-    setNodes(newNodes);
+    setNodes(
+      layoutedNodes.map((node) => {
+        const cached = cache.get(node.id);
+        if (!cached) cache.set(node.id, { ...node.position });
+        return {
+          ...node,
+          position: cached ?? node.position,
+          data: { ...node.data },
+        };
+      }),
+    );
     setEdges([...layoutedEdges]);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
   }, [layoutedNodes, layoutedEdges, setNodes, setEdges, direction]);
 
-  // Update selection state without resetting positions
   useEffect(() => {
-    setNodes((currentNodes) =>
-      currentNodes.map((node) => {
-        if (node.type !== "taskNode") return node;
-        const taskData = node.data as TaskNodeData;
-        const shouldBeSelected = taskData.taskId === selectedTaskId;
-        if (taskData.isSelected === shouldBeSelected) return node;
-        return {
-          ...node,
-          data: { ...node.data, isSelected: shouldBeSelected },
-        } as AnyNodeType;
+    setNodes((current) =>
+      current.map((node) => {
+        if (node.type === "batchNode") return node;
+        const data = node.data as TaskNodeData;
+        const selected = data.taskId === selectedTaskId;
+        return data.isSelected === selected
+          ? node
+          : { ...node, data: { ...data, isSelected: selected } };
       }),
     );
   }, [selectedTaskId, setNodes]);
 
-  // Save current node positions to cache before switching direction
   const handleDirectionChange = useCallback(
-    (newDirection: LayoutDirection) => {
-      setNodes((currentNodes) => {
+    (next: LayoutDirection) => {
+      setNodes((current) => {
         const cache = new Map<string, { x: number; y: number }>();
-        for (const node of currentNodes) {
-          cache.set(node.id, { ...node.position });
-        }
+        for (const node of current) cache.set(node.id, { ...node.position });
         positionCacheRef.current[direction] = cache;
-        return currentNodes;
+        return current;
       });
-      setDirection(newDirection);
+      setDirection(next);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
     [direction, setNodes],
   );
 
-  // Reset layout: clear cache for current direction, re-apply dagre positions
   const handleResetLayout = useCallback(() => {
     positionCacheRef.current[direction] = new Map();
-    const newNodes = layoutedNodes.map((node) => ({
-      ...node,
-      data: { ...node.data },
-    })) as AnyNodeType[];
-    setNodes(newNodes);
+    setNodes(layoutedNodes.map((node) => ({ ...node, data: { ...node.data } })));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
   }, [direction, layoutedNodes, setNodes]);
 
-  const handleNodeClick = useCallback(
-    (_: React.MouseEvent, node: Node) => {
-      const nodeData = node.data as TaskNodeData;
-      onTaskClick(nodeData.taskId);
-    },
-    [onTaskClick],
-  );
-
-  // Persist positions to cache whenever nodes are dragged
   const handleNodesChange: typeof onNodesChange = useCallback(
     (changes) => {
       onNodesChange(changes);
-      // After drag ends, update the position cache
       for (const change of changes) {
         if (change.type === "position" && change.position && !change.dragging) {
           positionCacheRef.current[direction].set(change.id, {
@@ -507,16 +361,15 @@ export function DagGraph({
     [onNodesChange, direction],
   );
 
-  if (!graph || graph.nodes.length === 0) {
+  if (view.members.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
-        No tasks to display
+        No members to display
       </div>
     );
   }
 
   const colorMode: ColorMode = theme === "dark" ? "dark" : "light";
-
   return (
     <div className="h-full w-full bg-gray-50 dark:bg-gray-900">
       <ReactFlow
@@ -524,7 +377,13 @@ export function DagGraph({
         edges={edges}
         onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
-        onNodeClick={handleNodeClick}
+        onNodeClick={(_, node) => {
+          if (node.type === "batchNode") {
+            expand(node.id);
+          } else {
+            onTaskClick((node.data as TaskNodeData).taskId);
+          }
+        }}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         colorMode={colorMode}

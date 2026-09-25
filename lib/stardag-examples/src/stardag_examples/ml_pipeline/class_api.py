@@ -10,8 +10,8 @@ from typing import Annotated, Any
 import pandas as pd
 import stardag as sd
 from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from stardag.artifact import Artifact, JSONArtifact, MarkdownArtifact
-from stardag.build import GlobalLockConfig
 from stardag.target import LoadedT
 
 from stardag_examples.ml_pipeline import base
@@ -22,22 +22,42 @@ logger = logging.getLogger(__name__)
 sd.namespace("examples.ml_pipeline.class_api", scope=__name__)
 
 
+class SimulationSettings(BaseSettings):
+    """Build-wide knobs, given per build as ``settings`` (see ``__main__``).
+
+    Settings are environment variables the build applies in every process it
+    runs in, and a task reads them at run time through a settings class like
+    this one. They may change how a task runs (here: how long it pretends to
+    work) or which upstreams it has, never what it writes -- completion is
+    global, so anything that affects output belongs in a significant
+    parameter instead.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="EXAMPLES_ML_PIPELINE_")
+
+    sleep_seconds: float = 3.0
+
+
 class ExamplesMLPipelineBase(sd.Task[LoadedT], abc.ABC, typing.Generic[LoadedT]):
     __version__ = "0"
 
-    # How long each task pretends to work. It changes neither the output nor
-    # which upstreams are needed, so it is *execution only*: never passed at
-    # init, read from the build config (see ``__main__`` below), and not part
-    # of the task id. This is the modern spelling of ``hash_exclude=True``.
-    sleep_seconds: Annotated[float, sd.StardagField(significance="execution_only")] = (
-        3.0
-    )
+    # A per-task override of how long it pretends to work. It changes neither
+    # the output nor the upstreams, so it is not part of the task id
+    # (``significant=False``): passable at init and stored with the task
+    # instance, but two tasks differing only here are the same task. Left at
+    # ``None``, the build-wide setting applies.
+    sleep_seconds: Annotated[float | None, sd.StardagField(significant=False)] = None
 
     def run(self) -> None:
         logger.info(f"Running task: {self.__class__.__name__}")
         import time
 
-        time.sleep(self.sleep_seconds)  # Simulate some work being done
+        sleep_seconds = (
+            self.sleep_seconds
+            if self.sleep_seconds is not None
+            else SimulationSettings().sleep_seconds
+        )
+        time.sleep(sleep_seconds)  # Simulate some work being done
         self._run()
         logger.info(f"Completed task: {self.__class__.__name__}")
 
@@ -354,15 +374,11 @@ def get_benchmark_dag(
 if __name__ == "__main__":
     metrics = get_metrics_dag()
     print(metrics.model_dump_json(indent=2))
-    # Level 2/3 parameters are given per build, keyed "<namespace>.<Name>":
-    # here the simulated work is shortened for the two slowest steps, without
-    # touching any task id. Omit a class to leave it at the field default.
+    # Build-wide settings are environment variables applied in every process
+    # of the build: here the simulated work is shortened for every task,
+    # without touching any task id. Omit it to keep the default.
     sd.build(
         [metrics],
-        global_lock_config=GlobalLockConfig(enabled=True),
-        build_config={
-            "examples.ml_pipeline.class_api.TrainedModel": {"sleep_seconds": 0.5},
-            "examples.ml_pipeline.class_api.Predictions": {"sleep_seconds": 0.5},
-        },
+        settings={"EXAMPLES_ML_PIPELINE_SLEEP_SECONDS": "0.5"},
     )
     print(json.dumps(metrics.load(), indent=2))

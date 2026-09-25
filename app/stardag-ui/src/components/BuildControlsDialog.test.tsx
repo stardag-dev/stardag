@@ -1,51 +1,38 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { BuildStatus, Task, TaskStatus } from "../types/task";
-import { CLAIM_PAGE_SIZE, MAX_CLAIM_PAGES } from "../utils/stoppable";
-import { BuildControlsDialog, MAX_ROWS_DRAWN } from "./BuildControlsDialog";
+import type { BuildStatus, Execution } from "../types/task";
 
-vi.mock("../api/tasks", () => ({
-  fetchTasks: vi.fn(),
+vi.mock("../api/registry", () => ({
+  fetchBuildExecutions: vi.fn(),
   cancelBuild: vi.fn(),
   completeBuild: vi.fn(),
   failBuild: vi.fn(),
 }));
 
-vi.mock("../context/AuthContext", () => ({
-  useAuth: () => ({ user: { profile: { sub: "user-1" } } }),
-}));
+import { cancelBuild, fetchBuildExecutions } from "../api/registry";
+import { BuildControlsDialog } from "./BuildControlsDialog";
+import type { ExecutionTaskInfo } from "./ExecutionTable";
+import { MAX_ROWS_DRAWN } from "./ExecutionTable";
 
-import { cancelBuild, completeBuild, failBuild, fetchTasks } from "../api/tasks";
+const BUILD = "01a0c5c3-f18e-7d22-bcaf-add71bd0287c";
+const MINUTE = 60_000;
 
-const BUILD = "11111111-1111-1111-1111-111111111111";
-const OTHER_BUILD = "22222222-2222-2222-2222-222222222222";
-
-const MINUTE = 60 * 1000;
-const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
-
-function makeTask(overrides: Partial<Task> = {}): Task {
+function execution(
+  id: string,
+  taskId: string,
+  inCurrentPlan: boolean,
+  overrides: Partial<Execution> = {},
+): Execution {
   return {
-    id: "row-1",
-    task_id: "tid-grind-beans",
-    environment_id: "env-1",
-    task_namespace: "",
-    task_name: "GrindBeans",
-    task_data: {},
-    version: null,
-    output_uri: null,
-    created_at: ago(90 * MINUTE),
-    status: "running" as TaskStatus,
-    started_at: ago(60 * MINUTE),
-    completed_at: null,
-    error_message: null,
-    artifact_count: 0,
-    latest_status: "running",
-    latest_status_at: ago(20 * MINUTE),
-    latest_status_build_id: BUILD,
-    latest_executor: "modal",
-    latest_executor_ref: "fc-abc123",
-    latest_executor_metadata: {
+    id,
+    task_id: taskId,
+    build_id: BUILD,
+    plan_id: inCurrentPlan ? "p-2" : "p-1",
+    instance_id: `i-${id}`,
+    executor: "modal",
+    executor_ref: `fc-${id}`,
+    executor_metadata: {
       kind: "modal",
       workspace: "acme",
       app_name: "pipeline",
@@ -53,836 +40,371 @@ function makeTask(overrides: Partial<Task> = {}): Task {
       function_id: "fu-1",
       function_name: "worker_gpu",
     },
+    started_at: new Date(Date.now() - MINUTE).toISOString(),
+    claim_released_at: inCurrentPlan ? null : new Date().toISOString(),
+    claim_outcome: inCurrentPlan ? null : "taken_over",
+    ended_at: null,
+    outcome: null,
+    in_current_plan: inCurrentPlan,
     ...overrides,
   };
 }
 
-/**
- * Serve `tasks` as page 1 and claim a `total`.
- *
- * `total` larger than what is served is how a truncated scan is simulated:
- * the panel keeps asking for pages, and this keeps handing back the same
- * one, which is exactly the shape of an environment with more claim
- * holders than the panel will walk.
- */
-function answerWith(tasks: Task[], total = tasks.length) {
-  vi.mocked(fetchTasks).mockResolvedValue({
-    tasks,
-    total,
-    page: 1,
-    page_size: 100,
-  });
-}
+const TASK_INFO = new Map<string, ExecutionTaskInfo>([
+  ["task-aaaaaaaa", { namespace: "demo", name: "GrindBeans", status: "running" }],
+  ["task-bbbbbbbb", { namespace: "demo", name: "Brew", status: "running" }],
+]);
 
-const onBuildChanged = vi.fn();
-
-function renderPanel(buildStatus: BuildStatus = "running", holdsClaims = true) {
+function renderDialog(buildStatus: BuildStatus = "running") {
   return render(
     <BuildControlsDialog
       buildId={BUILD}
       environmentId="env-1"
       buildStatus={buildStatus}
-      holdsClaims={holdsClaims}
-      refreshToken={0}
-      onBuildChanged={onBuildChanged}
+      onBuildChanged={vi.fn()}
+      taskInfo={TASK_INFO}
     />,
   );
 }
 
-/**
- * Render, then open the dialog.
- *
- * Nothing is fetched until it is open — that is the point of the dialog
- * (STA-83), so every test that wants a list has to open one first.
- */
-async function openDialog(user: ReturnType<typeof userEvent.setup>) {
-  renderPanel();
+async function open(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: "Build controls" }));
-  await waitFor(() => expect(fetchTasks).toHaveBeenCalled());
 }
 
+const command = () => screen.getByText(/^stardag builds stop /);
+
 beforeEach(() => {
-  vi.mocked(fetchTasks).mockReset();
+  vi.mocked(fetchBuildExecutions).mockReset();
   vi.mocked(cancelBuild).mockReset();
-  vi.mocked(completeBuild).mockReset();
-  vi.mocked(failBuild).mockReset();
-  onBuildChanged.mockReset();
 });
 
-describe("BuildControlsDialog", () => {
-  // The suspended case the two signals exist for: a claim with nothing
-  // behind it to stop. The stop half must not call that "no claims", and
-  // the cancel warning must not send the user to a command with nothing
-  // to do — while Mark completed is still withheld.
-  it("separates a held claim from a running execution", async () => {
-    answerWith([]);
+describe("BuildControlsDialog stop list", () => {
+  it("lists unended executions, marks orphans, and narrows the command to them", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-bbbbbbbb", false),
+    ]);
     const user = userEvent.setup();
-    renderPanel("running", true);
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
+    renderDialog();
+    await open(user);
+    expect(await screen.findByText("orphan")).toBeInTheDocument();
+    expect(screen.getByText("claim taken over")).toBeInTheDocument();
+    expect(command()).toHaveTextContent(`stardag builds stop ${BUILD}`);
 
-    expect(
-      await screen.findByText(/nothing running that can be stopped from here/i),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
-
-    await user.click(screen.getByRole("button", { name: "Cancel build" }));
-    expect(screen.queryByText(/cancelling here will not stop them/i)).toBeNull();
-  });
-
-  it("says nothing is running rather than showing an empty dialog", async () => {
-    // As a band above the DAG this rendered nothing at all, which was
-    // right for something that appeared unbidden. In a dialog somebody
-    // opened on purpose, silence reads as a broken dialog.
-    answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
-    const user = userEvent.setup();
-    await openDialog(user);
-    expect(
-      await screen.findByText(/nothing running that can be stopped from here/i),
-    ).toBeInTheDocument();
-  });
-
-  it("fetches nothing until the dialog is opened", async () => {
-    // The scan is up to 20 sequential requests and it used to run on
-    // every 5s auto-refresh, drawing nothing (STA-83).
-    answerWith([makeTask()]);
-    renderPanel();
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Build controls" }),
-      ).toBeInTheDocument(),
+    await user.click(screen.getByLabelText("Orphans only (not in the current plan)"));
+    expect(command()).toHaveTextContent(
+      `stardag builds stop ${BUILD} --not-in-current-plan`,
     );
-    expect(fetchTasks).not.toHaveBeenCalled();
+    expect(screen.queryByText("holds the claim")).not.toBeInTheDocument();
   });
 
-  it("offers no way in on a completed build", async () => {
-    answerWith([makeTask()]);
-    const { container } = renderPanel("completed");
-    expect(container).toBeEmptyDOMElement();
-    expect(fetchTasks).not.toHaveBeenCalled();
-  });
-
-  it("asks only for the statuses that may still have a container", async () => {
-    answerWith([]);
+  it("says what the printed command does, per mode", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-bbbbbbbb", false),
+    ]);
     const user = userEvent.setup();
-    await openDialog(user);
-    expect(vi.mocked(fetchTasks).mock.calls[0][0]).toMatchObject({
-      status: ["running", "interrupted"],
-      environment_id: "env-1",
-    });
+    renderDialog();
+    await open(user);
+    expect(await screen.findByText(/then cancels the build/)).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Orphans only (not in the current plan)"));
+    expect(screen.queryByText(/then cancels the build/)).not.toBeInTheDocument();
+    expect(screen.getByText(/does not cancel the build/)).toBeInTheDocument();
   });
 
-  it("lists this build's executions and hands over the command", async () => {
-    answerWith([makeTask()]);
+  it("says so when nothing is left to stop", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([]);
     const user = userEvent.setup();
-    renderPanel();
+    renderDialog("failed");
+    await open(user);
+    expect(await screen.findByText(/nothing to stop/)).toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
+  it("fetches nothing until the dialog is opened", () => {
+    renderDialog();
+    expect(fetchBuildExecutions).not.toHaveBeenCalled();
+  });
 
-    expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
-    expect(screen.getByText(`stardag builds stop ${BUILD}`)).toBeInTheDocument();
+  it("names each task and its status, not a short id", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      // A task the active plan does not hold (an orphan's): short id.
+      execution("e2", "task-cccccccc-dddd", false),
+    ]);
+    const user = userEvent.setup();
+    renderDialog();
+    await open(user);
+    const table = await screen.findByRole("table");
+    expect(within(table).getByRole("columnheader", { name: "Status" })).toBeVisible();
+    expect(within(table).getByText("demo.GrindBeans")).toBeInTheDocument();
+    expect(within(table).getByText("running")).toBeInTheDocument();
+    expect(within(table).getByText("task-ccc")).toBeInTheDocument();
+    expect(screen.getByLabelText("Include demo.GrindBeans")).toBeInTheDocument();
   });
 
   it("links each call to its Modal dashboard page for a hard kill", async () => {
-    answerWith([makeTask()]);
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+    ]);
     const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
-    const link = screen.getByRole("link", { name: "fc-abc123" });
-    expect(link).toHaveAttribute("href", expect.stringContaining("modal.com"));
-    expect(link).toHaveAttribute("href", expect.stringContaining("fc-abc123"));
+    renderDialog();
+    await open(user);
+    const link = await screen.findByRole("link", { name: "fc-e1" });
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("href")).toContain("fc-e1");
   });
 
   it("puts the worker filter into the command it hands over", async () => {
-    // The panel's contract: the command acts on exactly the list on
-    // screen. If the filter narrowed one and not the other, showing both
-    // would be worse than showing neither.
-    answerWith([
-      makeTask({
-        task_id: "gpu-task",
-        task_name: "Featurise",
-        latest_executor_metadata: { function_name: "worker_gpu" },
-      }),
-      makeTask({
-        task_id: "cpu-task",
-        task_name: "Aggregate",
-        latest_executor_metadata: { function_name: "worker_cpu" },
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-bbbbbbbb", true, {
+        executor_metadata: { kind: "modal", function_name: "worker_cpu" },
       }),
     ]);
     const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
-    await user.selectOptions(screen.getByLabelText("Worker"), "gpu");
-
-    expect(screen.getByText("Featurise")).toBeInTheDocument();
-    expect(screen.queryByText("Aggregate")).not.toBeInTheDocument();
-    expect(
-      screen.getByText(`stardag builds stop ${BUILD} --worker gpu`),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/1 not selected/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/will keep running once the build is cancelled/),
-    ).toBeInTheDocument();
+    renderDialog();
+    await open(user);
+    await user.selectOptions(await screen.findByLabelText("Worker"), "gpu");
+    expect(command()).toHaveTextContent(`stardag builds stop ${BUILD} --worker gpu`);
+    expect(screen.getByText("1 not selected")).toBeInTheDocument();
   });
 
   it("puts the executor filter into the command too", async () => {
-    // Parity with the CLI's own flags: every filter the panel offers has
-    // to be expressible in the command it hands over, or the two stop
-    // describing the same set.
-    answerWith([
-      makeTask({ task_id: "on-modal", task_name: "Featurise" }),
-      makeTask({
-        task_id: "elsewhere",
-        task_name: "Aggregate",
-        latest_executor: "prefect",
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-bbbbbbbb", true, {
+        executor: "local",
+        executor_metadata: null,
       }),
     ]);
     const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
-    await user.selectOptions(screen.getByLabelText("Executor"), "modal");
-
-    expect(screen.getByText("Featurise")).toBeInTheDocument();
-    expect(screen.queryByText("Aggregate")).not.toBeInTheDocument();
-    expect(
-      screen.getByText(`stardag builds stop ${BUILD} --executor modal`),
-    ).toBeInTheDocument();
+    renderDialog();
+    await open(user);
+    await user.selectOptions(await screen.findByLabelText("Executor"), "modal");
+    expect(command()).toHaveTextContent(
+      `stardag builds stop ${BUILD} --executor modal`,
+    );
   });
 
   it("offers no executor filter when there is only one", async () => {
-    // One executor is not a choice, it is a fact the table already states.
-    answerWith([makeTask()]);
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-bbbbbbbb", true),
+    ]);
     const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
+    renderDialog();
+    await open(user);
+    await screen.findByRole("table");
     expect(screen.queryByLabelText("Executor")).not.toBeInTheDocument();
   });
 
-  it("offers no command when the ticked rows are filtered away", async () => {
-    // The regression this pins is a widening, which is the worst
-    // direction: ticks survive a filter change, so the dropdowns can be
-    // moved until no ticked row is shown. "No ids" is not a narrower
-    // request — a command with no filters stops *everything* the build
-    // holds, so the operator who ticked one row would copy a command that
-    // kills all of them.
-    answerWith([
-      makeTask({
-        task_id: "gpu-task",
-        task_name: "Featurise",
-        latest_executor_metadata: { function_name: "worker_gpu" },
-      }),
-      makeTask({
-        task_id: "cpu-task",
-        task_name: "Aggregate",
-        latest_executor_metadata: { function_name: "worker_cpu" },
+  it("ticking rows narrows the command to those task ids", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-bbbbbbbb", true),
+    ]);
+    const user = userEvent.setup();
+    renderDialog();
+    await open(user);
+    expect(
+      await screen.findByText(/Nothing ticked — the command below targets every/),
+    ).toBeInTheDocument();
+    await user.click(screen.getByLabelText("Include demo.Brew"));
+    expect(command()).toHaveTextContent(
+      `stardag builds stop ${BUILD} --task-id task-bbbbbbbb`,
+    );
+    expect(screen.getByText("The command below names the 1 you ticked.")).toBeVisible();
+    expect(screen.getByText("1 not selected")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /The 1 execution it does not name will keep running once the build/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the filters on the command when rows are ticked", async () => {
+    // One task, two executions on different workers: --task-id alone would
+    // also stop the one the worker filter hides.
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-aaaaaaaa", true, {
+        executor_metadata: { kind: "modal", function_name: "worker_cpu" },
       }),
     ]);
     const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
+    renderDialog();
+    await open(user);
+    await user.selectOptions(await screen.findByLabelText("Worker"), "gpu");
+    await user.click(screen.getByLabelText("Include demo.GrindBeans"));
+    expect(command()).toHaveTextContent(
+      `stardag builds stop ${BUILD} --task-id task-aaaaaaaa --worker gpu`,
+    );
+  });
 
-    await user.click(screen.getByRole("checkbox", { name: /Include Featurise/ }));
-    expect(
-      screen.getByText(`stardag builds stop ${BUILD} --task-id gpu-task`),
-    ).toBeInTheDocument();
-
-    // Now filter the ticked row out of view.
-    await user.selectOptions(screen.getByLabelText("Worker"), "cpu");
-
-    expect(screen.queryByText(`stardag builds stop ${BUILD}`)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Copy" })).not.toBeInTheDocument();
+  it("offers no command when the ticked rows are filtered away", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-bbbbbbbb", false),
+    ]);
+    const user = userEvent.setup();
+    renderDialog();
+    await open(user);
+    await user.click(await screen.findByLabelText("Include demo.GrindBeans"));
+    await user.click(screen.getByLabelText("Orphans only (not in the current plan)"));
     expect(
       screen.getByText(/None of the rows you ticked match these filters/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/one with no targets would stop everything/)).toBeVisible();
+    expect(screen.queryByText(/^stardag builds stop /)).not.toBeInTheDocument();
+  });
+
+  it("says the ticked rows ended, not that the filters are too narrow", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValueOnce([
+      execution("e1", "task-aaaaaaaa", true),
+      execution("e2", "task-bbbbbbbb", true),
+    ]);
+    const user = userEvent.setup();
+    const view = renderDialog();
+    await open(user);
+    await user.click(await screen.findByLabelText("Include demo.Brew"));
+    // The next read no longer lists the ticked row: it reported an end.
+    vi.mocked(fetchBuildExecutions).mockResolvedValueOnce([
+      execution("e1", "task-aaaaaaaa", true),
+    ]);
+    view.rerender(
+      <BuildControlsDialog
+        buildId={BUILD}
+        environmentId="env-1"
+        buildStatus="running"
+        onBuildChanged={vi.fn()}
+        taskInfo={TASK_INFO}
+        refreshToken={1}
+      />,
+    );
+    expect(
+      await screen.findByText(/The executions you ticked are no longer listed/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/match these filters/)).not.toBeInTheDocument();
   });
 
   it("copies the command as shown", async () => {
-    answerWith([makeTask()]);
-    const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
-    await user.click(screen.getByRole("button", { name: "Copy" }));
-
-    expect(await window.navigator.clipboard.readText()).toBe(
-      `stardag builds stop ${BUILD}`,
-    );
-  });
-
-  it("does not leave the copied-flash timer running after unmount", async () => {
-    // Unmounting mid-flash would set state on a dead component; a second
-    // copy inside the flash would let the first timer clear the label
-    // early. One tracked timer, cleared on both paths.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      answerWith([makeTask()]);
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
-      const { unmount } = renderPanel();
-      await user.click(await screen.findByRole("button", { name: "Build controls" }));
-      await user.click(screen.getByRole("button", { name: "Copy" }));
-      expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
-
-      unmount();
-      // Would warn about a state update on an unmounted component if the
-      // timer still fired into the dead tree.
-      vi.advanceTimersByTime(5000);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("pages until the server says it is done", async () => {
-    // One page is not enough: a build's executions can sit entirely on
-    // later pages, and finding none is what this panel renders as absent.
-    vi.mocked(fetchTasks)
-      .mockResolvedValueOnce({
-        tasks: Array.from({ length: 100 }, (_, i) =>
-          makeTask({ task_id: `other-${i}`, latest_status_build_id: OTHER_BUILD }),
-        ),
-        total: 101,
-        page: 1,
-        page_size: 100,
-      })
-      .mockResolvedValueOnce({
-        tasks: [makeTask({ task_name: "OnPageTwo" })],
-        total: 101,
-        page: 2,
-        page_size: 100,
-      });
-
-    const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
-    expect(vi.mocked(fetchTasks).mock.calls.map((c) => c[0]?.page)).toEqual([1, 2]);
-    expect(screen.getByText("OnPageTwo")).toBeInTheDocument();
-  });
-
-  it("says so rather than vanishing when the scan gives up early", async () => {
-    // The dangerous direction: finding nothing and having stopped looking
-    // are the same screen otherwise, and one of them is a build whose live
-    // executions nobody was shown.
-    answerWith(
-      [makeTask({ latest_status_build_id: OTHER_BUILD })],
-      MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
-    );
-    const user = userEvent.setup();
-    await openDialog(user);
-
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      /could not be determined here/,
-    );
-  });
-
-  it("warns when a truncated scan did find some of this build's work", async () => {
-    answerWith([makeTask()], MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500);
-    const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
-    expect(screen.getByText(/may be incomplete/)).toBeInTheDocument();
-  });
-
-  it("ticking rows narrows the command to those task ids", async () => {
-    // Parity with the CLI's repeatable --task-id, and the reason ids
-    // replace the other flags: they name the set exactly on their own.
-    answerWith([
-      makeTask({ task_id: "keep-me", task_name: "Featurise" }),
-      makeTask({ task_id: "leave-me", task_name: "Aggregate" }),
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
     ]);
     const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
-    // Nothing ticked means the command targets everything listed.
-    expect(screen.getByText(`stardag builds stop ${BUILD}`)).toBeInTheDocument();
-
-    await user.click(screen.getByRole("checkbox", { name: /Include Featurise/ }));
-
-    expect(
-      screen.getByText(`stardag builds stop ${BUILD} --task-id keep-me`),
-    ).toBeInTheDocument();
-    // The row that was not ticked stays on screen — a selection whose
-    // alternatives are off-screen is not a selection.
-    expect(screen.getByText("Aggregate")).toBeInTheDocument();
-    expect(screen.getByText(/1 not selected/)).toBeInTheDocument();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    renderDialog();
+    await open(user);
+    await screen.findByRole("table");
+    await user.click(screen.getByRole("button", { name: "Copy" }));
+    expect(writeText).toHaveBeenCalledWith(`stardag builds stop ${BUILD}`);
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
   });
 
   it("marks an execution stardag cannot stop rather than hiding it", async () => {
-    answerWith([makeTask({ latest_executor: "prefect" })]);
-    const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
-    expect(
-      screen.getByText(/run on an executor stardag cannot stop/),
-    ).toBeInTheDocument();
-  });
-
-  it("lists a claim whose spawn has not reported a call id yet", async () => {
-    // STA-88, the panel half. The row is RUNNING and held by this build
-    // from the moment it is claimed, which is before its container
-    // exists; dropping it until the ref arrived made the panel silently
-    // short during exactly the fan-out somebody opens it to look at.
-    answerWith([makeTask({ latest_executor: null, latest_executor_ref: null })]);
-    const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
-    expect(screen.getByText("not recorded yet")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Rows without a call id exit at their next checkpoint/),
-    ).toBeInTheDocument();
-    // The pending wording, not the other-executor one.
-    expect(screen.queryByText(/executor stardag cannot stop/)).toBe(null);
-  });
-
-  it("does not call an unattributed row permanently unstoppable", async () => {
-    // No executor, no ref, no metadata. Written by a non-detached
-    // execution *and* by a Modal claim whose best-effort metadata lookup
-    // returned None, so neither verdict is safe.
-    answerWith([
-      makeTask({
-        latest_executor: null,
-        latest_executor_ref: null,
-        latest_executor_metadata: null,
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true, {
+        executor: "k8s",
+        executor_metadata: { kind: "k8s" },
       }),
     ]);
     const user = userEvent.setup();
-    renderPanel();
-    await user.click(await screen.findByRole("button", { name: "Build controls" }));
-
-    // Ambiguous, so it is grouped with the pending rows and the wording
-    // names both possibilities rather than promising a call id.
+    renderDialog();
+    await open(user);
     expect(
-      screen.getByText(/Rows without a call id exit at their next checkpoint/),
+      await screen.findByText(/1 run on an executor stardag cannot stop/),
     ).toBeInTheDocument();
-    expect(screen.getByText("not recorded yet")).toBeInTheDocument();
-    expect(screen.queryByText(/executor stardag cannot stop/)).toBe(null);
+    expect(screen.getByText("demo.GrindBeans")).toBeInTheDocument();
+  });
+
+  it("lists a claim whose spawn has not reported a call id, with the remedies", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true, { executor_ref: null }),
+    ]);
+    const user = userEvent.setup();
+    renderDialog();
+    await open(user);
+    expect(await screen.findByText("not recorded yet")).toBeInTheDocument();
+    const remedy = screen.getByText(/1 selected has no call id/);
+    expect(remedy).toHaveTextContent("--mark-lost");
+    expect(remedy).toHaveTextContent("--no-cancel");
+    // Not called permanently unstoppable: a spawn may yet report.
+    expect(screen.queryByText(/cannot stop;/)).not.toBeInTheDocument();
   });
 
   it("reports a read failure rather than looking empty", async () => {
-    vi.mocked(fetchTasks).mockRejectedValue(new Error("gateway timeout"));
+    vi.mocked(fetchBuildExecutions).mockRejectedValue(new Error("boom"));
     const user = userEvent.setup();
-    await openDialog(user);
-    expect(await screen.findByRole("alert")).toHaveTextContent("gateway timeout");
+    renderDialog();
+    await open(user);
+    expect(await screen.findByText(/Could not read .* executions: boom/)).toBeVisible();
+    expect(screen.queryByText(/nothing to stop/)).not.toBeInTheDocument();
   });
 
-  // The warning is the reason these two controls share a dialog. It is
-  // driven by the build's own task list now, so it does not depend on
-  // whether the stop scan has answered — it is right from first paint.
-  it("warns about running work before the stop scan has answered", async () => {
-    vi.mocked(fetchTasks).mockReturnValue(new Promise(() => {}) as never);
-    const user = userEvent.setup();
-    renderPanel("running", true);
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-
-    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    // Not known is not none, for a warning.
-    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
-  });
-
-  // As a panel, vanishing on `completed` was invisible. As a dialog
-  // somebody is reading, it is not — and one way to reach `completed`
-  // is to mark it so from this very dialog.
-  it("stays open when the build reaches a finished status", async () => {
-    answerWith([makeTask()]);
-    const user = userEvent.setup();
-    const view = renderPanel();
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-    expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
-
-    view.rerender(
-      <BuildControlsDialog
-        buildId={BUILD}
-        environmentId="env-1"
-        buildStatus="completed"
-        holdsClaims
-        refreshToken={0}
-        onBuildChanged={onBuildChanged}
-      />,
+  it("caps the rows it draws and says the command still targets them all", async () => {
+    const many = Array.from({ length: MAX_ROWS_DRAWN + 3 }, (_, i) =>
+      execution(`e${i}`, `task-${i}`, true),
     );
-
-    expect(screen.getByText("GrindBeans")).toBeInTheDocument();
-  });
-
-  it("confirms an override where the override section cannot", async () => {
-    answerWith([makeTask()]);
-    vi.mocked(failBuild).mockResolvedValue({
-      id: BUILD,
-      status: "failed",
-    } as never);
+    vi.mocked(fetchBuildExecutions).mockResolvedValue(many);
     const user = userEvent.setup();
-    await openDialog(user);
-
-    await user.click(await screen.findByRole("button", { name: "Mark failed" }));
-    await user.click(screen.getByRole("button", { name: "Mark failed" }));
-
-    // The section itself unmounts once the status is no longer
-    // overridable, so the confirmation has to live outside it.
-    expect(await screen.findByText(/now recorded as failed/i)).toBeInTheDocument();
-    expect(screen.getByText(/Nothing running was stopped/i)).toBeInTheDocument();
+    renderDialog();
+    await open(user);
+    expect(
+      await screen.findByText(/3 more executions not listed\. The command below still/),
+    ).toBeInTheDocument();
+    expect(command()).toHaveTextContent(`stardag builds stop ${BUILD}`);
   });
 
-  // Auto-refresh re-runs the effect every 5s and a scan is up to 20
-  // sequential requests with no cancellation.
-  it("does not start a second scan while one is in flight", async () => {
-    vi.mocked(fetchTasks).mockReturnValue(new Promise(() => {}) as never);
+  it("stops claiming the undrawn rows are covered once rows are ticked", async () => {
+    const many = Array.from({ length: MAX_ROWS_DRAWN + 3 }, (_, i) =>
+      execution(`e${i}`, `task-${i}`, true),
+    );
+    vi.mocked(fetchBuildExecutions).mockResolvedValue(many);
     const user = userEvent.setup();
-    const view = renderPanel();
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-    await waitFor(() => expect(fetchTasks).toHaveBeenCalledTimes(1));
-
-    for (const token of [1, 2, 3]) {
-      view.rerender(
-        <BuildControlsDialog
-          buildId={BUILD}
-          environmentId="env-1"
-          buildStatus="running"
-          holdsClaims
-          refreshToken={token}
-          onBuildChanged={onBuildChanged}
-        />,
-      );
-    }
-
-    expect(fetchTasks).toHaveBeenCalledTimes(1);
+    renderDialog();
+    await open(user);
+    await user.click(await screen.findByLabelText("Include task-0"));
+    expect(screen.getByText(/Ticked rows are named individually/)).toBeInTheDocument();
   });
+});
 
-  // With no filter set, rows falling out of the selection means they
-  // stopped running — telling the user to widen filters they never set
-  // sends them looking for a control that is already at "all".
-  it("says the ticked rows finished, not that the filters are too narrow", async () => {
-    answerWith([
-      makeTask({ task_id: "gone", task_name: "Featurise" }),
-      makeTask({ task_id: "stays", task_name: "Aggregate" }),
+describe("BuildControlsDialog overrides", () => {
+  it("warns that an override does not stop what is running", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([
+      execution("e1", "task-aaaaaaaa", true),
     ]);
     const user = userEvent.setup();
-    const view = renderPanel();
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-    await user.click(
-      await screen.findByRole("checkbox", { name: /Include Featurise/ }),
-    );
-
-    // The rescan no longer lists the ticked one: it completed. Another
-    // execution is still running, so the list itself is not empty.
-    answerWith([makeTask({ task_id: "stays", task_name: "Aggregate" })]);
-    view.rerender(
-      <BuildControlsDialog
-        buildId={BUILD}
-        environmentId="env-1"
-        buildStatus="running"
-        holdsClaims
-        refreshToken={1}
-        onBuildChanged={onBuildChanged}
-      />,
-    );
-
-    expect(
-      await screen.findByText(/no longer running, so there is nothing to stop/i),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/widen the filters/i)).toBeNull();
-  });
-
-  // --- Overriding the recorded status ---
-  //
-  // These live in the same dialog as the stop list because the two were
-  // confusable while they were separate controls: on a build you wanted
-  // stopped, "Cancel" looked like the answer, and it releases the claims
-  // while every container runs on.
-
-  // #375 pinned this copy to say *nothing* about claims, because the
-  // behaviour was mid-flight: STA-81 was about to make a terminal
-  // transition release them, and no sentence was true on both sides. It
-  // has landed, so the honest constraint is no longer silence but
-  // accuracy — each action names the claims exactly when it changes
-  // them. Same discipline, a settled fact to attach it to.
-  it("names the claims exactly where the action changes them", async () => {
-    answerWith([makeTask()]);
-    const user = userEvent.setup();
-    await openDialog(user);
-
-    const override = () =>
-      screen.getByRole("region", { name: /Record an outcome instead/ });
-
-    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    expect(override().textContent ?? "").toMatch(/releases the build's claims/i);
-    await user.click(screen.getByRole("button", { name: "Back" }));
-
-    await user.click(screen.getByRole("button", { name: "Mark failed" }));
-    expect(override().textContent ?? "").toMatch(/releases the claims/i);
-    await user.click(screen.getByRole("button", { name: "Back" }));
-  });
-
-  // The one terminal override that releases nothing (STA-103), so it is
-  // withheld while the build holds any claim. Gated on `holdsClaims`,
-  // which comes from the build's own task list and includes SUSPENDED —
-  // not on the stop scan, which cannot see a claim with nothing to stop.
-  it("withholds Mark completed while the build holds claims", async () => {
-    answerWith([makeTask()]);
-    const user = userEvent.setup();
-    await openDialog(user);
-
-    expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
-    expect(
-      screen.getByText(/is the one outcome that releases no claims/i),
-    ).toBeInTheDocument();
-  });
-
-  // The gate reads the build's own task list, not the stop scan — which
-  // asks for the *stoppable* statuses, so a SUSPENDED task holds a claim
-  // it cannot see, and which can truncate besides. A build whose only
-  // task is suspended has an empty stop list and a held claim.
-  it("withholds Mark completed for a claim the stop list cannot see", async () => {
-    answerWith([]);
-    const user = userEvent.setup();
-    renderPanel("running", true);
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-
-    expect(
-      await screen.findByText(/nothing running that can be stopped from here/i),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
-    expect(
-      screen.getByText(/is the one outcome that releases no claims/i),
-    ).toBeInTheDocument();
-  });
-
-  it("offers Mark completed once the build holds no claims", async () => {
-    answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
-    const user = userEvent.setup();
-    renderPanel("running", false);
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-
-    expect(
-      await screen.findByRole("button", { name: "Mark completed" }),
-    ).toBeInTheDocument();
-  });
-
-  it("warns that cancelling does not stop what is running", async () => {
-    answerWith([makeTask()]);
-    const user = userEvent.setup();
-    await openDialog(user);
-
-    // The section's own line carries the non-effect for every action;
-    // the per-action warning carries the one that only bites while
-    // something is actually running.
-    expect(screen.getByText(/nothing running is stopped/i)).toBeInTheDocument();
-
-    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    expect(screen.getByText(/cancelling here will not stop them/i)).toBeInTheDocument();
-    expect(
-      screen.getByText(/ends the containers first and cancels the build afterwards/i),
-    ).toBeInTheDocument();
-    expect(cancelBuild).not.toHaveBeenCalled();
-  });
-
-  // Ticking a row and then filtering it out leaves the stop section
-  // explaining that no command is offered. A warning that pointed at
-  // "the command above" would be pointing at that explanation.
-  it("keeps the warning usable when the stop section offers no command", async () => {
-    answerWith([
-      makeTask({
-        task_id: "gpu-task",
-        task_name: "Featurise",
-        latest_executor_metadata: { function_name: "worker_gpu" },
-      }),
-      makeTask({
-        task_id: "cpu-task",
-        task_name: "Aggregate",
-        latest_executor_metadata: { function_name: "worker_cpu" },
-      }),
-    ]);
-    const user = userEvent.setup();
-    await openDialog(user);
-
-    // Tick one row, then narrow to the other: nothing ticked is shown,
-    // so there is no command to draw.
-    const rows = await screen.findAllByRole("checkbox");
-    await user.click(rows[0]);
-    await user.selectOptions(screen.getByLabelText("Worker"), "cpu");
-    expect(screen.getByText(/No command is offered/i)).toBeInTheDocument();
-
+    renderDialog();
+    await open(user);
+    await screen.findByRole("table");
     await user.click(screen.getByRole("button", { name: "Cancel build" }));
-    const warning = screen
-      .getByText(/cancelling here will not stop them/i)
-      .closest("p");
-    expect(warning?.textContent).toContain(`stardag builds stop ${BUILD}`);
-    expect(warning?.textContent).not.toMatch(/command above|command below/i);
-  });
-
-  // The old copy said in words that no override was needed alongside the
-  // command. The structure says it now — stop first, record second — so
-  // what has to hold is that the stop line states the build is cancelled
-  // and its claims released, which is what makes an override redundant.
-  it("says the command cancels the build and releases its claims", async () => {
-    answerWith([makeTask()]);
-    const user = userEvent.setup();
-    await openDialog(user);
-
     expect(
-      await screen.findByText(
-        /then cancels the build and releases every claim it holds/i,
-      ),
+      screen.getByText(/still has executions with no end reported/),
     ).toBeInTheDocument();
-  });
-
-  // An empty truncated scan found nothing only because it stopped
-  // looking; this build's executions can sit on pages it never read.
-  it("warns about running work when a truncated scan found none", async () => {
-    answerWith(
-      [makeTask({ latest_status_build_id: OTHER_BUILD })],
-      MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
-    );
-    const user = userEvent.setup();
-    renderPanel("running", true);
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-
-    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
-  });
-
-  // A failed refresh leaves the previous result in place, so an empty
-  // answer from minutes ago would otherwise keep reading as a fresh one.
-  it("warns about running work once a refresh of an empty scan fails", async () => {
-    answerWith([]);
-    const user = userEvent.setup();
-    const { rerender } = render(
-      <BuildControlsDialog
-        buildId={BUILD}
-        environmentId="env-1"
-        buildStatus="running"
-        holdsClaims={true}
-        refreshToken={0}
-        onBuildChanged={onBuildChanged}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-    await screen.findByText(/nothing running that can be stopped/i);
-
-    vi.mocked(fetchTasks).mockRejectedValue(new Error("network down"));
-    rerender(
-      <BuildControlsDialog
-        buildId={BUILD}
-        environmentId="env-1"
-        buildStatus="running"
-        holdsClaims={true}
-        refreshToken={1}
-        onBuildChanged={onBuildChanged}
-      />,
-    );
-    await screen.findByText(/Could not read this build/i);
-
-    await user.click(screen.getByRole("button", { name: "Cancel build" }));
-    expect(screen.getByText(/is not known yet/i)).toBeInTheDocument();
-  });
-
-  // The unknown states are exactly the states in which the stop section
-  // renders a notice instead of the command, so the warning must name
-  // the command rather than point at a place on screen.
-  it("names the stop command in the warning rather than pointing at it", async () => {
-    answerWith(
-      [makeTask({ latest_status_build_id: OTHER_BUILD })],
-      MAX_CLAIM_PAGES * CLAIM_PAGE_SIZE + 500,
-    );
-    const user = userEvent.setup();
-    renderPanel("running", true);
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-
-    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    const warning = screen.getByText(/is not known yet/i).closest("p");
-    expect(warning?.textContent).toContain(`stardag builds stop ${BUILD}`);
-    expect(warning?.textContent).not.toMatch(/command above|command below/i);
-  });
-
-  it("does not warn about running work when the build holds no claims", async () => {
-    answerWith([makeTask({ latest_status_build_id: OTHER_BUILD })]);
-    const user = userEvent.setup();
-    renderPanel("running", false);
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-
-    await user.click(await screen.findByRole("button", { name: "Cancel build" }));
-    expect(screen.queryByText(/cancelling here will not stop them/i)).toBeNull();
   });
 
   it("overrides only after the second, confirming click", async () => {
-    answerWith([makeTask()]);
-    vi.mocked(failBuild).mockResolvedValue({ id: BUILD } as never);
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([]);
+    vi.mocked(cancelBuild).mockResolvedValue({ status: "cancelled" } as never);
     const user = userEvent.setup();
-    await openDialog(user);
-
-    await user.click(await screen.findByRole("button", { name: "Mark failed" }));
-    expect(failBuild).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: "Mark failed" }));
-    await waitFor(() =>
-      expect(failBuild).toHaveBeenCalledWith(BUILD, "env-1", "user-1"),
-    );
-    expect(onBuildChanged).toHaveBeenCalled();
+    renderDialog();
+    await open(user);
+    await screen.findByText(/nothing to stop/);
+    await user.click(screen.getByRole("button", { name: "Cancel build" }));
+    expect(cancelBuild).not.toHaveBeenCalled();
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: "Cancel build" }));
+    });
+    await waitFor(() => expect(cancelBuild).toHaveBeenCalledWith(BUILD, "env-1"));
   });
 
   it("offers no override on a build whose record is already final", async () => {
-    answerWith([makeTask()]);
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([]);
     const user = userEvent.setup();
-    renderPanel("failed");
-    await user.click(screen.getByRole("button", { name: "Build controls" }));
-
+    renderDialog("completed");
+    await open(user);
+    await screen.findByText(/nothing to stop/);
     expect(screen.queryByRole("button", { name: "Cancel build" })).toBeNull();
-    // The stop half is still there: a failed build's containers run on.
-    expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
-  });
-
-  // STA-83: rendering was uncapped while fetching was paginated, so a wide
-  // fan-out put every execution in the DOM and pushed the page around.
-  it("caps the rows it draws and says how many it left out", async () => {
-    const many = Array.from({ length: MAX_ROWS_DRAWN + 12 }, (_, i) =>
-      makeTask({ id: `row-${i}`, task_id: `tid-${i}`, task_name: `Task${i}` }),
-    );
-    answerWith(many);
-    const user = userEvent.setup();
-    await openDialog(user);
-
-    expect(await screen.findByText("Task0")).toBeInTheDocument();
-    expect(screen.getByText(`Task${MAX_ROWS_DRAWN - 1}`)).toBeInTheDocument();
-    expect(screen.queryByText(`Task${MAX_ROWS_DRAWN}`)).toBe(null);
-    expect(screen.getByText(/12 more executions not listed/)).toBeInTheDocument();
-  });
-
-  // Ticking switches the command to exact task ids, so the undrawn rows
-  // stop being included — and saying otherwise errs towards "everything
-  // is covered", which is the dangerous direction.
-  it("stops claiming the undrawn rows are covered once rows are ticked", async () => {
-    answerWith(
-      Array.from({ length: MAX_ROWS_DRAWN + 12 }, (_, i) =>
-        makeTask({ id: `row-${i}`, task_id: `tid-${i}`, task_name: `Task${i}` }),
-      ),
-    );
-    const user = userEvent.setup();
-    await openDialog(user);
-
-    expect(
-      await screen.findByText(/still targets every one of them/),
-    ).toBeInTheDocument();
-
-    await user.click(screen.getByRole("checkbox", { name: "Include Task0" }));
-
-    expect(screen.queryByText(/still targets every one of them/)).toBeNull();
-    expect(screen.getByText(/these are not included/)).toBeInTheDocument();
-  });
-
-  // The command is unaffected by how much of the list is drawn.
-  it("still targets every execution when rows are left undrawn", async () => {
-    answerWith(
-      Array.from({ length: MAX_ROWS_DRAWN + 5 }, (_, i) =>
-        makeTask({ id: `row-${i}`, task_id: `tid-${i}`, task_name: `Task${i}` }),
-      ),
-    );
-    const user = userEvent.setup();
-    await openDialog(user);
-
-    expect(await screen.findByText(`stardag builds stop ${BUILD}`)).toBeInTheDocument();
   });
 });

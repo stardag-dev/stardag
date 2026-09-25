@@ -18,8 +18,9 @@ import { WorkspaceSettings } from "./components/WorkspaceSettings";
 import { PendingInvites } from "./components/PendingInvites";
 import type { NavItem } from "./components/Sidebar";
 import { Sidebar } from "./components/Sidebar";
-import { TaskExplorer } from "./components/TaskExplorer";
 import { ConcurrencyLimits } from "./components/ConcurrencyLimits";
+import { DeploymentsPage } from "./components/DeploymentsPage";
+import { TaskPage } from "./components/TaskPage";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
 import { AuthProvider, useAuth } from "./context/AuthContext";
@@ -27,6 +28,7 @@ import { BreadcrumbProvider, useBreadcrumb } from "./context/BreadcrumbContext";
 import type React from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import { EnvironmentProvider, useEnvironment } from "./context/EnvironmentContext";
+import { viewFromPath } from "./utils/routes";
 
 // Main app layout with sidebar
 interface MainLayoutProps {
@@ -142,14 +144,16 @@ interface BuildPageProps extends SidebarStateProps {
   buildId: string;
   onNavigate: (item: NavItem) => void;
   onBack: () => void;
-  onNavigateToBuild: (buildId: string) => void;
+  onOpenTask: (taskId: string) => void;
+  onSelectBuild: (buildId: string) => void;
 }
 
 function BuildPage({
   buildId,
   onNavigate,
   onBack,
-  onNavigateToBuild,
+  onOpenTask,
+  onSelectBuild,
   sidebarCollapsed,
   onToggleSidebar,
 }: BuildPageProps) {
@@ -163,24 +167,29 @@ function BuildPage({
       <BuildView
         buildId={buildId}
         onBack={onBack}
-        onNavigateToBuild={onNavigateToBuild}
+        onOpenTask={onOpenTask}
+        onOpenBuild={onSelectBuild}
       />
     </MainLayout>
   );
 }
 
-// Task explorer page
-interface TaskExplorerPageProps extends SidebarStateProps {
+// Task page: one task by id, or the lookup form
+interface TaskPageRouteProps extends SidebarStateProps {
+  taskId: string | null;
   onNavigate: (item: NavItem) => void;
-  onNavigateToBuild: (buildId: string) => void;
+  onOpenTask: (taskId: string) => void;
+  onSelectBuild: (buildId: string) => void;
 }
 
-function TaskExplorerPage({
+function TaskPageRoute({
+  taskId,
   onNavigate,
-  onNavigateToBuild,
+  onOpenTask,
+  onSelectBuild,
   sidebarCollapsed,
   onToggleSidebar,
-}: TaskExplorerPageProps) {
+}: TaskPageRouteProps) {
   return (
     <MainLayout
       activeNav="tasks"
@@ -188,7 +197,7 @@ function TaskExplorerPage({
       sidebarCollapsed={sidebarCollapsed}
       onToggleSidebar={onToggleSidebar}
     >
-      <TaskExplorer onNavigateToBuild={onNavigateToBuild} />
+      <TaskPage taskId={taskId} onOpenTask={onOpenTask} onOpenBuild={onSelectBuild} />
     </MainLayout>
   );
 }
@@ -196,10 +205,14 @@ function TaskExplorerPage({
 // Concurrency limits admin page
 type ConcurrencyLimitsPageProps = SidebarStateProps & {
   onNavigate: (item: NavItem) => void;
+  onSelectBuild: (buildId: string) => void;
+  onOpenTask: (taskId: string) => void;
 };
 
 function ConcurrencyLimitsPage({
   onNavigate,
+  onSelectBuild,
+  onOpenTask,
   sidebarCollapsed,
   onToggleSidebar,
 }: ConcurrencyLimitsPageProps) {
@@ -210,7 +223,29 @@ function ConcurrencyLimitsPage({
       sidebarCollapsed={sidebarCollapsed}
       onToggleSidebar={onToggleSidebar}
     >
-      <ConcurrencyLimits />
+      <ConcurrencyLimits onSelectBuild={onSelectBuild} onOpenTask={onOpenTask} />
+    </MainLayout>
+  );
+}
+
+// Deployments page
+type DeploymentsPageRouteProps = SidebarStateProps & {
+  onNavigate: (item: NavItem) => void;
+};
+
+function DeploymentsPageRoute({
+  onNavigate,
+  sidebarCollapsed,
+  onToggleSidebar,
+}: DeploymentsPageRouteProps) {
+  return (
+    <MainLayout
+      activeNav="deployments"
+      onNavigate={onNavigate}
+      sidebarCollapsed={sidebarCollapsed}
+      onToggleSidebar={onToggleSidebar}
+    >
+      <DeploymentsPage />
     </MainLayout>
   );
 }
@@ -595,26 +630,7 @@ function Router() {
   }, []);
 
   // Parse path to determine view
-  const getViewFromPath = useCallback(() => {
-    if (path === "/callback") return "callback";
-    if (path === "/settings") return "settings";
-    if (path === "/invites") return "invites";
-    if (path === "/workspaces/new") return "new-workspace";
-
-    // Check for tasks path: /tasks, /:org/tasks, or /:org/:environment/tasks
-    if (path === "/tasks" || path.endsWith("/tasks")) return "tasks";
-
-    // Concurrency limits admin: /limits (same env-scoped forms as /tasks)
-    if (path === "/limits" || path.endsWith("/limits")) return "limits";
-
-    // Check for build ID in path: /builds/:id or /:org/:environment/builds/:id
-    const buildMatch = path.match(/\/builds\/([^/]+)/);
-    if (buildMatch) {
-      return "build";
-    }
-
-    return "builds";
-  }, [path]);
+  const getViewFromPath = useCallback(() => viewFromPath(path), [path]);
 
   // Handle sidebar navigation
   const handleNavigation = useCallback(
@@ -626,6 +642,9 @@ function Router() {
           break;
         case "tasks":
           navigateTo(`${basePath}/tasks`);
+          break;
+        case "deployments":
+          navigateTo(`${basePath}/deployments`);
           break;
         case "limits":
           navigateTo(`${basePath}/limits`);
@@ -643,6 +662,23 @@ function Router() {
     (buildId: string) => {
       const basePath = getEnvironmentPath();
       navigateTo(`${basePath}/builds/${buildId}`);
+    },
+    [navigateTo, getEnvironmentPath],
+  );
+
+  const selectedTaskId = useMemo(() => {
+    const taskMatch = path.match(/(?:^|\/)tasks\/([^/]+)$/);
+    return taskMatch ? decodeURIComponent(taskMatch[1]) : null;
+  }, [path]);
+
+  const handleOpenTask = useCallback(
+    (taskId: string) => {
+      const basePath = getEnvironmentPath();
+      navigateTo(
+        taskId
+          ? `${basePath}/tasks/${encodeURIComponent(taskId)}`
+          : `${basePath}/tasks`,
+      );
     },
     [navigateTo, getEnvironmentPath],
   );
@@ -693,9 +729,11 @@ function Router() {
 
       case "tasks":
         return (
-          <TaskExplorerPage
+          <TaskPageRoute
+            taskId={selectedTaskId}
             onNavigate={handleNavigation}
-            onNavigateToBuild={handleSelectBuild}
+            onOpenTask={handleOpenTask}
+            onSelectBuild={handleSelectBuild}
             sidebarCollapsed={sidebarCollapsed}
             onToggleSidebar={handleToggleSidebar}
           />
@@ -704,6 +742,17 @@ function Router() {
       case "limits":
         return (
           <ConcurrencyLimitsPage
+            onNavigate={handleNavigation}
+            onSelectBuild={handleSelectBuild}
+            onOpenTask={handleOpenTask}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={handleToggleSidebar}
+          />
+        );
+
+      case "deployments":
+        return (
+          <DeploymentsPageRoute
             onNavigate={handleNavigation}
             sidebarCollapsed={sidebarCollapsed}
             onToggleSidebar={handleToggleSidebar}
@@ -717,7 +766,8 @@ function Router() {
               buildId={selectedBuildId}
               onNavigate={handleNavigation}
               onBack={handleBackFromBuild}
-              onNavigateToBuild={handleSelectBuild}
+              onOpenTask={handleOpenTask}
+              onSelectBuild={handleSelectBuild}
               sidebarCollapsed={sidebarCollapsed}
               onToggleSidebar={handleToggleSidebar}
             />

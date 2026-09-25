@@ -384,10 +384,12 @@ def _mint_api_key(
         # A key that does not work is a harness failure, and it is worth
         # discovering at the line that created it rather than three layers
         # later where it reads as a scheduling problem.
+        # The registry's SDK routes are under ``/api/v2``; the UI and auth
+        # routes above stay under ``/api/v1``.
         check = client.get(
-            "/builds",
+            f"{api_url.rstrip('/')}/api/v2/builds",
             headers={"X-API-Key": key},
-            params={"environment_id": environment_id, "limit": 1},
+            params={"limit": 1},
         )
         if check.status_code != 200:
             raise RuntimeError(

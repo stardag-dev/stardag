@@ -1,4 +1,10 @@
-"""Build model for tracking DAG executions."""
+"""``build``: one request to materialise a set of root tasks.
+
+A build is a request, not an owner. Its structure lives on its plans (one
+per scope it has been planned under, one of them active); the build row
+keeps the request (``root_task_ids``, at completion-id level, stable across
+rollover), the stored status, and the reactive-scheduling columns.
+"""
 
 from __future__ import annotations
 
@@ -11,42 +17,51 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
-    JSON,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
+    false,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, TimestampMixin, generate_uuid7, utc_now
+from stardag_api.models.base import (
+    Base,
+    EnvironmentScopedMixin,
+    generate_uuid7,
+    pg_enum,
+    utc_now,
+)
 from stardag_api.models.enums import BuildStatus
 
 if TYPE_CHECKING:
-    from stardag_api.models.event import Event
     from stardag_api.models.user import User
     from stardag_api.models.environment import Environment
 
 
-class Build(Base, TimestampMixin):
-    """Represents execution of sd.build() for a DAG/set of tasks.
+class Build(EnvironmentScopedMixin, Base):
+    """Represents one ``sd.build()`` request for a set of root tasks.
 
-    Status is a fold of the build's build-level events, denormalised onto
-    the row (the ``latest_*`` columns below) exactly as ``Task`` does it.
+    Status is a stored column driven by build events; the server does not
+    flip it inside task transactions. The active plan is found through
+    ``plan``, not stored here twice.
     """
 
-    __tablename__ = "builds"
+    __tablename__ = "build"
     __table_args__ = (
-        Index("ix_builds_environment_created", "environment_id", "created_at"),
+        # FK target of every composite FK onto ``build`` (the environment rule).
+        UniqueConstraint("environment_id", "id", name="uq_build_environment_id"),
+        Index("ix_build_environment_created", "environment_id", "created_at"),
         Index(
-            "ix_builds_environment_last_active",
+            "ix_build_environment_last_active",
             "environment_id",
             "last_active_at",
         ),
         # Serves ``GET /builds?status=`` — "builds in THIS environment with
         # status X, most recently active first" — and the reaper's
         # "RUNNING builds, stalest first". Same shape, and the same reasoning,
-        # as ix_tasks_environment_status: the single-environment filter and
+        # as ix_task_environment_status: the single-environment filter and
         # the status filter are useless apart (RUNNING spans every tenant;
         # the environment-keyed composites don't mention status), and the
         # distribution is badly skewed — a mature environment is almost all
@@ -57,9 +72,9 @@ class Build(Base, TimestampMixin):
         # in either direction (newest-first for the default listing,
         # stalest-first for a staleness query).
         Index(
-            "ix_builds_environment_status",
+            "ix_build_environment_status",
             "environment_id",
-            "latest_status",
+            "status",
             "last_active_at",
         ),
     )
@@ -68,12 +83,6 @@ class Build(Base, TimestampMixin):
         Uuid,
         primary_key=True,
         default=generate_uuid7,
-    )
-    environment_id: Mapped[UUID] = mapped_column(
-        Uuid,
-        ForeignKey("environments.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
     )
     user_id: Mapped[UUID | None] = mapped_column(
         Uuid,
@@ -88,67 +97,30 @@ class Build(Base, TimestampMixin):
     # Optional user-provided documentation
     description: Mapped[str | None] = mapped_column(Text)
 
-    # Git context: the SHA of the *triggering* process, for display. Not the
-    # code identity a build runs under — that is the first half of
-    # ``scope_key`` below, and it comes from the deployment.
-    commit_hash: Mapped[str | None] = mapped_column(String(64), index=True)
-
-    # The structure scope this build's dependency edges live in: the code
-    # id of the deployment (or local process) that evaluated ``requires()``
-    # and the hash of the structure-significant build config, as
-    # ``<code_id>:<config_hash>``. Fixed for the build's life: a resume or
-    # re-trigger under a different scope is refused. Readiness is evaluated
-    # over ``task_dependencies`` rows with this key only.
-    #
-    # Set once by whoever runs discovery (the reactive bootstrap, or the
-    # local process), *before* it registers any edge, via
-    # ``PUT /builds/{id}/scope``. Until then it is the synthetic
-    # ``build:<id>`` — a scope nobody else shares, so a client that never
-    # sets one (an older SDK) gets per-build edges: no caching, always
-    # correct. See ``docs/design/scope-keyed-dependency-structure.md``.
-    scope_key: Mapped[str] = mapped_column(
-        String(96),
-        nullable=False,
-        # Context-sensitive default: the synthetic scope names the row's own
-        # id, which is client-generated and processed first. Lets a Build be
-        # constructed without a scope (tests, and any caller predating the
-        # column) and land on exactly the scope create_build would give it.
-        default=lambda ctx: f"build:{ctx.get_current_parameters()['id']}",
-    )
-
-    # The build config: ``{"<namespace>.<Name>": {"<field>": value}}`` for
-    # the fields a task declares ``significance="dependencies_only"`` or
-    # ``"execution_only"``. The one place those values come from — never
-    # from the task's own data — and immutable for the build's life. Read by
-    # every worker and tick before rehydrating a task, so the two rehydration
-    # paths (pickle, registry data) agree by construction. NULL = ``{}``.
-    build_config: Mapped[dict | None] = mapped_column(
-        JSON().with_variant(JSONB(), "postgresql"),
-        nullable=True,
-    )
-
-    # Root task IDs (the tasks passed to sd.build()).
-    # JSONB on Postgres for consistency and to avoid reparsing on access.
+    # The request at completion-id level: the ``task_id`` hashes of the
+    # roots, stable across rollover. A rollover whose re-read roots hash
+    # differently fails the build ("re-trigger it as a new build").
     root_task_ids: Mapped[list[str]] = mapped_column(
-        JSON().with_variant(JSONB(), "postgresql"),
+        JSONB,
         nullable=False,
         default=list,
     )
 
-    # Bumped on build-level lifecycle events only (BUILD_RESUMED,
-    # BUILD_COMPLETED, BUILD_FAILED, BUILD_CANCELLED, BUILD_EXIT_EARLY) —
-    # initial creation sets it via DEFAULT. Task events do NOT touch this
-    # column, so the per-task hot path is free of contention on the build
-    # row.
+    # Bumped on build-level lifecycle events (BUILD_RESUMED, BUILD_COMPLETED,
+    # BUILD_FAILED, BUILD_CANCELLED, BUILD_EXIT_EARLY; initial creation sets
+    # it via DEFAULT) and, as in v1, on task activity: every status change of
+    # a task the build's active plan holds bumps it too
+    # (``wakeups.flag_after_transition``, called from ``transition_task()``).
+    # That bump is a best-effort ``SKIP LOCKED`` UPDATE outside this
+    # service — a build whose row a claiming start or a terminal transition
+    # holds at that moment just misses the one bump, caught by the build's
+    # next task event or its own next lifecycle write. So the per-task hot
+    # path is not free of contention on the build row, but it never waits
+    # for it.
     #
-    # This column drives the "Home" / list-builds ordering: a resumed
-    # build (BUILD_RESUMED) jumps to the top instead of staying buried at
-    # its original ``created_at`` position. The trade-off vs touching on
-    # every task event is that a long-running build won't bump position
-    # while it's mid-execution — but its ``status=running`` badge already
-    # signals activity, and "most recent lifecycle change" is a cleaner
-    # sort key than "any event in the build's subtree." See
-    # ``_touch_build_last_active`` in ``routes/builds.py``.
+    # This column drives the "Home" / list-builds ordering and the
+    # ``idle_for_seconds`` filter (``GET /builds``): "idle" means no task or
+    # lifecycle activity for that long, not merely no lifecycle change.
     last_active_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
@@ -163,31 +135,13 @@ class Build(Base, TimestampMixin):
     # metadata — the in-container SDK resume of a Modal-triggered build
     # doesn't know its trigger metadata.
     executor_metadata: Mapped[dict | None] = mapped_column(
-        JSON().with_variant(JSONB(), "postgresql"),
+        JSONB,
         nullable=True,
     )
 
-    # Reactive-scheduler dirty flag: set by POST /builds/{id}/notify (e.g. a
-    # worker finishing a task), cleared by the scheduler tick before it
-    # computes the frontier (DELETE /builds/{id}/notify). A notify landing
-    # between clear and compute re-sets it, so the tick's linger poll picks
-    # the wake-up back up — no lost signals. NULL = no pending wake-up.
-    needs_tick_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-
-    # When a caller was last told to spawn a tick for this build — by
-    # ``POST /builds/wake-candidates`` handing it out, or by
-    # ``POST /builds/{id}/notify`` reporting no live scheduler to a worker
-    # that will spawn. A flagged build is handed out at most once per
-    # ``services.wakeups.WAKE_HANDOUT_WINDOW``, which is what turns N
-    # concurrent askers into one container rather than N. Not a liveness
-    # signal and not cleared: it simply ages out.
-    tick_requested_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
+    # The wake-up flags (``needs_tick_at``, ``tick_requested_at``) live on
+    # ``build_wake``, one row per build: flagging must not lock this row,
+    # which a claiming start holds ``FOR SHARE`` (models/build_wake.py).
 
     # The reactive scheduler's single-flight lease on this build: at most
     # one tick drives a build at a time. Held while a tick runs (renewed
@@ -196,15 +150,6 @@ class Build(Base, TimestampMixin):
     # column set, and treating that as a live scheduler would suppress
     # wake-ups for exactly the build that most needs them.
     #
-    # On the build row rather than in ``distributed_locks`` because every
-    # reader wants it alongside the build: ``is_scheduler_live`` and
-    # ``select_wake_candidates`` were both a second table and a lock name
-    # assembled from a build id, and the name prefix had to be kept
-    # byte-identical in the SDK and the API by comment alone.
-    #
-    # Transient by nature, so the migration backfills nothing: a lease that
-    # existed across the deploy is simply not seen, which costs at most one
-    # duplicate tick (idempotent, and arbitrated per task by the claim).
     scheduler_lease_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -241,61 +186,38 @@ class Build(Base, TimestampMixin):
     # (the asset store, which may be immutable) because a re-trigger must be
     # able to update it.
     reactive_tick_kwargs: Mapped[dict | None] = mapped_column(
-        JSON().with_variant(JSONB(), "postgresql"),
+        JSONB,
         nullable=True,
     )
 
     # ------------------------------------------------------------------
-    # Denormalised build-status columns.
-    #
-    # Maintained in-transaction whenever a build-level event is created
-    # (see services.status.apply_event_to_build, called by every build
-    # lifecycle path). They hold exactly what the historical
-    # ``get_build_status`` event replay returned, so a read is a column
-    # read rather than a scan of the build's whole event stream.
-    #
-    # They exist for three reasons, in increasing order of importance:
-    # every BuildResponse used to cost one event scan; ``GET /builds?status=``
-    # could not filter in SQL and so scanned a bounded window of candidates
-    # and reported a `total` that was only the matches *within that window*;
-    # and the stale-build reaper needed an exact, unbounded "is this build
-    # RUNNING?", which meant a second SQL encoding of the same rule that
-    # disagreed with the replay on timestamp ties. One column, one answer.
+    # Stored build status, driven by build events (v1's ``latest_*``
+    # columns, renamed to match ``task``). ``/complete`` recomputes the
+    # plan-complete predicate in its own transaction before it moves this.
     # ------------------------------------------------------------------
-    latest_status: Mapped[BuildStatus] = mapped_column(
-        String(32),
+    status: Mapped[BuildStatus] = mapped_column(
+        pg_enum(BuildStatus, "build_status"),
         nullable=False,
         default=BuildStatus.PENDING,
+        server_default=BuildStatus.PENDING.value,
     )
-    # First BUILD_STARTED. A resume does *not* move it — the build started
-    # when it first started; resuming is a separate concept, flagged by
-    # ``latest_is_resumed``.
-    latest_started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-    )
-    # The terminal event that produced ``latest_status``; cleared by a
-    # resume so the UI doesn't keep showing a stale "completed at".
-    latest_completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-    )
+    # First BUILD_STARTED. A resume does *not* move it; resuming is flagged
+    # by ``is_resumed``.
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The terminal event that produced ``status``; cleared by a resume.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # ``external_id`` of the user who triggered the current status, when it
-    # came from a manual UI override (the ``triggered_by_user_id`` key in
-    # the event metadata). NULL for the machine-driven transitions —
-    # start/resume/exit-early are never user-triggered.
-    latest_status_triggered_by_user_id: Mapped[str | None] = mapped_column(String(255))
-    # True iff the event that produced the current status was BUILD_RESUMED,
-    # i.e. the build was picked up again after finishing/failing and is
-    # RUNNING under resume semantics. The UI surfaces this as
-    # "running (resumed)".
-    latest_is_resumed: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
+    # came from a manual override. NULL for machine-driven transitions.
+    status_triggered_by_user_id: Mapped[str | None] = mapped_column(String(255))
+    # Why the build is FAILED: the message of the BUILD_FAILED that produced
+    # the current status. NULL for every other status, so a build resumed or
+    # completed after a failure does not keep explaining it.
+    error_message: Mapped[str | None] = mapped_column(Text)
+    # True iff the event that produced the current status was BUILD_RESUMED.
+    is_resumed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
     )
 
     # Relationships
     environment: Mapped[Environment] = relationship(back_populates="builds")
     user: Mapped[User | None] = relationship(back_populates="builds")
-    events: Mapped[list[Event]] = relationship(
-        back_populates="build",
-        cascade="all, delete-orphan",
-        order_by="Event.created_at",
-    )

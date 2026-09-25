@@ -104,16 +104,15 @@ import pandas as pd
 import stardag as sd
 from pydantic import Field
 from stardag.artifact import Artifact, JSONArtifact, MarkdownArtifact
-from stardag.build import GlobalLockConfig
+from stardag.target import LoadedT
 
 sd.namespace("examples.ml_pipeline", scope=__name__)
-from stardag.target import LoadedT
 
 # Shared base with versioning and sleep simulation
 class PipelineBase(sd.Task[LoadedT], abc.ABC, typing.Generic[LoadedT]):
     __version__ = "1"
-    version: str = __version__
-    sleep_seconds: Annotated[float, sd.StardagField(significance="execution_only")] = 0.0
+    # Not part of the task id: changes how long a run takes, not its output.
+    sleep_seconds: Annotated[float, sd.StardagField(significant=False)] = 0.0
 
     def run(self) -> None:
         self._run()
@@ -200,7 +199,7 @@ def build_pipeline(source: str = "default"):
 
 if __name__ == "__main__":
     root = build_pipeline()
-    sd.build(root, global_lock_config=GlobalLockConfig(enabled=True))
+    sd.build(root)  # with a registry, claims keep concurrent builds from duplicating work
     print(root.load())
 ```
 
@@ -267,20 +266,55 @@ class DownstreamTask(sd.Task[int]):
         return self.data
 ```
 
-### Execution-Only Runtime Parameters
+### Non-Significant Parameters and Settings
 
 ```python
+from typing import Annotated
+
+import stardag as sd
+
+
 class FlexibleTask(sd.Task[dict]):
-    # These affect the task ID (data parameters)
+    # Significant (the default): part of the task id — they name the output
     dataset_name: str
     model_type: str
 
-    # These DON'T affect the task ID (runtime tuning). Never passed at
-    # init — set per build via build_config={"FlexibleTask": {...}}.
-    num_workers: Annotated[int, sd.StardagField(significance="execution_only")] = 4
-    verbose: Annotated[bool, sd.StardagField(significance="execution_only")] = False
-    timeout: Annotated[float, sd.StardagField(significance="execution_only")] = 300.0
+    # Non-significant: runtime tuning, NOT part of the task id. Still ordinary
+    # constructor arguments, stored with the task instance.
+    num_workers: Annotated[int, sd.StardagField(significant=False)] = 4
+    verbose: Annotated[bool, sd.StardagField(significant=False)] = False
+
+    def run(self):
+        self._save({"dataset": self.dataset_name, "model": self.model_type})
+
+
+fast = FlexibleTask(dataset_name="iris", model_type="svm", num_workers=16)
+assert fast.id == FlexibleTask(dataset_name="iris", model_type="svm").id
 ```
+
+A build-wide knob that no task should carry as a parameter goes in `settings` instead,
+read at run time:
+
+```python
+import logging
+import os
+
+
+class Scored(sd.Task[int]):
+    n: int
+
+    def run(self):
+        # A setting may change how the work is done, never the output.
+        threads = int(os.environ.get("MYAPP_THREADS", "1"))
+        logging.getLogger(__name__).info("scoring with %d threads", threads)
+        self._save(self.n * 2)
+
+
+sd.build(Scored(n=3), settings={"MYAPP_THREADS": "8"})
+```
+
+Do not construct one task id twice with different non-significant values in one DAG: a build
+plans one instance per task id and raises `sd.InstanceConflictError`.
 
 ### Inspecting the DAG
 

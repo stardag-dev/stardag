@@ -1,866 +1,433 @@
-"""The attempt and interruption budgets
-(stardag.build._reactive._budgets)."""
+"""What a reactive tick does with a member that failed or keeps being
+interrupted (unit tier, against the in-memory registry).
+
+- A FAILED member is a result: the fail mode owns it and the tick never
+  retries it (design.md, "The runnable rule": FAILED is not actionable).
+- An INTERRUPTED member is actionable, so the tick restarts it — up to
+  ``TickConfig.max_interruptions``, counted by the registry from the
+  execution ledger over the build's plans (D9) and served on the frontier.
+  At the cap the tick records a failure naming the count instead.
+- A RUNNING member whose claim lapsed without a report is actionable, so
+  the tick takes it over — up to ``TickConfig.max_executions``, counted
+  from the same ledger (``attempts``). At the cap it fails the same way.
+"""
 
 from __future__ import annotations
 
 import typing
-from uuid import UUID, uuid4
+from datetime import timedelta
+from uuid import UUID
 
-
-from stardag import (
-    BaseTask,
-)
-from stardag.build import (
-    DetachedExecutionStatus,
-    DetachedHandle,
-    FailMode,
-    TickConfig,
-    discover_and_register_aio,
-    run_tick_aio,
-)
-from stardag.build._reactive import (
-    _RETRYABLE_STATUSES,
-)
+from stardag import BaseTask, auto_namespace
+from stardag.build import TickConfig, run_tick_aio
+from stardag.build._reactive import TickSummary
+from stardag.build._registration import new_id, register_plan_aio, walk_aio
 from stardag.target import InMemoryFileTarget
+from stardag.testing import InMemoryRegistry
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
-from tests.test_build.reactive_fakes import (
-    FAST_TICK,
-    FakeTickExecutor,
-    _chain,
-    _setup,
-)
+from tests.test_build.fakes import FakeDetachedExecutor
+
+auto_namespace(__name__)
+
+Target = typing.Type[InMemoryFileTarget]
 
 
-class TestRetryPath:
-    async def test_retry_failed_discovery_resets_and_build_completes(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The reactive retry path: a task failed in a previous run is reset
-        to pending by discovery (retry_failed=True) and the re-triggered
-        build runs to completion instead of FAIL_FASTing on tick 1."""
-        (root,) = _chain("retry-root")
-        registry, executor = _setup([root])
-        registry.add_task(str(root.id), status="failed")
-
-        # What the reactive trigger does on (re-)trigger:
-        result = await discover_and_register_aio(
-            registry, uuid4(), root, retry_failed=True
-        )
-        assert [t.id for t in result.retried] == [root.id]
-        assert registry.statuses[str(root.id)] == "pending"
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,
-        )
-        assert summary.terminal_status == "completed"
-        assert registry.build_status == "completed"
-
-    async def test_retry_failed_resets_an_abandoned_suspended_task(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """#208 A2: a task left SUSPENDED — its execution yielded dynamic
-        dependencies and returned, then the build was abandoned — used to be
-        permanently unschedulable, since the re-trigger's retry skipped it.
-        It is now reset like any other non-completed status."""
-        (root,) = _chain("suspended-retry-root")
-        registry, executor = _setup([root])
-        registry.add_task(str(root.id), status="suspended")
-
-        result = await discover_and_register_aio(
-            registry, uuid4(), root, retry_failed=True
-        )
-
-        assert [t.id for t in result.retried] == [root.id]
-        assert registry.statuses[str(root.id)] == "pending"
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,
-        )
-        assert summary.terminal_status == "completed"
-
-    async def test_worker_dynamic_dep_registration_never_resets_suspended(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The other caller of discover_and_register_aio is a worker
-        registering its dynamically yielded deps — it takes the default
-        retry_failed=False, so widening the retryable set cannot make a
-        suspending worker reset its own task."""
-        (root,) = _chain("suspended-worker-root")
-        registry, _ = _setup([root], auto_complete=False)
-        registry.add_task(str(root.id), status="suspended")
-
-        result = await discover_and_register_aio(registry, uuid4(), root)
-
-        assert result.retried == []
-        assert registry.statuses[str(root.id)] == "suspended"
-        assert not any(method == "retry" for (method, _) in registry.calls)
-
-    async def test_without_retry_failed_build_fail_fasts(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """Control: without the retry, the failed status poisons the build
-        (the pre-fix behavior the stack review flagged)."""
-        (root,) = _chain("poison-root")
-        registry, executor = _setup([root])
-        registry.add_task(str(root.id), status="failed")
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,
-        )
-        assert summary.terminal_status == "failed"
+def _config(**kwargs: typing.Any) -> TickConfig:
+    return TickConfig(linger_seconds=0.5, poll_interval_seconds=0.01, **kwargs)
 
 
-class SpawnFailingExecutor(FakeTickExecutor):
-    """Executor whose detached submit always raises.
-
-    The failure this PR exists for: the backend refused the spawn, so no
-    container ever ran and no function-level retry policy can apply.
-    """
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.spawn_attempts = 0
-
-    async def submit_detached(
-        self, task: BaseTask, *, execution_id: UUID | None = None
-    ) -> DetachedHandle:
-        self.spawn_attempts += 1
-        raise RuntimeError("backend refused the spawn")
+async def _plan(registry: InMemoryRegistry, roots: list[BaseTask]) -> UUID:
+    deployment_id = registry.add_deployment(app_name="app")
+    build_id = registry.build_create(root_task_ids=[str(r.id) for r in roots]).id
+    await register_plan_aio(
+        registry,
+        build_id,
+        await walk_aio(roots),
+        deployment_id=deployment_id,
+        settings={},
+    )
+    registry.build_set_reactive_meta(build_id, app_name="app")
+    return build_id
 
 
-class TestAttemptBudget:
-    """``TickConfig.max_attempts``: a per-build, per-task budget on starts.
+class InterruptingExecutor(FakeDetachedExecutor):
+    """Every execution records its ref, then reports INTERRUPTED — a task
+    that checkpoints and asks to be resumed on every run (the Modal
+    runner's ``interrupted`` report)."""
 
-    It exists because a backend's function-level retries only cover
-    exceptions *inside* the container. Everything a tick observes — a spawn
-    that never produced a container, an execution the backend killed, a
-    claim that lapsed under a vanished worker — is outside that, and used
-    to end a FAIL_FAST build on the first occurrence.
-    """
+    def __init__(self, *, interrupt_runs: int | None = None, **kwargs) -> None:
+        super().__init__(workers=True, **kwargs)
+        # None: every run is interrupted; n: the first n runs are.
+        self.interrupt_runs = interrupt_runs
+        self.runs = 0
 
-    async def test_spawn_failure_under_budget_is_retried_then_exhausts(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The headline case, both halves: the first spawn failure is
-        retried, the second exhausts the 2-attempt budget and fails the
-        build — bounded, not a loop."""
-        (root,) = _chain("budget-spawn-fail")
-        executor = SpawnFailingExecutor()
-        registry, _ = _setup([root], auto_complete=False, executor=executor)
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,  # max_attempts=2, FAIL_FAST
-        )
-
-        assert executor.spawn_attempts == 2
-        assert summary.retried == 1
-        assert summary.retry_exhausted == 1
-        assert summary.failed_recorded == 2
-        assert summary.terminal_status == "failed"
-        assert registry.build_status == "failed"
-        # Each spawn's two starts (claim + ref-recording) collapse into one
-        # attempt, so two attempts is what the budget counted.
-        assert registry.attempt_count(str(root.id)) == 2
-
-    async def test_probed_dead_execution_under_budget_is_respawned(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """An execution the backend reports FAILED is retried while the
-        budget allows — and FAIL_FAST does not kill the build over the
-        failure recorded on the way there."""
-        (root,) = _chain("budget-probe-retry")
-        executor = FakeTickExecutor(statuses={"fc-oom": DetachedExecutionStatus.FAILED})
-        registry, _ = _setup([root], auto_complete=False, executor=executor)
-        registry.add_task(
-            str(root.id),
-            status="running",
-            executor="fake",
-            executor_ref="fc-oom",
-            attempt_count=1,
-        )
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,
-        )
-
-        assert summary.retried == 1
-        assert summary.failed_recorded == 1
-        assert summary.spawned == 1
-        assert executor.spawned == [root.id]
-        # FAIL_FAST reads the pre-action frontier snapshot, so the failure
-        # recorded and retried inside one pass never counts as a
-        # build-killing failure.
-        assert summary.terminal_status is None
-        assert registry.build_status == "running"
-        assert registry.statuses[str(root.id)] == "running"
-
-    async def test_at_budget_the_tick_declines_and_says_why(
-        self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """Budget spent: no respawn, and a message naming the task, the
-        count, the budget and the escape that actually works."""
-        (root,) = _chain("budget-probe-exhausted")
-        executor = FakeTickExecutor(
-            statuses={"fc-dead": DetachedExecutionStatus.FAILED}
-        )
-        registry, _ = _setup([root], auto_complete=False, executor=executor)
-        registry.add_task(
-            str(root.id),
-            status="running",
-            executor="fake",
-            executor_ref="fc-dead",
-            attempt_count=2,
-        )
-
-        with caplog.at_level("ERROR"):
-            summary = await run_tick_aio(
-                uuid4(),
-                registry=registry,
-                task_executor=executor,
-                config=FAST_TICK,
+    async def _worker(self, task, execution_id, plan_id, deployment_id, ref):
+        self.runs += 1
+        if self.interrupt_runs is not None and self.runs > self.interrupt_runs:
+            return await super()._worker(
+                task, execution_id, plan_id, deployment_id, ref
             )
+        registry = self.registry
+        assert registry is not None and plan_id is not None
+        await registry.member_start_aio(
+            plan_id, str(task.id), execution_id=execution_id, claim=False
+        )
+        registry.member_interrupt(
+            plan_id,
+            str(task.id),
+            execution_id=execution_id,
+            error_message="asked to be resumed near its timeout",
+        )
+        self._wake(plan_id)
+        return None
 
-        assert summary.retried == 0
-        assert summary.retry_exhausted == 1
-        assert executor.spawned == []
-        assert summary.terminal_status == "failed"
-        assert ("retry", str(root.id)) not in registry.calls
-        messages = "\n".join(record.getMessage() for record in caplog.records)
-        assert str(root.id) in messages
-        assert "will NOT be retried" in messages
-        assert "2 of 2 allowed attempt(s) spent" in messages
-        # The escape is the re-trigger, and the message must not leave the
-        # reader thinking a bare retry would have done.
-        assert "RE-TRIGGER THIS BUILD" in messages
-        assert "starts a new round and resets every task's attempt count" in messages
-        assert "Retrying the task on its own does NOT reset the count" in messages
-        assert 'tick_kwargs={"max_attempts": 4}' in messages
 
-    async def test_bare_retry_at_budget_is_refused_and_names_the_re_trigger(
-        self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The trap: a *bare* retry of a task already at budget.
+class LapsingExecutor(FakeDetachedExecutor):
+    """Every execution records its start, then its worker dies without a
+    report: the claim is granted, never ended, and its expiry passes (moved
+    into the past here instead of waiting out a TTL)."""
 
-        The retry succeeds server-side and the task returns to PENDING, but
-        it records no BUILD_RESUMED, so the round the count is measured
-        against is unchanged and the scheduler would never start it. The
-        distinction from a re-trigger (which does reset) is the whole
-        reason this message exists.
-        """
-        (root,) = _chain("budget-operator-retry")
-        registry, executor = _setup([root], auto_complete=False)
-        # Exactly what `stardag tasks retry` / the UI's Retry leaves behind:
-        # pending again, with the attempts already spent.
-        registry.add_task(str(root.id), status="pending", attempt_count=2)
+    def __init__(self, *, lapse_runs: int | None = None, **kwargs) -> None:
+        super().__init__(workers=True, **kwargs)
+        # None: every run lapses; n: the first n runs do.
+        self.lapse_runs = lapse_runs
+        self.runs = 0
 
-        with caplog.at_level("ERROR"):
-            summary = await run_tick_aio(
-                uuid4(),
-                registry=registry,
-                task_executor=executor,
-                config=FAST_TICK,
+    async def _worker(self, task, execution_id, plan_id, deployment_id, ref):
+        self.runs += 1
+        if self.lapse_runs is not None and self.runs > self.lapse_runs:
+            return await super()._worker(
+                task, execution_id, plan_id, deployment_id, ref
             )
+        registry = self.registry
+        assert isinstance(registry, InMemoryRegistry) and plan_id is not None
+        await registry.member_start_aio(
+            plan_id, str(task.id), execution_id=execution_id, claim=False
+        )
+        row = registry.tasks[str(task.id)]
+        assert row.execution_id == execution_id
+        row.claim_expires_at = registry.now() - timedelta(seconds=1)
+        self._wake(plan_id)
+        return None
 
-        assert summary.budget_denied == 1
-        assert summary.retried == 0
-        assert executor.spawned == []
-        assert ("start_claim", str(root.id)) not in registry.calls
-        assert summary.terminal_status == "failed"
-        messages = "\n".join(record.getMessage() for record in caplog.records)
-        assert str(root.id) in messages
-        assert "a BARE RETRY put it back" in messages
-        assert "That retry SUCCEEDED" in messages
-        assert "a bare retry does not start a new build round" in messages
-        assert "What you wanted is a RE-TRIGGER of this build" in messages
-        # The operator reads the task, not only the tick's logs.
-        reason = registry.fail_reasons[str(root.id)][0]
-        assert reason is not None
-        assert "Attempt budget spent (2 of 2 allowed attempt(s)" in reason
-        assert "A bare retry does not reset it" in reason
-        assert "re-trigger this build" in reason
 
-    async def test_a_re_trigger_starts_a_new_round_and_resets_the_budget(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+async def _drive(
+    registry: InMemoryRegistry,
+    build_id: UUID,
+    executor: FakeDetachedExecutor,
+    config: TickConfig,
+) -> TickSummary:
+    summary = await run_tick_aio(
+        build_id, registry=registry, task_executor=executor, config=config
+    )
+    await executor.drain()
+    return summary
+
+
+class TestTheLedgerCounts:
+    """The fake serves the counts the server's frontier serves."""
+
+    async def test_interruptions_and_attempts_are_counted_over_the_build(
+        self, default_in_memory_fs_target: Target
     ):
-        """The escape both exhaustion messages point at, end to end.
-
-        A re-trigger of an existing build id records BUILD_RESUMED *before*
-        its discovery retries the failed tasks, so the round boundary lands
-        ahead of them and they arrive at zero — the same task the tick
-        refused a moment ago is now an ordinary spawn candidate.
-        """
-        build_id = uuid4()
-        (root,) = _chain("budget-round-reset")
-        registry, executor = _setup([root], auto_complete=False)
-        registry.add_task(str(root.id), status="pending", attempt_count=2)
-
-        refused = await run_tick_aio(
-            build_id,
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"counted-{new_id()}")
+        build_id = await _plan(registry, [task])
+        plan_id = registry.active_plan(build_id).id  # type: ignore[union-attr]
+        for _ in range(2):
+            execution_id = new_id()
+            registry.member_start(plan_id, str(task.id), execution_id=execution_id)
+            registry.member_interrupt(plan_id, str(task.id), execution_id=execution_id)
+        (member,) = registry.build_get_frontier(build_id).runnable
+        assert (member.status, member.attempts, member.interruptions) == (
+            "interrupted",
+            2,
+            2,
         )
 
-        assert refused.budget_denied == 1
-        assert executor.spawned == []
-        assert registry.build_status == "failed"
-
-        # Exactly what ``_trigger_reactive`` does, in exactly that order:
-        # resume the build (the round boundary), then let discovery reset
-        # the failed task to pending.
-        await registry.build_resume_aio(build_id)
-        await registry.task_retry_aio(build_id, root)
-        assert registry.attempt_count(str(root.id)) == 0
-
-        resumed = await run_tick_aio(
-            build_id,
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,
-        )
-
-        assert resumed.budget_denied == 0
-        assert resumed.spawned == 1
-        assert executor.spawned == [root.id]
-        # One attempt into the new round (the spawn's claim + ref starts
-        # collapse), with the previous round's two no longer counted.
-        assert registry.attempt_count(str(root.id)) == 1
-
-    async def test_a_zero_attempt_count_never_denies_a_start(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    async def test_a_preempted_end_counts_once_and_a_failed_spawn_is_an_attempt(
+        self, default_in_memory_fs_target: Target
     ):
-        """0 is "not attempted in this build", never "out of budget" — even
-        with retries switched off entirely."""
-        (root,) = _chain("budget-zero-count")
-        registry, executor = _setup([root], auto_complete=False)
-        registry.add_task(str(root.id), status="pending", attempt_count=0)
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"preempted-{new_id()}")
+        build_id = await _plan(registry, [task])
+        plan_id = registry.active_plan(build_id).id  # type: ignore[union-attr]
+        first = new_id()
+        registry.member_start(plan_id, str(task.id), execution_id=first)
+        registry.member_interrupt(plan_id, str(task.id), execution_id=first)
+        # A preemption's restart that ends interrupted: one execution, and
+        # its claim release and its end both say so — counted once.
+        registry.executions[first].outcome = "preempted"
+        assert registry.attempt_counts(build_id, str(task.id)) == (1, 1)
+        second = new_id()
+        registry.member_start(plan_id, str(task.id), execution_id=second)
+        registry.member_fail(plan_id, str(task.id), execution_id=second)
+        assert registry.attempt_counts(build_id, str(task.id)) == (2, 1)
 
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=1
-            ),
-        )
-
-        assert summary.budget_denied == 0
-        assert summary.spawned == 1
-        assert executor.spawned == [root.id]
-
-    async def test_suspended_resumption_is_never_budget_gated(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    async def test_another_builds_executions_are_not_counted(
+        self, default_in_memory_fs_target: Target
     ):
-        """Resuming a dynamic-dependency yield records a fresh start, so a
-        suspend-heavy task is "over budget" while perfectly healthy. Gating
-        it would cap dynamic dependencies, not retries."""
-        (root,) = _chain("budget-suspended")
-        registry, executor = _setup([root], auto_complete=False)
-        registry.add_task(str(root.id), status="suspended", attempt_count=5)
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"shared-{new_id()}")
+        first_build = await _plan(registry, [task])
+        plan_id = registry.active_plan(first_build).id  # type: ignore[union-attr]
+        execution_id = new_id()
+        registry.member_start(plan_id, str(task.id), execution_id=execution_id)
+        registry.member_interrupt(plan_id, str(task.id), execution_id=execution_id)
+        second_build = await _plan(registry, [task])
+        (member,) = registry.build_get_frontier(second_build).runnable
+        assert (member.attempts, member.interruptions) == (0, 0)
 
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=2
-            ),
-        )
 
-        assert summary.budget_denied == 0
-        assert summary.spawned == 1
-        assert executor.spawned == [root.id]
-
-    async def test_unrehydratable_task_never_spends_the_budget(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+class TestAFailedMember:
+    async def test_a_worker_reported_failure_is_not_retried(
+        self, default_in_memory_fs_target: Target
     ):
-        """A task whose object cannot be resolved fails deterministically:
-        the second reading finds the same absence. Retrying it would burn
-        the budget to arrive at the same failure, later."""
-        (root,) = _chain("budget-no-object")
-        registry, executor = _setup([root], auto_complete=False)
-        registry.metadata_bodies.pop(str(root.id), None)  # nothing to rebuild from
+        """Case (a): the fail mode decides, the tick does not retry. The
+        build stalls on the failure and fails."""
 
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,
-        )
+        class Raising(SyncOnlyTask):
+            def run(self) -> None:
+                raise RuntimeError("deterministic")
 
-        assert summary.failed_recorded == 1
-        assert summary.retried == 0
-        assert summary.retry_exhausted == 0
-        assert ("retry", str(root.id)) not in registry.calls
-        assert registry.attempt_count(str(root.id)) == 0
+        registry = InMemoryRegistry()
+        task = Raising(name=f"fails-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        summary = await _drive(registry, build_id, executor, _config())
+        assert len(executor.spawns) == 1
+        assert registry.status_of(task.id) == "failed"
         assert summary.terminal_status == "failed"
 
-    async def test_max_attempts_one_records_the_failure_and_never_respawns(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+
+class TestTheInterruptionBudget:
+    async def test_an_interrupted_member_under_budget_is_restarted(
+        self, default_in_memory_fs_target: Target
     ):
-        """The pre-``max_attempts`` behaviour, still available verbatim."""
-        (root,) = _chain("budget-disabled")
-        executor = SpawnFailingExecutor()
-        registry, _ = _setup([root], auto_complete=False, executor=executor)
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=1
-            ),
-        )
-
-        assert executor.spawn_attempts == 1
-        assert summary.retried == 0
-        # Not "exhausted": nothing was budgeted away, retries are off.
-        assert summary.retry_exhausted == 0
-        assert summary.terminal_status == "failed"
-
-    async def test_a_registry_that_cannot_count_attempts_never_retries(
-        self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """A server predating ``attempt_count`` reports nothing, so no
-        budget can bound a retry loop. Degrade to the old behaviour rather
-        than to an unbounded one — and say so, because a configured retry
-        policy silently doing nothing is its own trap."""
-        (root,) = _chain("budget-old-server")
-        executor = SpawnFailingExecutor()
-        registry, _ = _setup([root], auto_complete=False, executor=executor)
-        registry.serves_attempt_counts = False
-
-        with caplog.at_level("WARNING"):
-            summary = await run_tick_aio(
-                uuid4(),
-                registry=registry,
-                task_executor=executor,
-                config=FAST_TICK,
-            )
-
-        assert executor.spawn_attempts == 1
-        assert summary.retried == 0
-        assert summary.retry_exhausted == 0
-        assert summary.budget_denied == 0
-        assert summary.terminal_status == "failed"
-        messages = "\n".join(record.getMessage() for record in caplog.records)
-        assert "does not report per-round attempt counts" in messages
-        assert "Upgrade stardag-api" in messages
-
-    async def test_summary_counters_are_reported_to_the_registry(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The budget counters ride the persisted TickSummary, so "why did
-        this build fail on a transient error?" is answerable without logs."""
-        (root,) = _chain("budget-summary")
-        executor = SpawnFailingExecutor()
-        registry, _ = _setup([root], auto_complete=False, executor=executor)
-
-        await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,
-        )
-
-        reported = registry.reported_tick_summaries[-1]
-        assert reported["retried"] == 1
-        assert reported["retry_exhausted"] == 1
-        assert reported["budget_denied"] == 0
-
-
-class TestInterruptedTasks:
-    """What a tick does with a task the platform interrupted.
-
-    An interruption is the execution backend taking a container away — a
-    function timeout, a reclaimed instance — reported by the dying worker
-    in its grace window. It is not a failure, so it must not fail a
-    FAIL_FAST build; it is not running, so it holds no claim; and it is
-    still the scheduler's to act on, which is what these tests pin.
-
-    There is no policy to configure: the status is written only for a
-    task that raised ``ResumableInterruption``, so reaching this code means
-    the task asked. An interruption a task did not catch never gets here —
-    the worker reports nothing, the execution dies, and a later pass
-    records an ordinary retryable failure.
-    """
-
-    async def test_an_interrupted_task_is_resumed(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """No configuration involved: the status exists only because a
-        worker asked to be resumed, so the tick resumes it."""
-        (root,) = _chain("interrupted-default")
-        registry, executor = _setup([root], auto_complete=True)
-        registry.statuses[str(root.id)] = "interrupted"
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,
-        )
-
-        assert summary.interruptions_restarted == 1
-        assert summary.interruptions_failed == 0
-        assert summary.failed_recorded == 0
-        assert ("fail", str(root.id)) not in registry.calls
-        assert executor.spawned == [root.id]
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"resumed-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = InterruptingExecutor(registry=registry, interrupt_runs=2)
+        summary = await _drive(registry, build_id, executor, _config())
+        assert executor.runs == 3
+        assert summary.interruptions_exhausted == 0
         assert summary.terminal_status == "completed"
 
-    async def test_a_resumption_request_respawns_without_a_failure(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    async def test_a_task_interrupted_on_every_run_is_bounded(
+        self, default_in_memory_fs_target: Target
     ):
-        """An INTERRUPTED task is one that asked to be resumed, so it goes
-        straight back to the frontier with no failure in its history."""
-        (root,) = _chain("interrupted-restart")
-        registry, executor = _setup([root], auto_complete=True)
-        registry.statuses[str(root.id)] = "interrupted"
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.3,
-                poll_interval_seconds=0.01,
-            ),
+        """Case (b): without the cap this restarts forever. With
+        ``max_interruptions=3`` it runs three times, then the tick records
+        a failure naming the count and the build fails per its fail mode."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"forever-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = InterruptingExecutor(registry=registry)
+        summary = await _drive(
+            registry, build_id, executor, _config(max_interruptions=3)
         )
-
-        assert summary.interruptions_restarted == 1
-        assert summary.interruptions_failed == 0
-        assert summary.failed_recorded == 0
-        assert ("fail", str(root.id)) not in registry.calls
-        assert executor.spawned == [root.id]
-        assert summary.terminal_status == "completed"
-
-    async def test_resumption_is_bounded_by_its_own_budget(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """Exempt from the attempt budget does not mean unbounded: a task
-        that times out forever must stop, with a message naming the knob."""
-        (root,) = _chain("interrupted-exhausted")
-        registry, executor = _setup([root], auto_complete=True)
-        registry.add_task(str(root.id), status="interrupted", interrupt_count=3)
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.3,
-                poll_interval_seconds=0.01,
-                max_interruptions=3,
-            ),
-        )
-
+        assert executor.runs == 3
         assert summary.interruptions_exhausted == 1
-        assert summary.interruptions_restarted == 0
-        assert executor.spawned == []
-        reason = registry.fail_reasons[str(root.id)][-1] or ""
-        assert "Interruption budget spent (3 of 3" in reason
-        assert "max_interruptions" in reason
-
-    async def test_interruptions_do_not_spend_the_attempt_budget(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The property the whole separate budget exists for. Two
-        interruptions with ``max_attempts=2`` — a task charged for them
-        would already be refused a start."""
-        (root,) = _chain("interrupted-not-an-attempt")
-        registry, executor = _setup([root], auto_complete=True)
-        registry.add_task(str(root.id), status="interrupted", interrupt_count=2)
-        assert registry.attempt_count(str(root.id)) == 1
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.3,
-                poll_interval_seconds=0.01,
-                max_attempts=2,
-                max_interruptions=10,
-            ),
-        )
-
-        assert summary.interruptions_restarted == 1
-        assert summary.budget_denied == 0
-        assert executor.spawned == [root.id]
-
-    async def test_a_live_ref_is_re_probed_until_it_is_not(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """An interrupted task whose execution still probes as live is left
-        alone — the backend may be retrying the input under the same ref,
-        and spawning would run it twice.
-
-        **But "left alone" must not mean "abandoned".** Nothing will ever
-        emit an event when that ref stops being live: the worker that would
-        have reported is dead, and an interrupted task produces nothing
-        further. A tick that lingered on the wake-up flag here would stall
-        the build until the watchdog — which is off by default. So the pass
-        re-probes instead, and picks the task up as soon as the ref
-        resolves.
-
-        The executor below answers RUNNING once and FAILED after, which is
-        exactly the shape of the race this guards: the interruption is
-        reported inside the grace window and wakes a tick immediately, so
-        the probe can easily land before the call has finished unwinding.
-        """
-        (root,) = _chain("interrupted-backend-retry")
-
-        class SettlingExecutor(FakeTickExecutor):
-            probes = 0
-
-            async def detached_status(self, task, executor, ref):
-                SettlingExecutor.probes += 1
-                if SettlingExecutor.probes == 1:
-                    return DetachedExecutionStatus.RUNNING
-                return DetachedExecutionStatus.FAILED
-
-        registry, executor = _setup(
-            [root], auto_complete=True, executor=SettlingExecutor()
-        )
-        registry.add_task(
-            str(root.id),
-            status="interrupted",
-            executor="fake",
-            executor_ref="fc-live",
-        )
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=FAST_TICK,
-        )
-
-        # It waited on the first probe...
-        assert summary.interruptions_backend_retrying >= 1
-        assert SettlingExecutor.probes >= 2, "the tick stopped re-probing"
-        # ...and resumed the task once the ref resolved, rather than
-        # lingering out with the build stalled.
-        assert summary.interruptions_restarted == 1
-        assert executor.spawned == [root.id]
-        assert summary.terminal_status == "completed"
-
-    async def test_a_live_ref_is_not_spawned_in_the_same_pass(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The other half: while the ref stays live, nothing is spawned.
-        A permanently-live ref lingers out rather than duplicating the
-        execution."""
-        (root,) = _chain("interrupted-still-live")
-        registry, executor = _setup(
-            [root],
-            auto_complete=False,
-            executor=FakeTickExecutor(
-                statuses={"fc-live": DetachedExecutionStatus.RUNNING}
-            ),
-        )
-        registry.add_task(
-            str(root.id),
-            status="interrupted",
-            executor="fake",
-            executor_ref="fc-live",
-        )
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(linger_seconds=0.1, poll_interval_seconds=0.02),
-        )
-
-        assert summary.interruptions_backend_retrying >= 1
-        assert summary.interruptions_restarted == 0
-        assert executor.spawned == []
-        assert registry.statuses[str(root.id)] == "interrupted"
-
-    async def test_a_dead_ref_does_not_block_the_restart(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The control for the guard above: a ref that probes FAILED is a
-        finished execution, so the task is the scheduler's to start."""
-        (root,) = _chain("interrupted-dead-ref")
-        registry, executor = _setup(
-            [root],
-            auto_complete=True,
-            executor=FakeTickExecutor(
-                statuses={"fc-dead": DetachedExecutionStatus.FAILED}
-            ),
-        )
-        registry.add_task(
-            str(root.id),
-            status="interrupted",
-            executor="fake",
-            executor_ref="fc-dead",
-        )
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.3,
-                poll_interval_seconds=0.01,
-            ),
-        )
-
-        assert summary.interruptions_backend_retrying == 0
-        assert summary.interruptions_restarted == 1
-        assert executor.spawned == [root.id]
-
-    async def test_unknown_probe_does_not_stall_the_task(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """UNKNOWN is deliberately NOT treated as "hands off", unlike the
-        RUNNING-task path. An interrupted task holds no claim and is
-        nobody else's to run, and an executor that does not recognise the
-        recorded ref's backend answers UNKNOWN forever — so waiting on it
-        would wedge the build rather than protect it."""
-        (root,) = _chain("interrupted-unknown-ref")
-        # FakeTickExecutor answers UNKNOWN for any ref it was not told about.
-        registry, executor = _setup([root], auto_complete=True)
-        registry.add_task(
-            str(root.id),
-            status="interrupted",
-            executor="some-other-backend",
-            executor_ref="ref-we-cannot-probe",
-        )
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.3,
-                poll_interval_seconds=0.01,
-            ),
-        )
-
-        assert summary.interruptions_backend_retrying == 0
-        assert executor.spawned == [root.id]
-
-    async def test_no_interrupt_counter_falls_back_to_the_attempt_budget(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """A server predating ``interrupt_count`` cannot bound a resume
-        loop, so resumption degrades to the bounded thing rather than to an
-        unbounded one."""
-        (root,) = _chain("interrupted-no-counter")
-        registry, executor = _setup([root], auto_complete=True)
-        registry.statuses[str(root.id)] = "interrupted"
-        registry.serves_interrupt_counts = False
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.3,
-                poll_interval_seconds=0.01,
-            ),
-        )
-
-        assert summary.interruptions_restarted == 0
-        assert summary.interruptions_failed == 1
-
-    async def test_an_interruption_does_not_fail_a_fail_fast_build(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """The headline property, stated directly. Under FAIL_FAST a single
-        FAILED task kills the build on the next pass — which is exactly
-        what must not happen when the platform, not the task, ended the
-        run. The dep is interrupted and the build still completes."""
-        dep, root = _chain("ff-dep", "ff-root")
-        registry, executor = _setup([dep, root], auto_complete=True)
-        registry.statuses[str(dep.id)] = "interrupted"
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.3,
-                poll_interval_seconds=0.01,
-                fail_mode=FailMode.FAIL_FAST,
-            ),
-        )
-
-        assert summary.terminal_status == "completed"
-        assert registry.build_status == "completed"
-
-    async def test_fail_fast_cancels_an_interrupted_task(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """An interrupted task may still have a live execution — that is
-        the premise of the backend-retry guard — so a dying build must
-        cancel it, and must not leave it INTERRUPTED.
-
-        Left behind it is a wedge for every other build gated on it: an
-        INTERRUPTED task holds no claim a neighbour can see lapse and is not
-        one of the statuses a neighbour may reset, where a CANCELLED task is
-        reset and run.
-        """
-        # Siblings, not a chain: a failed *upstream* would gate the
-        # interrupted task out of `actionable` and the test would pass for
-        # the wrong reason.
-        broken = SyncOnlyTask(name="ff-cancel-broken", deps=())
-        resuming = SyncOnlyTask(name="ff-cancel-resuming", deps=())
-        root = SyncOnlyTask(name="ff-cancel-root", deps=(broken, resuming))
-        registry, executor = _setup(
-            [broken, resuming, root],
-            auto_complete=False,
-            executor=FakeTickExecutor(
-                statuses={"fc-live": DetachedExecutionStatus.RUNNING}
-            ),
-        )
-        registry.statuses[str(broken.id)] = "failed"
-        registry.add_task(
-            str(resuming.id),
-            status="interrupted",
-            executor="fake",
-            executor_ref="fc-live",
-        )
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            config=TickConfig(
-                linger_seconds=0.05,
-                poll_interval_seconds=0.02,
-                fail_mode=FailMode.FAIL_FAST,
-            ),
-        )
-
+        (fail,) = registry.calls_to("member_fail", task_id=task.id)
+        assert "Interrupted 3 times" in fail["error_message"]
+        assert "max_interruptions=3" in fail["error_message"]
+        assert registry.status_of(task.id) == "failed"
+        assert any(e.type == "TASK_FAILED" for e in registry.events)
         assert summary.terminal_status == "failed"
-        # The claim is released by the failure itself, server-side. The
-        # tick stops no container (STA-81): the worker under ``fc-live``,
-        # if it is still alive, finds out at its next checkpoint.
-        assert executor.cancelled_refs == []
-        assert registry.statuses[str(resuming.id)] == "cancelled"
+        assert registry.builds[build_id].status == "failed"
+        # The failure is recorded under a claim and nothing was spawned for
+        # it: one more attempt on the ledger, no fourth run.
+        assert registry.attempt_counts(build_id, str(task.id)) == (4, 3)
 
-    async def test_interrupted_is_reset_by_a_re_trigger(self):
-        """``_RETRYABLE_STATUSES`` covers it, so discovery's
-        ``retry_failed`` picks up a task abandoned mid-interruption. Leave
-        it out and that task is unschedulable forever."""
-        assert "interrupted" in _RETRYABLE_STATUSES
+    async def test_the_default_budget_is_twenty(
+        self, default_in_memory_fs_target: Target
+    ):
+        assert TickConfig().max_interruptions == 20
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"default-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = InterruptingExecutor(registry=registry)
+        summary = await _drive(registry, build_id, executor, _config())
+        assert executor.runs == 20
+        assert summary.terminal_status == "failed"
+
+    async def test_an_operators_retry_gets_one_more_run(
+        self, default_in_memory_fs_target: Target
+    ):
+        """At the budget the member is FAILED; ``tasks retry`` makes it
+        PENDING, which is not gated: it runs once more, and an interruption
+        of that run fails it again (the count is over the build)."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"retried-{new_id()}")
+        build_id = await _plan(registry, [task])
+        plan_id = registry.active_plan(build_id).id  # type: ignore[union-attr]
+        for _ in range(2):
+            execution_id = new_id()
+            registry.member_start(plan_id, str(task.id), execution_id=execution_id)
+            registry.member_interrupt(plan_id, str(task.id), execution_id=execution_id)
+        registry.member_retry(plan_id, str(task.id))
+        executor = InterruptingExecutor(registry=registry)
+        summary = await _drive(
+            registry, build_id, executor, _config(max_interruptions=2)
+        )
+        assert executor.runs == 1
+        assert summary.interruptions_exhausted == 1
+        assert registry.status_of(task.id) == "failed"
+
+
+class TestTheExecutionBudget:
+    async def test_a_lapsed_claim_is_taken_over_and_counted(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The fake counts a takeover as the server does: every claiming
+        start is an execution, and the lapsed one is closed ``taken_over``."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"taken-over-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = LapsingExecutor(registry=registry, lapse_runs=2)
+        summary = await _drive(registry, build_id, executor, _config())
+        assert executor.runs == 3
+        assert summary.executions_exhausted == 0
+        assert summary.terminal_status == "completed"
+        assert registry.attempt_counts(build_id, str(task.id)) == (3, 0)
+        outcomes = sorted(
+            str(e.claim_outcome)
+            for e in registry.executions.values()
+            if e.task_id == str(task.id)
+        )
+        assert outcomes.count("taken_over") == 2
+
+    async def test_a_task_whose_claim_lapses_on_every_run_is_bounded(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Without the cap this is taken over forever, one container per
+        claim TTL. With ``max_executions=3`` it runs three times, then the
+        tick records a failure naming the count and the build fails per its
+        fail mode."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"lapses-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = LapsingExecutor(registry=registry)
+        summary = await _drive(registry, build_id, executor, _config(max_executions=3))
+        assert executor.runs == 3
+        assert summary.executions_exhausted == 1
+        assert summary.interruptions_exhausted == 0
+        (fail,) = registry.calls_to("member_fail", task_id=task.id)
+        assert "3 executions in this build" in fail["error_message"]
+        assert "lapsed without a report" in fail["error_message"]
+        assert "max_executions=3" in fail["error_message"]
+        assert registry.status_of(task.id) == "failed"
+        assert any(e.type == "TASK_FAILED" for e in registry.events)
+        assert summary.terminal_status == "failed"
+        assert registry.builds[build_id].status == "failed"
+        # The failure is recorded under a claim (the takeover of the third
+        # execution) and nothing was spawned for it.
+        assert registry.attempt_counts(build_id, str(task.id)) == (4, 0)
+
+    async def test_the_default_budget_is_twenty(
+        self, default_in_memory_fs_target: Target
+    ):
+        assert TickConfig().max_executions == 20
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"default-lapse-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = LapsingExecutor(registry=registry)
+        summary = await _drive(registry, build_id, executor, _config())
+        assert executor.runs == 20
+        assert summary.terminal_status == "failed"
+
+    async def test_without_the_gate_takeovers_do_not_stop(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The gate is what ends the loop: with the budget out of reach, a
+        task lapsing 30 times is taken over 30 times (and the 31st run,
+        which reports, completes it). Without that bound on the executor
+        the test would not terminate."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"ungated-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = LapsingExecutor(registry=registry, lapse_runs=30)
+        summary = await _drive(
+            registry, build_id, executor, _config(max_executions=10_000)
+        )
+        assert executor.runs == 31
+        assert summary.executions_exhausted == 0
+        assert summary.terminal_status == "completed"
+
+    async def test_an_operators_retry_gets_one_more_run(
+        self, default_in_memory_fs_target: Target
+    ):
+        """At the budget the member is FAILED; ``tasks retry`` makes it
+        PENDING, which is not gated even though the ledger already holds
+        more executions than the cap: it runs once more, and a lapse of that
+        run fails it again (the count is over the build)."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"retried-lapse-{new_id()}")
+        build_id = await _plan(registry, [task])
+        plan_id = registry.active_plan(build_id).id  # type: ignore[union-attr]
+        for _ in range(2):
+            execution_id = new_id()
+            registry.member_start(plan_id, str(task.id), execution_id=execution_id)
+            registry.member_fail(plan_id, str(task.id), execution_id=execution_id)
+            registry.member_retry(plan_id, str(task.id))
+        executor = LapsingExecutor(registry=registry)
+        summary = await _drive(registry, build_id, executor, _config(max_executions=2))
+        assert executor.runs == 1
+        assert summary.executions_exhausted == 1
+        assert registry.status_of(task.id) == "failed"
+
+    async def test_a_pending_first_run_is_never_gated(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"first-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        summary = await _drive(registry, build_id, executor, _config(max_executions=0))
+        assert len(executor.spawns) == 1
+        assert summary.terminal_status == "completed"
+
+    async def test_a_spawn_failure_is_still_retried_within_one_execution(
+        self, default_in_memory_fs_target: Target
+    ):
+        """``max_attempts`` keeps its meaning: spawn tries of one claimed
+        execution. A spawn refused on its first try and accepted on its
+        second runs the task, under one execution."""
+
+        class FlakySpawn(FakeDetachedExecutor):
+            def __init__(self, **kwargs) -> None:
+                super().__init__(workers=True, **kwargs)
+                self.tries = 0
+
+            async def submit_detached(self, task, *, execution_id):
+                self.tries += 1
+                if self.tries == 1:
+                    raise RuntimeError("backend refused the spawn for a moment")
+                return await super().submit_detached(task, execution_id=execution_id)
+
+        assert TickConfig().max_attempts == 2
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"flaky-spawn-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = FlakySpawn(registry=registry)
+        summary = await _drive(registry, build_id, executor, _config(max_executions=1))
+        assert executor.tries == 2
+        assert summary.spawn_failed == 0
+        assert summary.terminal_status == "completed"
+        assert registry.attempt_counts(build_id, str(task.id)) == (1, 0)
+
+    async def test_the_interruption_budget_is_unaffected(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Restarting an INTERRUPTED member is not a takeover: a tight
+        execution budget does not gate it, the interruption budget does."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"interrupted-not-lapsed-{new_id()}")
+        build_id = await _plan(registry, [task])
+        executor = InterruptingExecutor(registry=registry, interrupt_runs=4)
+        summary = await _drive(registry, build_id, executor, _config(max_executions=2))
+        assert executor.runs == 5
+        assert summary.executions_exhausted == 0
+        assert summary.interruptions_exhausted == 0
+        assert summary.terminal_status == "completed"

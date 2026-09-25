@@ -1,98 +1,104 @@
 import { Handle, Position } from "@xyflow/react";
 import type { TaskStatus } from "../types/task";
-import type { LayoutDirection } from "./DagGraph";
-import { truncateLabel } from "./dagLayout";
+import { truncateLabel, type LayoutDirection } from "./dagLayout";
+import { Tooltip } from "./ui/Tooltip";
 
+/**
+ * A batch of plan members drawn as one node: same type, same level, same
+ * status (v1's fan-out grouping, done here on the client). Clicking it
+ * expands it back into its members.
+ */
 export interface BatchNodeData extends Record<string, unknown> {
   label: string;
+  taskType: string;
   count: number;
-  taskNamespace: string;
-  depth: number;
   status: TaskStatus;
+  // Every member filtered out by the table's filters.
+  isMuted: boolean;
   direction: LayoutDirection;
+  // Expand the batch into its members (click, Enter or Space).
+  onExpand?: () => void;
 }
 
-const STATUS_COLORS: Record<
-  string,
-  { bg: string; border: string; badge: string; text: string }
-> = {
+const STATUS_COLORS: Record<string, { bg: string; border: string; badge: string }> = {
   completed: {
     bg: "bg-green-50 dark:bg-green-900/20",
     border: "border-green-300 dark:border-green-700",
     badge: "bg-green-200 text-green-800 dark:bg-green-800 dark:text-green-200",
-    text: "text-green-700 dark:text-green-300",
   },
   running: {
     bg: "bg-blue-50 dark:bg-blue-900/20",
     border: "border-blue-300 dark:border-blue-700",
     badge: "bg-blue-200 text-blue-800 dark:bg-blue-800 dark:text-blue-200",
-    text: "text-blue-700 dark:text-blue-300",
   },
   failed: {
     bg: "bg-red-50 dark:bg-red-900/20",
     border: "border-red-300 dark:border-red-700",
     badge: "bg-red-200 text-red-800 dark:bg-red-800 dark:text-red-200",
-    text: "text-red-700 dark:text-red-300",
   },
   pending: {
     bg: "bg-gray-100 dark:bg-gray-800/80",
     border: "border-gray-300 dark:border-gray-600",
     badge: "bg-gray-300 text-gray-600 dark:bg-gray-600 dark:text-gray-300",
-    text: "text-gray-700 dark:text-gray-300",
-  },
-  unregistered: {
-    bg: "bg-gray-50 dark:bg-gray-900/30",
-    border: "border-dashed border-gray-300 dark:border-gray-600",
-    badge: "bg-gray-200 text-gray-400 dark:bg-gray-700 dark:text-gray-500",
-    text: "text-gray-400 dark:text-gray-500",
   },
 };
 
-function getStatusColors(status: string) {
-  return STATUS_COLORS[status] ?? STATUS_COLORS.pending;
-}
-
-interface BatchNodeProps {
-  data: BatchNodeData;
-}
-
-export function BatchNode({ data }: BatchNodeProps) {
+export function BatchNode({ data }: { data: BatchNodeData }) {
   const isHorizontal = data.direction === "LR";
-  const colors = getStatusColors(data.status);
-
+  const colors = STATUS_COLORS[data.status] ?? STATUS_COLORS.pending;
   return (
-    <div className="relative">
-      {/* Stacked card effect */}
+    <Tooltip
+      content={`${data.count} × ${data.taskType}, ${data.status} — click to expand`}
+    >
       <div
-        className={`absolute left-1 top-1 h-full w-full rounded-lg border-2 ${colors.border} opacity-50 ${colors.bg}`}
-      />
-      <div
-        className={`relative rounded-lg border-2 ${colors.border} ${colors.bg} px-3 py-2 shadow-md`}
+        role="button"
+        tabIndex={0}
+        aria-label={`Expand ${data.count} ${data.taskType} (${data.status})`}
+        className={`relative cursor-pointer rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+          data.isMuted ? "opacity-60" : ""
+        }`}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            e.stopPropagation();
+            data.onExpand?.();
+          }
+        }}
       >
-        <Handle
-          type="target"
-          position={isHorizontal ? Position.Left : Position.Top}
-          className="!bg-gray-400 dark:!bg-gray-500"
+        {/* Stacked-card effect */}
+        <div
+          className={`absolute top-1 left-1 h-full w-full rounded-lg border-2 opacity-50 ${colors.border} ${colors.bg}`}
         />
-        <div className="flex flex-col items-center gap-1 opacity-80">
-          <span className={`text-sm font-medium ${colors.text}`} title={data.label}>
-            {truncateLabel(data.label)}
-          </span>
-          <div className="flex items-center gap-1">
-            <span
-              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${colors.badge}`}
-            >
-              x{data.count}
+        <div
+          className={`relative rounded-lg border-2 px-3 py-2 shadow-md ${colors.border} ${colors.bg}`}
+        >
+          <Handle
+            type="target"
+            position={isHorizontal ? Position.Left : Position.Top}
+            className="!bg-gray-400 dark:!bg-gray-500"
+          />
+          <div className="flex flex-col items-center gap-1">
+            <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+              {truncateLabel(data.label)}
             </span>
-            <span className="text-[10px] uppercase opacity-70">{data.status}</span>
+            <div className="flex items-center gap-1">
+              <span
+                className={`rounded-full px-2 py-0.5 text-xs font-semibold ${colors.badge}`}
+              >
+                ×{data.count}
+              </span>
+              <span className="text-[10px] uppercase text-gray-600 dark:text-gray-300">
+                {data.status}
+              </span>
+            </div>
           </div>
+          <Handle
+            type="source"
+            position={isHorizontal ? Position.Right : Position.Bottom}
+            className="!bg-gray-400 dark:!bg-gray-500"
+          />
         </div>
-        <Handle
-          type="source"
-          position={isHorizontal ? Position.Right : Position.Bottom}
-          className="!bg-gray-400 dark:!bg-gray-500"
-        />
       </div>
-    </div>
+    </Tooltip>
   );
 }

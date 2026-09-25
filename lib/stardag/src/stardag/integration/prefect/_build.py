@@ -4,11 +4,14 @@ This module provides functions to build stardag tasks using Prefect for
 orchestration. Prefect handles scheduling and dependency management via
 its task submission system.
 
+With a registry, the build is registered like any resident build — the
+walk as a plan (roots first, post-order, sealed) — and every execution
+claims and reports under its own execution id, through the same
+:class:`~stardag.build._session.ResidentSession` the core engines use.
+
 TODO: Further interface alignment with stardag.build:
     - Return BuildSummary alongside/instead of futures dict
     - Add max_concurrent_discover parameter for DAG discovery optimization
-    - Consider global_lock_manager/global_lock_config support (complex - Prefect
-      has its own concurrency primitives via work pools and concurrency limits)
 """
 
 import asyncio
@@ -32,7 +35,20 @@ from stardag._core.base_task import (
     _has_custom_run_aio,
     flatten_task_struct,
 )
-from stardag.build import FailMode, TaskExecutionError, TaskExecutorABC
+from stardag.build import (
+    ExecutionMode,
+    FailMode,
+    TaskExecutionError,
+    TaskExecutorABC,
+)
+from stardag.build._base import (
+    BuildStopped,
+    ExecutorDetails,
+    in_process_executor_details,
+)
+from stardag.build._registration import walk_aio, yield_batches
+from stardag.build._session import ResidentSession
+from stardag.exceptions import APIError
 from stardag.integration.prefect._utils import format_key
 from stardag.registry import RegistryABC, registry_provider
 
@@ -47,7 +63,7 @@ class _PrefectTaskRunWrapper:
 
     This class handles the "run" phase of task execution within a Prefect flow,
     providing:
-    - Registry lifecycle calls (task_start, task_complete, task_fail)
+    - The execution's claim and its reports (complete, fail, yield)
     - Before/after execution callbacks for custom logging or artifacts
     - Artifact uploading after task completion
     - Local task execution (async or threaded) when no executor is provided
@@ -57,13 +73,11 @@ class _PrefectTaskRunWrapper:
     still handling registry tracking and callbacks locally within the Prefect flow.
 
     Args:
-        build_id: The build ID for registry tracking.
+        session: The build's registry session.
         task_executor: Optional TaskExecutorABC for delegating task execution to
             remote infrastructure (e.g., ModalTaskExecutor). When provided, tasks
             are submitted to this executor instead of running locally. When None,
             tasks execute locally using async (run_aio) or threaded (run) methods.
-        registry: Registry for tracking task lifecycle events (start, complete,
-            fail). Defaults to the registry from registry_provider.
         before_run_callback: Async callback invoked before each task executes.
             Useful for creating Prefect artifacts or custom logging.
         on_complete_callback: Async callback invoked after each task completes
@@ -77,21 +91,21 @@ class _PrefectTaskRunWrapper:
             modal_app_name="my-app",
             worker_selector=lambda task: "gpu" if needs_gpu(task) else "default",
         )
-        run_wrapper = _PrefectTaskRunWrapper(build_id=build_id, task_executor=modal_executor)
+        run_wrapper = _PrefectTaskRunWrapper(session, task_executor=modal_executor)
     """
 
     def __init__(
         self,
-        build_id: UUID,
+        session: ResidentSession,
         task_executor: TaskExecutorABC | None = None,
-        registry: RegistryABC | None = None,
         before_run_callback: AsyncRunCallback | None = None,
         on_complete_callback: AsyncRunCallback | None = None,
         fail_mode: FailMode = FailMode.FAIL_FAST,
     ):
-        self.build_id = build_id
+        self.session = session
         self.task_executor = task_executor
-        self.registry = registry or registry_provider.get()
+        self.execution_ids: dict[UUID, UUID | None] = {}
+        self.renewals: dict[UUID, typing.Any] = {}
         self.before_run_callback = before_run_callback
         self.on_complete_callback = on_complete_callback
         self.fail_mode = fail_mode
@@ -117,11 +131,25 @@ class _PrefectTaskRunWrapper:
             - Generator: Task has dynamic deps and is suspended (in-process).
             - TaskStruct: Task has dynamic deps but completed (cross-process).
         """
-        # Register before starting — the /start endpoint requires the task
-        # to exist in the build, and as of the discover-time-registration
-        # change `task_start_aio` no longer auto-registers.
-        await self.registry.task_register_aio(self.build_id, task)
-        await self.registry.task_start_aio(self.build_id, task)
+        outcome = await self.session.claim(
+            task,
+            claim_ttl_seconds=self.session.claim_config.in_process_ttl_seconds,
+            executor=await self._executor_details(task),
+        )
+        if outcome.kind == "completed":
+            return None
+        if outcome.kind == "build_stopped":
+            # Not this task's failure: nothing is reported against it (no
+            # claim was taken), and the flow's closing ``finish`` finds the
+            # build terminal and leaves its status standing.
+            raise BuildStopped(outcome.message)
+        if outcome.kind != "granted":
+            raise RuntimeError(outcome.message)
+        execution_id = outcome.execution_id
+        self.execution_ids[task.id] = execution_id
+        renewal = self.session.renewal(task, execution_id)
+        renewal.start()
+        self.renewals[task.id] = renewal
 
         if self.before_run_callback is not None:
             await self.before_run_callback(task)
@@ -152,15 +180,9 @@ class _PrefectTaskRunWrapper:
                 # and completing the task
                 return result
 
-            # Task completed successfully (result is None)
-            await self.registry.task_complete_aio(self.build_id, task)
-
-            # Upload artifacts if any
-            artifacts = await task.artifacts_aio()
-            if artifacts:
-                await self.registry.task_upload_artifacts_aio(
-                    self.build_id, task, artifacts
-                )
+            # Task completed successfully (result is None); complete()
+            # uploads the artifacts too.
+            await self.finished(task)
 
             if self.on_complete_callback is not None:
                 await self.on_complete_callback(task)
@@ -168,12 +190,51 @@ class _PrefectTaskRunWrapper:
             return None
 
         except Exception as e:
-            await self.registry.task_fail_aio(self.build_id, task, str(e))
-            if self.fail_mode == FailMode.FAIL_FAST:
-                raise
-            # For FAIL_ALL_COMPLETED, we still need to re-raise to mark task as failed
-            # in Prefect, but the build will continue with other tasks
+            self.execution_ids.pop(task.id, None)
+            await self._stop_renewal(task)
+            await self.session.fail(task, execution_id, str(e))
+            # Re-raised in every fail mode, so Prefect marks the task failed.
             raise
+
+    async def _executor_details(self, task: BaseTask) -> ExecutorDetails:
+        """Best-effort, like the resident engine's: a failure to describe
+        the executor never fails the claim."""
+        if self.task_executor is None:
+            # As ``_execute_locally`` runs it: async on the loop, sync in a
+            # thread — the execution modes the concurrent executor records.
+            mode = (
+                ExecutionMode.ASYNC_MAIN_LOOP
+                if _has_custom_run_aio(task)
+                else ExecutionMode.SYNC_THREAD
+            )
+            return in_process_executor_details(mode.value)
+        try:
+            return await self.task_executor.get_executor_details(task)
+        except Exception:
+            logger.debug(f"Executor details failed for {task.id}", exc_info=True)
+            return ExecutorDetails()
+
+    async def _stop_renewal(self, task: BaseTask) -> None:
+        renewal = self.renewals.pop(task.id, None)
+        if renewal is not None:
+            await renewal.stop()
+
+    async def finished(self, task: BaseTask) -> None:
+        """The execution of ``task`` completed."""
+        execution_id = self.execution_ids.pop(task.id, None)
+        await self._stop_renewal(task)
+        await self.session.complete(task, execution_id)
+
+    async def suspended(self, task: BaseTask, deps: list[BaseTask]) -> None:
+        """Register the dynamic deps a task yielded; its execution ends
+        here (the generator is dropped, and it re-runs once they are
+        built)."""
+        execution_id = self.execution_ids.pop(task.id, None)
+        await self._stop_renewal(task)
+        walk = await walk_aio(deps)
+        await self.session.send_yield(
+            task, execution_id, yield_batches(walk, deps, suspend=True)
+        )
 
 
 @flow
@@ -234,19 +295,20 @@ async def build_aio(
                     f"Invalid task at index {idx}: {task} (must be BaseTask)"
                 )
 
-    if registry is None:
-        registry = registry_provider.get()
-
-    # Start or resume build
-    if resume_build_id is not None:
-        build_id = resume_build_id
-    else:
-        build_id = await registry.build_start_aio(root_tasks=task_list)
+    session = ResidentSession(
+        registry if registry is not None else registry_provider.get()
+    )
+    walk = await walk_aio(task_list)
+    await session.open(
+        task_list,
+        app_name=task_executor.deployment_app_name() if task_executor else None,
+        resume_build_id=resume_build_id,
+    )
+    await session.register(walk)
 
     run_wrapper = _PrefectTaskRunWrapper(
-        build_id=build_id,
+        session,
         task_executor=task_executor,
-        registry=registry,
         before_run_callback=before_run_callback,
         on_complete_callback=on_complete_callback,
         fail_mode=fail_mode,
@@ -306,8 +368,12 @@ async def build_aio(
             if future is not None:
                 future.wait()
 
-    # Mark build as complete
-    await registry.build_complete_aio(build_id)
+    try:
+        await session.finish(None)
+    except APIError as e:
+        if e.code != "plan_incomplete":
+            raise
+        await session.finish(RuntimeError(f"The build did not complete: {e}"))
 
     return task_id_to_future  # type: ignore
 
@@ -441,6 +507,7 @@ async def _build_dag_recursive(
                             completed = [dep.complete() for dep in deps]
                             logger.debug(f"Deps: {deps}, completed: {completed}")
 
+                        await run_wrapper.suspended(task, deps)
                         return task.id, deps
                     else:
                         # Result is TaskStruct (cross-process, task already completed)
@@ -449,10 +516,12 @@ async def _build_dag_recursive(
                         task_struct: TaskStruct = result  # type: ignore[assignment]
                         deps = flatten_task_struct(task_struct)
                         logger.debug(f"Cross-process deps: {deps}")
+                        await run_wrapper.suspended(task, deps)
                         return task.id, deps
 
                 except StopIteration:
                     logger.debug("Task completed")
+                    await run_wrapper.finished(task)
                     return task.id, None
             return task.id, None
 

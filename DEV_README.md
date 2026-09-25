@@ -206,8 +206,31 @@ for the run. What the scenarios there assert:
 | `test_wide_fan_out`         | A layer wider than one pass may spawn — throttle, or stall?                             |
 | `test_scheduler_lease_live` | Does the lease serialize on real Postgres, and lapse on the real clock?                 |
 
-**Two apps are deployed, not one.** `registry-live-dag` runs everything
-except the watchdog sweep, which gets `registry-live-watchdog` to itself.
+The v2 design's scenario checklist (`docs/design/registry-v2/design.md`)
+names a test tier per scenario; the `live` rows each have a module named
+after the scenario id (the must-still-hold scenarios above keep their
+names). `plan.md`, I10, holds the mapping and each one's status.
+
+| Scenario             | The question it answers                                                                        |
+| -------------------- | ---------------------------------------------------------------------------------------------- |
+| `test_s1_*`          | Two scopes shape one completion differently — is it run once, from the claimant's own body?    |
+| `test_rollover` (S3) | A redeploy mid-build — does the build follow the live deployment?                              |
+| `test_s5_*`          | A completed target is deleted — does the next build observe it, invalidate, and re-run it?     |
+| `test_s6_*`          | A redeploy of unchanged code — a new scope, and nothing runs twice?                            |
+| `test_s7_*`          | An old deployment's worker yields after the switch — accepted, and restarted on new code?      |
+| `test_s8_*`          | Two settings scopes share a completion — one `task`, two instances, one execution?             |
+| `test_s14_*`         | A resume under new settings — a new plan in the same build, completions reused?                |
+| `test_s20_*`         | New code changes a root's id — is the build failed rather than silently re-planned?            |
+| `test_s21_*`         | A worker dies unreported — is its lapsed claim taken over, its ledger row left unended?        |
+| `test_s22_*`         | The yielding build is cancelled — does a scope-mate's closure admit the children and run them? |
+| `test_s24_*`         | Two instances of one completion in one scope — do they (correctly) not share yields?           |
+| `test_s26_*`         | A local driver with Modal workers — does it plan under the app's current deployment?           |
+| `test_s33_*`         | Two new deployments roll one build over — is the older one's seal refused?                     |
+| `test_s37_*`         | A deploy whose activation never landed — do its ticks stand down until the record is re-sent?  |
+
+**Several apps are deployed, not one.** `registry-live-dag` runs everything
+except the scenarios that drive a watchdog sweep: the sweep itself gets
+`registry-live-watchdog` to itself.
 The sweep lists running builds scoped by _reactive app name_, so a sweep
 driven against the shared app would spawn ticks for whatever else was
 running at that moment — waking the dormant builds that four other
@@ -215,7 +238,19 @@ scenarios assert cannot be woken by anything but the mechanism they test.
 They would not fail; they would quietly stop meaning anything. The
 environment stays shared, because it is the unit of teardown; only the app
 name separates them, and the image is identical so the extra deploy is
-seconds.
+seconds. A third, `registry-live-lapse`, exists for the same reason: a
+lapsed claim flags nothing, so S21's recovery is a watchdog sweep, which
+must reach that scenario's builds and no one else's. S37 needs no fourth
+app: it already deploys its own per-scenario rollover app
+(`registry-live-s37-late-record`), and its watchdog sweep runs against
+that one, isolating it the same way without a separate deploy.
+
+**The rollover scenarios deploy an app each**, several times, under several
+code ids (`_rollover.ROLLOVER_APP_NAMES`): a deploy moves every running
+build of its app to the new code, so two of them sharing an app would roll
+each other over. The deploying process names the app through
+`REGISTRY_LIVE_ROLLOVER_APP_NAME`; provisioning does not own those apps, but
+the log dump collects them.
 
 **The registry runs its own Postgres inside its own Modal container.** There
 is no database account to create, nothing to provision and nothing to clean
@@ -329,8 +364,9 @@ by hand while the other tier was still running. The artifact holds both marker
 files, one record per timeout with its boot probe — plus a JSON sidecar of the
 same facts, which is what the join reads, so rewriting a sentence in the record
 cannot silently break it — `verdicts.txt`, each attempt's pytest output, and
-`modal app logs` for all four apps — the registry, both scenario apps and the
-one `test_rollover` deploys for itself — with timestamps and container ids. The
+`modal app logs` for every app — the registry, the three provisioned scenario
+apps and the ones the rollover scenarios deploy for themselves — with
+timestamps and container ids. The
 registry's access log reports `duration` and `execution` separately per
 request, which is the line-level form of the same question — time spent queued
 against time spent in the handler.
@@ -806,30 +842,29 @@ for fixes and dependency floors.
 Bump `DEFAULT_SERVER_VERSION` in the same PR — the pin is what a fresh
 `stardag self-host up` gets.
 
-### Dropping support for older SDKs
+### SDK and server versions: upgraded together
 
-The hosted service always runs the latest API, so the compatibility case
-that actually happens is an **old SDK against a new API**. The server
-accepts every SDK version by default; the floor lives in
-`STARDAG_API_SDK_MINIMUM_VERSION` (see
-`app/stardag-api/src/stardag_api/sdk_compat.py`) and is published as
-`minimum_sdk_version` on `GET /api/v1/version`.
+There is no version gate in either direction on the v2 line. The SDK and
+the registry server are one release line and are upgraded together: the
+server does not read the client's version (the SDK sends a `User-Agent`
+for logs only, `registry/_api_http.py`) and has no minimum-SDK setting,
+and the SDK does not check the server's version before calling it.
+`GET /api/v2/version` reports `server_version` and `api_version` for
+humans and the UI, nothing more.
 
-Raising that floor is a product decision, not an implementation detail: it
-breaks working deployments on purpose. **An API change that raises
-`minimum_sdk_version` must say so in all three places a user could look:**
+A mismatch fails on the first call to a route the other side does not
+serve: a v2 SDK against a v1 registry gets a 404 on its first `/api/v2`
+request (`NotFoundError`, detail `"Not Found"`, which
+`stardag.exceptions.is_missing_route_error` tells apart from a
+resource-level 404), and a v1 SDK against a v2 registry gets the same on
+the removed `/api/v1` registry routes. The hosted service is upgraded
+server-first and the SDK tagged after it; a self-hoster upgrades the server
+and the SDK together. A change that breaks an existing SDK is therefore a
+release-line decision, recorded in `CHANGELOG.md` and `RELEASE_NOTES.md`,
+not a server setting. Crossing from v1, the v2 migration refuses to drop v1
+builds and tasks unless `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set for that
+migration run (`stardag self-host upgrade --accept-data-loss` does so).
 
-1. `CHANGELOG.md` — under the release's Registry API section, with the new
-   minimum and what stopped working below it.
-2. `RELEASE_NOTES.md` — under the SDK release that clears the bar, as a
-   migration note. This is the file users are pointed at when they upgrade.
-3. **The error the server returns** — which is automatic, provided you set
-   the value rather than special-casing anything: the 426 body names the
-   client's version, the required version and the upgrade command.
-
-A newer SDK against an older self-hosted API is not a supported
-configuration and nothing tries to keep it working — self-hosters upgrade
-the server and the SDK together.
 The image definition is `app/server.Dockerfile` (build context = repo root):
 
 ```bash
@@ -858,11 +893,46 @@ CI (`.github/workflows/publish-server-image.yml`) then:
 1. Builds the image and pushes it to
    `ghcr.io/stardag-dev/stardag-server:X.Y.Z` and `:latest`, with
    `STARDAG_SERVER_VERSION=X.Y.Z` baked in (surfaced at
-   `GET /api/v1/version`).
+   `GET /api/v2/version`).
 2. Creates a GitHub Release for the tag with the web UI (extracted from the
    pushed image, so it is byte-identical to what the image serves) attached
    as `stardag-ui-dist-X.Y.Z.tar.gz` (for deployments that serve the UI
    separately, e.g. from S3/CDN).
+
+### Pre-release
+
+Both `publish.yml` (SDK) and `publish-server-image.yml` (server image) also
+trigger on a release-candidate tag: `vX.Y.ZrcN` and `server-vX.Y.ZrcN`. Use
+one to get a build in front of a consumer before the final cut — e.g. to
+verify a v2-line pre-release end to end before committing to `X.Y.Z`:
+
+```bash
+# Server first, same order as a final release:
+git tag server-vX.Y.ZrcN && git push origin server-vX.Y.ZrcN
+git tag vX.Y.ZrcN && git push origin vX.Y.ZrcN
+```
+
+- **The server image publishes only `:X.Y.ZrcN`** — an rc never moves the
+  mutable `:latest` tag, so `--server-version latest` (and
+  `_latest_released_server_version`, the resolver behind it) never
+  resolves to one. That is a separate question from what a plain
+  `stardag self-host up`/`upgrade` deploys: those follow
+  `DEFAULT_SERVER_VERSION` (or the recorded deployment), and an SDK
+  release cut during this pre-release window intentionally points that
+  constant at the matching `X.Y.ZrcN` — see the comment above it. To
+  target the rc from a different SDK, pass it explicitly:
+  `stardag self-host up --server-version X.Y.ZrcN`.
+- **The SDK publishes to PyPI as a pre-release.** A plain `pip install
+stardag` still resolves to the last final release; a consumer gets the
+  rc only by pinning it exactly (`pip install stardag==X.Y.ZrcN`) or
+  passing `--pre`.
+- **Both GitHub Releases are marked pre-release**, so neither shows as the
+  repo's "Latest release", and `_latest_released_server_version` (the
+  `--server-version latest` resolver) skips them.
+- `DEFAULT_SERVER_VERSION`
+  (`lib/stardag/src/stardag/selfhost/_modal_app.py`) may point at an rc
+  while a release line is still in flight — see the comment above the
+  constant for when it moves to the final `X.Y.Z`.
 
 ### First release only: make the GHCR package public
 

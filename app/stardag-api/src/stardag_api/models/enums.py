@@ -1,4 +1,10 @@
-"""Enumeration types for database models."""
+"""Enumeration types for database models.
+
+Every enum below is stored as a **native Postgres enum** whose labels are
+the members' *values* (lowercase), the same spelling the API puts on the
+wire — so a status reads the same in a query, a log line and a response.
+See :func:`stardag_api.models.base.pg_enum`.
+"""
 
 import enum
 
@@ -21,32 +27,28 @@ class InviteStatus(str, enum.Enum):
 
 
 class TaskStatus(str, enum.Enum):
-    """Derived status for tasks, computed from events."""
+    """Global status of a completion (``task.status``).
 
-    UNREGISTERED = "unregistered"  # Phantom task, only known as a dependency
+    v1's ``UNREGISTERED`` (a phantom, known only as a dependency) is gone:
+    every ``task`` row is registered with a body on some instance.
+    """
+
     PENDING = "pending"
     RUNNING = "running"
-    SUSPENDED = "suspended"  # Waiting for dynamic dependencies
-    # The execution was taken away for a reason unrelated to the task's
-    # correctness — the platform hit its function timeout, or reclaimed the
-    # container. Not a failure and not terminal: the attempt ended, nothing
-    # is running, and the task is the scheduler's to start again.
-    #
-    # Shaped after SUSPENDED, which is the same kind of thing for a
-    # different reason: non-terminal, non-running, holds no execution
-    # claim, listed as actionable by the frontier, reset by a re-trigger.
-    # The distinction from FAILED is the whole point — "infrastructure took
-    # it" and "the task is broken" want opposite responses, and a build
-    # under FAIL_FAST must not die for the first.
-    INTERRUPTED = "interrupted"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
     SKIPPED = "skipped"
-    CANCELLED = "cancelled"  # Explicitly cancelled by user
+    # Waiting for its dynamic (yielded) children; holds no claim, and is
+    # re-run from scratch once they are COMPLETED.
+    SUSPENDED = "suspended"
+    # The platform took the execution away (function timeout, container
+    # reclaimed) — not a failure and not terminal; holds no claim.
+    INTERRUPTED = "interrupted"
 
 
 class BuildStatus(str, enum.Enum):
-    """Derived status for builds, computed from events."""
+    """Stored status of a build, driven by build events."""
 
     PENDING = "pending"
     RUNNING = "running"
@@ -56,46 +58,112 @@ class BuildStatus(str, enum.Enum):
     EXIT_EARLY = "exit_early"  # All remaining tasks running in other builds
 
 
+class DeploymentKind(str, enum.Enum):
+    """Where a deployment's code runs. Part of every deployment lookup, so a
+    local ``code_id`` can never collide with a Modal one."""
+
+    MODAL = "modal"
+    LOCAL = "local"
+
+
+class AdmittedBy(str, enum.Enum):
+    """How an instance became a member of a plan (``plan_member.admitted_by``)."""
+
+    ROOT = "root"  # the build's request
+    STATIC = "static"  # registered by the static phase (discovery walk)
+    DYNAMIC = "dynamic"  # yielded by a running parent
+    CLOSURE = "closure"  # reachable over edges from a member, admitted to close
+
+
+class ExclusionReason(str, enum.Enum):
+    """Why a plan member was given up on (``plan_member.excluded_reason``)."""
+
+    OPERATOR = "operator"  # an operator excluded it (STA-104)
+    DISCOVERY_FAILED = "discovery_failed"  # class not importable / requires() raised
+    UPSTREAM_EXCLUDED = "upstream_excluded"  # cascaded from an excluded upstream
+
+
+class ClaimOutcome(str, enum.Enum):
+    """How an execution's claim ended (``execution.claim_outcome``).
+
+    Written by the **server**, in ``transition_task()``, whenever the task
+    leaves RUNNING or the claim changes hands.
+    """
+
+    # The report that moved the task off RUNNING.
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SUSPENDED = "suspended"
+    INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
+    # A later claiming start took over the lapsed claim.
+    TAKEN_OVER = "taken_over"
+    # A lapsed claim closed by something other than a claiming start (e.g.
+    # an observed completion).
+    LAPSED = "lapsed"
+    # Released by a build's terminal transition (complete / fail / cancel).
+    RELEASED = "released"
+
+
+class ExecutionOutcome(str, enum.Enum):
+    """How an execution itself ended (``execution.outcome``).
+
+    Written only by the execution's own terminal report, or by an operator
+    stop — never inferred by the server.
+    """
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SUSPENDED = "suspended"
+    INTERRUPTED = "interrupted"
+    PREEMPTED = "preempted"
+    # Operator ends (``/executions/{id}/stopped``): the CLI stopped it, or
+    # could not and gives up on it (``lost``). Either way no later report of
+    # the execution is applied.
+    STOPPED = "stopped"
+    LOST = "lost"
+
+
 class EventType(str, enum.Enum):
     """Event types for the append-only event log."""
 
     # Build events
     BUILD_STARTED = "build_started"
-    BUILD_RESUMED = (
-        "build_resumed"  # Existing build picked up by sd.build(resume_build_id=...)
-    )
+    BUILD_RESUMED = "build_resumed"
     BUILD_COMPLETED = "build_completed"
     BUILD_FAILED = "build_failed"
     BUILD_CANCELLED = "build_cancelled"
-    BUILD_EXIT_EARLY = "build_exit_early"  # All remaining tasks running in other builds
+    BUILD_EXIT_EARLY = "build_exit_early"  # All remaining tasks running elsewhere
 
-    # Task events (within a build)
-    TASK_PENDING = "task_pending"
-    TASK_REFERENCED = (
-        "task_referenced"  # Task already existed, referenced by this build
-    )
+    # Task events
+    TASK_PENDING = "task_pending"  # a new completion was registered
+    TASK_REFERENCED = "task_referenced"  # an existing completion joined a plan
     TASK_STARTED = "task_started"
-    TASK_SUSPENDED = "task_suspended"  # Task waiting for dynamic dependencies
-    TASK_RESUMED = "task_resumed"  # Task resuming after dynamic deps complete
-    TASK_WAITING_FOR_LOCK = (
-        "task_waiting_for_lock"  # Blocked by global lock in another build
-    )
-    TASK_RETRIED = (
-        "task_retried"  # Failed/cancelled/skipped task reset to pending (retry)
-    )
+    TASK_SUSPENDED = "task_suspended"
+    TASK_RESUMED = "task_resumed"
+    TASK_RETRIED = "task_retried"
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
-    # Execution taken away by the platform, not by the task being wrong
-    # (function timeout, container reclaimed) — see TaskStatus.INTERRUPTED.
     TASK_INTERRUPTED = "task_interrupted"
-    # The platform took the container away but is restarting the *same*
-    # execution itself — a preemption. Deliberately has no TaskStatus of its
-    # own: the task is still running, still holds its claim and still has
-    # the executor ref the restart will reuse, so moving it anywhere would
-    # release a claim the restart is about to need. What it records is that
-    # a restart is now *due*, which is the one thing nothing could see
-    # before: a restart that never arrives used to be indistinguishable
-    # from an execution running happily. See services.status for the fold.
+    # The platform is restarting the same execution itself; no status of
+    # its own — the task stays RUNNING and keeps its claim.
     TASK_PREEMPTED = "task_preempted"
     TASK_SKIPPED = "task_skipped"
-    TASK_CANCELLED = "task_cancelled"  # Explicitly cancelled by user
+    TASK_CANCELLED = "task_cancelled"
+    # New in v2.
+    TASK_INVALIDATED = "task_invalidated"  # COMPLETED -> PENDING, target missing
+    TASK_EXCLUDED = "task_excluded"  # a plan member was given up on
+    TASK_OBSERVED_COMPLETE = "task_observed_complete"  # target found at discovery
+    TASK_STRUCTURE_DIVERGED = "task_structure_diverged"  # edges grew in-scope
+    TASK_YIELDED = "task_yielded"  # one applied /yield batch (carries batch_id)
+
+
+#: Build-level event types: they carry no ``plan_id`` (CHECK on ``event``).
+BUILD_EVENT_TYPES: tuple[EventType, ...] = (
+    EventType.BUILD_STARTED,
+    EventType.BUILD_RESUMED,
+    EventType.BUILD_COMPLETED,
+    EventType.BUILD_FAILED,
+    EventType.BUILD_CANCELLED,
+    EventType.BUILD_EXIT_EARLY,
+)

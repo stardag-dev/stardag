@@ -383,9 +383,10 @@ their own lifecycle to the registry — see [Orchestration on
 Modal](../concepts/modal-orchestration.md#detached-execution-and-self-reporting-workers)
 for what that buys. Two practical notes:
 
-- Driving an app deployed with an **older** stardag from a newer SDK: pass
-  `ModalTaskExecutor(worker_reports_lifecycle=False)` or redeploy, so the
-  build engine does not wait for events old workers never send.
+- A custom `run_function` that does not report the task lifecycle itself
+  needs `ModalTaskExecutor(worker_reports_lifecycle=False)` (resident
+  builds only: a reactive build needs self-reporting workers). Keep the
+  deployed app on the same stardag as the driver: redeploy after upgrading.
 - Executor metadata (app, workspace, environment, function name) is
   recorded with starts and surfaced in the UI as Modal deep links. The
   workspace is resolved from the cached Modal token; set
@@ -399,9 +400,10 @@ build_function=sd_modal.Builder(detached=False))`.
 ```{.python notest}
 result = app.build_trigger(root_task, reactive=True)
 
-# Same build id: wake a stalled build, add roots, or change tick config.
+# Same build id and the same roots: wake a stalled build or change tick
+# config. Other roots are refused — a build is one request; start a new one.
 app.build_trigger(
-    more_tasks, build_id=result.build_id, reactive=True,
+    root_task, build_id=result.build_id, reactive=True,
     tick_kwargs={"linger_seconds": 60},
 )
 ```
@@ -410,13 +412,17 @@ The model — bootstrap, ticks, wake-ups, retries, the watchdog — is on
 [Orchestration on Modal](../concepts/modal-orchestration.md#reactive-scheduling).
 What you configure:
 
-**Requirements.** Both the Modal app and the registry server must run a
-matching stardag version (an older server fails reactive triggers with a
-clear "does not support reactive scheduling" error; an app deployed before
-the `bootstrap` function existed has nothing to spawn — see
-`reactive_discovery` below). The triggering process needs registry
-credentials only. Builds cancelled in the UI are picked up by the next
-tick in the environment, which cancels the running Modal calls.
+**Requirements.** The Modal app, the triggering SDK and the registry
+server must all be on the v2 line (a v2 SDK against an older server fails
+on its first call: the routes do not exist there); the deployed
+`bootstrap` function walks the DAG unless `reactive_discovery="local"`
+(below) walks it here. The triggering process needs registry and Modal
+credentials: it mints the build, then spawns the deployed function.
+Discovery itself runs in Modal, so it needs no access to the target root.
+Cancelling a build
+releases its claims and stops nothing: its running workers exit at their
+next cooperative checkpoint, and `stardag builds stop` ends the containers
+themselves.
 
 **Function sizing.** `tick_settings` and `bootstrap_settings` default to
 `builder_settings`. They want different timeouts: a tick is one frontier
@@ -439,39 +445,22 @@ Set an explicit worker `timeout`: the execution claim's TTL is derived
 from it, which is what lets other builds tell an abandoned claim from a
 live one, and what keeps a live claim from being taken early.
 
-**Ticks share containers.** A tick is almost entirely I/O wait — read the
-frontier, spawn, then poll on a sleep until its linger deadline — so the
-deployed `tick` is registered with `max_concurrent_inputs=10` and one
-container serves up to ten concurrent reactive builds. That is what makes
-`linger_seconds` cheap: a resident tick driving level after level no
-longer costs a container of its own.
+**One build per container at a time.** A build's `settings` are applied
+as environment variables, which are per process, so the deployed `tick`
+and every worker function serve one input per container and scale by
+containers (`max_containers`). A `max_concurrent_inputs` above one in
+`tick_settings` or `worker_settings` is refused at deploy, and a container
+asked to run a second build while another build's settings are applied
+refuses it rather than running under the wrong values. The cost is more
+containers — a lingering tick holds one of its own.
 
-Nothing else is packed by default. Workers run your code and may be CPU-
-or GPU-bound; the builder runs a whole build; the bootstrap walks a DAG.
-Override per function where you know better:
-
-```{.python notest}
-tick_settings=sd_modal.FunctionSettings(image=image, max_concurrent_inputs=32),
-# ...or opt an I/O-bound worker in:
-worker_settings={
-    "fetch": sd_modal.FunctionSettings(image=image, max_concurrent_inputs=8),
-},
-```
-
-A worker that opts in must be safe to run **concurrently on threads** —
-Modal serves concurrent inputs to a sync function that way, and to an
-`async def` as asyncio tasks on one event loop.
-
-`target_concurrent_inputs` is the concurrency Modal's autoscaler _aims_
-for below the ceiling, so it requires `max_concurrent_inputs` alongside
-it; setting it alone is refused at deploy. Note also that `tick_settings`
-registers both `tick` and `tick_watchdog`, but a concurrency declared
-there applies only to the tick — the watchdog is sync and never packed.
+`target_concurrent_inputs` requires `max_concurrent_inputs` alongside it;
+setting it alone is refused at deploy.
 
 **Per-build knobs** (`tick_kwargs`, persisted with the build so every tick
 shares them): `linger_seconds` (default 120), `poll_interval_seconds` (3),
 `fail_mode`, `max_attempts` (2), `max_interruptions` (20),
-`worker_report_grace_seconds` (30), `max_concurrent_actions` (50),
+`max_executions` (20), `max_concurrent_actions` (50),
 `max_spawns_per_tick` (derived). Callables —
 `worker_selector`, `limit_key_selector` — are deployed-app configuration,
 never per-trigger.
@@ -489,8 +478,8 @@ app = sd_modal.StardagApp(
 ```
 
 A denied task stays pending and runs when a slot frees — whichever build
-frees it. Resident builds enforce the same limits with
-`RegistryConcurrencyLimiter`.
+frees it. Resident builds enforce the same limits by passing
+`limit_key_selector` to `sd.build(...)`.
 
 **The watchdog** (`watchdog_period_minutes`) is deployed always and
 scheduled only when set. Leave it off unless a stall of a few minutes is
@@ -535,11 +524,10 @@ are actionable from the registry, but to spawn a worker it needs the actual
 task _object_ — and there is exactly one way to get one: rebuild it from
 the payload the registry already stores at registration.
 
-That payload is the task's **identity parameters only**, which is what
-makes it safe: nothing a rebuilt task carries came from the process that
-registered it, so its `dependencies_only` / `execution_only` fields resolve
-from the build config installed in the tick, under the code running in the
-tick. It is also why a running build can follow a redeploy (see
+That payload is the task's **stored instance body**, which is what makes
+it safe: it is exactly what this scope (deployment + settings) would
+construct, so nothing a rebuilt task carries came from the process that
+registered it. It is also why a running build can follow a redeploy (see
 [Evolving DAGs](evolve-dags.md)).
 
 But rebuilding a task resolves its class through stardag's polymorphic
@@ -657,9 +645,9 @@ Two caveats worth designing around:
 
 Named concurrency limits are enforced registry-side in reactive mode —
 across builds, not just within one. Configure caps per environment
-(`PUT /api/v1/concurrency-limits/{key}` with `{"max_concurrent": N}`) and
-tag tasks with keys on the app (deployed configuration, applied
-consistently by every scheduler tick):
+(`stardag concurrency-limits set <key> <max_concurrent>`) and tag tasks
+with keys on the app (deployed configuration, applied consistently by
+every scheduler tick):
 
 ```{.python notest}
 app = sd_modal.StardagApp(
@@ -718,50 +706,61 @@ knowing: a build not progressing while tick logs show `foreign_app`
 with failed forwards means the owning app was **deleted** — the build
 is orphaned; re-trigger it from a live app to adopt it.
 
-The same named limits can be enforced from resident (non-reactive)
-builds via `stardag.build.RegistryConcurrencyLimiter` — both modes share
-the slots. Two caveats when mixing modes: a crashed _resident_ build has
-no automatic healer (its RUNNING task holds the slot until explicitly
-failed/cancelled via the API/UI — the worker-reporting/tick self-healing
-story above is reactive-only), and a legitimately long-running ref-less
-resident task can be force-failed once its claim lapses if it also appears
-in a concurrently ticking reactive build. Resident builds do not derive a
-claim TTL from an executor timeout, so such a task gets the registry's
-default expiry — keep that in mind if you mix modes over tasks that run
-longer than it.
+The same named limits can be enforced from resident (non-reactive) builds
+by passing `limit_key_selector` to `sd.build(...)` — both modes share the
+slots (see [Concurrency limits across
+builds](../concepts/build-execution.md#concurrency-limits-across-builds)).
+Two caveats when mixing modes: a crashed _resident_ build has no automatic
+healer (its RUNNING task holds the slot until explicitly failed/cancelled
+via the API/UI — the worker-reporting/tick self-healing story above is
+reactive-only), and a legitimately long-running ref-less resident task can
+be force-failed once its claim lapses if it also appears in a concurrently
+ticking reactive build. Resident builds do not derive a claim TTL from an
+executor timeout, so such a task gets the registry's default expiry — keep
+that in mind if you mix modes over tasks that run longer than it.
 
-**Builds that overlap.** Task state is per environment, so a task another
-build owns blocks yours. A tick waits that out — whether the other build is
-executing the task under a live execution claim, or has yet to schedule it
-— instead of failing the build. A blocker whose claim has **lapsed**, or a
-non-running blocker no _live_ build is going to run, fails the build with a
-message naming the task, the build that owns it and why that owner will not
-move it. Symptom worth knowing: a tick log line saying the build is _"waiting on
-N upstream task(s) owned by other builds … waiting rather than failing"_
-means your build is fine and waiting on a neighbour. See
-[Cross-build blocking](../concepts/build-execution.md#cross-build-blocking)
-for the recovery path when the blocker is abandoned — including a task left
-SUSPENDED, which a retry (and therefore a re-trigger) now resets.
-`stardag builds frontier <build-id>` shows this directly, naming the blocking
-task and the build that owns it — see
-[Reading the frontier](../configuration/cli.md#reading-the-frontier).
+**Builds that overlap.** Task state is global to the environment, so a
+task another build owns holds yours back. A tick waits that out — whether
+the other build is executing the task under a live claim, holds a lapsed
+claim (the next claiming start takes it over), or has yet to schedule it —
+rather than treating a neighbour's in-progress work as a problem. A shared
+task another build **cancelled** or **skipped** is actionable again and
+this build runs it itself, within its own attempt budget; one it
+**failed** is left to your build's fail mode. `stardag builds frontier
+<build-id>` shows exactly what the active plan is waiting on — discovery
+jobs, runnable members and members currently `running` under someone
+else's claim — see [Build & Execution](../concepts/build-execution.md#shared-tasks-across-builds).
 
 **Task retries: `retries=` and `max_attempts` are not the same knob.**
 `FunctionSettings(retries=N)` on a worker is Modal's own retry policy: it
 covers an exception raised _inside_ the container, and it is the right tool
-for that. It cannot cover a spawn that failed before the container existed,
-a container Modal killed (OOM, timeout), or a preempted worker — from
-Modal's side there is nothing to retry, and from the build's side those
-used to end a `FAIL_FAST` build outright.
+for that. It cannot cover a spawn that failed before the container ever
+existed — from Modal's side there is nothing to retry.
 
-Reactive ticks therefore carry `TickConfig.max_attempts` (default **2**), a
-per-task budget on how many executions the _scheduler_ starts in one build
-round. It applies only to failures a tick records itself — a failed spawn,
-an execution Modal reports as failed, and a task whose execution claim
-lapsed with no ref left to probe (the preemption/OOM shape). A task that
-simply raises never reaches it: the worker self-reports the failure, which
-is what `retries=` is for. Set the two together — `retries=` for flaky task
-code, `max_attempts` for flaky infrastructure:
+`TickConfig.max_attempts` (default **2**) covers exactly that one case: how
+many times, within a single claim, the tick tries to start the container
+before giving up and recording the failure once. It is not a persisted
+budget — nothing about it is tracked across ticks, so there is no "still
+under budget" state for a retry to restore. Two failure shapes that look
+similar are **not** covered by it at all:
+
+- **A worker that died with no restart coming** (OOM, a crash, a
+  network partition, or a timeout nothing caught). Its claim simply
+  lapses on its TTL, and the next claiming start takes the execution
+  over as a fresh attempt. That loop is bounded by
+  `TickConfig.max_executions` (default 20): once the member has that many
+  executions under the build's plans, the tick fails it instead of taking
+  the claim over again, and the build's fail mode applies. This is **not**
+  the same as a preemption, which keeps its claim across Modal's own
+  restart on the same call id — see [Preemption and
+  timeouts](#preemption-and-timeouts).
+- **A task that raises inside the container.** The worker self-reports
+  the failure, and the tick never retries a `FAILED` task automatically
+  — the build's `fail_mode` decides, and only a retry (below) gives it
+  another try. This is what `retries=` is for.
+
+Set the two together — `retries=` for flaky task code, `max_attempts` for
+a spawn that keeps failing before any container starts:
 
 ```{.python notest}
 app.build_trigger(
@@ -770,71 +769,146 @@ app.build_trigger(
 ```
 
 `max_attempts=1` restores the previous behaviour (record the failure, never
-respawn).
+retry the spawn).
 
-**A build that ran out of attempts is recovered by re-triggering it.** The
-budget is scoped to a build _round_, and re-triggering an existing build id
-records `BUILD_RESUMED` ahead of its discovery retries, so every task
-starts the new round at zero:
+**A `FAILED` task is recovered by retrying it — a bare retry works just as
+well as a re-trigger.** `stardag tasks retry <task-id> --build <build-id>`
+(or the UI's Retry) moves it back to `PENDING`, and the next tick claims
+and spawns it fresh with its own `max_attempts` budget; there is no stale
+"already at budget" state that would make the scheduler refuse it again.
+`--build` is required here: it defaults to the build holding the task's
+claim, and a `FAILED` task holds none. Re-triggering an existing build id
+does the same for every not-complete member at once and records
+`BUILD_RESUMED`:
 
 ```{.python notest}
-# Resets the attempt budget and re-runs what failed. Optionally raise the
-# budget for the new round at the same time.
+# Resets every FAILED member to PENDING and re-runs it. Optionally raise
+# max_attempts at the same time.
 app.build_trigger(
     root_task, build_id=result.build_id, reactive=True,
     tick_kwargs={"max_attempts": 4},
 )
 ```
 
-A **bare** retry does not do this. Clicking Retry in the UI (or running
-`stardag tasks retry`) flips the task to pending without starting a new
-round, so on a task already at budget the retry succeeds and the scheduler
-still refuses to start it. The tick logs that case explicitly, names the
-re-trigger, and fails the task again rather than leaving it pending and
-inert. See
+Neither path resets `max_interruptions`: that budget is counted from the
+execution ledger over every plan the build has ever had, so a retry — bare
+or via re-trigger — buys an interrupted task exactly one more execution
+before the cap fails it again; only a **new build** starts the count at
+zero. See
 [Retries and interruptions](../concepts/modal-orchestration.md#retries-and-interruptions).
 
-### Build config: per-build knobs without touching the task id
+### Settings: per-build configuration without touching the task id
 
-_The full guide, including how to choose a parameter's significance:
+_The full guide, including significant vs non-significant fields:
 [Evolve a DAG Safely](evolve-dags.md)._
 
-Parameters declared `significance="dependencies_only"` or
-`"execution_only"` (see [Three levels of
-significance](../concepts/parameters.md#three-levels-of-significance))
-are never passed at init. Give them values per build on the trigger:
+`settings` is a flat `Mapping[str, str]` of environment variables, applied in
+every process of the build — the bootstrap, every tick, every worker and a
+resident driver. It is how you give a build-wide knob a value without it
+becoming a task parameter: a thread count, a feature flag, anything the
+[pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
+pattern can read back at run time.
 
 ```{.python notest}
 result = app.build_trigger(
     root_task,
     reactive=True,
-    build_config={
-        "reports.Aggregate": {"partition_size": 500, "num_threads": 8},
-    },
+    settings={"NUM_THREADS": "8"},
 )
+
+# Locally — also sd.build_aio and sd.build_sequential:
+sd.build(root_task, settings={"NUM_THREADS": "8"})
 ```
 
-The config is stored with the build and installed by the bootstrap, every
-tick and every worker before any task is constructed, so a yielded
-dependency sees the same values the scheduler planned with. A re-trigger of
-the same build reuses its stored config; a different one is a new build.
+**The contract: settings may change structure and execution, never
+output.** Anything that affects a task's output belongs in a significant
+parameter instead — completion is global, so a value read only from
+settings would let one build's result depend on values another build
+reusing the completion never saw.
+
+**Nothing validates the keys.** A misspelled key is simply an environment
+variable nothing reads, and the build runs on whatever default the task
+falls back to. Read the settings you rely on at run time and fail loudly
+when one is missing — a pydantic-settings class with a required field does
+exactly that.
+
+**Precedence**, where a key appears in more than one place: `settings` win
+over the worker selector's per-task `env_overrides`, which win over the
+deployment's own environment. Keys the framework writes itself
+(`STARDAG_PLAN_ID`, `STARDAG_DEPLOYMENT_ID`, `STARDAG_EXECUTION_ID`, ...)
+are written last by the executor and win over all three — a selector or a
+build's settings may not redirect where a worker's reports go. Keys
+starting `STARDAG_` or `MODAL_` are reserved and refused at the trigger,
+before a build exists.
+
+A bare resume — retriggering an existing build with `settings` omitted —
+reuses the settings of the build's active plan, as a bare re-trigger
+always has; passing `settings={}` explicitly means "no settings", which is
+a different scope from one that had some.
+
+From the CLI, `stardag build` takes the same argument as repeatable
+`--settings KEY=VALUE` pairs, both for a resident build and, with `--app`,
+for a trigger:
+
+```sh
+stardag build my_pkg.pipeline:root --app my_pkg.app:app --reactive \
+    --settings NUM_THREADS=8
+```
+
+### `stardag modal deploy`: two steps, before and after
+
+_Why a redeploy is safe for running builds: [Evolve a DAG
+Safely](evolve-dags.md#4-deploy-new-code)._
+
+`stardag modal deploy` records a **deployment** row before the Modal
+deploy and activates it after:
+
+```bash
+stardag modal deploy app.py     # records the deployment, deploys, activates it
+stardag modal deployments       # deployments recorded in this environment, newest first
+```
+
+The registry assigns the row its `generation` at the create step, so a
+record that lands late can never roll a build back to older code; a
+failed activation exits non-zero and leaves the new code unable to plan
+anything until you re-run the command. That re-run is not a retry of the
+same row, though: `StardagApp.deployment_id` is minted fresh on each
+command invocation, so re-running after a failure records (and, if
+Modal's own deploy already succeeded, deploys) a new deployment rather
+than retrying the original activation. The server-side activate call
+itself is idempotent for a given id; the CLI simply never sends the same
+id twice.
+
+Deploy from a clean checkout: a dirty tree gets a one-off code id, so
+every deploy of it is a new scope that shares nothing with the last. A
+branch that should run beside production is a separate app with its own
+name.
 
 ### Redeploying while builds run
 
-_Why it is safe: [Evolve a DAG Safely](evolve-dags.md#4-deploy-new-code)._
-
 Deploy the new code under the same app name. Running containers finish on
-the old code; each running build is re-planned under the new code by its
-next scheduler tick (`rolled_over` in the tick summary) and continues.
+the old code; each running build is re-planned under the new deployment
+by its next scheduler tick (`rolled_over` in the tick summary) and
+continues — see [Deployments and code
+versions](../concepts/modal-orchestration.md#deployments-and-code-versions)
+for the mechanism.
 
-```bash
-stardag modal deploy app.py     # recorded as a deployment of this app
-stardag modal deployments       # code versions deployed to this environment, newest first
-```
+### Cancelling a build vs. stopping its executions
 
-Deploy from a clean checkout: a dirty tree gets a one-off code id, so every
-deploy of it is a new structure scope that shares nothing. A branch that
-should run beside production is a separate app with its own name.
+`stardag builds cancel <build-id>` releases the build's claims
+immediately, making its tasks available to any other build that wants
+them. It reaches no container: a worker still running notices at its own
+next checkpoint (see [Cancelling
+work](../concepts/build-execution.md#cancelling-work-the-worker-asks-nothing-reaches-in)).
+
+To end the containers themselves rather than waiting for them to notice,
+`stardag builds stop <build-id>` stops each of the build's live Modal
+calls, reports it, and only then cancels the build — see [Stopping a
+build's executions](../configuration/cli.md#stopping-a-builds-executions).
+`--not-in-current-plan` narrows it to orphans left behind by a
+[rollover](../concepts/modal-orchestration.md#deployments-and-code-versions)
+or a re-trigger under new settings, without touching the build's current
+work.
 
 ### Preemption and timeouts
 
@@ -970,19 +1044,21 @@ Three things carry it:
 #### What happens if you _don't_ catch it
 
 Nothing to configure, and this is the part worth understanding: **an
-interruption you do not catch is a failure.** The execution dies, a
-scheduler tick notices, and the task is retried under the ordinary
-`TickConfig.max_attempts` (default 2) like any other failure.
+interruption you do not catch leaves the execution to die with no report
+at all** — the same shape as a container Modal kills outright, or a worker
+that crashes. Recovery goes through the claim, not through `max_attempts`:
+the claim's TTL (the executor's own `timeout` plus a fixed grace) is what a
+later tick waits out before treating the execution as lapsed and taking it
+over as a fresh attempt. `max_attempts` covers only a spawn that fails
+before any container starts (see "Task retries" above); a lapsed-claim
+takeover like this one is bounded instead by `TickConfig.max_executions`
+(default 20): once the task has had that many executions in the build, the
+next lapse fails it with the count rather than starting another.
 
-A tick that notices first waits for you, though. Modal ends a cancelled
-input the moment the cancel is issued, so a probe can see the call gone
-while your `except` block is still checkpointing — and calling that a
-failure would spend an attempt on an interruption you were in the middle
-of reporting. So the probe holds its verdict for
-`TickConfig.worker_report_grace_seconds` (default 30) and records a
-failure only if nothing arrives. Raise it if your checkpoints take longer
-than that; the only cost of a larger value is how long a build waits
-before healing a worker that died without a word.
+There is no separate probe or report-grace knob to raise here. The claim's
+built-in grace is generous specifically so an `except` block that is still
+checkpointing when Modal ends the input has time to report before the
+registry would call the claim lapsed.
 
 That is deliberate. Letting an interruption propagate means the task had no
 plan for one, which leaves exactly two possibilities — it hung, or the
@@ -1014,14 +1090,14 @@ failures and fail the build for the one reason it was built to survive.
 
 #### The knobs, and how they multiply
 
-| knob                                     | covers                                                                          |
-| ---------------------------------------- | ------------------------------------------------------------------------------- |
-| `FunctionSettings(timeout=)`             | how long one execution attempt may run                                          |
-| `FunctionSettings(retries=)`             | exceptions raised inside the container, and timeouts                            |
-| `FunctionSettings(nonpreemptible=)`      | opts out of reclamation entirely (3× CPU/memory price; no GPU)                  |
-| `TickConfig.max_attempts`                | failures a tick records itself — spawn failures, dead executions                |
-| `TickConfig.max_interruptions`           | how many times a task may ask to be resumed                                     |
-| `TickConfig.worker_report_grace_seconds` | how long a tick waits for your report before calling a dead execution a failure |
+| knob                                | covers                                                          |
+| ----------------------------------- | --------------------------------------------------------------- |
+| `FunctionSettings(timeout=)`        | how long one execution attempt may run                          |
+| `FunctionSettings(retries=)`        | exceptions raised inside the container, and timeouts            |
+| `FunctionSettings(nonpreemptible=)` | opts out of reclamation entirely (3× CPU/memory price; no GPU)  |
+| `TickConfig.max_attempts`           | a claimed execution's spawn failing before any container starts |
+| `TickConfig.max_interruptions`      | how many times a task may ask to be resumed                     |
+| `TickConfig.max_executions`         | executions in the build before a lapsed claim is not taken over |
 
 They **multiply**, which is easy to miss: a worker with `retries=3` running
 a task allowed 20 interruptions can consume up to 80 container attempts.
@@ -1039,14 +1115,6 @@ frontier.
 If a task genuinely cannot be interrupted, `nonpreemptible=True` is the
 honest answer — at 3× the CPU and memory price, and not available for GPU
 functions.
-
-!!! note "Registry version"
-
-    Interruption reporting needs a Registry API that serves
-    `POST /builds/{id}/tasks/{task_id}/interrupt`. Against an older server
-    the SDK logs a warning and records nothing, which is exactly its
-    behaviour before this existed — a version skew degrades to the old
-    recovery path, never to a failed build.
 
 ## Where to define what you pass to `StardagApp`
 

@@ -12,7 +12,7 @@ import typer
 from typer.testing import CliRunner
 
 from stardag._cli._registry_ctx import _resolve_registry
-from stardag._cli.limits import app
+from stardag._cli.builds import app
 
 runner = CliRunner()
 
@@ -46,7 +46,7 @@ class TestNoRegistry:
             ),
             mock.patch("stardag._cli._registry_ctx.clear_config_cache"),
         ):
-            result = runner.invoke(app, ["list"])
+            result = runner.invoke(app, ["show", _ENV_UUID])
         assert result.exit_code == 1
         assert "No registry configured" in result.output
 

@@ -90,8 +90,18 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode."""
+    """Run migrations in 'online' mode.
 
+    A caller may hand in its own (sync-facing) connection through
+    ``config.attributes["connection"]`` - Alembic's connection-sharing
+    recipe, used by the tests to migrate a scratch schema on a connection
+    whose ``search_path`` they control. Otherwise an engine is built from
+    ``sqlalchemy.url``.
+    """
+    connection = config.attributes.get("connection")
+    if connection is not None:
+        do_run_migrations(connection)
+        return
     asyncio.run(run_async_migrations())
 
 

@@ -12,18 +12,17 @@ Enforcement lives in ``build_aio``: it wraps the executor ``submit`` call in
 ``async with limiter.slot(task)`` so the same throttle applies to every
 executor (local hybrid, Modal, Routed).
 
-Relationship to the global lock (``GlobalConcurrencyLockManager``):
-- A **lock** is about exactly-once *identity* (one execution per task-id
-  globally) and is held across dynamic-deps suspension.
-- A **slot** is about *active execution* capacity. It is released when a task
-  suspends waiting for its own dynamic deps and re-acquired on resume —
-  required for correctness, since a task holding a slot while suspended on its
-  own deps would deadlock under a tight limit.
+Relationship to the execution claim:
+- A **claim** is about exactly-once *identity* (one execution per task id,
+  across builds) and is kept across an in-process dynamic-deps suspension.
+- A **slot** is about *active execution* capacity in this build. It is
+  released when a task suspends waiting for its own dynamic deps and
+  re-acquired on resume — a task holding a slot while suspended on its own
+  deps would deadlock under a tight limit.
 
-The ``ConcurrencyLimiter`` protocol is the seam for a future registry-backed
-implementation that enforces the named limits *globally* (acquiring a named
-slot server-side and polling on a concurrency-limit response), configured from
-the Stardag API/UI. Switching to it needs no change in ``build_aio``.
+Limits shared *across* builds are the registry's named concurrency limits:
+their keys travel on the claiming start (``build(limit_key_selector=...)``,
+``TickConfig.limit_key_selector``), and a full key refuses the claim.
 """
 
 from __future__ import annotations

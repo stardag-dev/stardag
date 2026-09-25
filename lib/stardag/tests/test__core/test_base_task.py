@@ -1,9 +1,8 @@
 import asyncio
-from datetime import datetime
 from typing import Annotated, Type
 from unittest.mock import Mock
+from uuid import uuid4
 
-import warnings
 
 import pytest
 
@@ -21,7 +20,7 @@ from stardag._core.task import Task
 from stardag._core.task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, SubClass, TypeId
-from stardag.registry._base import RegistryABC, TaskMetadata
+from stardag.registry import RegistryABC, TaskInfo, TaskInstanceInfo
 from stardag.target._in_memory import InMemoryTarget
 from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
 from stardag.utils.testing.namepace import (
@@ -141,11 +140,8 @@ class BasicTask(MockBaseTask):
     a: int
 
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-
-    class HashExcludeTask(MockBaseTask):
-        a: Annotated[int, StardagField(hash_exclude=True)]
+class NonSignificantTask(MockBaseTask):
+    a: Annotated[int, StardagField(significant=False)]
 
 
 class CompatDefaultTask(MockBaseTask):
@@ -156,13 +152,10 @@ class WithNestedTask(MockBaseTask):
     task: BasicTask
 
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-
-    class NonTaskModel(StardagBaseModel):
-        a: Annotated[int, StardagField(hash_exclude=True)]
-        b: Annotated[str, StardagField(compat_default="default")]
-        tasks: tuple[SubClass[BaseTask], ...]
+class NonTaskModel(StardagBaseModel):
+    a: Annotated[int, StardagField(significant=False)]
+    b: Annotated[str, StardagField(compat_default="default")]
+    tasks: tuple[SubClass[BaseTask], ...]
 
 
 class ComplexNestedTask(MockBaseTask):
@@ -183,10 +176,10 @@ class ComplexNestedTask(MockBaseTask):
             },
         ),
         (
-            "hash exclude (a) should be excluded",
-            HashExcludeTask(a=10),
+            "non-significant (a) should be excluded",
+            NonSignificantTask(a=10),
             {
-                NAME_KEY: "HashExcludeTask",
+                NAME_KEY: "NonSignificantTask",
                 NAMESPACE_KEY: "",
                 "version": "",
             },
@@ -613,18 +606,68 @@ def test_from_registry(default_in_memory_fs_target):
     task.run()
 
     mock_registry = Mock(spec=RegistryABC)
-    mock_registry.task_get_metadata.return_value = TaskMetadata(
-        id=task.id,
-        body=task.model_dump(),
-        name=task.get_name(),
-        namespace=task.get_namespace(),
+    mock_registry.task_get.return_value = TaskInfo(
+        task_id=str(task.id),
+        task_namespace=task.get_namespace(),
+        task_name=task.get_name(),
         version=task.version,
         output_uri=task.target().uri,
         status="completed",
-        registered_at=datetime.now(),
-        started_at=datetime.now(),
-        completed_at=datetime.now(),
-        error_message=None,
+        instances=[
+            TaskInstanceInfo(
+                id=uuid4(),
+                deployment_id=uuid4(),
+                settings_hash="deadbeef",
+                instance_hash=str(task.instance_hash),
+                body=task.instance_body(),
+            )
+        ],
     )
     loaded_task = MockTask.from_registry(id=task.id, registry=mock_registry)
     assert loaded_task == task
+
+
+def test_from_registry_rejects_a_body_whose_recomputed_id_moves(
+    default_in_memory_fs_target,
+):
+    """``from_registry`` must check the recomputed task id against the one
+    it was asked for, exactly as ``task_from_registry_data`` does. Without
+    it, a stored body whose significant field was since removed or renamed
+    (silently dropped by compat mode's lenient rules) would validate fine
+    and be returned as if it were the requested task — under a different
+    completion identity than the caller asked for. Simulated directly here
+    via a metadata id that does not match what the stored body recomputes
+    to, the same observable defect regardless of its cause."""
+    from stardag._core.rehydrate import TaskRehydrationError
+
+    class MockTask(Task[str]):
+        a: int
+        b: str
+
+        def run(self):
+            self._save(self.a * self.b)
+
+    task = MockTask(a=5, b="test")
+    stale_id = uuid4()
+    assert stale_id != task.id
+
+    mock_registry = Mock(spec=RegistryABC)
+    mock_registry.task_get.return_value = TaskInfo(
+        task_id=str(stale_id),
+        task_namespace=task.get_namespace(),
+        task_name=task.get_name(),
+        version=task.version,
+        output_uri=None,
+        status="completed",
+        instances=[
+            TaskInstanceInfo(
+                id=uuid4(),
+                deployment_id=uuid4(),
+                settings_hash="deadbeef",
+                instance_hash=str(task.instance_hash),
+                body=task.instance_body(),
+            )
+        ],
+    )
+    with pytest.raises(TaskRehydrationError, match="does not match"):
+        MockTask.from_registry(id=stale_id, registry=mock_registry)

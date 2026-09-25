@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import { rootsCompleted } from "../utils/builds";
 import { BuildFailureReason } from "./BuildFailureReason";
 
 // A real one, abbreviated: the reactive scheduler's reasons name the blocked
@@ -41,8 +42,8 @@ describe("BuildFailureReason", () => {
   });
 
   it("says nothing when no reason was recorded", () => {
-    // A server predating `latest_error_message` omits the field. An empty
-    // banner headed "Why this build failed" would be worse than no banner.
+    // A BUILD_FAILED recorded without a message. An empty banner headed
+    // "Why this build failed" would be worse than no banner.
     render(<BuildFailureReason status="failed" message={null} />);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     render(<BuildFailureReason status="failed" />);
@@ -78,5 +79,21 @@ describe("BuildFailureReason", () => {
     expect(
       await screen.findByText(/Re-trigger this build to reset the blocker/),
     ).toBeInTheDocument();
+  });
+
+  it("reads the roots of the plan to decide whether the failure is history", () => {
+    expect(rootsCompleted([])).toBe(false);
+    expect(
+      rootsCompleted([
+        { is_root: true, status: "completed" },
+        { is_root: false, status: "failed" },
+      ]),
+    ).toBe(true);
+    expect(
+      rootsCompleted([
+        { is_root: true, status: "completed" },
+        { is_root: true, status: "failed" },
+      ]),
+    ).toBe(false);
   });
 });

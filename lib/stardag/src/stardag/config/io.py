@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -19,25 +19,8 @@ def load_toml_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        # Python 3.11+ has tomllib built-in
-        if sys.version_info >= (3, 11):
-            import tomllib
-
-            with open(path, "rb") as f:
-                return tomllib.load(f)
-        else:
-            # Fall back to tomli for older Python
-            try:
-                import tomli
-
-                with open(path, "rb") as f:
-                    return tomli.load(f)
-            except ImportError:
-                logger.warning(
-                    f"tomli not installed, cannot load {path}. "
-                    "Install with: pip install tomli"
-                )
-                return {}
+        with open(path, "rb") as f:
+            return tomllib.load(f)
     except Exception as e:
         logger.debug(f"Could not load {path}: {e}")
         return {}

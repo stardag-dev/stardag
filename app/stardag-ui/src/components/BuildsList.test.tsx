@@ -1,599 +1,160 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BreadcrumbProvider } from "../context/BreadcrumbContext";
-import type { Build, BulkCancelBuildsResponse } from "../types/task";
-import { shortBuildId } from "../utils/ids";
-import { BuildsList } from "./BuildsList";
+import type { Build, BuildListResponse } from "../types/task";
 
-let mockEnvironmentId = "env-1";
-let mockWorkspaceRole: "owner" | "admin" | "member" | null = "admin";
 vi.mock("../context/EnvironmentContext", () => ({
-  useEnvironment: () => ({
-    activeEnvironment: {
-      id: mockEnvironmentId,
-      slug: "default",
-      name: "default",
-    },
-    activeWorkspaceRole: mockWorkspaceRole,
-  }),
+  useEnvironment: () => ({ activeEnvironment: { id: "env-1" } }),
 }));
+vi.mock("../api/registry", () => ({ fetchBuilds: vi.fn() }));
 
-vi.mock("../api/tasks", () => ({
-  fetchBuilds: vi.fn(),
-  bulkCancelBuilds: vi.fn(),
-}));
+import { fetchBuilds } from "../api/registry";
+import { BuildsList } from "./BuildsList";
+import { tooltipOf } from "../test/tooltip";
 
-import { bulkCancelBuilds, fetchBuilds } from "../api/tasks";
+const mocked = vi.mocked(fetchBuilds);
 
-// Real build ids are UUIDs. The fixtures used to carry short slugs, which
-// silently made any assertion about abbreviating an id vacuous —
-// `slice(0, 8)` of a seven-character id is the whole id.
-const STALE_ID = "01a0c5c3-f18e-7d22-bcaf-add71bd0287c";
-const BUSY_ID = "01a0c5d4-2a7f-7e31-9dbc-0b4e21f7c9aa";
-const DONE_ID = "01a0c5e5-3b80-7f42-ae0d-1c5f32a8dab1";
-
-const HOUR = 3600 * 1000;
-const DAY = 24 * HOUR;
-const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
-
-function makeBuild(overrides: Partial<Build> & Pick<Build, "id" | "name">): Build {
+function build(id: string, overrides: Partial<Build> = {}): Build {
   return {
-    environment_id: "env-1",
-    user_id: null,
+    id,
+    name: `build ${id}`,
     description: null,
-    commit_hash: null,
-    root_task_ids: [],
-    created_at: ago(10 * DAY),
     status: "running",
-    started_at: ago(10 * DAY),
+    root_task_ids: [],
+    created_at: "2026-09-24T00:00:00Z",
+    started_at: "2026-09-24T00:00:00Z",
     completed_at: null,
-    status_triggered_by_user: null,
-    // Deliberately older than every `last_activity_at` below: the table
-    // must never surface this lifecycle timestamp as activity.
-    last_active_at: ago(6 * DAY),
-    last_activity_at: ago(2 * HOUR),
+    last_active_at: "2026-09-24T00:00:00Z",
+    is_resumed: false,
+    status_triggered_by_user_id: null,
+    executor_metadata: null,
+    reactive_app_name: null,
+    reactive_tick_kwargs: null,
+    error_message: null,
     ...overrides,
   };
 }
 
-// Three obviously fictional builds: one stale, one busy reactive build,
-// one already finished.
-const staleBuild = makeBuild({
-  id: STALE_ID,
-  name: "nightly-refresh",
-  description: "Refresh the demo warehouse",
-  commit_hash: "abcdef1234567",
-  last_activity_at: ago(3 * DAY),
-});
-const busyBuild = makeBuild({
-  id: BUSY_ID,
-  name: "hourly-ingest",
-  reactive_app_name: "demo-scheduler",
-  last_activity_at: ago(5 * 60 * 1000),
-});
-const doneBuild = makeBuild({
-  id: DONE_ID,
-  name: "feature-sandbox",
-  status: "completed",
-  completed_at: ago(2 * HOUR),
-  last_activity_at: ago(2 * HOUR),
-});
-
-const ALL_BUILDS = [staleBuild, busyBuild, doneBuild];
-
-function buildsResponse(builds: Build[], total = builds.length) {
-  return { builds, total, page: 1, page_size: 20 };
+function page(ids: string[], total: number, next: string | null): BuildListResponse {
+  return { builds: ids.map((id) => build(id)), total, next_cursor: next };
 }
-
-function bulkResponse(
-  overrides: Partial<BulkCancelBuildsResponse> = {},
-): BulkCancelBuildsResponse {
-  return {
-    dry_run: false,
-    builds: [],
-    build_count: 0,
-    task_count: 0,
-    skipped: {},
-    truncated: false,
-    ...overrides,
-  };
-}
-
-const onSelectBuild = vi.fn();
 
 function renderList() {
   return render(
     <BreadcrumbProvider>
-      <BuildsList onSelectBuild={onSelectBuild} />
+      <BuildsList onSelectBuild={() => {}} />
     </BreadcrumbProvider>,
   );
 }
 
-/** The row whose Build cell carries `name`. */
-function rowFor(name: string): HTMLElement {
-  return screen.getByRole("button", { name }).closest("tr") as HTMLElement;
-}
+beforeEach(() => mocked.mockReset());
 
 describe("BuildsList", () => {
-  beforeEach(() => {
-    mockEnvironmentId = "env-1";
-    mockWorkspaceRole = "admin";
-    vi.mocked(fetchBuilds).mockResolvedValue(buildsResponse(ALL_BUILDS));
-  });
-
-  afterEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("shows last_activity_at as the activity signal, never last_active_at", async () => {
+  it("pages with the server's cursor and shows the total", async () => {
+    mocked
+      .mockResolvedValueOnce(page(["a"], 45, "cursor-2"))
+      .mockResolvedValueOnce(page(["b"], 45, "cursor-3"))
+      .mockResolvedValueOnce(page(["a"], 45, "cursor-2"));
     renderList();
 
-    expect(await screen.findByText("nightly-refresh")).toBeInTheDocument();
-    // last_activity_at of each build renders...
-    expect(screen.getByText("3d ago")).toBeInTheDocument();
-    expect(screen.getByText("5m ago")).toBeInTheDocument();
-    // ...and the (older) lifecycle column never does.
-    expect(screen.queryByText("6d ago")).not.toBeInTheDocument();
+    expect(await screen.findByText("build a")).toBeInTheDocument();
+    expect(screen.getByText("45 builds")).toBeInTheDocument();
+    expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
+    expect(mocked.mock.calls[0][1]).toMatchObject({ limit: 20, cursor: undefined });
 
-    // The absolute time is available on hover.
-    expect(screen.getByText("3d ago")).toHaveAttribute(
-      "title",
-      expect.stringContaining("Last activity"),
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByText("build b")).toBeInTheDocument();
+    expect(screen.getByText("Page 2 of 3")).toBeInTheDocument();
+    expect(mocked.mock.calls[1][1]).toMatchObject({ cursor: "cursor-2" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    expect(await screen.findByText("build a")).toBeInTheDocument();
+    expect(mocked.mock.calls[2][1]).toMatchObject({ cursor: undefined });
+  });
+
+  it("says the list is ordered by last activity, as the server orders it", async () => {
+    mocked.mockResolvedValueOnce(page(["a"], 1, null));
+    renderList();
+    await screen.findByText("build a");
+    const header = screen.getByRole("columnheader", { name: /last active/i });
+    expect(header).toHaveAttribute("aria-sort", "descending");
+    expect(tooltipOf(within(header).getByText("Last active"))).toMatch(
+      /most recent first/,
     );
-    // A running build quiet for over a day is flagged as such.
-    expect(screen.getByText("3d ago").getAttribute("title")).toContain(
-      "nothing has happened for over a day",
-    );
+    expect(screen.queryByText(/newest/i)).not.toBeInTheDocument();
   });
 
-  // Both chips used to be bare tokens — a hex string and an app name,
-  // grey and purple, with nothing saying which was which.
-  it("says what each chip is", async () => {
+  it("returns to page 1 when a filter changes", async () => {
+    mocked
+      .mockResolvedValueOnce(page(["a"], 45, "cursor-2"))
+      .mockResolvedValueOnce(page(["b"], 45, "cursor-3"))
+      .mockResolvedValue(page(["c"], 1, null));
     renderList();
-    expect(await screen.findByText("abcdef1")).toBeInTheDocument();
-    expect(screen.getByText(/^commit/)).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "reactive app: demo-scheduler" }),
-    ).toBeInTheDocument();
-  });
+    await screen.findByText("build a");
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByText("build b");
 
-  // The table did not show the build id at all, and it is what every CLI
-  // command against a build takes.
-  //
-  // The three fixtures deliberately share a leading `01a0c…` the way real
-  // UUIDv7 build ids created in the same second do — an abbreviation from
-  // the front would draw the same string on every row.
-  it("shows each build's id, and copies the whole one", async () => {
-    // userEvent.setup() installs a working clipboard stub in jsdom.
-    const user = userEvent.setup();
-    renderList();
-    const chip = await screen.findByRole("button", {
-      name: `Copy build id ${staleBuild.id}`,
+    fireEvent.change(screen.getByLabelText("Filter by build status"), {
+      target: { value: "failed" },
     });
-    // Both halves matter: the short form is drawn, and the full id is not.
-    expect(chip).toHaveTextContent(shortBuildId(staleBuild.id));
-    expect(chip).not.toHaveTextContent(staleBuild.id);
-
-    await user.click(chip);
-    expect(await window.navigator.clipboard.readText()).toBe(staleBuild.id);
-    // Copying an identifier must not also open the build it identifies.
-    expect(onSelectBuild).not.toHaveBeenCalled();
+    await screen.findByText("build c");
+    expect(mocked.mock.lastCall?.[1]).toMatchObject({
+      status: "failed",
+      cursor: undefined,
+    });
+    await waitFor(() => expect(screen.queryByText(/^Page /)).not.toBeInTheDocument());
   });
 
-  it("sends the status filter to the server", async () => {
-    const user = userEvent.setup();
+  it("never breaks the build slug or its id chip, only between them", async () => {
+    mocked.mockResolvedValueOnce({
+      builds: [
+        build("01a0d3f7-f8c2-7753-be5b-b95e544476c9", { name: "gentle-horizon-67" }),
+      ],
+      total: 1,
+      next_cursor: null,
+    });
     renderList();
-    await screen.findByText("nightly-refresh");
+    const slug = await screen.findByRole("button", { name: "gentle-horizon-67" });
+    // A table column is at least its cells' min-content wide, so nowrap
+    // on each item is what keeps the column from squeezing them.
+    expect(slug.className).toMatch(/whitespace-nowrap/);
+    const chip = screen.getByRole("button", { name: /^Copy build id/ });
+    expect(chip.className).toMatch(/whitespace-nowrap/);
+    expect(slug.parentElement?.className).toMatch(/flex-wrap/);
+  });
+});
 
-    await user.selectOptions(
-      screen.getByLabelText("Filter by build status"),
-      "running",
-    );
+describe("BuildsList idle filter", () => {
+  it("sends idle_for_seconds and blocks the statuses the server refuses", async () => {
+    mocked.mockResolvedValue(page(["a"], 1, null));
+    renderList();
+    await screen.findByText("build a");
 
+    fireEvent.change(screen.getByLabelText("Filter by time since last activity"), {
+      target: { value: "86400" },
+    });
     await waitFor(() =>
-      expect(fetchBuilds).toHaveBeenCalledWith(
-        expect.objectContaining({ status: "running", environment_id: "env-1" }),
-      ),
+      expect(mocked.mock.lastCall?.[1]).toMatchObject({ idleForSeconds: 86400 }),
     );
+    expect(await screen.findByText("1 build running, idle ≥ 24h")).toBeInTheDocument();
+    const failed = screen.getByRole("option", {
+      name: "Failed — not idle-filterable",
+    }) as HTMLOptionElement;
+    expect(failed.disabled).toBe(true);
+    const running = screen.getByRole("option", {
+      name: "Running",
+    }) as HTMLOptionElement;
+    expect(running.disabled).toBe(false);
   });
 
-  it("filters by reactive app when its chip is clicked", async () => {
-    const user = userEvent.setup();
+  it("disables the idle filter while a finished status is selected", async () => {
+    mocked.mockResolvedValue(page(["a"], 1, null));
     renderList();
-    await screen.findByText("nightly-refresh");
-
-    await user.click(
-      screen.getByRole("button", { name: "reactive app: demo-scheduler" }),
-    );
-
-    // Debounced, so the request lands shortly after the click.
-    await waitFor(() =>
-      expect(fetchBuilds).toHaveBeenCalledWith(
-        expect.objectContaining({ reactive_app_name: "demo-scheduler" }),
-      ),
-    );
-    // The filter is visible, not hidden state.
-    expect(screen.getByLabelText("Filter by reactive app")).toHaveValue(
-      "demo-scheduler",
-    );
-    expect(screen.getByRole("button", { name: "Clear filters" })).toBeInTheDocument();
-  });
-
-  it("asks the server for idle builds instead of filtering locally", async () => {
-    // The API filters, counts, paginates and orders by idleness with the
-    // same predicate the cleanup sweep uses, so the component must send
-    // the threshold and render whatever comes back verbatim.
-    vi.mocked(fetchBuilds).mockResolvedValue(buildsResponse([staleBuild], 1));
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByLabelText("Filter by time since last activity");
-
-    await user.selectOptions(
-      screen.getByLabelText("Filter by time since last activity"),
-      String(DAY / 1000),
-    );
-
-    await waitFor(() =>
-      expect(fetchBuilds).toHaveBeenCalledWith(
-        expect.objectContaining({
-          idle_for_seconds: 86400,
-          page: 1,
-          page_size: 20,
-          environment_id: "env-1",
-        }),
-      ),
-    );
-    expect(await screen.findByText(/1 build running, idle ≥ 24h/)).toBeInTheDocument();
-    // No over-fetching and no local caveat: `total` is exact and
-    // pagination is server-side for this filter.
-    expect(fetchBuilds).not.toHaveBeenCalledWith(
-      expect.objectContaining({ page_size: 100 }),
-    );
-    expect(screen.queryByText(/older matches may be missing/)).not.toBeInTheDocument();
-  });
-
-  it("does not re-sort or re-filter the page the server returned", async () => {
-    // The server orders stalest-first on an index-backed proxy for last
-    // activity, so the rendered column is not strictly monotonic. The
-    // component must render the server's order as given rather than
-    // imposing a local ordering on one page of a server-side set — and it
-    // must not drop a row whose `last_activity_at` looks too recent.
-    vi.mocked(fetchBuilds).mockResolvedValue(
-      buildsResponse([busyBuild, staleBuild], 2),
-    );
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByLabelText("Filter by time since last activity");
-
-    await user.selectOptions(
-      screen.getByLabelText("Filter by time since last activity"),
-      String(DAY / 1000),
-    );
-
-    await waitFor(() =>
-      expect(screen.getByText("2 builds running, idle ≥ 24h")).toBeInTheDocument(),
-    );
-    const names = screen
-      .getAllByRole("row")
-      .slice(1)
-      .map((row) => row.querySelector("td:nth-child(3) button")?.textContent);
-    expect(names).toEqual(["hourly-ingest", "nightly-refresh"]);
-  });
-
-  it("makes the status + idleness combination the API rejects unreachable", async () => {
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByText("nightly-refresh");
-
-    const statusSelect = screen.getByLabelText("Filter by build status");
-    const idleSelect = screen.getByLabelText("Filter by time since last activity");
-
-    // With an idle filter set, only "All statuses" and "Running" remain
-    // selectable — the rest are the 422.
-    await user.selectOptions(idleSelect, String(DAY / 1000));
-    expect(
-      within(statusSelect).getByRole("option", { name: /^Running/ }),
-    ).toBeEnabled();
-    expect(
-      within(statusSelect).getByRole("option", { name: /^Failed/ }),
-    ).toBeDisabled();
-    await user.selectOptions(statusSelect, "running");
-    await waitFor(() =>
-      expect(fetchBuilds).toHaveBeenCalledWith(
-        expect.objectContaining({ status: "running", idle_for_seconds: 86400 }),
-      ),
-    );
-
-    // ...and symmetrically: an incompatible status disables the idle
-    // filter rather than silently dropping it.
-    await user.selectOptions(idleSelect, "0");
-    await user.selectOptions(statusSelect, "failed");
-    expect(idleSelect).toBeDisabled();
-    expect(idleSelect).toHaveValue("0");
-  });
-
-  it("selects rows, supports select-all, and reports an indeterminate header", async () => {
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByText("nightly-refresh");
-
-    const selectAll = screen.getByRole("checkbox", {
-      name: "Select all builds on this page",
-    }) as HTMLInputElement;
-    await user.click(selectAll);
-
-    expect(
-      screen.getByRole("checkbox", { name: "Select build nightly-refresh" }),
-    ).toBeChecked();
-    expect(screen.getByText("3 builds selected")).toBeInTheDocument();
-    expect(selectAll.indeterminate).toBe(false);
-
-    // Deselecting one row leaves the header mixed.
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select build hourly-ingest" }),
-    );
-    expect(screen.getByText("2 builds selected")).toBeInTheDocument();
-    expect(selectAll).not.toBeChecked();
-    expect(selectAll.indeterminate).toBe(true);
-  });
-
-  it("does not navigate when the selection checkbox is clicked", async () => {
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByText("nightly-refresh");
-
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select build nightly-refresh" }),
-    );
-    expect(onSelectBuild).not.toHaveBeenCalled();
-    expect(screen.getByText("1 build selected")).toBeInTheDocument();
-
-    // Clicking the cell around the checkbox is equally inert.
-    const cell = screen
-      .getByRole("checkbox", { name: "Select build nightly-refresh" })
-      .closest("td") as HTMLElement;
-    await user.click(cell);
-    expect(onSelectBuild).not.toHaveBeenCalled();
-  });
-
-  it("opens the build from the row and from the keyboard-focusable name button", async () => {
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByText("nightly-refresh");
-
-    // The name is a real button, so it is reachable and activatable by
-    // keyboard — the row itself is only a mouse convenience.
-    const nameButton = screen.getByRole("button", { name: "nightly-refresh" });
-    nameButton.focus();
-    expect(nameButton).toHaveFocus();
-    await user.keyboard("{Enter}");
-    expect(onSelectBuild).toHaveBeenCalledWith(STALE_ID);
-
-    onSelectBuild.mockClear();
-    await user.click(within(rowFor("feature-sandbox")).getByText("feature-sandbox"));
-    expect(onSelectBuild).toHaveBeenCalledWith(DONE_ID);
-  });
-
-  it("clears the selection when the page changes", async () => {
-    vi.mocked(fetchBuilds).mockResolvedValue(buildsResponse(ALL_BUILDS, 45));
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByText("nightly-refresh");
-
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select build nightly-refresh" }),
-    );
-    expect(screen.getByText("1 build selected")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Next" }));
-    await waitFor(() =>
-      expect(screen.queryByText("1 build selected")).not.toBeInTheDocument(),
-    );
-  });
-
-  it("dry-runs a bulk cancel, shows the consequences, then applies", async () => {
-    vi.mocked(bulkCancelBuilds).mockImplementation(async (request) =>
-      request.dry_run
-        ? bulkResponse({
-            dry_run: true,
-            builds: [
-              {
-                build_id: STALE_ID,
-                name: "nightly-refresh",
-                last_activity_at: staleBuild.last_activity_at ?? null,
-                reactive_app_name: null,
-                cascaded_task_ids: ["t-1", "t-2"],
-              },
-              {
-                build_id: BUSY_ID,
-                name: "hourly-ingest",
-                last_activity_at: busyBuild.last_activity_at ?? null,
-                reactive_app_name: "demo-scheduler",
-                cascaded_task_ids: ["t-3"],
-              },
-            ],
-            build_count: 2,
-            task_count: 3,
-            skipped: { [DONE_ID]: "not_running" },
-          })
-        : bulkResponse({ build_count: 2, task_count: 3, skipped: {} }),
-    );
-
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByText("nightly-refresh");
-
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select all builds on this page" }),
-    );
-    await user.click(screen.getByRole("button", { name: "Cancel builds…" }));
-
-    // The dry run runs first and reports exactly what will happen.
-    expect(
-      await screen.findByText("Will cancel 2 builds and release 3 task claims."),
-    ).toBeInTheDocument();
-    expect(bulkCancelBuilds).toHaveBeenCalledWith(
-      expect.objectContaining({
-        dry_run: true,
-        cascade: true,
-        include_reactive: false,
-        build_ids: [STALE_ID, BUSY_ID, DONE_ID],
-      }),
-      "env-1",
-    );
-    // Per-build skip reason is surfaced, not swallowed — named, with the
-    // reason spelled out rather than left as an opaque enum value.
-    const skippedBlock = screen.getByText("Skipped (1)").parentElement as HTMLElement;
-    expect(skippedBlock).toHaveTextContent(
-      "feature-sandbox — Already finished — only running builds can be cancelled",
-    );
-
-    // Nothing has been written yet.
-    expect(bulkCancelBuilds).toHaveBeenCalledTimes(1);
-
-    await user.click(screen.getByRole("button", { name: "Cancel 2 builds" }));
-
-    await waitFor(() =>
-      expect(bulkCancelBuilds).toHaveBeenCalledWith(
-        expect.objectContaining({ dry_run: false, cascade: true }),
-        "env-1",
-      ),
-    );
-    expect(
-      await screen.findByText(/Cancelled 2 builds and released 3 task claims\./),
-    ).toBeInTheDocument();
-    // Selection cleared and the list refetched after the mutation.
-    expect(screen.queryByText("2 builds selected")).not.toBeInTheDocument();
-  });
-
-  it("re-runs the dry run when cascade is switched off", async () => {
-    vi.mocked(bulkCancelBuilds).mockImplementation(async (request) =>
-      bulkResponse({
-        dry_run: true,
-        build_count: 1,
-        task_count: request.cascade ? 4 : 0,
-      }),
-    );
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByText("nightly-refresh");
-
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select build nightly-refresh" }),
-    );
-    await user.click(screen.getByRole("button", { name: "Cancel builds…" }));
-    expect(
-      await screen.findByText("Will cancel 1 build and release 4 task claims."),
-    ).toBeInTheDocument();
-
-    await user.click(
-      screen.getByRole("checkbox", {
-        name: "Release the execution claims these builds' tasks hold",
-      }),
-    );
-    expect(
-      await screen.findByText(
-        "Will cancel 1 build and release no task claims (cascade is off).",
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it("surfaces truncation and a dry-run failure in the dialog", async () => {
-    vi.mocked(bulkCancelBuilds).mockRejectedValue(
-      new Error("Provide build_ids and/or idle_for_seconds."),
-    );
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByText("nightly-refresh");
-
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select build nightly-refresh" }),
-    );
-    await user.click(screen.getByRole("button", { name: "Cancel builds…" }));
-
-    expect(
-      await screen.findByText("Provide build_ids and/or idle_for_seconds."),
-    ).toBeInTheDocument();
-    // Nothing to confirm when the preview failed.
-    expect(screen.getByRole("button", { name: "Cancel 0 builds" })).toBeDisabled();
-  });
-
-  it("sweeps by idleness server-side once an idle filter is chosen", async () => {
-    vi.mocked(bulkCancelBuilds).mockResolvedValue(
-      bulkResponse({ dry_run: true, build_count: 12, task_count: 30, truncated: true }),
-    );
-    const user = userEvent.setup();
-    renderList();
-    await screen.findByText("nightly-refresh");
-
-    // Disabled until the threshold is explicit and visible in the filters.
-    expect(
-      screen.getByRole("button", { name: "Clean up idle builds…" }),
-    ).toBeDisabled();
-
-    await user.selectOptions(
-      screen.getByLabelText("Filter by time since last activity"),
-      String(DAY / 1000),
-    );
-    const sweep = screen.getByRole("button", { name: "Clean up idle builds…" });
-    expect(sweep).toBeEnabled();
-    await user.click(sweep);
-
-    expect(
-      await screen.findByText("Will cancel 12 builds and release 30 task claims."),
-    ).toBeInTheDocument();
-    expect(bulkCancelBuilds).toHaveBeenCalledWith(
-      expect.objectContaining({ dry_run: true, idle_for_seconds: 86400 }),
-      "env-1",
-    );
-    expect(
-      screen.getByText(/More builds match than one call may cancel/),
-    ).toBeInTheDocument();
-  });
-
-  it("hides selection and bulk cleanup from non-admin members", async () => {
-    mockWorkspaceRole = "member";
-    renderList();
-    await screen.findByText("nightly-refresh");
-
-    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Clean up idle builds…" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByText("Bulk cleanup requires the workspace admin role"),
-    ).toBeInTheDocument();
-    // Filters and navigation still work for everyone.
-    expect(screen.getByLabelText("Filter by build status")).toBeInTheDocument();
-  });
-
-  it("distinguishes an empty environment from an empty filter result", async () => {
-    vi.mocked(fetchBuilds).mockResolvedValue(buildsResponse([]));
-    const user = userEvent.setup();
-    renderList();
-
-    expect(await screen.findByText("No builds yet")).toBeInTheDocument();
-
-    await user.selectOptions(screen.getByLabelText("Filter by build status"), "failed");
-    expect(
-      await screen.findByText("No builds match these filters"),
-    ).toBeInTheDocument();
-    await user.click(screen.getAllByRole("button", { name: "Clear filters" })[0]);
-    expect(await screen.findByText("No builds yet")).toBeInTheDocument();
-  });
-
-  it("shows a load error with a retry that refetches", async () => {
-    vi.mocked(fetchBuilds).mockRejectedValueOnce(new Error("Failed to fetch builds"));
-    const user = userEvent.setup();
-    renderList();
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Failed to fetch builds",
-    );
-
-    vi.mocked(fetchBuilds).mockResolvedValue(buildsResponse(ALL_BUILDS));
-    await user.click(screen.getByRole("button", { name: "Retry" }));
-    expect(await screen.findByText("nightly-refresh")).toBeInTheDocument();
+    await screen.findByText("build a");
+    fireEvent.change(screen.getByLabelText("Filter by build status"), {
+      target: { value: "completed" },
+    });
+    expect(screen.getByLabelText("Filter by time since last activity")).toBeDisabled();
   });
 });

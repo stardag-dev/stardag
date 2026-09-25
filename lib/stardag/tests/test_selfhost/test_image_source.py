@@ -26,7 +26,9 @@ def test_server_image_ref():
 
 
 def test_default_server_version_is_semver():
-    assert re.fullmatch(r"\d+\.\d+\.\d+", DEFAULT_SERVER_VERSION)
+    # Also allows a release-candidate suffix (e.g. "0.6.0rc1"), pinning
+    # self-host to a v2 pre-release image while the line is still in flight.
+    assert re.fullmatch(r"\d+\.\d+\.\d+(rc\d+)?", DEFAULT_SERVER_VERSION)
 
 
 def test_resolve_default_is_prebuilt_at_default_version():
@@ -157,8 +159,10 @@ def test_client_python_version_rejects_too_old(monkeypatch: pytest.MonkeyPatch):
 
     from stardag.selfhost._modal_app import client_python_version
 
-    monkeypatch.setattr(sys, "version_info", (3, 9, 0, "final", 0))
-    with pytest.raises(RuntimeError, match="requires Python >= 3.10"):
+    # 3.10, not e.g. 3.9: this must fail specifically because it is below
+    # the current 3.11 floor, not because it was already below the old one.
+    monkeypatch.setattr(sys, "version_info", (3, 10, 0, "final", 0))
+    with pytest.raises(RuntimeError, match="requires Python >= 3.11"):
         client_python_version()
 
 

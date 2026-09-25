@@ -22,7 +22,7 @@ cover a low-traffic deployment).
 ## Quickstart
 
 **Prerequisites:** ~10 minutes, a GitHub/Google account for sign-ups, and
-[uv](https://docs.astral.sh/uv/) (or plain Python ≥ 3.10 + pip).
+[uv](https://docs.astral.sh/uv/) (or plain Python ≥ 3.11 + pip).
 
 ### 1. Create a Modal account and token
 
@@ -51,7 +51,7 @@ that via the API (Postgres 16, project name `stardag`).
 uvx --from "stardag[selfhost]" stardag self-host up
 ```
 
-(Any Python ≥ 3.10 works — the prebuilt image is deployed by reference, so
+(Any Python ≥ 3.11 works — the prebuilt image is deployed by reference, so
 the CLI's interpreter is independent of the image's.)
 
 The command walks you through the rest interactively:
@@ -112,7 +112,10 @@ uvx --from "stardag[selfhost]" stardag self-host upgrade
 
 This applies any new database migrations and redeploys the API + UI. The JWT
 keypair secret is left untouched, so existing sessions and SDK logins survive
-upgrades.
+upgrades. Upgrading a v1 registry to v2 drops its build and task history, and
+the migration refuses while v1 rows exist unless you pass `--accept-data-loss`
+(which sets `STARDAG_ACCEPT_V2_DATA_LOSS=1` for that run); see the v2 section
+of the release notes.
 
 ### Which server version you get
 
@@ -168,7 +171,7 @@ The image is then built from the checkout: the UI is compiled with npm
 inside the Modal image build (no local Node needed) and the API package is
 installed from source. In this mode the function bodies are serialized with
 the CLI's interpreter, so the image's Python is matched to it automatically
-(any Python ≥ 3.10 works). `upgrade --from-source` redeploys after local
+(any Python ≥ 3.11 works). `upgrade --from-source` redeploys after local
 changes or a `git pull`.
 
 ## Auth mode: `local` (default)
@@ -302,17 +305,15 @@ equivalent):
   match it. If you see it, drop any `--python`/`python_version` override so
   the image tracks your interpreter. The default prebuilt path is deployed
   by reference (not serialized), so it is immune to this and runs under any
-  Python ≥ 3.10.
+  Python ≥ 3.11.
 - **`Modal authentication not set up`** — run `uvx modal token new`.
 - **`Neon API key rejected`** — create a key at
   [console.neon.tech/app/settings/api-keys](https://console.neon.tech/app/settings/api-keys).
-- **SDK and server out of step** — upgrade both together. A newer SDK
-  against an older server fails on whatever endpoint is missing, naming the
-  command and telling you to upgrade `stardag-api`. In the other direction
-  the server can reject the SDK outright (`426 Upgrade Required`,
-  `SDKVersionUnsupportedError`) with the exact `pip install --upgrade` line;
-  it only does so if you configured a minimum SDK version, and by default
-  there is none.
+- **SDK and server out of step** — upgrade both together. There is no
+  version check in either direction: a mismatched pair fails on the first
+  call to a route the other side does not serve, as a `NotFoundError`
+  whose detail is `"Not Found"` (a v2 SDK against a v1 server fails on its
+  first `/api/v2` request).
 - **Sign-in loops or 401s right after an upgrade** — stale cached tokens;
   sign out and in again. (The JWT keypair is preserved across upgrades, so
   this should be rare.)

@@ -1,280 +1,270 @@
-"""Task inspection and recovery commands for the Stardag CLI.
+"""``stardag tasks``: a completion, its instances, and the operator's
+per-task actions (registry v2).
 
-    stardag tasks list [--status running] [--older-than 1h]
-    stardag tasks cancel <build-id> <task-id>
-    stardag tasks retry <build-id> <task-id>
+A **task** is the completion (``task_id``) with its global status and
+claim; it holds no parameters. An **instance** is one construction of it
+under a scope ``(deployment, settings)``, with the body (design.md, D1/D2).
 
-``tasks list --status running`` is the claim-holder question. A task row is
-unique per ``(environment_id, task_id)`` and its status is denormalised
-there, so a task left RUNNING by a build whose orchestrator died denies
-the execution claim to *every* future build that needs it, indefinitely —
-and keeps occupying whatever concurrency-limit slots it acquired.
-``latest_status_build_id`` names the build holding it and
-``latest_status_at`` says since when, which together are the whole
-diagnosis. ``--status suspended`` matters for the same reason: an
-abandoned suspension gates everything downstream of it.
-
-Cancel and retry take ``<build-id> <task-id>`` because a task event is
-recorded *against a build*: the registry's task lifecycle endpoints are
-build sub-resources, and the build whose event produced a task's current
-status is the one entitled to change it. Use the build id from
-``latest_status_build_id`` (``tasks list`` prints it) — that is the claim
-holder, and cancelling from anywhere else records an event for a build
-that never ran the task.
-
-``--json`` on the read-only command follows the convention documented in
-``stardag._cli.builds``: the SDK's model of the API payload, alone on
-stdout.
+    stardag tasks list [--status S] [--cursor C]  # most recent change first
+    stardag tasks show <task-id>                 # task, claim, executions, events
+    stardag tasks check <task-id> -m <module>    # run complete() locally
+    stardag tasks retry <task-id> [--build <id>] [--yes]   # reset to PENDING
+    stardag tasks cancel <task-id> [--build <id>] [--yes]  # release the claim
+    stardag tasks exclude <plan-id> <task-id>    # give up on it in one plan
 """
 
 import json
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
-from uuid import UUID
+from datetime import datetime, timezone
+from typing import Optional
 
 import typer
 from rich.table import Table
 
-# Shared by every registry-backed CLI group; imported into this module's
-# namespace so ``stardag._cli.tasks._resolve_registry`` is the patch point.
-from stardag._cli._duration import format_duration, parse_duration
+from stardag._cli._output import (
+    JSON_OPTION,
+    as_utc,
+    emit_json,
+    short,
+    stamp,
+)
 from stardag._cli._registry_ctx import (
     _ENV_OPTION,
     _PROFILE_OPTION,
     _fail,
     _resolve_registry,
     console,
-    error_console,
+)
+from stardag._cli.tasks_actions import (
+    tasks_cancel,
+    tasks_check,
+    tasks_exclude,
+    tasks_retry,
 )
 from stardag.exceptions import StardagError
+from stardag._cli.executions import render_executions
+from stardag.registry import EventInfo, TaskArtifactInfo, TaskInfo
 
-app = typer.Typer(
-    help="Inspect, cancel and retry tasks in an environment",
-    no_args_is_help=True,
-)
+app = typer.Typer(help="Inspect tasks and act on one task.", no_args_is_help=True)
+app.command("check")(tasks_check)
+app.command("retry")(tasks_retry)
+app.command("cancel")(tasks_cancel)
+app.command("exclude")(tasks_exclude)
 
-_JSON_OPTION = typer.Option(
-    False,
-    "--json",
-    help="Emit the API payload as JSON on stdout (nothing else goes to stdout).",
-)
+_TASK_ID = typer.Argument(..., help="Task ID (the completion hash)")
 
-
-def _emit_json(payload: Any) -> None:
-    """Write one JSON document to stdout, and nothing else."""
-    typer.echo(json.dumps(payload, indent=2, default=str))
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
+# How ``tasks show`` reads the event log: the server serves at most 500 of
+# a task's events, oldest first.
+EVENT_READ_LIMIT = 500
+# The wire value of EventType.TASK_STRUCTURE_DIVERGED (the server serves
+# event types lowercase).
+STRUCTURE_DIVERGED = "task_structure_diverged"
 
 
-def _age(value: datetime | None) -> str:
-    if value is None:
-        return "-"
-    delta = datetime.now(timezone.utc) - _as_utc(value)
-    return format_duration(delta.total_seconds())
+# -----------------------------------------------------------------------------
+# show
+# -----------------------------------------------------------------------------
 
 
-def _stamp(value: datetime | None) -> str:
-    if value is None:
-        return "-"
-    return _as_utc(value).strftime("%Y-%m-%d %H:%M:%SZ")
+@app.command("show")
+def tasks_show(
+    task_id: str = _TASK_ID,
+    include_ended: bool = typer.Option(
+        False,
+        "--include-ended",
+        help="List every execution of the task, not only those with no end reported.",
+    ),
+    events: int = typer.Option(
+        10, "--events", min=0, max=EVENT_READ_LIMIT, help="Last events to show."
+    ),
+    stardag_profile: Optional[str] = _PROFILE_OPTION,
+    stardag_env: Optional[str] = _ENV_OPTION,
+    json_output: bool = JSON_OPTION,
+) -> None:
+    """Show a task: its global status and the claim's holder (plan and
+    build), its instances (one per scope it was constructed under, newest
+    first), its executions across builds, its last events — every
+    structure divergence (``TASK_STRUCTURE_DIVERGED``: an expanded instance
+    declared new static edges within its scope) called out — and its
+    artifacts.
 
-
-def _parse_uuid(value: str, label: str) -> UUID:
+    Reads ``GET /tasks/{id}``, ``GET /tasks/{id}/executions``,
+    ``GET /tasks/{id}/events`` (at most the task's first 500) and
+    ``GET /tasks/{id}/artifacts``. Writes nothing.
+    """
+    registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        return UUID(value)
-    except ValueError:
-        error_console.print(
-            f"[bold red]Error:[/bold red] {value!r} is not a valid {label} (UUID)."
+        task = registry.task_get(task_id)
+        executions = registry.task_list_executions(task_id, include_ended=include_ended)
+        log = registry.task_events(task_id, limit=EVENT_READ_LIMIT)
+        artifacts = registry.task_list_artifacts(task_id)
+    except StardagError as e:
+        _fail(e)
+    finally:
+        registry.close()
+    diverged = [e for e in log if e.event_type.lower() == STRUCTURE_DIVERGED]
+    if json_output:
+        emit_json(
+            {
+                **task.model_dump(mode="json"),
+                "executions": [x.model_dump(mode="json") for x in executions],
+                # --events bounds the listing here too; divergences are
+                # reported whole below, as in the text output.
+                "events": [e.model_dump(mode="json") for e in log[-events:]]
+                if events
+                else [],
+                "structure_diverged": [e.model_dump(mode="json") for e in diverged],
+                "artifacts": [a.model_dump(mode="json") for a in artifacts],
+            }
         )
-        raise typer.Exit(1)
+        return
+    _render_task(task, artifacts)
+    render_executions(
+        executions,
+        title=f"{'Executions' if include_ended else 'Unended executions'} "
+        f"({len(executions)}, newest first)",
+        by_task=True,
+    )
+    _render_events(log, diverged, events)
+
+
+def _render_events(log: list[EventInfo], diverged: list[EventInfo], last: int) -> None:
+    if diverged:
+        console.print(
+            f"[bold yellow]Structure diverged {len(diverged)} time(s)[/bold yellow] "
+            "(an expanded instance declared new static edges within its scope; "
+            "appended, never refused):"
+        )
+        for e in diverged:
+            detail = (
+                json.dumps(e.event_metadata, sort_keys=True) if e.event_metadata else ""
+            )
+            console.print(
+                f"  {stamp(e.created_at)} plan {short(e.plan_id, 8)} {detail}"
+            )
+    if not last or not log:
+        return
+    table = Table(title=f"Last events ({min(last, len(log))} of {len(log)})")
+    for col in ("When", "Event", "Build", "Execution", "Applied", "Detail"):
+        table.add_column(col)
+    for e in log[-last:]:
+        table.add_row(
+            stamp(e.created_at),
+            e.event_type,
+            short(e.build_id, 8),
+            short(e.execution_id, 8),
+            "yes" if e.report_applied else "no (late)",
+            e.error_message or "",
+        )
+    console.print(table)
+
+
+def _claim(task: TaskInfo) -> str:
+    if task.claim_build_id is None:
+        return "-"
+    live = task.claim_expires_at is not None and as_utc(
+        task.claim_expires_at
+    ) > datetime.now(timezone.utc)
+    state = "live" if live else "lapsed"
+    return f"build {task.claim_build_id}, plan {task.claim_plan_id} ({state})"
+
+
+def _render_task(task: TaskInfo, artifacts: list[TaskArtifactInfo]) -> None:
+    name = f"{task.task_namespace}.{task.task_name}".lstrip(".")
+    table = Table(title=f"Task {task.task_id}", show_header=False)
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Task", name or "-")
+    table.add_row("Version", task.version or "-")
+    table.add_row("Output", task.output_uri or "-")
+    table.add_row("Status", f"{task.status or '-'} (since {stamp(task.status_at)})")
+    table.add_row("Completed", stamp(task.completed_at))
+    if task.error_message:
+        table.add_row("Error", task.error_message)
+    table.add_row("Claim held by", _claim(task))
+    if task.execution_id is not None:
+        table.add_row("Execution", str(task.execution_id))
+    if task.claim_expires_at is not None:
+        table.add_row("Claim expires", stamp(task.claim_expires_at))
+    console.print(table)
+    instances = Table(title=f"Instances ({len(task.instances)}, newest first)")
+    for col in ("Instance", "Deployment", "Settings", "Expanded", "Created"):
+        instances.add_column(col)
+    for i in task.instances:
+        instances.add_row(
+            str(i.id),
+            str(i.deployment_id),
+            str(i.settings_hash),
+            stamp(i.expanded_at) if i.expanded_at else "no",
+            stamp(i.created_at),
+        )
+    console.print(instances)
+    if artifacts:
+        rows = Table(title="Artifacts")
+        for col in ("Type", "Name", "Created"):
+            rows.add_column(col)
+        for a in artifacts:
+            rows.add_row(a.artifact_type, a.name, stamp(a.created_at))
+        console.print(rows)
+
+
+# -----------------------------------------------------------------------------
+# list
+# -----------------------------------------------------------------------------
 
 
 @app.command("list")
 def tasks_list(
-    stardag_profile: Optional[str] = _PROFILE_OPTION,
-    stardag_env: Optional[str] = _ENV_OPTION,
-    status: Optional[list[str]] = typer.Option(
+    status: Optional[str] = typer.Option(
         None,
         "--status",
-        help=(
-            "Global task status; repeatable "
-            "(--status running --status suspended matches either)."
-        ),
+        help="Only tasks in this global status (pending, running, completed, "
+        "failed, cancelled, skipped, suspended, interrupted).",
     ),
-    older_than: Optional[str] = typer.Option(
+    limit: int = typer.Option(50, "--limit", "-n", min=1, max=500),
+    cursor: Optional[str] = typer.Option(
         None,
-        "--older-than",
-        help="Only tasks in their current status at least this long (e.g. 1h, 3d).",
+        "--cursor",
+        help="Start after the previous page (the cursor it printed as next).",
     ),
-    name: Optional[str] = typer.Option(None, "--name", help="Filter by task name."),
-    namespace: Optional[str] = typer.Option(
-        None, "--namespace", help="Filter by task namespace."
-    ),
-    page: int = typer.Option(1, "--page", min=1, help="Page number (1-based)."),
-    limit: int = typer.Option(
-        20, "--limit", "-n", min=1, max=100, help="Tasks per page (max 100)."
-    ),
-    json_output: bool = _JSON_OPTION,
+    stardag_profile: Optional[str] = _PROFILE_OPTION,
+    stardag_env: Optional[str] = _ENV_OPTION,
+    json_output: bool = JSON_OPTION,
 ) -> None:
-    """List tasks by their environment-global status — i.e. claim holders.
+    """List tasks in the environment, most recent status change first, a
+    page at a time. ``--status running`` is the claim-holder question: the
+    Claim column names the build holding each claim.
 
-    With a status or staleness filter the server returns oldest-claim
-    first: the task that has been RUNNING longest is both the most likely
-    to be abandoned and the most expensive to leave holding a claim.
-
-    `--older-than` is converted to an absolute cutoff before it is sent,
-    so paging a large result cannot have the cutoff drift underneath it.
-    Tasks with no recorded status timestamp never match it — an age that
-    cannot be established is not evidence of staleness.
+    Reads ``GET /tasks``. Writes nothing. v1's ``--older-than``, ``--name``
+    and ``--namespace`` filters are not available: the server's task list
+    filters by status only.
     """
-    status_older_than: datetime | None = None
-    if older_than is not None:
-        try:
-            seconds = parse_duration(older_than)
-        except ValueError as e:
-            error_console.print(f"[bold red]Error:[/bold red] {e}")
-            raise typer.Exit(1)
-        status_older_than = datetime.now(timezone.utc) - timedelta(seconds=seconds)
-
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        result = registry.task_list(
-            page=page,
-            page_size=limit,
-            status=status or None,
-            status_older_than=status_older_than,
-            task_name=name,
-            task_namespace=namespace,
-        )
+        page = registry.task_list(status=status, limit=limit, cursor=cursor)
     except StardagError as e:
         _fail(e)
     finally:
         registry.close()
-
     if json_output:
-        _emit_json(
-            {
-                "tasks": [t.model_dump(mode="json") for t in result.tasks],
-                "total": result.total,
-                "page": result.page,
-                "page_size": result.page_size,
-            }
+        # List items carry no instances (``GET /tasks`` serves none).
+        emit_json(
+            page.model_dump(mode="json", exclude={"tasks": {"__all__": {"instances"}}})
         )
         return
-
-    if not result.tasks:
-        console.print("No tasks match this filter.")
-        console.print(
-            "\n[dim]Claim holders are: stardag tasks list --status running[/dim]"
-        )
+    if not page.tasks:
+        console.print("No tasks match.")
         return
-
-    table = Table(title=f"Tasks (page {result.page}, {result.total} total)")
-    table.add_column("Task ID")
-    table.add_column("Task")
-    table.add_column("Status")
-    table.add_column("Since")
-    table.add_column("For", justify="right")
-    table.add_column("Held by build")
-    table.add_column("Executor")
-    for task in result.tasks:
-        qualified = (
-            f"{task.task_namespace}.{task.task_name}"
-            if task.task_namespace
-            else task.task_name
-        )
+    table = Table(title="Tasks (most recent status change first)")
+    for col in ("Task ID", "Task", "Status", "Since", "Claim (build)"):
+        table.add_column(col)
+    for t in page.tasks:
         table.add_row(
-            task.task_id,
-            qualified,
-            task.latest_status or "-",
-            _stamp(task.latest_status_at),
-            _age(task.latest_status_at),
-            str(task.latest_status_build_id or "-"),
-            task.latest_executor or "-",
+            t.task_id,
+            f"{t.task_namespace}.{t.task_name}".lstrip("."),
+            t.status or "-",
+            stamp(t.status_at),
+            str(t.claim_build_id) if t.claim_build_id else "-",
         )
     console.print(table)
-    if result.total > len(result.tasks):
-        console.print(
-            f"[dim]Showing {len(result.tasks)} of {result.total} "
-            f"(use --page / --limit for more).[/dim]"
-        )
-
-
-@app.command("cancel")
-def tasks_cancel(
-    build_id: str = typer.Argument(..., help="Build the event is recorded against"),
-    task_id: str = typer.Argument(..., help="Task ID"),
-    stardag_profile: Optional[str] = _PROFILE_OPTION,
-    stardag_env: Optional[str] = _ENV_OPTION,
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt."
-    ),
-) -> None:
-    """Cancel a task, releasing its execution claim and limit slots.
-
-    This is the recovery for a task stranded RUNNING or SUSPENDED by a
-    build that is gone. Pass the build from `latest_status_build_id` —
-    the claim holder.
-
-    The server cannot stop anything: a worker still executing keeps going
-    until it notices, and a completion that lands afterwards wins
-    (COMPLETED is sticky). Cancel claims whose process you believe is
-    dead.
-    """
-    parsed_build = _parse_uuid(build_id, "build ID")
-    if not yes:
-        typer.confirm(
-            f"Cancel task {task_id} in build {build_id}? "
-            "This releases its execution claim and any limit slots.",
-            abort=True,
-        )
-
-    registry = _resolve_registry(stardag_profile, stardag_env)
-    try:
-        registry.task_cancel_by_id(parsed_build, task_id)
-    except StardagError as e:
-        _fail(e)
-    finally:
-        registry.close()
-
-    console.print(f"[green]Cancelled task[/green] {task_id} in build {build_id}")
-
-
-@app.command("retry")
-def tasks_retry(
-    build_id: str = typer.Argument(..., help="Build the event is recorded against"),
-    task_id: str = typer.Argument(..., help="Task ID"),
-    stardag_profile: Optional[str] = _PROFILE_OPTION,
-    stardag_env: Optional[str] = _ENV_OPTION,
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt."
-    ),
-) -> None:
-    """Reset a terminal-but-retryable task to PENDING so it can run again.
-
-    Flips failed / cancelled / skipped / suspended back to PENDING; a
-    COMPLETED or RUNNING task is untouched (a RUNNING task holds a live
-    claim, and releasing that is cancellation, not retry — see
-    `stardag tasks cancel`).
-    """
-    parsed_build = _parse_uuid(build_id, "build ID")
-    if not yes:
-        typer.confirm(
-            f"Reset task {task_id} in build {build_id} to PENDING?",
-            abort=True,
-        )
-
-    registry = _resolve_registry(stardag_profile, stardag_env)
-    try:
-        registry.task_retry_by_id(parsed_build, task_id)
-    except StardagError as e:
-        _fail(e)
-    finally:
-        registry.close()
-
-    console.print(f"[green]Reset task[/green] {task_id} to pending in build {build_id}")
+    if page.next_cursor:
+        console.print(f"[dim]Next page: --cursor {page.next_cursor}[/dim]")

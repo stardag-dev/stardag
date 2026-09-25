@@ -1,13 +1,15 @@
 """Unit tests for Modal executor metadata resolution and propagation.
 
 Covers the executor side (metadata on detached handles + the env-override
-channel to workers) and the worker side (self-reported starts carrying the
-same dict, dropping it for registries predating the kwarg). Workspace and
+channel to workers) and the worker side (the holder's non-claiming start
+carrying the same dict). Workspace and
 environment values are pinned by the ``hermetic_modal_executor_metadata``
 conftest fixture; the resolution helpers themselves are tested with
 explicit monkeypatching below.
 """
 
+import contextlib
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -20,21 +22,24 @@ except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
 
 from stardag import BaseTask
-from stardag.build._base import current_build_id_var
+from stardag.build._base import BuildContext, current_build_context_var
+from stardag.build._claims import CLAIM_TTL_GRACE_SECONDS
 from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
+    STARDAG_EXECUTION_ID_ENV,
     STARDAG_MODAL_APP_ID_ENV,
     STARDAG_MODAL_APP_NAME_ENV,
     STARDAG_MODAL_ENVIRONMENT_ENV,
     STARDAG_MODAL_FUNCTION_ID_ENV,
     STARDAG_MODAL_FUNCTION_NAME_ENV,
     STARDAG_MODAL_WORKSPACE_ENV,
+    STARDAG_PLAN_ID_ENV,
 )
-from stardag.integration.modal._runner import _WorkerLifecycleReporter
-from stardag.registry import NoOpRegistry
+from stardag.integration.modal._reporter import _WorkerLifecycleReporter
+from stardag.testing import InMemoryRegistry
 
 EXPECTED_BASE_METADATA = {
     "kind": "modal",
@@ -91,12 +96,22 @@ def _make_task() -> BaseTask:
     return task
 
 
+@contextlib.contextmanager
+def _in_build(build_id: UUID | None = None) -> Iterator[BuildContext]:
+    context = BuildContext(build_id=build_id or uuid4(), plan_id=uuid4())
+    token = current_build_context_var.set(context)
+    try:
+        yield context
+    finally:
+        current_build_context_var.reset(token)
+
+
 class TestDetachedHandleMetadata:
     async def test_handle_carries_resolved_metadata(self):
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
-        handle = await executor.submit_detached(_make_task())
+        handle = await executor.submit_detached(_make_task(), execution_id=uuid4())
 
         assert handle.executor_metadata == EXPECTED_WORKER_METADATA
 
@@ -104,7 +119,7 @@ class TestDetachedHandleMetadata:
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker, modal_workspace="explicit-ws")
 
-        handle = await executor.submit_detached(_make_task())
+        handle = await executor.submit_detached(_make_task(), execution_id=uuid4())
 
         assert handle.executor_metadata is not None
         assert handle.executor_metadata["workspace"] == "explicit-ws"
@@ -142,7 +157,7 @@ class TestDetachedHandleMetadata:
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
-        handle = await executor.submit_detached(_make_task())
+        handle = await executor.submit_detached(_make_task(), execution_id=uuid4())
 
         assert handle.ref == "fc-meta-1"
         assert handle.executor_metadata == {
@@ -264,24 +279,10 @@ class TestDetachedHandleMetadata:
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
-        await executor.submit_detached(_make_task())
-        await executor.submit_detached(_make_task())
+        await executor.submit_detached(_make_task(), execution_id=uuid4())
+        await executor.submit_detached(_make_task(), execution_id=uuid4())
 
         assert calls["n"] == 1
-
-    async def test_reattach_handle_carries_base_metadata(self, monkeypatch):
-        """Re-attached handles get base metadata only — the worker function
-        behind a bare ref isn't known."""
-        function_call = FakeFunctionCall(object_id="fc-live")
-        monkeypatch.setattr(
-            modal.FunctionCall, "from_id", staticmethod(lambda ref: function_call)
-        )
-        executor = _make_executor(FakeWorkerFunction(function_call))
-
-        handle = await executor.reattach(_make_task(), MODAL_EXECUTOR_NAME, "fc-live")
-
-        assert handle is not None
-        assert handle.executor_metadata == EXPECTED_BASE_METADATA
 
 
 class TestWorkerEnvForwarding:
@@ -290,11 +291,8 @@ class TestWorkerEnvForwarding:
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
-        token = current_build_id_var.set(build_id)
-        try:
-            await executor.submit_detached(_make_task())
-        finally:
-            current_build_id_var.reset(token)
+        with _in_build(build_id):
+            await executor.submit_detached(_make_task(), execution_id=uuid4())
 
         _, env_overrides = worker.spawn_calls[0]
         assert env_overrides[STARDAG_BUILD_ID_ENV] == str(build_id)
@@ -309,34 +307,27 @@ class TestWorkerEnvForwarding:
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
-        await executor.submit_detached(_make_task())
+        await executor.submit_detached(_make_task(), execution_id=uuid4())
 
         _, env_overrides = worker.spawn_calls[0]
         assert env_overrides is None or STARDAG_MODAL_WORKSPACE_ENV not in env_overrides
 
 
 class TestClaimTtlForwarding:
-    """The worker's own TASK_STARTED is a start like any other, so the
-    orchestrator's derived claim TTL has to reach it — otherwise the worker
-    would re-stamp the claim with the registry's generic default and undo
-    the derivation. Forwarding also re-bases the expiry on the moment
-    execution actually begins, rather than on the pre-spawn claim."""
+    """The claim TTL derived from the worker's Modal timeout reaches the
+    worker, whose non-claiming start after a preemption restores the
+    claim's TTL (the registry's default otherwise)."""
 
     async def test_ttl_derived_from_the_workers_timeout_is_forwarded(self):
-        from stardag.build._reactive import _CLAIM_TTL_GRACE_SECONDS
-
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker, worker_timeouts={"default": 3600})
 
-        token = current_build_id_var.set(uuid4())
-        try:
-            await executor.submit_detached(_make_task())
-        finally:
-            current_build_id_var.reset(token)
+        with _in_build():
+            await executor.submit_detached(_make_task(), execution_id=uuid4())
 
         _, env_overrides = worker.spawn_calls[0]
         assert env_overrides[STARDAG_CLAIM_TTL_SECONDS_ENV] == str(
-            int(3600 + _CLAIM_TTL_GRACE_SECONDS)
+            int(3600 + CLAIM_TTL_GRACE_SECONDS)
         )
 
     async def test_no_declared_timeout_forwards_nothing(self):
@@ -345,11 +336,8 @@ class TestClaimTtlForwarding:
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
-        token = current_build_id_var.set(uuid4())
-        try:
-            await executor.submit_detached(_make_task())
-        finally:
-            current_build_id_var.reset(token)
+        with _in_build():
+            await executor.submit_detached(_make_task(), execution_id=uuid4())
 
         _, env_overrides = worker.spawn_calls[0]
         assert STARDAG_CLAIM_TTL_SECONDS_ENV not in env_overrides
@@ -373,36 +361,11 @@ class TestClaimTtlForwarding:
         assert executor.execution_timeout_seconds(_make_task()) is None
 
 
-class MetadataAwareRegistry(NoOpRegistry):
-    """Registry whose task_start accepts the executor_metadata kwarg."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.starts: list[dict] = []
-
-    def task_start(
-        self,
-        build_id,
-        task,
-        executor=None,
-        executor_ref=None,
-        executor_metadata=None,
-        claim_ttl_seconds=None,
-        execution_id=None,
-    ) -> None:
-        self.starts.append(
-            {
-                "executor": executor,
-                "executor_ref": executor_ref,
-                "executor_metadata": executor_metadata,
-                "claim_ttl_seconds": claim_ttl_seconds,
-            }
-        )
-
-
-def _reporter_env(build_id) -> dict[str, str]:
+def _reporter_env(build_id, plan_id, execution_id) -> dict[str, str]:
     return {
         STARDAG_BUILD_ID_ENV: str(build_id),
+        STARDAG_PLAN_ID_ENV: str(plan_id),
+        STARDAG_EXECUTION_ID_ENV: str(execution_id),
         STARDAG_MODAL_APP_NAME_ENV: "test-app",
         STARDAG_MODAL_WORKSPACE_ENV: "test-workspace",
         STARDAG_MODAL_ENVIRONMENT_ENV: "test-env",
@@ -413,6 +376,9 @@ def _reporter_env(build_id) -> dict[str, str]:
 
 
 class TestWorkerReporterMetadata:
+    """The worker's non-claiming start records the same executor metadata
+    the executor resolved, rebuilt from the forwarded env."""
+
     def _create_reporter(self, registry, env) -> _WorkerLifecycleReporter:
         from stardag.registry import registry_provider
 
@@ -423,51 +389,48 @@ class TestWorkerReporterMetadata:
 
     def test_create_builds_metadata_from_env(self):
         reporter = self._create_reporter(
-            MetadataAwareRegistry(), _reporter_env(uuid4())
+            InMemoryRegistry(), _reporter_env(uuid4(), uuid4(), uuid4())
         )
         assert reporter.executor_metadata == EXPECTED_WORKER_METADATA
 
-    def test_started_passes_metadata_to_aware_registry(self, monkeypatch):
+    def test_started_records_the_metadata_under_the_execution(self, monkeypatch):
         monkeypatch.setattr(modal, "current_function_call_id", lambda: "fc-worker-1")
-        registry = MetadataAwareRegistry()
-        reporter = self._create_reporter(registry, _reporter_env(uuid4()))
-
-        reporter.started()
-
-        assert registry.starts == [
-            {
-                "executor": MODAL_EXECUTOR_NAME,
-                "executor_ref": "fc-worker-1",
-                "executor_metadata": EXPECTED_WORKER_METADATA,
-                "claim_ttl_seconds": None,
-            }
-        ]
-
-    def test_started_passes_the_forwarded_claim_ttl(self, monkeypatch):
-        """The orchestrator's derived TTL survives the worker's own start."""
-        monkeypatch.setattr(modal, "current_function_call_id", lambda: "fc-worker-1")
-        registry = MetadataAwareRegistry()
-        env = {**_reporter_env(uuid4()), STARDAG_CLAIM_TTL_SECONDS_ENV: "4500"}
-        reporter = self._create_reporter(registry, env)
-
-        reporter.started()
-
-        assert registry.starts[0]["claim_ttl_seconds"] == 4500
-
-    def test_a_malformed_claim_ttl_is_ignored_not_raised(self):
-        """A bound on an expiry must never cost a worker its start event."""
-        env = {**_reporter_env(uuid4()), STARDAG_CLAIM_TTL_SECONDS_ENV: "soon"}
-        reporter = self._create_reporter(MetadataAwareRegistry(), env)
-
-        assert reporter.claim_ttl_seconds is None
-
-    def test_metadata_minimal_without_forwarded_env(self):
-        """Older orchestrators forward only the build id — the worker still
-        reports what it knows (executor kind)."""
-        build_id = uuid4()
+        registry = InMemoryRegistry()
+        build_id, plan_id, execution_id = uuid4(), uuid4(), uuid4()
         reporter = self._create_reporter(
-            MetadataAwareRegistry(), {STARDAG_BUILD_ID_ENV: str(build_id)}
+            registry, _reporter_env(build_id, plan_id, execution_id)
         )
+        # The member is unknown to the fake: the start is refused, but the
+        # call it made is what is under test (reporting is best-effort).
+        reporter.started()
+        (start,) = registry.calls_to("member_start")
+        assert start["claim"] is False
+        assert start["execution_id"] == execution_id
+        assert start["plan_id"] == plan_id
+        assert start["executor"] == MODAL_EXECUTOR_NAME
+        assert start["executor_ref"] == "fc-worker-1"
+        assert start["executor_metadata"] == EXPECTED_WORKER_METADATA
+
+    def test_without_the_forwarded_ids_there_is_nothing_to_report(self):
+        """A build id alone names no execution: no reporter."""
+        from stardag.registry import registry_provider
+
+        with registry_provider.override(InMemoryRegistry()):
+            assert (
+                _WorkerLifecycleReporter.create(
+                    _make_task(), {STARDAG_BUILD_ID_ENV: str(uuid4())}
+                )
+                is None
+            )
+
+    def test_metadata_minimal_without_forwarded_modal_env(self):
+        build_id = uuid4()
+        env = {
+            STARDAG_BUILD_ID_ENV: str(build_id),
+            STARDAG_PLAN_ID_ENV: str(uuid4()),
+            STARDAG_EXECUTION_ID_ENV: str(uuid4()),
+        }
+        reporter = self._create_reporter(InMemoryRegistry(), env)
         assert reporter.build_id == UUID(str(build_id))
         assert reporter.executor_metadata == {"kind": "modal"}
 
@@ -662,8 +625,8 @@ class TestFunctionIdCaching:
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
-        await executor.submit_detached(_make_task())
-        await executor.submit_detached(_make_task())
+        await executor.submit_detached(_make_task(), execution_id=uuid4())
+        await executor.submit_detached(_make_task(), execution_id=uuid4())
 
         assert calls["n"] == 1
 
@@ -682,8 +645,8 @@ class TestFunctionIdCaching:
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
-        handle = await executor.submit_detached(_make_task())
-        await executor.submit_detached(_make_task())
+        handle = await executor.submit_detached(_make_task(), execution_id=uuid4())
+        await executor.submit_detached(_make_task(), execution_id=uuid4())
 
         assert calls["n"] == 1  # negative result cached, not retried
         assert handle.executor_metadata is not None

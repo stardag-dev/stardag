@@ -1,14 +1,20 @@
-"""The task event log, which is the only place some questions are answered.
+"""The task event log and the execution ledger: the durable records.
 
 Two scenarios here turn on whether a *particular build* reset a task it did
-not own. No status column can answer that. ``latest_status`` and
-``latest_status_build_id`` are one row per task, overwritten by whoever
-wrote last, so a build that resets a task and then watches someone else
-complete it leaves no trace in them at all -- the reset happened, and the
-columns show the completion. The append-only event log is where the reset
-is still visible, attributed to the build that made it.
+not own. No status column can answer that. A ``task`` row is one row per
+completion, overwritten by whoever wrote last, so a build that resets a
+task and then watches someone else complete it leaves no trace in it at all
+-- the reset happened, and the row shows the completion. The append-only
+event log is where the reset is still visible, attributed to the build (and
+plan, and execution) that made it.
 
-The registry client has no method for this endpoint, so these talk to the
+The other record is the **execution ledger** (``GET
+/builds/{id}/executions?include_ended=true``): one row per execution a
+claiming start granted, carrying the backend's ref once the spawn
+succeeded. It is what "how many containers did this build submit" is
+counted from.
+
+The registry client has no method for the event log, so these talk to the
 API directly with the deployment's own API key -- the same credential the
 workers use, and the same shape as the harness's other direct calls.
 """
@@ -16,6 +22,7 @@ workers use, and the same shape as the harness's other direct calls.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -36,9 +43,6 @@ def task_events(
 ) -> list[dict[str, Any]]:
     """Every event recorded against one task, across all builds, oldest first.
 
-    The API answers newest first; reversed here because these read as a
-    story and a story runs forwards.
-
     ``missing_ok`` decides what an unregistered task means, and the default
     is the strict reading on purpose. At assertion time a task the registry
     has never heard of is a real failure and must not read as "no resets
@@ -48,15 +52,11 @@ def task_events(
     answer rather than a problem; that mirrors the None-for-missing
     contract ``_wait.task_status`` documents for the same situation.
     """
-    with httpx.Client(timeout=60.0) as client:
-        response = client.get(
-            f"{deployment.api_url.rstrip('/')}/api/v1/tasks/{task_id}/events",
-            headers={"X-API-Key": deployment.api_key},
-        )
-        if missing_ok and response.status_code == 404:
-            return []
-        response.raise_for_status()
-        return list(reversed(response.json()))
+    response = _get(deployment, f"tasks/{task_id}/events", raise_for_status=False)
+    if missing_ok and response.status_code == 404:
+        return []
+    response.raise_for_status()
+    return list(response.json()["events"])
 
 
 def events_by(events: Iterable[dict[str, Any]], build_id: Any) -> list[dict[str, Any]]:
@@ -144,60 +144,153 @@ def first_event_at(events: Iterable[dict[str, Any]], build_id: Any) -> str | Non
     return str(mine[0]["created_at"]) if mine else None
 
 
-# A report the registry kept as audit but refused to apply. Excluded,
-# because a refused claim-start changed nothing and did not license a
-# spawn (`services.status.REPORT_APPLIED_KEY`).
-REPORT_APPLIED_KEY = "report_applied"
-
-
 def spawned_executions(deployment: Deployment, build_id: Any) -> dict[str, int]:
     """Executions this build actually submitted, per task id.
 
-    **The durable form of a tick's ``spawned`` counter.** A tick records a
-    second ``task_started`` once ``submit_detached`` has returned, carrying
-    the backend's reference for the call it just created. That row is the
-    registry's evidence that a container was submitted, it is written
-    before the container reports anything, and it survives the tick dying
-    on the way home.
+    **The durable form of a tick's ``spawned`` counter**, read off the
+    execution ledger. A claiming start mints one execution row; the tick's
+    non-claiming start after ``submit_detached`` has returned writes the
+    backend's ref onto it. That row is the registry's evidence that a
+    container was submitted, it is written before the container reports
+    anything, and it survives the tick dying on the way home.
 
-    **Counted by distinct ``executor_ref``, and both halves of that matter.**
+    **Ref-bearing only**, because the granted **claim** is not a spawn. The
+    claim is taken first and the submission can still fail:
+    ``submit_detached`` raises, the tick reports a task failure, and
+    ``summary.spawned`` is never incremented -- but the execution row
+    exists. Counting executions would read that as a container that never
+    ran. The ref only exists once there is a call to name.
 
-    *Distinct*, because the registry client retries a POST whose response
-    was lost and the API deliberately appends a second row for it -- the
-    code that writes it warns any new reader that counts rows. Two rows
-    naming one call are one execution.
-
-    *Ref-bearing*, because the granted **claim** is not a spawn. The claim
-    is taken first and the submission can still fail: ``submit_detached``
-    raises, the tick records a task failure, and ``summary.spawned`` is
-    never incremented -- but the claim row exists. Counting claims would
-    read that as an execution that never happened and fail a scenario for
-    a submission error. The ref only exists once there is a call to name.
-
-    Refused reports are excluded: a start the registry kept as audit but
-    did not apply changed nothing.
+    One row per execution, so a retried report cannot double-count (v1
+    appended an event per retry and had to count distinct refs).
     """
-    refs: dict[str, set[str]] = {}
-    for event in _build_events(deployment, build_id):
-        metadata = event.get("event_metadata") or {}
-        ref = metadata.get("executor_ref")
-        if (
-            event.get("event_type") != "task_started"
-            or ref is None
-            or metadata.get(REPORT_APPLIED_KEY) is False
-        ):
+    counts: dict[str, int] = {}
+    for execution in ledger(deployment, build_id):
+        if execution.get("executor_ref") is None:
             continue
-        refs.setdefault(str(event.get("task_id")), set()).add(str(ref))
-    return {task_id: len(seen) for task_id, seen in refs.items()}
+        task_id = str(execution["task_id"])
+        counts[task_id] = counts.get(task_id, 0) + 1
+    return counts
 
 
-def _get(deployment: Deployment, path: str) -> httpx.Response:
-    """One authenticated GET against the registry, for the readers below."""
+def ledger(deployment: Deployment, build_id: Any) -> list[dict[str, Any]]:
+    """Every execution the build's plans granted, ended or not, oldest first."""
+    response = _get(
+        deployment, f"builds/{build_id}/executions", params={"include_ended": "true"}
+    )
+    return list(response.json()["executions"])
+
+
+def executions_of(
+    deployment: Deployment, task_id: Any, *build_ids: Any
+) -> list[dict[str, Any]]:
+    """Every execution of one task across the given builds' ledgers.
+
+    Each row is tagged ``"build_id"`` with the build whose ledger listed it,
+    so a scenario can say *whose* execution ran a shared completion -- the
+    question every cross-build scenario turns on.
+    """
+    wanted = str(task_id)
+    rows: list[dict[str, Any]] = []
+    for build_id in build_ids:
+        for execution in ledger(deployment, build_id):
+            if str(execution.get("task_id")) == wanted:
+                rows.append({**execution, "build_id": str(build_id)})
+    return rows
+
+
+def spawned_of(
+    deployment: Deployment, task_id: Any, *build_ids: Any
+) -> list[dict[str, Any]]:
+    """``executions_of``, ref-bearing only: the containers actually submitted.
+
+    See ``spawned_executions`` for why a claim without a ref is not a spawn.
+    """
+    return [
+        e
+        for e in executions_of(deployment, task_id, *build_ids)
+        if e.get("executor_ref") is not None
+    ]
+
+
+def describe_ledger(rows: Iterable[dict[str, Any]], **labels: Any) -> str:
+    """Ledger rows as lines, for an assertion message; ``labels`` as above."""
+    named = {str(value): name for name, value in labels.items()}
+    lines = []
+    for row in rows:
+        build = str(row.get("build_id"))
+        lines.append(
+            f"  {str(row.get('task_id'))[:8]} exec {str(row.get('id'))[:8]} "
+            f"(build {named.get(build, build)}, plan {str(row.get('plan_id'))[:8]}) "
+            f"ref={row.get('executor_ref')!r} claim={row.get('claim_outcome')!r} "
+            f"outcome={row.get('outcome')!r}"
+        )
+    return "\n".join(lines) or "  (no executions)"
+
+
+@dataclass(frozen=True)
+class CurrentExecution:
+    """The execution a task's claim names now, and whose it is.
+
+    ``build_id`` answers "which build holds, or held, this task's claim" --
+    the question v1 answered with ``latest_status_build_id``. v2 keeps no
+    build on the task row; the claim names an execution, whose plan belongs
+    to a build, and the event log attributes the execution's start to it.
+    """
+
+    execution_id: str
+    build_id: str | None
+    executor_ref: str | None
+    status: str
+
+
+def current_execution(deployment: Deployment, task_id: Any) -> CurrentExecution | None:
+    """The task's current execution, or ``None`` if its claim names none."""
+    task = _get(deployment, f"tasks/{task_id}").json()
+    execution_id = task.get("execution_id")
+    if execution_id is None:
+        return None
+    build_id = next(
+        (
+            str(event["build_id"])
+            for event in task_events(deployment, task_id)
+            if event.get("execution_id") == execution_id and event.get("build_id")
+        ),
+        None,
+    )
+    executor_ref = None
+    if build_id is not None:
+        executor_ref = next(
+            (
+                e.get("executor_ref")
+                for e in ledger(deployment, build_id)
+                if e["id"] == execution_id
+            ),
+            None,
+        )
+    return CurrentExecution(
+        execution_id=str(execution_id),
+        build_id=build_id,
+        executor_ref=executor_ref,
+        status=str(task["status"]),
+    )
+
+
+def _get(
+    deployment: Deployment,
+    path: str,
+    *,
+    params: dict[str, str] | None = None,
+    raise_for_status: bool = True,
+) -> httpx.Response:
+    """One authenticated GET against the registry's SDK routes (``/api/v2``)."""
     with httpx.Client(timeout=60.0) as client:
         response = client.get(
-            f"{deployment.api_url.rstrip('/')}/api/v1/{path.lstrip('/')}",
+            f"{deployment.api_url.rstrip('/')}/api/v2/{path.lstrip('/')}",
             headers={"X-API-Key": deployment.api_key},
+            params=params,
         )
+    if raise_for_status:
         response.raise_for_status()
     return response
 
@@ -209,7 +302,7 @@ def earliest_start_and_server_now(
 
     Both ends from the server, and both chosen to err the same way.
 
-    The *earliest* ``task_started`` rather than the task row's
+    The *earliest* applied ``task_started`` rather than the task row's
     ``started_at``: the row holds the latest start, and the reactive
     engine writes a second one after ``submit_detached``, so reading it
     understates how long the task has been running -- which overstates
@@ -229,8 +322,10 @@ def earliest_start_and_server_now(
     response = _get(deployment, f"tasks/{task_id}/events")
     starts = [
         event["created_at"]
-        for event in response.json()
-        if event.get("event_type") == "task_started" and event.get("created_at")
+        for event in response.json()["events"]
+        if event.get("event_type") == "task_started"
+        and event.get("report_applied")
+        and event.get("created_at")
     ]
     if not starts:
         return None
@@ -247,7 +342,3 @@ def earliest_start_and_server_now(
         min(datetime.fromisoformat(value) for value in starts),
         parsedate_to_datetime(served_at),
     )
-
-
-def _build_events(deployment: Deployment, build_id: Any) -> list[dict[str, Any]]:
-    return list(_get(deployment, f"builds/{build_id}/events").json())

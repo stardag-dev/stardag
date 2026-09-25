@@ -35,12 +35,20 @@ class LimitsSettings(BaseSettings):
     max_tasks_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
     max_events_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
     max_artifacts_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
+    # Per-environment 24h creation quota of the v2 registry: task_instance
+    # rows, the table a non-significant field can inflate. Charged only for
+    # rows actually inserted.
+    max_task_instances_per_environment_24h: Annotated[int, Field(ge=1)] | None = None
+    # Per-environment 24h creation quota of task_artifact rows (v1's
+    # per-workspace artifact count, re-implemented on the v2 pattern).
+    max_artifacts_per_environment_24h: Annotated[int, Field(ge=1)] | None = None
 
     # Structural limits
     max_dependency_ids_per_task: Annotated[int, Field(ge=1)] | None = None
     max_artifacts_per_task: Annotated[int, Field(ge=1)] | None = None
 
-    # Tenancy quotas (enforced in routes/workspaces.py)
+    # Tenancy quotas (enforced in routes/workspaces.py and
+    # routes/workspace_environments.py)
     max_workspaces_per_user: Annotated[int, Field(ge=1)] | None = None
     max_environments_per_workspace: Annotated[int, Field(ge=1)] | None = None
 
@@ -201,7 +209,13 @@ async def _count_entities_24h(
 
     from sqlalchemy import func, select
 
-    from stardag_api.models import Build, Environment, Event, Task, TaskArtifact
+    from stardag_api.models import (
+        Build,
+        Environment,
+        Event,
+        TaskArtifact,
+        TaskInstance,
+    )
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
@@ -214,19 +228,21 @@ async def _count_entities_24h(
             .where(Build.created_at >= cutoff)
         )
     elif entity_type == "tasks":
+        # Counts instances, not completions: ``task_instance`` is the table a
+        # non-significant field can inflate (one row per construction per
+        # scope), so it is the one the quota has to bound.
         stmt = (
             select(func.count())
-            .select_from(Task)
-            .join(Environment, Task.environment_id == Environment.id)
+            .select_from(TaskInstance)
+            .join(Environment, TaskInstance.environment_id == Environment.id)
             .where(Environment.workspace_id == workspace_id)
-            .where(Task.created_at >= cutoff)
+            .where(TaskInstance.created_at >= cutoff)
         )
     elif entity_type == "events":
         stmt = (
             select(func.count())
             .select_from(Event)
-            .join(Build, Event.build_id == Build.id)
-            .join(Environment, Build.environment_id == Environment.id)
+            .join(Environment, Event.environment_id == Environment.id)
             .where(Environment.workspace_id == workspace_id)
             .where(Event.created_at >= cutoff)
         )

@@ -24,6 +24,7 @@ import uuid
 
 import pytest
 from stardag_integration_tests.registry_live._events import (
+    current_execution,
     spawned_executions,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
@@ -31,7 +32,6 @@ from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     assert_trail_complete,
     describe,
-    find_task,
     tick_summaries,
     wait_for_terminal,
 )
@@ -118,8 +118,8 @@ def test_a_shared_task_runs_once_across_two_builds(deployment: Deployment) -> No
 
     # Diagnostics, not a second assertion. It is worth *printing* which
     # build ended up owning the shared task, and worth failing if nothing
-    # does -- but `latest_status_build_id` is a single column on a row that
-    # is unique per (environment, task), and the only builds that ever
+    # does -- but the task's latest execution is a single column on a row
+    # that is unique per (environment, task), and the only builds that ever
     # touch this salted task are A and B. So "the owner is A or B" holds
     # unconditionally, including in the very failure this test exists to
     # catch: if the claim broke and both builds ran the task, the column
@@ -135,8 +135,8 @@ def test_a_shared_task_runs_once_across_two_builds(deployment: Deployment) -> No
     # require. The commoner outcome is the second tick reading a frontier
     # where the task is already RUNNING and never attempting the claim.
     # Both are the registry arbitrating.
-    shared_row = find_task(str(shared.id), task_name="Slow")
-    owner = shared_row.latest_status_build_id
+    current = current_execution(deployment, shared.id)
+    owner = current.build_id if current is not None else None
     denied = sum(s.get("claim_denied", 0) for s in (*summaries_a, *summaries_b))
     assert owner is not None, (
         "The shared task completed but no build owns its status, so the "
@@ -146,6 +146,6 @@ def test_a_shared_task_runs_once_across_two_builds(deployment: Deployment) -> No
     )
     print(
         f"[claim] shared task ran under "
-        f"{'A' if owner == build_a else 'B' if owner == build_b else owner}; "
+        f"{'A' if owner == str(build_a) else 'B' if owner == str(build_b) else owner}; "
         f"the other build reused it (claim_denied across both: {denied})"
     )

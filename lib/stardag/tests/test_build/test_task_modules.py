@@ -599,39 +599,22 @@ class TestPlanRehydration:
         assert "not declared" in (plan.error([]) or "")
 
     def test_the_dry_run_uses_the_payload_registration_stores(self):
-        """The registry-mode dump, not a full one.
-
-        ``task_data`` holds identity parameters only; a task's level 2/3
-        fields are resolved from the build config wherever it is rebuilt.
-        Round-tripping a *full* dump would check a payload the registry does
-        not hold — and would reject a task whose non-identity field does not
-        round-trip, even though a tick never sees that field in the data.
-        """
+        """The instance body — every field, significant or not — which is
+        what registration stores and what a tick rebuilds from."""
         import typing as t
 
         import stardag as sd
         from stardag.base_model import StardagField
 
-        class NotRoundTrippable:
-            """Serializes to a string, validates from anything but one."""
-
         class PreflightConfigured(sd.Task[int]):
             __namespace__ = "preflight_tests"
             key: str
-            width: t.Annotated[int, StardagField(significance="dependencies_only")] = 4
+            width: t.Annotated[int, StardagField(significant=False)] = 4
 
             def run(self) -> None:
                 pass
 
-        from stardag.build_config import build_config_scope
-
-        with build_config_scope({"preflight_tests.PreflightConfigured": {"width": 9}}):
-            task = PreflightConfigured(key="k")
-        assert task.width == 9
-
-        # No config installed here, so a rebuilt task gets width=4. The dry
-        # run must still pass: width is not part of the identity, so the id
-        # is unchanged and the payload round-trips.
+        task = PreflightConfigured(key="k", width=9)
         plan = plan_rehydration([task], [PreflightConfigured.__module__])
         assert plan.reconstructable == (task,)
 

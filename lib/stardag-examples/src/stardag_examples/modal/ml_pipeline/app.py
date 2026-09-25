@@ -24,7 +24,8 @@ image = (
 
 app = sd_modal.StardagApp(
     "stardag_examples-ml_pipeline",
-    # Optional: lets reactive ticks rebuild tasks without the pickle store.
+    # The modules whose import registers the task classes a reactive tick
+    # rebuilds from the registry (default: this app's root package).
     task_modules=["stardag_examples.ml_pipeline.*"],
     builder_settings=sd_modal.FunctionSettings(
         image=image,

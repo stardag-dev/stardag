@@ -178,7 +178,7 @@ def _classify(
     # leave the run retryable over an XPASS.
     error = call.excinfo.value if call.excinfo is not None else None
     timeout = transport_timeout(error) if error is not None else None
-    if timeout is not None:
+    if error is not None and timeout is not None:
         record_transport_timeout(
             _deployment,
             nodeid=item.nodeid,

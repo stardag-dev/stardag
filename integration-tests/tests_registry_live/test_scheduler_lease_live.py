@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Awaitable, Callable
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -85,8 +86,13 @@ def _registry():
     return APIRegistry()
 
 
-def _new_build(registry) -> "object":
-    return registry.build_start(description="STA-17 lease verification")
+def _new_build(registry) -> UUID:
+    """A RUNNING build to hold a lease on. The lease is a build row's own
+    columns, so the build needs no plan; its root id is never planned."""
+    return registry.build_create(
+        root_task_ids=[f"lease-probe-{uuid4().hex}"],
+        description="STA-17 lease verification",
+    ).id
 
 
 async def _wait_for(
@@ -173,7 +179,7 @@ def test_concurrent_acquires_grant_exactly_one() -> None:
         owners = [f"racer-{round_no}-{i}" for i in range(RACERS)]
         results = await asyncio.gather(
             *(
-                registry.build_acquire_scheduler_lease_aio(
+                registry.scheduler_lease_acquire_aio(
                     build_id, owner_id=owner, ttl_seconds=LIVE_TTL_SECONDS
                 )
                 for owner in owners
@@ -186,29 +192,60 @@ def test_concurrent_acquires_grant_exactly_one() -> None:
             "were granted; the build row's FOR UPDATE must serialize them "
             "down to exactly one"
         )
-        # Every denial reports the winner's expiry: same row, same value.
-        assert {r.expires_at for r in denied} == {held[0].expires_at}
+        # Every denial reports the expiry stored on the row that refused it,
+        # and every lease that can refuse this round is one the winner was
+        # granted: no denial may report an expiry later than the winner's
+        # final one.
+        #
+        # This asserted that every denial reported exactly the winner's
+        # echoed expiry until a live run showed it is not what the server
+        # promises. The SDK's transport retries a request whose response was
+        # lost, and an acquire retried by the owner already holding the
+        # lease is granted again with a fresh ``now + ttl`` ("a retried
+        # acquire is not a lost race", ``acquire_lease``). The winner then
+        # echoes its *last* grant, while each denial reports whichever
+        # grant was on the row when it was refused -- so the denials may
+        # differ from the winner, and among themselves: one refused before
+        # the retry reports the first grant, one refused after it (itself
+        # retried, say) the re-grant. Seen live: all twelve acquires were
+        # logged by the server within the same second, a thirteenth arrived
+        # 31s later (the 30s client timeout, then the retry), and the
+        # winner's echoed expiry was 31s past the one the eleven denials
+        # reported. A lower bound (the winner's *first* grant) would be
+        # tighter, but a lost response is by definition not observable
+        # here, so it is omitted. What remains is the direction nothing
+        # legitimate can produce: a denial reporting a *later* expiry than
+        # the winner's final one was refused by a lease the winner never
+        # held.
+        granted_until = held[0].expires_at
+        assert granted_until is not None, f"round {round_no}: the grant had no expiry"
+        for refused in denied:
+            assert refused.expires_at is not None, (
+                f"round {round_no}: a denial carried no expiry; it was "
+                "refused by a live lease and must report it"
+            )
+            assert refused.expires_at <= granted_until, (
+                f"round {round_no}: a denial reported an expiry of "
+                f"{refused.expires_at}, later than the winner's own "
+                f"{granted_until}"
+            )
 
         winner = owners[results.index(held[0])]
         loser = next(o for o in owners if o != winner)
 
         # Owner checks, against the live row: the loser can neither extend
         # nor clear the winner's lease, and the winner can do both.
-        renewed = await registry.build_renew_scheduler_lease_aio(
+        renewed = await registry.scheduler_lease_renew_aio(
             build_id, owner_id=loser, ttl_seconds=LIVE_TTL_SECONDS
         )
         assert renewed.held is False
-        released = await registry.build_release_scheduler_lease_aio(
-            build_id, owner_id=loser
-        )
+        released = await registry.scheduler_lease_release_aio(build_id, owner_id=loser)
         assert released.held is False
-        renewed = await registry.build_renew_scheduler_lease_aio(
+        renewed = await registry.scheduler_lease_renew_aio(
             build_id, owner_id=winner, ttl_seconds=LIVE_TTL_SECONDS
         )
         assert renewed.held is True
-        released = await registry.build_release_scheduler_lease_aio(
-            build_id, owner_id=winner
-        )
+        released = await registry.scheduler_lease_release_aio(build_id, owner_id=winner)
         assert released.held is True
 
     async def rounds() -> None:
@@ -238,17 +275,17 @@ def test_a_lapsed_lease_is_taken_over_on_the_real_clock() -> None:
 
         # (1) While a lease is live, a competitor is refused -- and with ten
         # minutes on it, that stays true however slow the wire is.
-        live = await registry.build_acquire_scheduler_lease_aio(
+        live = await registry.scheduler_lease_acquire_aio(
             build_id, owner_id="incumbent", ttl_seconds=LIVE_TTL_SECONDS
         )
         assert live.held is True
-        refused = await registry.build_acquire_scheduler_lease_aio(
+        refused = await registry.scheduler_lease_acquire_aio(
             build_id, owner_id="early-bird", ttl_seconds=LIVE_TTL_SECONDS
         )
         assert refused.held is False
         # The denial reports the holder's expiry: same row, same value.
         assert refused.expires_at == live.expires_at
-        released = await registry.build_release_scheduler_lease_aio(
+        released = await registry.scheduler_lease_release_aio(
             build_id, owner_id="incumbent"
         )
         assert released.held is True
@@ -263,13 +300,13 @@ def test_a_lapsed_lease_is_taken_over_on_the_real_clock() -> None:
         # fail only if the server handed a still-live lease to a second
         # owner.
         asked_at = loop.time()
-        first = await registry.build_acquire_scheduler_lease_aio(
+        first = await registry.scheduler_lease_acquire_aio(
             build_id, owner_id="dead-tick", ttl_seconds=MIN_TTL_SECONDS
         )
         assert first.held is True
 
         async def takeover():
-            result = await registry.build_acquire_scheduler_lease_aio(
+            result = await registry.scheduler_lease_acquire_aio(
                 build_id, owner_id="successor", ttl_seconds=LIVE_TTL_SECONDS
             )
             return result if result.held else None
@@ -290,7 +327,7 @@ def test_a_lapsed_lease_is_taken_over_on_the_real_clock() -> None:
         )
 
         # And the dead holder cannot renew its way back in.
-        stale = await registry.build_renew_scheduler_lease_aio(
+        stale = await registry.scheduler_lease_renew_aio(
             build_id, owner_id="dead-tick", ttl_seconds=LIVE_TTL_SECONDS
         )
         assert stale.held is False
@@ -333,13 +370,13 @@ def test_failing_renewals_are_a_blip_and_not_a_lost_lease(monkeypatch) -> None:
     acquire round trip ate.
     """
     # The lease timing knobs are mutable globals, so the patch must land on
-    # the module whose code reads them -- the package deliberately does not
+    # the module whose code reads them (``_lease``) -- the package deliberately does not
     # re-export them, precisely so a patch against it fails loudly here
     # rather than silently patching nothing.
-    from stardag.build._reactive import SchedulerLease, _tick
+    from stardag.build._reactive import SchedulerLease, _lease
 
-    monkeypatch.setattr(_tick, "_LEASE_TTL_SECONDS", LIVE_TTL_SECONDS)
-    monkeypatch.setattr(_tick, "_LEASE_RENEW_INTERVAL_SECONDS", 1.0)
+    monkeypatch.setattr(_lease, "_LEASE_TTL_SECONDS", LIVE_TTL_SECONDS)
+    monkeypatch.setattr(_lease, "_LEASE_RENEW_INTERVAL_SECONDS", 1.0)
 
     registry = _registry()
     build_id = _new_build(registry)
@@ -393,11 +430,11 @@ def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
     lease with ten minutes left, where no amount of load can make the
     answer ambiguous.
     """
-    from stardag.build._reactive import SchedulerLease, _tick
+    from stardag.build._reactive import SchedulerLease, _lease
 
     ttl = MIN_TTL_SECONDS
-    monkeypatch.setattr(_tick, "_LEASE_TTL_SECONDS", ttl)
-    monkeypatch.setattr(_tick, "_LEASE_RENEW_INTERVAL_SECONDS", 1.0)
+    monkeypatch.setattr(_lease, "_LEASE_TTL_SECONDS", ttl)
+    monkeypatch.setattr(_lease, "_LEASE_RENEW_INTERVAL_SECONDS", 1.0)
 
     registry = _registry()
     bystander = _registry()
@@ -451,7 +488,7 @@ def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
                 # a test that asserted the takeover at the instant the
                 # client gave up would be asserting the opposite of it.
                 async def takeover():
-                    result = await bystander.build_acquire_scheduler_lease_aio(
+                    result = await bystander.scheduler_lease_acquire_aio(
                         build_id, owner_id="successor", ttl_seconds=LIVE_TTL_SECONDS
                     )
                     return result if result.held else None
@@ -488,7 +525,7 @@ def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
 
         # (4) __aexit__ released best-effort; owner-checked, so the
         # successor's lease must have survived it.
-        still_held = await bystander.build_renew_scheduler_lease_aio(
+        still_held = await bystander.scheduler_lease_renew_aio(
             build_id, owner_id="successor", ttl_seconds=LIVE_TTL_SECONDS
         )
         assert still_held.held is True, (

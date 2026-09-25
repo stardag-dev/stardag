@@ -21,14 +21,6 @@ import pytest
 
 TERMINAL = ("completed", "failed", "cancelled")
 
-TASK_PAGE_SIZE = 100
-# A provisioned stack is meant to be kept and re-run against, so tasks of
-# one name accumulate across runs and the one being looked for is not
-# necessarily on the first page. Bounded so a lookup for a task that does
-# not exist fails in seconds rather than paging a large registry forever.
-MAX_TASK_PAGES = 20
-
-
 # The server retains this many summaries per build and prunes older ones on
 # insert. Asking for exactly that many means a full page is indistinguishable
 # from a truncated one, which matters because assertions here read
@@ -51,42 +43,6 @@ def tick_summaries(
 
     records = registry_provider.get().build_list_tick_summaries(build_id, limit=limit)
     return [record.summary for record in reversed(records)]
-
-
-def find_task(task_id: str, *, task_name: str):
-    """The registry's row for one task, by its stardag task id.
-
-    ``task_list`` filters by name, not by id, so the name narrows the
-    search and the id picks the row out of it. Worth the round trips
-    because the row carries ``latest_status_build_id`` -- the answer to
-    "which build holds, or held, this task's execution claim", which no
-    tick summary can give.
-
-    Paging is by offset, so a row can in principle be skipped if another
-    scenario inserts tasks of the same name *while* this walks the pages.
-    Reachable only on a long-lived stack that has accumulated more than one
-    page of them -- which is the mode the docs recommend -- so the failure
-    is a spurious "no such task" rather than a wrong answer, and re-running
-    clears it.
-    """
-    from stardag.registry import registry_provider
-
-    registry = registry_provider.get()
-    seen = 0
-    for page_number in range(1, MAX_TASK_PAGES + 1):
-        page = registry.task_list(
-            page_size=TASK_PAGE_SIZE, page=page_number, task_name=task_name
-        )
-        for task in page.tasks:
-            if task.task_id == task_id:
-                return task
-        seen += len(page.tasks)
-        if len(page.tasks) < TASK_PAGE_SIZE:
-            break
-    raise AssertionError(
-        f"No {task_name!r} task with id {task_id!r} among {seen} "
-        f"{task_name!r} tasks in the registry."
-    )
 
 
 def assert_trail_complete(build_id: UUID, summaries: list[dict[str, Any]]) -> None:
@@ -393,9 +349,7 @@ def task_status(task_id: UUID) -> str | None:
     """One task's current status, or None if the registry has no row yet.
 
     A single request against the task's own row, which is what makes it
-    cheap enough to poll. ``find_task`` answers a richer question and pages
-    through every task of a name to do it -- far too expensive to sit in a
-    loop.
+    cheap enough to poll.
 
     None rather than an exception for the unregistered case, because it is
     the *normal* first answer: a scenario starts polling as soon as it has
@@ -405,7 +359,7 @@ def task_status(task_id: UUID) -> str | None:
     from stardag.registry import registry_provider
 
     try:
-        return registry_provider.get().task_get_metadata(task_id).status
+        return registry_provider.get().task_get(str(task_id)).status
     except NotFoundError:
         return None
 

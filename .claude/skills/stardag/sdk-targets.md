@@ -174,11 +174,10 @@ sd.get_file_target("output.json", target_root_key="ingestion")
 
 For remote storage via AWS S3:
 
-```python
-from stardag.integration.aws.s3 import S3TargetFactory
+Selected automatically when a target root URI starts with `s3://` (needs the `s3` extra):
 
-# Configured automatically when target root URI starts with s3://
-# e.g., STARDAG_TARGET_ROOTS='{"default": "s3://my-bucket/stardag/"}'
+```bash
+export STARDAG_TARGET_ROOTS='{"default": "s3://my-bucket/stardag/"}'
 ```
 
 ## Custom Target Factory Provider
@@ -215,9 +214,10 @@ def test_my_pipeline():
 For unit tests that need direct target manipulation:
 
 ```python
-from stardag.target._in_memory import InMemoryTarget
+from stardag.target import InMemoryFileTarget
 
-target = InMemoryTarget[list[int]]()
-target.save([1, 2, 3])
-assert target.load() == [1, 2, 3]
+target = InMemoryFileTarget("in-memory://test/output.txt")
+with target.open("w") as f:
+    f.write("hello")
+assert target.exists()
 ```

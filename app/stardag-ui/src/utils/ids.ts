@@ -28,14 +28,21 @@ export function shortBuildId(id: string): string {
 }
 
 /**
- * A task id, abbreviated — from the start.
+ * A content hash, abbreviated — from the start: a task id, an instance
+ * hash or a settings hash.
  *
- * Task ids are content hashes (UUID5 over the task's parameters), so
- * every character is equally discriminating and the front is as good as
- * the back. Kept leading because that is how the rest of the UI, the CLI
- * and the logs all render them, and an id you cannot match against a log
- * line by eye is worse than one abbreviated at the less useful end.
+ * All three are UUID5 over canonical JSON (the task's significant
+ * parameters, the instance body, the settings body), so every character is
+ * equally discriminating and the front is as good as the back. Kept
+ * leading because that is how the rest of the UI, the CLI and the logs all
+ * render them, and an id you cannot match against a log line by eye is
+ * worse than one abbreviated at the less useful end.
  */
-export function shortTaskId(id: string): string {
+export function shortHash(id: string): string {
   return id.slice(0, SHORT_ID_LENGTH);
+}
+
+/** A task id, abbreviated: see {@link shortHash}. */
+export function shortTaskId(id: string): string {
+  return shortHash(id);
 }

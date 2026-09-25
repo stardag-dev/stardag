@@ -7,14 +7,11 @@ atomically when a task starts, across all builds in the environment.
 
 The API is a single endpoint (see the Modal how-to guide):
 
-    PUT /api/v1/concurrency-limits/{key}   {"max_concurrent": N}
+    PUT /api/v2/concurrency-limits/{key}   {"max_concurrent": N}
 
-Equivalent curl (with an environment-scoped API key):
+The CLI equivalent, against the active stardag profile:
 
-    curl -X PUT "$STARDAG_API_URL/api/v1/concurrency-limits/walkthrough-shards" \\
-        -H "X-API-Key: $STARDAG_API_KEY" \\
-        -H "Content-Type: application/json" \\
-        -d '{"max_concurrent": 3}'
+    stardag concurrency-limits set walkthrough-shards 3
 
 This script does the same through the SDK's configured registry client
 (so it works with your active stardag profile, API key or browser
@@ -42,18 +39,8 @@ def set_limit(key: str, max_concurrent: int) -> None:
             "No registry configured. Run 'stardag auth login' or set "
             "STARDAG_API_KEY / STARDAG_API_URL."
         )
-    response = registry.client.put(
-        f"{registry.api_url}/api/v1/concurrency-limits/{key}",
-        json={"max_concurrent": max_concurrent},
-        # Required for browser-login (JWT) auth; ignored with API keys.
-        params=(
-            {"environment_id": registry.environment_id}
-            if registry.environment_id
-            else None
-        ),
-    )
-    response.raise_for_status()
-    print(f"Configured limit: {response.json()}")
+    registry.concurrency_limit_set(key, max_concurrent)
+    print(f"Configured limit: {key} = {max_concurrent}")
 
 
 def main() -> None:
