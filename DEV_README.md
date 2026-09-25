@@ -861,7 +861,9 @@ the removed `/api/v1` registry routes. The hosted service is upgraded
 server-first and the SDK tagged after it; a self-hoster upgrades the server
 and the SDK together. A change that breaks an existing SDK is therefore a
 release-line decision, recorded in `CHANGELOG.md` and `RELEASE_NOTES.md`,
-not a server setting.
+not a server setting. Crossing from v1, the v2 migration refuses to drop v1
+builds and tasks unless `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set for that
+migration run (`stardag self-host upgrade --accept-data-loss` does so).
 
 The image definition is `app/server.Dockerfile` (build context = repo root):
 

@@ -1037,7 +1037,8 @@ the registry-live tier). See `plan.md`, Methodology.
   both travel as environment variables, which every process boundary already
   carries, and nothing else is transported.
 - A registry cannot be upgraded in place: v2 is a new line and existing
-  registries start empty.
+  registries start empty (the migration refuses while v1 rows exist unless
+  `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set for the run).
 - Two instances of one completion in one scope do not share dynamic edges
   (S24): the pre-yield part of a suspending task can run once per distinct
   instance.

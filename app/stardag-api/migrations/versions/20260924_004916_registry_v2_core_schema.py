@@ -15,6 +15,15 @@ empty. The v1 rows cannot be carried over: a v1 ``tasks`` row holds one
 first-write-wins parameter body per completion and no scope, so there is
 nothing to derive an instance, a plan or a membership from.
 
+**Guarded against unintended data loss.** Before anything is dropped,
+``upgrade()`` counts the v1 ``builds`` and ``tasks`` rows. If either is
+non-zero it refuses with a ``RuntimeError`` naming the counts, what is
+lost and what is kept, unless ``STARDAG_ACCEPT_V2_DATA_LOSS=1`` is set.
+The variable is meant to be set for the one migration run that crosses to
+v2, not left on permanently. A fresh database (no v1 tables) or an empty
+v1 schema passes without it. The check runs inside the migration's
+transaction, so a refusal leaves every v1 table and row in place.
+
 **Amended in place, never deployed.** No registry has ever run this
 revision (the v2 line is unreleased), so later I0 steps change it here
 rather than stacking revisions on a schema nobody has: step 3c moved the
@@ -47,6 +56,8 @@ Create Date: 2026-09-24 00:49:16.196042
 from typing import Sequence, Union
 
 from alembic import op
+import os
+
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
@@ -72,8 +83,51 @@ V1_CORE_TABLES = (
 )
 
 
+# Set to exactly "1" for the migration run that crosses to v2 on a registry
+# holding v1 rows. See ``_refuse_unaccepted_data_loss``.
+ACCEPT_DATA_LOSS_ENV = "STARDAG_ACCEPT_V2_DATA_LOSS"
+
+
+def _v1_row_count(table: str) -> int:
+    """Rows in a v1 table, or 0 if it does not exist (a fresh database).
+
+    No lock: the count informs the operator's decision, it is not a
+    consistency check. A row a still-running v1 server inserts between the
+    count and the drop changes nothing about whether the loss was accepted,
+    and the ``DROP TABLE`` that follows takes its own exclusive lock and
+    waits for in-flight transactions anyway. Taking ``SHARE`` locks here in
+    two statements could deadlock against a v1 server that locks the same
+    tables in the other order.
+    """
+    bind = op.get_bind()
+    if bind.execute(sa.text("SELECT to_regclass(:t)"), {"t": table}).scalar() is None:
+        return 0
+    return bind.execute(sa.text(f'SELECT count(*) FROM "{table}"')).scalar_one()
+
+
+def _refuse_unaccepted_data_loss() -> None:
+    """Refuse to drop v1 builds/tasks unless the loss was explicitly accepted."""
+    builds = _v1_row_count("builds")
+    tasks = _v1_row_count("tasks")
+    if (builds == 0 and tasks == 0) or os.environ.get(ACCEPT_DATA_LOSS_ENV) == "1":
+        return
+    raise RuntimeError(
+        "The registry v2 migration drops every v1 build, task, event, "
+        "deployment, artifact and concurrency-limit record, and what hangs "
+        "off them (dependencies, limit keys, tick summaries, locks) "
+        f"({builds} builds, {tasks} tasks in this database). Users, "
+        "workspaces, environments, memberships, invites, API keys and target "
+        "roots are kept. Task outputs in the target roots are not touched: "
+        "the registry does not store them. To keep the history, back up the "
+        f"database first (pg_dump). Set {ACCEPT_DATA_LOSS_ENV}=1 for this "
+        "migration run to accept the loss and proceed. See the v2 section of "
+        "RELEASE_NOTES.md."
+    )
+
+
 def upgrade() -> None:
     """Drop the v1 core tables and create the v2 ones, empty."""
+    _refuse_unaccepted_data_loss()
     for table in V1_CORE_TABLES:
         op.drop_table(table)
 
