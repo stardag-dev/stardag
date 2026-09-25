@@ -22,6 +22,7 @@ import os
 import time
 import typing
 from datetime import timedelta
+from types import MappingProxyType
 from typing import Annotated
 from uuid import UUID
 
@@ -266,6 +267,31 @@ class TestBoundaries:
                 settings={"STARDAG_PLAN_ID": "nope"},
             )
         assert registry.builds == {}
+
+
+def test_sd_build_accepts_any_mapping_as_settings(
+    default_in_memory_fs_target: Target,
+):
+    """``settings`` is typed ``Mapping[str, str]`` on every entry point, so a
+    read-only mapping goes through ``sd.build`` as a dict would."""
+    seen: dict[str, str | None] = {}
+
+    class ReadsMappingSettings(Task[str]):
+        name: str
+
+        def run(self):
+            seen[self.name] = os.environ.get("MY_FEATURE_FLAG")
+            self._save("ok")
+
+    registry = InMemoryRegistry()
+    task = ReadsMappingSettings(name=f"reads-{new_id()}")
+    settings = MappingProxyType({"MY_FEATURE_FLAG": "on"})
+    summary = sd.build([task], registry=registry, settings=settings)
+    assert summary.status == BuildExitStatus.SUCCESS
+    assert seen[task.name] == "on"
+    assert "MY_FEATURE_FLAG" not in os.environ
+    (plan,) = registry.plans.values()
+    assert registry.settings[plan.settings_hash] == {"MY_FEATURE_FLAG": "on"}
 
 
 def _claimed_elsewhere(

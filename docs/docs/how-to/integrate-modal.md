@@ -796,7 +796,7 @@ zero. See
 _The full guide, including significant vs non-significant fields:
 [Evolve a DAG Safely](evolve-dags.md)._
 
-`settings` is a flat `dict[str, str]` of environment variables, applied in
+`settings` is a flat `Mapping[str, str]` of environment variables, applied in
 every process of the build — the bootstrap, every tick, every worker and a
 resident driver. It is how you give a build-wide knob a value without it
 becoming a task parameter: a thread count, a feature flag, anything the

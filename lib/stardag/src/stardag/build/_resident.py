@@ -20,7 +20,7 @@ import asyncio
 import contextlib
 import logging
 import traceback as tb_module
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -115,7 +115,7 @@ async def build_aio(
     concurrency_config: ConcurrencyConfig | None = None,
     concurrency_limiter: ConcurrencyLimiter | None = None,
     claim_config: ClaimConfig | None = None,
-    settings: dict[str, str] | None = None,
+    settings: Mapping[str, str] | None = None,
     limit_key_selector: LimitKeySelector | None = None,
     description: str | None = None,
     raise_on_failure: bool = True,

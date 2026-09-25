@@ -26,7 +26,7 @@ import logging
 import queue
 import threading
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 from uuid import UUID
 
@@ -465,7 +465,7 @@ def build_sequential(
     register_all: bool = False,
     on_registry_failure: OnRegistryFailure = "raise",
     claim_config: ClaimConfig | None = None,
-    settings: dict[str, str] | None = None,
+    settings: Mapping[str, str] | None = None,
     limit_key_selector: LimitKeySelector | None = None,
     description: str | None = None,
     max_concurrent_discover: int = 16,
@@ -537,7 +537,7 @@ async def build_sequential_aio(
     register_all: bool = False,
     on_registry_failure: OnRegistryFailure = "raise",
     claim_config: ClaimConfig | None = None,
-    settings: dict[str, str] | None = None,
+    settings: Mapping[str, str] | None = None,
     limit_key_selector: LimitKeySelector | None = None,
     description: str | None = None,
     max_concurrent_discover: int = 16,
