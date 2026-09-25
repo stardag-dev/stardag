@@ -12,6 +12,31 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 > `server-v0.6.0` — the next minors, not a new major; **breaking** all the
 > same, see below.
 
+### Upgrading: the registry starts empty
+
+The v2 migration drops all v1 build, task, event, deployment, artifact and
+concurrency-limit records; users, workspaces, environments, memberships,
+invites, API keys and target roots are kept. A registry holding v1 rows
+refuses to migrate unless `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set for the
+migration run (`stardag self-host upgrade --accept-data-loss` sets it for a
+self-hosted deployment on Modal). Take a `pg_dump` first if the history
+matters.
+
+Task outputs are not registry data: targets in the target roots are
+untouched. A new build over previously built tasks finds their targets
+complete and registers them as complete; nothing is recomputed. What is not
+carried over is their provenance: the registry no longer knows which
+upstreams those tasks were built from, so they appear as complete leaves
+until something rebuilds them.
+
+The SDK and the server upgrade together: a 0.27.0 SDK refuses a 0.5.x
+registry on its first route, and a 0.6.0 registry serves no `/api/v1`
+routes.
+
+The hosted registry at stardag.com is in beta, intended for demo and
+evaluation use; it moves to v2 with this release and its v1 history is not
+kept. Anyone relying on a registry in production should self-host.
+
 ### What changed, and why
 
 v1 kept a task's identity and its state on one row. Everything that went
@@ -166,7 +191,9 @@ There is none, by design.
   or run the migration on the existing one: it **drops the v1 core tables**
   (builds, tasks, events, dependencies, artifacts, limit keys, tick
   summaries, locks, deployments and concurrency limits) and creates the v2
-  ones. Concurrency limits are among them: set them again after the
+  ones — refusing while v1 builds or tasks exist unless
+  `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set (see "Upgrading" above).
+  Concurrency limits are among them: set them again after the
   upgrade (`PUT /api/v2/concurrency-limits/{key}`). Users, workspaces,
   environments, members, invites, API keys and target roots are
   untouched. Downgrade is not supported. Targets are not touched either,

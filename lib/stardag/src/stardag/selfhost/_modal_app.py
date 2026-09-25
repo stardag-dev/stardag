@@ -302,13 +302,18 @@ def _build_from_source_app(
     api_remote_dir = API_REMOTE_DIR
     ui_dist_remote_dir = UI_DIST_REMOTE_DIR
 
-    def _migrate_impl() -> str:
-        """Run alembic upgrade head inside the container."""
+    def _migrate_impl(accept_data_loss: bool = False) -> str:
+        """Run alembic upgrade head inside the container (see _modal_entry)."""
+        import os
         import subprocess
 
+        env = dict(os.environ)
+        if accept_data_loss:
+            env["STARDAG_ACCEPT_V2_DATA_LOSS"] = "1"
         result = subprocess.run(
             ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
             cwd=api_remote_dir,
+            env=env,
             capture_output=True,
             text=True,
         )

@@ -157,6 +157,10 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   among the dropped tables and must be set again. Downgrade raises.
   **PostgreSQL 15 or newer** is required (SQLite is not supported), and the
   API suite runs on Postgres.
+- **New: the v2 migration refuses to drop v1 data unasked.** With v1
+  `builds` or `tasks` rows present it raises unless
+  `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set for the run; an empty or fresh
+  database migrates without it.
 - **Breaking: the registry routes move to `/api/v2`.** Every `/api/v1`
   registry route (builds, tasks, search, deployments, locks, concurrency
   limits, tick summaries) is removed, and so is the SDK version gate. Authentication, workspaces, environments and target
@@ -241,6 +245,8 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
 
 ### CLI
 
+- **New: `stardag self-host up/upgrade --accept-data-loss`** sets
+  `STARDAG_ACCEPT_V2_DATA_LOSS=1` for that deploy's migration run.
 - **New: `stardag build <module:attr ...>`** — roots from a task object, a
   list, a zero-argument callable or a task class with `--param KEY=VALUE`;
   `--settings KEY=VALUE` (repeatable), `--app module:attr` (with

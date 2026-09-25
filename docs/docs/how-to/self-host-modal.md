@@ -112,7 +112,10 @@ uvx --from "stardag[selfhost]" stardag self-host upgrade
 
 This applies any new database migrations and redeploys the API + UI. The JWT
 keypair secret is left untouched, so existing sessions and SDK logins survive
-upgrades.
+upgrades. Upgrading a v1 registry to v2 drops its build and task history, and
+the migration refuses while v1 rows exist unless you pass `--accept-data-loss`
+(which sets `STARDAG_ACCEPT_V2_DATA_LOSS=1` for that run); see the v2 section
+of the release notes.
 
 ### Which server version you get
 

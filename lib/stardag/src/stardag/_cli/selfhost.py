@@ -645,6 +645,7 @@ def _deploy(
     server_version: str | None = None,
     run_migrations: bool = True,
     environment_name: str | None = None,
+    accept_data_loss: bool = False,
 ) -> str:
     """Build the Modal app, run migrations, deploy. Returns the web URL.
 
@@ -687,7 +688,9 @@ def _deploy(
             if run_migrations:
                 console.print("Applying database migrations...")
                 with server_app.run(environment_name=environment_name):
-                    output = functions["migrate"].remote()
+                    output = functions["migrate"].remote(
+                        accept_data_loss=accept_data_loss
+                    )
                 for line in output.strip().splitlines()[-5:]:
                     console.print(f"  [dim]{line}[/dim]")
 
@@ -892,6 +895,13 @@ def up(
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Non-interactive: take defaults, fail on prompts"
     ),
+    accept_data_loss: bool = typer.Option(
+        False,
+        "--accept-data-loss",
+        help="Set STARDAG_ACCEPT_V2_DATA_LOSS=1 for this deploy's migration "
+        "run: required to upgrade a registry holding v1 builds/tasks to v2, "
+        "which drops them (see RELEASE_NOTES.md).",
+    ),
 ):
     """Bring up the full Stardag stack: database, migrations, API + UI on Modal.
 
@@ -1077,6 +1087,7 @@ def up(
         _resolve_keep_warm(name, keep_warm, server_env),
         server_version=resolved_server_version,
         environment_name=server_env,
+        accept_data_loss=accept_data_loss,
     )
     _record_deployed_server_version(
         name, resolved_server_version or FROM_SOURCE_VERSION, server_env
@@ -1205,6 +1216,13 @@ def upgrade(
         "for Modal's default environment (deployments made before the "
         "dedicated server environment existed).",
     ),
+    accept_data_loss: bool = typer.Option(
+        False,
+        "--accept-data-loss",
+        help="Set STARDAG_ACCEPT_V2_DATA_LOSS=1 for this deploy's migration "
+        "run: required to upgrade a registry holding v1 builds/tasks to v2, "
+        "which drops them (see RELEASE_NOTES.md).",
+    ),
 ):
     """Update the deployment: apply DB migrations and redeploy."""
     server_version = _resolve_version_keyword(server_version)
@@ -1243,6 +1261,7 @@ def upgrade(
         _resolve_keep_warm(name, keep_warm, server_env),
         server_version=resolved_server_version,
         environment_name=server_env,
+        accept_data_loss=accept_data_loss,
     )
     _record_deployed_server_version(
         name, resolved_server_version or FROM_SOURCE_VERSION, server_env
