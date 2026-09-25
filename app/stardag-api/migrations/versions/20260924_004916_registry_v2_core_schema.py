@@ -89,10 +89,16 @@ ACCEPT_DATA_LOSS_ENV = "STARDAG_ACCEPT_V2_DATA_LOSS"
 
 
 def _v1_row_count(table: str) -> int:
-    """Rows in a v1 table, or 0 if it does not exist (a fresh database)."""
+    """Rows in a v1 table, or 0 if it does not exist (a fresh database).
+
+    The table is locked against writes first (held to the end of the
+    migration's transaction), so a v1 writer still running cannot insert a
+    row between the count and the drop.
+    """
     bind = op.get_bind()
     if bind.execute(sa.text("SELECT to_regclass(:t)"), {"t": table}).scalar() is None:
         return 0
+    bind.execute(sa.text(f'LOCK TABLE "{table}" IN SHARE MODE'))
     return bind.execute(sa.text(f'SELECT count(*) FROM "{table}"')).scalar_one()
 
 
@@ -104,7 +110,8 @@ def _refuse_unaccepted_data_loss() -> None:
         return
     raise RuntimeError(
         "The registry v2 migration drops every v1 build, task, event, "
-        "deployment, artifact and concurrency-limit record "
+        "deployment, artifact and concurrency-limit record, and what hangs "
+        "off them (dependencies, limit keys, tick summaries, locks) "
         f"({builds} builds, {tasks} tasks in this database). Users, "
         "workspaces, environments, memberships, invites, API keys and target "
         "roots are kept. Task outputs in the target roots are not touched: "

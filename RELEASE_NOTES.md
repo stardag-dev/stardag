@@ -15,7 +15,8 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 ### Upgrading: the registry starts empty
 
 The v2 migration drops all v1 build, task, event, deployment, artifact and
-concurrency-limit records; users, workspaces, environments, memberships,
+concurrency-limit records, and what hangs off them (dependencies, limit
+keys, tick summaries, locks); users, workspaces, environments, memberships,
 invites, API keys and target roots are kept. A registry holding v1 rows
 refuses to migrate unless `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set for the
 migration run (`stardag self-host upgrade --accept-data-loss` sets it for a
