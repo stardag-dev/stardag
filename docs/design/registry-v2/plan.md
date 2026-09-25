@@ -485,6 +485,11 @@ assignee the maintainer.
       failed task, in-process executions record their executor,
       `tasks exclude` reports per call, and the version route is
       `/api/v2/version`.
+      Pre-release polish from the release-candidate consumer and the
+      self-host upgrade, in PR #414: the bundled agent skill rewritten for
+      v2, release-note corrections, `settings: Mapping[str, str]` on every
+      build entry point, the migration guard logging what an accepted loss
+      dropped, and `MIGRATION_ENV` for the AWS CDK migration script.
 
 ## Delivery steps
 

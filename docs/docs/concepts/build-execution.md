@@ -151,10 +151,10 @@ that, and nothing else does.
   design does not try to prevent this — see [Shared
   tasks](#shared-tasks-across-builds) below.
 
-Control it with `build(..., claim=...)`: `None` (default) claims probeable
-executions; `True` always claims; `False` disables. Without a registry
-(`NoOpRegistry`) there is nothing to arbitrate against and every claim is
-granted.
+With a registry every execution claims; there is no switch to turn it off.
+`build(..., claim_config=ClaimConfig(...))` tunes how a claim is waited on
+and renewed. Without a registry (`NoOpRegistry`) there is nothing to
+arbitrate against and every claim is granted.
 
 Design record: [`docs/design/registry-v2/design.md`](https://github.com/stardag-dev/stardag/blob/main/docs/design/registry-v2/design.md).
 

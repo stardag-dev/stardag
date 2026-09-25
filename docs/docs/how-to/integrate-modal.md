@@ -383,9 +383,10 @@ their own lifecycle to the registry — see [Orchestration on
 Modal](../concepts/modal-orchestration.md#detached-execution-and-self-reporting-workers)
 for what that buys. Two practical notes:
 
-- Driving an app deployed with an **older** stardag from a newer SDK: pass
-  `ModalTaskExecutor(worker_reports_lifecycle=False)` or redeploy, so the
-  build engine does not wait for events old workers never send.
+- A custom `run_function` that does not report the task lifecycle itself
+  needs `ModalTaskExecutor(worker_reports_lifecycle=False)` (resident
+  builds only: a reactive build needs self-reporting workers). Keep the
+  deployed app on the same stardag as the driver: redeploy after upgrading.
 - Executor metadata (app, workspace, environment, function name) is
   recorded with starts and surfaced in the UI as Modal deep links. The
   workspace is resolved from the cached Modal token; set
@@ -399,9 +400,10 @@ build_function=sd_modal.Builder(detached=False))`.
 ```{.python notest}
 result = app.build_trigger(root_task, reactive=True)
 
-# Same build id: wake a stalled build, add roots, or change tick config.
+# Same build id and the same roots: wake a stalled build or change tick
+# config. Other roots are refused — a build is one request; start a new one.
 app.build_trigger(
-    more_tasks, build_id=result.build_id, reactive=True,
+    root_task, build_id=result.build_id, reactive=True,
     tick_kwargs={"linger_seconds": 60},
 )
 ```
@@ -410,13 +412,17 @@ The model — bootstrap, ticks, wake-ups, retries, the watchdog — is on
 [Orchestration on Modal](../concepts/modal-orchestration.md#reactive-scheduling).
 What you configure:
 
-**Requirements.** Both the Modal app and the registry server must run a
-matching stardag version (an older server fails reactive triggers with a
-clear "does not support reactive scheduling" error; an app deployed before
-the `bootstrap` function existed has nothing to spawn — see
-`reactive_discovery` below). The triggering process needs registry
-credentials only. Builds cancelled in the UI are picked up by the next
-tick in the environment, which cancels the running Modal calls.
+**Requirements.** The Modal app, the triggering SDK and the registry
+server must all be on the v2 line (a v2 SDK against an older server fails
+on its first call: the routes do not exist there); the deployed
+`bootstrap` function walks the DAG unless `reactive_discovery="local"`
+(below) walks it here. The triggering process needs registry and Modal
+credentials: it mints the build, then spawns the deployed function.
+Discovery itself runs in Modal, so it needs no access to the target root.
+Cancelling a build
+releases its claims and stops nothing: its running workers exit at their
+next cooperative checkpoint, and `stardag builds stop` ends the containers
+themselves.
 
 **Function sizing.** `tick_settings` and `bootstrap_settings` default to
 `builder_settings`. They want different timeouts: a tick is one frontier
@@ -796,7 +802,7 @@ zero. See
 _The full guide, including significant vs non-significant fields:
 [Evolve a DAG Safely](evolve-dags.md)._
 
-`settings` is a flat `dict[str, str]` of environment variables, applied in
+`settings` is a flat `Mapping[str, str]` of environment variables, applied in
 every process of the build — the bootstrap, every tick, every worker and a
 resident driver. It is how you give a build-wide knob a value without it
 becoming a task parameter: a thread count, a feature flag, anything the
@@ -819,6 +825,12 @@ output.** Anything that affects a task's output belongs in a significant
 parameter instead — completion is global, so a value read only from
 settings would let one build's result depend on values another build
 reusing the completion never saw.
+
+**Nothing validates the keys.** A misspelled key is simply an environment
+variable nothing reads, and the build runs on whatever default the task
+falls back to. Read the settings you rely on at run time and fail loudly
+when one is missing — a pydantic-settings class with a required field does
+exactly that.
 
 **Precedence**, where a key appears in more than one place: `settings` win
 over the worker selector's per-task `env_overrides`, which win over the
@@ -1103,14 +1115,6 @@ frontier.
 If a task genuinely cannot be interrupted, `nonpreemptible=True` is the
 honest answer — at 3× the CPU and memory price, and not available for GPU
 functions.
-
-!!! note "Registry version"
-
-    Interruption reporting needs a Registry API that serves
-    `POST /builds/{id}/tasks/{task_id}/interrupt`. Against an older server
-    the SDK logs a warning and records nothing, which is exactly its
-    behaviour before this existed — a version skew degrades to the old
-    recovery path, never to a failed build.
 
 ## Where to define what you pass to `StardagApp`
 

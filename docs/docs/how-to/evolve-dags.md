@@ -11,7 +11,7 @@ disagreeing about what a task is.
       _which upstreams are required or yielded_ is
       `sd.StardagField(significant=False)` — still an ordinary constructor
       argument.
-    - **`settings`** is a flat `dict[str, str]` of environment variables
+    - **`settings`** is a flat `Mapping[str, str]` of environment variables
       for build-wide knobs you would rather not turn into task parameters
       — passed to `sd.build(...)` or `app.build_trigger(...)`, applied in
       every process of the build.

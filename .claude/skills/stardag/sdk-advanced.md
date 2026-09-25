@@ -207,8 +207,7 @@ Artifact types:
 
 ```python
 class MyTask(sd.Task[int]):
-    __version__ = "2"           # Bump when logic changes
-    version: str = __version__  # Include in parameters for hash
+    __version__ = "2"           # Bump when logic changes (the version field follows it)
 
     def run(self):
         # New logic in v2
@@ -221,7 +220,9 @@ When to bump version:
 - Serialization format changes
 - Bug fixes that affect output values
 
-Version change → new task ID → new output path → forces re-execution.
+Version change → new task ID → new output path → forces re-execution. A change to
+`requires()` or a fan-out that does not change the output needs **no** bump: dependency
+structure belongs to the deployment, not the task id.
 
 ## HashableSet
 
@@ -253,7 +254,8 @@ class MyConfig(sd.StardagBaseModel):
     name: str
 ```
 
-Used internally by tasks for parameter hashing. Supports `model_dump(mode="hash")` for deterministic serialization.
+Use it for nested parameter models: `StardagField(significant=False)` and `compat_default`
+work on its fields exactly as on a task's, so a nested model carries its own significance.
 
 ## Polymorphic Type System
 
@@ -302,17 +304,17 @@ class MyModel(sd.StardagBaseModel):
 ### Prefect
 
 ```python
-from stardag.integration.prefect import run_as_prefect_flow
+from stardag.integration.prefect import build as prefect_build
 
-# Wraps stardag DAG as a Prefect flow
-run_as_prefect_flow(root_task)
+# Runs the DAG as a Prefect flow (sync wrapper; build_aio for async callers)
+prefect_build(root_task)
 ```
 
 ### Modal
 
-The packaged setup is `StardagApp` (deploys a `build` function, per-worker
-`worker_<name>` functions, a reactive scheduler `tick` function, and an
-optional watchdog cron):
+The packaged setup is `StardagApp`: a `build` function (resident builds), per-worker
+`worker_<name>` functions, the reactive scheduler's `bootstrap` and `tick` functions, and an
+optional watchdog cron.
 
 ```python
 from stardag.integration.modal import StardagApp, FunctionSettings
@@ -321,73 +323,81 @@ app = StardagApp(
     "my-app",
     builder_settings=FunctionSettings(image=image),
     worker_settings={"default": FunctionSettings(image=image)},
-    # watchdog_period_minutes=5,        # optional timer; sweep deployed anyway
-    limit_key_selector=lambda t: [],    # named concurrency-limit keys per task
-    container_setup=my_container_setup, # runs once in EVERY container
+    # watchdog_period_minutes=5,           # optional timed sweep (lapsed claims)
+    # limit_key_selector=my_limit_keys,    # registry concurrency-limit keys per task
+    # container_setup=my_container_setup,  # runs once in EVERY container
+    # task_modules=["my_pkg.tasks"],       # inferred from the app's package by default
 )
-
-# After `stardag modal deploy`:
-result = app.build_trigger(root_task)              # restart-safe (build id
-                                                   # minted at the trigger,
-                                                   # restarts resume)
-result = app.build_trigger(root_task, reactive=True)  # experimental: no
-                                                   # resident orchestrator —
-                                                   # scheduler ticks drive it
-app.build_spawn(root_task)                         # legacy fire-and-forget
 ```
 
-**Container setup**: `container_setup` (a zero-arg callable, `ContainerSetup`)
-runs once per container at the top of all five registered functions —
-`build`, `worker_*`, `tick`, `bootstrap`, `tick_watchdog` — before stardag's
-logging default. It is the only setup hook that reaches the reactive
-functions (a `tick`/`bootstrap`/`tick_watchdog` container has no `Builder`
-or `Runner` in it). It complements rather than replaces `Builder.setup(tasks)`
-(per build, `build` container only) and `Runner.setup(task)` (per task).
-Define it in a module importable inside the container — it is pickled by
-reference, like `worker_selector`.
+```bash
+stardag modal deploy my_pkg/app.py   # records a deployment, deploys, activates it
+```
 
-**Placement rule for all five callables** (`container_setup`,
-`worker_selector`, `limit_key_selector`, `build_function`, `run_function`):
-define them in an importable module of your own package and _import_ them
-into the file you deploy. They are cloudpickled into the `serialized=True`
-functions, and cloudpickle stores a module-level callable (or the class of
-a callable instance) as a reference to its defining module. `stardag modal
-deploy path/to/app.py` loads that file under the module name `app`, so a
-`def` written there pickles as `app.<name>`, deploys cleanly, and then
-fails in every container with `ModuleNotFoundError: No module named 'app'`.
-`StardagApp(...)` raises `SerializedCallablePlacementError` for this.
+```python
+result = app.build_trigger(root_task)                 # resident: the build function drives it
+result = app.build_trigger(root_task, reactive=True)  # reactive: short-lived ticks drive it
+result = app.build_trigger(
+    root_task,
+    reactive=True,
+    settings={"MYAPP_THREADS": "8"},                   # applied in every process of the build
+    tick_kwargs={"max_attempts": 3},                   # TickConfig, stored with the build
+)
+app.build_trigger(root_task, build_id=result.build_id, reactive=True)  # resume / wake it
+```
 
-Worker executions are **detached** Modal function calls by default: they
-survive orchestrator restarts (resumed builds re-attach instead of
-re-executing), are explicitly cancellable, and workers self-report their
-lifecycle events to the registry. Low-level executor:
-`ModalTaskExecutor(modal_app_name=..., worker_selector=..., detached=True)`
-implements the `TaskExecutorABC` detached surface (`submit_detached` /
-`reattach` / `detached_status` / `cancel_detached`).
+`build_trigger` mints the build at the trigger, so any restart resumes the same build. A
+re-trigger names the same roots (a build is one request; other roots are refused — start a new
+build). It needs registry credentials (the active stardag profile) and Modal credentials.
 
-Key `stardag.build` exports for the execution layer: `DetachedHandle`,
-`DetachedExecutionStatus`, `get_current_build_id`, `run_tick_aio`,
-`TickConfig`, `TickSummary`, `BuildTaskStore`, `discover_and_register_aio`,
-`ClaimConfig`.
+**Deployments.** `stardag modal deploy` mints a deployment id, bakes it into every function as
+`STARDAG_DEPLOYMENT_ID`, records the deployment with the registry **before** the deploy and
+activates it **after**; a failed record or activation exits non-zero (re-run the deploy).
+`stardag deployments list` shows them and marks each app's current one. A running reactive
+build **follows the live deployment**: the first tick on new code re-plans it (`rolled_over`
+in its tick summary), and a tick on old code exits `superseded`. A redeploy of unchanged code
+is a new deployment too. What cannot roll over (a root whose task id changed, a class the new
+code cannot import) fails the build. A branch that should run beside production is a separate
+app name.
 
-**Exactly-once by default (execution claims)**: task starts atomically
-claim the task (registry-arbitrated); a losing racer re-attaches to the
-winner instead of duplicating work. Control via `build(..., claim=...)`
-(`None`=auto for probeable executions, `True`, `False`); reactive
-scheduler ticks always claim. Custom arbitration backends implement
-`RegistryABC.task_start_claim_aio`. `GlobalLockConfig` is deprecated
-(kept for ref-less executions, now with background TTL renewal).
+A **local** `sd.build()` plans under a local deployment keyed on its code id:
+`STARDAG_CODE_ID` if set, else the clean git commit, else a fresh one-off id (dirty tree) — so
+local builds at one clean commit share structure. A hybrid build whose tasks run on a Modal app
+plans under that app's current deployment.
 
-See `docs/docs/concepts/build-execution.md` and
-`docs/docs/how-to/integrate-modal.md` for the full model.
+**Reactive builds** rebuild every task from the registry's stored instance body, which needs
+the task classes importable in the tick: declare `task_modules` if inference cannot find them.
+Tick budgets (`stardag.build.TickConfig`, passed as `tick_kwargs`):
+
+| `TickConfig` field  | Default | Bounds                                                                                      |
+| ------------------- | ------- | ------------------------------------------------------------------------------------------- |
+| `max_attempts`      | 2       | a spawn failing before any container starts, retried within one claim                       |
+| `max_interruptions` | 20      | a task checkpointing and raising `ResumableInterruption`                                    |
+| `max_executions`    | 20      | executions of a task in the build (a dead worker's lapsed claim is taken over as a new one) |
+| `linger_seconds`    | 120     | how long an idle tick waits for a wake-up before exiting                                    |
+
+An exception inside a task is `FAILED` and is never retried automatically: `stardag tasks
+retry` or a re-trigger moves it back to `PENDING`. Deployed ticks, workers and the bootstrap
+run one input per container (`stardag modal deploy` refuses `max_concurrent_inputs` above one
+on them), because each applies its build's settings to the process environment.
+
+**Placement rule** for everything you pass as a callable (`container_setup`,
+`worker_selector`, `limit_key_selector`, `build_function`, `run_function`): define it in an
+importable module of your own package and _import_ it into the file you deploy. They are
+cloudpickled by reference; a `def` in the deploy script pickles as `app.<name>` and fails in
+every container. `StardagApp(...)` raises `SerializedCallablePlacementError` for this.
+
+Worker executions are **detached** Modal calls: they survive the driver, report their own
+lifecycle to the registry, and a later build re-attaches instead of re-running.
+
+See `docs/docs/concepts/modal-orchestration.md` and `docs/docs/how-to/integrate-modal.md` for
+the full model.
 
 ### AWS S3
 
-```python
-# Set S3 target root
+```bash
+# Set an S3 target root; tasks then persist to S3 automatically
 export STARDAG_TARGET_ROOTS='{"default": "s3://my-bucket/stardag/"}'
-
-# Tasks automatically use S3 for persistence
 ```
 
 ## Error Handling
@@ -396,15 +406,21 @@ export STARDAG_TARGET_ROOTS='{"default": "s3://my-bucket/stardag/"}'
 from stardag.exceptions import (
     StardagError,          # Base exception
     APIError,              # Registry API communication errors
+    NotFoundError,         # 404 — also what an SDK/server version mismatch looks like
     AuthenticationError,   # Auth failures (missing/invalid credentials)
     AuthorizationError,    # Permission denied (403)
     TokenExpiredError,     # Auth token expiration
+    InstanceConflictError,       # One task id constructed twice in one build
+    UnstableSerializationError,  # A field whose dump is not a fixed point
     # Raised BY a task, not caught: "I checkpointed, run me again".
     ResumableInterruption,
+    # Raised BY a task that was told to stop (see Cooperative cancellation).
+    ExecutionCancelled,
 )
 
 from stardag.build import (
     BuildFailed,           # Raised by BuildSummary.raise_on_failure()
+    SettingsError,         # Reserved settings key, or conflicting settings in one process
     TaskExecutionError,    # Wraps task executor exceptions with formatted tracebacks
 )
 ```
@@ -440,14 +456,42 @@ class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
 - Catch `MODAL_INTERRUPTIONS`, never `BaseException` — a blanket catch
   sweeps up ordinary bugs and would resume a `NameError` until the budget
   runs out. `except KeyboardInterrupt:` is also wrong: it misses timeouts.
-- An interruption you do **not** catch is a failure, retried under
-  `TickConfig.max_attempts`. That is the correct answer for a hung task or
-  a too-small `timeout`, and it is why no configuration decides whether a
-  timeout was "expected".
-- Resumption is bounded by `TickConfig.max_interruptions` (default 20).
+- An interruption you do **not** catch leaves the execution to die with no
+  report, like a crashed container: its claim lapses and a later tick takes
+  it over as a fresh execution, bounded by `TickConfig.max_executions`
+  (default 20) — not `max_attempts`, which covers only a spawn failing
+  before any container starts. No configuration decides whether a timeout
+  was "expected": the task answers by raising `ResumableInterruption` or not.
+- Resumption is bounded by `TickConfig.max_interruptions` (default 20). A
+  preemption is restarted by Modal on the same call and spends no budget.
 - Only reactive builds resume. `sd.build`/`build_aio` fail the task.
 - The checkpoint goes inside the task's directory target; `mark_done()` is
   what marks the task complete.
+
+## Cooperative Cancellation
+
+Cancelling a build releases its claims; nothing reaches into a running container. A worker
+checks at the start of each attempt and at each dynamic-dependency yield whether its execution
+is still wanted, and stops cleanly if not. For a long `run()`, ask where stopping is safe:
+
+```python
+class LongTraining(sd.TargetTask[sd.DirectoryTarget]):
+    epochs: int = 10
+
+    def target(self) -> sd.DirectoryTarget:
+        return sd.get_directory_target(sd.get_default_relpath(self))
+
+    def run(self):
+        directory = self.target()
+        for epoch in range(self.epochs):
+            if sd.cancellation_requested():   # throttled (30s); False outside a worker
+                raise sd.ExecutionCancelled() # raise, never return: no output, no completion
+            train_one_epoch(directory, epoch)
+        directory.mark_done()
+```
+
+A registry that cannot be reached answers `False`: a worker never stops on silence. To end
+containers _now_, use `stardag builds stop` (see registry-and-platform.md).
 
 ## TaskRef (Immutable Reference)
 
