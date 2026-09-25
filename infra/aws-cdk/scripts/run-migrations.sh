@@ -21,7 +21,9 @@ set -e
 # quoting, so arguments containing spaces can be quoted)
 MIGRATION_COMMAND="${MIGRATION_COMMAND:-alembic upgrade head}"
 # Extra NAME=VALUE pairs for the migration container (see header comment)
-MIGRATION_ENV="${MIGRATION_ENV:-}"
+# Exported and read by the helper, not passed as argv: values stay out
+# of the process list.
+export MIGRATION_ENV="${MIGRATION_ENV:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CDK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -122,11 +124,11 @@ echo "Admin Secret: $ADMIN_SECRET_ARN"
 # variables for this run only (see header comment).
 echo "Migration command: $MIGRATION_COMMAND"
 OVERRIDES=$(python3 -c "
-import json, re, shlex, sys
+import json, os, re, shlex, sys
 command = shlex.split(sys.argv[1])
 override = {'name': 'Api', 'command': command}
 environment = []
-for pair in re.split(r'[,\s]+', sys.argv[2].strip()):
+for pair in re.split(r'[,\s]+', os.environ.get('MIGRATION_ENV', '').strip()):
     if not pair:
         continue
     name, sep, value = pair.partition('=')
@@ -136,7 +138,7 @@ for pair in re.split(r'[,\s]+', sys.argv[2].strip()):
 if environment:
     override['environment'] = environment
 print(json.dumps({'containerOverrides': [override]}))
-" "$MIGRATION_COMMAND" "$MIGRATION_ENV")
+" "$MIGRATION_COMMAND")
 if [ -n "$MIGRATION_ENV" ]; then
     # Names only: a value may be sensitive.
     echo "Migration environment: $(echo "$OVERRIDES" | python3 -c "import json, sys; print(' '.join(e['name'] for e in json.load(sys.stdin)['containerOverrides'][0]['environment']))")"

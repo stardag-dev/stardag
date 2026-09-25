@@ -130,8 +130,9 @@ sd.build(task, registry=registry)
 
 The React frontend provides builds (list and detail, with the active plan's graph), a task
 explorer and task detail (status, claim holder, instances, executions, events, artifacts),
-artifact viewing (markdown, JSON) and workspace management (members, invites, API keys). All
-registry calls are on `/api/v2`.
+artifact viewing (markdown, JSON) and workspace management (members, invites, API keys). Only
+its registry calls (builds, plans, tasks, executions, deployments) moved to `/api/v2`; auth,
+UI, workspace and target-root calls stay on `/api/v1`.
 
 ## CLI Commands
 

@@ -416,7 +416,10 @@ What you configure:
 server must all be on the v2 line (a v2 SDK against an older server fails
 on its first call: the routes do not exist there); the deployed
 `bootstrap` function walks the DAG unless `reactive_discovery="local"`
-(below) walks it here. The triggering process needs registry credentials only. Cancelling a build
+(below) walks it here. The triggering process needs registry and Modal
+credentials: it mints the build, then spawns the deployed function.
+Discovery itself runs in Modal, so it needs no access to the target root.
+Cancelling a build
 releases its claims and stops nothing: its running workers exit at their
 next cooperative checkpoint, and `stardag builds stop` ends the containers
 themselves.
