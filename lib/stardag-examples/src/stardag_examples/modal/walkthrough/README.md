@@ -56,7 +56,7 @@ Report
 - Stardag Registry credentials in the calling process — an active stardag
   profile (`stardag auth login`, or an API key). `build_trigger` mints the
   build id locally, unlike `build_spawn`.
-- A v2 registry (server 0.6.0 or newer). The SDK and the server upgrade
+- A v2 registry (server 0.6.0rc1 or newer). The SDK and the server upgrade
   together: this SDK fails on its first call against a v1 registry.
 - An environment whose default target root both the calling process and
   the deployed functions can access, e.g. a Modal volume:
