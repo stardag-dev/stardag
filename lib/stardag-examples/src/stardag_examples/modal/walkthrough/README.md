@@ -49,19 +49,17 @@ Report
 
 ## Prerequisites
 
-- **stardag >= 0.10.2.** This example relies on
-  `StardagApp(stardag_api_key_secret=...)` (its default) to inject registry
-  credentials into every deployed function, which landed in 0.10.2.
+- **stardag >= 0.27.0rc1** — the v2 line (registry v2 on `/api/v2`,
+  deployments as the scope, build settings).
 - A [Modal](https://modal.com/) account with credentials set up locally
   (`modal token new`).
 - Stardag Registry credentials in the calling process — an active stardag
   profile (`stardag auth login`, or an API key). `build_trigger` mints the
   build id locally, unlike `build_spawn`.
-- A registry server version matching this SDK. Reactive scheduling fails
-  explicitly against an older server; concurrency-limit enforcement is
-  **silently ignored** by an older server — upgrade before relying on it.
-- An environment whose default target root the calling process can access
-  (reactive mode persists task objects there), e.g. a Modal volume:
+- A v2 registry (server 0.6.0rc1 or newer). The SDK and the server upgrade
+  together: this SDK fails on its first call against a v1 registry.
+- An environment whose default target root both the calling process and
+  the deployed functions can access, e.g. a Modal volume:
 
 ```sh
 cd lib/stardag-examples
@@ -83,9 +81,10 @@ uv run stardag modal deploy src/stardag_examples/modal/walkthrough/app.py
 ```
 
 This creates the `build`, `worker_default`, `worker_long`, `tick` and
-`tick_watchdog` functions (the latter two power reactive scheduling), and
-records the deployment — this code version, under this app name — in the
-registry:
+`tick_watchdog` functions (the latter two power reactive scheduling). It
+also mints a deployment id (`STARDAG_DEPLOYMENT_ID`), bakes it into the
+app, records the deployment with the registry before the Modal deploy and
+activates it after:
 
 ```sh
 uv run stardag modal deployments --app stardag_examples-walkthrough
@@ -93,22 +92,22 @@ uv run stardag modal deployments --app stardag_examples-walkthrough
 
 ### Redeploy while builds are running
 
-There is one live deployment per app. Deploy again under the same name and
+Each app has one current deployment. Deploy again under the same name and
 containers already running finish on the old code, every new spawn lands on
 the new one, and a running reactive build's next scheduler tick **re-plans
-it** under the new code (`rolled_over` in the tick summary): discovery again,
-edges recorded under the new code's structure scope, completed tasks kept.
-Try it: start a reactive build (below), change something in `tasks.py` that
-alters the structure — say, which shards `report_dag` yields — commit, and
-run the deploy command again while the build is in flight.
+it** under the new deployment (`rolled_over` in the tick summary): discovery
+again, a new plan with its own dependency edges, completed tasks kept. A
+tick still on the old code exits `superseded`. Try it: start a reactive
+build (below), change something in `tasks.py` that alters the structure —
+say, which shards `report_dag` yields — and run the deploy command again
+while the build is in flight.
 
-One precondition, already met by this app: the deploy must have been
-recorded (the command exits non-zero if it could not reach the registry).
-What makes the re-plan safe is that a tick rebuilds every task from the
-registry's identity-level data under its own code — which needs the app's
-`task_modules` to name the modules defining those classes, as this one
-does. The code id is the git SHA of a clean checkout; a dirty tree gets a
-one-off id and a warning, so commit before deploying.
+Every deploy is a new deployment, even of unchanged code, so running builds
+re-plan on each one. Two preconditions, both already met by this app: the
+deployment must have been recorded and activated (the command exits
+non-zero if either step failed), and the app's `task_modules` must name the
+modules defining its task classes, because a tick rebuilds every task from
+the instance body the registry stored under the plan's scope.
 
 **A branch beside production** is simply another app name with its own
 single live version — a convention, not a feature:
@@ -121,8 +120,8 @@ uv run stardag modal deploy src/stardag_examples/modal/walkthrough/app.py \
 ```
 
 The [Evolve a DAG Safely](https://stardag-dev.github.io/stardag/how-to/evolve-dags/)
-how-to has the full account, including the three levels of parameter
-significance and the per-build `build_config`.
+how-to has the full account, including significant vs non-significant
+parameters and build-wide `settings`.
 
 ## Configure the named concurrency limit
 
@@ -132,7 +131,8 @@ The limit cap lives in the registry, per environment:
 uv run python -m stardag_examples.modal.walkthrough.configure_limits --max-concurrent 3
 ```
 
-(Equivalently: `PUT /api/v1/concurrency-limits/walkthrough-shards` with
+(Equivalently: `uv run stardag concurrency-limits set walkthrough-shards 3`,
+`PUT /api/v2/concurrency-limits/walkthrough-shards` with
 `{"max_concurrent": 3}`, or the **Concurrency Limits** admin page in the
 registry UI, where you can also inspect current slot holders.)
 

@@ -376,6 +376,14 @@ stop --mark-lost` frees a slot held by a gone execution).
   15. The build view runs one refresh at a time.
   16. `platform/ui.md` describes the v2 UI.
 
+### Examples
+
+- `lib/stardag-examples` and the standalone Modal example ported to v2 and
+  pinned to `stardag>=0.27.0rc1` (the release PR flips it to `>=0.27.0`):
+  settings replace the ML pipeline's build config, the global-lock
+  benchmark option is gone, the walkthrough uses `/api/v2`, and the tests
+  no longer reach a configured registry.
+
 ## [0.26.0] — 2026-09-24
 
 **Released together with `server-v0.5.0`, server first.** Unlike 0.25.0,

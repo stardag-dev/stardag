@@ -10,21 +10,6 @@ import sys
 
 import pytest
 
-# The walkthrough uses APIs introduced together with reactive scheduling
-# (StardagApp watchdog/limit-selector kwargs, build_trigger,
-# RegistryConcurrencyLimiter). Skip the whole module when the installed
-# stardag predates them (the examples lockfile pins the published
-# release) — anything else (including bugs in the example modules) must
-# surface, not skip. Module-existence sentinel: needs neither the modal
-# extra nor an import (stardag.build the *attribute* is the build()
-# function, so hasattr checks won't do).
-if importlib.util.find_spec("stardag.build._registry_limiter") is None:
-    pytest.skip(
-        "installed stardag predates the walkthrough APIs (bump the "
-        "examples lockfile after the release)",
-        allow_module_level=True,
-    )
-
 from stardag.build import build_sequential
 from stardag.testing import test_harness as _test_harness
 

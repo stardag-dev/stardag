@@ -49,7 +49,8 @@ image = (
 # stardag_api_key_secret=... to override, or None to disable.
 app = sd_modal.StardagApp(
     "stardag_examples-basic",
-    # Optional: lets reactive ticks rebuild tasks without the pickle store.
+    # The modules whose import registers the task classes a reactive tick
+    # rebuilds from the registry (default: this app's root package).
     task_modules=["stardag_examples.modal.basic.task"],
     builder_settings=sd_modal.FunctionSettings(image=image),
     worker_settings={

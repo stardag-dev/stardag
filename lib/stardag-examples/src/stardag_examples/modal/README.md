@@ -26,8 +26,8 @@ uv sync --extra modal
 export STARDAG_TARGET_ROOTS__DEFAULT="modalvol://stardag-examples/target-roots/default"
 
 # Deploy and run basic example
-uv run stardag modal deploy stardag_examples/modal/basic/app.py
-python stardag_examples/modal/basic/main.py
+uv run stardag modal deploy src/stardag_examples/modal/basic/app.py
+uv run python -m stardag_examples.modal.basic.main
 ```
 
 ## Documentation
