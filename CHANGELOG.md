@@ -146,6 +146,14 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
   `DEFAULT_SERVER_VERSION` (`_modal_app.py`) points `stardag self-host up`
   at a v2 release candidate while this line is still in flight; see
   DEV_README.md "Pre-release".
+- **Changed: every build entry point takes `settings: Mapping[str, str]`.**
+  `sd.build`, `build_aio`, `build_sequential` and `build_sequential_aio`
+  declared `dict[str, str]` while `build_trigger` and the registry took a
+  `Mapping`; any mapping (a `MappingProxyType`, say) now type-checks.
+- **Docs: the bundled agent skill (`.claude/skills/stardag/`) is rewritten
+  for v2**, and `RELEASE_NOTES.md` corrected: which routes a 0.6.0 registry
+  serves under `/api/v1` and `/api/v2`, that the `significant=False`
+  rename moves no task id, and that settings keys are not validated.
 
 ### Server
 
@@ -160,7 +168,13 @@ significance=...)` and `StardagField(hash_exclude=...)` are removed and
 - **New: the v2 migration refuses to drop v1 data unasked.** With v1
   `builds` or `tasks` rows present it raises unless
   `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set for the run; an empty or fresh
-  database migrates without it.
+  database migrates without it. On the accepted path it logs the v1
+  `builds`/`tasks` counts it drops (Alembic's logger, INFO), so the
+  roll-out log records what went.
+- **New: `infra/aws-cdk/scripts/run-migrations.sh` takes `MIGRATION_ENV`**
+  (`NAME=VALUE` pairs, comma- or space-separated) as environment for the
+  migration task only, e.g. `MIGRATION_ENV="STARDAG_ACCEPT_V2_DATA_LOSS=1"`;
+  unset, the ECS override is unchanged.
 - **Breaking: the registry routes move to `/api/v2`.** Every `/api/v1`
   registry route (builds, tasks, search, deployments, locks, concurrency
   limits, tick summaries) is removed, and so is the SDK version gate. Authentication, workspaces, environments and target
