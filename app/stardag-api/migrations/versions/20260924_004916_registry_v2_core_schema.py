@@ -91,14 +91,17 @@ ACCEPT_DATA_LOSS_ENV = "STARDAG_ACCEPT_V2_DATA_LOSS"
 def _v1_row_count(table: str) -> int:
     """Rows in a v1 table, or 0 if it does not exist (a fresh database).
 
-    The table is locked against writes first (held to the end of the
-    migration's transaction), so a v1 writer still running cannot insert a
-    row between the count and the drop.
+    No lock: the count informs the operator's decision, it is not a
+    consistency check. A row a still-running v1 server inserts between the
+    count and the drop changes nothing about whether the loss was accepted,
+    and the ``DROP TABLE`` that follows takes its own exclusive lock and
+    waits for in-flight transactions anyway. Taking ``SHARE`` locks here in
+    two statements could deadlock against a v1 server that locks the same
+    tables in the other order.
     """
     bind = op.get_bind()
     if bind.execute(sa.text("SELECT to_regclass(:t)"), {"t": table}).scalar() is None:
         return 0
-    bind.execute(sa.text(f'LOCK TABLE "{table}" IN SHARE MODE'))
     return bind.execute(sa.text(f'SELECT count(*) FROM "{table}"')).scalar_one()
 
 
