@@ -16,9 +16,6 @@ uv run python -m stardag_examples.benchmarks.run_benchmark --quick
 # With local registry (docker-compose at localhost:8000)
 STARDAG_API_KEY=<key> uv run python -m stardag_examples.benchmarks.run_benchmark --registry local
 
-# With local registry and global concurrency locks enabled
-STARDAG_API_KEY=<key> uv run python -m stardag_examples.benchmarks.run_benchmark --registry local --lock
-
 # With remote registry (uses STARDAG_API_URL from env/config)
 uv run python -m stardag_examples.benchmarks.run_benchmark --registry remote
 ```
@@ -26,7 +23,6 @@ uv run python -m stardag_examples.benchmarks.run_benchmark --registry remote
 ### Command-line Options
 
 - `--registry {noop,local,remote}`: Registry mode (default: noop)
-- `--lock`: Enable global concurrency locks (requires real registry)
 - `--quick`: Run quick benchmark (fewer scenarios, fewer runs)
 
 ## Results Summary
@@ -42,18 +38,20 @@ uv run python -m stardag_examples.benchmarks.run_benchmark --registry remote
 
 ### Local Registry Comparison
 
-| Scenario       | Config     | No Locks | With Locks | Overhead |
-| -------------- | ---------- | -------- | ---------- | -------- |
-| io_bound_tree  | sequential | 2.16s    | 2.18s      | +1%      |
-| io_bound_tree  | concurrent | 0.72s    | 0.82s      | +14%     |
-| cpu_bound_tree | sequential | 0.60s    | 0.55s      | -8%      |
-| cpu_bound_tree | concurrent | 0.58s    | 0.66s      | +14%     |
-| light_tree     | sequential | 0.24s    | 0.24s      | 0%       |
-| light_tree     | concurrent | 0.28s    | 0.42s      | +50%     |
+| Scenario       | Config     | Time  |
+| -------------- | ---------- | ----- |
+| io_bound_tree  | sequential | 2.16s |
+| io_bound_tree  | concurrent | 0.72s |
+| cpu_bound_tree | sequential | 0.60s |
+| cpu_bound_tree | concurrent | 0.58s |
+| light_tree     | sequential | 0.24s |
+| light_tree     | concurrent | 0.28s |
 
 **Registry overhead**: Local registry adds ~0.6s for io_bound scenarios (API calls for task registration/completion tracking). This is network latency to localhost:8000.
 
-**Lock overhead**: Global concurrency locks add ~10-15% overhead for concurrent execution due to lock acquisition/release API calls. Light tasks show higher percentage overhead because task work is minimal.
+These figures were measured against a v1 registry. The v1 `--lock` option (the
+lease-based global concurrency lock) is gone: from stardag 0.27 the claim is the
+only cross-build coordination, and it needs no option.
 
 ## Key Takeaways
 

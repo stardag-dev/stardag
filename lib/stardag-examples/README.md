@@ -14,6 +14,10 @@ Example DAGs and integrations demonstrating Stardag's capabilities.
 
 ## Getting Started
 
+The examples install the published `stardag` from PyPI, pinned to the v2
+line (`stardag>=0.27.0rc1`); anything registry-backed needs a v2 registry
+(server 0.6.0 or newer).
+
 Install with extras for the examples you want to run:
 
 ```bash

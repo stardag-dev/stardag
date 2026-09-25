@@ -466,6 +466,9 @@ assignee the maintainer.
       fixes; `configuration/cli.md` updated to the full v2 CLI merged in
       I8 (#387). `docs/design/README.md` and `DEV_README.md` needed no
       change.
+- [x] Examples — `lib/stardag-examples` and the standalone Modal example
+      ported to the v2 SDK and pinned to the published `stardag==0.27.0rc1`
+      (STA-112); the I12 release PR flips both pins to `>=0.27.0`.
 - [ ] I12 — release. Everything above is merged into `v2`; this is the
       only open package and it needs Anders' calls: the SDK and server
       version numbers and the release date (the `TODO(Anders)` markers in

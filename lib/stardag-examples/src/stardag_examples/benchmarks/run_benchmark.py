@@ -36,7 +36,6 @@ from typing import Any, Callable, Literal
 
 from stardag.build import (
     DefaultExecutionModeSelector,
-    GlobalLockConfig,
     HybridConcurrentTaskExecutor,
     build_aio,
     build_sequential,
@@ -45,7 +44,6 @@ from stardag.registry import (
     APIRegistry,
     NoOpRegistry,
     RegistryABC,
-    RegistryGlobalConcurrencyLockManager,
     init_registry,
 )
 from stardag.target import InMemoryFileTarget
@@ -103,7 +101,6 @@ async def run_concurrent_build(
     dag_factory: Callable,
     run_id: str,
     registry: RegistryABC,
-    use_global_lock: bool = False,
     sync_run_default: Literal["thread", "process", "blocking"] = "thread",
     max_async_workers: int = 10,
     max_thread_workers: int = 10,
@@ -121,21 +118,12 @@ async def run_concurrent_build(
         max_process_workers=max_process_workers,
     )
 
-    # Setup global lock if using real registry
-    global_lock_manager = None
-    global_lock_config = None
-    if use_global_lock:
-        global_lock_manager = RegistryGlobalConcurrencyLockManager()
-        global_lock_config = GlobalLockConfig(enabled=True)
-
     gc.collect()
     start = time.perf_counter()
     await build_aio(
         [dag],
         task_executor=task_executor,
         registry=registry,
-        global_lock_manager=global_lock_manager,
-        global_lock_config=global_lock_config,
     )
     duration = time.perf_counter() - start
 
@@ -147,10 +135,7 @@ def run_sequential_build(
     run_id: str,
     registry: RegistryABC,
 ) -> float:
-    """Run a sequential build and return duration.
-
-    Note: Sequential build doesn't use global locks since it's single-threaded.
-    """
+    """Run a sequential build and return duration."""
     dag = dag_factory(prefix=f"{run_id}_")
 
     gc.collect()
@@ -191,7 +176,6 @@ def run_benchmark(
     scenario_name: str,
     dag_factory: Callable,
     registry_mode: RegistryMode = "noop",
-    use_global_lock: bool = False,
     api_key: str | None = None,
     configs: list[str] | None = None,
     timed_runs: int = 3,
@@ -206,7 +190,6 @@ def run_benchmark(
         scenario_name: Name of the benchmark scenario
         dag_factory: Factory function that creates a DAG
         registry_mode: Registry mode - "noop", "local", or "remote"
-        use_global_lock: Whether to use global concurrency locks (for real registries)
         api_key: Optional API key for registry authentication
         configs: List of config names to run (default: all)
         timed_runs: Number of runs per configuration
@@ -243,7 +226,6 @@ def run_benchmark(
                             dag_factory,
                             run_id,
                             registry,
-                            use_global_lock=use_global_lock,
                             sync_run_default=config.get("sync_run_default", "thread"),
                             max_async_workers=config.get("max_async_workers", 10),
                             max_thread_workers=config.get("max_thread_workers", 10),
@@ -289,9 +271,6 @@ Examples:
   # Run with local registry (docker-compose at localhost:8000):
   STARDAG_API_KEY=<key> uv run python -m stardag_examples.benchmarks.run_benchmark --registry local
 
-  # Run with local registry and global locks enabled:
-  STARDAG_API_KEY=<key> uv run python -m stardag_examples.benchmarks.run_benchmark --registry local --lock
-
   # Run with remote registry (uses STARDAG_API_URL env var):
   uv run python -m stardag_examples.benchmarks.run_benchmark --registry remote
 
@@ -306,11 +285,6 @@ Authentication:
         choices=["noop", "local", "remote"],
         default="noop",
         help="Registry mode: noop (default, no network), local (docker-compose), remote (configured API)",
-    )
-    parser.add_argument(
-        "--lock",
-        action="store_true",
-        help="Enable global concurrency locks (requires real registry: local or remote)",
     )
     parser.add_argument(
         "--quick",
@@ -328,13 +302,7 @@ def main():
     """Run all benchmarks."""
     args = parse_args()
     registry_mode: RegistryMode = args.registry
-    use_global_lock: bool = args.lock
     api_key: str | None = args.api_key
-
-    # Validate lock option requires real registry
-    if use_global_lock and registry_mode == "noop":
-        print("ERROR: --lock requires --registry local or --registry remote")
-        return
 
     # Warn if using real registry without API key
     if registry_mode in ("local", "remote") and not api_key:
@@ -374,7 +342,6 @@ def main():
         print("BUILD CONFIGURATION BENCHMARK")
         print("=" * 70)
         print(f"\nRegistry mode: {registry_mode}")
-        print(f"Global locks: {'enabled' if use_global_lock else 'disabled'}")
         print(f"Timed runs: {io_runs} (targets cleared between each run)")
         print()
 
@@ -392,7 +359,6 @@ def main():
             "io_bound_tree",
             io_bound_tree,
             registry_mode=registry_mode,
-            use_global_lock=use_global_lock,
             api_key=api_key,
             configs=io_configs,
             timed_runs=io_runs,
@@ -407,7 +373,6 @@ def main():
                 "io_bound_flat_64",
                 lambda prefix: io_bound_flat(prefix, leaf_count=64),
                 registry_mode=registry_mode,
-                use_global_lock=use_global_lock,
                 api_key=api_key,
                 configs=io_configs,
                 timed_runs=io_runs,
@@ -430,7 +395,6 @@ def main():
             "cpu_bound_tree",
             cpu_bound_tree,
             registry_mode=registry_mode,
-            use_global_lock=use_global_lock,
             api_key=api_key,
             configs=cpu_configs,
             timed_runs=cpu_runs,
@@ -445,7 +409,6 @@ def main():
                 "heavy_cpu_flat",
                 lambda prefix: heavy_cpu_flat(prefix, leaf_count=8),
                 registry_mode=registry_mode,
-                use_global_lock=use_global_lock,
                 api_key=api_key,
                 configs=cpu_configs,
                 timed_runs=heavy_cpu_runs,
@@ -467,7 +430,6 @@ def main():
             "light_tree",
             light_tree,
             registry_mode=registry_mode,
-            use_global_lock=use_global_lock,
             api_key=api_key,
             configs=["sequential", "concurrent_thread", "concurrent_blocking"],
             timed_runs=io_runs,

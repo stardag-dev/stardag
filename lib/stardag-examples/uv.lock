@@ -3590,7 +3590,7 @@ wheels = [
 
 [[package]]
 name = "stardag"
-version = "0.24.0"
+version = "0.27.0rc1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -3603,9 +3603,9 @@ dependencies = [
     { name = "typer" },
     { name = "uuid6" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/65/7b/aebb27e437a899b56fa20206e422a7dd481b8fa4c27931cef3f9e4a3f6b9/stardag-0.24.0.tar.gz", hash = "sha256:ef617fbb94cf59ae53b6ac3d8820d177cf87f9ad5efe0e9e87db78945ff726bb", size = 1004964, upload-time = "2026-09-20T16:01:07.978Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0c/0a/ee6aadf6d8a11f317e2bd4c802361b5d5c660b54f52e8480e3cb9d20933a/stardag-0.27.0rc1.tar.gz", hash = "sha256:4a1a9a72f0a630289f74403bccc9c8b5865637e78219a0e94f3c90040b5407aa", size = 849215, upload-time = "2026-09-25T09:18:03.718Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fa/71/63ac5bf3324a46d38b809cf23f56b9f528427f42d6a92f2ea2834bbe369a/stardag-0.24.0-py3-none-any.whl", hash = "sha256:71756f6ac18243c224874f14aa43d3b3f48c58645d87faef986c45277b768e7c", size = 494286, upload-time = "2026-09-20T16:01:05.861Z" },
+    { url = "https://files.pythonhosted.org/packages/22/21/7b53bff44b9a7763851e609bf1f1b2f4d84f52a11402ca3176db6714bbad/stardag-0.27.0rc1-py3-none-any.whl", hash = "sha256:d3743f96a77fb78901a035b0f763475cc5fde9eec37b11017fe2fe0853841f47", size = 464192, upload-time = "2026-09-25T09:18:02.183Z" },
 ]
 
 [[package]]
@@ -3614,6 +3614,7 @@ version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
+    { name = "pydantic-settings" },
     { name = "stardag" },
 ]
 
@@ -3659,8 +3660,9 @@ requires-dist = [
     { name = "pandas", marker = "extra == 'ml-pipeline'", specifier = ">=2.2.3" },
     { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2.8.2" },
+    { name = "pydantic-settings", specifier = ">=2.1.0" },
     { name = "scikit-learn", marker = "extra == 'ml-pipeline'", specifier = ">=1.5.2" },
-    { name = "stardag", specifier = ">=0.10.2" },
+    { name = "stardag", specifier = ">=0.27.0rc1" },
     { name = "tabulate", marker = "extra == 'ml-pipeline'", specifier = ">=0.9" },
 ]
 provides-extras = ["prefect", "s3", "modal", "ml-pipeline"]

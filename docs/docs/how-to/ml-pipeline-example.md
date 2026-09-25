@@ -137,6 +137,27 @@ class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
     # ...
 ```
 
+### Non-significant Parameters and Build Settings
+
+Every task in `class_api.py` pretends to work for a while. That duration
+changes neither a task's output nor its upstreams, so it must not be part
+of the task id, and it comes from two places:
+
+- a per-task `sleep_seconds` field declared with
+  `StardagField(significant=False)`: passable at init and stored with the
+  task instance, but two tasks differing only in it are the same task;
+- a build-wide default read at run time through a pydantic-settings class,
+  given per build as `settings`:
+
+```{.python notest}
+sd.build([metrics], settings={"EXAMPLES_ML_PIPELINE_SLEEP_SECONDS": "0.5"})
+```
+
+Settings are environment variables applied in every process of the build.
+They may change how a task runs or which upstreams it has, never what it
+writes; see [Evolve a DAG
+Safely](evolve-dags.md#2-give-build-wide-values-through-settings).
+
 ## Source Code
 
 View the full source on GitHub: [stardag-examples/ml_pipeline](https://github.com/stardag-dev/stardag/tree/main/lib/stardag-examples/src/stardag_examples/ml_pipeline)

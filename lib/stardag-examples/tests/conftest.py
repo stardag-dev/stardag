@@ -1,8 +1,15 @@
 """Pytest fixtures for stardag-examples tests."""
 
+import os
 import typing
 
 import pytest
+
+# The examples' tests build DAGs and need no registry. Without this, a machine
+# with a stardag profile (or a ``.stardag/config.toml`` in any parent
+# directory) would register every test build with that profile's registry.
+# Set before stardag first loads its config, which happens lazily.
+os.environ["STARDAG_NO_REGISTRY"] = "1"
 from stardag.target import (
     InMemoryFileTarget,
     target_factory_provider,
