@@ -144,12 +144,19 @@ if [ -n "$MIGRATION_ENV" ]; then
     echo "Migration environment: $(echo "$OVERRIDES" | python3 -c "import json, sys; print(' '.join(e['name'] for e in json.load(sys.stdin)['containerOverrides'][0]['environment']))")"
 fi
 
+# The overrides JSON carries every MIGRATION_ENV value, so it goes to the AWS
+# CLI through a private temp file rather than as an argument, keeping values
+# out of the process list. Removed when this script exits.
+OVERRIDES_FILE=$(mktemp)
+chmod 600 "$OVERRIDES_FILE"
+trap 'rm -f "$OVERRIDES_FILE"' EXIT
+printf '%s' "$OVERRIDES" > "$OVERRIDES_FILE"
 TASK_RUN_RESULT=$($AWS_CMD ecs run-task \
     --cluster $CLUSTER_NAME \
     --task-definition $TASK_DEF_ARN \
     --launch-type FARGATE \
     --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SECURITY_GROUP],assignPublicIp=DISABLED}" \
-    --overrides "$OVERRIDES" \
+    --overrides "file://$OVERRIDES_FILE" \
     --region $AWS_REGION \
     --output json)
 
