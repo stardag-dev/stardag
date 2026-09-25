@@ -18,7 +18,9 @@ nothing to derive an instance, a plan or a membership from.
 **Guarded against unintended data loss.** Before anything is dropped,
 ``upgrade()`` counts the v1 ``builds`` and ``tasks`` rows. If either is
 non-zero it refuses with a ``RuntimeError`` naming the counts, what is
-lost and what is kept, unless ``STARDAG_ACCEPT_V2_DATA_LOSS=1`` is set.
+lost and what is kept, unless ``STARDAG_ACCEPT_V2_DATA_LOSS=1`` is set;
+then it logs the counts it drops (Alembic's logger, INFO), so the
+roll-out log records what went.
 The variable is meant to be set for the one migration run that crosses to
 v2, not left on permanently. A fresh database (no v1 tables) or an empty
 v1 schema passes without it. The check runs inside the migration's
@@ -56,6 +58,7 @@ Create Date: 2026-09-24 00:49:16.196042
 from typing import Sequence, Union
 
 from alembic import op
+import logging
 import os
 
 import sqlalchemy as sa
@@ -83,6 +86,10 @@ V1_CORE_TABLES = (
 )
 
 
+# Alembic's own logger, so the accepted-loss line lands next to its
+# "Running upgrade ..." lines in the roll-out log.
+logger = logging.getLogger("alembic.runtime.migration")
+
 # Set to exactly "1" for the migration run that crosses to v2 on a registry
 # holding v1 rows. See ``_refuse_unaccepted_data_loss``.
 ACCEPT_DATA_LOSS_ENV = "STARDAG_ACCEPT_V2_DATA_LOSS"
@@ -109,7 +116,17 @@ def _refuse_unaccepted_data_loss() -> None:
     """Refuse to drop v1 builds/tasks unless the loss was explicitly accepted."""
     builds = _v1_row_count("builds")
     tasks = _v1_row_count("tasks")
-    if (builds == 0 and tasks == 0) or os.environ.get(ACCEPT_DATA_LOSS_ENV) == "1":
+    if builds == 0 and tasks == 0:
+        return
+    if os.environ.get(ACCEPT_DATA_LOSS_ENV) == "1":
+        logger.info(
+            "Dropping %d v1 builds and %d v1 tasks (with their events, "
+            "deployments, artifacts and concurrency limits): the loss was "
+            "accepted with %s=1.",
+            builds,
+            tasks,
+            ACCEPT_DATA_LOSS_ENV,
+        )
         return
     raise RuntimeError(
         "The registry v2 migration drops every v1 build, task, event, "

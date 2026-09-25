@@ -21,6 +21,8 @@ there), with and without v1 rows and with and without the consent variable.
 
 from __future__ import annotations
 
+import logging
+import logging.config
 import re
 
 import pytest
@@ -235,11 +237,20 @@ async def test_v2_migration_refuses_v1_rows_without_consent(
     assert await _scalar(v1_schema, "SELECT to_regclass('build')") is None
 
 
-async def test_v2_migration_drops_v1_rows_with_consent(v1_schema, monkeypatch):
+async def test_v2_migration_drops_v1_rows_with_consent(v1_schema, monkeypatch, caplog):
     await _seed_v1_rows(v1_schema)
     monkeypatch.setenv(ACCEPT_ENV, "1")
 
-    await _migrate(v1_schema, V2_CORE)
+    # env.py's fileConfig would replace every alembic logger's handlers,
+    # caplog's with them; the log line is what is under test, not that.
+    monkeypatch.setattr(logging.config, "fileConfig", lambda *a, **k: None)
+    with caplog.at_level(logging.INFO, logger="alembic"):
+        await _migrate(v1_schema, V2_CORE)
+
+    # The roll-out log records what the accepted loss dropped.
+    (accepted,) = [r for r in caplog.records if ACCEPT_ENV in r.getMessage()]
+    assert accepted.levelno == logging.INFO
+    assert "Dropping 1 v1 builds and 1 v1 tasks" in accepted.getMessage()
 
     assert await _scalar(v1_schema, "SELECT to_regclass('builds')") is None
     assert await _scalar(v1_schema, "SELECT to_regclass('tasks')") is None
