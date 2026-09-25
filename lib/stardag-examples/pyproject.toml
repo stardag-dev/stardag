@@ -8,9 +8,8 @@ dependencies = [
     "pydantic>=2.8.2",
     "pydantic-settings>=2.1.0",
     # The v2 line: the examples use StardagField(significant=...) and build
-    # settings, and talk to a v2 (/api/v2) registry. The release candidate
-    # is named explicitly so uv resolves the pre-release; the final release
-    # flips this to >=0.27.0.
+    # settings, and talk to a v2 (/api/v2) registry. 0.27.0 is the first
+    # release of that line; anything older fails against a v2 registry.
     "stardag>=0.27.0",
 ]
 
