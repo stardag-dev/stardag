@@ -21,9 +21,9 @@ set -e
 # quoting, so arguments containing spaces can be quoted)
 MIGRATION_COMMAND="${MIGRATION_COMMAND:-alembic upgrade head}"
 # Extra NAME=VALUE pairs for the migration container (see header comment)
-# Exported and read by the helper, not passed as argv: values stay out
-# of the process list.
-export MIGRATION_ENV="${MIGRATION_ENV:-}"
+# Handed to the helper alone (not exported, not argv): values stay out of
+# the process list and out of the AWS CLI's environment.
+MIGRATION_ENV="${MIGRATION_ENV:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CDK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -123,7 +123,7 @@ echo "Admin Secret: $ADMIN_SECRET_ARN"
 # configurable via MIGRATION_COMMAND, and MIGRATION_ENV adds environment
 # variables for this run only (see header comment).
 echo "Migration command: $MIGRATION_COMMAND"
-OVERRIDES=$(python3 -c "
+OVERRIDES=$(MIGRATION_ENV="$MIGRATION_ENV" python3 -c "
 import json, os, re, shlex, sys
 command = shlex.split(sys.argv[1])
 override = {'name': 'Api', 'command': command}
