@@ -6,11 +6,10 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## v0.27.0 (registry v2) — Every fact gets its own home
+## v0.27.0 — Every fact gets its own home
 
-> **TODO(Anders):** the release date. Versions: SDK `0.27.0`, server
-> `server-v0.6.0` — the next minors, not a new major; **breaking** all the
-> same, see below.
+Released 2026-09-25 together with the registry server `server-v0.6.0`: the
+next minors, not a new major, and **breaking** all the same — see below.
 
 ### Upgrading: the registry starts empty
 

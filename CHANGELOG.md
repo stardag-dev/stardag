@@ -4,14 +4,11 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased — v2 line]
+## [0.27.0] — 2026-09-25
 
-> **TODO(Anders):** the release date replaces this heading's placeholder;
-> the versions are the next minors, SDK `0.27.0` and server `0.6.0` (no new
-> major: the project is pre-1.0 and promises no compatibility yet). The v1
-> line ended with 0.26.0 below. #387 (CLI), #389 (live
-> scenarios) and #390 (server reads, `lost`, artifact quota) were open when
-> this entry was drafted: re-check their items against what merged.
+SDK `0.27.0` and server `server-v0.6.0`: the next minors, not a new major
+(the project is pre-1.0 and promises no compatibility yet), **breaking**
+all the same. The v1 line ended with 0.26.0 below.
 
 A new release line of the SDK, the registry server, the CLI and the UI
 together, on new registry entities: **task** (a completion and its claim),
@@ -393,7 +390,8 @@ stop --mark-lost` frees a slot held by a gone execution).
 ### Examples
 
 - `lib/stardag-examples` and the standalone Modal example ported to v2 and
-  pinned to `stardag>=0.27.0rc1` (the release PR flips it to `>=0.27.0`):
+  pinned to the v2 line (`stardag>=0.27.0rc1`; a follow-up relocks to
+  `>=0.27.0` once the release is on PyPI):
   settings replace the ML pipeline's build config, the global-lock
   benchmark option is gone, the walkthrough uses `/api/v2`, and the tests
   no longer reach a configured registry.

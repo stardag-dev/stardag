@@ -467,8 +467,9 @@ assignee the maintainer.
       I8 (#387). `docs/design/README.md` and `DEV_README.md` needed no
       change.
 - [x] Examples — `lib/stardag-examples` and the standalone Modal example
-      ported to the v2 SDK and pinned to the published `stardag==0.27.0rc1`
-      (STA-112); the I12 release PR flips both pins to `>=0.27.0`.
+      ported to the v2 SDK and pinned to the published `stardag>=0.27.0rc1`
+      (STA-112); a follow-up relocks both pins to `>=0.27.0` once the
+      release is on PyPI.
 - [ ] I12 — release. Everything above is merged into `v2`; this is the
       only open package and it needs Anders' calls: the SDK and server
       version numbers and the release date (the `TODO(Anders)` markers in
@@ -490,6 +491,13 @@ assignee the maintainer.
       v2, release-note corrections, `settings: Mapping[str, str]` on every
       build entry point, the migration guard logging what an accepted loss
       dropped, and `MIGRATION_ENV` for the AWS CDK migration script.
+      Release candidates `server-v0.6.0rc1` / `v0.27.0rc1` were tagged on
+      the `v2` head on 2026-09-25 and verified end to end by a consumer
+      against a self-hosted registry. The release PR dates the
+      `CHANGELOG.md` / `RELEASE_NOTES.md` entries (0.27.0 / server-v0.6.0,
+      2026-09-25) and moves `DEFAULT_SERVER_VERSION` to `0.6.0`; then #378
+      is merged once and the tags go on the `main` merge commit, server
+      first.
 
 ## Delivery steps
 

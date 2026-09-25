@@ -60,19 +60,19 @@ DEFAULT_JWT_SECRET = "server-jwt"
 DEFAULT_SERVER_MODAL_ENV = "stardag-host"
 
 SERVER_IMAGE_REPO = "ghcr.io/stardag-dev/stardag-server"
-# The server release this SDK version is tested against. Bumped at SDK
-# release time, in the release PR, once the `server-vX.Y.Z` image exists
-# — bumping it earlier points `self-host up` at an image that has not been
-# published.
+# The server release this SDK version is tested against. Bumped in the
+# release PR that the `server-vX.Y.Z` tag follows: the image is published
+# from that tag before the SDK is tagged, so no SDK on PyPI ever points at
+# an image that does not exist. Between the merge and the tag an SDK
+# installed from source resolves a tag that is not published yet; that
+# window is minutes and is the release procedure, not a state to support.
+# A release candidate (`server-vX.Y.ZrcN`) is a valid pin, same as a final
+# `server-vX.Y.Z`.
 #
-# While the v2 line is still in flight, this pins the matching v2 image —
-# a release candidate (`server-vX.Y.ZrcN`) is a valid pin, same as a final
-# `server-vX.Y.Z`. The final cut of this release moves it to "0.6.0" once
-# `server-v0.6.0` ships. (v0.26.0/server-v0.5.0 was the last release of the
-# v1 line; the STA-81 load-bearing-pin note that used to live here was
-# about that line's cancel-draining pairing and no longer applies once the
-# pin is on the v2 side.)
-DEFAULT_SERVER_VERSION = "0.6.0rc1"
+# 0.6.0 is the first v2 server; a v2 SDK refuses a v1 registry on its first
+# call, so this must never point below it. (v0.26.0/server-v0.5.0 was the
+# last release of the v1 line.)
+DEFAULT_SERVER_VERSION = "0.6.0"
 
 # Minimum client interpreter for from-source image builds (stardag-api's
 # requires-python; the image gets the client's version via add_python).
