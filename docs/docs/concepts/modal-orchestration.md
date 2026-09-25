@@ -95,7 +95,7 @@ tick (short-lived, single-flighted per build):
     act: spawn ready tasks detached (claim first), leave live claims
          alone (a lapsed one is runnable again), heal completions,
          retry a failed spawn within its own budget
-    terminal? → complete / fail the build (cancelling live executions)
+    terminal? → complete / fail the build (releasing its claims)
     acted? → re-read immediately; else linger on the wake-up flag
   on the way out: re-read the flag before and after releasing the lease
 ```
