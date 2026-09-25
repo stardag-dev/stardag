@@ -131,7 +131,10 @@ Notes:
   so `run-migrations.sh` works unchanged.
 - `run-migrations.sh` overrides the container command with
   `alembic upgrade head` (configurable via `MIGRATION_COMMAND` for images
-  with a different layout).
+  with a different layout). `MIGRATION_ENV` adds environment variables to
+  the migration run only, e.g.
+  `MIGRATION_ENV="STARDAG_ACCEPT_V2_DATA_LOSS=1"` for the registry v2
+  migration on a database holding v1 rows.
 
 ### Recommended for production: ECR pull-through cache
 

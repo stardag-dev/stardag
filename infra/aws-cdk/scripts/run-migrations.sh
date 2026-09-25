@@ -9,11 +9,19 @@
 # (ghcr.io/stardag-dev/stardag-server:X.Y.Z), which keep the same layout.
 # For images with a different layout, override with e.g.:
 #   MIGRATION_COMMAND="alembic -c /path/to/alembic.ini upgrade head" ./scripts/run-migrations.sh
+#
+# Environment variables for the migration run only (not the API service's)
+# go in MIGRATION_ENV, a comma- or space-separated list of NAME=VALUE pairs,
+# added to the container override. Unset, the override carries no
+# environment. The registry v2 migration, on a database holding v1 rows:
+#   MIGRATION_ENV="STARDAG_ACCEPT_V2_DATA_LOSS=1" ./scripts/run-migrations.sh
 set -e
 
 # Command to run inside the container (split into argv with shell-style
 # quoting, so arguments containing spaces can be quoted)
 MIGRATION_COMMAND="${MIGRATION_COMMAND:-alembic upgrade head}"
+# Extra NAME=VALUE pairs for the migration container (see header comment)
+MIGRATION_ENV="${MIGRATION_ENV:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CDK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -110,13 +118,29 @@ echo "Admin Secret: $ADMIN_SECRET_ARN"
 
 # Run a one-off task from the API service's task definition, overriding
 # the command to run alembic instead of the API server. The command is
-# configurable via MIGRATION_COMMAND (see header comment).
+# configurable via MIGRATION_COMMAND, and MIGRATION_ENV adds environment
+# variables for this run only (see header comment).
 echo "Migration command: $MIGRATION_COMMAND"
 OVERRIDES=$(python3 -c "
-import json, shlex, sys
+import json, re, shlex, sys
 command = shlex.split(sys.argv[1])
-print(json.dumps({'containerOverrides': [{'name': 'Api', 'command': command}]}))
-" "$MIGRATION_COMMAND")
+override = {'name': 'Api', 'command': command}
+environment = []
+for pair in re.split(r'[,\s]+', sys.argv[2].strip()):
+    if not pair:
+        continue
+    name, sep, value = pair.partition('=')
+    if not sep or not name:
+        sys.exit(f'MIGRATION_ENV: expected NAME=VALUE, got {pair!r}')
+    environment.append({'name': name, 'value': value})
+if environment:
+    override['environment'] = environment
+print(json.dumps({'containerOverrides': [override]}))
+" "$MIGRATION_COMMAND" "$MIGRATION_ENV")
+if [ -n "$MIGRATION_ENV" ]; then
+    # Names only: a value may be sensitive.
+    echo "Migration environment: $(echo "$OVERRIDES" | python3 -c "import json, sys; print(' '.join(e['name'] for e in json.load(sys.stdin)['containerOverrides'][0]['environment']))")"
+fi
 
 TASK_RUN_RESULT=$($AWS_CMD ecs run-task \
     --cluster $CLUSTER_NAME \
