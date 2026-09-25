@@ -820,6 +820,12 @@ parameter instead — completion is global, so a value read only from
 settings would let one build's result depend on values another build
 reusing the completion never saw.
 
+**Nothing validates the keys.** A misspelled key is simply an environment
+variable nothing reads, and the build runs on whatever default the task
+falls back to. Read the settings you rely on at run time and fail loudly
+when one is missing — a pydantic-settings class with a required field does
+exactly that.
+
 **Precedence**, where a key appears in more than one place: `settings` win
 over the worker selector's per-task `env_overrides`, which win over the
 deployment's own environment. Keys the framework writes itself

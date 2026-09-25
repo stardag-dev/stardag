@@ -30,9 +30,11 @@ carried over is their provenance: the registry no longer knows which
 upstreams those tasks were built from, so they appear as complete leaves
 until something rebuilds them.
 
-The SDK and the server upgrade together: a 0.27.0 SDK refuses a 0.5.x
-registry on its first route, and a 0.6.0 registry serves no `/api/v1`
-routes.
+The SDK and the server upgrade together: a 0.27.0 SDK fails against a
+0.5.x registry on its first call (a 404: the `/api/v2` routes do not exist
+there), and a 0.6.0 registry serves its registry routes only under
+`/api/v2` (auth, UI, workspace and target-root routes stay under `/api/v1`,
+so logins and the UI are unaffected).
 
 The hosted registry at stardag.com is in beta, intended for demo and
 evaluation use; it moves to v2 with this release and its v1 history is not
@@ -99,6 +101,15 @@ class Train(sd.Task[str]):
 that was `dependencies_only`, `execution_only` or excluded from the hash.
 `compat_default` works as before, on significant fields.
 
+**The rename moves no task id.** The task id hashes exactly the fields it
+hashed before: the hash-mode dump drops a `significant=False` field the way
+it dropped a `hash_exclude=True` or non-identity field, and nothing else
+about the dump changed. Replacing `hash_exclude=True` with
+`significant=False` (and dropping `significance=`) leaves every id where it
+was — a consumer of the release candidate with 132 module-level task
+instances dumped byte-identical ids under 0.23.0 and under 0.27.0rc1 after
+the rename — so existing targets stay complete.
+
 A non-significant field is an ordinary parameter now. It is passed at init,
 stored on the task instance and rehydrated from it; the v1 rule that levels
 2 and 3 came only from the build config is gone with the build config.
@@ -139,7 +150,9 @@ distinct instance is round-tripped once at registration; a field whose
 serialization is not a fixed point (an unsorted set, a naive vs aware
 datetime, `-0.0`, a numpy scalar) raises `UnstableSerializationError`
 naming it. You can run the same check in a test with
-`sd.check_serialization_stability(task)`. Two different constructions of
+`sd.check_serialization_stability(task)`. It is cheap, and quiet on
+ordinary code: on a codebase with 105 distinct instances using floats,
+tuples, frozensets and custom serializers it flagged nothing. Two different constructions of
 one task id in one build raise `InstanceConflictError`, with both
 construction paths: a build is one request, and one plan holds one instance
 per completion.
@@ -195,7 +208,8 @@ There is none, by design.
   ones — refusing while v1 builds or tasks exist unless
   `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set (see "Upgrading" above).
   Concurrency limits are among them: set them again after the
-  upgrade (`PUT /api/v2/concurrency-limits/{key}`). Users, workspaces,
+  upgrade (`stardag concurrency-limits set <key> <max_concurrent>`, or
+  `PUT /api/v2/concurrency-limits/{key}`). Users, workspaces,
   environments, members, invites, API keys and target roots are
   untouched. Downgrade is not supported. Targets are not touched either,
   so the first v2 build of an existing DAG observes its complete tasks and
