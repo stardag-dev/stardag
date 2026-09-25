@@ -8,10 +8,9 @@ dependencies = [
     "pydantic>=2.8.2",
     "pydantic-settings>=2.1.0",
     # The v2 line: the examples use StardagField(significant=...) and build
-    # settings, and talk to a v2 (/api/v2) registry. The release candidate
-    # is named explicitly so uv resolves the pre-release; the final release
-    # flips this to >=0.27.0.
-    "stardag>=0.27.0rc1",
+    # settings, and talk to a v2 (/api/v2) registry. 0.27.0 is the first
+    # release of that line; anything older fails against a v2 registry.
+    "stardag>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +25,7 @@ s3 = [
 ]
 modal = [
     # stardag's own modal extra carries the Modal version the SDK supports.
-    "stardag[modal]>=0.27.0rc1",
+    "stardag[modal]>=0.27.0",
 ]
 ml-pipeline = [
     "pandas>=2.2.3",
