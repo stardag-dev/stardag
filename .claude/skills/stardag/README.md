@@ -19,24 +19,24 @@ Claude uses this skill as background knowledge — it won't appear in the `/` me
 ```
 .claude/skills/stardag/
 ├── SKILL.md                     # Main entry point — overview, quick reference, key imports
-├── sdk-core.md                  # Task hierarchy, decorators, dependencies, build, types
+├── sdk-core.md                  # Tasks, dependencies, parameters and the two hashes, settings, build
 ├── sdk-targets.md               # Targets, serialization, storage, target roots
-├── sdk-advanced.md              # Async, dynamic deps, namespaces, artifacts, versioning
-├── registry-and-platform.md     # Registry API, UI, CLI, auth, config, local dev
+├── sdk-advanced.md              # Async, dynamic deps, namespaces, artifacts, cancellation, Modal
+├── registry-and-platform.md     # Registry entities and API, CLI, config, upgrading from v1
 ├── examples.md                  # Complete code examples and common patterns
 └── README.md                    # This file
 ```
 
 ### Content Scope
 
-| File                         | Topics                                                                                                                                   |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| **SKILL.md**                 | Quick reference, core concepts, three-tier API overview, key imports                                                                     |
-| **sdk-core.md**              | BaseTask/LoadableTask/Task/TargetTask hierarchy, @sd.task decorator, dependency patterns, build execution, type system, versioning       |
-| **sdk-targets.md**           | FileSystemTarget, serializers (JSON/pickle/pandas), target factories, target roots config, S3 integration, InMemoryTarget                |
-| **sdk-advanced.md**          | Async run/build, dynamic dependencies (generators), namespaces, artifacts, HashableSet, polymorphic types, integrations (Prefect/Modal)  |
-| **registry-and-platform.md** | API endpoints, auth methods, SDK→API flow, UI features, CLI commands, config system, docker-compose setup, distributed locks             |
-| **examples.md**              | Three API levels side-by-side, ML pipeline pattern, DAG composition factories, fan-out/benchmark, conditional deps, hash-excluded params |
+| File                         | Topics                                                                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **SKILL.md**                 | Quick reference, core concepts, three-tier API overview, key imports                                                                                    |
+| **sdk-core.md**              | Task hierarchy, @sd.task, dependencies, build options, settings, significant/non-significant fields, the two hashes, versioning                         |
+| **sdk-targets.md**           | FileSystemTarget, serializers (JSON/pickle/pandas), target factories, target roots config, S3 integration, InMemoryTarget                               |
+| **sdk-advanced.md**          | Async, dynamic deps, namespaces, artifacts, cancellation, polymorphic types, Prefect, Modal (deployments, reactive builds, TickConfig)                  |
+| **registry-and-platform.md** | Registry entities (task, instance, plan, deployment, execution), `/api/v2`, v2 CLI, config, local dev, upgrading from v1                                |
+| **examples.md**              | Three API levels side-by-side, ML pipeline pattern, DAG composition factories, fan-out/benchmark, conditional deps, non-significant params and settings |
 
 ## How It Works
 
@@ -44,7 +44,7 @@ Claude Code [automatically discovers skills](https://code.claude.com/docs/en/ski
 
 ## Keeping It Updated
 
-This skill bundle should be updated when:
+It describes the v2 line (SDK 0.27, registry server 0.6). This skill bundle should be updated when:
 
 - New public API is added to `lib/stardag/`
 - Breaking changes to task definitions or build execution

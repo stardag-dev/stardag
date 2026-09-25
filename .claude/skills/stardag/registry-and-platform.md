@@ -4,35 +4,66 @@
 
 The Stardag platform consists of:
 
-- **Registry API** (`stardag-api`): FastAPI backend for task tracking, builds, locks
+- **Registry API** (`stardag-api`, server `0.6`): FastAPI backend — the ledger of tasks,
+  task instances, plans, deployments, settings and executions
 - **Registry UI** (`stardag-ui`): React frontend for monitoring and exploration
-- **CLI** (`stardag` command): Authentication, configuration, environment management
+- **CLI** (`stardag` command): builds, inspection, auth, configuration, Modal, self-hosting
 
-The SDK integrates with the API optionally — tasks work standalone without it.
+The SDK integrates with the API optionally — tasks work standalone without it. The SDK and the
+server upgrade **together**: there is no compatibility between v1 and v2 in either direction.
+
+## The Registry as a Ledger
+
+| Entity            | What it is                                                                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------- |
+| **task**          | One row per task id: global status, the live claim, the current execution. No parameters.         |
+| **task instance** | A construction of a task under a scope `(deployment, settings)`: full parameter body + its edges. |
+| **plan**          | One build's request under one scope: its members (instances) and the edges between them.          |
+| **deployment**    | One `stardag modal deploy`, or one local code id. With **settings**, the scope.                   |
+| **execution**     | The ledger of attempts: one row per claim granted, with how it started and ended.                 |
+
+What a user of the SDK needs from this:
+
+- **Task state is global to the environment.** The same task id in two builds is one row with
+  one status, so a build never re-runs what another completed.
+- **A build is a request, not an owner.** The execution claim (RUNNING + a finite expiry) is
+  the only coordination: at most one execution per task at a time, a lapsed claim is taken
+  over, and cancelling build B releases only B's claims.
+- **Dependency edges belong to the instance, under its scope** — not to the task id. Within
+  a scope edges only grow; a build acts on everything in its plan.
+- **A plan** is created holding its roots, filled by discovery in chunks, then **sealed**.
+  Exactly one plan per build is active; a rollover (new deployment) or a re-trigger under
+  new settings creates a new plan and supersedes the old one, whose running executions finish
+  on their own (see `builds stop --not-in-current-plan`).
+- **The only way out of COMPLETED** is a build observing the target missing. To re-run a
+  task, delete its target and build; there is no "mark incomplete" route.
+- **Excluding** a member (`stardag tasks exclude`) gives up on it and its downstream within
+  one plan; an excluded root fails the build.
 
 ## Registry API
 
-### Key Endpoints
+Registry routes live under **`/api/v2`**; auth, UI, workspace and target-root routes stay under
+`/api/v1`. The full list is `docs/docs/platform/api.md`.
 
-| Endpoint                                                     | Method          | Purpose                              |
-| ------------------------------------------------------------ | --------------- | ------------------------------------ |
-| `/api/v1/builds`                                             | POST            | Create a new build                   |
-| `/api/v1/builds`                                             | GET             | List builds with pagination          |
-| `/api/v1/builds/{id}`                                        | GET             | Get build details                    |
-| `/api/v1/builds/{id}/tasks`                                  | POST            | Register task in build               |
-| `/api/v1/tasks`                                              | GET             | List tasks (workspace-scoped)        |
-| `/api/v1/tasks/{id}`                                         | GET             | Get task details                     |
-| `/api/v1/tasks/graph`                                        | POST            | Get DAG graph (upstream/downstream)  |
-| `/api/v1/tasks/{id}/artifacts`                               | GET             | List task artifacts                  |
-| `/api/v1/tasks/{id}/events`                                  | GET             | Task lifecycle events                |
-| `/api/v1/tasks/{id}/metadata`                                | GET             | Task metadata (for AliasTask)        |
-| `/api/v1/tasks/search`                                       | POST            | Full-text search with filters        |
-| `/api/v1/locks`                                              | POST/PUT/DELETE | Distributed lock management          |
-| `/api/v1/builds/{id}/frontier`                               | GET             | Scheduling frontier (reactive ticks) |
-| `/api/v1/builds/{id}/notify`                                 | POST/DELETE     | Scheduler wake-up flag (reactive)    |
-| `/api/v1/concurrency-limits`                                 | GET/PUT/DELETE  | Named env concurrency limits         |
-| `/api/v1/concurrency-limits/{key}/holders[/{task_id}/evict]` | GET/POST        | Limit slot holders + admin evict     |
-| `/api/v1/auth/exchange`                                      | POST            | OIDC token exchange                  |
+| Endpoint                                                     | Method         | Purpose                                                              |
+| ------------------------------------------------------------ | -------------- | -------------------------------------------------------------------- |
+| `/api/v2/version`                                            | GET            | Server and API version (no auth)                                     |
+| `/api/v2/deployments`, `/deployments/{id}/activate`          | GET/POST       | Record, activate and list deployments                                |
+| `/api/v2/settings/{settings_hash}`                           | GET            | A stored settings body                                               |
+| `/api/v2/builds`, `/builds/{id}`                             | GET/POST       | Create, list, read builds                                            |
+| `/api/v2/builds/{id}/{complete,fail,cancel,resume}`          | POST           | Build lifecycle (cancel releases every plan's claims)                |
+| `/api/v2/builds/{id}/frontier`                               | GET            | Runnable / discovery-job / running members                           |
+| `/api/v2/builds/{id}/executions`                             | GET            | The build's unended (or all) executions                              |
+| `/api/v2/builds/{id}/plans`, `/plans/{id}[/graph]`           | GET            | Plans, their members and instance edges                              |
+| `/api/v2/plans/{id}/members[/{task_id}/...]`                 | POST           | Register, seal, start (claim), complete, fail, yield, retry, exclude |
+| `/api/v2/tasks`, `/tasks/{id}[/executions,events,artifacts]` | GET            | Tasks and their history                                              |
+| `/api/v2/executions/{id}/stopped`                            | POST           | Record a stop (`stopped` / `lost`)                                   |
+| `/api/v2/concurrency-limits[/{key}]`                         | GET/PUT/DELETE | Named environment-wide limits                                        |
+| `/api/v1/auth/exchange`                                      | POST           | OIDC token exchange                                                  |
+
+Refusals carry a code (`instance_conflict`, `plan_superseded`, `reserved_settings_key`,
+`concurrency_limit_reached`, ...). A v2 SDK against a v1 server fails on its first call with a
+404 (`NotFoundError`): the routes do not exist there.
 
 ### Authentication Methods
 
@@ -43,10 +74,8 @@ clients at runtime via `GET /api/v1/auth/config`):
 2. **Browser Login** (CLI): `stardag auth login` → OIDC PKCE flow (oidc mode)
    or email/password prompt (local mode) → stores credentials
 3. **OIDC** (UI, oidc mode): external IdP login → token exchange → internal JWT
-4. **Local** (UI, local mode): email/password → session token (user-scoped
-   internal JWT, `token_use=session`) → exchange for workspace tokens.
-   Endpoints: `POST /auth/login`, `/auth/register` (opt-in), `/auth/change-password`.
-   Bootstrap admin via `AUTH_BOOTSTRAP_ADMIN_EMAIL/_PASSWORD` env vars.
+4. **Local** (UI, local mode): email/password → session token → exchange for workspace
+   tokens. Bootstrap admin via `AUTH_BOOTSTRAP_ADMIN_EMAIL/_PASSWORD` env vars.
 
 ### SDK Integration
 
@@ -68,64 +97,113 @@ import stardag as sd
 sd.build(task)
 ```
 
-When a registry is configured, `sd.build()` automatically:
+When a registry is configured, `sd.build()`:
 
-1. Creates a build record (`POST /builds`)
-2. Registers each task (`POST /builds/{id}/tasks`) — edges are recorded in the build's structure scope on every registration; every declared upstream must already be registered (an unknown id is a 400)
-3. Reports task start/complete/fail events — each event includes the git commit hash in metadata for traceability
-4. Marks build as complete/failed
+1. Resolves its deployment (local: keyed on `STARDAG_CODE_ID` / the clean git commit)
+2. Creates the build and a plan under `(deployment, settings)` holding the roots
+3. Registers the walk in chunks (instances with their edges), then seals the plan
+4. Claims each task before running it, reports start/complete/fail per execution
+5. Completes or fails the build (releasing its claims)
 
 ### NoOpRegistry (Default)
 
-Without configuration, the SDK uses `NoOpRegistry` — all registry calls are silently skipped.
-Tasks still execute and persist to local targets normally.
+Without configuration, the SDK uses `NoOpRegistry` — all registry calls are silently skipped:
+no plan, no claims. Tasks still execute and persist to local targets normally.
 
-### Registry Abstract Base
+### Custom Registries
+
+`stardag.registry.RegistryABC` is organised around plans and members: `build_create`,
+`plan_create`, `plan_register_members`, `plan_seal`, `member_start` (the claiming start),
+`member_complete` / `member_fail` / `member_yield`, `build_complete` / `build_fail`,
+deployments, settings and executions (each with an `_aio` twin). A custom registry is written
+against it; `stardag.testing.InMemoryRegistry` is the reference implementation that follows
+the server's seams, and the one to use in tests:
 
 ```python
-from stardag.registry import RegistryABC
+from stardag.testing import InMemoryRegistry
 
-class RegistryABC:
-    async def build_start_aio(root_tasks, description) -> UUID
-    async def build_complete_aio(build_id) -> None
-    async def build_fail_aio(build_id, error_msg) -> None
-    async def task_register_aio(build_id, task) -> None
-    async def task_start_aio(build_id, task) -> None
-    async def task_complete_aio(build_id, task) -> None
-    async def task_fail_aio(build_id, task, error) -> None
-    async def task_get_metadata_aio(task_id) -> TaskMetadata
+registry = InMemoryRegistry()
+sd.build(task, registry=registry)
 ```
 
 ## Registry UI
 
-The React frontend at `app.stardag.com` provides:
-
-- **Builds List**: Paginated view of all builds with status (running/completed/failed)
-- **Build View**: Detailed view with interactive DAG visualization (Dagre + XYFlow)
-- **Task Explorer**: Search and browse tasks with advanced filtering (refactored into `TaskExplorerSearch` + `TaskExplorerTable` sub-components)
-- **DAG Graph**: Interactive visualization with configurable upstream/downstream depth, batch/group nodes for collapsed same-type dependencies, depth-based opacity fading, and breadcrumb navigation
-- **Task Detail**: Shows commit hash from status-determining event; Event Log table shows per-event commit hash
-- **Provenance graph**: the environment-wide DAG shows each task's edges from the scope of the build that produced its status; cross-scope hops are marked
-- **Artifact Viewer**: Display task artifacts (markdown with syntax highlighting, JSON)
-- **Workspace Management**: Create/manage workspaces, invite members, manage API keys
-- **Search**: Full-text search with filter syntax (`key:op:value`)
-
-### Filter Syntax
-
-The search UI supports operators: `=`, `!=`, `>`, `<`, `>=`, `<=`, `~` (contains)
-
-```
-namespace:=:my_app.pipeline
-name:~:metrics
-status:=:completed
-```
+The React frontend provides builds (list and detail, with the active plan's graph), a task
+explorer and task detail (status, claim holder, instances, executions, events, artifacts),
+artifact viewing (markdown, JSON) and workspace management (members, invites, API keys). All
+registry calls are on `/api/v2`.
 
 ## CLI Commands
+
+All registry-backed commands accept `-p/--stardag-profile` and `-e/--stardag-env` (except
+`stardag build`, which takes only `-p`) and `--json` (one JSON document on stdout).
+
+### Building
+
+```bash
+stardag build mypkg.dags:root                        # sd.build here (task, list, callable or class)
+stardag build mypkg.dags:Train --param epochs=5      # a task class, constructed from --param
+stardag build mypkg.dags:root --settings K=V         # build settings (repeatable)
+stardag build mypkg.dags:root --app mypkg.app:app --reactive   # build_trigger on a deployed app
+stardag build mypkg.dags:root --resume <build-id>    # resume (stored settings reused)
+stardag build mypkg.dags:root --dry-run              # print the plan; write nothing
+```
+
+### Builds
+
+```bash
+stardag builds list [--status S] [--app NAME]        # most recently active first, paged
+stardag builds show <build-id>                       # status, failure reason, active plan
+stardag builds frontier <build-id>                   # what a tick sees: discovery jobs, runnable, running
+stardag builds ticks <build-id>                      # the reactive scheduler's recent ticks
+stardag builds cancel <build-id>                     # release claims; stops nothing
+stardag builds stop <build-id> [--dry-run]           # stop unended executions, then cancel
+stardag builds stop <build-id> --not-in-current-plan # only orphans of a rollover (implies --no-cancel)
+stardag builds stop <build-id> --mark-lost           # also end executions it cannot stop (outcome lost)
+stardag builds complete <build-id> [--force]
+stardag builds fail <build-id> [--message TEXT]
+```
+
+`builds cancel` releases the build's claims and reaches no container: a worker notices at its
+next checkpoint. `builds stop` is the hard stop: it lists the build's unended executions from
+the ledger, cancels each Modal call it can identify, reports it stopped, and cancels the build
+unless `--no-cancel`. Filters: `--executor`, `--worker`, `--namespace`, `--older-than 2h`,
+`--task-id`. Use `--mark-lost` only when the container is known gone: a later report from a
+lost execution is refused.
+
+### Plans, deployments, executions, tasks
+
+```bash
+stardag plans show <plan-id>                          # lifecycle, scope, member counts
+stardag plans list --build <build-id>                 # rollover / re-trigger history
+stardag deployments list [--app NAME] [--current]     # newest first, current marked
+stardag deployments show <deployment-id>
+stardag executions list --build <build-id> [--include-ended] [--not-in-current-plan]
+stardag executions list --task <task-id>
+stardag tasks list [--status running]                 # Claim column names the holding build
+stardag tasks show <task-id> [--events N]             # status, claim holder, instances, executions
+stardag tasks check <task-id> --module mypkg.tasks    # run complete() locally; writes nothing
+stardag tasks retry <task-id> [--build <build-id>]    # FAILED -> PENDING (refused on COMPLETED)
+stardag tasks cancel <task-id> [--build <build-id>]   # release one claim; stops nothing
+stardag tasks exclude <plan-id> <task-id> --reason TEXT
+```
+
+### Concurrency Limits
+
+```bash
+stardag concurrency-limits list [--holders]          # limits, in_use, and holders in one call
+stardag concurrency-limits set <key> <max_concurrent> # upsert (0 blocks the key)
+stardag concurrency-limits delete <key>
+stardag concurrency-limits holders <key>
+```
+
+There is no `evict`: a slot is released by ending its execution (`builds stop --mark-lost`
+for a holder whose worker is gone).
 
 ### Authentication
 
 ```bash
-stardag auth login              # Browser-based OIDC login
+stardag auth login              # Browser-based OIDC login (or local email/password)
 stardag auth login --api-url URL  # Login to specific API
 stardag auth logout             # Remove stored credentials
 stardag auth status             # Show current auth state
@@ -153,23 +231,11 @@ stardag environment target-roots add KEY URI # Add target root
 stardag environment target-roots list        # List target roots
 ```
 
-### Concurrency Limits
-
-```bash
-stardag concurrency-limits list              # List named limits (--holders adds counts)
-stardag concurrency-limits set KEY N         # Upsert a limit (max_concurrent = N)
-stardag concurrency-limits delete KEY        # Remove a limit (--yes to skip confirm)
-stardag concurrency-limits holders KEY       # List RUNNING slot holders
-stardag concurrency-limits evict KEY TASK_ID # Free a leaked slot (--yes to skip confirm)
-```
-
-All accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
-non-active profile / environment.
-
 ### Modal Integration
 
 ```bash
-stardag modal deploy APP_REF                # Deploy to Modal.com
+stardag modal deploy my_pkg/app.py          # record a deployment, deploy, activate it
+stardag modal deployments                   # alias of `stardag deployments list`
 stardag modal stardag-api-key create        # Create API key for Modal
 ```
 
@@ -182,26 +248,36 @@ checkout). See docs/how-to/self-host-modal.md.
 ```bash
 stardag self-host up        # Provision Neon DB, migrate, deploy API+UI, complete setup
 stardag self-host connect   # (Re)run the post-deploy setup only (idempotent)
-stardag self-host upgrade   # Apply migrations + redeploy
+stardag self-host upgrade   # Apply migrations + redeploy (--accept-data-loss for the v2 migration)
 stardag self-host status    # Deployment status + URL
 stardag self-host destroy   # Stop the Modal app (DB untouched)
 ```
 
-The server app (default name `server`) + its secrets live in a dedicated
-Modal environment (default `stardag-host`, flag `--server-modal-env`),
-isolated from the environments where user DAG apps run; the default URL is
-`https://<workspace>-stardag-host--server.modal.run`. `up`/`connect` also
-complete the setup: a primary Stardag workspace (named after the shared
-Modal workspace, or the personal workspace;
-`--primary-workspace`/`--no-primary-workspace`), a `main` environment, an
-API key pushed as Modal secret `stardag-api-key` into the DAG-execution
-Modal environment (`--execution-modal-env`, default: the account's default
-env), a default target root
-`modalvol://stardag-targets-<workspace-slug>-<environment-slug>/default`
-(`--target-root`/`--no-target-root`), and a local SDK registry + profile
-named `selfhosted` (`--registry-name`/`--profile-name`). In OIDC auth mode
-run `stardag self-host connect` after `up` (browser login, then the same
-setup via the API).
+The server app (default name `server`) and its secrets live in a dedicated Modal environment
+(default `stardag-host`, `--server-modal-env`), isolated from the environments where DAG apps
+run. `up`/`connect` also create a primary workspace, a `main` environment, an API key pushed as
+Modal secret `stardag-api-key` into the DAG-execution environment (`--execution-modal-env`), a
+default target root on a Modal volume, and a local SDK registry + profile named `selfhosted`.
+
+## Upgrading from v1
+
+- **The registry starts empty.** The v2 migration drops every v1 build, task, event,
+  deployment, artifact and concurrency-limit record (users, workspaces, environments, API keys
+  and target roots are kept). On a database holding v1 rows it refuses unless
+  `STARDAG_ACCEPT_V2_DATA_LOSS=1` is set for that migration run
+  (`stardag self-host upgrade --accept-data-loss` sets it); take a `pg_dump` first if the
+  history matters. Set concurrency limits again afterwards.
+- **Targets are untouched**, so the first v2 build of an existing DAG finds its tasks complete
+  and re-runs nothing; they appear as complete leaves until something rebuilds them.
+- **Upgrade SDK and server together**; finish or cancel running v1 builds first. Redeploy every
+  Modal app with the v2 `stardag modal deploy`.
+- **Code**: `significance=` / `hash_exclude=` → `StardagField(significant=False)` (no task id
+  moves); `build_config=` / `sd.build_config_scope` / `sd.get_build_config` /
+  `sd.set_build_config` → `settings`, read through a settings class; `GlobalLockConfig` and
+  the lock routes → gone (the claim is the only mutual exclusion); `stardag builds cleanup` →
+  gone; `stardag tasks list` filters by status only. Python 3.11+.
+- Removed errors: `RegistryTooOldError`, `SDKVersionUnsupportedError`, `ScopeMismatchError`,
+  `BuildConfigMismatchError`.
 
 ## Configuration System
 
@@ -281,30 +357,11 @@ Services:
 - Keycloak admin: `admin:admin`
 - Test user: `testuser@localhost` / `testpassword`
 
-## Distributed Locks
-
-For coordinating concurrent builds across machines:
-
-```python
-from stardag.build import GlobalLockConfig
-
-# Via build parameter
-sd.build(task, global_lock_config=GlobalLockConfig(enabled=True))
-```
-
-Lock lifecycle via API:
-
-- `POST /api/v1/locks` → Acquire lock
-- `PUT /api/v1/locks/{id}` → Renew (heartbeat)
-- `DELETE /api/v1/locks/{id}` → Release
-
-Prevents duplicate task execution when multiple workers run the same DAG.
-
 ## API Technology Stack
 
 - **Framework**: FastAPI 0.115+
 - **ORM**: SQLAlchemy 2.0+ (async)
-- **Database**: PostgreSQL + asyncpg
+- **Database**: PostgreSQL 15+ + asyncpg (SQLite is not supported)
 - **Migrations**: Alembic (always use `--autogenerate`)
 - **Validation**: Pydantic
 - **Auth**: JWT + OIDC (Keycloak)
