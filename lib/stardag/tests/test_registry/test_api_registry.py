@@ -690,6 +690,16 @@ def _body_cut() -> httpx.Response:
     )
 
 
+def _clock(*readings: float) -> typing.Callable[[], float]:
+    """A monotonic clock reading ``readings`` in turn, then holding the last."""
+    remaining = list(readings)
+
+    def monotonic() -> float:
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    return monotonic
+
+
 class TestLostExchange:
     """An exchange that got no complete answer is retried, whole."""
 
@@ -765,13 +775,24 @@ class TestLostExchange:
         assert excinfo.value.status_code == 502
         assert len(script.requests) == 4
 
-    def test_no_retry_starts_once_the_call_has_taken_a_timeout(self):
+    def test_an_attempt_that_took_a_whole_timeout_is_still_retried(self, monkeypatch):
+        """The case the retry exists for: a read that waited out its timeout."""
+        monkeypatch.setattr(_api_http.time, "monotonic", _clock(0.0, 10.0, 10.5))
         script = _Script(_body_stalls(), httpx.Response(200, json=BUILD))
         registry = _registry(script)
-        registry.timeout = 0.0
+        registry.timeout = 10.0
+        build = registry.build_get(UUID(BUILD["id"]))
+        assert str(build.id) == BUILD["id"]
+        assert len(script.requests) == 2
+
+    def test_no_retry_starts_once_the_call_has_taken_two_timeouts(self, monkeypatch):
+        monkeypatch.setattr(_api_http.time, "monotonic", _clock(0.0, 10.0, 20.0))
+        script = _Script(_body_stalls(), _body_stalls(), httpx.Response(200))
+        registry = _registry(script)
+        registry.timeout = 10.0
         with pytest.raises(httpx.ReadTimeout):
             registry.build_get(uuid4())
-        assert len(script.requests) == 1
+        assert len(script.requests) == 2
 
     def test_a_rate_limit_and_a_lost_answer_are_budgeted_apart(self):
         rate_limited = httpx.Response(

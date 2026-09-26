@@ -93,9 +93,12 @@ _ASYNC_MAX_KEEPALIVE_CONNECTIONS = 50
 # straight to the caller.
 #
 # Bounded twice: by a number of retries, and by time -- no retry starts
-# once the call has been going for longer than one timeout, so a call
-# waits at most about twice its timeout. Without that a renewal could
-# block past the claim or lease it is renewing.
+# once the call has been going for longer than two timeouts. Two, not
+# one: a timed-out attempt has by definition taken one full timeout, and
+# the retry exists for exactly that case. So a call that times out gets at
+# least one more attempt, and waits at most about three timeouts rather
+# than four -- a renewal should not block far past the claim or lease it
+# is renewing.
 _MAX_TRANSIENT_RETRIES = 3
 _TRANSIENT_BACKOFF_SECONDS = 0.5
 _TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
@@ -350,7 +353,7 @@ class HTTPTransport:
     def _may_retry(self, retries: int, started: float) -> bool:
         return (
             retries < _MAX_TRANSIENT_RETRIES
-            and time.monotonic() - started < self.timeout
+            and time.monotonic() - started < 2 * self.timeout
         )
 
     def call(self, request: Request[T]) -> T:
