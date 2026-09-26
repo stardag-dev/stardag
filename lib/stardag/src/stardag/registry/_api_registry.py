@@ -764,6 +764,10 @@ class APIRegistry(APIRegistryReads, RegistryABC):
             lambda _payload: None,
             json=dict(summary),
             operation=f"Report tick summary of build {build_id}",
+            # Each delivery inserts a row (no id, no replay), and harnesses
+            # count these rows: a summary lost is read as "unknown", a
+            # summary doubled as a second tick. So not re-sent.
+            retry=False,
         )
 
     def build_report_tick_summary(

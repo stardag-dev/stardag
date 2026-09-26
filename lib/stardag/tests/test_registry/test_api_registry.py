@@ -745,6 +745,14 @@ class TestLostExchange:
         first, second = (json.loads(r.content) for r in script.requests)
         assert first["id"] and first == second
 
+    def test_a_tick_summary_is_not_re_sent(self):
+        """Each delivery inserts a row, and a doubled summary reads as a
+        second tick: better lost than doubled."""
+        script = _Script(_body_stalls(), httpx.Response(201))
+        with pytest.raises(httpx.ReadTimeout):
+            _registry(script).build_report_tick_summary(uuid4(), {"outcome": "x"})
+        assert len(script.requests) == 1
+
     def test_a_post_is_retried_with_the_same_body(self):
         script = _Script(_body_stalls(), httpx.Response(200, json=BUILD))
         _registry(script).build_create(

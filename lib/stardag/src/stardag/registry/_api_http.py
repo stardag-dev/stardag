@@ -86,7 +86,9 @@ _ASYNC_MAX_KEEPALIVE_CONNECTIONS = 50
 # out the hand-out window. Both surface as an error or a delayed wake-up,
 # never as wrong state, and both were already exposed to the header-phase
 # retry this loop replaces (STA-54). ``build_create`` mints the build id
-# client-side when the caller does not, so it is re-sent unchanged.
+# client-side when the caller does not, so it is re-sent unchanged. Tick
+# summaries insert a row per delivery and are counted, so that one route
+# opts out (``Request.retry``).
 #
 # The retry wraps the whole exchange, body read included. A retry inside
 # the httpx transport cannot: the transport returns once the headers are
@@ -137,6 +139,10 @@ class Request(Generic[T]):
     json: Any = None
     params: dict[str, str] = field(default_factory=dict)
     operation: str = "API call"
+    # Whether a lost exchange is sent again (see ``_MAX_TRANSIENT_RETRIES``).
+    # Off only for a route where a second delivery does worse than a lost
+    # one.
+    retry: bool = True
 
 
 def gzip_json_body(body: object) -> tuple[bytes | None, dict[str, str]]:
@@ -351,9 +357,10 @@ class HTTPTransport:
             kwargs["headers"] = headers
         return f"{self.api_url}{API_PREFIX}{request.path}", kwargs
 
-    def _may_retry(self, retries: int, started: float) -> bool:
+    def _may_retry(self, request: Request[Any], retries: int, started: float) -> bool:
         return (
-            retries < _MAX_TRANSIENT_RETRIES
+            request.retry
+            and retries < _MAX_TRANSIENT_RETRIES
             and time.monotonic() - started < 2 * self.timeout
         )
 
@@ -365,7 +372,7 @@ class HTTPTransport:
             try:
                 response = self.client.request(request.method, url, **kwargs)
             except _TRANSIENT_EXCEPTIONS as e:
-                if not self._may_retry(transient, started):
+                if not self._may_retry(request, transient, started):
                     raise
                 transient += 1
                 delay = _transient_delay(transient)
@@ -373,7 +380,7 @@ class HTTPTransport:
                 time.sleep(delay)
                 continue
             cause = _transient_cause(response)
-            if cause is not None and self._may_retry(transient, started):
+            if cause is not None and self._may_retry(request, transient, started):
                 transient += 1
                 delay = _transient_delay(transient)
                 _note_retry(request, cause, response.text[:120], transient, delay)
@@ -399,7 +406,7 @@ class HTTPTransport:
                     request.method, url, **kwargs
                 )
             except _TRANSIENT_EXCEPTIONS as e:
-                if not self._may_retry(transient, started):
+                if not self._may_retry(request, transient, started):
                     raise
                 transient += 1
                 delay = _transient_delay(transient)
@@ -407,7 +414,7 @@ class HTTPTransport:
                 await asyncio.sleep(delay)
                 continue
             cause = _transient_cause(response)
-            if cause is not None and self._may_retry(transient, started):
+            if cause is not None and self._may_retry(request, transient, started):
                 transient += 1
                 delay = _transient_delay(transient)
                 _note_retry(request, cause, response.text[:120], transient, delay)
