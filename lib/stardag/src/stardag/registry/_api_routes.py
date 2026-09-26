@@ -10,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+import uuid6
+
 from stardag.registry._api_http import Request
 from stardag.registry._models import (
     BuildFrontier,
@@ -67,13 +69,18 @@ def _build_create_req(
     description: str | None,
     executor_metadata: dict[str, Any] | None,
 ) -> Request[BuildInfo]:
+    # Minted here when the caller did not, so the request is the same on
+    # every delivery: a create re-sent after its answer was lost then finds
+    # its own build instead of making a second one (``HTTPTransport.call``
+    # retries a lost exchange). uuid7, as the server would have minted.
+    build_id = build_id or UUID(str(uuid6.uuid7()))
     return Request(
         "POST",
         "/builds",
         BuildInfo.model_validate,
         json=_drop_none(
             {
-                "id": str(build_id) if build_id else None,
+                "id": str(build_id),
                 "name": name,
                 "description": description,
                 "root_task_ids": sorted(set(root_task_ids)),

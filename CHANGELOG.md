@@ -21,7 +21,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   and counted in `stardag.registry._api_http.transport_retry_counts()`. An
   answer the app wrote — any other error status — is never retried, and a
   429 that is not the app's rate limit is no longer retried either. The
-  `httpx-retries` dependency is dropped.
+  `httpx-retries` dependency is dropped. `build_create` now mints the build
+  id client-side when none is passed, so a re-sent create finds its own
+  build rather than making a second.
 
 ## [0.27.0] — 2026-09-25
 

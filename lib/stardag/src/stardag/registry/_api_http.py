@@ -82,10 +82,11 @@ _ASYNC_MAX_KEEPALIVE_CONNECTIONS = 50
 # exceptions are known rather than assumed away: a re-delivered execution
 # report (complete, fail, ...) whose first delivery landed is refused with
 # ``execution_already_ended``; ``POST /builds/wake-candidates`` is a drain,
-# so a re-delivery hands out a different set; and ``build_create`` without
-# a ``build_id`` creates a second build. Each surfaces as an error or a
-# delayed wake-up, never as wrong state, and each was already exposed to
-# the header-phase retry this loop replaces (STA-54).
+# so a re-delivery hands out a different set, and the first set waits
+# out the hand-out window. Both surface as an error or a delayed wake-up,
+# never as wrong state, and both were already exposed to the header-phase
+# retry this loop replaces (STA-54). ``build_create`` mints the build id
+# client-side when the caller does not, so it is re-sent unchanged.
 #
 # The retry wraps the whole exchange, body read included. A retry inside
 # the httpx transport cannot: the transport returns once the headers are

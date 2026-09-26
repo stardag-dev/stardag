@@ -737,6 +737,14 @@ class TestLostExchange:
         assert f"GET /builds/{BUILD['id']}" in record.getMessage()
         assert "retry 1 of 3" in record.getMessage()
 
+    def test_a_create_without_an_id_is_re_sent_with_the_same_minted_id(self):
+        """Otherwise a create re-sent after its answer was lost would make a
+        second build rather than find its own."""
+        script = _Script(_body_stalls(), httpx.Response(200, json=BUILD))
+        _registry(script).build_create(name="b", root_task_ids=["t1"])
+        first, second = (json.loads(r.content) for r in script.requests)
+        assert first["id"] and first == second
+
     def test_a_post_is_retried_with_the_same_body(self):
         script = _Script(_body_stalls(), httpx.Response(200, json=BUILD))
         _registry(script).build_create(
