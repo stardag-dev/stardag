@@ -162,6 +162,17 @@ class Build(EnvironmentScopedMixin, Base):
         nullable=True,
     )
 
+    # When a tick last released the lease. A hand-out older than this has
+    # been consumed -- the tick it spawned ran and ended -- so it no longer
+    # holds the build out of ``wake_candidates`` (STA-34). Kept here rather
+    # than by clearing ``build_wake.tick_requested_at``, because the release
+    # already holds this row, and locking the wake row there would make a
+    # concurrent flagger ``SKIP LOCKED`` past it and lose its flag.
+    scheduler_lease_released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     # Reactive-scheduling owner: the name of the app whose scheduler ticks
     # drive this build, set by PUT /builds/{id}/reactive-meta. NULL means
     # the build is NOT reactively scheduled — its presence

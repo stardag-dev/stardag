@@ -655,6 +655,10 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
             if (
                 build.handed_out_at is not None
                 and now - build.handed_out_at < WAKE_HANDOUT_WINDOW
+                and not (
+                    build.lease_released_at is not None
+                    and build.handed_out_at < build.lease_released_at
+                )
             ):
                 continue
             build.handed_out_at = now
@@ -690,6 +694,8 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         build = self.build(build_id)
         if build.lease_owner != owner_id:
             return SchedulerLeaseResult(held=False)
+        if self._lease_live(build):  # a lapsed holder spends no hand-out
+            build.lease_released_at = self.now()
         build.lease_owner = None
         build.lease_expires_at = None
         return SchedulerLeaseResult(held=True)

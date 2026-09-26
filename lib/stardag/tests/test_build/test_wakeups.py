@@ -75,3 +75,25 @@ async def test_the_registry_hands_a_flagged_build_out_once_per_window():
     spawned, spawn = _spawner()
     assert await drain_wake_candidates(registry, spawn) == [build_id]
     assert await drain_wake_candidates(registry, spawn) == []
+
+
+async def test_a_hand_out_is_spent_once_its_tick_released_the_lease():
+    """STA-34, mirrored: a flag landing after the handed-out tick released
+    its lease is handed out again inside the window."""
+    from datetime import timedelta
+
+    registry = InMemoryRegistry()
+    build_id = registry.build_create(root_task_ids=["x"]).id
+    registry.build_set_reactive_meta(build_id, app_name="app")
+    build = registry.builds[build_id]
+    build.needs_tick = True
+    spawned, spawn = _spawner()
+    assert await drain_wake_candidates(registry, spawn) == [build_id]
+
+    registry.scheduler_lease_acquire(build_id, owner_id="tick", ttl_seconds=60)
+    registry.scheduler_lease_release(build_id, owner_id="tick")
+    build.handed_out_at = registry.now() - timedelta(seconds=1)  # before it
+    build.needs_tick = True
+    assert await drain_wake_candidates(registry, spawn) == [build_id]
+    build.needs_tick = True
+    assert await drain_wake_candidates(registry, spawn) == []  # new stamp holds

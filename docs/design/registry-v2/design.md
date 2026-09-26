@@ -966,7 +966,9 @@ flags those whose active plan has an actionable member with a
 `task_limit_key` on one of the task's keys. `POST /builds/{id}/notify` flags
 the caller's RUNNING build and reads the lease after the flag's commit;
 `POST /builds/wake-candidates` hands out at most 20 flagged builds with no
-live lease, not handed out within 120 s, oldest flag first. Concurrency slots are `task_limit_key` rows
+live lease, not handed out within 120 s, oldest flag first; a hand-out older
+than the build's last lease release (`build.scheduler_lease_released_at`) is
+spent, since the tick it spawned has run and ended (STA-34). Concurrency slots are `task_limit_key` rows
 joined to a live claim. The `distributed_lock` table and `/locks` routes are
 retired: the claim is the only mutual exclusion (D11); the one thing kept
 from them is renewal, as `POST …/tasks/{task_id}/claim/renew {execution_id}`

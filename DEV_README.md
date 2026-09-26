@@ -653,17 +653,18 @@ seconds, with a message that reads like a scheduling defect. It now warns,
 records the trail as possibly truncated, and returns; `trail_may_be_truncated`
 lets a failure message say so.
 
-**A scenario that needs its second build woken _twice_ should keep that
-build resident instead.** `select_wake_candidates` hands a flagged build
-out at most once per 120s window and does not compare the flag's timestamp
-against the hand-out's — so a build re-flagged after being handed out
-waits for the window to lapse, and then needs someone to drain. In the
-full concurrent tier another scenario's tick does that (drains are not
-scoped to the caller's build), so such a scenario passes here and hangs
-under `-n0`. The watchdog is the production backstop for it, and this tier
-runs none. The two blocker scenarios keep their second build resident for
-this reason — which is the better shape anyway, since what they test is
-what a tick _decides_, not who called it.
+**A build re-flagged after its tick ended is eligible again at once.**
+`wake_candidates` hands a flagged build out at most once per 120s window, and
+until STA-34 the window outlived the tick it had spawned: a build re-flagged
+after that tick exited waited for the window to lapse, and then for someone
+to drain. In the full concurrent tier another scenario's tick did (drains are
+not scoped to the caller's build), so such a scenario passed there and hung
+under `-n0`, or in a retry that re-ran it alone. Releasing the scheduler lease
+now consumes the hand-out, so only the stretch between a hand-out and its tick
+taking the lease is collapsed — which is what the window is for. Eligible is
+not delivered: the next drain hands it out, which is usually the one the
+flagging write itself triggers. A tick that dies without releasing still
+leaves its hand-out the full window.
 
 **When something fails, run them one at a time.** A shared registry and
 interleaved logs make a low-level failure much harder to read:

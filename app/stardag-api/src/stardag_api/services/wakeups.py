@@ -16,7 +16,9 @@ write that can change a build's frontier. So the wake-up is split in two:
 - **Spawning** belongs to whoever has an executor. They ask
   :func:`wake_candidates` for flagged builds nobody is serving; each is
   handed out once per :data:`WAKE_HANDOUT_WINDOW` by stamping
-  ``tick_requested_at``, so N concurrent askers produce one spawn.
+  ``tick_requested_at``, so N concurrent askers produce one spawn. The
+  stamp lasts until the window lapses or the tick it spawned releases its
+  lease, whichever is first (:func:`release_lease`).
 
 The flags live on ``build_wake`` (one row per build), not on ``build``: a
 claiming start holds its build row ``FOR SHARE`` while it holds a task row,
@@ -261,6 +263,21 @@ async def _build(session: AsyncSession, environment_id: UUID, build_id: UUID) ->
     return build
 
 
+async def _shared_build(
+    session: AsyncSession, environment_id: UUID, build_id: UUID
+) -> Build:
+    """The build row ``FOR SHARE``: excludes the lease writers only."""
+    build = await session.scalar(
+        select(Build)
+        .where(Build.environment_id == environment_id, Build.id == build_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if build is None:
+        raise NotFound("unknown_build", f"no build {build_id}", build_id=str(build_id))
+    return build
+
+
 async def _locked_build(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> Build:
@@ -326,10 +343,22 @@ async def notify(
             wake.tick_requested_at = now
     async with transaction(session):
         wake = await _locked_wake(session, environment_id, build_id)
-        build = await _build(session, environment_id, build_id)
+        # FOR SHARE, so the lease check and the re-stamp below are ordered
+        # against every lease write (acquire, renew, release take the row FOR
+        # NO KEY UPDATE): a release either committed before this read -- and
+        # the re-stamp is newer than it -- or waits for this commit. Wake row,
+        # then build row: nothing takes the two the other way round (the
+        # lease writers never touch the wake row; flaggers SKIP LOCKED).
+        build = await _shared_build(session, environment_id, build_id)
         live = _lease_live(build, utc_now())
-        if live and stamped and wake.tick_requested_at == now:
-            wake.tick_requested_at = previous_stamp
+        if stamped and wake.tick_requested_at == now:
+            if live:
+                wake.tick_requested_at = previous_stamp
+            else:
+                # Re-stamped after the lease check, so a release that
+                # committed while the first stamp was in flight cannot spend
+                # the hand-out made here: its tick has yet to run.
+                wake.tick_requested_at = utc_now()
     return NotifyState(build_id=build_id, needs_tick=running, scheduler_live=live)
 
 
@@ -373,7 +402,9 @@ async def wake_candidates(
     limit: int = MAX_WAKE_CANDIDATES,
 ) -> list[WakeCandidate]:
     """Hand out flagged RUNNING reactive builds with no live lease, not
-    handed out within :data:`WAKE_HANDOUT_WINDOW`, oldest flag first (at
+    handed out within :data:`WAKE_HANDOUT_WINDOW` (a hand-out older than the
+    build's last lease release counts as spent; strictly older, so a
+    hand-out stamped in the same microsecond keeps its window), oldest flag first (at
     most :data:`MAX_WAKE_CANDIDATES`). Each returned build is stamped
     ``tick_requested_at`` in this transaction, its wake row taken ``SKIP
     LOCKED``, so concurrent callers get disjoint answers.
@@ -394,7 +425,8 @@ async def wake_candidates(
                     BuildWake.environment_id == environment_id,
                     BuildWake.needs_tick_at.is_not(None),
                     BuildWake.tick_requested_at.is_(None)
-                    | (BuildWake.tick_requested_at < now - WAKE_HANDOUT_WINDOW),
+                    | (BuildWake.tick_requested_at < now - WAKE_HANDOUT_WINDOW)
+                    | (BuildWake.tick_requested_at < Build.scheduler_lease_released_at),
                     Build.status == BuildStatus.RUNNING,
                     Build.reactive_app_name.is_not(None),
                     Build.scheduler_lease_until.is_(None)
@@ -492,15 +524,41 @@ async def release_lease(
     session: AsyncSession, environment_id: UUID, build_id: UUID, *, owner_id: str
 ) -> LeaseState:
     """Drop the lease if ``owner_id`` still holds it; ``held`` reports
-    whether it did (a lost tick cannot clear its successor's lease)."""
+    whether it did (a lost tick cannot clear its successor's lease).
+
+    A released lease also **consumes the hand-out** that spawned its tick:
+    the release time is recorded on the build (``scheduler_lease_released_at``),
+    and :func:`wake_candidates` treats a hand-out older than it as spent. The
+    hand-out window exists to collapse the askers between a hand-out and its
+    tick taking the lease into one spawn; once that tick has run and ended,
+    the window has done its job, and holding it any longer only hides a flag
+    that landed after the tick looked (STA-34). Without this, a build
+    re-flagged within the window after its tick exited is handed out to
+    nobody until the window lapses -- and then only if something else happens
+    to ask, which in an environment with no other builds and no watchdog is
+    never.
+
+    Written on the build row, which this transaction already holds, and not
+    on the wake row: locking the wake row here would make a concurrent
+    flagger ``SKIP LOCKED`` past it and lose its flag. A tick that dies
+    without releasing, or releases a lease that had already lapsed, leaves
+    no release time, so its hand-out keeps the whole window, as before.
+    """
     owner_id = _owner(owner_id)
     async with transaction(session):
         build = await _locked_build(session, environment_id, build_id)
         if build.scheduler_lease_owner != owner_id:
             return LeaseState(build_id, held=False)
+        now = utc_now()
+        # Only a release of a *live* lease is evidence the tick ran to its
+        # end as the build's scheduler. A holder whose lease lapsed may
+        # already have a successor handed out; spending that hand-out would
+        # spawn a second one.
+        if _lease_live(build, now):
+            build.scheduler_lease_released_at = now
         build.scheduler_lease_owner = None
         build.scheduler_lease_until = None
-        return LeaseState(build_id, held=True)
+    return LeaseState(build_id, held=True)
 
 
 __all__ = [
