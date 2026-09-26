@@ -537,12 +537,30 @@ jobs:
           STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR: ${{ runner.temp }}/registry-live-diagnostics
           STARDAG_REGISTRY_LIVE_RECYCLE_MARKER: ${{ runner.temp }}/registry-live-diagnostics/registry-recycled
           POSARGS: ${{ inputs.serial && '-- -n0 tests_registry_live' || '' }}
+          # A retry runs only what failed. The stack is intact after a
+          # transport fault and rebuilt after a recycle, and in neither
+          # case does a scenario that already passed need its result
+          # again: re-running all of them turned one lost answer into a
+          # second full-length tier. `--last-failed` reads pytest's cache,
+          # which attempt 1 wrote in this same checkout.
+          RETRY_POSARGS: >-
+            -- ${{ inputs.serial && '-n0' || '' }} --last-failed tests_registry_live
           # Whether the tree this runs has the classifier the branches
           # below read markers from. See the step that computes it.
           # Only the classifier matters to this step: it is what writes
           # the markers the branches below read. A checkout with the
           # classifier and nothing else still classifies correctly.
           INSTRUMENT_PRESENT: ${{ steps.instrument.outputs.classifier }}
+          # For iterating on a PR: the `registry-live-fail-fast` label stops
+          # the tier at its first failed scenario and skips the retry, so a
+          # red run hands over its logs and artifact in minutes rather than
+          # after the slowest scenario and a second attempt. GitHub serves a
+          # job's log only once the job has ended, so ending it early is
+          # what makes a failure readable early. Remove the label before the
+          # final run: it trades the retry away.
+          FAIL_FAST: >-
+            ${{ contains(github.event.pull_request.labels.*.name,
+                         'registry-live-fail-fast') }}
         run: |
           set -uo pipefail
           diag="$STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR"
@@ -567,6 +585,20 @@ jobs:
           # file would preserve an attempt-1 skip in the artifact and
           # never warn about it or count it, which is the failure this
           # whole marker exists to prevent.
+          # Lost answers that the SDK and the harness sent again, so that
+          # the scenario did not fail on them. Annotated on a green run as
+          # well: absorbing the class is the point, going blind to it is
+          # not, and this count is what STA-86 is now measured by.
+          report_retries() {
+            [ -f "$1" ] || return 0
+            total=$(jq '[.[]] | add // 0' "$1")
+            [ "$total" -gt 0 ] || return 0
+            echo "::warning title=Registry exchanges retried::$total from" \
+              "the runner ($(jq -r 'to_entries | map("\(.key): \(.value)")
+              | join(", ")' "$1")) -- sent again after no complete answer" \
+              "arrived, so no scenario failed on them (STA-86)."
+          }
+
           report_inconclusive() {
             [ -f "$1" ] || return 0
             echo "::warning title=Registry-live inconclusive::$(tr '\n' ';' \
@@ -578,13 +610,44 @@ jobs:
             echo "diagnose=true" >> "$GITHUB_OUTPUT"
           }
 
+          retries="$diag/transport-retries.json"
+          if [ "$FAIL_FAST" = true ]; then
+            echo "::notice title=Registry-live fail-fast::Stopping at the" \
+              "first failed scenario, with no retry (label" \
+              "registry-live-fail-fast)."
+            log="$diag/pytest-attempt-1.log"
+            : > "$log"
+            tox -e registry-modal-live $POSARGS > "$log" 2>&1 &
+            tox_pid=$!
+            tail -n +1 -f "$log" --pid "$tox_pid" &
+            # The first failure report ends the run: pytest-xdist would
+            # otherwise let every in-flight scenario finish first.
+            while kill -0 "$tox_pid" 2>/dev/null; do
+              if grep -qE '^\[gw[0-9]+\] (FAILED|ERROR) |^(FAILED|ERROR) ' "$log"
+              then
+                echo "First failure seen; stopping the tier."
+                pkill -TERM -f 'registry-modal-live|tests_registry_live' || true
+                break
+              fi
+              sleep 5
+            done
+            wait "$tox_pid"
+            rc=$?
+            report_inconclusive "$inconclusive"
+            report_retries "$retries"
+            echo "diagnose=true" >> "$GITHUB_OUTPUT"
+            exit $rc
+          fi
+
           if tox -e registry-modal-live $POSARGS 2>&1 \
                | tee "$diag/pytest-attempt-1.log"; then
             # A green run can still have skipped a scenario, and that is
             # worth the artifact and the count even though nothing failed.
             report_inconclusive "$inconclusive"
+            report_retries "$retries"
             exit 0
           fi
+          report_retries "$retries"
 
           # Set before the branches below, so it holds for a retry that
           # goes green as well as for an outright failure. A green retry is
@@ -595,7 +658,7 @@ jobs:
           if [ -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER" ]; then
             echo "::warning title=Registry container recycled::$(cat \
               "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER") -- the run's database" \
-              "went with it. Re-provisioning and running the tier once more."
+              "went with it. Re-provisioning and re-running the failed scenarios."
             reprovision=yes
           elif grep -q "$unclassified" "$diag/pytest-attempt-1.log"; then
             echo "The harness could not classify or could not record a" \
@@ -606,9 +669,10 @@ jobs:
                  "closed."
             exit 1
           elif [ -f "$timeouts" ] && [ ! -f "$others" ]; then
-            echo "::warning title=Registry transport timeout::$(tr '\n' ';' \
-              < "$timeouts") -- no HTTP response arrived. Running the tier" \
-              "once more; each line names the phase it happened in, and the" \
+            echo "::warning title=Registry transport fault::$(tr '\n' ';' \
+              < "$timeouts") -- no complete HTTP response arrived, even after" \
+              "the client's own retries. Re-running the failed scenarios" \
+              "once; each line names the phase it happened in, and the" \
               "boot probe in the diagnostics artifact says whether the" \
               "container was answering at the time (STA-86)."
             reprovision=no
@@ -662,10 +726,11 @@ jobs:
             fi
           fi
 
-          tox -e registry-modal-live $POSARGS 2>&1 \
+          tox -e registry-modal-live $RETRY_POSARGS 2>&1 \
             | tee "$diag/pytest-attempt-2.log"
           rc=$?
           report_inconclusive "$inconclusive"
+          report_retries "$retries"
           exit $rc
 
       # Pulled before anything can delete them. The teardown job runs

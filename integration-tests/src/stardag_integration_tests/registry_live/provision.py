@@ -116,6 +116,9 @@ def load_coordinates(modal_environment: str) -> Deployment | None:
     return Deployment(**json.loads(path.read_text()))
 
 
+SCENARIO_API_TIMEOUT_SECONDS = 10.0
+
+
 def sdk_environment(deployment: Deployment) -> dict[str, str]:
     """The environment variables that point the SDK at this deployment.
 
@@ -124,12 +127,18 @@ def sdk_environment(deployment: Deployment) -> dict[str, str]:
     looking for one -- so a checkout under the developer's home directory
     finds their real config, whose default profile may well be a registry
     that other people depend on. These four beat every file.
+
+    The timeout is not the SDK's 30 s default. The registry answers in well
+    under a second, so a call that has waited ten has lost its answer
+    rather than being slow, and the SDK sends it again; waiting out thirty
+    first is what turned each lost answer into a scenario's timing failure.
     """
     return {
         "STARDAG_API_URL": deployment.api_url,
         "STARDAG_WORKSPACE_ID": deployment.workspace_id,
         "STARDAG_ENVIRONMENT_ID": deployment.environment_id,
         "STARDAG_API_KEY": deployment.api_key,
+        "STARDAG_API_TIMEOUT": str(SCENARIO_API_TIMEOUT_SECONDS),
         "MODAL_ENVIRONMENT": deployment.modal_environment,
     }
 

@@ -24,13 +24,17 @@ none of, and ``testpaths`` in ``pyproject.toml`` still points only at
 
 from __future__ import annotations
 
+import collections
+import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
 from stardag_integration_tests.registry_live._diagnostics import (
     CLASSIFICATION_FAILED,
+    DIAGNOSTICS_DIR_ENV,
     record_non_timeout_failure,
     record_transport_timeout,
     transport_timeout,
@@ -220,3 +224,61 @@ def deployment() -> Deployment:
             "that stopped it is above this line."
         )
     return _deployment
+
+
+# -- Retries: the lost answers that no longer fail a scenario ----------------
+#
+# The SDK and the harness both send an exchange again when it got no
+# complete answer, so the class that used to redden this tier now mostly
+# passes. It is still counted, because a tier that absorbs a fault silently
+# has stopped measuring it: each xdist worker hands its tally to the
+# controller, which prints the total and leaves it in the diagnostics
+# directory for CI to annotate, green run or red.
+
+RETRY_COUNTS_NAME = "transport-retries.json"
+
+_worker_retry_counts: collections.Counter[str] = collections.Counter()
+
+
+def _process_retry_counts() -> dict[str, int]:
+    from stardag.registry._api_http import transport_retry_counts
+
+    from stardag_integration_tests.registry_live._events import retry_counts
+
+    counts = collections.Counter(transport_retry_counts())
+    counts.update(retry_counts())
+    return dict(counts)
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput["transport_retries"] = _process_retry_counts()
+
+
+def pytest_testnodedown(node, error) -> None:  # pytest-xdist hook
+    counts = getattr(node, "workeroutput", {}).get("transport_retries") or {}
+    _worker_retry_counts.update(counts)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
+    if not is_enabled() or hasattr(config, "workerinput"):
+        return
+    counts = collections.Counter(_process_retry_counts())
+    counts.update(_worker_retry_counts)
+    total = sum(counts.values())
+    by_cause = ", ".join(f"{cause}: {n}" for cause, n in counts.most_common())
+    terminalreporter.write_sep(
+        "-",
+        f"registry exchanges retried from this runner: {total}"
+        + (f" ({by_cause})" if by_cause else ""),
+    )
+    directory = os.environ.get(DIAGNOSTICS_DIR_ENV, "").strip()
+    if directory:
+        try:
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            (Path(directory) / RETRY_COUNTS_NAME).write_text(
+                json.dumps(dict(counts), sort_keys=True) + "\n"
+            )
+        except OSError as error:
+            print(f"Could not record the retry counts: {error}", file=sys.stderr)

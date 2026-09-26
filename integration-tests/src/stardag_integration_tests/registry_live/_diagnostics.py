@@ -272,11 +272,16 @@ def transport_timeout(error: BaseException) -> BaseException | None:
       judgement went against the code. Retrying that is precisely the
       "run it again and hope" this tier exists to avoid.
 
-    What is left is the case where no response exists to reason about:
-    ``httpx.TimeoutException`` and its four subclasses, connect, read,
-    write and pool. Nothing else -- not a connection reset, not a
-    protocol error -- because the evidence names timeouts and a wider net
-    would start covering failures nobody has looked at.
+    What is left is the case where no complete response exists to reason
+    about: a timeout at any phase (``httpx.TimeoutException`` and its
+    four subclasses), a network error (the connection refused, reset or
+    dropped), or a body cut short (``RemoteProtocolError``: "peer closed
+    connection without sending complete message body"). The last was
+    once excluded because only timeouts had been seen; then the tier met
+    one (STA-102), and it is the most direct form of the failure this
+    tier keeps meeting -- the server sent a ``Content-Length`` and the
+    body never arrived. What unites them is not "timeout" but "no
+    complete answer", so that is the rule.
 
     **A cause chain and an exception group are read differently, and the
     difference is load-bearing.** A chain is one failure described at
@@ -315,7 +320,7 @@ def _timeout_in(error: BaseException, groups_seen: set[int]) -> BaseException | 
 
         if _carries_http_status(current) or isinstance(current, AssertionError):
             return None
-        if found is None and _is_timeout(current):
+        if found is None and _is_transport_fault(current):
             found = current
     return found
 
@@ -365,9 +370,18 @@ def _chain(error: BaseException) -> Iterator[BaseException]:
                 queue.append(linked)
 
 
-def _is_timeout(error: BaseException) -> bool:
-    """Whether this exception means "no response arrived in time"."""
-    if isinstance(error, httpx.TimeoutException):
+# httpcore's names for the same faults, for a transport that re-raised
+# rather than mapped (see ``_is_transport_fault``).
+_HTTPCORE_FAULTS = frozenset(
+    {"RemoteProtocolError", "ConnectError", "ReadError", "WriteError"}
+)
+
+
+def _is_transport_fault(error: BaseException) -> bool:
+    """Whether this exception means "no complete response arrived"."""
+    if isinstance(
+        error, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+    ):
         return True
     # httpx maps httpcore's transport exceptions to its own at the
     # transport boundary, so the httpx type is normally the one raised --
@@ -376,9 +390,9 @@ def _is_timeout(error: BaseException) -> bool:
     # Matched structurally rather than by importing httpcore, which is
     # httpx's dependency and not this package's.
     kind = type(error)
-    return kind.__module__.partition(".")[0] == "httpcore" and kind.__name__.endswith(
-        "Timeout"
-    )
+    if kind.__module__.partition(".")[0] != "httpcore":
+        return False
+    return kind.__name__.endswith("Timeout") or kind.__name__ in _HTTPCORE_FAULTS
 
 
 def _request_of(error: BaseException) -> tuple[str, str] | None:
