@@ -33,8 +33,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   again after that tick exited — a limit slot freed, a shared task finished —
   was handed out to nobody until the window lapsed, and then only if another
   caller drained. With no other builds running and no watchdog, never.
-  Releasing the scheduler lease now consumes the hand-out, so the window only
-  collapses the askers between a hand-out and its tick taking the lease.
+  Releasing the scheduler lease now consumes the hand-out (recorded as
+  `build.scheduler_lease_released_at`, a new nullable column), so the window
+  only collapses the askers between a hand-out and its tick taking the
+  lease. A tick that dies without releasing leaves the window as before.
 
 ## [0.27.0] — 2026-09-25
 

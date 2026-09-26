@@ -35,12 +35,11 @@ delivery machinery, which is tested on its own next door.
 
 It is also the difference between a scenario that works and one that works
 most of the time. A dormant B has to be woken twice here -- once when the
-task suspends, once when it completes -- and the server hands a flagged
-build out at most once per window (120s), so the second flag can land
-inside the first hand-out's window and reach nobody. In the full
-concurrent tier another scenario's tick drains it once the window lapses
-and B finishes anyway; run alone, nothing drains and B waits forever. That
-is the watchdog's job, and this tier deliberately runs none.
+task suspends, once when it completes. The server hands a flagged build
+out at most once per window (120s) unless the tick it spawned has since
+released its lease (STA-34), so the second wake depends on that tick having
+ended cleanly and on someone draining afterwards -- delivery machinery that
+is not what this scenario is about.
 """
 
 from __future__ import annotations

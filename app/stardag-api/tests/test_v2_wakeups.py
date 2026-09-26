@@ -505,22 +505,45 @@ async def test_the_window_still_collapses_askers_until_the_tick_has_run(
     assert await _svc(h, wakeups.wake_candidates) == []
 
 
-async def test_a_release_does_not_undo_a_hand_out_made_after_it(h: Harness):
-    """A losing owner's release changes nothing, and a stamp newer than
-    the release survives it."""
+async def test_only_the_holders_release_spends_a_hand_out(h: Harness):
+    """A losing owner's release spends nothing; and a hand-out made after
+    the holder's release keeps its whole window."""
     t = item("T")
     build, _ = await h.planned([t], [t])
     await _reactive(h, build)
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert len(await _svc(h, wakeups.wake_candidates)) == 1  # stamped
     await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
     assert not (await _svc(h, wakeups.release_lease, build, owner_id="other")).held
     await _sql(
         h,
-        "UPDATE build_wake SET tick_requested_at = now() + interval '1 hour'"
-        " WHERE build_id = :b",
+        "UPDATE build SET scheduler_lease_until = now() - interval '1 second'"
+        " WHERE id = :b",
         b=build,
-    )
+    )  # lapsed, still unreleased: the window applies
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert await _svc(h, wakeups.wake_candidates) == []
+
+    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
     await _svc(h, wakeups.release_lease, build, owner_id="tick")
-    assert (await h.build(build))["tick_requested_at"] is not None
+    assert len(await _svc(h, wakeups.wake_candidates)) == 1  # spent, re-stamped
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert await _svc(h, wakeups.wake_candidates) == []  # the new stamp holds
+
+
+async def test_a_release_leaves_the_wake_row_unlocked_for_flaggers(h: Harness):
+    """The release writes only the build row, so a flagger's ``SKIP LOCKED``
+    can never pass the wake row over because of it."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _reactive(h, build)
+    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    before = await h.build(build)
+    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    after = await h.build(build)
+    assert after["tick_requested_at"] == before["tick_requested_at"]
+    assert after["needs_tick_at"] == before["needs_tick_at"]
+    assert after["scheduler_lease_released_at"] is not None
 
 
 # --------------------------------------------------------------------------

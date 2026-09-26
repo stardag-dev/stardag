@@ -190,7 +190,8 @@ so a wake-up is two halves, done by two parties:
    the build's lease (that tick will see the flag on its next poll).
    Every tick, at the end of each pass that acted and on every exit, asks
    the registry for the **wake candidates**: flagged builds with no live
-   lease that were not handed out in the last ~2 minutes. It spawns one
+   lease that were not handed out in the last ~2 minutes (or whose
+   handed-out tick has since run and released its lease). It spawns one
    tick per candidate, on that build's own app. A resident build with
    Modal workers does the same after each result it processes.
 

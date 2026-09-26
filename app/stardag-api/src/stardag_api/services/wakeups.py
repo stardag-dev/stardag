@@ -375,7 +375,8 @@ async def wake_candidates(
     limit: int = MAX_WAKE_CANDIDATES,
 ) -> list[WakeCandidate]:
     """Hand out flagged RUNNING reactive builds with no live lease, not
-    handed out within :data:`WAKE_HANDOUT_WINDOW`, oldest flag first (at
+    handed out within :data:`WAKE_HANDOUT_WINDOW` (a hand-out older than the
+    build's last lease release counts as spent), oldest flag first (at
     most :data:`MAX_WAKE_CANDIDATES`). Each returned build is stamped
     ``tick_requested_at`` in this transaction, its wake row taken ``SKIP
     LOCKED``, so concurrent callers get disjoint answers.
@@ -396,7 +397,10 @@ async def wake_candidates(
                     BuildWake.environment_id == environment_id,
                     BuildWake.needs_tick_at.is_not(None),
                     BuildWake.tick_requested_at.is_(None)
-                    | (BuildWake.tick_requested_at < now - WAKE_HANDOUT_WINDOW),
+                    | (BuildWake.tick_requested_at < now - WAKE_HANDOUT_WINDOW)
+                    | (
+                        BuildWake.tick_requested_at <= Build.scheduler_lease_released_at
+                    ),
                     Build.status == BuildStatus.RUNNING,
                     Build.reactive_app_name.is_not(None),
                     Build.scheduler_lease_until.is_(None)
@@ -497,20 +501,22 @@ async def release_lease(
     whether it did (a lost tick cannot clear its successor's lease).
 
     A released lease also **consumes the hand-out** that spawned its tick:
-    ``tick_requested_at`` is cleared if it predates the release. The
-    hand-out window exists to collapse the askers between a hand-out and
-    its tick taking the lease into one spawn; once that tick has run and
-    ended, the window has done its job, and holding it any longer only
-    hides a flag that landed after the tick looked (STA-34). Without this,
-    a build re-flagged within the window after its tick exited is handed
-    out to nobody until the window lapses -- and then only if something
-    else happens to ask, which in an environment with no other builds and
-    no watchdog is never.
+    the release time is recorded on the build (``scheduler_lease_released_at``),
+    and :func:`wake_candidates` treats a hand-out older than it as spent. The
+    hand-out window exists to collapse the askers between a hand-out and its
+    tick taking the lease into one spawn; once that tick has run and ended,
+    the window has done its job, and holding it any longer only hides a flag
+    that landed after the tick looked (STA-34). Without this, a build
+    re-flagged within the window after its tick exited is handed out to
+    nobody until the window lapses -- and then only if something else happens
+    to ask, which in an environment with no other builds and no watchdog is
+    never.
 
-    In its own transaction, after the lease row's, so the build row is
-    never held while the wake row is waited on (see the module
-    docstring's lock order), and conditioned on the stamp predating the
-    release, so a hand-out made in between is never undone.
+    Written on the build row, which this transaction already holds, and not
+    on the wake row: locking the wake row here would make a concurrent
+    flagger ``SKIP LOCKED`` past it and lose its flag. A tick that dies
+    without releasing leaves no release time, so its hand-out keeps the
+    whole window, as before.
     """
     owner_id = _owner(owner_id)
     async with transaction(session):
@@ -519,18 +525,7 @@ async def release_lease(
             return LeaseState(build_id, held=False)
         build.scheduler_lease_owner = None
         build.scheduler_lease_until = None
-        released_at = utc_now()
-    async with transaction(session):
-        await session.execute(
-            update(BuildWake)
-            .where(
-                BuildWake.environment_id == environment_id,
-                BuildWake.build_id == build_id,
-                BuildWake.tick_requested_at <= released_at,
-            )
-            .values(tick_requested_at=None)
-            .execution_options(synchronize_session=False)
-        )
+        build.scheduler_lease_released_at = utc_now()
     return LeaseState(build_id, held=True)
 
 
