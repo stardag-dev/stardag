@@ -669,7 +669,7 @@ jobs:
                  "closed."
             exit 1
           elif [ -f "$timeouts" ] && [ ! -f "$others" ]; then
-            echo "::warning title=Registry transport timeout::$(tr '\n' ';' \
+            echo "::warning title=Registry transport fault::$(tr '\n' ';' \
               < "$timeouts") -- no complete HTTP response arrived, even after" \
               "the client's own retries. Re-running the failed scenarios" \
               "once; each line names the phase it happened in, and the" \

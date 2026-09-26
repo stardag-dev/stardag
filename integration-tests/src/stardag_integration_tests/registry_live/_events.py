@@ -320,6 +320,16 @@ def _get(
     """
     url = f"{deployment.api_url.rstrip('/')}/api/v2/{path.lstrip('/')}"
     retries = 0
+    started = time.monotonic()
+
+    def may_retry() -> bool:
+        # The SDK's bounds: a number of retries, and no retry started once
+        # the read has taken two timeouts (a timed-out attempt has taken one).
+        return (
+            retries < _MAX_TRANSIENT_RETRIES
+            and time.monotonic() - started < 2 * _READ_TIMEOUT_SECONDS
+        )
+
     with httpx.Client(timeout=_READ_TIMEOUT_SECONDS) as client:
         while True:
             try:
@@ -327,12 +337,12 @@ def _get(
                     url, headers={"X-API-Key": deployment.api_key}, params=params
                 )
             except _TRANSIENT_EXCEPTIONS as error:
-                if retries >= _MAX_TRANSIENT_RETRIES:
+                if not may_retry():
                     raise
                 cause, detail = type(error).__name__, str(error)
             else:
                 cause = _transient_cause(response)
-                if cause is None or retries >= _MAX_TRANSIENT_RETRIES:
+                if cause is None or not may_retry():
                     break
                 detail = response.text[:120]
             retries += 1

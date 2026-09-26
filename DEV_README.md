@@ -407,8 +407,9 @@ the verdict pass over any directory holding a `registry.log` and some records â€
 including one downloaded from a CI run with `gh run download`.
 
 Both retries are counted as workflow annotations, titled
-`Registry transport timeout` and `Registry container recycled`, so the rate is
-a query rather than a memory:
+`Registry transport fault` (`Registry transport timeout` before 2026-09-26)
+and `Registry container recycled`, and the exchanges the clients absorbed as
+`Registry exchanges retried`, so the rate is a query rather than a memory:
 
 ```bash
 gh api repos/stardag-dev/stardag/actions/runs/<run-id>/jobs \
