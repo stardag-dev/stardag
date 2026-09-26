@@ -263,6 +263,21 @@ async def _build(session: AsyncSession, environment_id: UUID, build_id: UUID) ->
     return build
 
 
+async def _shared_build(
+    session: AsyncSession, environment_id: UUID, build_id: UUID
+) -> Build:
+    """The build row ``FOR SHARE``: excludes the lease writers only."""
+    build = await session.scalar(
+        select(Build)
+        .where(Build.environment_id == environment_id, Build.id == build_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if build is None:
+        raise NotFound("unknown_build", f"no build {build_id}", build_id=str(build_id))
+    return build
+
+
 async def _locked_build(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> Build:
@@ -328,16 +343,21 @@ async def notify(
             wake.tick_requested_at = now
     async with transaction(session):
         wake = await _locked_wake(session, environment_id, build_id)
-        build = await _build(session, environment_id, build_id)
+        # FOR SHARE, so the lease check and the re-stamp below are ordered
+        # against every lease write (acquire, renew, release take the row FOR
+        # NO KEY UPDATE): a release either committed before this read -- and
+        # the re-stamp is newer than it -- or waits for this commit. Wake row,
+        # then build row: nothing takes the two the other way round (the
+        # lease writers never touch the wake row; flaggers SKIP LOCKED).
+        build = await _shared_build(session, environment_id, build_id)
         live = _lease_live(build, utc_now())
         if stamped and wake.tick_requested_at == now:
             if live:
                 wake.tick_requested_at = previous_stamp
             else:
-                # Re-stamped after the lease check, so a lease release that
-                # committed while the first stamp was in flight
-                # (``scheduler_lease_released_at`` newer than it) cannot spend
-                # the hand-out made here: that tick has yet to run.
+                # Re-stamped after the lease check, so a release that
+                # committed while the first stamp was in flight cannot spend
+                # the hand-out made here: its tick has yet to run.
                 wake.tick_requested_at = utc_now()
     return NotifyState(build_id=build_id, needs_tick=running, scheduler_live=live)
 
