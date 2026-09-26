@@ -16,7 +16,9 @@ write that can change a build's frontier. So the wake-up is split in two:
 - **Spawning** belongs to whoever has an executor. They ask
   :func:`wake_candidates` for flagged builds nobody is serving; each is
   handed out once per :data:`WAKE_HANDOUT_WINDOW` by stamping
-  ``tick_requested_at``, so N concurrent askers produce one spawn.
+  ``tick_requested_at``, so N concurrent askers produce one spawn. The
+  stamp lasts until the window lapses or the tick it spawned releases its
+  lease, whichever is first (:func:`release_lease`).
 
 The flags live on ``build_wake`` (one row per build), not on ``build``: a
 claiming start holds its build row ``FOR SHARE`` while it holds a task row,
@@ -492,7 +494,24 @@ async def release_lease(
     session: AsyncSession, environment_id: UUID, build_id: UUID, *, owner_id: str
 ) -> LeaseState:
     """Drop the lease if ``owner_id`` still holds it; ``held`` reports
-    whether it did (a lost tick cannot clear its successor's lease)."""
+    whether it did (a lost tick cannot clear its successor's lease).
+
+    A released lease also **consumes the hand-out** that spawned its tick:
+    ``tick_requested_at`` is cleared if it predates the release. The
+    hand-out window exists to collapse the askers between a hand-out and
+    its tick taking the lease into one spawn; once that tick has run and
+    ended, the window has done its job, and holding it any longer only
+    hides a flag that landed after the tick looked (STA-34). Without this,
+    a build re-flagged within the window after its tick exited is handed
+    out to nobody until the window lapses -- and then only if something
+    else happens to ask, which in an environment with no other builds and
+    no watchdog is never.
+
+    In its own transaction, after the lease row's, so the build row is
+    never held while the wake row is waited on (see the module
+    docstring's lock order), and conditioned on the stamp predating the
+    release, so a hand-out made in between is never undone.
+    """
     owner_id = _owner(owner_id)
     async with transaction(session):
         build = await _locked_build(session, environment_id, build_id)
@@ -500,7 +519,19 @@ async def release_lease(
             return LeaseState(build_id, held=False)
         build.scheduler_lease_owner = None
         build.scheduler_lease_until = None
-        return LeaseState(build_id, held=True)
+        released_at = utc_now()
+    async with transaction(session):
+        await session.execute(
+            update(BuildWake)
+            .where(
+                BuildWake.environment_id == environment_id,
+                BuildWake.build_id == build_id,
+                BuildWake.tick_requested_at <= released_at,
+            )
+            .values(tick_requested_at=None)
+            .execution_options(synchronize_session=False)
+        )
+    return LeaseState(build_id, held=True)
 
 
 __all__ = [

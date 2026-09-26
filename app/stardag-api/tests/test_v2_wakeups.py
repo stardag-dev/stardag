@@ -463,6 +463,66 @@ async def test_wake_candidates_hand_each_build_out_once_per_window(h: Harness):
     assert [c.build_id for c in again] == built[2:7]
 
 
+async def test_a_flag_after_the_handed_out_tick_ended_is_handed_out_again(
+    h: Harness,
+):
+    """STA-34: handed out, its tick runs and releases the lease, then the
+    build is re-flagged inside the window. The tick that was spawned has
+    already looked and gone, so the new flag is handed out at once rather
+    than after the window -- which, with nothing else asking, was never."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _reactive(h, build)
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert [c.build_id for c in await _svc(h, wakeups.wake_candidates)] == [build]
+
+    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, wakeups.clear_notify, build)
+    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    assert await _svc(h, wakeups.wake_candidates) == []  # nothing new yet
+
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert [c.build_id for c in await _svc(h, wakeups.wake_candidates)] == [build]
+
+
+async def test_the_window_still_collapses_askers_until_the_tick_has_run(
+    h: Harness,
+):
+    """The storm protection the window exists for: between a hand-out and
+    its tick taking the lease, re-flags hand out nothing more; and while the
+    tick holds the lease, nothing either."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _reactive(h, build)
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert len(await _svc(h, wakeups.wake_candidates)) == 1
+    for _ in range(3):
+        await _svc(h, wakeups.notify, build, can_spawn=False)
+        assert await _svc(h, wakeups.wake_candidates) == []
+
+    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert await _svc(h, wakeups.wake_candidates) == []
+
+
+async def test_a_release_does_not_undo_a_hand_out_made_after_it(h: Harness):
+    """A losing owner's release changes nothing, and a stamp newer than
+    the release survives it."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _reactive(h, build)
+    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    assert not (await _svc(h, wakeups.release_lease, build, owner_id="other")).held
+    await _sql(
+        h,
+        "UPDATE build_wake SET tick_requested_at = now() + interval '1 hour'"
+        " WHERE build_id = :b",
+        b=build,
+    )
+    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    assert (await h.build(build))["tick_requested_at"] is not None
+
+
 # --------------------------------------------------------------------------
 # The scheduler lease
 # --------------------------------------------------------------------------
