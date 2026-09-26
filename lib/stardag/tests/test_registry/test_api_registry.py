@@ -20,9 +20,11 @@ import pytest
 
 from stardag.exceptions import APIError, NotFoundError, execution_not_wanted
 from stardag.registry import APIRegistry, RegistrationItem
+from stardag.registry import _api_http
 from stardag.registry._api_http import (
     _GZIP_REQUEST_THRESHOLD_BYTES,
     gzip_json_body,
+    transport_retry_counts,
 )
 
 Handler = typing.Callable[[httpx.Request], httpx.Response]
@@ -635,6 +637,139 @@ class TestErrors:
         with pytest.raises(APIError) as excinfo:
             registry.member_complete(uuid4(), "t", execution_id=uuid4())
         assert execution_not_wanted(excinfo.value) is (not wanted)
+
+
+class _StalledBody(httpx.SyncByteStream, httpx.AsyncByteStream):
+    """A body that fails while it is being read: the headers are in."""
+
+    def __init__(self, error: Exception):
+        self.error = error
+
+    def __iter__(self) -> typing.Iterator[bytes]:
+        raise self.error
+
+    async def __aiter__(self) -> typing.AsyncIterator[bytes]:
+        raise self.error
+        yield b""  # pragma: no cover
+
+
+class _Script:
+    """Answer each request with the next step: a response, or an exception."""
+
+    def __init__(self, *steps: httpx.Response | Exception):
+        self.steps = list(steps)
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        step = self.steps.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+def _body_stalls() -> httpx.Response:
+    return httpx.Response(
+        200, stream=_StalledBody(httpx.ReadTimeout("body read timed out"))
+    )
+
+
+def _body_cut() -> httpx.Response:
+    return httpx.Response(
+        200,
+        stream=_StalledBody(
+            httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body"
+            )
+        ),
+    )
+
+
+class TestLostExchange:
+    """An exchange that got no complete answer is retried, whole."""
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self, monkeypatch):
+        monkeypatch.setattr(_api_http, "_TRANSIENT_BACKOFF_SECONDS", 0.0)
+
+    @pytest.mark.parametrize(
+        "lost",
+        [
+            pytest.param(_body_stalls, id="body-stalls"),
+            pytest.param(_body_cut, id="body-cut-short"),
+            pytest.param(lambda: httpx.ReadTimeout("no headers"), id="no-headers"),
+            pytest.param(lambda: httpx.ConnectError("refused"), id="no-connection"),
+            pytest.param(lambda: httpx.Response(503), id="gateway-503"),
+            pytest.param(
+                lambda: httpx.Response(
+                    500,
+                    text="modal-http: internal error: status InternalFailure: "
+                    "Server has lost track of input",
+                ),
+                id="proxy-500",
+            ),
+        ],
+    )
+    def test_a_lost_exchange_is_sent_again(self, lost, caplog):
+        script = _Script(lost(), httpx.Response(200, json=BUILD))
+        before = sum(transport_retry_counts().values())
+        with caplog.at_level("WARNING", logger=_api_http.__name__):
+            build = _registry(script).build_get(UUID(BUILD["id"]))
+        assert str(build.id) == BUILD["id"]
+        assert len(script.requests) == 2
+        assert sum(transport_retry_counts().values()) == before + 1
+        (record,) = caplog.records
+        assert f"GET /builds/{BUILD['id']}" in record.getMessage()
+        assert "retry 1 of 3" in record.getMessage()
+
+    def test_a_post_is_retried_with_the_same_body(self):
+        script = _Script(_body_stalls(), httpx.Response(200, json=BUILD))
+        _registry(script).build_create(name="b", root_task_ids=["t1"])
+        first, second = script.requests
+        assert first.method == second.method == "POST"
+        assert first.content == second.content
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            pytest.param(httpx.Response(500, json={"detail": "boom"}), id="app-500"),
+            pytest.param(
+                httpx.Response(409, json={"detail": {"code": "x"}}), id="refusal"
+            ),
+            pytest.param(httpx.Response(404, json={"detail": "nope"}), id="404"),
+        ],
+    )
+    def test_an_answer_the_app_wrote_is_not_retried(self, answer):
+        script = _Script(answer)
+        with pytest.raises(APIError):
+            _registry(script).build_get(uuid4())
+        assert len(script.requests) == 1
+
+    def test_the_retries_are_bounded_and_the_last_fault_raised(self):
+        script = _Script(*(_body_stalls() for _ in range(4)))
+        with pytest.raises(httpx.ReadTimeout):
+            _registry(script).build_get(uuid4())
+        assert len(script.requests) == 4
+
+    def test_a_gateway_error_that_persists_surfaces_as_an_error(self):
+        script = _Script(*(httpx.Response(502) for _ in range(4)))
+        with pytest.raises(APIError) as excinfo:
+            _registry(script).build_get(uuid4())
+        assert excinfo.value.status_code == 502
+        assert len(script.requests) == 4
+
+    async def test_the_async_path_retries_a_stalled_body(self):
+        import asyncio
+
+        script = _Script(_body_stalls(), httpx.Response(200, json=BUILD))
+        registry = APIRegistry(api_url="https://registry.test", api_key="sk-test")
+        registry._async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(script)
+        )
+        registry._async_client_loop = asyncio.get_running_loop()
+        build = await registry.build_get_aio(UUID(BUILD["id"]))
+        assert str(build.id) == BUILD["id"]
+        assert len(script.requests) == 2
 
 
 class TestGzip:
