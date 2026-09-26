@@ -55,6 +55,7 @@ BUILD_TIMEOUT_SECONDS = 600
 FLAG = "REGISTRY_LIVE_FLAG"
 
 
+@pytest.mark.budget(125)
 def test_s8_two_settings_scopes_share_one_completion(deployment: Deployment) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.dag_app import app

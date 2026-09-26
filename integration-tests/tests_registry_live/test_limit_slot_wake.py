@@ -85,6 +85,7 @@ def slot_limit():
         registry.concurrency_limit_delete(SLOW_LIMIT_KEY)
 
 
+@pytest.mark.budget(120)
 def test_releasing_a_slot_wakes_the_build_queued_on_it(
     slot_limit, deployment: Deployment
 ) -> None:

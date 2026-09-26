@@ -28,6 +28,7 @@ import collections
 import json
 import os
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import pytest
@@ -39,11 +40,16 @@ from stardag_integration_tests.registry_live._diagnostics import (
     record_transport_timeout,
     transport_timeout,
 )
+from stardag_integration_tests.registry_live._gates import GateSet
 from stardag_integration_tests.registry_live._guard import ENV_API_URL, is_enabled
 from stardag_integration_tests.registry_live._harness import (
     BootCheckUnanswered,
     Deployment,
     RegistryContainerRecycled,
+)
+from stardag_integration_tests.registry_live._ordering import (
+    controller_dist_mode,
+    plan_order,
 )
 from stardag_integration_tests.registry_live.provision import (
     default_environment_name,
@@ -52,6 +58,13 @@ from stardag_integration_tests.registry_live.provision import (
 )
 
 ENV_MODAL_ENVIRONMENT = "MODAL_ENVIRONMENT"
+
+# A scenario's declared wall clock, ``pytest.mark.budget(seconds)``: what the
+# collection is ordered by (longest first, see ``_ordering``) and what the
+# run's summary compares each scenario's actual time against. A scenario
+# without one is planned as this, and the summary says it has none.
+DEFAULT_BUDGET_SECONDS = 240.0
+BUDGET_PROPERTY = "registry_live_budget_seconds"
 
 _deployment: Deployment | None = None
 
@@ -70,6 +83,11 @@ def pytest_configure(config: pytest.Config) -> None:
     scenario that quietly ran against the wrong registry.
     """
     global _deployment
+    config.addinivalue_line(
+        "markers",
+        "budget(seconds): the scenario's expected wall clock; orders the tier "
+        "longest first and is reported against the actual time",
+    )
     if not is_enabled():
         return
 
@@ -103,13 +121,109 @@ def pytest_configure(config: pytest.Config) -> None:
     _deployment = deployment
 
 
+def _budget(item: pytest.Item) -> tuple[float, bool]:
+    """``(budget seconds, declared?)`` for one collected scenario."""
+    marker = item.get_closest_marker("budget")
+    if marker is None or not marker.args:
+        return DEFAULT_BUDGET_SECONDS, False
+    return float(marker.args[0]), True
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]):
+    """Hand xdist the longest scenarios first, so the critical path starts at
+    t=0 rather than wherever the alphabet put it.
+
+    ``trylast`` so it plans only what ``-k``/``-m`` left selected. Runs in
+    every xdist worker, each of which collects on its own; the plan is a
+    pure function of the items and the worker count, so they all agree, as
+    xdist requires. See ``_ordering`` for why the plan is not a plain sort.
+    """
+    budgets = [_budget(item)[0] for item in items]
+    workerinput = getattr(config, "workerinput", None)
+    workers = int(workerinput["workercount"]) if workerinput else 1
+    if workers > 1 and controller_dist_mode(workerinput) == "load":
+        order = plan_order(
+            budgets, workers, maxschedchunk=config.getoption("maxschedchunk", None)
+        )
+    else:
+        order = sorted(range(len(items)), key=lambda i: (-budgets[i], i))
+    items[:] = [items[i] for i in order]
+    for item in items:
+        budget, declared = _budget(item)
+        # Carried on every report, so the xdist controller -- which never
+        # collects -- can put budget and actual side by side.
+        item.user_properties.append((BUDGET_PROPERTY, budget if declared else None))
+
+
+_actual_seconds: dict[str, float] = defaultdict(float)
+_budgets: dict[str, float | None] = {}
+_started_at: dict[str, float] = {}
+_failed: set[str] = set()
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Accumulate each scenario's wall clock across setup, call and teardown."""
+    properties = dict(report.user_properties)
+    if BUDGET_PROPERTY not in properties:
+        return
+    budget = properties[BUDGET_PROPERTY]
+    _budgets[report.nodeid] = float(budget) if isinstance(budget, int | float) else None
+    _actual_seconds[report.nodeid] += report.duration
+    start = getattr(report, "start", None)
+    if start is not None:
+        _started_at[report.nodeid] = min(_started_at.get(report.nodeid, start), start)
+    if report.failed:
+        _failed.add(report.nodeid)
+
+
+def _budget_summary(terminalreporter) -> None:
+    """Budget against actual, per scenario, slowest first; overruns flagged.
+
+    Printed on every run, green or red, because a budget that has drifted is
+    how the ordering silently stops putting the critical path first: the
+    plan is only as good as these numbers. When the tier is under xdist,
+    this runs in the controller, from the workers' reports.
+    """
+    if not _actual_seconds:
+        return
+    t0 = min(_started_at.values(), default=0.0)
+    over = []
+    terminalreporter.section("registry-live budgets (actual / budget, start)")
+    for nodeid in sorted(_actual_seconds, key=lambda n: -_actual_seconds[n]):
+        actual = _actual_seconds[nodeid]
+        budget = _budgets.get(nodeid)
+        start = _started_at.get(nodeid)
+        offset = f"+{start - t0:4.0f}s" if start is not None else "    ?"
+        if budget is None:
+            verdict, shown = "  NO BUDGET DECLARED", "   -"
+        elif actual > budget:
+            verdict, shown = "  OVER BUDGET", f"{budget:4.0f}"
+            over.append(nodeid)
+        else:
+            verdict, shown = "", f"{budget:4.0f}"
+        failed = "  (failed)" if nodeid in _failed else ""
+        terminalreporter.write_line(
+            f"{actual:5.0f}s / {shown}s  start {offset}  {nodeid}{verdict}{failed}",
+            yellow=bool(verdict),
+        )
+    if over:
+        terminalreporter.write_line(
+            f"WARNING: {len(over)} scenario(s) over budget. Raise the budget "
+            "if the scenario legitimately grew; otherwise it is a regression "
+            "in the scenario's own timing.",
+            yellow=True,
+            bold=True,
+        )
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
     """Classify every failure, at the instant it happens.
 
     Two records come out of this, and CI needs both: a transport timeout
     is what buys a run its one retry, and anything else is what forbids
-    one. The tier runs twelve scenarios at once, so "somebody timed out"
+    one. The tier runs sixteen scenarios at once, so "somebody timed out"
     and "somebody failed for real" are routinely both true of the same
     run, and only the second may decide it.
 
@@ -215,6 +329,26 @@ def _registry_survived(deployment: Deployment):
     deployment.assert_same_container()
 
 
+@pytest.fixture
+def gates(deployment: Deployment):
+    """The scenario's gates (see ``_gates``): ``gates.new(name, salt=...)``.
+
+    On teardown every gate the scenario did not release is released, so a
+    scenario that failed early frees its held containers now rather than at
+    their bound; then one line per recorded hold says how it ended, flagging
+    any that ran to its bound -- the lost release that would otherwise pass
+    for a slow scenario. Neither step can raise: this is teardown, and a
+    failure here would be classified as a real one.
+    """
+    gate_set = GateSet(deployment.modal_environment)
+    yield gate_set
+    for gate in gate_set.gates:
+        if gate.released_at is None:
+            gate.release(attempts=2)
+    for line in gate_set.report():
+        print(f"[registry-live] {line}", file=sys.stderr)
+
+
 @pytest.fixture(scope="session")
 def deployment() -> Deployment:
     """The provisioned registry for this session."""
@@ -261,7 +395,7 @@ def pytest_testnodedown(node, error) -> None:  # pytest-xdist hook
     _worker_retry_counts.update(counts)
 
 
-def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
+def _retry_summary(terminalreporter, config) -> None:
     if not is_enabled() or hasattr(config, "workerinput"):
         return
     counts = collections.Counter(_process_retry_counts())
@@ -282,3 +416,10 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
             )
         except OSError as error:
             print(f"Could not record the retry counts: {error}", file=sys.stderr)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
+    """Two tallies at the end of every run: time against budget per scenario,
+    and the lost answers the clients absorbed."""
+    _budget_summary(terminalreporter)
+    _retry_summary(terminalreporter, config)

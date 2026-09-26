@@ -72,6 +72,7 @@ BUILD_TIMEOUT_SECONDS = 420
 TASKS_IN_PLAN = 3
 
 
+@pytest.mark.budget(105)
 def test_a_worker_wakes_the_build_that_has_no_scheduler(deployment: Deployment) -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (

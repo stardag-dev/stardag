@@ -60,6 +60,7 @@ BUILD_TIMEOUT_SECONDS = 600
 FLAG = "REGISTRY_LIVE_FLAG"
 
 
+@pytest.mark.budget(150)
 def test_s14_resume_under_new_settings_plans_anew_and_reuses_completions(
     deployment: Deployment,
 ) -> None:

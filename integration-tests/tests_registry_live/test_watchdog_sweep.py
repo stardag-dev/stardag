@@ -94,6 +94,7 @@ DORMANT_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
+@pytest.mark.budget(160)
 def test_one_sweep_spawns_one_tick_per_build_and_returns(
     deployment: Deployment,
 ) -> None:

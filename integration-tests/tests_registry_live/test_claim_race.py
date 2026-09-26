@@ -59,6 +59,7 @@ BUILD_TIMEOUT_SECONDS = 480
 DISTINCT_TASKS = 4
 
 
+@pytest.mark.budget(105)
 def test_a_shared_task_runs_once_across_two_builds(deployment: Deployment) -> None:
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (

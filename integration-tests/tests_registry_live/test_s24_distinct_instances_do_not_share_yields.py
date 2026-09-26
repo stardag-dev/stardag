@@ -19,6 +19,11 @@ yields three -- structure that B's body never declared.
 The observable is the parent's event log: exactly **two** suspensions (A's
 and B's), where a shared instance has one. The rerun after the children
 complete yields children that are all complete, so it does not suspend.
+
+A's children hold on a gate until B's instance has suspended on them, then
+the scenario releases it. That is the ordering the scenario rests on, as a
+state rather than as a child duration sized to outlast B's bootstrap, its
+``Range`` and its pre-yield section.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from stardag_integration_tests.registry_live._events import (
     task_events,
     wait_until_registered,
 )
+from stardag_integration_tests.registry_live._gates import GateSet
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._scenario_app import MAX_LINGER_SECONDS
@@ -40,6 +46,7 @@ from stardag_integration_tests.registry_live._wait import (
     task_status,
     wait_for_task_status,
     wait_for_terminal,
+    wait_until,
 )
 
 registry_live_guard()
@@ -51,8 +58,10 @@ pytestmark = [
 
 # A's children must still be running when B's instance is claimed and
 # yields, so B's yield lands on children A is progressing (and B's run
-# suspends rather than completing): B's bootstrap, its Range, and its
-# pre-yield section all fit inside this.
+# suspends rather than completing). They hold on a gate the scenario
+# releases once B's instance has suspended (see ``_gates``); this is their
+# upper bound, the old window -- B's bootstrap, its Range and its pre-yield
+# section fitted inside it -- reached only if the release is lost.
 CHILD_SECONDS = 120
 PRE_YIELD_SECONDS = 15
 A_CHILDREN = 3
@@ -62,8 +71,9 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 700
 
 
+@pytest.mark.budget(180)
 def test_s24_two_instances_in_one_scope_rerun_the_pre_yield_once(
-    deployment: Deployment,
+    deployment: Deployment, gates: GateSet
 ) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.dag_app import app
@@ -74,17 +84,20 @@ def test_s24_two_instances_in_one_scope_rerun_the_pre_yield_once(
     )
 
     salt = uuid.uuid4().hex
+    children = gates.new("children", salt=salt)
     parent_a = ConfiguredFanOut(
         salt=salt,
         children=A_CHILDREN,
         child_seconds=CHILD_SECONDS,
         pre_yield_seconds=PRE_YIELD_SECONDS,
+        child_gate=children.key,
     )
     parent_b = ConfiguredFanOut(
         salt=salt,
         children=B_CHILDREN,
         child_seconds=CHILD_SECONDS,
         pre_yield_seconds=PRE_YIELD_SECONDS,
+        child_gate=children.key,
     )
     assert parent_a.id == parent_b.id, "the width must not be significant"
     tick_kwargs = {"linger_seconds": MAX_LINGER_SECONDS, "poll_interval_seconds": 3}
@@ -111,6 +124,23 @@ def test_s24_two_instances_in_one_scope_rerun_the_pre_yield_once(
         frontier_b.deployment_id,
         frontier_b.settings_hash,
     ), "The two builds must share a scope for this scenario to mean anything."
+
+    # B's instance has run its own pre-yield section and suspended on the
+    # children A is still progressing: now they may finish.
+    def _b_suspended() -> bool:
+        return any(
+            e.get("event_type") == "task_suspended"
+            and str(e.get("build_id")) == str(build_b)
+            for e in task_events(deployment, parent_a.id)
+        )
+
+    wait_until(
+        _b_suspended,
+        build_id=build_b,
+        timeout=STATUS_TIMEOUT_SECONDS,
+        what="B's instance of the parent to suspend on A's running children",
+    )
+    children.release()
 
     for build_id in (build_a, build_b):
         status = wait_for_terminal(build_id, timeout=BUILD_TIMEOUT_SECONDS)

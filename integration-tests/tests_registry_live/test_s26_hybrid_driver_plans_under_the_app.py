@@ -46,6 +46,7 @@ CHILD_SECONDS = 5
 PRE_YIELD_SECONDS = 5
 
 
+@pytest.mark.budget(70)
 def test_s26_a_hybrid_driver_plans_under_the_apps_current_deployment(
     deployment: Deployment,
 ) -> None:

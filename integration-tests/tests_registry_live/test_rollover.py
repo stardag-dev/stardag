@@ -9,9 +9,12 @@ stalled (design.md, "Rollover").
 The scenario deploys its own app twice under two code ids, ``A`` and
 ``B`` (``STARDAG_CODE_ID`` in the deploy's environment, the same override a
 CI image uses; ``stardag modal deploy`` records a deployment for each),
-triggers a reactive build on ``A`` whose fan-out parent has a long
-pre-yield, and redeploys as ``B`` while the parent is still running. What
-it then asserts is the rollover as the design states it:
+triggers a reactive build on ``A`` whose fan-out parent holds its pre-yield
+section on a gate, and redeploys as ``B`` while the parent is still running.
+The gate is released once ``B`` is live and ``A``'s last tick has exited, so
+the parent yields on ``A`` after the switch; the re-planned parent under
+``B`` finds the gate already open and yields at once. What it then asserts
+is the rollover as the design states it:
 
 - the build completes;
 - its active plan is now under deployment ``B`` (same build id);
@@ -29,12 +32,11 @@ in exactly the same words, so a real regression would have read as the
 known flake. See ``_rollover_reports`` and STA-87.
 
 An old worker's late yield landing in scope ``A`` is the other half of the
-rule (its ``/yield`` names the old plan). It is not forced here: it needs the
-redeploy to land inside the parent's pre-yield window *and* the parent's
-worker to yield before the new tick re-plans, which is a race this tier
-cannot time. The worker side is covered by unit tests
-(``TestWorkerScope`` in the SDK suite); this scenario proves the tick side
-against a real deployment.
+rule (its ``/yield`` names the old plan). The gate makes it this scenario's
+usual path, but it is not asserted here: S7
+(``test_s7_old_deployment_yield_after_switch``) is the scenario that pins
+it, and the worker side is covered by unit tests (``TestWorkerScope`` in
+the SDK suite). This one proves the tick side against a real deployment.
 
 Each deploy takes 30-60 s of the budget; the image is the one the other
 scenario apps already built.
@@ -42,19 +44,20 @@ scenario apps already built.
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 import uuid
-from pathlib import Path
 
 import pytest
 
+from stardag_integration_tests.registry_live._gates import (
+    GateSet,
+    wait_for_the_ticks_to_exit,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import (
     Deployment,
     stop_existing_app,
 )
+from stardag_integration_tests.registry_live._rollover import deploy_rollover_app
 from stardag_integration_tests.registry_live._wait import (
     describe,
     tick_summaries,
@@ -69,44 +72,25 @@ pytestmark = [
     pytest.mark.timeout(1200),
 ]
 
-# Long enough that the redeploy lands while the parent is still in its
-# pre-yield section: two deploys' worth of margin on top of a container
-# start.
+# The pre-yield section's *upper bound*. The parent holds on a gate that
+# the scenario releases once B is live (see ``_gates``), so this is paid only
+# if the release is lost -- and then it is the old timing: long enough that
+# the redeploy lands inside it, with two deploys' worth of margin.
 PRE_YIELD_SECONDS = 150
 CHILD_SECONDS = 5
+# The build's tick linger, and how long the release waits on top of it for
+# A's last tick to report its exit (``wait_for_the_ticks_to_exit``).
+LINGER_SECONDS = 60
+TICK_EXIT_MARGIN_SECONDS = 90
 
 STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 900
 
-APP_MODULE = "stardag_integration_tests.registry_live.rollover_app"
-
 
 def _deploy(app_name: str, modal_environment: str, code_id: str) -> None:
-    """Deploy the rollover app as ``code_id``, with the CLI of this venv.
-
-    Same shape as ``provision._deploy_dag_apps``, for the same reason: the
-    app's functions are serialised by the interpreter that imports the
-    module, and every trigger unpickles them in a container built for that
-    Python. ``STARDAG_CODE_ID`` is the deploy's code identity — baked into
-    the deployment, so every container of it answers ``code_id``.
-    """
-    stardag_cli = Path(sys.executable).with_name("stardag")
-    assert stardag_cli.exists(), f"No stardag CLI next to {sys.executable}"
-    result = subprocess.run(
-        [str(stardag_cli), "modal", "deploy", "-m", APP_MODULE],
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        text=True,
-        env={
-            **os.environ,
-            "MODAL_ENVIRONMENT": modal_environment,
-            "STARDAG_CODE_ID": code_id,
-        },
-    )
-    assert result.returncode == 0, (
-        f"Deploy of {app_name!r} as {code_id[:12]} failed:\n"
-        f"{result.stdout}\n{result.stderr}"
-    )
+    """Deploy the rollover app as ``code_id``: ``_rollover.deploy_rollover_app``,
+    which returns once a fresh call reaches the new code."""
+    deploy_rollover_app(app_name, modal_environment, code_id=code_id)
 
 
 def _deployment_ids(app_name: str) -> dict[str, tuple[str, bool]]:
@@ -138,8 +122,9 @@ def _rollover_reports(summaries: list[dict]) -> str:
     )
 
 
+@pytest.mark.budget(260)
 def test_a_running_build_rolls_over_to_the_new_deployment(
-    deployment: Deployment,
+    deployment: Deployment, gates: GateSet
 ) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.rollover_app import APP_NAME, app
@@ -154,16 +139,21 @@ def test_a_running_build_rolls_over_to_the_new_deployment(
     _deploy(APP_NAME, modal_environment, code_a)
     try:
         salt = uuid.uuid4().hex
+        pre_yield = gates.new("pre-yield", salt=salt)
         parent = ConfiguredFanOut(
             salt=salt,
             child_seconds=CHILD_SECONDS,
             pre_yield_seconds=PRE_YIELD_SECONDS,
+            pre_yield_gate=pre_yield.key,
         )
         root = get_sum(integers=parent)
         build_id = app.build_trigger(
             root,
             reactive=True,
-            tick_kwargs={"linger_seconds": 60, "poll_interval_seconds": 3},
+            tick_kwargs={
+                "linger_seconds": LINGER_SECONDS,
+                "poll_interval_seconds": 3,
+            },
         ).build_id
         wait_for_task_status(
             parent.id,
@@ -183,6 +173,17 @@ def test_a_running_build_rolls_over_to_the_new_deployment(
         # in-flight container finishes on A; every spawn from here on lands
         # on B, including the tick that the parent's completion wakes.
         _deploy(APP_NAME, modal_environment, code_b)
+
+        # Then let the parent go -- once no tick of A's is left to drive the
+        # build on A's plan when it yields. The re-planned parent under B
+        # finds the gate already open.
+        wait_for_the_ticks_to_exit(
+            deployment,
+            build_id,
+            task_id=parent.id,
+            bound_seconds=LINGER_SECONDS + TICK_EXIT_MARGIN_SECONDS,
+        )
+        pre_yield.release()
 
         status = wait_for_terminal(build_id, timeout=BUILD_TIMEOUT_SECONDS)
         assert status == "completed", (

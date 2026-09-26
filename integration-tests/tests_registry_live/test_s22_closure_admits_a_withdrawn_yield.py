@@ -21,6 +21,10 @@ Replaces v1's ``test_structure_scope_dynamic``. The observables: B
 completed, B's own ledger holds a submitted execution of every child, and
 the parent suspended exactly once (B trusted A's yield rather than re-running
 the parent's pre-yield section).
+
+The children hold on a gate until A has been cancelled and its claims
+checked released; then the scenario releases it, so B's own executions of
+them finish at once instead of sleeping the window again.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from stardag_integration_tests.registry_live._events import (
     task_events,
     wait_until_registered,
 )
+from stardag_integration_tests.registry_live._gates import GateSet
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._scenario_app import MAX_LINGER_SECONDS
@@ -54,8 +59,11 @@ pytestmark = [
 ]
 
 # The children must still be RUNNING under A's claims when A is cancelled,
-# so that the cancel -- not their own completion -- is what hands them to B:
-# B's bootstrap and registration fit inside this with room to spare.
+# so that the cancel -- not their own completion -- is what hands them to B.
+# They hold on a gate released after the cancel (see ``_gates``); this is
+# their upper bound, the old window -- B's bootstrap and registration fitted
+# inside it -- reached only if the release is lost. Ungated, B's own runs of
+# the children slept it a second time.
 CHILD_SECONDS = 90
 PRE_YIELD_SECONDS = 10
 CHILDREN = 2
@@ -64,7 +72,10 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
-def test_s22_closure_admits_a_cancelled_build_yield(deployment: Deployment) -> None:
+@pytest.mark.budget(130)
+def test_s22_closure_admits_a_cancelled_build_yield(
+    deployment: Deployment, gates: GateSet
+) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.dag_app import app
     from stardag_integration_tests.registry_live.tasks import (
@@ -74,11 +85,13 @@ def test_s22_closure_admits_a_cancelled_build_yield(deployment: Deployment) -> N
     )
 
     salt = uuid.uuid4().hex
+    held = gates.new("children", salt=salt)
     parent = ConfiguredFanOut(
         salt=salt,
         children=CHILDREN,
         child_seconds=CHILD_SECONDS,
         pre_yield_seconds=PRE_YIELD_SECONDS,
+        child_gate=held.key,
     )
     children = parent.child_tasks()
 
@@ -122,6 +135,9 @@ def test_s22_closure_admits_a_cancelled_build_yield(deployment: Deployment) -> N
         "A's cancel did not release its claims on the children, so nothing "
         "hands them to B.\n" + describe(build_a)
     )
+    # A's hold on them is over: B's executions of the children need not
+    # sleep the window again.
+    held.release()
 
     status_b = wait_for_terminal(build_b, timeout=BUILD_TIMEOUT_SECONDS)
     assert status_b == "completed", (
