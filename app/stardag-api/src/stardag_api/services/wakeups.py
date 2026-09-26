@@ -330,8 +330,15 @@ async def notify(
         wake = await _locked_wake(session, environment_id, build_id)
         build = await _build(session, environment_id, build_id)
         live = _lease_live(build, utc_now())
-        if live and stamped and wake.tick_requested_at == now:
-            wake.tick_requested_at = previous_stamp
+        if stamped and wake.tick_requested_at == now:
+            if live:
+                wake.tick_requested_at = previous_stamp
+            else:
+                # Re-stamped after the lease check, so a lease release that
+                # committed while the first stamp was in flight
+                # (``scheduler_lease_released_at`` newer than it) cannot spend
+                # the hand-out made here: that tick has yet to run.
+                wake.tick_requested_at = utc_now()
     return NotifyState(build_id=build_id, needs_tick=running, scheduler_live=live)
 
 
@@ -514,17 +521,23 @@ async def release_lease(
     Written on the build row, which this transaction already holds, and not
     on the wake row: locking the wake row here would make a concurrent
     flagger ``SKIP LOCKED`` past it and lose its flag. A tick that dies
-    without releasing leaves no release time, so its hand-out keeps the
-    whole window, as before.
+    without releasing, or releases a lease that had already lapsed, leaves
+    no release time, so its hand-out keeps the whole window, as before.
     """
     owner_id = _owner(owner_id)
     async with transaction(session):
         build = await _locked_build(session, environment_id, build_id)
         if build.scheduler_lease_owner != owner_id:
             return LeaseState(build_id, held=False)
+        now = utc_now()
+        # Only a release of a *live* lease is evidence the tick ran to its
+        # end as the build's scheduler. A holder whose lease lapsed may
+        # already have a successor handed out; spending that hand-out would
+        # spawn a second one.
+        if _lease_live(build, now):
+            build.scheduler_lease_released_at = now
         build.scheduler_lease_owner = None
         build.scheduler_lease_until = None
-        build.scheduler_lease_released_at = utc_now()
     return LeaseState(build_id, held=True)
 
 

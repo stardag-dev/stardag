@@ -694,9 +694,10 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         build = self.build(build_id)
         if build.lease_owner != owner_id:
             return SchedulerLeaseResult(held=False)
+        if self._lease_live(build):  # a lapsed holder spends no hand-out
+            build.lease_released_at = self.now()
         build.lease_owner = None
         build.lease_expires_at = None
-        build.lease_released_at = self.now()
         return SchedulerLeaseResult(held=True)
 
     def build_report_tick_summary(

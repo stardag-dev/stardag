@@ -531,6 +531,44 @@ async def test_only_the_holders_release_spends_a_hand_out(h: Harness):
     assert await _svc(h, wakeups.wake_candidates) == []  # the new stamp holds
 
 
+async def test_a_lapsed_holders_release_spends_no_hand_out(h: Harness):
+    """A tick whose lease lapsed may already have a successor handed out;
+    its late release must not free that hand-out for a second spawn."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _reactive(h, build)
+    await _svc(h, wakeups.acquire_lease, build, owner_id="old", ttl_seconds=60)
+    await _sql(
+        h,
+        "UPDATE build SET scheduler_lease_until = now() - interval '1 second'"
+        " WHERE id = :b",
+        b=build,
+    )
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert len(await _svc(h, wakeups.wake_candidates)) == 1  # the successor
+    assert (await _svc(h, wakeups.release_lease, build, owner_id="old")).held
+    assert (await h.build(build))["scheduler_lease_released_at"] is None
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert await _svc(h, wakeups.wake_candidates) == []
+
+
+async def test_a_notify_stamp_is_newer_than_any_release_before_its_check(
+    h: Harness,
+):
+    """notify re-stamps after its lease check, so its hand-out is never
+    older than a release that committed while it was in flight."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _reactive(h, build)
+    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    state = await _svc(h, wakeups.notify, build)
+    assert not state.scheduler_live
+    row = await h.build(build)
+    assert row["tick_requested_at"] > row["scheduler_lease_released_at"]
+    assert await _svc(h, wakeups.wake_candidates) == []
+
+
 async def test_a_release_leaves_the_wake_row_unlocked_for_flaggers(h: Harness):
     """The release writes only the build row, so a flagger's ``SKIP LOCKED``
     can never pass the wake row over because of it."""
