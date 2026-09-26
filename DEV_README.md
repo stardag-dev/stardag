@@ -252,6 +252,23 @@ each other over. The deploying process names the app through
 `REGISTRY_LIVE_ROLLOVER_APP_NAME`; provisioning does not own those apps, but
 the log dump collects them.
 
+**A task that must stay RUNNING while the scenario acts holds on a gate**,
+not on a sleep sized to outlast the act (`registry_live/_gates.py`). The body
+holds until the scenario releases the gate — after the redeploy, after the
+second build's yield — polling a `modal.Dict` in the run's environment, with
+the old sleep as its upper bound, so a lost release costs time and never
+correctness. Each hold's outcome is printed at the scenario's teardown, and one
+that ran to its bound is flagged. Changing a gated task's fields changes the
+deployed apps' task classes too: after editing `tasks.py`, re-run
+`provision up` so `registry-live-dag` and friends carry the new code, or a
+scenario triggering on them fails its bootstrap.
+
+**Each scenario declares a budget** (`pytest.mark.budget(seconds)`), which
+orders the collection so xdist starts the long ones first — planned against a
+model of `--dist load`, which hands each worker two consecutive items up front
+(`registry_live/_ordering.py`) — and which the run's summary prints against the
+actual time, flagging overruns.
+
 **The registry runs its own Postgres inside its own Modal container.** There
 is no database account to create, nothing to provision and nothing to clean
 up: `modal environment delete` takes the API, the database, the worker app,
@@ -478,7 +495,7 @@ profile name.
 
 ##### Concurrency, and turning it off
 
-The scenarios run concurrently (`-n 12`, sized to the scenario count). They
+The scenarios run concurrently (`-n 16`, sized against their budgets; see `tox.ini`). They
 are almost entirely sleep — each waits on Modal containers it does not own —
 so running them together costs little more than running the longest, and the
 tier's runtime is the length of its slowest scenario rather than the sum of

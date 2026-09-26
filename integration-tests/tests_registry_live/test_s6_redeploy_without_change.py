@@ -13,7 +13,9 @@ environment or a dependency under an unchanged commit would then share a
 scope with code it does not match.
 
 The scenario deploys its own app twice under one code id, redeploying while
-the chain's middle task is RUNNING. Observables: two deployment rows with the
+the chain's middle task is RUNNING -- held there on a gate the scenario
+releases after the redeploy, once the first deployment's tick has exited.
+Observables: two deployment rows with the
 same code id, the later current; the build's active plan under the second;
 the walked instances re-registered under it with identical hashes; every
 task run exactly once.
@@ -29,6 +31,10 @@ from stardag_integration_tests.registry_live._events import (
     describe_ledger,
     ledger,
     spawned_executions,
+)
+from stardag_integration_tests.registry_live._gates import (
+    GateSet,
+    wait_for_the_ticks_to_exit,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import (
@@ -57,15 +63,24 @@ pytestmark = [
 APP_NAME = ROLLOVER_APP_NAMES["S6"]
 
 # The redeploy (30-60 s) must land while the middle task is RUNNING, so the
-# rollover happens mid-build rather than after it.
+# rollover happens mid-build rather than after it. The middle task holds on
+# a gate released after the redeploy (see ``_gates``); this is its upper
+# bound, the old window, reached only if the release is lost.
 SLOW_SECONDS = 150
+# The first deployment's tick linger, and how long the release waits on top
+# of it for that tick to report its exit: a tick of the old deployment still
+# lingering when the middle task finishes would drive the build on under
+# the old plan, and it would never roll over.
+LINGER_SECONDS = 30
+TICK_EXIT_MARGIN_SECONDS = 90
 
 STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 900
 
 
+@pytest.mark.budget(150)
 def test_s6_a_redeploy_of_unchanged_code_replans_without_rerunning(
-    deployment: Deployment,
+    deployment: Deployment, gates: GateSet
 ) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.tasks import (
@@ -78,7 +93,8 @@ def test_s6_a_redeploy_of_unchanged_code_replans_without_rerunning(
     code_id = uuid.uuid4().hex
     salt = uuid.uuid4().hex
     leaf = get_range(limit=3, salt=salt)
-    middle = slow(values=leaf, seconds=SLOW_SECONDS)
+    held = gates.new("middle", salt=salt)
+    middle = slow(values=leaf, seconds=SLOW_SECONDS, gate=held.key)
     root = get_sum(integers=middle)
     registry = registry_provider.get()
 
@@ -90,7 +106,10 @@ def test_s6_a_redeploy_of_unchanged_code_replans_without_rerunning(
             .build_trigger(
                 root,
                 reactive=True,
-                tick_kwargs={"linger_seconds": 30, "poll_interval_seconds": 3},
+                tick_kwargs={
+                    "linger_seconds": LINGER_SECONDS,
+                    "poll_interval_seconds": 3,
+                },
             )
             .build_id
         )
@@ -105,9 +124,18 @@ def test_s6_a_redeploy_of_unchanged_code_replans_without_rerunning(
         deploy_rollover_app(APP_NAME, env, code_id=code_id)
         middle_status = registry.task_get(str(middle.id)).status
         assert middle_status == "running", (
-            f"The redeploy landed after the middle task finished ({middle_status}); "
-            f"raise SLOW_SECONDS ({SLOW_SECONDS}s)."
+            f"The redeploy landed after the middle task finished ({middle_status}): "
+            f"its hold ran to its {SLOW_SECONDS}s bound before the deploy was "
+            "done, or ended early; the gate lines in the teardown output say "
+            "which."
         )
+        wait_for_the_ticks_to_exit(
+            deployment,
+            build_id,
+            task_id=middle.id,
+            bound_seconds=LINGER_SECONDS + TICK_EXIT_MARGIN_SECONDS,
+        )
+        held.release()
 
         status = wait_for_terminal(build_id, timeout=BUILD_TIMEOUT_SECONDS)
         assert status == "completed", describe(build_id)

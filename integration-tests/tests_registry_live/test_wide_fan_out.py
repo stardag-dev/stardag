@@ -82,6 +82,7 @@ TASKS_IN_PLAN = WIDTH + 1
 BUILD_TIMEOUT_SECONDS = 600
 
 
+@pytest.mark.budget(60)
 def test_a_layer_wider_than_one_pass_completes_once_per_task(
     deployment: Deployment,
 ) -> None:

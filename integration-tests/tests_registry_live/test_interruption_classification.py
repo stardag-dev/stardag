@@ -139,6 +139,7 @@ def _resumption_reports(summaries: list[dict]) -> str:
     )
 
 
+@pytest.mark.budget(130)
 def test_a_cancelled_input_is_reported_rather_than_read_as_a_preemption(
     deployment: Deployment,
 ) -> None:

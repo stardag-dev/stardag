@@ -10,6 +10,13 @@ would fail at the first hand-off -- which is the point of exercising it.
 The durations are not padding. Each one sizes a *window* some scenario needs
 to exist, and the comments say which; shortening one to make a run faster is
 how a scenario silently stops testing anything.
+
+Where a window exists only to hold a state open *for the scenario* -- a task
+still running while the app is redeployed, or while a second build yields
+-- the task takes a ``gate`` as well (see ``_gates``). A gated body holds
+until the scenario releases it, and its duration becomes the upper bound: the
+old sleep, reached only if the release is lost. An empty gate is the old
+behaviour exactly.
 """
 
 from __future__ import annotations
@@ -18,6 +25,8 @@ import os
 from typing import Annotated
 
 import stardag as sd
+
+from ._gates import hold
 
 # The setting ``ScopedUpstreams`` reads its structure from. Named here so the
 # scenario that sets it and the task that reads it cannot drift apart.
@@ -63,7 +72,9 @@ def get_sum(integers: sd.Depends[list[int]]) -> int:
 
 
 @sd.task(name="Slow")
-def slow(values: sd.Depends[list[int]], seconds: int, limit_key: str = "") -> list[int]:
+def slow(
+    values: sd.Depends[list[int]], seconds: int, limit_key: str = "", gate: str = ""
+) -> list[int]:
     """Runs long enough to still be RUNNING when someone else asks for it.
 
     Two scenarios need that. The cross-build ones need a task genuinely
@@ -82,11 +93,14 @@ def slow(values: sd.Depends[list[int]], seconds: int, limit_key: str = "") -> li
     would wake another scenario's build -- and a build that gets woken by
     a neighbour is a build whose own wake-up path was never tested. So a
     scenario asks for a key only when the key is what it is testing.
-    """
-    import time
 
+    ``gate``, when set, ends the run as soon as the scenario releases it, with
+    ``seconds`` as the upper bound (see ``_gates``). For the scenarios that
+    need it RUNNING only until they have done something -- a redeploy, a
+    second build's yield -- rather than for a fixed time.
+    """
     del limit_key  # read off the task by the app's limit-key selector
-    time.sleep(seconds)
+    hold(gate, seconds, what="Slow")
     return values
 
 
@@ -289,12 +303,21 @@ class ConfiguredFanOut(sd.Task[list[int]]):
     Every child reads the same one-element ``Range`` rather than the
     width-sized one this task itself requires: a child's id must not carry the
     width, only its index.
+
+    Two optional gates (see ``_gates``). ``pre_yield_gate`` ends the pre-yield
+    section when the scenario releases it, bounded by ``pre_yield_seconds``;
+    a run of the body after the release -- a restart under new code, a
+    re-plan into a new scope -- finds it open and yields at once, where the
+    ungated body sleeps the whole window again. ``child_gate`` does the same
+    for every child, bounded by its ``child_seconds``.
     """
 
     salt: str
     children: Annotated[int, sd.StardagField(significant=False)] = 4
     child_seconds: int = 30
     pre_yield_seconds: int = 20
+    pre_yield_gate: str = ""
+    child_gate: str = ""
 
     def requires(self):
         return get_range(limit=self.children, salt=self.salt)
@@ -305,15 +328,14 @@ class ConfiguredFanOut(sd.Task[list[int]]):
             slow(
                 values=get_range(limit=1, salt=self.salt),
                 seconds=self.child_seconds + index,
+                gate=self.child_gate,
             )
             for index in range(self.children)
         ]
 
     def run(self):
-        import time
-
         indices = self.requires().load()
-        time.sleep(self.pre_yield_seconds)
+        hold(self.pre_yield_gate, self.pre_yield_seconds, what="pre-yield")
         kids = self.child_tasks()
         assert len(kids) == len(indices)
         yield kids
@@ -326,7 +348,7 @@ class ConfiguredFanOut(sd.Task[list[int]]):
 
 @sd.task(name="SlowOnWorker")
 def slow_on_worker(
-    values: sd.Depends[list[int]], seconds: int, worker: str = "default"
+    values: sd.Depends[list[int]], seconds: int, worker: str = "default", gate: str = ""
 ) -> list[int]:
     """``Slow``, but routed to a named worker by the app's selector.
 
@@ -344,12 +366,12 @@ def slow_on_worker(
     ``seconds`` has to outlive the stop -- the tasks that are not stopped
     must still be running when the command releases the claims, so that
     "they finish afterwards" is a thing that can be observed rather than a
-    race the scenario happened to win.
+    race the scenario happened to win. With a ``gate`` it is an upper bound:
+    the scenario releases the gate once it has observed that, and the ones
+    still running finish then (see ``_gates``).
     """
-    import time
-
     del worker  # read off the task by the app's worker selector
-    time.sleep(seconds)
+    hold(gate, seconds, what="SlowOnWorker")
     return values
 
 
@@ -379,12 +401,17 @@ class WorkerFanIn(sd.Task[int]):
 
     ``salt`` reaches the leaf and through it every task id here -- see the
     note on ``get_range``.
+
+    ``gate`` makes ``seconds`` an upper bound (see ``_gates``): every upstream
+    holds until the scenario releases it, so "outlive the whole scenario" is
+    a state the scenario ends rather than a duration it has to fit inside.
     """
 
     salt: str
     stopped_worker: str = "alt"
     seconds: int = 180
     per_worker: int = 2
+    gate: str = ""
 
     def requires(self):
         return self.stopped_tasks() + self.kept_tasks()
@@ -405,7 +432,12 @@ class WorkerFanIn(sd.Task[int]):
         # them all. Two is simply a small number of integers.
         leaf = get_range(limit=2, salt=self.salt)
         return [
-            slow_on_worker(values=leaf, seconds=self.seconds + index, worker=worker)
+            slow_on_worker(
+                values=leaf,
+                seconds=self.seconds + index,
+                worker=worker,
+                gate=self.gate,
+            )
             for index in range(self.per_worker)
         ]
 
@@ -521,15 +553,23 @@ class RolloverRoot(sd.Task[list[int]]):
     rehydrates with the default and the recomputed task id differs from the
     build's ``root_task_ids``: "new code changed what the build asked for",
     which a rollover must refuse rather than silently re-plan.
+
+    ``gate`` is handed to the upstream ``Slow`` (see ``_gates``); ``seconds``
+    is then its upper bound.
     """
 
     salt: str
     seconds: int = 60
+    gate: str = ""
     if _ROOT_VARIANT == "renamed":
         revision: int = 2
 
     def requires(self):
-        return slow(values=get_range(limit=2, salt=self.salt), seconds=self.seconds)
+        return slow(
+            values=get_range(limit=2, salt=self.salt),
+            seconds=self.seconds,
+            gate=self.gate,
+        )
 
     def run(self):
         self._save(self.requires().load())

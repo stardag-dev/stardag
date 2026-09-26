@@ -13,13 +13,14 @@ SUSPENDED is ACTIONABLE, so the parent is runnable there and is restarted
 completes once those children have. No detection step, no double
 execution: the old yield's children are members of a plan nobody drives.
 
-``test_rollover`` (S3) says the late yield "is not forced here" because it
-cannot time it; it can, and this is that scenario. The order is not a race
-the test wins: after the parent's claim the D1 tick lingers briefly and
-exits, and nothing else spawns a tick until the parent's own suspend -- by
-which time D2 is the app's live code. The one condition it rests on, that
-D2 was activated before the yield, is read back off the registry and
-asserted.
+``test_rollover`` (S3) does not assert the late yield; this scenario
+forces it. The order is not a race the test wins: the parent holds its
+pre-yield section on a gate, and the scenario releases it only once D2 is
+the app's live code *and* the D1 tick that claimed the parent has exited --
+so nothing spawns a tick until the parent's own suspend, and that tick is
+D2's. The restart under D2 finds the gate open and yields at once. The one
+condition it rests on, that D2 was activated before the yield, is read
+back off the registry and asserted.
 
 The alternatives this rules out: refusing the old execution's yield (its
 work lost, the parent failed), and continuing the old plan on the new code
@@ -39,6 +40,10 @@ from stardag_integration_tests.registry_live._events import (
     describe_ledger,
     executions_of,
     task_events,
+)
+from stardag_integration_tests.registry_live._gates import (
+    GateSet,
+    wait_for_the_ticks_to_exit,
 )
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import (
@@ -67,21 +72,26 @@ pytestmark = [
 
 APP_NAME = ROLLOVER_APP_NAMES["S7"]
 
-# The second deploy (30-60 s) must be activated before the parent yields;
-# the margin is a container start on top of one deploy (measured ~45 s)
-# and the wait for RUNNING. Paid three times:
-# the restart under D2 runs the pre-yield section twice (yield, then
-# completion), so this constant is the scenario's long pole in CI.
+# The pre-yield section's *upper bound*, reached only if the gate's release
+# is lost. The parent holds until the scenario releases it after D2 is
+# activated (see ``_gates``); the restarts under D2 -- yield, then
+# completion -- find it open. Ungated, this was paid three times and was the
+# scenario's long pole in CI.
 PRE_YIELD_SECONDS = 110
 CHILD_SECONDS = 5
 CHILDREN = 2
+# The D1 tick's linger, and how long the release waits on top of it for that
+# tick to report its exit (``wait_for_the_ticks_to_exit``).
+LINGER_SECONDS = 30
+TICK_EXIT_MARGIN_SECONDS = 90
 
 STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 900
 
 
+@pytest.mark.budget(180)
 def test_s7_an_old_deployment_yield_lands_and_the_parent_restarts_on_new_code(
-    deployment: Deployment,
+    deployment: Deployment, gates: GateSet
 ) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.tasks import (
@@ -91,11 +101,14 @@ def test_s7_an_old_deployment_yield_lands_and_the_parent_restarts_on_new_code(
 
     env = deployment.modal_environment
     code_1, code_2 = uuid.uuid4().hex, uuid.uuid4().hex
+    salt = uuid.uuid4().hex
+    pre_yield = gates.new("pre-yield", salt=salt)
     parent = ConfiguredFanOut(
-        salt=uuid.uuid4().hex,
+        salt=salt,
         children=CHILDREN,
         child_seconds=CHILD_SECONDS,
         pre_yield_seconds=PRE_YIELD_SECONDS,
+        pre_yield_gate=pre_yield.key,
     )
     registry = registry_provider.get()
 
@@ -109,7 +122,10 @@ def test_s7_an_old_deployment_yield_lands_and_the_parent_restarts_on_new_code(
                 reactive=True,
                 # Short on purpose: no D1 tick may still be lingering when
                 # the parent yields, or it would drive the old plan on.
-                tick_kwargs={"linger_seconds": 30, "poll_interval_seconds": 3},
+                tick_kwargs={
+                    "linger_seconds": LINGER_SECONDS,
+                    "poll_interval_seconds": 3,
+                },
             )
             .build_id
         )
@@ -124,6 +140,16 @@ def test_s7_an_old_deployment_yield_lands_and_the_parent_restarts_on_new_code(
 
         deploy_rollover_app(APP_NAME, env, code_id=code_2)
         deployment_2 = deployment_of(APP_NAME, code_2)
+
+        # D2 is live. Let the parent yield once no D1 tick is left to drive
+        # the old plan on: the tick its suspend spawns is then D2's.
+        wait_for_the_ticks_to_exit(
+            deployment,
+            build_id,
+            task_id=parent.id,
+            bound_seconds=LINGER_SECONDS + TICK_EXIT_MARGIN_SECONDS,
+        )
+        pre_yield.release()
 
         status = wait_for_terminal(build_id, timeout=BUILD_TIMEOUT_SECONDS)
         events = task_events(deployment, parent.id)
@@ -148,8 +174,10 @@ def test_s7_an_old_deployment_yield_lands_and_the_parent_restarts_on_new_code(
         assert activated_2 is not None
         assert datetime.fromisoformat(yields[0]["created_at"]) > activated_2, (
             "The parent yielded before D2 was activated, so the yield was not "
-            f"'after the switch'; raise PRE_YIELD_SECONDS ({PRE_YIELD_SECONDS}s).\n"
-            + context
+            "'after the switch'. Its gate is released only after the deploy, so "
+            "the hold ended early or ran to its bound "
+            f"({PRE_YIELD_SECONDS}s) before the deploy landed; the gate lines "
+            "in the teardown output say which.\n" + context
         )
 
         # The build rolled over, and the parent restarted under the new plan.

@@ -42,6 +42,10 @@ from stardag_integration_tests.registry_live._events import (
     ledger,
     spawned_executions,
 )
+from stardag_integration_tests.registry_live._gates import (
+    GateSet,
+    wait_for_the_ticks_to_exit,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import (
     Deployment,
@@ -72,8 +76,16 @@ pytestmark = [
 APP_NAME = ROLLOVER_APP_NAMES["S37"]
 
 # The unactivated deploy (30-60 s) must land while the middle task runs, so
-# the tick its completion wakes is the new code's.
+# the tick its completion wakes is the new code's. The middle task holds on a
+# gate released after that deploy (see ``_gates``); this is its upper bound,
+# the old window, reached only if the release is lost.
 SLOW_SECONDS = 120
+# The old code's tick linger, and how long the release waits on top of it
+# for that tick to report its exit: one still lingering when the middle
+# task finishes would drive the build on itself, and the new code's tick
+# would never be woken.
+LINGER_SECONDS = 30
+TICK_EXIT_MARGIN_SECONDS = 90
 
 STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
@@ -92,8 +104,9 @@ def _deployments_cli() -> str:
     return result.stdout
 
 
+@pytest.mark.budget(160)
 def test_s37_a_deploy_without_its_record_stalls_until_it_is_resent(
-    deployment: Deployment,
+    deployment: Deployment, gates: GateSet
 ) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live._deployed import (
@@ -109,7 +122,8 @@ def test_s37_a_deploy_without_its_record_stalls_until_it_is_resent(
     code_1, code_2 = uuid.uuid4().hex, uuid.uuid4().hex
     salt = uuid.uuid4().hex
     leaf = get_range(limit=3, salt=salt)
-    middle = slow(values=leaf, seconds=SLOW_SECONDS)
+    held = gates.new("middle", salt=salt)
+    middle = slow(values=leaf, seconds=SLOW_SECONDS, gate=held.key)
     root = get_sum(integers=middle)
     registry = registry_provider.get()
 
@@ -121,7 +135,10 @@ def test_s37_a_deploy_without_its_record_stalls_until_it_is_resent(
             .build_trigger(
                 root,
                 reactive=True,
-                tick_kwargs={"linger_seconds": 30, "poll_interval_seconds": 3},
+                tick_kwargs={
+                    "linger_seconds": LINGER_SECONDS,
+                    "poll_interval_seconds": 3,
+                },
             )
             .build_id
         )
@@ -139,9 +156,17 @@ def test_s37_a_deploy_without_its_record_stalls_until_it_is_resent(
         row_2 = next(d for d in app_deployments(APP_NAME) if d.id == deployment_2)
         assert row_2.activated_at is None and not row_2.is_current, row_2
         assert registry.task_get(str(middle.id)).status == "running", (
-            f"The deploy landed after the middle task finished; raise "
-            f"SLOW_SECONDS ({SLOW_SECONDS}s)."
+            "The deploy landed after the middle task finished: its hold ran to "
+            f"its {SLOW_SECONDS}s bound first, or ended early; the gate lines "
+            "in the teardown output say which."
         )
+        wait_for_the_ticks_to_exit(
+            deployment,
+            build_id,
+            task_id=middle.id,
+            bound_seconds=LINGER_SECONDS + TICK_EXIT_MARGIN_SECONDS,
+        )
+        held.release()
 
         # The middle task finishes on the old code and wakes a tick of the
         # new: it is superseded, and the build stays where it was.

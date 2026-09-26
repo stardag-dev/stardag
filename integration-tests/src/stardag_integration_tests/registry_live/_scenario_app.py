@@ -94,17 +94,39 @@ TICK_TIMEOUT_SECONDS = 300
 MAX_LINGER_SECONDS = TICK_TIMEOUT_SECONDS - 60
 
 
+# How long an idle container of a *rollover* app outlives its last input.
+# Modal keeps an idle container warm for its scaledown window and routes new
+# inputs to it even after a redeploy has replaced its code, so a tick that
+# lingered out on the old deployment leaves a warm container behind, and
+# the next spawn -- the one that must run the new code -- can land in it.
+# The rollover scenarios used to outwait the default window with their
+# clock-sized sleeps; with gates they must not rely on that. Modal's minimum.
+ROLLOVER_SCALEDOWN_SECONDS = 2
+
+
 def build_scenario_app(
-    app_name: str, *, app_image: modal.Image | None = None
+    app_name: str,
+    *,
+    app_image: modal.Image | None = None,
+    scaledown_window: int | None = None,
 ) -> sd_modal.StardagApp:
     """A scenario app under ``app_name``. Identical but for the name (and, for
-    the rollover app, an image with a variant baked in)."""
+    the rollover app, an image with a variant baked in and a short
+    ``scaledown_window``, see ``ROLLOVER_SCALEDOWN_SECONDS``)."""
     chosen = image if app_image is None else app_image
+
+    def settings(timeout: int) -> sd_modal.FunctionSettings:
+        if scaledown_window is None:
+            return sd_modal.FunctionSettings(image=chosen, timeout=timeout)
+        return sd_modal.FunctionSettings(
+            image=chosen, timeout=timeout, scaledown_window=scaledown_window
+        )
+
     return sd_modal.StardagApp(
         app_name,
-        builder_settings=sd_modal.FunctionSettings(image=chosen, timeout=900),
+        builder_settings=settings(900),
         worker_settings={
-            "default": sd_modal.FunctionSettings(image=chosen, timeout=600),
+            "default": settings(600),
             # A second worker so one scenario can stop *some* of a build's
             # executions and watch the rest finish. Identical settings: what
             # it exists to be is a different Modal function, because that is
@@ -112,12 +134,10 @@ def build_scenario_app(
             # name recorded in the execution metadata). Costs a deploy-time
             # function registration and nothing at run time -- no task
             # routes here unless it asks.
-            ALT_WORKER: sd_modal.FunctionSettings(image=chosen, timeout=600),
+            ALT_WORKER: settings(600),
         },
         worker_selector=registry_live_worker,
-        tick_settings=sd_modal.FunctionSettings(
-            image=chosen, timeout=TICK_TIMEOUT_SECONDS
-        ),
+        tick_settings=settings(TICK_TIMEOUT_SECONDS),
         # **Off on both apps, and the scenarios depend on it being off.**
         # The watchdog is a backstop that sweeps builds periodically; with
         # it running, a build that completes proves only that *something*

@@ -99,6 +99,7 @@ def _call_outcome(ref: str) -> object:
         return e
 
 
+@pytest.mark.budget(20)
 def test_a_retried_claim_is_granted_to_the_attempt_that_won_it() -> None:
     from stardag.build._deployment import local_deployment_id_aio
     from stardag.build._registration import new_id, registration_item
@@ -170,6 +171,7 @@ def test_a_retried_claim_is_granted_to_the_attempt_that_won_it() -> None:
 # --- The worker carries the identity, and both rules that reads it -------
 
 
+@pytest.mark.budget(125)
 def test_a_superseded_workers_start_cannot_take_the_task_back(
     deployment: Deployment,
 ) -> None:
@@ -301,6 +303,7 @@ def test_a_superseded_workers_start_cannot_take_the_task_back(
     )
 
 
+@pytest.mark.budget(80)
 def test_a_cancelled_builds_worker_stops_itself(deployment: Deployment) -> None:
     """Cooperative cancellation, with nothing reaching into the container.
 

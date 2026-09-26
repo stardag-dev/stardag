@@ -40,6 +40,11 @@ change the assertion, not the framework.
 The "the selected calls stopped" check below is now an exclusivity check
 rather than a mere liveness one, for the same reason: nothing but this
 command could have stopped them.
+
+Every upstream holds on a gate (see ``_gates``) until the scenario has made
+both checks, then the scenario releases it and the excluded ones finish at
+once. Their ``seconds`` is only the upper bound now, where it used to be a
+sleep the completion wait had to sit out.
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ import uuid
 import pytest
 
 from stardag_integration_tests.registry_live._events import task_events
+from stardag_integration_tests.registry_live._gates import GateSet
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
@@ -64,8 +70,9 @@ registry_live_guard()
 pytestmark = [
     pytest.mark.registry_live,
     # Longer than the tier's usual 900: this scenario now waits out the
-    # excluded upstreams' own sleep, which is the price of asserting that
-    # they were never touched rather than merely that they were listed.
+    # excluded upstreams' own sleep -- their gate's bound, if the release is
+    # lost -- which is the price of asserting that they were never touched
+    # rather than merely that they were listed.
     #
     # Sized above the sum of the per-step budgets below (420 + 420 + 420 +
     # 120 + 180 + 180), so a slow run fails on the step that is actually late
@@ -131,7 +138,10 @@ def _stoppable_ids(build_id: uuid.UUID) -> set[str]:
     return {str(e.task_id) for e in executions if _stop.is_stoppable(e)}
 
 
-def test_stop_cancels_only_the_selected_workers_calls(deployment: Deployment) -> None:
+@pytest.mark.budget(90)
+def test_stop_cancels_only_the_selected_workers_calls(
+    deployment: Deployment, gates: GateSet
+) -> None:
     from typer.testing import CliRunner
 
     from stardag._cli.builds import app
@@ -140,7 +150,8 @@ def test_stop_cancels_only_the_selected_workers_calls(deployment: Deployment) ->
     from stardag_integration_tests.registry_live.tasks import WorkerFanIn
 
     salt = uuid.uuid4().hex
-    root = WorkerFanIn(salt=salt, stopped_worker=ALT_WORKER)
+    upstreams = gates.new("upstreams", salt=salt)
+    root = WorkerFanIn(salt=salt, stopped_worker=ALT_WORKER, gate=upstreams.key)
     stopped = root.stopped_tasks()
     kept = root.kept_tasks()
 
@@ -285,16 +296,20 @@ def test_stop_cancels_only_the_selected_workers_calls(deployment: Deployment) ->
     assert payload["build_cancelled"] is True
     assert build_status(build_id) == "cancelled", describe(build_id)
 
-    # The strong form. The excluded executions run out their sleep and
+    # Both checks are made: let the excluded upstreams go. (The selected
+    # ones are gone; the release reaches nothing of theirs.)
+    upstreams.release()
+
+    # The strong form. The excluded executions finish their hold and
     # report their own completion -- late, since their claims were
     # released -- which ends them on the ledger with outcome ``completed``.
     # Nothing writes that end but the execution itself, and a cancelled
     # Modal call raises rather than reporting, so it proves they were never
     # touched. The task rows stay CANCELLED: a late report never moves one.
     #
-    # Sized off the task's own sleep plus the skew this scenario has
-    # already spent waiting, so a hang fails on the timeout rather than on
-    # the tier's.
+    # Sized off the task's own bound plus the skew this scenario has
+    # already spent waiting, so a lost release still passes and a hang fails
+    # on this timeout rather than on the tier's.
     kept_ids = {str(task.id) for task in kept}
 
     def _kept_outcomes() -> dict[str, str | None]:

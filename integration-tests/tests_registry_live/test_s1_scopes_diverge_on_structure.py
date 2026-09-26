@@ -58,6 +58,7 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
+@pytest.mark.budget(115)
 def test_s1_diverging_scopes_run_one_completion_once(deployment: Deployment) -> None:
     from stardag.registry import registry_provider
     from stardag.registry import TaskInstanceInfo

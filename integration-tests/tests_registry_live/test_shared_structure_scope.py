@@ -53,6 +53,7 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
+@pytest.mark.budget(210)
 def test_a_scope_mate_reuses_the_parents_yield(deployment: Deployment) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.dag_app import app

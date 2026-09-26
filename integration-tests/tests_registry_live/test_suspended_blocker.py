@@ -118,6 +118,7 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
+@pytest.mark.budget(210)
 def test_a_suspended_blocker_is_waited_on_rather_than_reset(
     deployment: Deployment,
 ) -> None:

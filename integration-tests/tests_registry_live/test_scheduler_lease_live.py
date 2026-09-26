@@ -169,6 +169,7 @@ class _CountingTransport(httpx.AsyncBaseTransport):
         return response
 
 
+@pytest.mark.budget(45)
 def test_concurrent_acquires_grant_exactly_one() -> None:
     """N concurrent acquires; the FOR UPDATE transaction lets one through."""
 
@@ -258,6 +259,7 @@ def test_concurrent_acquires_grant_exactly_one() -> None:
     asyncio.run(rounds())
 
 
+@pytest.mark.budget(30)
 def test_a_lapsed_lease_is_taken_over_on_the_real_clock() -> None:
     """Server-side expiry, no release: the takeover is the healing path.
 
@@ -355,6 +357,7 @@ def _cut_wire(registry) -> tuple[httpx.AsyncBaseTransport, Callable[[], int]]:
     return live_transport, lambda: swallowed
 
 
+@pytest.mark.budget(30)
 def test_failing_renewals_are_a_blip_and_not_a_lost_lease(monkeypatch) -> None:
     """Renewals that raise prove nothing, and must not stop the tick.
 
@@ -408,6 +411,7 @@ def test_failing_renewals_are_a_blip_and_not_a_lost_lease(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.budget(60)
 def test_an_outage_spanning_the_ttl_stops_the_lease_on_the_clock(
     monkeypatch,
 ) -> None:

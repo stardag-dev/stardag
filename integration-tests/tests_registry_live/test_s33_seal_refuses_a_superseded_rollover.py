@@ -37,6 +37,10 @@ from stardag_integration_tests.registry_live._events import (
     ledger,
     spawned_executions,
 )
+from stardag_integration_tests.registry_live._gates import (
+    GateSet,
+    wait_for_the_ticks_to_exit,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import (
     Deployment,
@@ -65,8 +69,15 @@ APP_NAME = ROLLOVER_APP_NAMES["S33"]
 
 # Two deploys (30-60 s each) and D2's local walk must fit while the middle
 # task is RUNNING: its completion is what wakes D3's tick, and nothing may
-# wake a tick on Modal before D3 is live.
+# wake a tick on Modal before D3 is live. So the middle task holds on a gate
+# the scenario releases once the race is staged (see ``_gates``); this is
+# its upper bound, the old window, reached only if the release is lost.
 SLOW_SECONDS = 240
+# D1's tick linger, and how long the release waits on top of it for that
+# tick to report its exit: a D1 tick still lingering when the middle task
+# finishes would drive the build on D1's plan instead of waking D3's.
+LINGER_SECONDS = 30
+TICK_EXIT_MARGIN_SECONDS = 90
 
 STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 900
@@ -101,8 +112,9 @@ class _DeployBeforeSeal:
             raise
 
 
+@pytest.mark.budget(150)
 def test_s33_the_older_of_two_rollovers_is_refused_at_seal(
-    deployment: Deployment,
+    deployment: Deployment, gates: GateSet
 ) -> None:
     from stardag.build._reactive._rollover import roll_over_aio
     from stardag.registry import RegistryABC, registry_provider
@@ -115,7 +127,10 @@ def test_s33_the_older_of_two_rollovers_is_refused_at_seal(
     env = deployment.modal_environment
     code_1, code_2, code_3 = (uuid.uuid4().hex for _ in range(3))
     salt = uuid.uuid4().hex
-    middle = slow(values=get_range(limit=3, salt=salt), seconds=SLOW_SECONDS)
+    held = gates.new("middle", salt=salt)
+    middle = slow(
+        values=get_range(limit=3, salt=salt), seconds=SLOW_SECONDS, gate=held.key
+    )
     root = get_sum(integers=middle)
     registry = registry_provider.get()
 
@@ -127,7 +142,10 @@ def test_s33_the_older_of_two_rollovers_is_refused_at_seal(
             .build_trigger(
                 root,
                 reactive=True,
-                tick_kwargs={"linger_seconds": 30, "poll_interval_seconds": 3},
+                tick_kwargs={
+                    "linger_seconds": LINGER_SECONDS,
+                    "poll_interval_seconds": 3,
+                },
             )
             .build_id
         )
@@ -161,9 +179,20 @@ def test_s33_the_older_of_two_rollovers_is_refused_at_seal(
         )
         assert outcome == "superseded", outcome
         assert registry.task_get(str(middle.id)).status == "running", (
-            f"The middle task finished before the race was staged; raise "
-            f"SLOW_SECONDS ({SLOW_SECONDS}s)."
+            "The middle task finished before the race was staged: its hold ran "
+            f"to its {SLOW_SECONDS}s bound first, or ended early; the gate "
+            "lines in the teardown output say which."
         )
+
+        # The race is staged and D3 is live: let the middle task finish, and
+        # its completion wake D3's tick.
+        wait_for_the_ticks_to_exit(
+            deployment,
+            build_id,
+            task_id=middle.id,
+            bound_seconds=LINGER_SECONDS + TICK_EXIT_MARGIN_SECONDS,
+        )
+        held.release()
 
         status = wait_for_terminal(build_id, timeout=BUILD_TIMEOUT_SECONDS)
         assert status == "completed", describe(build_id)

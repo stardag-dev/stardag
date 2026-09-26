@@ -11,9 +11,10 @@ build" rather than silently re-planned onto roots nobody asked for.
 
 The second deploy bakes ``REGISTRY_LIVE_ROOT_VARIANT=renamed`` into its
 image, which is the harness's stand-in for that code change (see
-``tasks.RolloverRoot``). It lands while the root's upstream is RUNNING;
-the upstream's worker finishes on the old code and its completion wakes the
-first tick of the new code, which is the one that must refuse.
+``tasks.RolloverRoot``). It lands while the root's upstream is RUNNING,
+held there on a gate the scenario releases after the deploy; the upstream's
+worker finishes on the old code and its completion wakes the first tick of
+the new code, which is the one that must refuse.
 
 The alternative this rules out is a rollover that trusts the stored root
 bodies' ids, or re-plans whatever the new code builds from them: the build
@@ -27,6 +28,10 @@ import uuid
 import pytest
 
 from stardag_integration_tests.registry_live._events import _get
+from stardag_integration_tests.registry_live._gates import (
+    GateSet,
+    wait_for_the_ticks_to_exit,
+)
 from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import (
     Deployment,
@@ -53,21 +58,31 @@ pytestmark = [
 APP_NAME = ROLLOVER_APP_NAMES["S20"]
 
 # The second deploy (30-60 s) must land while the root's upstream runs, so
-# that the first tick after it is the new code's.
+# that the first tick after it is the new code's. The upstream holds on a
+# gate released after that deploy (see ``_gates``); this is its upper bound,
+# the old window, reached only if the release is lost.
 UPSTREAM_SECONDS = 150
+# The first deploy's tick linger, and how long the release waits on top of
+# it for that tick to report its exit: one still lingering when the upstream
+# finishes would complete the build on the old code, never refusing.
+LINGER_SECONDS = 30
+TICK_EXIT_MARGIN_SECONDS = 90
 
 STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 900
 
 
+@pytest.mark.budget(220)
 def test_s20_a_root_whose_id_changes_under_new_code_fails_the_build(
-    deployment: Deployment,
+    deployment: Deployment, gates: GateSet
 ) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.tasks import RolloverRoot
 
     env = deployment.modal_environment
-    root = RolloverRoot(salt=uuid.uuid4().hex, seconds=UPSTREAM_SECONDS)
+    salt = uuid.uuid4().hex
+    held = gates.new("upstream", salt=salt)
+    root = RolloverRoot(salt=salt, seconds=UPSTREAM_SECONDS, gate=held.key)
     upstream = root.requires()
     registry = registry_provider.get()
 
@@ -79,7 +94,10 @@ def test_s20_a_root_whose_id_changes_under_new_code_fails_the_build(
             .build_trigger(
                 root,
                 reactive=True,
-                tick_kwargs={"linger_seconds": 30, "poll_interval_seconds": 3},
+                tick_kwargs={
+                    "linger_seconds": LINGER_SECONDS,
+                    "poll_interval_seconds": 3,
+                },
             )
             .build_id
         )
@@ -93,9 +111,17 @@ def test_s20_a_root_whose_id_changes_under_new_code_fails_the_build(
             APP_NAME, env, code_id=uuid.uuid4().hex, root_variant="renamed"
         )
         assert registry.task_get(str(upstream.id)).status == "running", (
-            f"The second deploy landed after the upstream finished; raise "
-            f"UPSTREAM_SECONDS ({UPSTREAM_SECONDS}s)."
+            "The second deploy landed after the upstream finished: its hold ran "
+            f"to its {UPSTREAM_SECONDS}s bound first, or ended early; the gate "
+            "lines in the teardown output say which."
         )
+        wait_for_the_ticks_to_exit(
+            deployment,
+            build_id,
+            task_id=upstream.id,
+            bound_seconds=LINGER_SECONDS + TICK_EXIT_MARGIN_SECONDS,
+        )
+        held.release()
 
         status = wait_for_terminal(build_id, timeout=BUILD_TIMEOUT_SECONDS)
         assert status == "failed", (

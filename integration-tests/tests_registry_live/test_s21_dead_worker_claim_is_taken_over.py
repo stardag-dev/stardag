@@ -79,6 +79,7 @@ MAX_SWEEPS = 4
 BUILD_TIMEOUT_SECONDS = 300
 
 
+@pytest.mark.budget(150)
 def test_s21_a_dead_worker_lapsed_claim_is_taken_over(deployment: Deployment) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live._deployed import (

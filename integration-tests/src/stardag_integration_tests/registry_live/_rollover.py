@@ -18,13 +18,20 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 from uuid import UUID
 
-from .rollover_app import ROLLOVER_APP_NAME_ENV
+from .rollover_app import DEPLOY_NONCE_ENV, DEPLOY_PROBE_FUNCTION, ROLLOVER_APP_NAME_ENV
 from .tasks import ROOT_VARIANT_ENV
 
 APP_MODULE = "stardag_integration_tests.registry_live.rollover_app"
+
+# How long a deploy may take to start serving before the scenario proceeds
+# anyway (see ``wait_until_the_deploy_serves``).
+DEPLOY_SERVING_TIMEOUT_SECONDS = 180
+PROBE_INTERVAL_SECONDS = 5
 
 # Every app name a rollover scenario deploys, so the log dump can collect
 # them. A scenario names its app from here and nowhere else.
@@ -63,12 +70,17 @@ def deploy_rollover_app(
 
     ``activate=False`` deploys the code and records the deployment, but
     never activates it (S37).
+
+    Returns only once a fresh call reaches the new code
+    (``wait_until_the_deploy_serves``).
     """
+    nonce = uuid.uuid4().hex
     env = {
         **os.environ,
         "MODAL_ENVIRONMENT": modal_environment,
         "STARDAG_CODE_ID": code_id,
         ROLLOVER_APP_NAME_ENV: app_name,
+        DEPLOY_NONCE_ENV: nonce,
     }
     env.pop(ROOT_VARIANT_ENV, None)
     if root_variant:
@@ -90,6 +102,71 @@ def deploy_rollover_app(
         f"Deploy of {app_name!r} as {code_id[:12]} failed:\n"
         f"{result.stdout}\n{result.stderr}"
     )
+    # Also for ``activate=False``: that skips only the registry's activation
+    # of the deployment record, and the Modal deploy itself goes live, so
+    # the new code is what the next spawn reaches either way (S37).
+    assert wait_until_the_deploy_serves(app_name, modal_environment, nonce), (
+        f"The deploy of {app_name!r} as {code_id[:12]} returned, but no fresh "
+        f"call reached it within {DEPLOY_SERVING_TIMEOUT_SECONDS}s. Carrying on "
+        "would run the scenario against the previous deployment, so it would "
+        "no longer test a rollover."
+    )
+
+
+def wait_until_the_deploy_serves(
+    app_name: str,
+    modal_environment: str,
+    nonce: str,
+    *,
+    timeout: float = DEPLOY_SERVING_TIMEOUT_SECONDS,
+) -> bool:
+    """Wait until a fresh call to the app reaches the deploy tagged ``nonce``.
+
+    **``modal deploy`` returning is not the new code serving.** Measured in
+    CI: a tick spawned seconds after the deploy command returned started a
+    fresh container of the *previous* version -- in S33, of a deployment
+    already superseded -- and locally a fresh container reached the new
+    code only ~16 s after the command returned. The old clock-sized windows
+    (a minute or more past every deploy) hid that; a gate released the
+    moment the deploy returns does not. So the deploy waits for the state
+    instead: ``deploy_probe`` answers with its deploy's nonce, and a call
+    answering with this one is a fresh container reaching the new code. The
+    probe scales down between calls (``ROLLOVER_SCALEDOWN_SECONDS``), so no
+    answer comes from a warm container of an earlier deploy -- which, polled
+    every two seconds, one did for three minutes straight.
+
+    Bounded: at ``timeout`` it says so and returns False, and the deploy
+    fails -- a scenario that carried on would be testing the previous
+    deployment.
+    """
+    import modal
+
+    function = modal.Function.from_name(
+        app_name, DEPLOY_PROBE_FUNCTION, environment_name=modal_environment
+    )
+    started = time.monotonic()
+    answered = None
+    while time.monotonic() - started < timeout:
+        try:
+            answered = function.remote()
+        except Exception as error:  # a fault is "not yet"
+            answered = f"<{type(error).__name__}>"
+        if answered == nonce:
+            waited = time.monotonic() - started
+            print(
+                f"[harness] {app_name}: the new deploy serves after {waited:.1f}s",
+                file=sys.stderr,
+            )
+            return True
+        # Longer than the probe's scaledown window, so the next call is a
+        # fresh container rather than the one that just answered.
+        time.sleep(PROBE_INTERVAL_SECONDS)
+    print(
+        f"[harness] {app_name}: a fresh call still reached another deploy "
+        f"({answered!r}) {timeout:.0f}s after the deploy returned; carrying on",
+        file=sys.stderr,
+    )
+    return False
 
 
 def trigger_app(app_name: str):

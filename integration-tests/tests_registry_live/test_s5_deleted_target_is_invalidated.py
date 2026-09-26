@@ -71,6 +71,7 @@ def _invalidations(deployment: Deployment, task_id, build_id) -> list[dict]:
     ]
 
 
+@pytest.mark.budget(115)
 def test_s5_a_deleted_target_is_invalidated_and_rerun(deployment: Deployment) -> None:
     from stardag.registry import registry_provider
     from stardag_integration_tests.registry_live.dag_app import app

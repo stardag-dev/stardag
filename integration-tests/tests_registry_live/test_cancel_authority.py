@@ -86,6 +86,7 @@ def _owner(deployment: Deployment, task_id: str) -> str | None:
     return current.build_id if current is not None else None
 
 
+@pytest.mark.budget(140)
 def test_a_cancelled_build_cannot_touch_another_builds_execution(
     deployment: Deployment,
 ) -> None:

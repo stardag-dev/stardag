@@ -86,6 +86,7 @@ STATUS_TIMEOUT_SECONDS = 300
 BUILD_TIMEOUT_SECONDS = 600
 
 
+@pytest.mark.budget(110)
 def test_a_failed_blocker_is_left_alone_by_a_second_build(
     deployment: Deployment,
 ) -> None:
