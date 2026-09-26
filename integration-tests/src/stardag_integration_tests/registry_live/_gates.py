@@ -237,9 +237,10 @@ class GateSet:
     def holds(self, *, remove: bool = False) -> list[dict]:
         """Every hold recorded against this scenario's gates.
 
-        ``remove`` also deletes those records and the gates' own keys, so
-        an environment reused across runs (a developer's stack) does not
-        accumulate them.
+        ``remove`` also deletes those records, so an environment reused
+        across runs (a developer's stack) does not accumulate them. The
+        gates' own release keys stay: a held task may still be polling for
+        one, and removing it would strand the task until its bound.
         """
         if not self.gates:
             return []
@@ -254,7 +255,7 @@ class GateSet:
             and value.get("gate") in keys
         ]
         if remove:
-            for key in [*(k for k, _ in found), *keys]:
+            for key in (k for k, _ in found):
                 try:
                     store.pop(key, None)
                 except Exception as error:  # housekeeping only
