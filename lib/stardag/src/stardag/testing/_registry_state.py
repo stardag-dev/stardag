@@ -65,6 +65,9 @@ class BuildRow:
     reactive_tick_kwargs: dict[str, Any] | None = None
     needs_tick: bool = False
     handed_out_at: datetime | None = None
+    # When a tick last released the lease: a hand-out older than this is
+    # spent (the server's ``build.scheduler_lease_released_at``, STA-34).
+    lease_released_at: datetime | None = None
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
     is_resumed: bool = False

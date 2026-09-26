@@ -376,7 +376,8 @@ async def wake_candidates(
 ) -> list[WakeCandidate]:
     """Hand out flagged RUNNING reactive builds with no live lease, not
     handed out within :data:`WAKE_HANDOUT_WINDOW` (a hand-out older than the
-    build's last lease release counts as spent), oldest flag first (at
+    build's last lease release counts as spent; strictly older, so a
+    hand-out stamped in the same microsecond keeps its window), oldest flag first (at
     most :data:`MAX_WAKE_CANDIDATES`). Each returned build is stamped
     ``tick_requested_at`` in this transaction, its wake row taken ``SKIP
     LOCKED``, so concurrent callers get disjoint answers.
@@ -398,9 +399,7 @@ async def wake_candidates(
                     BuildWake.needs_tick_at.is_not(None),
                     BuildWake.tick_requested_at.is_(None)
                     | (BuildWake.tick_requested_at < now - WAKE_HANDOUT_WINDOW)
-                    | (
-                        BuildWake.tick_requested_at <= Build.scheduler_lease_released_at
-                    ),
+                    | (BuildWake.tick_requested_at < Build.scheduler_lease_released_at),
                     Build.status == BuildStatus.RUNNING,
                     Build.reactive_app_name.is_not(None),
                     Build.scheduler_lease_until.is_(None)

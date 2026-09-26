@@ -655,6 +655,10 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
             if (
                 build.handed_out_at is not None
                 and now - build.handed_out_at < WAKE_HANDOUT_WINDOW
+                and not (
+                    build.lease_released_at is not None
+                    and build.handed_out_at < build.lease_released_at
+                )
             ):
                 continue
             build.handed_out_at = now
@@ -692,6 +696,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
             return SchedulerLeaseResult(held=False)
         build.lease_owner = None
         build.lease_expires_at = None
+        build.lease_released_at = self.now()
         return SchedulerLeaseResult(held=True)
 
     def build_report_tick_summary(

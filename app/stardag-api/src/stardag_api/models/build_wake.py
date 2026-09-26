@@ -60,6 +60,9 @@ class BuildWake(EnvironmentScopedMixin, Base):
     # When a caller was last told to spawn a tick for this build (a
     # wake-candidates hand-out, or a notify that reported no live
     # scheduler). A flagged build is handed out at most once per
-    # ``services.wakeups.WAKE_HANDOUT_WINDOW``. Not a liveness signal and
-    # not cleared: it ages out.
+    # ``services.wakeups.WAKE_HANDOUT_WINDOW``, or until the tick it spawned
+    # releases the scheduler lease (``build.scheduler_lease_released_at``
+    # newer than this spends it; STA-34). Not a liveness signal and never
+    # cleared here: the release is recorded on the build row, so releasing
+    # does not lock this one.
     tick_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
