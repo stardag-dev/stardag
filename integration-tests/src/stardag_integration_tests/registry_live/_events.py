@@ -21,6 +21,9 @@ workers use, and the same shape as the harness's other direct calls.
 
 from __future__ import annotations
 
+import collections
+import logging
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,8 +31,28 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
+from stardag.registry._api_http import (
+    _MAX_TRANSIENT_RETRIES,
+    _TRANSIENT_EXCEPTIONS,
+    _transient_cause,
+    _transient_delay,
+)
 
 from ._harness import Deployment
+
+logger = logging.getLogger(__name__)
+
+# The harness's own reads retried the way the SDK retries its calls, and
+# counted beside the SDK's tally (``retry_counts``): these are calls to the
+# same registry through the same proxy, and they meet the same lost
+# answers. A read is safe to send twice by construction.
+_retry_counts: collections.Counter[str] = collections.Counter()
+
+
+def retry_counts() -> dict[str, int]:
+    """How many of the harness's own reads this process has retried, by cause."""
+    return dict(_retry_counts)
+
 
 # A reset is recorded as this. It is what a build does to a failed,
 # cancelled or skipped task to make it its own to run again -- correct
@@ -276,6 +299,11 @@ def current_execution(deployment: Deployment, task_id: Any) -> CurrentExecution 
     )
 
 
+# The registry answers in well under a second; a read that has waited this
+# long is lost, not slow, and is better sent again than waited on.
+_READ_TIMEOUT_SECONDS = 10.0
+
+
 def _get(
     deployment: Deployment,
     path: str,
@@ -283,13 +311,44 @@ def _get(
     params: dict[str, str] | None = None,
     raise_for_status: bool = True,
 ) -> httpx.Response:
-    """One authenticated GET against the registry's SDK routes (``/api/v2``)."""
-    with httpx.Client(timeout=60.0) as client:
-        response = client.get(
-            f"{deployment.api_url.rstrip('/')}/api/v2/{path.lstrip('/')}",
-            headers={"X-API-Key": deployment.api_key},
-            params=params,
-        )
+    """One authenticated GET against the registry's SDK routes (``/api/v2``).
+
+    An exchange that got no complete answer -- a timeout, a dropped
+    connection, a body cut short, a proxy error -- is sent again, with the
+    SDK's bounds and backoff; an answer the registry wrote is returned as
+    it is.
+    """
+    url = f"{deployment.api_url.rstrip('/')}/api/v2/{path.lstrip('/')}"
+    retries = 0
+    with httpx.Client(timeout=_READ_TIMEOUT_SECONDS) as client:
+        while True:
+            try:
+                response = client.get(
+                    url, headers={"X-API-Key": deployment.api_key}, params=params
+                )
+            except _TRANSIENT_EXCEPTIONS as error:
+                if retries >= _MAX_TRANSIENT_RETRIES:
+                    raise
+                cause, detail = type(error).__name__, str(error)
+            else:
+                cause = _transient_cause(response)
+                if cause is None or retries >= _MAX_TRANSIENT_RETRIES:
+                    break
+                detail = response.text[:120]
+            retries += 1
+            _retry_counts[cause] += 1
+            delay = _transient_delay(retries)
+            logger.warning(
+                "Harness GET %s got no complete answer (%s: %s); retrying in "
+                "%.1fs (retry %d of %d).",
+                path,
+                cause,
+                detail,
+                delay,
+                retries,
+                _MAX_TRANSIENT_RETRIES,
+            )
+            time.sleep(delay)
     if raise_for_status:
         response.raise_for_status()
     return response

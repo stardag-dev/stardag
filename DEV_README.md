@@ -266,22 +266,34 @@ rows — and every scenario then fails in ways that read as scheduling bugs.
 boot nonce on `/_harness/boot` is the detection, checked after every scenario,
 so a recycle is one sentence naming the cause instead of a debugging session.
 
-**A recycled container is retried, once, and nothing else is.** CI reruns the
-tier — re-provisioning first, since the replacement container's database is
-empty — when and only when that boot nonce changed. A scenario that failed on
-its own merits is never retried. Locally the marker is not written and the
-assertion message tells you to provision again. The alternative, PGDATA on a
-Modal Volume, was considered and rejected; `record_recycle` in `_harness.py`
-carries the reasoning.
+**A lost answer is retried where it happens, first.** The registry answers in
+well under a second, and yet a call from the runner or a worker sometimes gets
+no complete answer at all — no headers in time, a body that stalls or is cut
+short, a 500 page from Modal's web proxy. The SDK sends such an exchange again
+(up to three retries, with a warning each time), and so do the harness's own
+reads; the tier sets the client timeout to 10 s rather than the SDK's 30 s,
+because a call that has waited ten has lost its answer rather than being slow.
+Those retries are counted, and CI annotates the count on every run, green or
+red (`Registry exchanges retried`), so the class stays measured after it
+stopped failing scenarios.
 
-**A transport timeout is the second retryable failure, and the list ends
-there.** A request that receives _no HTTP response at all_ says nothing about
-the code under test. It has happened five times, in five scenarios against
-five endpoints, and the cause is still unidentified. CI runs the tier once
-more — without re-provisioning, since the stack is intact — and emits a
-workflow warning, so occurrences are counted rather than silenced. Strictly a
-timeout: an assertion failure and an HTTP error status are real results and
-fail immediately. `_diagnostics.transport_timeout` states both exclusions, and
+**A recycled container is retried, once, and nothing else is.** CI re-runs
+the failed scenarios — re-provisioning first, since the replacement
+container's database is empty — when and only when that boot nonce changed. A
+scenario that failed on its own merits is never retried. Locally the marker is
+not written and the assertion message tells you to provision again. The
+alternative, PGDATA on a Modal Volume, was considered and rejected;
+`record_recycle` in `_harness.py` carries the reasoning.
+
+**A transport fault that survives the client's retries is the second
+retryable failure, and the list ends there.** A request that never received a
+complete HTTP response says nothing about the code under test. CI re-runs
+**only the scenarios that failed** (`pytest --last-failed`), without
+re-provisioning since the stack is intact, and emits a workflow warning, so
+occurrences are counted rather than silenced. Strictly a transport fault — a
+timeout, a network error, or a body cut short: an assertion failure and an
+HTTP error status are real results and fail immediately.
+`_diagnostics.transport_timeout` states both exclusions, and
 `tests/test_registry_live_diagnostics.py` holds them.
 
 **Read the phase before concluding what was lost**, because it is recorded and

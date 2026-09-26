@@ -327,9 +327,55 @@ def test_an_unwritable_marker_fails_closed(
     assert CLASSIFICATION_FAILED in capsys.readouterr().err
 
 
-def test_a_connection_error_is_not_a_timeout() -> None:
-    """Narrow by design: the evidence names timeouts and nothing else."""
-    error = _raised(httpx.ConnectError("connection refused", request=_REQUEST))
+@pytest.mark.parametrize(
+    "fault",
+    [
+        pytest.param(
+            httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body "
+                "(received 0 bytes, expected 2560)",
+                request=_REQUEST,
+            ),
+            id="body-cut-short",
+        ),
+        pytest.param(
+            httpx.ConnectError("connection refused", request=_REQUEST),
+            id="no-connection",
+        ),
+        pytest.param(
+            httpx.ReadError("connection reset by peer", request=_REQUEST),
+            id="connection-reset",
+        ),
+    ],
+)
+def test_no_complete_answer_is_a_transport_fault(fault: Exception) -> None:
+    """Not only a timeout: STA-102's body cut short is the same failure."""
+    assert transport_timeout(_raised(fault)) is not None
+
+
+def test_the_body_cut_short_of_run_35756822725_is_a_transport_fault() -> None:
+    """The exact shape: httpcore's exception under httpx's, as re-raised."""
+
+    class RemoteProtocolError(Exception):
+        pass
+
+    RemoteProtocolError.__module__ = "httpcore._exceptions"
+    try:
+        try:
+            raise RemoteProtocolError(
+                "peer closed connection without sending complete message "
+                "body (received 0 bytes, expected 2560)"
+            )
+        except RemoteProtocolError as inner:
+            raise httpx.RemoteProtocolError(str(inner), request=_REQUEST) from inner
+    except httpx.RemoteProtocolError as caught:
+        error = caught
+    assert transport_timeout(error) is error
+
+
+def test_a_protocol_error_of_our_own_making_is_not_a_transport_fault() -> None:
+    """A malformed request is a bug on this side, not a lost answer."""
+    error = _raised(httpx.LocalProtocolError("bad header", request=_REQUEST))
     assert transport_timeout(error) is None
 
 
