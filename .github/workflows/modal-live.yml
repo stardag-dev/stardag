@@ -551,6 +551,16 @@ jobs:
           # the markers the branches below read. A checkout with the
           # classifier and nothing else still classifies correctly.
           INSTRUMENT_PRESENT: ${{ steps.instrument.outputs.classifier }}
+          # For iterating on a PR: the `registry-live-fail-fast` label stops
+          # the tier at its first failed scenario and skips the retry, so a
+          # red run hands over its logs and artifact in minutes rather than
+          # after the slowest scenario and a second attempt. GitHub serves a
+          # job's log only once the job has ended, so ending it early is
+          # what makes a failure readable early. Remove the label before the
+          # final run: it trades the retry away.
+          FAIL_FAST: >-
+            ${{ contains(github.event.pull_request.labels.*.name,
+                         'registry-live-fail-fast') }}
         run: |
           set -uo pipefail
           diag="$STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR"
@@ -601,6 +611,34 @@ jobs:
           }
 
           retries="$diag/transport-retries.json"
+          if [ "$FAIL_FAST" = true ]; then
+            echo "::notice title=Registry-live fail-fast::Stopping at the" \
+              "first failed scenario, with no retry (label" \
+              "registry-live-fail-fast)."
+            log="$diag/pytest-attempt-1.log"
+            : > "$log"
+            tox -e registry-modal-live $POSARGS > "$log" 2>&1 &
+            tox_pid=$!
+            tail -n +1 -f "$log" --pid "$tox_pid" &
+            # The first failure report ends the run: pytest-xdist would
+            # otherwise let every in-flight scenario finish first.
+            while kill -0 "$tox_pid" 2>/dev/null; do
+              if grep -qE '^\[gw[0-9]+\] (FAILED|ERROR) |^(FAILED|ERROR) ' "$log"
+              then
+                echo "First failure seen; stopping the tier."
+                pkill -TERM -f 'registry-modal-live|tests_registry_live' || true
+                break
+              fi
+              sleep 5
+            done
+            wait "$tox_pid"
+            rc=$?
+            report_inconclusive "$inconclusive"
+            report_retries "$retries"
+            echo "diagnose=true" >> "$GITHUB_OUTPUT"
+            exit $rc
+          fi
+
           if tox -e registry-modal-live $POSARGS 2>&1 \
                | tee "$diag/pytest-attempt-1.log"; then
             # A green run can still have skipped a scenario, and that is
