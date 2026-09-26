@@ -2,8 +2,8 @@
 
 Everything that is about talking to the registry and nothing about what is
 said: the base URL, authentication, the retrying sync and async clients,
-gzip for large bodies, rate-limit backoff, and the mapping of error
-responses to :mod:`stardag.exceptions`.
+gzip for large bodies, the retry of a lost exchange, rate-limit backoff,
+and the mapping of error responses to :mod:`stardag.exceptions`.
 
 A route is described once, as a :class:`Request` (method, path, body, query
 and a parser for the answer), and sent by :meth:`HTTPTransport.call` or
@@ -19,17 +19,19 @@ things to different callers.
 from __future__ import annotations
 
 import asyncio
+import collections
 import gzip
 import json as _json
 import logging
 import platform
+import random
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 import httpx
-from httpx_retries import Retry, RetryTransport
 
 from stardag._version import __version__
 from stardag.config import DEFAULT_API_TIMEOUT, config_provider
@@ -67,17 +69,53 @@ SDK_CLIENT_HEADERS = {
 _ASYNC_MAX_CONNECTIONS = 100
 _ASYNC_MAX_KEEPALIVE_CONNECTIONS = 50
 
-# Transient transport errors (connection, timeout, protocol) are retried for
-# every method. That is sound for POST because every v2 write is idempotent
-# on re-delivery: ids are client-minted, inserts are DO NOTHING, lifecycle
+# A lost exchange is retried for every method: a request that never got a
+# complete answer -- no connection, no headers in time, or a body that
+# stalled or was cut short -- and an answer the app did not write (a
+# gateway error from the proxy in front of it).
+#
+# Retrying a write rests on re-delivery being safe, which holds for almost
+# every v2 route: ids are client-minted, inserts are DO NOTHING, lifecycle
 # transitions are idempotent by state, a retried claiming start by the same
 # execution is granted, and a retried yield batch is replayed by its
-# ``batch_id`` (design.md, "Registration").
-_RETRY_CONFIG = Retry(
-    total=3,
-    backoff_factor=0.5,
-    allowed_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"],
+# ``batch_id`` (design.md, "Registration"). Not for all of them, and the
+# exceptions are known rather than assumed away: a re-delivered execution
+# report (complete, fail, ...) whose first delivery landed is refused with
+# ``execution_already_ended``; ``POST /builds/wake-candidates`` is a drain,
+# so a re-delivery hands out a different set, and the first set waits
+# out the hand-out window. Both surface as an error or a delayed wake-up,
+# never as wrong state, and both were already exposed to the header-phase
+# retry this loop replaces (STA-54). ``build_create`` mints the build id
+# client-side when the caller does not, so it is re-sent unchanged. Tick
+# summaries insert a row per delivery and are counted, so that one route
+# opts out (``Request.retry``).
+#
+# The retry wraps the whole exchange, body read included. A retry inside
+# the httpx transport cannot: the transport returns once the headers are
+# in, and the body is read after it has returned, so a stall there raised
+# straight to the caller.
+#
+# Bounded twice: by a number of retries, and by time -- no retry starts
+# once the call has been going for longer than two timeouts. Two, not
+# one: a timed-out attempt has by definition taken one full timeout, and
+# the retry exists for exactly that case. So a call that times out gets at
+# least one more attempt, and waits at most about three timeouts rather
+# than four -- a renewal should not block far past the claim or lease it
+# is renewing.
+_MAX_TRANSIENT_RETRIES = 3
+_TRANSIENT_BACKOFF_SECONDS = 0.5
+_TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
 )
+_GATEWAY_STATUSES = frozenset({502, 503, 504})
+# Modal's web proxy answers 500 with a plain-text body of its own when it
+# loses the request on its way to or from the container ("modal-http:
+# internal error: ... Server has lost track of input"). The app never
+# writes that prefix -- its errors are JSON, or Starlette's plain
+# "Internal Server Error" for an unhandled one -- so it tells the two apart.
+_PROXY_ERROR_PREFIX = "modal-http:"
 
 _MAX_RATE_LIMIT_RETRIES = 5
 _MAX_RETRY_WAIT = 60
@@ -101,6 +139,10 @@ class Request(Generic[T]):
     json: Any = None
     params: dict[str, str] = field(default_factory=dict)
     operation: str = "API call"
+    # Whether a lost exchange is sent again (see ``_MAX_TRANSIENT_RETRIES``).
+    # Off only for a route where a second delivery does worse than a lost
+    # one.
+    retry: bool = True
 
 
 def gzip_json_body(body: object) -> tuple[bytes | None, dict[str, str]]:
@@ -113,6 +155,59 @@ def gzip_json_body(body: object) -> tuple[bytes | None, dict[str, str]]:
         return encoded, headers
     headers["Content-Encoding"] = "gzip"
     return gzip.compress(encoded), headers
+
+
+_retry_counts: collections.Counter[str] = collections.Counter()
+_retry_counts_lock = threading.Lock()
+
+
+def transport_retry_counts() -> dict[str, int]:
+    """How many exchanges this process has retried, by cause.
+
+    A cause is an exception class name (``ReadTimeout``), ``HTTP <status>``,
+    or ``HTTP 500 (proxy)`` for the proxy's own error page.
+    Every retry is also logged as a warning; this is the same tally in a form
+    a harness can read without parsing logs.
+    """
+    with _retry_counts_lock:
+        return dict(_retry_counts)
+
+
+def _transient_cause(response: httpx.Response) -> str | None:
+    """Why ``response`` is not the app's answer, or None if it is."""
+    status = response.status_code
+    if status in _GATEWAY_STATUSES:
+        return f"HTTP {status}"
+    if status == 500 and response.text.lstrip().startswith(_PROXY_ERROR_PREFIX):
+        return f"HTTP {status} (proxy)"
+    return None
+
+
+def _note_retry(
+    request: Request[Any], cause: str, detail: str, retry: int, delay: float
+) -> None:
+    with _retry_counts_lock:
+        _retry_counts[cause] += 1
+    logger.warning(
+        "Registry %s %s got no complete answer (%s: %s); retrying in %.1fs "
+        "(retry %d of %d).",
+        request.method,
+        request.path,
+        cause,
+        detail,
+        delay,
+        retry,
+        _MAX_TRANSIENT_RETRIES,
+    )
+
+
+def _transient_delay(retry: int) -> float:
+    """Exponential backoff with full jitter: up to 0.5 s, 1 s, 2 s.
+
+    Jittered because the callers are many: every worker and tick meeting
+    the same stall would otherwise re-send in lockstep.
+    """
+    return random.uniform(0, _TRANSIENT_BACKOFF_SECONDS * 2 ** (retry - 1))
 
 
 def _json_or_none(response: httpx.Response) -> Any:
@@ -187,7 +282,6 @@ class HTTPTransport:
             self._client = httpx.Client(
                 timeout=self.timeout,
                 auth=self._auth,
-                transport=RetryTransport(retry=_RETRY_CONFIG),
                 headers=SDK_CLIENT_HEADERS,
             )
         return self._client
@@ -218,7 +312,6 @@ class HTTPTransport:
                     max_keepalive_connections=_ASYNC_MAX_KEEPALIVE_CONNECTIONS,
                     keepalive_expiry=5,
                 ),
-                transport=RetryTransport(retry=_RETRY_CONFIG),
                 headers=SDK_CLIENT_HEADERS,
             )
             self._async_client_loop = current_loop
@@ -264,33 +357,78 @@ class HTTPTransport:
             kwargs["headers"] = headers
         return f"{self.api_url}{API_PREFIX}{request.path}", kwargs
 
+    def _may_retry(self, request: Request[Any], retries: int, started: float) -> bool:
+        return (
+            request.retry
+            and retries < _MAX_TRANSIENT_RETRIES
+            and time.monotonic() - started < 2 * self.timeout
+        )
+
     def call(self, request: Request[T]) -> T:
         url, kwargs = self._kwargs(request)
-        for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
-            response = self.client.request(request.method, url, **kwargs)
+        transient = rate_limited = 0
+        started = time.monotonic()
+        while True:
+            try:
+                response = self.client.request(request.method, url, **kwargs)
+            except _TRANSIENT_EXCEPTIONS as e:
+                if not self._may_retry(request, transient, started):
+                    raise
+                transient += 1
+                delay = _transient_delay(transient)
+                _note_retry(request, type(e).__name__, str(e), transient, delay)
+                time.sleep(delay)
+                continue
+            cause = _transient_cause(response)
+            if cause is not None and self._may_retry(request, transient, started):
+                transient += 1
+                delay = _transient_delay(transient)
+                _note_retry(request, cause, response.text[:120], transient, delay)
+                time.sleep(delay)
+                continue
             try:
                 self.raise_for_error(response, request.operation)
             except RateLimitError as e:
-                if attempt >= _MAX_RATE_LIMIT_RETRIES:
+                if rate_limited >= _MAX_RATE_LIMIT_RETRIES:
                     raise
+                rate_limited += 1
                 time.sleep(min(e.retry_after, _MAX_RETRY_WAIT))
                 continue
             return request.parse(_json_or_none(response))
-        raise AssertionError("unreachable")  # pragma: no cover
 
     async def acall(self, request: Request[T]) -> T:
         url, kwargs = self._kwargs(request)
-        for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
-            response = await self.async_client.request(request.method, url, **kwargs)
+        transient = rate_limited = 0
+        started = time.monotonic()
+        while True:
+            try:
+                response = await self.async_client.request(
+                    request.method, url, **kwargs
+                )
+            except _TRANSIENT_EXCEPTIONS as e:
+                if not self._may_retry(request, transient, started):
+                    raise
+                transient += 1
+                delay = _transient_delay(transient)
+                _note_retry(request, type(e).__name__, str(e), transient, delay)
+                await asyncio.sleep(delay)
+                continue
+            cause = _transient_cause(response)
+            if cause is not None and self._may_retry(request, transient, started):
+                transient += 1
+                delay = _transient_delay(transient)
+                _note_retry(request, cause, response.text[:120], transient, delay)
+                await asyncio.sleep(delay)
+                continue
             try:
                 self.raise_for_error(response, request.operation)
             except RateLimitError as e:
-                if attempt >= _MAX_RATE_LIMIT_RETRIES:
+                if rate_limited >= _MAX_RATE_LIMIT_RETRIES:
                     raise
+                rate_limited += 1
                 await asyncio.sleep(min(e.retry_after, _MAX_RETRY_WAIT))
                 continue
             return request.parse(_json_or_none(response))
-        raise AssertionError("unreachable")  # pragma: no cover
 
     def raise_for_error(self, response: httpx.Response, operation: str) -> None:
         """Map an error response to the SDK's exceptions (no-op below 400).

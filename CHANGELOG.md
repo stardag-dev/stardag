@@ -4,6 +4,27 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **Fixed: a registry answer lost in transit is retried.** The client used to
+  retry inside the httpx transport, which returns as soon as the response
+  headers arrive, so a body that stalled or was cut short raised straight to
+  the caller (`httpx.ReadTimeout`, `RemoteProtocolError`) and failed the
+  task or tick that made the call. The retry now wraps the whole exchange,
+  body included, in `HTTPTransport.call`/`acall`: up to three retries, with
+  jittered exponential backoff and none started once the call has taken
+  two timeouts (so a timed-out attempt always gets one more), on a timeout, a network error, a body cut short, a
+  502/503/504, or a 500 written by Modal's web proxy rather than the app
+  (`modal-http: ...`). Every retry is logged as a warning naming the route,
+  and counted in `stardag.registry._api_http.transport_retry_counts()`. An
+  answer the app wrote — any other error status — is never retried, and a
+  429 that is not the app's rate limit is no longer retried either. The
+  `httpx-retries` dependency is dropped. `build_create` now mints the build
+  id client-side when none is passed, so a re-sent create finds its own
+  build rather than making a second.
+
 ## [0.27.0] — 2026-09-25
 
 SDK `0.27.0` and server `server-v0.6.0`: the next minors, not a new major
