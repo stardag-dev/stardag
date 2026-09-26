@@ -102,10 +102,9 @@ def deploy_rollover_app(
         f"Deploy of {app_name!r} as {code_id[:12]} failed:\n"
         f"{result.stdout}\n{result.stderr}"
     )
-    if not activate:
-        # An unactivated deploy never takes calls: the app still routes to
-        # the active deployment, so there is no answer to wait for (S37).
-        return
+    # Also for ``activate=False``: that skips only the registry's activation
+    # of the deployment record, and the Modal deploy itself goes live, so
+    # the new code is what the next spawn reaches either way (S37).
     assert wait_until_the_deploy_serves(app_name, modal_environment, nonce), (
         f"The deploy of {app_name!r} as {code_id[:12]} returned, but no fresh "
         f"call reached it within {DEPLOY_SERVING_TIMEOUT_SECONDS}s. Carrying on "
