@@ -102,7 +102,12 @@ def deploy_rollover_app(
         f"Deploy of {app_name!r} as {code_id[:12]} failed:\n"
         f"{result.stdout}\n{result.stderr}"
     )
-    wait_until_the_deploy_serves(app_name, modal_environment, nonce)
+    assert wait_until_the_deploy_serves(app_name, modal_environment, nonce), (
+        f"The deploy of {app_name!r} as {code_id[:12]} returned, but no fresh "
+        f"call reached it within {DEPLOY_SERVING_TIMEOUT_SECONDS}s. Carrying on "
+        "would run the scenario against the previous deployment, so it would "
+        "no longer test a rollover."
+    )
 
 
 def wait_until_the_deploy_serves(
@@ -127,8 +132,9 @@ def wait_until_the_deploy_serves(
     answer comes from a warm container of an earlier deploy -- which, polled
     every two seconds, one did for three minutes straight.
 
-    Bounded: at ``timeout`` it says so and returns False, and the scenario
-    carries on, as it did before this wait existed.
+    Bounded: at ``timeout`` it says so and returns False, and the deploy
+    fails -- a scenario that carried on would be testing the previous
+    deployment.
     """
     import modal
 

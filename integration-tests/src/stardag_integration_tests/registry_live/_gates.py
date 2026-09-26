@@ -234,25 +234,37 @@ class GateSet:
         self.gates.append(gate)
         return gate
 
-    def holds(self) -> list[dict]:
-        """Every hold recorded against this scenario's gates."""
+    def holds(self, *, remove: bool = False) -> list[dict]:
+        """Every hold recorded against this scenario's gates.
+
+        ``remove`` also deletes those records and the gates' own keys, so
+        an environment reused across runs (a developer's stack) does not
+        accumulate them.
+        """
         if not self.gates:
             return []
         keys = {gate.key for gate in self.gates}
         store = _test_dict(self.modal_environment)
-        return [
-            value
+        found = [
+            (key, value)
             for key, value in store.items()
             if isinstance(key, str)
             and key.startswith(_HELD_PREFIX)
             and isinstance(value, dict)
             and value.get("gate") in keys
         ]
+        if remove:
+            for key in [*(k for k, _ in found), *keys]:
+                try:
+                    store.pop(key, None)
+                except Exception as error:  # housekeeping only
+                    _log(f"gates: could not remove {key}: {error!r}")
+        return [value for _, value in found]
 
     def report(self) -> list[str]:
         """One line per recorded hold; the ones that hit their bound flagged."""
         try:
-            holds = self.holds()
+            holds = self.holds(remove=True)
         except Exception as error:  # diagnostics only
             return [f"gates: could not read the hold records: {error!r}"]
         lines = []
