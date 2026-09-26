@@ -18,7 +18,12 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from stardag.exceptions import APIError, NotFoundError, execution_not_wanted
+from stardag.exceptions import (
+    APIError,
+    NotFoundError,
+    QuotaExceededError,
+    execution_not_wanted,
+)
 from stardag.registry import APIRegistry, RegistrationItem
 from stardag.registry import _api_http
 from stardag.registry._api_http import (
@@ -724,7 +729,9 @@ class TestLostExchange:
 
     def test_a_post_is_retried_with_the_same_body(self):
         script = _Script(_body_stalls(), httpx.Response(200, json=BUILD))
-        _registry(script).build_create(name="b", root_task_ids=["t1"])
+        _registry(script).build_create(
+            build_id=UUID(BUILD["id"]), name="b", root_task_ids=["t1"]
+        )
         first, second = script.requests
         assert first.method == second.method == "POST"
         assert first.content == second.content
@@ -756,6 +763,48 @@ class TestLostExchange:
         with pytest.raises(APIError) as excinfo:
             _registry(script).build_get(uuid4())
         assert excinfo.value.status_code == 502
+        assert len(script.requests) == 4
+
+    def test_no_retry_starts_once_the_call_has_taken_a_timeout(self):
+        script = _Script(_body_stalls(), httpx.Response(200, json=BUILD))
+        registry = _registry(script)
+        registry.timeout = 0.0
+        with pytest.raises(httpx.ReadTimeout):
+            registry.build_get(uuid4())
+        assert len(script.requests) == 1
+
+    def test_a_rate_limit_and_a_lost_answer_are_budgeted_apart(self):
+        rate_limited = httpx.Response(
+            429,
+            headers={"Retry-After": "0"},
+            json={"detail": {"code": "RATE_LIMIT", "message": "slow down"}},
+        )
+        script = _Script(
+            _body_stalls(), rate_limited, _body_cut(), httpx.Response(200, json=BUILD)
+        )
+        build = _registry(script).build_get(UUID(BUILD["id"]))
+        assert str(build.id) == BUILD["id"]
+        assert len(script.requests) == 4
+
+    def test_a_quota_refusal_is_not_retried(self):
+        script = _Script(
+            httpx.Response(429, json={"detail": {"code": "QUOTA", "message": "q"}})
+        )
+        with pytest.raises(QuotaExceededError):
+            _registry(script).build_get(uuid4())
+        assert len(script.requests) == 1
+
+    async def test_the_async_path_is_bounded_too(self):
+        import asyncio
+
+        script = _Script(*(_body_cut() for _ in range(4)))
+        registry = APIRegistry(api_url="https://registry.test", api_key="sk-test")
+        registry._async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(script)
+        )
+        registry._async_client_loop = asyncio.get_running_loop()
+        with pytest.raises(httpx.RemoteProtocolError):
+            await registry.build_get_aio(uuid4())
         assert len(script.requests) == 4
 
     async def test_the_async_path_retries_a_stalled_body(self):

@@ -13,8 +13,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   headers arrive, so a body that stalled or was cut short raised straight to
   the caller (`httpx.ReadTimeout`, `RemoteProtocolError`) and failed the
   task or tick that made the call. The retry now wraps the whole exchange,
-  body included, in `HTTPTransport.call`/`acall`: up to three retries with
-  0.5/1/2 s backoff on a timeout, a network error, a body cut short, a
+  body included, in `HTTPTransport.call`/`acall`: up to three retries, with
+  jittered exponential backoff and none started once the call has taken
+  longer than its timeout, on a timeout, a network error, a body cut short, a
   502/503/504, or a 500 written by Modal's web proxy rather than the app
   (`modal-http: ...`). Every retry is logged as a warning naming the route,
   and counted in `stardag.registry._api_http.transport_retry_counts()`. An

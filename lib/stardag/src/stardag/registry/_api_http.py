@@ -24,6 +24,7 @@ import gzip
 import json as _json
 import logging
 import platform
+import random
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -71,17 +72,30 @@ _ASYNC_MAX_KEEPALIVE_CONNECTIONS = 50
 # A lost exchange is retried for every method: a request that never got a
 # complete answer -- no connection, no headers in time, or a body that
 # stalled or was cut short -- and an answer the app did not write (a
-# gateway error from the proxy in front of it). That is sound for POST
-# because every v2 write is idempotent on re-delivery: ids are
-# client-minted, inserts are DO NOTHING, lifecycle transitions are
-# idempotent by state, a retried claiming start by the same execution is
-# granted, and a retried yield batch is replayed by its ``batch_id``
-# (design.md, "Registration").
+# gateway error from the proxy in front of it).
+#
+# Retrying a write rests on re-delivery being safe, which holds for almost
+# every v2 route: ids are client-minted, inserts are DO NOTHING, lifecycle
+# transitions are idempotent by state, a retried claiming start by the same
+# execution is granted, and a retried yield batch is replayed by its
+# ``batch_id`` (design.md, "Registration"). Not for all of them, and the
+# exceptions are known rather than assumed away: a re-delivered execution
+# report (complete, fail, ...) whose first delivery landed is refused with
+# ``execution_already_ended``; ``POST /builds/wake-candidates`` is a drain,
+# so a re-delivery hands out a different set; and ``build_create`` without
+# a ``build_id`` creates a second build. Each surfaces as an error or a
+# delayed wake-up, never as wrong state, and each was already exposed to
+# the header-phase retry this loop replaces (STA-54).
 #
 # The retry wraps the whole exchange, body read included. A retry inside
 # the httpx transport cannot: the transport returns once the headers are
 # in, and the body is read after it has returned, so a stall there raised
 # straight to the caller.
+#
+# Bounded twice: by a number of retries, and by time -- no retry starts
+# once the call has been going for longer than one timeout, so a call
+# waits at most about twice its timeout. Without that a renewal could
+# block past the claim or lease it is renewing.
 _MAX_TRANSIENT_RETRIES = 3
 _TRANSIENT_BACKOFF_SECONDS = 0.5
 _TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
@@ -92,8 +106,9 @@ _TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
 _GATEWAY_STATUSES = frozenset({502, 503, 504})
 # Modal's web proxy answers 500 with a plain-text body of its own when it
 # loses the request on its way to or from the container ("modal-http:
-# internal error: ... Server has lost track of input"). The app's own
-# errors are JSON, so the prefix tells the two apart.
+# internal error: ... Server has lost track of input"). The app never
+# writes that prefix -- its errors are JSON, or Starlette's plain
+# "Internal Server Error" for an unhandled one -- so it tells the two apart.
 _PROXY_ERROR_PREFIX = "modal-http:"
 
 _MAX_RATE_LIMIT_RETRIES = 5
@@ -153,7 +168,7 @@ def _transient_cause(response: httpx.Response) -> str | None:
     status = response.status_code
     if status in _GATEWAY_STATUSES:
         return f"HTTP {status}"
-    if status == 500 and response.text.startswith(_PROXY_ERROR_PREFIX):
+    if status == 500 and response.text.lstrip().startswith(_PROXY_ERROR_PREFIX):
         return f"HTTP {status} (proxy)"
     return None
 
@@ -177,8 +192,12 @@ def _note_retry(
 
 
 def _transient_delay(retry: int) -> float:
-    """Exponential backoff: 0.5 s, 1 s, 2 s."""
-    return _TRANSIENT_BACKOFF_SECONDS * 2 ** (retry - 1)
+    """Exponential backoff with full jitter: up to 0.5 s, 1 s, 2 s.
+
+    Jittered because the callers are many: every worker and tick meeting
+    the same stall would otherwise re-send in lockstep.
+    """
+    return random.uniform(0, _TRANSIENT_BACKOFF_SECONDS * 2 ** (retry - 1))
 
 
 def _json_or_none(response: httpx.Response) -> Any:
@@ -328,14 +347,21 @@ class HTTPTransport:
             kwargs["headers"] = headers
         return f"{self.api_url}{API_PREFIX}{request.path}", kwargs
 
+    def _may_retry(self, retries: int, started: float) -> bool:
+        return (
+            retries < _MAX_TRANSIENT_RETRIES
+            and time.monotonic() - started < self.timeout
+        )
+
     def call(self, request: Request[T]) -> T:
         url, kwargs = self._kwargs(request)
         transient = rate_limited = 0
+        started = time.monotonic()
         while True:
             try:
                 response = self.client.request(request.method, url, **kwargs)
             except _TRANSIENT_EXCEPTIONS as e:
-                if transient >= _MAX_TRANSIENT_RETRIES:
+                if not self._may_retry(transient, started):
                     raise
                 transient += 1
                 delay = _transient_delay(transient)
@@ -343,7 +369,7 @@ class HTTPTransport:
                 time.sleep(delay)
                 continue
             cause = _transient_cause(response)
-            if cause is not None and transient < _MAX_TRANSIENT_RETRIES:
+            if cause is not None and self._may_retry(transient, started):
                 transient += 1
                 delay = _transient_delay(transient)
                 _note_retry(request, cause, response.text[:120], transient, delay)
@@ -362,13 +388,14 @@ class HTTPTransport:
     async def acall(self, request: Request[T]) -> T:
         url, kwargs = self._kwargs(request)
         transient = rate_limited = 0
+        started = time.monotonic()
         while True:
             try:
                 response = await self.async_client.request(
                     request.method, url, **kwargs
                 )
             except _TRANSIENT_EXCEPTIONS as e:
-                if transient >= _MAX_TRANSIENT_RETRIES:
+                if not self._may_retry(transient, started):
                     raise
                 transient += 1
                 delay = _transient_delay(transient)
@@ -376,7 +403,7 @@ class HTTPTransport:
                 await asyncio.sleep(delay)
                 continue
             cause = _transient_cause(response)
-            if cause is not None and transient < _MAX_TRANSIENT_RETRIES:
+            if cause is not None and self._may_retry(transient, started):
                 transient += 1
                 delay = _transient_delay(transient)
                 _note_retry(request, cause, response.text[:120], transient, delay)
