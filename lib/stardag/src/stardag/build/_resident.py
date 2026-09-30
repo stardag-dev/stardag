@@ -251,6 +251,9 @@ class _ResidentEngine:
         self.stopped: str | None = None
         self.fail_fast_triggered = False
         self._last_drain = float("-inf")
+        # A drain the throttle deferred, run once its interval is up.
+        self._trailing_drain: asyncio.Task | None = None
+        self._trailing_drain_started = False
 
     # -- discovery ------------------------------------------------------------------
 
@@ -547,17 +550,48 @@ class _ResidentEngine:
     # -- cross-build wake-ups (hybrid builds) ----------------------------------------
 
     async def drain_neighbours(self, *, force: bool = False) -> None:
+        """Drain the environment's wake candidates, at most once per
+        interval. A throttled drain is deferred, not dropped: the result
+        that asked for it may have flagged a neighbour, and nothing else
+        would drain for it until the next result, which may never come."""
         if not self.session.enabled or not self.executor.can_spawn_scheduler_ticks():
             return
         now = asyncio.get_running_loop().time()
-        if not force and now - self._last_drain < _RESIDENT_DRAIN_INTERVAL_SECONDS:
+        wait = self._last_drain + _RESIDENT_DRAIN_INTERVAL_SECONDS - now
+        if not force and wait > 0:
+            if self._trailing_drain is None or self._trailing_drain.done():
+                self._trailing_drain_started = False
+                self._trailing_drain = asyncio.create_task(self._drain_after(wait))
             return
-        self._last_drain = now
+        await self.settle_trailing_drain()
+        await self._drain_now()
+
+    async def _drain_after(self, delay: float) -> None:
+        await asyncio.sleep(delay)
+        self._trailing_drain_started = True
+        await self._drain_now()
+
+    async def _drain_now(self) -> None:
+        self._last_drain = asyncio.get_running_loop().time()
         await drain_wake_candidates(
             self.session.registry,
             self.executor.spawn_scheduler_tick,
             build_id=self.session.build_id,
         )
+
+    async def settle_trailing_drain(self) -> None:
+        """Cancel a deferred drain still waiting out its interval; wait for
+        one already asking. Cancelling that one could land between the
+        server stamping its hand-outs and the spawns, and a stamped build
+        nobody spawned for waits out the whole hand-out window."""
+        trailing, self._trailing_drain = self._trailing_drain, None
+        if trailing is None or trailing.done():
+            return
+        if not self._trailing_drain_started:
+            trailing.cancel()
+        # The drain is best-effort and raises nothing of its own; this only
+        # reaps the cancellation.
+        await asyncio.gather(trailing, return_exceptions=True)
 
     # -- the loop ---------------------------------------------------------------------
 
@@ -618,6 +652,7 @@ class _ResidentEngine:
                 self.error,
             )
         finally:
+            await self.settle_trailing_drain()
             for task_id in list(self.renewals):
                 await self._stop_renewal(task_id)
             if token is not None:

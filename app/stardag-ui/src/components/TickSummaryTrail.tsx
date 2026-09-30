@@ -27,6 +27,11 @@ const OUTCOMES: Record<string, { label: string; help: string; tone: string }> = 
     help: "The tick waited for work to become actionable and gave up without anything appearing. Repeated on every tick, this is the signature of a stalled build.",
     tone: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
   },
+  lifetime_reached: {
+    label: "lifetime reached",
+    help: "The build kept the tick busy until it neared its container's time limit, so it stopped, released the build and started a successor rather than being killed mid-work. Normal for a long, busy build.",
+    tone: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300",
+  },
   foreign_app: {
     label: "foreign app",
     help: "The build is owned by a different reactive app than the one that ticked, so this tick declined to drive it.",

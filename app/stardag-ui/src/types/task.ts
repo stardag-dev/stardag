@@ -256,6 +256,7 @@ export type TickOutcome =
   | "lease_held"
   | "terminal"
   | "lingered_out"
+  | "lifetime_reached"
   | "foreign_app"
   | "superseded";
 

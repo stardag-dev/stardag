@@ -400,8 +400,9 @@ class TestTheEnd:
     ):
         """The operator cancels between the frontier read and the claim: the
         claim is refused ``build_not_running`` and counted like any denied
-        claim, and the tick winds down (lingers out; the cancel sets no
-        wake-up flag) instead of ending in ``error``."""
+        claim, and the tick winds down instead of ending in ``error``: the
+        cancel sets no wake-up flag, so it lingers, and its exit pass reads
+        the build terminal."""
         registry = InMemoryRegistry()
         task = SyncOnlyTask(name=f"t-{new_id()}")
         build_id, _ = await _plan(registry, [task])
@@ -412,7 +413,7 @@ class TestTheEnd:
                 return None
 
         summary = await _tick(registry, build_id, CancelsInMetadata(registry=registry))
-        assert summary.outcome == "lingered_out" and summary.error_type is None
+        assert summary.outcome == "terminal" and summary.error_type is None
         assert summary.claim_denied == 1 and summary.spawned == 0
         assert registry.builds[build_id].status == "cancelled"
 
@@ -605,6 +606,147 @@ class TestLeaseAndHandshake:
         )
         assert (neighbour, "other-app") in spawned
         assert summary.neighbour_ticks_spawned >= 1
+
+    async def test_neighbours_are_drained_after_a_pass_that_did_not_act(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The completion that woke a tick may give its own build nothing to
+        do and still flag a neighbour: the drain follows every pass, while
+        the tick still lingers, not only its exit."""
+        registry = InMemoryRegistry()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"q-{new_id()}")])
+        registry.limits["slot"] = 0
+        neighbour = registry.build_create(root_task_ids=["x"]).id
+        registry.build_set_reactive_meta(neighbour, app_name="other-app")
+        registry.builds[neighbour].needs_tick = True
+        drained_while_lingering: list[bool] = []
+
+        def spawn(b: UUID, a: str) -> None:
+            if b == neighbour:
+                drained_while_lingering.append(
+                    registry.builds[build_id].lease_owner is not None
+                )
+
+        config = TickConfig(
+            linger_seconds=0.1,
+            poll_interval_seconds=0.01,
+            limit_key_selector=lambda t: ["slot"],
+            spawn_tick=spawn,
+        )
+        await _tick(registry, build_id, FakeDetachedExecutor(registry=registry), config)
+        assert drained_while_lingering == [True]
+
+    async def test_the_exit_pass_acts_on_work_whose_flag_was_lost(
+        self, default_in_memory_fs_target: Target
+    ):
+        """A worker's report lands but its notify never does (or a flagger
+        skipped the locked wake row): the frontier moved and the flag stays
+        clear. The exit pass reads the frontier once more at the deadline
+        and drives the build on."""
+
+        class ReportsButNeverNotifies(FakeDetachedExecutor):
+            def _wake(self, plan_id: UUID) -> None:
+                pass
+
+        registry = InMemoryRegistry()
+        _, _, root = _chain()
+        build_id, _ = await _plan(registry, [root])
+        config = TickConfig(linger_seconds=0.05, poll_interval_seconds=0.01)
+        summary = await _tick(
+            registry,
+            build_id,
+            ReportsButNeverNotifies(registry=registry, workers=True),
+            config,
+        )
+        assert summary.terminal_status == "completed"
+        assert summary.linger_extended_unflagged >= 1
+
+    async def test_the_exit_pass_does_not_clear_the_flag(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Clearing takes the wake-row lock, the window a flagger's ``SKIP
+        LOCKED`` loses its news in; the exit pass only reads."""
+        registry = InMemoryRegistry()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"e-{new_id()}")])
+        registry.limits["slot"] = 0
+        config = TickConfig(
+            linger_seconds=0.05,
+            poll_interval_seconds=0.01,
+            limit_key_selector=lambda t: ["slot"],
+        )
+        summary = await _tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry), config
+        )
+        assert summary.outcome == "lingered_out"
+        assert summary.iterations == 2
+        assert len(registry.calls_to("build_clear_notify")) == 1
+
+    async def test_an_idle_tick_lingers_out_at_its_lifetime_bound(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The bound caps the linger: a tick with nothing to do meets it as
+        an ordinary deadline -- exits ``lingered_out``, lease released, and
+        spawns nothing, so a build waiting on long work does not churn
+        ticks."""
+        registry = InMemoryRegistry()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"i-{new_id()}")])
+        registry.limits["slot"] = 0
+        spawned: list[tuple[UUID, str]] = []
+        config = TickConfig(
+            linger_seconds=30,
+            poll_interval_seconds=0.01,
+            tick_timeout_seconds=0.2,
+            limit_key_selector=lambda t: ["slot"],
+            spawn_tick=lambda b, a: spawned.append((b, a)),
+        )
+        summary = await asyncio.wait_for(
+            _tick(registry, build_id, FakeDetachedExecutor(registry=registry), config),
+            timeout=5,
+        )
+        assert summary.outcome == "lingered_out"
+        assert spawned == []
+        assert registry.builds[build_id].lease_owner is None
+
+    async def test_a_busy_tick_stops_at_its_lifetime_bound_and_hands_on(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Still acting at the bound, a tick starts no further pass: it
+        exits ``lifetime_reached`` -- lease released, not killed holding it
+        -- and spawns a successor whether or not the flag is set."""
+
+        class SlowSpawns(FakeDetachedExecutor):
+            async def submit_detached(self, task, *, execution_id):
+                await asyncio.sleep(0.03)
+                return await super().submit_detached(task, execution_id=execution_id)
+
+        registry = InMemoryRegistry()
+        leaf = SyncOnlyTask(name=f"c0-{new_id()}")
+        chain = [leaf]
+        for i in range(1, 20):
+            chain.append(SyncOnlyTask(name=f"c{i}", deps=(chain[-1],)))
+        build_id, _ = await _plan(registry, [chain[-1]])
+        spawned: list[tuple[UUID, str]] = []
+        config = TickConfig(
+            linger_seconds=30,
+            poll_interval_seconds=0.01,
+            tick_timeout_seconds=0.2,
+            spawn_tick=lambda b, a: spawned.append((b, a)),
+        )
+        summary = await asyncio.wait_for(
+            _tick(
+                registry,
+                build_id,
+                SlowSpawns(registry=registry, workers=True),
+                config,
+            ),
+            timeout=5,
+        )
+        assert summary.outcome == "lifetime_reached"
+        assert 0 < summary.spawned < len(chain)
+        assert spawned == [(build_id, "app")]
+        assert summary.successor_spawned == 1
+        assert registry.builds[build_id].lease_owner is None
+        assert registry.builds[build_id].status == "running"
 
     async def test_a_lease_lost_mid_pass_stops_claiming(
         self, default_in_memory_fs_target: Target

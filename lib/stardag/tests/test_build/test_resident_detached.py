@@ -167,3 +167,39 @@ async def test_a_hybrid_build_wakes_its_flagged_neighbours(
     )
     assert summary.status == BuildExitStatus.SUCCESS
     assert (neighbour, "app") in executor.ticks_spawned
+
+
+async def test_a_throttled_drain_is_deferred_not_dropped(
+    registry: InMemoryRegistry, monkeypatch: pytest.MonkeyPatch
+):
+    """A result inside the drain interval defers its drain to the interval's
+    end: nothing else may ask again, and the neighbour it flagged would
+    wait for the build's end."""
+    import asyncio
+    import types
+
+    from stardag.build import _resident
+    from stardag.build._concurrency import NoOpConcurrencyLimiter
+
+    monkeypatch.setattr(_resident, "_RESIDENT_DRAIN_INTERVAL_SECONDS", 0.05)
+    executor = _executor()
+    engine = _resident._ResidentEngine(
+        [],
+        task_executor=executor,
+        fail_mode=FailMode.FAIL_FAST,
+        session=types.SimpleNamespace(  # type: ignore[arg-type]
+            enabled=True, registry=registry, build_id=None
+        ),
+        max_concurrent_discover=1,
+        register_all=False,
+        limiter=NoOpConcurrencyLimiter(),
+    )
+    await engine.drain_neighbours()  # leading edge: nothing flagged yet
+    neighbour = registry.build_create(root_task_ids=["x"]).id
+    registry.build_set_reactive_meta(neighbour, app_name="app")
+    registry.builds[neighbour].needs_tick = True
+    await engine.drain_neighbours()  # throttled
+    assert executor.ticks_spawned == []
+    await asyncio.sleep(0.1)
+    assert executor.ticks_spawned == [(neighbour, "app")]
+    await engine.settle_trailing_drain()

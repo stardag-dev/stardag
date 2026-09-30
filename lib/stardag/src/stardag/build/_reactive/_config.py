@@ -100,7 +100,8 @@ class TickSummary:
     the registry with ``dataclasses.asdict``."""
 
     # "not_reactive" | "lease_held" | "lease_lost" | "terminal" |
-    # "lingered_out" | "superseded" | "rollover_failed" | "error"
+    # "lingered_out" | "lifetime_reached" | "superseded" | "rollover_failed"
+    # | "error"
     outcome: str
     terminal_status: str | None = None
     # Set for "error" and "rollover_failed": what ended the tick (bounded).
@@ -140,6 +141,10 @@ class TickSummary:
     # Exit handshake: the linger deadline expired with the wake-up flag set,
     # so the tick kept the lease and re-acted.
     linger_extended: int = 0
+    # Exit pass: the linger deadline expired with the flag clear, and the
+    # final read of the frontier still found work, which no flag announced
+    # (a flag lost to a lock, a notify that never arrived, a lapsed claim).
+    linger_extended_unflagged: int = 0
     # Successor ticks spawned for a flag set while the lease was released.
     successor_spawned: int = 0
     # Ticks spawned for other builds the registry flagged.

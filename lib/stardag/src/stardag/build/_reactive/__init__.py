@@ -16,7 +16,11 @@ No resident orchestrator lives for the whole build. Short-lived, idempotent
    left to run; otherwise linger polling the flag, and on the way out
    re-read it once before and once after releasing the lease (the exit
    handshake that lets a worker skip spawning a tick while a scheduler is
-   live).
+   live), with one last read of the frontier in between for work whose
+   flag was lost (the exit pass);
+5. drain the environment's wake candidates after every pass, and stop
+   starting passes short of the tick container's wall-clock limit, handing
+   the build to a successor instead of being killed holding the lease.
 
 Workers report their own lifecycle and wake the scheduler when they
 finish; a periodic watchdog tick covers lost wake-ups. A worker that dies
