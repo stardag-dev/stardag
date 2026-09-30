@@ -51,7 +51,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, func, select, update
+from sqlalchemy import Select, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -536,8 +536,13 @@ async def stalled_builds(
                     & (Build.scheduler_lease_until <= cutoff)
                 ),
             )
+            # The ``since`` each row is reported with, so a limit cuts the
+            # newest stalls, never an older one classified the other way.
             .order_by(
-                func.coalesce(BuildWake.needs_tick_at, Build.scheduler_lease_until),
+                case(
+                    (BuildWake.needs_tick_at <= cutoff, BuildWake.needs_tick_at),
+                    else_=Build.scheduler_lease_until,
+                ),
                 Build.id,
             )
             .limit(limit)

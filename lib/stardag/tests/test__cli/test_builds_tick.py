@@ -238,3 +238,42 @@ class TestStalled:
             result = runner.invoke(builds_app, ["stalled", "--older-than", "soon"])
         assert result.exit_code == 1
         registry.build_list_stalled.assert_not_called()
+
+
+class TestSpawnerNeedsAWholeToken:
+    def test_an_id_without_a_secret_is_no_spawner(self, monkeypatch):
+        """With only an id, the spawn would fail after ``notify`` stamped the
+        hand-out, hiding the build from every other drainer for the window."""
+        import modal.config
+
+        from stardag._cli import _wake
+
+        values = {"token_id": "ak-1", "token_secret": None}
+        monkeypatch.setattr(modal.config.config, "get", values.get)
+        assert _wake.has_modal_token() is False
+        values["token_secret"] = "as-1"
+        assert _wake.has_modal_token() is True
+
+
+class TestInMemoryStalled:
+    def test_flagged_unserved_and_lapsed_leases_past_the_threshold(self):
+        from datetime import datetime, timedelta, timezone
+
+        from stardag.testing import InMemoryRegistry
+
+        now = [datetime(2026, 9, 30, tzinfo=timezone.utc)]
+        registry = InMemoryRegistry(clock=lambda: now[0])
+        flagged, lapsed, fresh = (
+            registry.build_create(root_task_ids=["x"]).id for _ in range(3)
+        )
+        for build_id in (flagged, lapsed, fresh):
+            registry.build_set_reactive_meta(build_id, app_name="app")
+        registry.build_notify(flagged, can_spawn=False)
+        registry.scheduler_lease_acquire(lapsed, owner_id="dead", ttl_seconds=60)
+        now[0] += timedelta(minutes=10)
+        registry.build_notify(fresh, can_spawn=False)
+        stalled = registry.build_list_stalled(older_than_seconds=300)
+        assert [(s.build_id, s.reason) for s in stalled] == [
+            (flagged, "flagged_unserved"),
+            (lapsed, "lease_lapsed"),
+        ]

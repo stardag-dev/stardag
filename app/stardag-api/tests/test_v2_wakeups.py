@@ -625,6 +625,34 @@ async def test_stalled_builds_are_the_flags_and_leases_nobody_served(h: Harness)
     assert later == []
 
 
+async def test_stalled_builds_are_ordered_by_the_since_they_report(h: Harness):
+    """A lapsed lease with a fresh flag is reported ``lease_lapsed`` since
+    the lease's expiry, and ordered by that, so a limit keeps it ahead of a
+    newer flagged stall."""
+    t = item("T")
+    lapsed, flagged = [(await h.planned([t], [t]))[0] for _ in range(2)]
+    await _reactive(h, lapsed, flagged)
+    await _clear(h, lapsed, flagged)
+    await _svc(h, wakeups.acquire_lease, lapsed, owner_id="dead", ttl_seconds=60)
+    await _sql(
+        h,
+        "UPDATE build SET scheduler_lease_until = now() - interval '20 minutes'"
+        " WHERE id = :b",
+        b=lapsed,
+    )
+    await _svc(h, wakeups.notify, lapsed, can_spawn=False)
+    await _sql(
+        h,
+        "UPDATE build_wake SET needs_tick_at = now() - interval '10 minutes'"
+        " WHERE build_id = :b",
+        b=flagged,
+    )
+    (oldest,) = await _svc(
+        h, wakeups.stalled_builds, older_than=timedelta(minutes=5), limit=1
+    )
+    assert (oldest.build_id, oldest.reason) == (lapsed, "lease_lapsed")
+
+
 async def test_a_late_hand_out_is_logged_as_a_delayed_wake_up(
     h: Harness, caplog: pytest.LogCaptureFixture
 ):

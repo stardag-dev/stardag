@@ -38,22 +38,30 @@ logger = logging.getLogger(__name__)
 
 def modal_spawner() -> SpawnTick | None:
     """The Modal integration's tick spawner, when this machine can use it:
-    the ``modal`` package importable and a Modal token configured. The
+    the ``modal`` package importable and a Modal token (id and secret)
+    configured. The
     function is looked up in the ambient Modal environment
     (``MODAL_ENVIRONMENT`` or the profile's default), as ``stardag build
     --app`` does."""
     try:
-        import modal.config
-
         from stardag.integration.modal._spawn import spawn_tick
     except ImportError:
         return None
+    return spawn_tick if has_modal_token() else None
+
+
+def has_modal_token() -> bool:
+    """A Modal token id *and* secret are configured. Both, as ``selfhost``'s
+    Modal check requires: with only an id the spawn fails *after*
+    ``notify`` stamped the hand-out, which keeps the build from every other
+    drainer for the whole window."""
     try:
-        if not modal.config.config.get("token_id"):
-            return None
+        import modal.config
+
+        config = modal.config.config
+        return bool(config.get("token_id") and config.get("token_secret"))
     except Exception:
-        return None
-    return spawn_tick
+        return False
 
 
 @dataclass(frozen=True)
@@ -194,6 +202,7 @@ __all__ = [
     "TickRequest",
     "describe",
     "drain",
+    "has_modal_token",
     "modal_spawner",
     "request_tick",
     "wake_after_write",

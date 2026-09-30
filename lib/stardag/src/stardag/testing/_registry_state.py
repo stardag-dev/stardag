@@ -64,6 +64,10 @@ class BuildRow:
     reactive_app_name: str | None = None
     reactive_tick_kwargs: dict[str, Any] | None = None
     needs_tick: bool = False
+    # When the flag was last set by the registry's own paths (the server's
+    # ``build_wake.needs_tick_at``); a test setting ``needs_tick`` directly
+    # leaves it unset, and ``build_list_stalled`` then does not report it.
+    needs_tick_at: datetime | None = None
     handed_out_at: datetime | None = None
     # When a tick last released the lease: a hand-out older than this is
     # spent (the server's ``build.scheduler_lease_released_at``, STA-34).
@@ -376,6 +380,7 @@ class RegistryState:
             member = self.members.get(plan.id, {}).get(task_id)
             if member is not None and member.excluded_reason is None:
                 build.needs_tick = True
+                build.needs_tick_at = self.now()
 
     def release_build_claims(self, build: BuildRow) -> None:
         """A build's terminal transition releases the claims of all its

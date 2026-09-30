@@ -324,11 +324,12 @@ def tasks_exclude(
         )
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
+        # Before the write: a plan's build never changes, and a lookup
+        # failing after the write landed would report the exclusion failed.
+        build_id = registry.plan_get(parsed).build_id
         result = registry.member_exclude(parsed, task_id, reason=reason)
         wake_after_write(
-            registry,
-            [registry.plan_get(parsed).build_id],
-            error_console if json_output else console,
+            registry, [build_id], error_console if json_output else console
         )
     except StardagError as e:
         _fail(e)
