@@ -740,6 +740,37 @@ class TestLeaseAndHandshake:
         assert summary.iterations == 0 and summary.spawned == 0
         assert spawned == [(build_id, "app")]
 
+    async def test_a_flag_still_set_at_the_bound_hands_on_once(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Flagged at the bound, a tick is busy, not idle: it starts no
+        further pass, ends ``lifetime_reached``, and exactly one successor
+        is spawned (the drain after it finds the hand-out stamped)."""
+
+        class FlagNeverClears(InMemoryRegistry):
+            def build_clear_notify(self, build_id):
+                super().build_clear_notify(build_id)
+                self.builds[build_id].needs_tick = True
+
+        registry = FlagNeverClears()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"f-{new_id()}")])
+        registry.limits["slot"] = 0
+        spawned: list[tuple[UUID, str]] = []
+        config = TickConfig(
+            linger_seconds=30,
+            poll_interval_seconds=0.01,
+            tick_timeout_seconds=0.2,
+            limit_key_selector=lambda t: ["slot"],
+            spawn_tick=lambda b, a: spawned.append((b, a)),
+        )
+        summary = await asyncio.wait_for(
+            _tick(registry, build_id, FakeDetachedExecutor(registry=registry), config),
+            timeout=5,
+        )
+        assert summary.outcome == "lifetime_reached"
+        assert spawned == [(build_id, "app")]
+        assert summary.successor_spawned == 1
+
     async def test_a_long_poll_interval_does_not_sleep_through_the_bound(
         self, default_in_memory_fs_target: Target
     ):

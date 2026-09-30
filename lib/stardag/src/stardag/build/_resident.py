@@ -593,6 +593,23 @@ class _ResidentEngine:
             build_id=self.session.build_id,
         )
 
+    async def flush_trailing_drain(self) -> None:
+        """Run a deferred drain now rather than drop it: the build is ending,
+        and the neighbour its result flagged would otherwise wait for the
+        next drain anywhere, or a watchdog. One already asking is awaited.
+        Best-effort, as every drain is."""
+        trailing, self._trailing_drain = self._trailing_drain, None
+        if trailing is None or trailing.done():
+            return
+        started = self._trailing_drain_started
+        if not started:
+            trailing.cancel()
+        else:
+            self._drain_again = False
+        await asyncio.gather(trailing, return_exceptions=True)
+        if not started:
+            await self._drain_now()
+
     async def settle_trailing_drain(self) -> None:
         """Cancel a deferred drain still waiting out its interval; wait for
         one already asking. Cancelling that one could land between the
@@ -641,6 +658,9 @@ class _ResidentEngine:
                 try:
                     await self._loop()
                 finally:
+                    # Every way out of the loop, a stop, a deadlock or an
+                    # error included, and while the executor can still spawn.
+                    await self.flush_trailing_drain()
                     await self.executor.teardown()
                 if self.stopped is None:
                     if self.error is not None and self.fail_mode == FailMode.FAIL_FAST:

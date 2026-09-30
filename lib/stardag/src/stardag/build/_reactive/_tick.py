@@ -235,7 +235,7 @@ async def run_tick_aio(
         started_at: When the invocation running this tick started, as a
             ``time.monotonic()`` reading: what the lifetime bound against
             ``TickConfig.tick_timeout_seconds`` counts from. None counts from
-            the lease.
+            the start of the tick's loop, once it holds the lease.
 
     Idempotent and safe to invoke at any time (single-flighted by the
     scheduler lease; a no-op on a build that is not reactively scheduled).
@@ -435,6 +435,11 @@ class _Driver:
         the deadline (``linger_extended_unflagged`` counts them: work no flag
         announced); one that does not ends the tick.
 
+        With ``linger_seconds <= 0`` there is no deadline to meet: one pass
+        and out, with neither the handshake's pre-release read nor the exit
+        pass. That is the watchdog sweep's own tick, a safety net that runs
+        again on the next period.
+
         **The lifetime bound.** The deadline moves on every pass that acts,
         so a churning build's tick would otherwise run into its container's
         wall-clock limit and be killed holding the lease. So the deadline
@@ -470,6 +475,18 @@ class _Driver:
             # the deadline, which the bound caps, and the margin is sized
             # for one pass started there.
             if not exit_pass and still_busy_at_the_bound():
+                if self.summary.iterations == 0:
+                    # Handed on without a pass. Container setup runs once
+                    # per container, so a successor on a warm one gets
+                    # further; one that never does needs a longer timeout.
+                    logger.warning(
+                        "Tick for build %s reached its lifetime bound before "
+                        "its first pass (setup took over %.0f%% of the %ss "
+                        "timeout); handing the build to a successor.",
+                        self.build_id,
+                        100 * (1 - _LIFETIME_MARGIN_FRACTION),
+                        self.config.tick_timeout_seconds,
+                    )
                 return
             stop, acted = await self.one_pass(lease, clear=not exit_pass)
             if stop:
