@@ -452,9 +452,10 @@ option).
 - `builds tick` — start a reactive build's scheduler by hand: flag the
   build and, unless a scheduler holds its lease, spawn its app's `tick`.
   `--flagged` spawns one for every flagged build in the environment that
-  no scheduler is serving. Needs the `modal` extra and a Modal token, and
-  looks the app up in the ambient Modal environment. The fallback for a
-  stalled build when no watchdog is deployed.
+  no scheduler is serving. Needs the `modal` extra and a Modal token for
+  the workspace the build records, and looks the app up in the Modal
+  environment the build records. The fallback for a stalled build when no
+  watchdog is deployed.
 - `builds stalled` — running reactive builds nobody has served for
   `--older-than` (default 5 minutes): flagged with no scheduler, or whose
   last tick died holding the lease. Empty is the expected answer.
@@ -693,17 +694,19 @@ deployments`.
   members) from that plan's scheduling and completion check, recording
   `--reason`. The task's global status is untouched, so other builds
   holding it are unaffected; an excluded root fails the build.
-- After any of these writes, and after `builds cancel`, `complete`, `fail`
-  and `stop`, the CLI wakes what it changed: it starts a scheduler tick
-  for the build the write went through (unless one is running) and for
-  the other flagged builds the write may have unblocked. The registry
-  flags those builds but never spawns, and it does not flag the build a
-  write goes through, so without this a retried task would sit `PENDING`
-  until a watchdog sweep. This needs the `modal` extra and a Modal token.
-  Without them the build is flagged for the next tick anywhere in the
-  environment, and the command prints `stardag builds tick <build-id>` for
-  starting one from somewhere that has Modal. The write itself never fails
-  because the wake-up did.
+- After `tasks retry`, `cancel` and `exclude`, and after `builds stop`
+  when the build keeps running, the CLI starts a scheduler tick for the
+  build the write went through (unless one is running). The registry does
+  not flag that build, so without this a retried task would sit `PENDING`
+  until a watchdog sweep. It spawns only when the build's recorded Modal
+  workspace is the one this machine's Modal token belongs to, and looks
+  the app up in the build's recorded Modal environment. Otherwise, or
+  without the `modal` extra and a token, the build is flagged for the next
+  tick anywhere in the environment, and the command prints `stardag builds
+tick <build-id>`. Other builds the write unblocked are flagged by the
+  registry and drained by the next tick; `stardag builds tick --flagged`
+  does it on request. The write itself never fails because the wake-up
+  did.
 
 ## Concurrency Limit Commands
 

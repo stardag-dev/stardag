@@ -32,13 +32,20 @@ CLI_MODULES = (
 
 
 class SpawnRecorder:
-    """Stands in for the Modal tick spawner: records, never reaches Modal."""
+    """Stands in for the Modal tick spawner: records, never reaches Modal.
+    ``refuse`` plays a build on another Modal workspace."""
 
     def __init__(self) -> None:
         self.spawned: list[tuple[UUID, str]] = []
         self.fail_with: Exception | None = None
+        self.refuse: str | None = None
 
-    def __call__(self, build_id: UUID, app_name: str) -> None:
+    def for_build(self, build):
+        if self.refuse is not None:
+            return None, self.refuse
+        return self._spawn, None
+
+    def _spawn(self, build_id: UUID, app_name: str) -> None:
         if self.fail_with is not None:
             raise self.fail_with
         self.spawned.append((build_id, app_name))

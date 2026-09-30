@@ -380,7 +380,7 @@ class RegistryState:
             member = self.members.get(plan.id, {}).get(task_id)
             if member is not None and member.excluded_reason is None:
                 build.needs_tick = True
-                build.needs_tick_at = self.now()
+                build.needs_tick_at = build.needs_tick_at or self.now()
 
     def release_build_claims(self, build: BuildRow) -> None:
         """A build's terminal transition releases the claims of all its

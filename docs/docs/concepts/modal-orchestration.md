@@ -194,9 +194,11 @@ so a wake-up is two halves, done by two parties:
    handed-out tick has since run and released its lease). It spawns one
    tick per candidate, on that build's own app. A resident build with
    Modal workers does the same after each result it processes (at most
-   once per 5 s; a drain inside that interval runs at its end). So does
-   the CLI after a write that changes a build (`stardag tasks retry`,
-   `builds cancel`, `builds stop`, ...), when it has Modal credentials.
+   once per 5 s; a drain inside that interval runs at its end). The
+   registry does not flag the build a write went through, so the CLI
+   starts that build's tick itself after a write (`stardag tasks retry`,
+   `builds stop`, ...), when it has a Modal token for the build's
+   workspace.
 
 The registry hands each build out **once per window** and records the
 hand-out, so twenty ticks asking at once produce one tick per flagged

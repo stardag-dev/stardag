@@ -18,8 +18,14 @@ def spawn_tick(
     build_id: UUID,
     app_name: str,
     tick_kwargs: dict[str, typing.Any] | None = None,
+    *,
+    environment_name: str | None = None,
 ) -> None:
     """Spawn the deployed ``tick`` function of ``app_name`` for ``build_id``.
+
+    ``environment_name`` is the Modal environment to look the app up in;
+    None is the ambient one, which is right inside a deployment (a tick, a
+    worker) and needs checking anywhere else (the CLI).
 
     With ``tick_kwargs`` omitted — which is what every wake-up does — the
     tick runs on the build's own stored config, so a wake-up gets the same
@@ -42,4 +48,9 @@ def spawn_tick(
         # "overrides that happen to be empty" from looking alike on the
         # wire, and keeps the common path free of a parameter it never uses.
         kwargs["tick_kwargs"] = tick_kwargs
-    modal.Function.from_name(app_name=app_name, name="tick").spawn(**kwargs)
+    # Omitted when None, like ``tick_kwargs``: every spawn from inside a
+    # deployment stays the call it always was.
+    lookup: dict[str, typing.Any] = {"app_name": app_name, "name": "tick"}
+    if environment_name is not None:
+        lookup["environment_name"] = environment_name
+    modal.Function.from_name(**lookup).spawn(**kwargs)

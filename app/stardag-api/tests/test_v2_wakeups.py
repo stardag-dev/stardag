@@ -653,6 +653,28 @@ async def test_stalled_builds_are_ordered_by_the_since_they_report(h: Harness):
     assert (oldest.build_id, oldest.reason) == (lapsed, "lease_lapsed")
 
 
+async def test_a_re_flag_keeps_the_first_flags_age(h: Harness):
+    """A build nobody serves but that keeps being re-flagged must still age
+    into the stall count: the flag keeps its first time until a clear."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _reactive(h, build)
+    await _clear(h, build)
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    await _sql(
+        h,
+        "UPDATE build_wake SET needs_tick_at = now() - interval '10 minutes'"
+        " WHERE build_id = :b",
+        b=build,
+    )
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    stalled = await _svc(h, wakeups.stalled_builds, older_than=timedelta(minutes=5))
+    assert [s.build_id for s in stalled] == [build]
+    await _clear(h, build)
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert await _svc(h, wakeups.stalled_builds, older_than=timedelta(minutes=5)) == []
+
+
 async def test_a_late_hand_out_is_logged_as_a_delayed_wake_up(
     h: Harness, caplog: pytest.LogCaptureFixture
 ):

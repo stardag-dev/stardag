@@ -629,7 +629,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
                 build_id=build_id, needs_tick=False, scheduler_live=False
             )
         build.needs_tick = True
-        build.needs_tick_at = self.now()
+        build.needs_tick_at = build.needs_tick_at or self.now()
         if can_spawn:
             build.handed_out_at = self.now()
         return BuildNotifyResult(

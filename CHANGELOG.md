@@ -51,21 +51,24 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - **New: `stardag builds tick <build-id>` and `stardag builds stalled`**
   (STA-123). `builds tick` is the manual fallback for a stalled reactive
   build when no watchdog is deployed. It flags the build and, unless a
-  scheduler holds its lease, spawns its app's `tick`; with `--flagged` it
-  spawns one for every flagged build in the environment that no scheduler
-  is serving. `builds stalled` lists the running reactive builds nobody has
+  scheduler holds its lease, spawns its app's `tick` in the Modal
+  environment the build records; with `--flagged` it spawns one for every
+  flagged build in the environment that no scheduler is serving. `builds stalled` lists the running reactive builds nobody has
   served for `--older-than` (default 5 minutes). It reads the new
   `RegistryABC.build_list_stalled()`, which needs a registry that serves
   `GET /stalled-builds`.
 - **Fixed: CLI writes woke nobody** (STA-123). The registry does not flag
   the build a write goes through, so `stardag tasks retry T --build B` left
-  T `PENDING` with no tick coming until a watchdog sweep. `tasks
-retry/cancel/exclude` and `builds cancel/complete/fail/stop` now start a
-  tick for the build they wrote through, unless one is running, and drain
-  the other flagged builds the write may have unblocked. This needs the
-  `modal` extra and a Modal token. Without them the build is flagged for
-  the next tick anywhere in the environment, and the command prints the
-  `builds tick` fallback. A write never fails because its wake-up did.
+  T `PENDING` with no tick coming until a watchdog sweep. Now `tasks
+retry/cancel/exclude`, and `builds stop` when the build keeps running,
+  start a tick for the build they wrote through, unless one is running.
+  They spawn only where the build's recorded Modal workspace matches this
+  machine's token, and look the app up in the build's recorded Modal
+  environment, never the ambient one. Otherwise the build is flagged
+  without a hand-out stamp for the next tick anywhere to serve, and the
+  command prints the `builds tick` fallback. Other builds a write unblocks
+  are left to the next drain from a deployment (or `builds tick
+--flagged`). A write never fails because its wake-up did.
 
 ### Server
 

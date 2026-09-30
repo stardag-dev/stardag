@@ -137,7 +137,10 @@ async def _flag(
     await session.execute(
         update(BuildWake)
         .where(BuildWake.build_id.in_(targets))
-        .values(needs_tick_at=now)
+        # Kept from the first flag until a tick clears it: the flag's age is
+        # how long the news has waited, which a re-flag must not reset (the
+        # stall count and the oldest-first hand-out both read it).
+        .values(needs_tick_at=func.coalesce(BuildWake.needs_tick_at, now))
         .execution_options(synchronize_session=False)
     )
 
@@ -347,7 +350,8 @@ async def notify(
         build = await _build(session, environment_id, build_id)
         now = utc_now()
         running = build.status == BuildStatus.RUNNING
-        if running:
+        if running and wake.needs_tick_at is None:
+            # Kept from the first flag, as in ``_flag``.
             wake.needs_tick_at = now
         previous_stamp = wake.tick_requested_at
         stamped = can_spawn and running

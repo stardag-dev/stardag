@@ -45,7 +45,6 @@ from stardag._cli._registry_ctx import (
     error_console,
 )
 from stardag._cli.builds_frontier import builds_frontier, builds_ticks
-from stardag._cli._wake import wake_after_write
 from stardag._cli.builds_stop import builds_stop
 from stardag._cli.builds_tick import builds_stalled, builds_tick
 from stardag.exceptions import NotFoundError, StardagError
@@ -305,9 +304,6 @@ def builds_cancel(
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
         build = registry.build_cancel(parsed)
-        # The build is ended; the builds its released claims unblocked are
-        # flagged, and need someone to drain them.
-        wake_after_write(registry, [parsed], error_console if json_output else console)
     except StardagError as e:
         _fail(e)
     finally:
@@ -347,9 +343,6 @@ def builds_complete(
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
         build = registry.build_complete(parsed, force=force)
-        # The build is ended; the builds its released claims unblocked are
-        # flagged, and need someone to drain them.
-        wake_after_write(registry, [parsed], error_console if json_output else console)
     except StardagError as e:
         _fail(e)
     finally:
@@ -388,9 +381,6 @@ def builds_fail(
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
         build = registry.build_fail(parsed, message)
-        # The build is ended; the builds its released claims unblocked are
-        # flagged, and need someone to drain them.
-        wake_after_write(registry, [parsed], error_console if json_output else console)
     except StardagError as e:
         _fail(e)
     finally:

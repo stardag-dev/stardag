@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import json
 from unittest import mock
+from uuid import UUID
 
 from typer.testing import CliRunner
 
+from stardag._cli._wake import modal_spawner as real_modal_spawner
 from stardag._cli.builds import app as builds_app
 from stardag._cli.tasks import app as tasks_app
 
@@ -122,29 +124,72 @@ class TestWritesWakeWhatTheyChanged:
         assert tick_spawner.spawned == [(running_build.build_id, "app")]
         assert "Spawned a scheduler tick" in result.output
 
-    def test_a_cancelled_build_drains_its_neighbours(
+    def _failed_leaf(self, registry, running_build):
+        _reactive(registry, running_build.build_id)
+        registry.member_fail(
+            running_build.plan_id,
+            str(running_build.leaf.id),
+            execution_id=running_build.execution_id,
+            error_message="boom",
+        )
+
+    def _retry(self, running_build, *extra):
+        return runner.invoke(
+            tasks_app,
+            [
+                "retry",
+                str(running_build.leaf.id),
+                "--build",
+                str(running_build.build_id),
+                "--yes",
+                *extra,
+            ],
+        )
+
+    def test_a_write_drains_nothing_beyond_its_own_build(
         self, fake_registry, running_build, tick_spawner
     ):
+        """The environment's other flagged builds are left to the next
+        drain from a deployment: a drain from here would hand them out
+        before it could check where each one runs."""
         neighbour = fake_registry.build_create(root_task_ids=["x"]).id
         _reactive(fake_registry, neighbour, "other")
         fake_registry.builds[neighbour].needs_tick = True
-        result = runner.invoke(
-            builds_app, ["cancel", str(running_build.build_id), "--yes"]
-        )
+        self._failed_leaf(fake_registry, running_build)
+        result = self._retry(running_build)
         assert result.exit_code == 0, result.output
-        assert tick_spawner.spawned == [(neighbour, "other")]
+        assert tick_spawner.spawned == [(running_build.build_id, "app")]
+        assert [c.build_id for c in fake_registry.build_wake_candidates()] == [
+            neighbour
+        ]
 
     def test_json_output_stays_one_document(
         self, fake_registry, running_build, tick_spawner
     ):
-        neighbour = fake_registry.build_create(root_task_ids=["x"]).id
-        _reactive(fake_registry, neighbour, "other")
-        fake_registry.builds[neighbour].needs_tick = True
-        result = runner.invoke(
-            builds_app, ["cancel", str(running_build.build_id), "--yes", "--json"]
-        )
+        self._failed_leaf(fake_registry, running_build)
+        result = self._retry(running_build, "--json")
         assert result.exit_code == 0, result.output
         json.loads(result.stdout)
+        assert tick_spawner.spawned == [(running_build.build_id, "app")]
+
+    def test_a_build_on_another_modal_workspace_is_flagged_not_spawned(
+        self, fake_registry, running_build, tick_spawner
+    ):
+        """Decided before ``notify``: a stamp followed by no spawn would hide
+        the build from every drainer for the hand-out window."""
+        self._failed_leaf(fake_registry, running_build)
+        tick_spawner.refuse = "this machine's Modal token is for workspace 'a'"
+        result = self._retry(running_build)
+        assert result.exit_code == 0, result.output
+        assert tick_spawner.spawned == []
+        assert "workspace 'a'" in result.output
+        (notified,) = fake_registry.calls_to(
+            "build_notify", build_id=running_build.build_id
+        )
+        assert notified["can_spawn"] is False
+        assert [c.build_id for c in fake_registry.build_wake_candidates()] == [
+            running_build.build_id
+        ]
 
     def test_without_modal_the_build_is_flagged_unstamped_and_the_fallback_named(
         self, fake_registry, running_build
@@ -181,15 +226,58 @@ class TestWritesWakeWhatTheyChanged:
     def test_a_failing_wake_up_does_not_fail_the_write(
         self, fake_registry, running_build, tick_spawner
     ):
-        _reactive(fake_registry, running_build.build_id)
+        self._failed_leaf(fake_registry, running_build)
         with mock.patch.object(
             fake_registry, "build_notify", side_effect=RuntimeError("down")
         ):
-            result = runner.invoke(
-                builds_app, ["cancel", str(running_build.build_id), "--yes"]
-            )
+            result = self._retry(running_build)
         assert result.exit_code == 0, result.output
-        assert fake_registry.builds[running_build.build_id].status == "cancelled"
+        assert fake_registry.status_of(running_build.leaf.id) == "pending"
+
+    def test_a_broken_modal_import_does_not_fail_the_write(
+        self, fake_registry, running_build
+    ):
+        self._failed_leaf(fake_registry, running_build)
+        with mock.patch(
+            "stardag._cli._wake.modal_spawner", side_effect=RuntimeError("protobuf")
+        ):
+            result = self._retry(running_build)
+        assert result.exit_code == 0, result.output
+        assert fake_registry.status_of(running_build.leaf.id) == "pending"
+
+
+class TestModalSpawner:
+    def _build(self, **metadata):
+        return mock.Mock(executor_metadata=metadata or None)
+
+    def _spawner(self, local_workspace):
+        from stardag._cli._wake import _ModalSpawner
+
+        spawner = _ModalSpawner()
+        spawner._workspace, spawner._resolved = local_workspace, True
+        return spawner
+
+    def test_spawns_in_the_environment_the_build_records(self):
+        # Patched before ``for_build``, which binds ``spawn_tick`` when called:
+        # this test must never reach Modal.
+        with mock.patch("stardag.integration.modal._spawn.spawn_tick") as tick:
+            spawn, refusal = self._spawner("ws").for_build(
+                self._build(workspace="ws", environment="dev")
+            )
+            assert refusal is None and spawn is not None
+            spawn(UUID(int=1), "app")
+        tick.assert_called_once_with(UUID(int=1), "app", environment_name="dev")
+
+    def test_refuses_another_workspace_or_none_recorded(self):
+        spawner = self._spawner("mine")
+        assert spawner.for_build(self._build(workspace="theirs"))[0] is None
+        assert spawner.for_build(self._build())[0] is None
+
+    def test_anything_going_wrong_is_no_spawner(self):
+        with mock.patch(
+            "stardag._cli._wake.has_modal_token", side_effect=RuntimeError("x")
+        ):
+            assert real_modal_spawner() is None
 
 
 class TestStalled:

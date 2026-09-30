@@ -26,8 +26,7 @@ from stardag._cli._registry_ctx import (
     console,
     error_console,
 )
-from stardag._cli._wake import describe, drain, modal_spawner, request_tick
-from stardag.build._wakeups import SpawnTick
+from stardag._cli._wake import Spawner, describe, drain, modal_spawner, request_tick
 from stardag.exceptions import StardagError
 
 _NO_SPAWNER = (
@@ -63,9 +62,10 @@ def builds_tick(
     ``--flagged`` asks the registry for every flagged build no scheduler is
     serving (``POST /builds/wake-candidates``) and spawns one tick each.
 
-    Needs the modal extra and a Modal token; the tick is looked up in the
-    ambient Modal environment (``MODAL_ENVIRONMENT`` or the profile's
-    default), as ``stardag build --app`` does.
+    Needs the modal extra and a Modal token for the workspace the build
+    records. The tick is looked up in the Modal environment the build
+    records, not the ambient one; a build from another workspace is
+    flagged, not spawned for.
     """
     if (build_id is None) == (not flagged):
         error_console.print(
@@ -73,26 +73,26 @@ def builds_tick(
         )
         raise typer.Exit(1)
     parsed = parse_uuid(build_id, "build ID") if build_id is not None else None
-    spawn = modal_spawner()
-    if spawn is None:
+    spawner = modal_spawner()
+    if spawner is None:
         error_console.print(f"[bold red]Error:[/bold red] {_NO_SPAWNER}")
         raise typer.Exit(1)
     if parsed is None:
-        _tick_flagged(spawn, stardag_profile, stardag_env, json_output)
+        _tick_flagged(spawner, stardag_profile, stardag_env, json_output)
     else:
-        _tick_one(parsed, spawn, stardag_profile, stardag_env, json_output)
+        _tick_one(parsed, spawner, stardag_profile, stardag_env, json_output)
 
 
 def _tick_one(
     build_id: UUID,
-    spawn: SpawnTick,
+    spawner: Spawner,
     stardag_profile: Optional[str],
     stardag_env: Optional[str],
     json_output: bool,
 ) -> None:
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        request = request_tick(registry, build_id, spawn)
+        request = request_tick(registry, build_id, spawner)
     except StardagError as e:
         _fail(e)
     finally:
@@ -108,19 +108,19 @@ def _tick_one(
         )
     else:
         console.print(describe(request))
-    if request.outcome == "spawn_failed":
+    if request.outcome in ("spawn_failed", "no_spawner"):
         raise typer.Exit(1)
 
 
 def _tick_flagged(
-    spawn: SpawnTick,
+    spawner: Spawner,
     stardag_profile: Optional[str],
     stardag_env: Optional[str],
     json_output: bool,
 ) -> None:
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        spawned, failed = drain(registry, spawn)
+        spawned, failed = drain(registry, spawner)
     except StardagError as e:
         _fail(e)
     finally:
@@ -146,6 +146,9 @@ def _tick_flagged(
     if failed:
         raise typer.Exit(1)
 
+
+# The server's bounds, checked here for a usage message rather than a 422.
+_MAX_STALL_AGE_SECONDS = 7 * 24 * 3600
 
 _REASONS = {
     "flagged_unserved": "flagged, no scheduler",
@@ -176,6 +179,12 @@ def builds_stalled(
         seconds = parse_duration(older_than)
     except ValueError as e:
         error_console.print(f"[bold red]Error:[/bold red] --older-than: {e}")
+        raise typer.Exit(1)
+    if seconds > _MAX_STALL_AGE_SECONDS or not 1 <= limit <= 200:
+        error_console.print(
+            "[bold red]Error:[/bold red] --older-than is at most 7d, and "
+            "--limit between 1 and 200."
+        )
         raise typer.Exit(1)
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:

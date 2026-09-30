@@ -381,13 +381,18 @@ def _no_stalled_builds(request: pytest.FixtureRequest, monkeypatch):
 
     from stardag_integration_tests.registry_live._wait import describe
 
-    stalled = [
-        s
-        for s in registry_provider.get().build_list_stalled(
+    # A measurement, not the scenario: a read that fails (a registry that
+    # recycled, a lost answer) is skipped, never a failure of its own --
+    # which would also be recorded as a non-timeout failure and forbid the
+    # retry, or pre-empt ``_registry_survived``'s recycle recovery.
+    try:
+        reported = registry_provider.get().build_list_stalled(
             older_than_seconds=STALL_AGE_SECONDS
         )
-        if s.build_id in triggered
-    ]
+    except Exception as error:
+        print(f"[registry-live] stall check skipped: {error!r}", file=sys.stderr)
+        return
+    stalled = [s for s in reported if s.build_id in triggered]
     if stalled:
         pytest.fail(
             f"{len(stalled)} of this scenario's reactive builds went unserved "
