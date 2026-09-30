@@ -707,6 +707,36 @@ class TestLeaseAndHandshake:
         assert spawned == []
         assert registry.builds[build_id].lease_owner is None
 
+    async def test_the_lifetime_bound_counts_from_the_invocations_start(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The container's limit covers the setup before the lease too
+        (container setup, imports, lookups), so the bound counts from
+        ``started_at``: a tick that took most of its budget to get going
+        lingers out at once rather than 30 s later."""
+        import time
+
+        registry = InMemoryRegistry()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"s-{new_id()}")])
+        registry.limits["slot"] = 0
+        config = TickConfig(
+            linger_seconds=30,
+            poll_interval_seconds=0.01,
+            tick_timeout_seconds=10,
+            limit_key_selector=lambda t: ["slot"],
+        )
+        summary = await asyncio.wait_for(
+            _tick(
+                registry,
+                build_id,
+                FakeDetachedExecutor(registry=registry),
+                config,
+                started_at=time.monotonic() - 7.5,
+            ),
+            timeout=5,
+        )
+        assert summary.outcome == "lingered_out"
+
     async def test_a_busy_tick_stops_at_its_lifetime_bound_and_hands_on(
         self, default_in_memory_fs_target: Target
     ):

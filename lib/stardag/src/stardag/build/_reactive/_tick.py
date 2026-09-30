@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import asdict
 from uuid import UUID
 
@@ -216,6 +217,7 @@ async def run_tick_aio(
     config: TickConfig | None = None,
     deployment_id: UUID | None = None,
     roll_over: RollOver | None = None,
+    started_at: float | None = None,
 ) -> TickSummary:
     """Run one reactive scheduler tick for ``build_id``.
 
@@ -230,6 +232,10 @@ async def run_tick_aio(
             the comparison (a caller that is not a deployment).
         roll_over: The rollover hook (see
             :data:`~stardag.build._reactive._rollover.RollOver`).
+        started_at: When the invocation running this tick started, as a
+            ``time.monotonic()`` reading: what the lifetime bound against
+            ``TickConfig.tick_timeout_seconds`` counts from. None counts from
+            the lease.
 
     Idempotent and safe to invoke at any time (single-flighted by the
     scheduler lease; a no-op on a build that is not reactively scheduled).
@@ -247,6 +253,7 @@ async def run_tick_aio(
             summary=summary,
             deployment_id=deployment_id,
             roll_over=roll_over,
+            started_at=started_at,
         )
     except Exception as e:
         summary.outcome = "error"
@@ -271,8 +278,10 @@ class _Driver:
         summary: TickSummary,
         deployment_id: UUID | None,
         roll_over: RollOver | None,
+        started_at: float | None = None,
     ) -> None:
         self.build_id = build_id
+        self.started_at = started_at
         self.registry = registry
         self.executor = task_executor
         self.config = config
@@ -389,15 +398,20 @@ class _Driver:
             return True, result.acted
         return False, result.acted
 
-    def _lifetime_end(self, started: float) -> float | None:
-        """How far this tick's deadline may run: short of its container's
-        wall-clock limit by a margin, so it exits through the normal path
-        (release, drain, hand-off) rather than being killed holding the
-        lease. None when the limit is unknown."""
+    def _lifetime_end(self, now: float) -> float | None:
+        """How far this tick's deadline may run, on the loop's clock: short
+        of its container's wall-clock limit by a margin, so it exits through
+        the normal path (release, drain, hand-off) rather than being killed
+        holding the lease. Counted from the invocation's start when known,
+        since the limit covers the setup before the lease too. None when the
+        limit is unknown."""
         timeout = self.config.tick_timeout_seconds
         if timeout is None:
             return None
-        return started + timeout * (1 - _LIFETIME_MARGIN_FRACTION)
+        elapsed = 0.0
+        if self.started_at is not None:
+            elapsed = max(0.0, time.monotonic() - self.started_at)
+        return now + timeout * (1 - _LIFETIME_MARGIN_FRACTION) - elapsed
 
     async def drive(self, lease: SchedulerLease) -> None:
         """The loop: act, then linger polling the flag until the deadline.
@@ -507,6 +521,7 @@ async def _tick_body(
     summary: TickSummary,
     deployment_id: UUID | None,
     roll_over: RollOver | None,
+    started_at: float | None = None,
 ) -> None:
     global _warned_missing_spawner
     lease = SchedulerLease(registry, build_id)
@@ -518,6 +533,7 @@ async def _tick_body(
         summary=summary,
         deployment_id=deployment_id,
         roll_over=roll_over,
+        started_at=started_at,
     )
     acquired = False
     try:
