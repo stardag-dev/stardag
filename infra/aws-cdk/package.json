@@ -14,16 +14,16 @@
     "@types/jest": "^30.0.0",
     "@types/node": "26.6.2",
     "@types/source-map-support": "^0.5.10",
-    "aws-cdk": "2.1142.0",
+    "aws-cdk": "2.1143.0",
     "jest": "^30.5.2",
-    "ts-jest": "^29.4.12",
+    "ts-jest": "^29.4.14",
     "ts-node": "^10.9.2",
     "typescript": "~6.0.3"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.270.0",
+    "aws-cdk-lib": "^2.271.0",
     "constructs": "^10.0.0",
-    "dotenv": "^18.0.1",
+    "dotenv": "^18.0.4",
     "source-map-support": "^0.5.21"
   }
 }
