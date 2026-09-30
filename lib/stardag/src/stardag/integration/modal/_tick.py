@@ -260,9 +260,13 @@ async def _run_deployed_tick_aio(
     tick_kwargs: dict[str, typing.Any] | None = None,
     *,
     deployment: _TickDeployment,
+    started_at: float | None = None,
 ) -> dict[str, typing.Any]:
     """One scheduler tick of a reactive build: the body of the deployed
     ``tick`` function (see :meth:`StardagApp.finalize`).
+
+    ``started_at`` is the invocation's ``time.monotonic()`` at entry, which
+    the tick's lifetime bound counts from.
 
     Returns a JSON-able outcome: the ``run_tick_aio`` summary, or a short
     ``{"outcome": ...}`` for the two cases that stop before the lease — a
@@ -363,6 +367,7 @@ async def _run_deployed_tick_aio(
         config=config,
         deployment_id=own,
         roll_over=_roll_over if own is not None else None,
+        started_at=started_at,
     )
     # The container id is in the line so a tick can be matched to its
     # container's logs.

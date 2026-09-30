@@ -203,3 +203,52 @@ async def test_a_throttled_drain_is_deferred_not_dropped(
     await asyncio.sleep(0.1)
     assert executor.ticks_spawned == [(neighbour, "app")]
     await engine.settle_trailing_drain()
+
+
+async def test_a_drain_asked_for_while_one_is_asking_runs_again(
+    registry: InMemoryRegistry, monkeypatch: pytest.MonkeyPatch
+):
+    """The trailing drain's answer may predate a flag raised while it was
+    asking, so a request in that window schedules one more drain."""
+    import asyncio
+    import types
+
+    from stardag.build import _resident
+    from stardag.build._concurrency import NoOpConcurrencyLimiter
+
+    monkeypatch.setattr(_resident, "_RESIDENT_DRAIN_INTERVAL_SECONDS", 0.05)
+    asking = asyncio.Event()
+    answer = asyncio.Event()
+    original = registry.build_wake_candidates_aio
+
+    async def slow_candidates(*args, **kwargs):
+        candidates = await original(*args, **kwargs)
+        if not asking.is_set():
+            asking.set()
+            await answer.wait()
+        return candidates
+
+    monkeypatch.setattr(registry, "build_wake_candidates_aio", slow_candidates)
+    executor = _executor()
+    engine = _resident._ResidentEngine(
+        [],
+        task_executor=executor,
+        fail_mode=FailMode.FAIL_FAST,
+        session=types.SimpleNamespace(  # type: ignore[arg-type]
+            enabled=True, registry=registry, build_id=None
+        ),
+        max_concurrent_discover=1,
+        register_all=False,
+        limiter=NoOpConcurrencyLimiter(),
+    )
+    engine._last_drain = asyncio.get_running_loop().time()
+    await engine.drain_neighbours()  # deferred
+    await asyncio.wait_for(asking.wait(), timeout=1)
+    neighbour = registry.build_create(root_task_ids=["x"]).id
+    registry.build_set_reactive_meta(neighbour, app_name="app")
+    registry.builds[neighbour].needs_tick = True
+    await engine.drain_neighbours()  # while the trailing one is asking
+    answer.set()
+    await asyncio.sleep(0.2)
+    assert executor.ticks_spawned == [(neighbour, "app")]
+    await engine.settle_trailing_drain()

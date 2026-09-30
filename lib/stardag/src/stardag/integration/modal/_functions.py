@@ -13,6 +13,7 @@ import contextlib
 import inspect
 import json
 import logging
+import time
 import typing
 from uuid import UUID
 
@@ -423,9 +424,12 @@ def _register_functions(
         build_id: str,
         tick_kwargs: dict[str, typing.Any] | None = None,
     ) -> dict[str, typing.Any]:
+        # Before the container setup: Modal's timeout covers it, so the
+        # tick's lifetime bound has to count from here, not from the lease.
+        started_at = time.monotonic()
         _run_container_setup(container_setup)
         return await _run_deployed_tick_aio(
-            build_id, tick_kwargs, deployment=tick_deployment
+            build_id, tick_kwargs, deployment=tick_deployment, started_at=started_at
         )
 
     # tick/watchdog default to builder_settings when tick_settings is

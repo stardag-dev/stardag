@@ -254,6 +254,8 @@ class _ResidentEngine:
         # A drain the throttle deferred, run once its interval is up.
         self._trailing_drain: asyncio.Task | None = None
         self._trailing_drain_started = False
+        # A drain was asked for while the trailing one was already asking.
+        self._drain_again = False
 
     # -- discovery ------------------------------------------------------------------
 
@@ -561,15 +563,27 @@ class _ResidentEngine:
         if not force and wait > 0:
             if self._trailing_drain is None or self._trailing_drain.done():
                 self._trailing_drain_started = False
+                self._drain_again = False
                 self._trailing_drain = asyncio.create_task(self._drain_after(wait))
+            elif self._trailing_drain_started:
+                # Asking already: its answer may predate this request's flag.
+                self._drain_again = True
             return
         await self.settle_trailing_drain()
         await self._drain_now()
 
     async def _drain_after(self, delay: float) -> None:
-        await asyncio.sleep(delay)
-        self._trailing_drain_started = True
-        await self._drain_now()
+        """The deferred drain, and one more per interval for as long as
+        requests keep arriving while it asks."""
+        while True:
+            await asyncio.sleep(delay)
+            self._trailing_drain_started = True
+            self._drain_again = False
+            await self._drain_now()
+            if not self._drain_again:
+                return
+            self._trailing_drain_started = False
+            delay = _RESIDENT_DRAIN_INTERVAL_SECONDS
 
     async def _drain_now(self) -> None:
         self._last_drain = asyncio.get_running_loop().time()
@@ -589,6 +603,9 @@ class _ResidentEngine:
             return
         if not self._trailing_drain_started:
             trailing.cancel()
+        else:
+            # The caller drains next; the trailing one need not go again.
+            self._drain_again = False
         # The drain is best-effort and raises nothing of its own; this only
         # reaps the cancellation.
         await asyncio.gather(trailing, return_exceptions=True)

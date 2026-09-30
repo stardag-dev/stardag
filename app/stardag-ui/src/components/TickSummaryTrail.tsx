@@ -29,7 +29,7 @@ const OUTCOMES: Record<string, { label: string; help: string; tone: string }> = 
   },
   lifetime_reached: {
     label: "lifetime reached",
-    help: "The build kept the tick busy until it neared its container's time limit, so it stopped, released the build and started a successor rather than being killed mid-work. Normal for a long, busy build.",
+    help: "The build kept the tick busy until it neared its container's time limit, so it stopped and released the build rather than being killed mid-work, and handed it on: a successor is spawned unless another tick already holds the build (best-effort — see successor_spawned). Normal for a long, busy build.",
     tone: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300",
   },
   foreign_app: {
