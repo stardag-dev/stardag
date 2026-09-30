@@ -34,6 +34,8 @@ Usage:
     stardag builds show <build-id> [--json]
     stardag builds frontier <build-id> [--json]
     stardag builds ticks <build-id> [--limit N] [--json]
+    stardag builds tick (<build-id> | --flagged) [--json]
+    stardag builds stalled [--older-than D] [--limit N] [--json]
     stardag builds stop <build-id> [--not-in-current-plan] [--no-cancel]
         [--executor E] [--worker W] [--namespace NS] [--older-than D]
         [--task-id T ...] [--mark-lost] [--dry-run] [--yes] [--json]

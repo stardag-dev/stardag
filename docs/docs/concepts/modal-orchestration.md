@@ -188,12 +188,15 @@ so a wake-up is two halves, done by two parties:
 2. **The scheduler spawns.** A finishing worker sets its own build's flag
    and spawns a tick unless the registry says a scheduler already holds
    the build's lease (that tick will see the flag on its next poll).
-   Every tick, at the end of each pass that acted and on every exit, asks
-   the registry for the **wake candidates**: flagged builds with no live
+   Every tick, after every pass and on every exit, asks the registry for
+   the **wake candidates**: flagged builds with no live
    lease that were not handed out in the last ~2 minutes (or whose
    handed-out tick has since run and released its lease). It spawns one
    tick per candidate, on that build's own app. A resident build with
-   Modal workers does the same after each result it processes.
+   Modal workers does the same after each result it processes (at most
+   once per 5 s; a drain inside that interval runs at its end). So does
+   the CLI after a write that changes a build (`stardag tasks retry`,
+   `builds cancel`, `builds stop`, ...), when it has Modal credentials.
 
 The registry hands each build out **once per window** and records the
 hand-out, so twenty ticks asking at once produce one tick per flagged
@@ -207,6 +210,15 @@ releasing the lease (set → keep the lease, act again) and once after (set
 → spawn a successor). A wake-up that lands during the release either finds
 the lease gone and spawns, or finds it held and is picked up by that
 post-release read.
+
+A flag can still be lost while the frontier is intact: a worker's report
+lands and its wake-up request does not, or two writers race for the same
+flag. So before exiting, a tick with its flag clear reads the frontier once
+more and acts on what it finds (the tick summary counts these as
+`linger_extended_unflagged`). And a tick that knows its container's time
+limit stops short of it: an idle one exits normally, and a busy one hands
+the build to a successor tick (`lifetime_reached`) rather than being killed
+while holding the lease.
 
 **What this guarantees.** Any recorded status change, and any freed
 concurrency slot, reaches every build it concerns, carried by the next
@@ -237,6 +249,14 @@ tick finds the scheduler lease held and exits without acting.
 With `watchdog_period_minutes` set it runs on that period; without it, it
 runs when you invoke it — from the Modal UI or `modal run` — which is the
 one-click recovery for a stalled build.
+
+**The watchdog is optional.** Reactive scheduling works without one, and
+the residual risk is measurable: `stardag builds stalled` lists the running
+reactive builds nobody has served for a while (flagged with no scheduler,
+or whose last tick died holding the lease), and the registry logs every
+wake-up it hands out late. To start one build's scheduler by hand, run
+`stardag builds tick <build-id>`; `stardag builds tick --flagged` does what
+a sweep's drain does, for every flagged build in the environment.
 
 The default is off, and that is usually right: a standing sweep polls the
 registry whether or not anything is building, enough to keep a

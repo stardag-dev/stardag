@@ -19,6 +19,7 @@ from stardag.registry._models import (
     EventInfo,
     ExecutionInfo,
     PlanDetail,
+    StalledBuild,
     TaskArtifactInfo,
     TaskInfo,
     TaskListPage,
@@ -121,6 +122,22 @@ class APIRegistryReads(HTTPTransport, RegistryReadsABC):
                 _list_of("summaries", TickSummaryRecord),
                 params={"limit": str(limit)},
                 operation=f"List tick summaries of build {build_id}",
+            )
+        )
+
+    def build_list_stalled(
+        self, *, older_than_seconds: int = 300, limit: int = 200
+    ) -> list[StalledBuild]:
+        return self.call(
+            Request(
+                "GET",
+                "/stalled-builds",
+                _list_of("builds", StalledBuild),
+                params={
+                    "older_than_seconds": str(older_than_seconds),
+                    "limit": str(limit),
+                },
+                operation="List stalled builds",
             )
         )
 

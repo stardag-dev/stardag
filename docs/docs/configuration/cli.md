@@ -398,6 +398,8 @@ each value parsed as JSON when it parses, else taken as a string).
     stardag builds show <build-id> [--json]
     stardag builds frontier <build-id> [--json]
     stardag builds ticks <build-id> [--limit N] [--json]
+    stardag builds tick (<build-id> | --flagged) [--json]
+    stardag builds stalled [--older-than 5m] [--limit N] [--json]
     stardag builds stop <build-id> [--not-in-current-plan]
         [--executor NAME] [--worker NAME] [--namespace NS] [--older-than 30m]
         [--task-id ID ...] [--no-cancel] [--mark-lost] [--dry-run]
@@ -415,6 +417,8 @@ each value parsed as JSON when it parses, else taken as a string).
     uv run stardag builds show <build-id> [--json]
     uv run stardag builds frontier <build-id> [--json]
     uv run stardag builds ticks <build-id> [--limit N] [--json]
+    uv run stardag builds tick (<build-id> | --flagged) [--json]
+    uv run stardag builds stalled [--older-than 5m] [--limit N] [--json]
     uv run stardag builds stop <build-id> [--not-in-current-plan]
         [--executor NAME] [--worker NAME] [--namespace NS] [--older-than 30m]
         [--task-id ID ...] [--no-cancel] [--mark-lost] [--dry-run]
@@ -445,6 +449,15 @@ option).
 - `builds ticks` — the scheduler's own account of its recent ticks, crashed
   ones included. Reactive builds are driven by many short-lived ticks, each in
   its own container; this is where their reasoning is kept.
+- `builds tick` — start a reactive build's scheduler by hand: flag the
+  build and, unless a scheduler holds its lease, spawn its app's `tick`.
+  `--flagged` spawns one for every flagged build in the environment that
+  no scheduler is serving. Needs the `modal` extra and a Modal token, and
+  looks the app up in the ambient Modal environment. The fallback for a
+  stalled build when no watchdog is deployed.
+- `builds stalled` — running reactive builds nobody has served for
+  `--older-than` (default 5 minutes): flagged with no scheduler, or whose
+  last tick died holding the lease. Empty is the expected answer.
 - `builds stop` — end the build's containers, not just its claims (see
   [Stopping a build's executions](#stopping-a-builds-executions) below).
 - `builds cancel` — release the claims held by every one of the build's
@@ -511,7 +524,8 @@ Above the lists, the summary also shows:
 - **Needs tick** — the build's wake-up flag (`GET /builds/{id}/notify`,
   read without clearing it): something changed that a tick has not acted
   on yet. A reactive build that says `yes` here for long, with nothing
-  running, has no tick coming; the watchdog sweep is what picks it up.
+  running, has no tick coming; the watchdog sweep picks it up, or
+  `stardag builds tick <build-id>` does now.
 - **Members** — the plan's non-excluded members by their task's status,
   with the excluded ones counted apart (`GET /plans/{id}`).
 - **Roots** — how many of the plan's roots are `COMPLETED`, out of all of
@@ -679,6 +693,17 @@ deployments`.
   members) from that plan's scheduling and completion check, recording
   `--reason`. The task's global status is untouched, so other builds
   holding it are unaffected; an excluded root fails the build.
+- After any of these writes, and after `builds cancel`, `complete`, `fail`
+  and `stop`, the CLI wakes what it changed: it starts a scheduler tick
+  for the build the write went through (unless one is running) and for
+  the other flagged builds the write may have unblocked. The registry
+  flags those builds but never spawns, and it does not flag the build a
+  write goes through, so without this a retried task would sit `PENDING`
+  until a watchdog sweep. This needs the `modal` extra and a Modal token.
+  Without them the build is flagged for the next tick anywhere in the
+  environment, and the command prints `stardag builds tick <build-id>` for
+  starting one from somewhere that has Modal. The write itself never fails
+  because the wake-up did.
 
 ## Concurrency Limit Commands
 

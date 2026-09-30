@@ -24,6 +24,7 @@ from stardag._cli._registry_ctx import (
     console,
     error_console,
 )
+from stardag._cli._wake import wake_after_write
 from stardag.exceptions import StardagError
 
 _TASK_ID = typer.Argument(..., help="Task ID (the completion hash)")
@@ -213,6 +214,11 @@ def _member_action(
             result = registry.member_retry(plan_id, task_id)
         else:
             result = registry.member_cancel(plan_id, task_id)
+        # The registry does not flag the build a write goes through, so
+        # nothing else would start its tick.
+        wake_after_write(
+            registry, [build_id], error_console if json_output else console
+        )
     except StardagError as e:
         _fail(e)
     finally:
@@ -319,6 +325,11 @@ def tasks_exclude(
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
         result = registry.member_exclude(parsed, task_id, reason=reason)
+        wake_after_write(
+            registry,
+            [registry.plan_get(parsed).build_id],
+            error_console if json_output else console,
+        )
     except StardagError as e:
         _fail(e)
     finally:

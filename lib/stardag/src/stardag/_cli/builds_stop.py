@@ -28,6 +28,7 @@ from stardag._cli._registry_ctx import (
     console,
     error_console,
 )
+from stardag._cli._wake import wake_after_write
 from stardag.exceptions import StardagError
 from stardag.registry import ExecutionInfo
 
@@ -186,6 +187,11 @@ def builds_stop(
                 registry.build_cancel(parsed)
             except StardagError as e:
                 _fail(e)
+        # Stopped and lost executions end their tasks' claims: a build that
+        # keeps running must re-plan them, and other builds holding them are
+        # flagged and need someone to drain them.
+        if results or lost or cancel_build:
+            wake_after_write(registry, [parsed], report)
         payload["stop_results"] = results
         payload["stopped_count"] = sum(1 for r in results if r["reported"])
         payload["lost"] = sorted(str(i) for i in lost)

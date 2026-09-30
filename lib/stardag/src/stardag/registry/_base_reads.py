@@ -21,6 +21,7 @@ from stardag.registry._models import (
     EventInfo,
     ExecutionInfo,
     PlanDetail,
+    StalledBuild,
     TaskListPage,
     TickSummaryRecord,
 )
@@ -97,6 +98,14 @@ class RegistryReadsABC:
         """``GET /builds/{id}/tick-summaries``: the reported tick summaries,
         newest first."""
         raise _missing(self, "build_list_tick_summaries")
+
+    def build_list_stalled(
+        self, *, older_than_seconds: int = 300, limit: int = 200
+    ) -> list[StalledBuild]:
+        """``GET /stalled-builds``: RUNNING reactive builds of the environment
+        nobody has served for ``older_than_seconds``, oldest first: flagged
+        with no live lease, or holding a lease that lapsed unreleased."""
+        raise _missing(self, "build_list_stalled")
 
     def deployment_get(self, deployment_id: UUID) -> DeploymentInfo:
         """``GET /deployments/{id}``."""
