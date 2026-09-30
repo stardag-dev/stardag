@@ -712,18 +712,19 @@ class TestLeaseAndHandshake:
     ):
         """The container's limit covers the setup before the lease too
         (container setup, imports, lookups), so the bound counts from
-        ``started_at``: a tick that took most of its budget to get going
-        lingers out at once rather than 30 s later."""
+        ``started_at``. A tick whose setup already spent the budget starts
+        no pass at all -- not even the first, which could spend its whole
+        spawn budget with no margin left -- and hands the build on."""
         import time
 
         registry = InMemoryRegistry()
         build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"s-{new_id()}")])
-        registry.limits["slot"] = 0
+        spawned: list[tuple[UUID, str]] = []
         config = TickConfig(
             linger_seconds=30,
             poll_interval_seconds=0.01,
             tick_timeout_seconds=10,
-            limit_key_selector=lambda t: ["slot"],
+            spawn_tick=lambda b, a: spawned.append((b, a)),
         )
         summary = await asyncio.wait_for(
             _tick(
@@ -733,6 +734,26 @@ class TestLeaseAndHandshake:
                 config,
                 started_at=time.monotonic() - 7.5,
             ),
+            timeout=5,
+        )
+        assert summary.outcome == "lifetime_reached"
+        assert summary.iterations == 0 and summary.spawned == 0
+        assert spawned == [(build_id, "app")]
+
+    async def test_a_long_poll_interval_does_not_sleep_through_the_bound(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        build_id, _ = await _plan(registry, [SyncOnlyTask(name=f"p-{new_id()}")])
+        registry.limits["slot"] = 0
+        config = TickConfig(
+            linger_seconds=30,
+            poll_interval_seconds=60,
+            tick_timeout_seconds=0.2,
+            limit_key_selector=lambda t: ["slot"],
+        )
+        summary = await asyncio.wait_for(
+            _tick(registry, build_id, FakeDetachedExecutor(registry=registry), config),
             timeout=5,
         )
         assert summary.outcome == "lingered_out"
@@ -749,26 +770,22 @@ class TestLeaseAndHandshake:
                 await asyncio.sleep(0.03)
                 return await super().submit_detached(task, execution_id=execution_id)
 
+        # Wide, one spawn per pass: every pass acts and the next starts at
+        # once, so the tick is busy when it meets the bound, not waiting on a
+        # worker's flag (which would be an idle tick, and linger out).
         registry = InMemoryRegistry()
-        leaf = SyncOnlyTask(name=f"c0-{new_id()}")
-        chain = [leaf]
-        for i in range(1, 20):
-            chain.append(SyncOnlyTask(name=f"c{i}", deps=(chain[-1],)))
-        build_id, _ = await _plan(registry, [chain[-1]])
+        chain = [SyncOnlyTask(name=f"w{i}-{new_id()}") for i in range(40)]
+        build_id, _ = await _plan(registry, list(chain))
         spawned: list[tuple[UUID, str]] = []
         config = TickConfig(
             linger_seconds=30,
             poll_interval_seconds=0.01,
             tick_timeout_seconds=0.2,
+            max_spawns_per_tick=1,
             spawn_tick=lambda b, a: spawned.append((b, a)),
         )
         summary = await asyncio.wait_for(
-            _tick(
-                registry,
-                build_id,
-                SlowSpawns(registry=registry, workers=True),
-                config,
-            ),
+            _tick(registry, build_id, SlowSpawns(registry=registry), config),
             timeout=5,
         )
         assert summary.outcome == "lifetime_reached"

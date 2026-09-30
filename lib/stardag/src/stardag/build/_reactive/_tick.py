@@ -441,8 +441,9 @@ class _Driver:
         never runs past :meth:`_lifetime_end`. A tick with nothing to do
         meets it like any deadline (the handshake and the exit pass, then
         ``lingered_out``); one still busy there -- its last pass acted, or
-        its flag is set -- starts no further pass, ends
-        ``lifetime_reached``, and hands the build to a successor.
+        its flag is set, or it is already past the bound before its first
+        pass -- starts no further pass, ends ``lifetime_reached``, and
+        hands the build to a successor.
         """
         loop = asyncio.get_running_loop()
         lifetime_end = self._lifetime_end(loop.time())
@@ -462,6 +463,13 @@ class _Driver:
         while True:
             if lease.lost:
                 self.summary.outcome = "lease_lost"
+                return
+            # No acting pass starts past the bound, the first one included:
+            # the setup before the lease may already have spent the margin.
+            # The exit pass is the exception, and is not late: it starts at
+            # the deadline, which the bound caps, and the margin is sized
+            # for one pass started there.
+            if not exit_pass and still_busy_at_the_bound():
                 return
             stop, acted = await self.one_pass(lease, clear=not exit_pass)
             if stop:
@@ -498,7 +506,14 @@ class _Driver:
                     self.summary.linger_extended += 1
                     deadline = linger_deadline()
                     break
-                await asyncio.sleep(self.config.poll_interval_seconds)
+                # Never past the deadline, which the bound caps: a poll
+                # interval longer than the time left must not sleep through it.
+                await asyncio.sleep(
+                    min(
+                        self.config.poll_interval_seconds,
+                        max(0.0, deadline - loop.time()),
+                    )
+                )
                 if lease.lost:
                     self.summary.outcome = "lease_lost"
                     return
