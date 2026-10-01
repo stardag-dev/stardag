@@ -604,10 +604,12 @@ class _ResidentEngine:
         started = self._trailing_drain_started
         if not started:
             trailing.cancel()
-        else:
-            self._drain_again = False
+        # A request recorded while it was asking may postdate its answer.
+        # Taken now and cleared, so the trailing task does not wait out
+        # another interval for it: the build is ending, and drains below.
+        again, self._drain_again = self._drain_again, False
         await asyncio.gather(trailing, return_exceptions=True)
-        if not started:
+        if not started or again or self._drain_again:
             await self._drain_now()
 
     async def settle_trailing_drain(self) -> None:

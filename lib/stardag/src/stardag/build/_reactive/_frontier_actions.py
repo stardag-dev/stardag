@@ -262,6 +262,11 @@ async def _spawn(
     """
     if _stop_for_lost_lease(lease_lost, result):
         return
+    # Before the metadata await too: once one spawn met the deadline, every
+    # one queued behind it must stop here, not after a call that can be slow.
+    if result.out_of_time or out_of_time():
+        result.out_of_time = True
+        return
     limit_keys = (
         list(config.limit_key_selector(task)) if config.limit_key_selector else []
     )
@@ -416,6 +421,7 @@ async def _fail_exhausted(
     summary: "TickSummary",
     result: PassResult,
     lease_lost: "LeaseLost",
+    out_of_time: "OutOfTime",
 ) -> None:
     """Fail a member at a budget instead of running it again: a claim (the
     registry fails only the execution holding a task's claim; for a lapsed
@@ -423,6 +429,10 @@ async def _fail_exhausted(
     ``taken_over``), then its failure with ``message``. No container is
     spawned. The build's fail mode takes it from there."""
     if _stop_for_lost_lease(lease_lost, result):
+        return
+    # A claim like any other: past the deadline it is the successor's.
+    if result.out_of_time or out_of_time():
+        result.out_of_time = True
         return
     execution_id = new_id()
     try:
@@ -473,8 +483,9 @@ async def act_on_frontier(
     refused mid-pass means another tick may already be acting. The pass
     then stops and returns ``lease_lost``.
 
-    ``out_of_time`` is read before every claim. Once it answers True, the
-    pass takes no further claim and returns ``out_of_time``. It bounds the
+    ``out_of_time`` is read before every claim, a budget failure's included,
+    and before each spawn's executor-metadata call. Once it answers True,
+    the pass takes no further claim and returns ``out_of_time``. It bounds the
     pass by the clock rather than by the spawn cap, which an explicit
     ``max_spawns_per_tick`` or the cap's floor can set beyond what is left
     of the tick's container time.
@@ -538,12 +549,13 @@ async def act_on_frontier(
                     summary=summary,
                     result=result,
                     lease_lost=lost,
+                    out_of_time=timed_out,
                 )
                 for member, message in exhausted
             ],
             semaphore,
         )
-        if result.lease_lost or result.superseded:
+        if result.lease_lost or result.superseded or result.out_of_time:
             return result
 
     loaded: list[tuple[BaseTask, FrontierMember]] = []
