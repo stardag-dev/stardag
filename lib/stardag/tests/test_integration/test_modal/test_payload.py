@@ -441,3 +441,42 @@ class TestDeployedReceivers:
             )
 
         assert "AAA_STA124_LEAK" not in os.environ
+
+
+class TestReceiverEdges:
+    def test_a_bare_resume_rehydrates_under_the_stored_settings(self):
+        """``settings`` omitted on a resume means the active plan's, and the
+        build function is handed that same resolved value."""
+        received = []
+
+        def build_function(tasks, worker_selector, app_name, build_kwargs=None):
+            received.append((dict(os.environ), build_kwargs))
+
+        functions = _finalize_capturing_functions(_app(build_function=build_function))
+        stored = {"STA124_STORED": "yes"}
+
+        with patch(
+            "stardag.integration.modal._functions.resolve_settings",
+            return_value=stored,
+        ) as resolve:
+            functions["build"](
+                [_payload_of(PayloadTask())],
+                lambda t: "default",
+                "test-payload-app",
+                build_kwargs={"resume_build_id": "the-build"},
+            )
+
+        assert resolve.call_args.args[1:] == ("the-build", None)
+        ((_, build_kwargs),) = received
+        assert build_kwargs["settings"] == stored
+
+    def test_a_reporter_that_cannot_be_created_does_not_mask_the_refusal(self):
+        from stardag.integration.modal import _reporter
+
+        with patch.object(
+            _reporter._WorkerLifecycleReporter,
+            "create",
+            side_effect=RuntimeError("broken registry config"),
+        ):
+            # Returns quietly; the caller raises the original refusal.
+            _reporter.report_unreadable_task("t", {}, TaskRehydrationError("refused"))

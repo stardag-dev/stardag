@@ -58,9 +58,9 @@ from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
 from stardag._core.rehydrate import TaskRehydrationError
 from stardag.build._settings import (
     resident_settings,
+    resolve_settings,
     settings_applied,
     settings_owner,
-    validate_settings,
 )
 from stardag.exceptions import StardagError
 from stardag.integration.modal._metadata import (
@@ -363,15 +363,23 @@ def _register_functions(
         # the resident guard, not a bare env swap: ``build`` may serve
         # several inputs per container, and the guard refuses a second
         # build with different settings rather than letting it interleave.
+        build_kwargs = dict(build_kwargs or {})
+        resume_build_id = build_kwargs.get("resume_build_id")
         try:
-            settings = validate_settings((build_kwargs or {}).get("settings"))
+            # Resolved as the build will resolve them -- a bare resume
+            # (``settings`` omitted) reuses the active plan's -- and handed
+            # on resolved, so the roots and the build see the same values.
+            settings = resolve_settings(
+                registry_provider.get(), resume_build_id, build_kwargs.get("settings")
+            )
+            if resume_build_id is not None:
+                build_kwargs["settings"] = settings
             with resident_settings(settings):
                 roots = from_task_payloads(tasks)
         except BaseException as e:
             # A triggered build is already RUNNING (the trigger created it);
             # a root refused here must not leave it orphaned, as the
             # bootstrap does not.
-            resume_build_id = (build_kwargs or {}).get("resume_build_id")
             if resume_build_id is not None:
                 _fail_build_best_effort(registry_provider.get(), resume_build_id, e)
             raise

@@ -436,9 +436,17 @@ def report_unreadable_task(
     failure and no error message on record. Started first, as the run
     function would have, then failed.
     """
-    reporter = _WorkerLifecycleReporter.create(
-        typing.cast(BaseTask, _TaskRef(task_id)), env_overrides
-    )
+    try:
+        reporter = _WorkerLifecycleReporter.create(
+            typing.cast(BaseTask, _TaskRef(task_id)), env_overrides
+        )
+    except Exception:
+        # Best-effort, creation included (as in the Runner): the refusal the
+        # caller is about to raise must not be replaced by a reporting error.
+        logger.exception(
+            f"Could not report the refused task {task_id}: reporter creation failed."
+        )
+        return
     if reporter is None:
         return
     reporter.started()
