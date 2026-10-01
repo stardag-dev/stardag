@@ -214,11 +214,11 @@ class TestToAndFromPayload:
         """The upstream sits inside a dataclass, which a pydantic-only walk
         would not enter: its module must still be named, or a receiver that
         has not imported it cannot resolve it."""
-        from tests.test_integration.test_modal._payload_pkg.root import (
+        from stardag.utils.testing.payload_root import (
             DataclassRoot,
             Holder,
         )
-        from tests.test_integration.test_modal._payload_pkg.upstream import (
+        from stardag.utils.testing.payload_upstream import (
             PkgUpstream,
         )
 
@@ -226,20 +226,17 @@ class TestToAndFromPayload:
 
         payload = _payload_of(task)
 
-        assert (
-            "tests.test_integration.test_modal._payload_pkg.upstream"
-            in (payload["modules"])
-        )
+        assert "stardag.utils.testing.payload_upstream" in (payload["modules"])
         assert from_task_payload(payload) == task
 
     def test_a_fresh_receiver_rehydrates_from_the_named_modules_alone(self):
         """The receiver's actual situation: a process that has imported none
         of the task's modules. Whatever the payload names must be enough."""
-        from tests.test_integration.test_modal._payload_pkg.root import (
+        from stardag.utils.testing.payload_root import (
             DataclassRoot,
             Holder,
         )
-        from tests.test_integration.test_modal._payload_pkg.upstream import (
+        from stardag.utils.testing.payload_upstream import (
             PkgUpstream,
         )
 

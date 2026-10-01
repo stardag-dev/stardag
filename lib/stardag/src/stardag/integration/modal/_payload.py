@@ -26,10 +26,12 @@ not importable by reference (``__main__``, a local class), a body that is
 not a fixed point of its own round trip (a nested task field with a plain
 annotation, a lossy serializer), or state the body does not carry (a private
 attribute set at runtime, a field excluded from the dump) — is sent **by
-value**, as before, with a warning once per class: it is not protected across deploys. A reactive
-build never has one (its pre-flight refuses any task a tick could not
-rehydrate), so the fallback is only ever taken by resident and hybrid
-builds.
+value**, as before, with a warning once per class: it is not protected
+across deploys. In a reactive build the bootstrap's pre-flight already
+refuses a task a tick could not rehydrate, so the fallback is not taken
+there for an unimportable class or an unstable body; runtime state, though,
+is not part of what the registry stores, and a tick runs such a task
+without it either way.
 
 The payload is a plain ``dict``, so there is no stardag class to unpickle
 on the far side and its shape can grow. Receivers keep accepting a pickled

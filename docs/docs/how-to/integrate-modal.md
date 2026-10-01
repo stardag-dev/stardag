@@ -910,8 +910,10 @@ task modules](#declaring-your-task-modules-required-for-reactive-builds),
 a class defined in `__main__` or inside a function, or a task carrying
 state its instance body does not (a private attribute set at runtime, a
 field excluded from the dump) — is still sent pickled, with a warning once
-per class. A reactive build never contains one; in a resident build, such a
-task is not protected across a redeploy.
+per class. In a resident build, such a task is not protected across a
+redeploy. A reactive build refuses the first two kinds before it starts;
+runtime state it does not detect, and its ticks run such a task without it,
+since the registry never stored it.
 
 The receiving container recomputes the task id to check it, so if you
 override the task-id namespace (`task_uuid5_namespace_provider`), install
