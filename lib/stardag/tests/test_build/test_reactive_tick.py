@@ -749,8 +749,11 @@ class TestLeaseAndHandshake:
         tick hands the rest to a successor."""
         import time
 
+        spawn_starts: list[float] = []
+
         class SlowSpawns(FakeDetachedExecutor):
             async def submit_detached(self, task, *, execution_id):
+                spawn_starts.append(time.monotonic())
                 await asyncio.sleep(0.03)
                 return await super().submit_detached(task, execution_id=execution_id)
 
@@ -781,9 +784,11 @@ class TestLeaseAndHandshake:
         assert summary.iterations == 1
         assert 0 < summary.spawned < len(tasks)
         assert spawned == [(build_id, "app")]
-        # The last claim went out before the claim deadline; only the spawn
-        # it had already started may run past it.
-        assert time.monotonic() - started < 0.3 * 0.9 + 0.1
+        # The last spawn started near the claim deadline (0.27 s), not at the
+        # ~1.2 s a pass bounded only by the cap would reach. Measured on the
+        # spawns, not the whole tick: release, drain and report come after,
+        # and a slow CI runner stretches them.
+        assert max(spawn_starts) - started < 0.3 * 0.9 + 0.2
 
     async def test_out_of_time_stops_before_metadata_and_budget_claims(
         self, default_in_memory_fs_target: Target
