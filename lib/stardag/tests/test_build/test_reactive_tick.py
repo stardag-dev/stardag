@@ -740,6 +740,51 @@ class TestLeaseAndHandshake:
         assert summary.iterations == 0 and summary.spawned == 0
         assert spawned == [(build_id, "app")]
 
+    async def test_a_pass_stops_claiming_at_the_claim_deadline(
+        self, default_in_memory_fs_target: Target
+    ):
+        """An explicit cap can promise more spawns than the margin covers:
+        here 40 sequential spawns of 30 ms against a 0.3 s timeout. The pass
+        stops claiming at 90% of the timeout whatever the cap says, and the
+        tick hands the rest to a successor."""
+        import time
+
+        class SlowSpawns(FakeDetachedExecutor):
+            async def submit_detached(self, task, *, execution_id):
+                await asyncio.sleep(0.03)
+                return await super().submit_detached(task, execution_id=execution_id)
+
+        registry = InMemoryRegistry()
+        tasks = [SyncOnlyTask(name=f"x{i}-{new_id()}") for i in range(40)]
+        build_id, _ = await _plan(registry, list(tasks))
+        spawned: list[tuple[UUID, str]] = []
+        config = TickConfig(
+            linger_seconds=30,
+            poll_interval_seconds=0.01,
+            tick_timeout_seconds=0.3,
+            max_spawns_per_tick=100,
+            max_concurrent_actions=1,
+            spawn_tick=lambda b, a: spawned.append((b, a)),
+        )
+        started = time.monotonic()
+        summary = await asyncio.wait_for(
+            _tick(
+                registry,
+                build_id,
+                SlowSpawns(registry=registry),
+                config,
+                started_at=started,
+            ),
+            timeout=5,
+        )
+        assert summary.outcome == "lifetime_reached"
+        assert summary.iterations == 1
+        assert 0 < summary.spawned < len(tasks)
+        assert spawned == [(build_id, "app")]
+        # The last claim went out before the claim deadline; only the spawn
+        # it had already started may run past it.
+        assert time.monotonic() - started < 0.3 * 0.9 + 0.1
+
     async def test_a_flag_still_set_at_the_bound_hands_on_once(
         self, default_in_memory_fs_target: Target
     ):

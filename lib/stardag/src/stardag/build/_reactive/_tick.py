@@ -49,6 +49,12 @@ _NO_HANDOFF_OUTCOMES = frozenset(
 # budget (a quarter of the limit, see ``_frontier_actions.spawn_cap``), and
 # the release, the drain and the successor come after it.
 _LIFETIME_MARGIN_FRACTION = 0.3
+# The share of that limit after which a pass already running takes no further
+# claim. The margin above assumes a pass spends at most its derived spawn
+# budget, which an explicit ``max_spawns_per_tick`` or the cap's floor can
+# exceed; this bounds the pass by the clock instead. The last tenth is for
+# the claims still in flight, the release, the drain and the successor.
+_CLAIM_DEADLINE_FRACTION = 0.9
 
 # The server caps a summary at 8 KiB; an unbounded message would turn "this
 # tick crashed" into no record at all.
@@ -291,6 +297,14 @@ class _Driver:
         self.rollover_attempted = False
         self.settings = _Settings(registry)
         self.cleared_a_wakeup = False
+        # Set by ``drive`` (the loop's clock); None: no limit known.
+        self.claim_deadline: float | None = None
+
+    def _out_of_time(self) -> bool:
+        return (
+            self.claim_deadline is not None
+            and asyncio.get_running_loop().time() >= self.claim_deadline
+        )
 
     async def _read(self, *, clear: bool) -> BuildFrontier:
         if clear:
@@ -375,6 +389,7 @@ class _Driver:
                     config=self.config,
                     summary=self.summary,
                     lease_lost=lambda: lease.lost,
+                    out_of_time=self._out_of_time,
                 )
         finally:
             current_build_context_var.reset(token)
@@ -383,6 +398,11 @@ class _Driver:
             return True, result.acted
         if result.superseded:
             self.summary.outcome = "superseded"
+            return True, result.acted
+        if result.out_of_time:
+            # What it could not claim is the successor's, which is spawned
+            # whether or not the flag is set.
+            self.summary.outcome = "lifetime_reached"
             return True, result.acted
         terminal = await handle_terminal(
             frontier,
@@ -405,13 +425,22 @@ class _Driver:
         holding the lease. Counted from the invocation's start when known,
         since the limit covers the setup before the lease too. None when the
         limit is unknown."""
+        return self._budget_end(now, 1 - _LIFETIME_MARGIN_FRACTION)
+
+    def _claim_deadline(self, now: float) -> float | None:
+        """When a pass already running stops claiming (see
+        ``_CLAIM_DEADLINE_FRACTION``), on the loop's clock; None when the
+        limit is unknown."""
+        return self._budget_end(now, _CLAIM_DEADLINE_FRACTION)
+
+    def _budget_end(self, now: float, fraction: float) -> float | None:
         timeout = self.config.tick_timeout_seconds
         if timeout is None:
             return None
         elapsed = 0.0
         if self.started_at is not None:
             elapsed = max(0.0, time.monotonic() - self.started_at)
-        return now + timeout * (1 - _LIFETIME_MARGIN_FRACTION) - elapsed
+        return now + timeout * fraction - elapsed
 
     async def drive(self, lease: SchedulerLease) -> None:
         """The loop: act, then linger polling the flag until the deadline.
@@ -448,10 +477,16 @@ class _Driver:
         ``lingered_out``); one still busy there -- its last pass acted, or
         its flag is set, or it is already past the bound before its first
         pass -- starts no further pass, ends ``lifetime_reached``, and
-        hands the build to a successor.
+        hands the build to a successor. A pass already running is bounded by
+        the clock too: past :meth:`_claim_deadline` it takes no further
+        claim, and the tick ends ``lifetime_reached`` the same way. The
+        margin alone assumes a pass spends at most its derived spawn budget,
+        which an explicit ``max_spawns_per_tick``, or the cap's floor, can
+        exceed.
         """
         loop = asyncio.get_running_loop()
         lifetime_end = self._lifetime_end(loop.time())
+        self.claim_deadline = self._claim_deadline(loop.time())
 
         def linger_deadline() -> float:
             deadline = loop.time() + self.config.linger_seconds
