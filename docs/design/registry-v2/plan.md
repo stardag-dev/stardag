@@ -414,6 +414,7 @@ assignee the maintainer.
       | S26      | `test_s26_hybrid_driver_plans_under_the_app`           | green   |
       | S33      | `test_s33_seal_refuses_a_superseded_rollover`          | green   |
       | S37      | `test_s37_deploy_recorded_late`                        | green   |
+      | S40      | `test_s40_added_field_across_deploys` (STA-124)        | green   |
       | —        | `test_builds_stop` (on `stardag builds stop`, #387)    | green   |
 
       S8, S22 and S24 replace the deleted `test_structure_scope_static/_dyn`.

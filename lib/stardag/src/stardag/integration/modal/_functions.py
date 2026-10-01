@@ -53,7 +53,11 @@ from stardag.integration.modal._tick import (
     _TickDeployment,
 )
 from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
-from stardag.build._settings import settings_owner
+from stardag.build._settings import (
+    resident_settings,
+    settings_applied,
+    settings_owner,
+)
 from stardag.exceptions import StardagError
 from stardag.integration.modal._metadata import (
     STARDAG_BUILD_ID_ENV,
@@ -351,9 +355,11 @@ def _register_functions(
             set_declared_task_module_patterns(task_module_patterns)
             import_task_modules(task_modules)
         # The roots arrive as instance bodies (see _payload), rehydrated
-        # under this deployment's classes and the build's settings.
-        settings = (build_kwargs or {}).get("settings") or {}
-        with temp_env_vars(dict(settings)):
+        # under this deployment's classes and the build's settings. Through
+        # the resident guard, not a bare env swap: ``build`` may serve
+        # several inputs per container, and the guard refuses a second
+        # build with different settings rather than letting it interleave.
+        with resident_settings((build_kwargs or {}).get("settings")):
             roots = from_task_payloads(tasks)
         return build_fn(roots, worker_selector, app_name, build_kwargs=build_kwargs)
 
@@ -475,7 +481,7 @@ def _register_functions(
         try:
             # Rehydrated under this deployment's classes, not the
             # trigger's: its local code may be older than the app's.
-            with temp_env_vars(dict(settings or {})):
+            with settings_applied(settings, owner=build_uuid):
                 roots = from_task_payloads(tasks)
             task_list = [roots] if isinstance(roots, BaseTask) else list(roots)
             result = run_reactive_bootstrap(

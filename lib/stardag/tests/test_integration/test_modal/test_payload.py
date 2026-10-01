@@ -16,6 +16,7 @@ import logging
 from typing import Annotated, Any
 
 import pytest
+from pydantic import field_serializer
 
 try:
     import modal  # noqa: F401
@@ -61,6 +62,21 @@ class PayloadParent(sd.Task[int]):
 
     def requires(self):
         return self.child
+
+    def run(self) -> None:
+        self._save(0)
+
+
+class DriftingNoteTask(sd.Task[int]):
+    """A non-significant field whose serialization is not a fixed point:
+    every round trip appends a "!". The task id survives; the value the
+    worker would see does not."""
+
+    note: Annotated[str, sd.StardagField(significant=False)] = ""
+
+    @field_serializer("note")
+    def _drift(self, value: str) -> str:
+        return value + "!"
 
     def run(self) -> None:
         self._save(0)
@@ -160,6 +176,18 @@ class TestToAndFromPayload:
 
 
 class TestByValueFallback:
+    def test_a_lossy_non_significant_field_goes_by_value(self, caplog):
+        """The id check alone would pass this task; the full-body fixed
+        point does not, so it keeps the pickle rather than arriving changed."""
+        caplog.set_level(logging.WARNING, logger=_payload.__name__)
+        task = DriftingNoteTask(note="a")
+
+        sent = to_task_payload(task)
+
+        assert sent is task
+        (warning,) = [r for r in caplog.records if "by value" in r.getMessage()]
+        assert "round trip is not stable" in warning.getMessage()
+
     def test_a_local_class_goes_by_value_with_one_warning(self, caplog):
         """A class no receiver can import by name cannot be rehydrated
         there, so it is pickled as before — and said so, once per class."""

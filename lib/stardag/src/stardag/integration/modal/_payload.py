@@ -44,6 +44,7 @@ import typing
 from pydantic import BaseModel
 
 from stardag._core.base_task import BaseTask
+from stardag._core.instance import check_serialization_stability
 from stardag._core.rehydrate import TaskRehydrationError, task_from_registry_data
 from stardag.build._task_modules import module_is_main
 
@@ -130,11 +131,13 @@ def _by_value_reason(task: BaseTask) -> tuple[str | None, TaskPayload | None]:
     except Exception as e:
         return f"its instance body could not be built ({e})", None
     try:
-        # A dry run of what the receiver does: a lossy round trip is caught
-        # here, where the pickle is still a fallback, not on the worker.
-        task_from_registry_data(body, expected_task_id=task_id)
+        # A dry run of what the receiver does, and stricter: the whole body
+        # must be a fixed point of its round trip, not only the task id, so
+        # a lossy non-significant field is caught here, where the pickle is
+        # still a fallback, rather than silently changed on the worker.
+        check_serialization_stability(task)
     except Exception as e:
-        return f"its registry-data round trip failed ({e})", None
+        return f"its registry-data round trip is not stable ({e})", None
     return None, {
         PAYLOAD_KEY: PAYLOAD_VERSION,
         "body": body,

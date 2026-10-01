@@ -2,7 +2,7 @@
 
 Its own module because the scenarios redeploy it mid-run, and a redeploy of
 the shared ``dag_app`` would roll every other scenario's build over too.
-Same factory, same tasks; only the name (and, for S20 and S38, one baked
+Same factory, same tasks; only the name (and, for S20 and S40, one baked
 variable) differs. See ``_scenario_app``.
 
 **One app name per scenario.** The rollover scenarios run concurrently in
@@ -16,7 +16,7 @@ triggering process builds a handle of the same name with
 ``ROOT_VARIANT_ENV`` and ``FIELD_VARIANT_ENV`` are baked into the image for
 the same reason they are read at import in ``tasks``: they are how a deploy
 of *this* module stands in for new code that changed a root's identity (S20)
-or added a field to a nested parameter model (S38).
+or added a field to a nested parameter model (S40).
 
 Every function scales down within ``ROLLOVER_SCALEDOWN_SECONDS`` of its
 last input, so no warm container of an old deploy is left for a new spawn to

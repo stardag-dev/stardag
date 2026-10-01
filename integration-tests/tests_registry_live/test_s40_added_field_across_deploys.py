@@ -1,4 +1,4 @@
-"""S38: a task spawned by deployment D1's tick runs under D2, which added a field.
+"""S40: a task spawned by deployment D1's tick runs under D2, which added a field.
 
 Workers are resolved by name, which is always the app's *current*
 deployment. So a D1 tick still lingering when D2 goes live spawns its next
@@ -56,7 +56,7 @@ pytestmark = [
     pytest.mark.timeout(1200),
 ]
 
-APP_NAME = ROLLOVER_APP_NAMES["S38"]
+APP_NAME = ROLLOVER_APP_NAMES["S40"]
 
 # The upstream's hold, as an upper bound only: the scenario releases it once
 # D2 serves. Kept under the D1 tick's linger, so that a lost release still
@@ -71,7 +71,7 @@ BUILD_TIMEOUT_SECONDS = 600
 
 
 @pytest.mark.budget(240)
-def test_s38_a_task_built_under_d1_runs_under_d2_with_the_added_field_defaulted(
+def test_s40_a_task_built_under_d1_runs_under_d2_with_the_added_field_defaulted(
     deployment: Deployment, gates: GateSet
 ) -> None:
     from stardag.registry import registry_provider

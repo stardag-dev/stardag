@@ -42,7 +42,7 @@ _ROOT_VARIANT = os.environ.get(ROOT_VARIANT_ENV, "")
 
 # Baked in the same way as ``ROOT_VARIANT_ENV``, and read at import by
 # ``AddedFieldParams``: the stand-in for "the new deployment's code added a
-# defaulted field to a nested parameter model" (S38).
+# defaulted field to a nested parameter model" (S40).
 FIELD_VARIANT_ENV = "REGISTRY_LIVE_FIELD_VARIANT"
 _FIELD_VARIANT = os.environ.get(FIELD_VARIANT_ENV, "")
 ADDED_FIELD_DEFAULT = 7
@@ -583,7 +583,7 @@ class RolloverRoot(sd.Task[list[int]]):
 
 
 class AddedFieldParams(sd.StardagBaseModel):
-    """A nested parameter model that a new deployment extends (S38).
+    """A nested parameter model that a new deployment extends (S40).
 
     Under ``REGISTRY_LIVE_FIELD_VARIANT=added`` -- set only in the image of
     the rollover app's *second* deploy -- it gains a defaulted field with a
@@ -599,7 +599,7 @@ class AddedFieldParams(sd.StardagBaseModel):
 
 
 class AddedFieldRoot(sd.Task[dict]):
-    """A root whose ``run()`` reads every field of its nested params (S38).
+    """A root whose ``run()`` reads every field of its nested params (S40).
 
     Run under the second deploy's code, it reads ``params.added``. Sent to
     that code as a pickle made under the first deploy, the field would be

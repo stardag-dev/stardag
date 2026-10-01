@@ -1,6 +1,6 @@
 """Deploying the rollover app, as a scenario needs it deployed.
 
-The rollover scenarios (S3, S6, S7, S20, S33, S37, S38) each redeploy an app of
+The rollover scenarios (S3, S6, S7, S20, S33, S37, S40) each redeploy an app of
 their own mid-run; see ``rollover_app`` for why each needs its own name.
 Everything here goes through ``stardag modal deploy`` from *this* venv, for
 the reason ``provision._deploy_dag_apps`` gives: the app's functions are
@@ -42,7 +42,7 @@ ROLLOVER_APP_NAMES = {
     "S20": "registry-live-s20-root-identity",
     "S33": "registry-live-s33-seal-race",
     "S37": "registry-live-s37-late-record",
-    "S38": "registry-live-s38-added-field",
+    "S40": "registry-live-s40-added-field",
 }
 
 # Run in the deploy subprocess instead of the CLI's entry point when a
