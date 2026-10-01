@@ -650,7 +650,7 @@ class TestStardagAppBuildSpawnRemote:
     def test_build_remote_single_task(self, modal_function_stub):
         captured = modal_function_stub
         app = self._make_app()
-        root = MagicMock()
+        root = MagicMock(spec=BaseTask)
 
         result = app.build_remote(root)
 

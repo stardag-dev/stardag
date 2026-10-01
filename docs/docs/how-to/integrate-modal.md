@@ -907,9 +907,16 @@ from a checkout older than the deployed app.
 
 A task that cannot be rehydrated — the cases listed under [Declaring your
 task modules](#declaring-your-task-modules-required-for-reactive-builds),
-or a class defined in `__main__` or inside a function — is still sent
-pickled, with a warning once per class. A reactive build never contains
-one; in a resident build, such a task is not protected across a redeploy.
+a class defined in `__main__` or inside a function, or a task carrying
+state its instance body does not (a private attribute set at runtime, a
+field excluded from the dump) — is still sent pickled, with a warning once
+per class. A reactive build never contains one; in a resident build, such a
+task is not protected across a redeploy.
+
+The receiving container recomputes the task id to check it, so if you
+override the task-id namespace (`task_uuid5_namespace_provider`), install
+the override in your [container setup](#container-setup-code-that-runs-in-every-container)
+too, not only in the process that triggers the build.
 
 ### Cancelling a build vs. stopping its executions
 

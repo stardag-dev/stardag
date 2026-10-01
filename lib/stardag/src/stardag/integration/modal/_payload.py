@@ -22,9 +22,11 @@ would rehydrate, and a significant change fails the id check rather than
 running a different task.
 
 A task that cannot make that round trip — an ``AliasTask``, a class that is
-not importable by reference (``__main__``, a local class), a nested task
-field with a plain annotation — is sent **by value**, as before, with a
-warning once per class: it is not protected across deploys. A reactive
+not importable by reference (``__main__``, a local class), a body that is
+not a fixed point of its own round trip (a nested task field with a plain
+annotation, a lossy serializer), or state the body does not carry (a private
+attribute set at runtime, a field excluded from the dump) — is sent **by
+value**, as before, with a warning once per class: it is not protected across deploys. A reactive
 build never has one (its pre-flight refuses any task a tick could not
 rehydrate), so the fallback is only ever taken by resident and hybrid
 builds.
@@ -36,6 +38,8 @@ on the far side and its shape can grow. Receivers keep accepting a pickled
 
 from __future__ import annotations
 
+import collections.abc
+import dataclasses
 import importlib
 import logging
 import sys
@@ -46,6 +50,7 @@ from pydantic import BaseModel
 from stardag._core.base_task import BaseTask
 from stardag._core.instance import check_serialization_stability
 from stardag._core.rehydrate import TaskRehydrationError, task_from_registry_data
+from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, TypeId
 from stardag.build._task_modules import module_is_main
 
 logger = logging.getLogger(__name__)
@@ -103,9 +108,70 @@ def _reachable_by_import(cls: type) -> bool:
     return any(value is cls for value in vars(module).values())
 
 
-def _model_classes(value: typing.Any) -> set[type]:
-    """Every pydantic model class reachable from ``value`` through its fields."""
+def _body_task_classes(body: typing.Any) -> set[type]:
+    """The task class of every task in ``body``, by its discriminator keys.
+
+    What the receiver resolves through the task registry, wherever it sits
+    in the body: a task nested in a container the object walk does not
+    know (an arbitrary serializable type) is still named here. A
+    discriminated dict that is not a task (another polymorphic family) is
+    not this lookup's to resolve, and is skipped.
+    """
     found: set[type] = set()
+    stack = [body]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if NAMESPACE_KEY in item and NAME_KEY in item:
+                try:
+                    found.add(
+                        BaseTask._registry().get_class(
+                            TypeId(namespace=item[NAMESPACE_KEY], name=item[NAME_KEY])
+                        )
+                    )
+                except KeyError:
+                    pass
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return found
+
+
+def _runtime_state(models: typing.Iterable[BaseModel]) -> str | None:
+    """A description of state the instance body does not carry, if any.
+
+    A private attribute set away from its default, or a field excluded from
+    the dump holding a non-default value: a pickle carried both, a payload
+    carries neither, so a task holding one stays by value rather than
+    arriving without it.
+    """
+    for model in models:
+        cls = type(model)
+        private = getattr(model, "__pydantic_private__", None) or {}
+        for name, attribute in cls.__private_attributes__.items():
+            if name not in private:
+                continue
+            try:
+                if private[name] != attribute.get_default():
+                    return f"{cls.__qualname__}.{name} is runtime state"
+            except Exception:
+                return f"{cls.__qualname__}.{name} is runtime state"
+        for name, info in cls.model_fields.items():
+            if not info.exclude or name not in model.__dict__:
+                continue
+            try:
+                default = info.get_default(call_default_factory=True)
+                if model.__dict__[name] != default:
+                    return f"{cls.__qualname__}.{name} is excluded from the body"
+            except Exception:
+                return f"{cls.__qualname__}.{name} is excluded from the body"
+    return None
+
+
+def _models(value: typing.Any) -> list[BaseModel]:
+    """Every pydantic model instance reachable from ``value`` through its
+    fields, and through dataclasses and containers holding models."""
+    found: list[BaseModel] = []
     seen: set[int] = set()
     stack = [value]
     while stack:
@@ -114,7 +180,7 @@ def _model_classes(value: typing.Any) -> set[type]:
             continue
         seen.add(id(item))
         if isinstance(item, BaseModel):
-            found.add(type(item))
+            found.append(item)
             # Declared fields only: ``__dict__`` may also hold cached values
             # that are not part of the body.
             stack.extend(
@@ -122,6 +188,8 @@ def _model_classes(value: typing.Any) -> set[type]:
                 for name in type(item).model_fields
                 if name in item.__dict__
             )
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            stack.extend(getattr(item, f.name, None) for f in dataclasses.fields(item))
         elif isinstance(item, dict):
             stack.extend(item.values())
         elif isinstance(item, (list, tuple, set, frozenset)):
@@ -136,7 +204,15 @@ def _by_value_reason(task: BaseTask) -> tuple[str | None, TaskPayload | None]:
     to the pickle, never a reason to fail the spawn.
     """
     try:
-        classes = _model_classes(task)
+        models = _models(task)
+        state = _runtime_state(models)
+        if state is not None:
+            return f"{state}, which its instance body does not carry", None
+        body = task.instance_body()
+        task_id = task.id
+        # The object walk and the body walk together: a task nested in a
+        # type the object walk does not enter is still named by the body.
+        classes = {type(m) for m in models} | _body_task_classes(body)
         for cls in sorted(classes, key=lambda c: (c.__module__, c.__qualname__)):
             if not _is_importable_by_reference(cls):
                 return (
@@ -144,8 +220,6 @@ def _by_value_reason(task: BaseTask) -> tuple[str | None, TaskPayload | None]:
                     "by reference",
                     None,
                 )
-        body = task.instance_body()
-        task_id = task.id
     except Exception as e:
         return f"its instance body could not be built ({e})", None
     try:
@@ -183,14 +257,25 @@ def to_task_payload(task: BaseTask) -> TaskOrPayload:
     return task
 
 
+def _is_single_root(value: typing.Any) -> bool:
+    """Whether ``value`` is one root (a task, a payload, or anything that is
+    not a collection of them), as the triggers' ``tasks`` argument allows."""
+    return (
+        isinstance(value, (BaseTask, str, bytes))
+        or is_task_payload(value)
+        or not isinstance(value, collections.abc.Iterable)
+    )
+
+
 def to_task_payloads(
-    tasks: typing.Sequence[BaseTask] | BaseTask,
+    tasks: typing.Iterable[BaseTask] | BaseTask,
 ) -> list[TaskOrPayload] | TaskOrPayload:
-    """:func:`to_task_payload` over roots, keeping their shape: a single
-    root stays a single value, so the receiver sees what it always has."""
-    if isinstance(tasks, (list, tuple)):
-        return [to_task_payload(t) for t in tasks]
-    return to_task_payload(typing.cast(BaseTask, tasks))
+    """:func:`to_task_payload` over roots: a single root stays a single
+    value, so the receiver sees what it always has; any other iterable of
+    roots is sent as a list."""
+    if _is_single_root(tasks):
+        return to_task_payload(typing.cast(BaseTask, tasks))
+    return [to_task_payload(t) for t in typing.cast(typing.Iterable[BaseTask], tasks)]
 
 
 def is_task_payload(value: typing.Any) -> bool:
@@ -218,21 +303,37 @@ def from_task_payload(value: TaskOrPayload) -> BaseTask:
             f"reads version {PAYLOAD_VERSION}); the sender runs a newer "
             "stardag than this deployment — redeploy the app."
         )
+    # Best-effort: a module the sender's classes came from may be gone from
+    # this deployment -- a field removed along with its type's module is a
+    # change compat rehydration absorbs (the field is dropped). Whether
+    # anything still needed is missing is rehydration's call, and its error
+    # carries what failed to import.
+    import_errors: list[str] = []
     for module in payload["modules"]:
         try:
             importlib.import_module(module)
         except Exception as e:
-            raise TaskRehydrationError(
-                f"Cannot import {module!r}, which defines a class in task "
-                f"{payload['task_id']}: {e}"
-            ) from e
-    return task_from_registry_data(payload["body"], expected_task_id=payload["task_id"])
+            import_errors.append(f"{module}: {type(e).__name__}: {e}")
+    try:
+        return task_from_registry_data(
+            payload["body"], expected_task_id=payload["task_id"]
+        )
+    except TaskRehydrationError as e:
+        if not import_errors:
+            raise
+        raise TaskRehydrationError(
+            f"{e} (modules that failed to import: {'; '.join(import_errors)})"
+        ) from e
 
 
 def from_task_payloads(
-    values: typing.Sequence[TaskOrPayload] | TaskOrPayload,
-) -> typing.Sequence[BaseTask] | BaseTask:
-    """:func:`from_task_payload` over roots, keeping their shape."""
-    if isinstance(values, (list, tuple)):
-        return [from_task_payload(v) for v in values]
-    return from_task_payload(typing.cast(TaskOrPayload, values))
+    values: typing.Iterable[TaskOrPayload] | TaskOrPayload,
+) -> list[BaseTask] | BaseTask:
+    """:func:`from_task_payload` over roots, keeping their shape: a single
+    task or payload stays single, any other iterable becomes a list."""
+    if _is_single_root(values):
+        return from_task_payload(typing.cast(TaskOrPayload, values))
+    return [
+        from_task_payload(v)
+        for v in typing.cast(typing.Iterable[TaskOrPayload], values)
+    ]

@@ -12,11 +12,18 @@ is exactly the body a class without the field produces.
 
 from __future__ import annotations
 
+import json
+from collections import UserList
 import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
 from typing import Annotated, Any
+from unittest.mock import patch
 
 import pytest
-from pydantic import field_serializer
+from pydantic import Field, PrivateAttr, field_serializer
 
 try:
     import modal  # noqa: F401
@@ -25,6 +32,7 @@ except ImportError:
 
 import stardag as sd
 from stardag import TaskRehydrationError
+from stardag.build import SettingsError
 from stardag.integration.modal import FunctionSettings, StardagApp
 from stardag.integration.modal import _payload
 from stardag.integration.modal._payload import (
@@ -72,6 +80,18 @@ def payload_range(limit: int) -> list[int]:
     """A decorator task: its class is bound to ``payload_range``, not to its
     own name ``PayloadRange``."""
     return list(range(limit))
+
+
+class StatefulTask(sd.Task[int]):
+    """Carries state its instance body does not: a private attribute and a
+    field excluded from the dump."""
+
+    x: int = 0
+    handle: Any = Field(default=None, exclude=True)
+    _state: str | None = PrivateAttr(default=None)
+
+    def run(self) -> None:
+        self._save(self.x)
 
 
 class DriftingNoteTask(sd.Task[int]):
@@ -163,11 +183,21 @@ class TestToAndFromPayload:
         with pytest.raises(TaskRehydrationError, match="version 2"):
             from_task_payload(payload)
 
-    def test_an_unimportable_module_is_refused(self):
+    def test_a_module_gone_from_the_receiver_is_not_fatal_by_itself(self):
+        """A module the sender named may be gone from the new deployment (a
+        field removed together with its type): rehydration decides whether
+        anything still needed is missing."""
         payload = _payload_of(PayloadTask())
-        payload["modules"] = ["stardag_no_such_module_sta124"]
+        payload["modules"].append("stardag_no_such_module_sta124")
 
-        with pytest.raises(TaskRehydrationError, match="Cannot import"):
+        assert from_task_payload(payload) == PayloadTask()
+
+    def test_a_missing_class_names_the_failed_import(self):
+        payload = _payload_of(PayloadTask())
+        payload["modules"].append("stardag_no_such_module_sta124")
+        payload["body"]["__name"] = "NoSuchTaskSta124"
+
+        with pytest.raises(TaskRehydrationError, match="stardag_no_such_module_sta124"):
             from_task_payload(payload)
 
     def test_a_decorator_task_is_sent_as_a_payload(self):
@@ -180,6 +210,60 @@ class TestToAndFromPayload:
         assert payload["modules"] == [__name__]
         assert from_task_payload(payload) == task
 
+    def test_a_task_nested_in_a_dataclass_names_its_module(self):
+        """The upstream sits inside a dataclass, which a pydantic-only walk
+        would not enter: its module must still be named, or a receiver that
+        has not imported it cannot resolve it."""
+        from tests.test_integration.test_modal._payload_pkg.root import (
+            DataclassRoot,
+            Holder,
+        )
+        from tests.test_integration.test_modal._payload_pkg.upstream import (
+            PkgUpstream,
+        )
+
+        task = DataclassRoot(holder=Holder(upstream=PkgUpstream(x=2)))
+
+        payload = _payload_of(task)
+
+        assert (
+            "tests.test_integration.test_modal._payload_pkg.upstream"
+            in (payload["modules"])
+        )
+        assert from_task_payload(payload) == task
+
+    def test_a_fresh_receiver_rehydrates_from_the_named_modules_alone(self):
+        """The receiver's actual situation: a process that has imported none
+        of the task's modules. Whatever the payload names must be enough."""
+        from tests.test_integration.test_modal._payload_pkg.root import (
+            DataclassRoot,
+            Holder,
+        )
+        from tests.test_integration.test_modal._payload_pkg.upstream import (
+            PkgUpstream,
+        )
+
+        task = DataclassRoot(holder=Holder(upstream=PkgUpstream(x=2)))
+        payload = _payload_of(task)
+        receiver = (
+            "import json, sys\n"
+            "from stardag.integration.modal._payload import from_task_payload\n"
+            "task = from_task_payload(json.loads(sys.stdin.read()))\n"
+            "print(task.id)\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", receiver],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).resolve().parents[3],
+            env={**os.environ, "STARDAG_NO_REGISTRY": "1"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(task.id)
+
     def test_roots_keep_their_shape(self):
         one, two = PayloadTask(p=PayloadParams(a=1)), PayloadTask(p=PayloadParams(a=2))
 
@@ -191,8 +275,31 @@ class TestToAndFromPayload:
         assert from_task_payloads(single) == one
         assert from_task_payloads(many) == [one, two]
 
+    def test_any_iterable_of_roots_is_sent_as_payloads(self):
+        """Not only lists and tuples: a ``UserList`` (or a generator) of roots
+        is roots, not one task to send by value."""
+        roots = UserList([PayloadTask(p=PayloadParams(a=1)), PayloadTask()])
+
+        sent = to_task_payloads(roots)
+
+        assert isinstance(sent, list)
+        assert all(is_task_payload(t) for t in sent)
+        assert from_task_payloads(UserList(sent)) == list(roots)
+
 
 class TestByValueFallback:
+    def test_runtime_state_goes_by_value(self):
+        """A pickle carried private attributes and excluded fields; a payload
+        cannot, so a task holding either keeps the pickle."""
+        with_private = StatefulTask()
+        with_private._state = "runtime"
+        with_excluded = StatefulTask(handle="live-handle")
+
+        assert to_task_payload(with_private) is with_private
+        assert to_task_payload(with_excluded) is with_excluded
+        # At their defaults, there is nothing to lose.
+        assert is_task_payload(to_task_payload(StatefulTask()))
+
     def test_a_lossy_non_significant_field_goes_by_value(self, caplog):
         """The id check alone would pass this task; the full-body fixed
         point does not, so it keeps the pickle rather than arriving changed."""
@@ -280,3 +387,60 @@ class TestDeployedReceivers:
 
         assert received == [[task]]
         assert received[0][0].p.b == 0
+
+    def test_a_refused_payload_is_reported_before_the_worker_raises(self):
+        """A refusal happens before the run function (and its reporter), so
+        the wrapper records the failure itself; otherwise the claim would
+        just lapse, with nothing on record."""
+        functions = _finalize_capturing_functions(_app(run_function=lambda t: None))
+        payload = _payload_of(PayloadTask(p=PayloadParams(a=3)))
+        payload["body"]["p"]["a"] = 5  # no longer hashes to the sent id
+        env = {"STARDAG_BUILD_ID": "b"}
+
+        with patch(
+            "stardag.integration.modal._functions.report_unreadable_task"
+        ) as report:
+            with pytest.raises(TaskRehydrationError):
+                functions["worker_default"](payload, env_overrides=env)
+
+        ((task_id, env_overrides, error), _) = report.call_args
+        assert task_id == payload["task_id"]
+        assert env_overrides == env
+        assert isinstance(error, TaskRehydrationError)
+
+    def test_a_refused_root_fails_the_triggered_build(self):
+        """``build_trigger`` created the build before spawning ``build``: a
+        root refused here must not leave it RUNNING."""
+        functions = _finalize_capturing_functions(
+            _app(build_function=lambda *a, **k: None)
+        )
+        payload = _payload_of(PayloadTask(p=PayloadParams(a=3)))
+        payload["body"]["p"]["a"] = 5
+
+        with patch(
+            "stardag.integration.modal._functions._fail_build_best_effort"
+        ) as fail:
+            with pytest.raises(TaskRehydrationError):
+                functions["build"](
+                    [payload],
+                    lambda t: "default",
+                    "test-payload-app",
+                    build_kwargs={"resume_build_id": "the-build"},
+                )
+
+        assert fail.call_args.args[1] == "the-build"
+
+    def test_build_settings_are_validated_before_they_are_applied(self):
+        functions = _finalize_capturing_functions(
+            _app(build_function=lambda *a, **k: None)
+        )
+
+        with pytest.raises(SettingsError):
+            functions["build"](
+                [_payload_of(PayloadTask())],
+                lambda t: "default",
+                "test-payload-app",
+                build_kwargs={"settings": {"AAA_STA124_LEAK": "x", "ZZZ": 1}},
+            )
+
+        assert "AAA_STA124_LEAK" not in os.environ

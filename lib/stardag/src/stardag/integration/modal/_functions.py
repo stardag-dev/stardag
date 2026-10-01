@@ -35,7 +35,9 @@ from stardag.integration.modal._payload import (
     TaskOrPayload,
     from_task_payload,
     from_task_payloads,
+    is_task_payload,
 )
+from stardag.integration.modal._reporter import report_unreadable_task
 from stardag.integration.modal._protocols import (
     _callable_accepts_env_overrides,
     _RunFunctionWithEnv,
@@ -53,10 +55,12 @@ from stardag.integration.modal._tick import (
     _TickDeployment,
 )
 from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
+from stardag._core.rehydrate import TaskRehydrationError
 from stardag.build._settings import (
     resident_settings,
     settings_applied,
     settings_owner,
+    validate_settings,
 )
 from stardag.exceptions import StardagError
 from stardag.integration.modal._metadata import (
@@ -359,8 +363,18 @@ def _register_functions(
         # the resident guard, not a bare env swap: ``build`` may serve
         # several inputs per container, and the guard refuses a second
         # build with different settings rather than letting it interleave.
-        with resident_settings((build_kwargs or {}).get("settings")):
-            roots = from_task_payloads(tasks)
+        try:
+            settings = validate_settings((build_kwargs or {}).get("settings"))
+            with resident_settings(settings):
+                roots = from_task_payloads(tasks)
+        except BaseException as e:
+            # A triggered build is already RUNNING (the trigger created it);
+            # a root refused here must not leave it orphaned, as the
+            # bootstrap does not.
+            resume_build_id = (build_kwargs or {}).get("resume_build_id")
+            if resume_build_id is not None:
+                _fail_build_best_effort(registry_provider.get(), resume_build_id, e)
+            raise
         return build_fn(roots, worker_selector, app_name, build_kwargs=build_kwargs)
 
     run_fn = self._run_function
@@ -395,8 +409,17 @@ def _register_functions(
             # rehydrated under THIS deployment's classes, which need not be
             # the sender's: a field added since takes its compat default.
             # Under the build's settings, as a tick rehydrates.
-            with temp_env_vars(env_overrides or {}):
-                received = from_task_payload(task)
+            try:
+                with temp_env_vars(env_overrides or {}):
+                    received = from_task_payload(task)
+            except TaskRehydrationError as e:
+                # Before the run function, so before its reporter: record
+                # the failure here, or the claim would just lapse silently.
+                if is_task_payload(task):
+                    report_unreadable_task(
+                        typing.cast(dict, task)["task_id"], env_overrides, e
+                    )
+                raise
             if run_fn_accepts_env:
                 run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)
                 return run_fn_with_env(received, env_overrides=env_overrides)
