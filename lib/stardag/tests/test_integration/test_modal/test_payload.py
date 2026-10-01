@@ -67,6 +67,13 @@ class PayloadParent(sd.Task[int]):
         self._save(0)
 
 
+@sd.task(name="PayloadRange")
+def payload_range(limit: int) -> list[int]:
+    """A decorator task: its class is bound to ``payload_range``, not to its
+    own name ``PayloadRange``."""
+    return list(range(limit))
+
+
 class DriftingNoteTask(sd.Task[int]):
     """A non-significant field whose serialization is not a fixed point:
     every round trip appends a "!". The task id survives; the value the
@@ -163,6 +170,16 @@ class TestToAndFromPayload:
         with pytest.raises(TaskRehydrationError, match="Cannot import"):
             from_task_payload(payload)
 
+    def test_a_decorator_task_is_sent_as_a_payload(self):
+        """The common case: a ``@sd.task`` class is reachable by import under
+        the function's name, so it is protected like a class-defined task."""
+        task = payload_range(limit=3)
+
+        payload = _payload_of(task)
+
+        assert payload["modules"] == [__name__]
+        assert from_task_payload(payload) == task
+
     def test_roots_keep_their_shape(self):
         one, two = PayloadTask(p=PayloadParams(a=1)), PayloadTask(p=PayloadParams(a=2))
 
@@ -207,6 +224,16 @@ class TestByValueFallback:
         warnings = [r for r in caplog.records if "by value" in r.getMessage()]
         assert len(warnings) == 1
         assert "not importable by reference" in warnings[0].getMessage()
+
+    def test_a_decorator_task_defined_in_a_function_goes_by_value(self):
+        """Not reachable by import: the receiver could never resolve it."""
+
+        @sd.task(name="LocalRange")
+        def local_range(limit: int) -> list[int]:
+            return list(range(limit))
+
+        task = local_range(limit=2)
+        assert to_task_payload(task) is task
 
 
 def _app(**kwargs) -> StardagApp:

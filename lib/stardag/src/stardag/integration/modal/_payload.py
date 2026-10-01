@@ -64,13 +64,29 @@ TaskOrPayload = BaseTask | TaskPayload
 _warned_by_value: set[type] = set()
 
 
+# Answers of :func:`_is_importable_by_reference`, per class: a class's module
+# attributes do not change after import, and the check runs on every spawn.
+_importable_cache: dict[type, bool] = {}
+
+
 def _is_importable_by_reference(cls: type) -> bool:
     """Whether importing ``cls.__module__`` on the far side defines ``cls``.
 
-    The same test cloudpickle applies before pickling a class by reference:
-    a class in ``__main__``, or one defined inside a function, is not
-    reachable by import, so a receiver could never resolve it by name.
+    Close to the test cloudpickle applies before pickling a class by
+    reference: a class in ``__main__``, or one defined inside a function, is
+    not reachable by import, so a receiver could never resolve it by name.
+    Reachable means at its qualified name, or under any module-level name:
+    a ``@sd.task(name="Range")`` class is bound to the decorated function's
+    name (``get_range``), not to ``Range``, and importing its module still
+    defines and registers it, which is all rehydration needs.
     """
+    cached = _importable_cache.get(cls)
+    if cached is None:
+        cached = _importable_cache[cls] = _reachable_by_import(cls)
+    return cached
+
+
+def _reachable_by_import(cls: type) -> bool:
     module_name = cls.__module__
     if module_is_main(module_name) or "<locals>" in cls.__qualname__:
         return False
@@ -81,8 +97,10 @@ def _is_importable_by_reference(cls: type) -> bool:
     for part in cls.__qualname__.split("."):
         obj = getattr(obj, part, None)
         if obj is None:
-            return False
-    return obj is cls
+            break
+    if obj is cls:
+        return True
+    return any(value is cls for value in vars(module).values())
 
 
 def _model_classes(value: typing.Any) -> set[type]:
