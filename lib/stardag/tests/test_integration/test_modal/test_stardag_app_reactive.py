@@ -32,6 +32,7 @@ from stardag import BaseTask
 from stardag.build import SettingsError
 from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
 from stardag.integration.modal import FunctionSettings, StardagApp
+from stardag.integration.modal._payload import from_task_payloads, is_task_payload
 from stardag.registry import NoOpRegistry, registry_provider
 from stardag.testing import InMemoryRegistry
 from stardag.testing._registry_state import settings_hash
@@ -136,11 +137,11 @@ def _members(registry: InMemoryRegistry, build_id) -> set[str]:
 
 
 class TestStardagAppReactiveTrigger:
-    def test_trigger_spawns_bootstrap_with_the_roots_by_value(
+    def test_trigger_spawns_bootstrap_with_the_roots_as_instance_bodies(
         self, modal_function_stub, default_in_memory_fs_target
     ):
         """The trigger's whole job: mint the build with its roots, hand the
-        root tasks to the deployed ``bootstrap`` by value."""
+        root tasks to the deployed ``bootstrap`` as instance bodies."""
         app = _make_app()
         dep = SyncOnlyTask(name="reactive-dep")
         root = SyncOnlyTask(name="reactive-root", deps=(dep,))
@@ -160,13 +161,17 @@ class TestStardagAppReactiveTrigger:
             "name": "bootstrap",
         }
         assert modal_function_stub["op"] == "spawn"
-        # Roots ride along BY VALUE (cloudpickled into the call).
+        # Roots ride as instance bodies, not pickles (see _payload): the
+        # bootstrap rehydrates them under the DEPLOYED classes, which may
+        # be newer than the trigger's.
+        sent = bootstrap_kwargs.pop("tasks")
         assert bootstrap_kwargs == {
             "build_id": str(result.build_id),
-            "tasks": [root],
             "tick_kwargs": {"linger_seconds": 30},
             "settings": {"MY_FLAG": "1"},
         }
+        assert [is_task_payload(t) for t in sent] == [True]
+        assert from_task_payloads(sent) == [root]
         assert result.function_call == "spawn-handle"
         # Nothing planned, nothing armed: that is the bootstrap's.
         assert registry.plans == {}

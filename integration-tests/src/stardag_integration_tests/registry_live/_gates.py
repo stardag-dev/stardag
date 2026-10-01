@@ -203,6 +203,21 @@ class Gate:
         return False
 
 
+def observe(key: str, value: dict) -> None:
+    """Record what a task body saw, for the scenario to read back
+    (``observed``). Called from a task body; best-effort, like a hold's
+    record -- a scenario that needs the record fails on its absence."""
+    try:
+        _container_dict().put(key, value)
+    except Exception as error:
+        _log(f"could not record observation {key}: {error!r}")
+
+
+def observed(modal_environment: str, key: str) -> dict | None:
+    """What a task body recorded under ``key`` (``observe``), if anything."""
+    return _test_dict(modal_environment).get(key)
+
+
 def _test_dict(modal_environment: str):
     """The gates Dict, from the scenario's side, in the named environment."""
     import modal

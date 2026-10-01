@@ -45,6 +45,7 @@ from stardag.integration.modal._metadata import (
     _get_modal_function_id_aio,
     _get_modal_workspace_aio,
 )
+from stardag.integration.modal._payload import to_task_payload
 from stardag.integration.modal._spawn import spawn_tick
 from stardag.integration.modal._selector import (
     WorkerSelector,
@@ -412,7 +413,9 @@ class ModalTaskExecutor(TaskExecutorABC):
         """Execute task on Modal (blocking remote call)."""
         try:
             worker_function, env_overrides, _ = await self._prepare_invocation(task)
-            res = await worker_function.remote.aio(task, env_overrides=env_overrides)
+            res = await worker_function.remote.aio(
+                to_task_payload(task), env_overrides=env_overrides
+            )
             return res
         except Exception as e:
             return TaskExecutionError(
@@ -480,8 +483,11 @@ class ModalTaskExecutor(TaskExecutorABC):
             env_overrides,
             executor_metadata,
         ) = await self._prepare_invocation(task, execution_id)
+        # The instance body, not the object: the worker resolved by name is
+        # the app's current deployment, which need not be the one whose
+        # classes built ``task`` (see _payload).
         function_call = await worker_function.spawn.aio(
-            task, env_overrides=env_overrides
+            to_task_payload(task), env_overrides=env_overrides
         )
         return self._make_handle(task, function_call, executor_metadata)
 

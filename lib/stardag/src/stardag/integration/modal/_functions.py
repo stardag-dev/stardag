@@ -32,6 +32,13 @@ from stardag.integration.modal._bootstrap import (
 )
 from stardag.integration.modal._container_setup import _run_container_setup
 from stardag.integration.modal._logging import _setup_logging
+from stardag.integration.modal._payload import (
+    TaskOrPayload,
+    from_task_payload,
+    from_task_payloads,
+    is_task_payload,
+)
+from stardag.integration.modal._reporter import report_unreadable_task
 from stardag.integration.modal._protocols import (
     _callable_accepts_env_overrides,
     _RunFunctionWithEnv,
@@ -49,7 +56,13 @@ from stardag.integration.modal._tick import (
     _TickDeployment,
 )
 from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
-from stardag.build._settings import settings_owner
+from stardag._core.rehydrate import TaskRehydrationError
+from stardag.build._settings import (
+    resident_settings,
+    resolve_settings,
+    settings_applied,
+    settings_owner,
+)
 from stardag.exceptions import StardagError
 from stardag.integration.modal._metadata import (
     STARDAG_BUILD_ID_ENV,
@@ -335,7 +348,7 @@ def _register_functions(
     build_fn = self._build_function
 
     def _modal_build(
-        tasks: typing.Sequence[BaseTask] | BaseTask,
+        tasks: typing.Sequence[TaskOrPayload] | TaskOrPayload,
         worker_selector: WorkerSelector,
         app_name: str,
         build_kwargs: dict[str, typing.Any] | None = None,
@@ -346,7 +359,32 @@ def _register_functions(
         if task_modules:
             set_declared_task_module_patterns(task_module_patterns)
             import_task_modules(task_modules)
-        return build_fn(tasks, worker_selector, app_name, build_kwargs=build_kwargs)
+        # The roots arrive as instance bodies (see _payload), rehydrated
+        # under this deployment's classes and the build's settings. Through
+        # the resident guard, not a bare env swap: ``build`` may serve
+        # several inputs per container, and the guard refuses a second
+        # build with different settings rather than letting it interleave.
+        build_kwargs = dict(build_kwargs or {})
+        resume_build_id = build_kwargs.get("resume_build_id")
+        try:
+            # Resolved as the build will resolve them -- a bare resume
+            # (``settings`` omitted) reuses the active plan's -- and handed
+            # on resolved, so the roots and the build see the same values.
+            settings = resolve_settings(
+                registry_provider.get(), resume_build_id, build_kwargs.get("settings")
+            )
+            if resume_build_id is not None:
+                build_kwargs["settings"] = settings
+            with resident_settings(settings):
+                roots = from_task_payloads(tasks)
+        except BaseException as e:
+            # A triggered build is already RUNNING (the trigger created it);
+            # a root refused here must not leave it orphaned, as the
+            # bootstrap does not.
+            if resume_build_id is not None:
+                _fail_build_best_effort(registry_provider.get(), resume_build_id, e)
+            raise
+        return build_fn(roots, worker_selector, app_name, build_kwargs=build_kwargs)
 
     run_fn = self._run_function
     # The ``RunFunction`` protocol gained an optional ``env_overrides``
@@ -356,16 +394,17 @@ def _register_functions(
     run_fn_accepts_env = _callable_accepts_env_overrides(run_fn)
 
     def _modal_run(
-        task: BaseTask, *, env_overrides: dict[str, str] | None = None
+        task: TaskOrPayload, *, env_overrides: dict[str, str] | None = None
     ) -> typing.Any:
         _run_container_setup(container_setup)
         # Publish the app's task-module patterns for the worker-side
         # code that needs them but is nowhere near the app object: the
         # reporter checks the coverage of dynamically yielded deps,
         # which the trigger's pre-flight cannot see. The worker does
-        # not IMPORT the modules: its task arrived by value and its
-        # dynamic deps were just constructed by user code, so their
-        # classes are registered by definition.
+        # not IMPORT the modules: its task names the modules its classes
+        # need (or arrived by value), and its dynamic deps were just
+        # constructed by user code, so their classes are registered by
+        # definition.
         set_declared_task_module_patterns(task_module_patterns)
         # The build's settings ride in ``env_overrides``: hold the process
         # for that build while they are applied (one build per process).
@@ -375,11 +414,26 @@ def _register_functions(
             if build_id is not None
             else contextlib.nullcontext()
         ):
+            # The task arrives as its instance body (see _payload) and is
+            # rehydrated under THIS deployment's classes, which need not be
+            # the sender's: a field added since takes its compat default.
+            # Under the build's settings, as a tick rehydrates.
+            try:
+                with temp_env_vars(env_overrides or {}):
+                    received = from_task_payload(task)
+            except TaskRehydrationError as e:
+                # Before the run function, so before its reporter: record
+                # the failure here, or the claim would just lapse silently.
+                if is_task_payload(task):
+                    report_unreadable_task(
+                        typing.cast(dict, task)["task_id"], env_overrides, e
+                    )
+                raise
             if run_fn_accepts_env:
                 run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)
-                return run_fn_with_env(task, env_overrides=env_overrides)
+                return run_fn_with_env(received, env_overrides=env_overrides)
             with temp_env_vars(env_overrides or {}):
-                return run_fn(task)
+                return run_fn(received)
 
     register("build", self._builder_settings)(_modal_build)
     function_names = ["build"]
@@ -445,22 +499,26 @@ def _register_functions(
     function_names.append("tick")
 
     # Reactive bootstrap (see run_reactive_bootstrap). Spawned by
-    # build_trigger(reactive=True) with the root tasks BY VALUE —
-    # cloudpickled into the call exactly as build_spawn passes
-    # ``tasks=`` to the builder — so the DAG is walked here, next to
-    # the mounted target root, instead of on the triggering machine.
+    # build_trigger(reactive=True) with the root tasks as instance
+    # bodies (see _payload), exactly as build_spawn passes ``tasks=`` to
+    # the builder — so the DAG is walked here, next to the mounted
+    # target root, instead of on the triggering machine.
     def _modal_bootstrap(
         build_id: str,
-        tasks: typing.Sequence[BaseTask] | BaseTask,
+        tasks: typing.Sequence[TaskOrPayload] | TaskOrPayload,
         tick_kwargs: dict[str, typing.Any] | None = None,
         settings: dict[str, str] | None = None,
     ) -> dict[str, typing.Any]:
         _run_container_setup(container_setup)
         _setup_logging()
         build_uuid = UUID(build_id)
-        task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
         registry = registry_provider.get()
         try:
+            # Rehydrated under this deployment's classes, not the
+            # trigger's: its local code may be older than the app's.
+            with settings_applied(settings, owner=build_uuid):
+                roots = from_task_payloads(tasks)
+            task_list = [roots] if isinstance(roots, BaseTask) else list(roots)
             result = run_reactive_bootstrap(
                 build_uuid,
                 task_list,

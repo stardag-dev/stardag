@@ -413,3 +413,41 @@ class _WorkerLifecycleReporter:
             )
             return
         self._guard(lambda: spawn_tick(self.build_id, app_name), "tick-spawn")
+
+
+class _TaskRef:
+    """Stands in for a task the worker could not rebuild: the reporter's
+    start and failure need only its id."""
+
+    def __init__(self, task_id: str):
+        self.id = task_id
+
+
+def report_unreadable_task(
+    task_id: str,
+    env_overrides: dict[str, str] | None,
+    exception: BaseException,
+) -> None:
+    """Record the failure of an execution whose task payload the worker
+    refused to rehydrate (``TaskRehydrationError``), best-effort.
+
+    The refusal happens before the run function, so before the reporter it
+    builds would exist: without this the claim would simply lapse, with no
+    failure and no error message on record. Started first, as the run
+    function would have, then failed.
+    """
+    try:
+        reporter = _WorkerLifecycleReporter.create(
+            typing.cast(BaseTask, _TaskRef(task_id)), env_overrides
+        )
+    except Exception:
+        # Best-effort, creation included (as in the Runner): the refusal the
+        # caller is about to raise must not be replaced by a reporting error.
+        logger.exception(
+            f"Could not report the refused task {task_id}: reporter creation failed."
+        )
+        return
+    if reporter is None:
+        return
+    reporter.started()
+    reporter.failed(exception)

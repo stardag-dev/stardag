@@ -125,6 +125,26 @@ class TestSupportsDetached:
 
 
 class TestSubmitDetached:
+    async def test_a_real_task_is_sent_as_its_instance_body(self):
+        """The worker resolved by name is the app's CURRENT deployment, which
+        need not be the one whose classes built the task: so the task goes
+        as its instance body, and the worker rehydrates it (see _payload)."""
+        from stardag.integration.modal._payload import (
+            from_task_payload,
+            is_task_payload,
+        )
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+        task = SyncOnlyTask(name="sent-as-body")
+
+        await executor.submit_detached(task, execution_id=uuid4())
+
+        ((sent, _),) = worker.spawn_calls
+        assert is_task_payload(sent)
+        assert from_task_payload(sent) == task
+
     async def test_spawns_and_returns_handle(self):
         function_call = FakeFunctionCall(object_id="fc-123", result=None)
         worker = FakeWorkerFunction(function_call)
