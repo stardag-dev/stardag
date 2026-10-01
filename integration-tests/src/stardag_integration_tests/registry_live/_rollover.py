@@ -1,6 +1,6 @@
 """Deploying the rollover app, as a scenario needs it deployed.
 
-The rollover scenarios (S3, S6, S7, S20, S33, S37) each redeploy an app of
+The rollover scenarios (S3, S6, S7, S20, S33, S37, S38) each redeploy an app of
 their own mid-run; see ``rollover_app`` for why each needs its own name.
 Everything here goes through ``stardag modal deploy`` from *this* venv, for
 the reason ``provision._deploy_dag_apps`` gives: the app's functions are
@@ -24,7 +24,7 @@ from pathlib import Path
 from uuid import UUID
 
 from .rollover_app import DEPLOY_NONCE_ENV, DEPLOY_PROBE_FUNCTION, ROLLOVER_APP_NAME_ENV
-from .tasks import ROOT_VARIANT_ENV
+from .tasks import FIELD_VARIANT_ENV, ROOT_VARIANT_ENV
 
 APP_MODULE = "stardag_integration_tests.registry_live.rollover_app"
 
@@ -42,6 +42,7 @@ ROLLOVER_APP_NAMES = {
     "S20": "registry-live-s20-root-identity",
     "S33": "registry-live-s33-seal-race",
     "S37": "registry-live-s37-late-record",
+    "S38": "registry-live-s38-added-field",
 }
 
 # Run in the deploy subprocess instead of the CLI's entry point when a
@@ -64,6 +65,7 @@ def deploy_rollover_app(
     *,
     code_id: str,
     root_variant: str = "",
+    field_variant: str = "",
     activate: bool = True,
 ) -> None:
     """Deploy the rollover app as ``app_name`` with code identity ``code_id``.
@@ -82,9 +84,13 @@ def deploy_rollover_app(
         ROLLOVER_APP_NAME_ENV: app_name,
         DEPLOY_NONCE_ENV: nonce,
     }
-    env.pop(ROOT_VARIANT_ENV, None)
-    if root_variant:
-        env[ROOT_VARIANT_ENV] = root_variant
+    for name, value in (
+        (ROOT_VARIANT_ENV, root_variant),
+        (FIELD_VARIANT_ENV, field_variant),
+    ):
+        env.pop(name, None)
+        if value:
+            env[name] = value
     if activate:
         stardag_cli = Path(sys.executable).with_name("stardag")
         assert stardag_cli.exists(), f"No stardag CLI next to {sys.executable}"

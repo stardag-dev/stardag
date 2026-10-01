@@ -8,6 +8,23 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Fixed: a task started under a newer deployment than the one that sent it
+  is missing any field added since** (STA-124). Modal calls carried task
+  objects cloudpickled, and workers are resolved by name — the app's
+  _current_ deployment — so a tick or resident build function still running
+  deployment N spawned N's pickle onto N+1's workers (as did a retried
+  input). Unpickling restores the old object without validation, so reading
+  a field added in N+1 raised `AttributeError`, typically on the retry of a
+  long task, long after the deploy. Every Modal call that carries a task —
+  worker, `bootstrap`, `build` — now sends its instance body and the modules
+  defining its classes, and the receiver rehydrates it in compat mode with
+  the task-id check: an added field takes its default, a removed one is
+  dropped, a significant change is refused. A task that cannot be rehydrated
+  (an `AliasTask`, a `__main__` or function-local class, a lossy round trip)
+  is still sent pickled, warned once per class; reactive builds never have
+  one. Receivers accept a pickled task too, so an older deployment's tick
+  keeps working; an app deployed with an older stardag cannot read the new
+  form, so **redeploy after upgrading before triggering it**.
 - **Fixed: a registry answer lost in transit is retried.** The client used to
   retry inside the httpx transport, which returns as soon as the response
   headers arrive, so a body that stalled or was cut short raised straight to

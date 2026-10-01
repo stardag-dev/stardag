@@ -31,6 +31,7 @@ from stardag.integration.modal._bootstrap import (
     _fail_build_best_effort,
     run_reactive_bootstrap,
 )
+from stardag.integration.modal._payload import to_task_payloads
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
     _get_modal_environment,
@@ -91,7 +92,7 @@ class _Triggering:
         """
         build_function = modal.Function.from_name(app_name=self.name, name="build")
         return build_function.spawn(
-            tasks=tasks,
+            tasks=to_task_payloads(tasks),
             worker_selector=worker_selector or self.worker_selector,
             app_name=self.name,
             build_kwargs=build_kwargs,
@@ -108,7 +109,7 @@ class _Triggering:
         ``BuildSummary``."""
         build_function = modal.Function.from_name(app_name=self.name, name="build")
         return build_function.remote(
-            tasks=tasks,
+            tasks=to_task_payloads(tasks),
             worker_selector=worker_selector or self.worker_selector,
             app_name=self.name,
             build_kwargs=build_kwargs,
@@ -238,7 +239,7 @@ class _Triggering:
             merged_kwargs["settings"] = checked_settings
         build_function = modal.Function.from_name(app_name=self.name, name="build")
         function_call = build_function.spawn(
-            tasks=tasks,
+            tasks=to_task_payloads(tasks),
             worker_selector=worker_selector or self.worker_selector,
             app_name=self.name,
             build_kwargs=merged_kwargs,
@@ -316,7 +317,7 @@ class _Triggering:
             )
             function_call = bootstrap_function.spawn(
                 build_id=str(build_id),
-                tasks=task_list,
+                tasks=to_task_payloads(task_list),
                 tick_kwargs=tick_kwargs,
                 settings=settings,
             )

@@ -26,7 +26,7 @@ from typing import Annotated
 
 import stardag as sd
 
-from ._gates import hold
+from ._gates import hold, observe
 
 # The setting ``ScopedUpstreams`` reads its structure from. Named here so the
 # scenario that sets it and the task that reads it cannot drift apart.
@@ -39,6 +39,13 @@ SCOPED_UPSTREAMS_SETTING = "REGISTRY_LIVE_UPSTREAMS"
 # the original class.
 ROOT_VARIANT_ENV = "REGISTRY_LIVE_ROOT_VARIANT"
 _ROOT_VARIANT = os.environ.get(ROOT_VARIANT_ENV, "")
+
+# Baked in the same way as ``ROOT_VARIANT_ENV``, and read at import by
+# ``AddedFieldParams``: the stand-in for "the new deployment's code added a
+# defaulted field to a nested parameter model" (S38).
+FIELD_VARIANT_ENV = "REGISTRY_LIVE_FIELD_VARIANT"
+_FIELD_VARIANT = os.environ.get(FIELD_VARIANT_ENV, "")
+ADDED_FIELD_DEFAULT = 7
 
 
 @sd.task(name="Range")
@@ -573,3 +580,53 @@ class RolloverRoot(sd.Task[list[int]]):
 
     def run(self):
         self._save(self.requires().load())
+
+
+class AddedFieldParams(sd.StardagBaseModel):
+    """A nested parameter model that a new deployment extends (S38).
+
+    Under ``REGISTRY_LIVE_FIELD_VARIANT=added`` -- set only in the image of
+    the rollover app's *second* deploy -- it gains a defaulted field with a
+    compat default, so every existing instance keeps its task id: the
+    backward-compatible change registry rehydration exists to absorb.
+    """
+
+    base: int = 1
+    if _FIELD_VARIANT == "added":
+        added: Annotated[int, sd.StardagField(ADDED_FIELD_DEFAULT)] = (
+            ADDED_FIELD_DEFAULT
+        )
+
+
+class AddedFieldRoot(sd.Task[dict]):
+    """A root whose ``run()`` reads every field of its nested params (S38).
+
+    Run under the second deploy's code, it reads ``params.added``. Sent to
+    that code as a pickle made under the first deploy, the field would be
+    absent and the read would raise ``AttributeError``; sent as its instance
+    body, it is rehydrated with the default. What it read is recorded under
+    ``observed-<salt>`` (see ``_gates.observe``), so the scenario can tell
+    which code ran it.
+
+    ``gate`` is handed to the upstream ``Slow`` (see ``_gates``); ``seconds``
+    is then its upper bound.
+    """
+
+    salt: str
+    params: AddedFieldParams = AddedFieldParams()
+    seconds: int = 240
+    gate: str = ""
+
+    def requires(self):
+        return slow(
+            values=get_range(limit=2, salt=self.salt),
+            seconds=self.seconds,
+            gate=self.gate,
+        )
+
+    def run(self):
+        observed: dict = {"variant": _FIELD_VARIANT, "base": self.params.base}
+        if _FIELD_VARIANT == "added":
+            observed["added"] = self.params.added
+        observe(f"observed-{self.salt}", observed)
+        self._save(observed)

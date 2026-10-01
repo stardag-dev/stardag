@@ -893,6 +893,24 @@ continues — see [Deployments and code
 versions](../concepts/modal-orchestration.md#deployments-and-code-versions)
 for the mechanism.
 
+A task can still be **started under the new code that was handed off by the
+old**: workers are looked up by name, which always gives the app's current
+deployment, so a tick or resident build function still running the old
+code spawns onto the new workers, and a retried input runs there too. Tasks
+therefore cross every Modal call as their **instance body**, not as a
+pickled object, and the receiving container rehydrates them under its own
+classes, exactly as the registry would: a field you added since takes its
+`compat_default` or class default, a field you removed is dropped with a
+warning, and a change to a significant field fails the task-id check rather
+than running a different task. The same holds for the roots a trigger sends
+from a checkout older than the deployed app.
+
+A task that cannot be rehydrated — the cases listed under [Declaring your
+task modules](#declaring-your-task-modules-required-for-reactive-builds),
+or a class defined in `__main__` or inside a function — is still sent
+pickled, with a warning once per class. A reactive build never contains
+one; in a resident build, such a task is not protected across a redeploy.
+
 ### Cancelling a build vs. stopping its executions
 
 `stardag builds cancel <build-id>` releases the build's claims

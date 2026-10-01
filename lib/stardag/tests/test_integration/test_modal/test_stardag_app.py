@@ -34,6 +34,7 @@ from stardag.integration.modal import (
     StardagApp,
 )
 from stardag.integration.modal._builder import _default_build
+from stardag.integration.modal._payload import from_task_payloads, is_task_payload
 from stardag.integration.modal import _container_setup as _container_setup_module
 from stardag.integration.modal._container_setup import (
     _loading_deploy_entrypoint,
@@ -666,7 +667,8 @@ class TestStardagAppBuildSpawnRemote:
 
         app.build_remote(roots)
 
-        assert captured["kwargs"]["tasks"] is roots
+        # Mocks cannot be sent as instance bodies, so they go by value.
+        assert captured["kwargs"]["tasks"] == roots
 
     def test_build_remote_forwards_build_kwargs(self, modal_function_stub):
         captured = modal_function_stub
@@ -685,7 +687,7 @@ class TestStardagAppBuildSpawnRemote:
 
         assert result == "spawn-handle"
         assert captured["op"] == "spawn"
-        assert captured["kwargs"]["tasks"] is roots
+        assert captured["kwargs"]["tasks"] == roots
         assert captured["kwargs"]["build_kwargs"] == {"register_all": True}
 
 
@@ -735,7 +737,11 @@ class TestStardagAppBuildTrigger:
         assert result.build_id.version == 7
         assert result.function_call == "spawn-handle"
         assert captured["op"] == "spawn"
-        assert captured["kwargs"]["tasks"] is root
+        # The root rides as its instance body (see _payload), which the
+        # build function rehydrates into an equal task.
+        sent = captured["kwargs"]["tasks"]
+        assert is_task_payload(sent)
+        assert from_task_payloads(sent) == root
         assert captured["kwargs"]["build_kwargs"] == {
             "resume_build_id": result.build_id
         }

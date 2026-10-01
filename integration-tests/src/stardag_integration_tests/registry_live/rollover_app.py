@@ -2,8 +2,8 @@
 
 Its own module because the scenarios redeploy it mid-run, and a redeploy of
 the shared ``dag_app`` would roll every other scenario's build over too.
-Same factory, same tasks; only the name (and, for S20, one baked variable)
-differs. See ``_scenario_app``.
+Same factory, same tasks; only the name (and, for S20 and S38, one baked
+variable) differs. See ``_scenario_app``.
 
 **One app name per scenario.** The rollover scenarios run concurrently in
 CI, and a deploy moves *every* running build of its app to the new code, so
@@ -13,9 +13,10 @@ import, which for ``stardag modal deploy -m`` is deploy time); the
 triggering process builds a handle of the same name with
 ``_rollover.trigger_app`` rather than importing ``app`` from here.
 
-``ROOT_VARIANT_ENV`` is baked into the image for the same reason it is read
-at import in ``tasks``: it is how a deploy of *this* module stands in for new
-code that changed a root's identity (S20).
+``ROOT_VARIANT_ENV`` and ``FIELD_VARIANT_ENV`` are baked into the image for
+the same reason they are read at import in ``tasks``: they are how a deploy
+of *this* module stands in for new code that changed a root's identity (S20)
+or added a field to a nested parameter model (S38).
 
 Every function scales down within ``ROLLOVER_SCALEDOWN_SECONDS`` of its
 last input, so no warm container of an old deploy is left for a new spawn to
@@ -38,7 +39,7 @@ from ._scenario_app import (
     image,
     scenario_image,
 )
-from .tasks import ROOT_VARIANT_ENV
+from .tasks import FIELD_VARIANT_ENV, ROOT_VARIANT_ENV
 
 ROLLOVER_APP_NAME_ENV = "REGISTRY_LIVE_ROLLOVER_APP_NAME"
 DEPLOY_NONCE_ENV = "REGISTRY_LIVE_DEPLOY_NONCE"
@@ -46,9 +47,13 @@ DEPLOY_PROBE_FUNCTION = "deploy_probe"
 
 APP_NAME = os.environ.get(ROLLOVER_APP_NAME_ENV, "") or "registry-live-rollover"
 
-_variant = os.environ.get(ROOT_VARIANT_ENV, "")
+_variants = {
+    name: value
+    for name in (ROOT_VARIANT_ENV, FIELD_VARIANT_ENV)
+    if (value := os.environ.get(name, ""))
+}
 
-_image = scenario_image({ROOT_VARIANT_ENV: _variant}) if _variant else image
+_image = scenario_image(_variants) if _variants else image
 
 app = build_scenario_app(
     APP_NAME, app_image=_image, scaledown_window=ROLLOVER_SCALEDOWN_SECONDS
