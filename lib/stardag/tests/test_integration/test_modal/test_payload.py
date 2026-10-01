@@ -12,6 +12,7 @@ is exactly the body a class without the field produces.
 
 from __future__ import annotations
 
+import importlib
 import json
 from collections import UserList
 import logging
@@ -191,6 +192,21 @@ class TestToAndFromPayload:
         payload["modules"].append("stardag_no_such_module_sta124")
 
         assert from_task_payload(payload) == PayloadTask()
+
+    def test_a_class_from_a_module_that_failed_to_import_is_refused(self):
+        """A module can raise after registering a class; resolving that class
+        would run the task with the module half-initialized."""
+        payload = _payload_of(PayloadTask())
+        real_import = importlib.import_module
+
+        def failing_import(name, *args, **kwargs):
+            if name == __name__:
+                raise RuntimeError("failed after registering its classes")
+            return real_import(name, *args, **kwargs)
+
+        with patch.object(_payload.importlib, "import_module", failing_import):
+            with pytest.raises(TaskRehydrationError, match="failed to import"):
+                from_task_payload(payload)
 
     def test_a_missing_class_names_the_failed_import(self):
         payload = _payload_of(PayloadTask())

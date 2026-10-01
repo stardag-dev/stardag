@@ -310,22 +310,38 @@ def from_task_payload(value: TaskOrPayload) -> BaseTask:
     # change compat rehydration absorbs (the field is dropped). Whether
     # anything still needed is missing is rehydration's call, and its error
     # carries what failed to import.
-    import_errors: list[str] = []
+    failed: dict[str, str] = {}
     for module in payload["modules"]:
         try:
             importlib.import_module(module)
         except Exception as e:
-            import_errors.append(f"{module}: {type(e).__name__}: {e}")
+            failed[module] = f"{type(e).__name__}: {e}"
     try:
-        return task_from_registry_data(
+        task = task_from_registry_data(
             payload["body"], expected_task_id=payload["task_id"]
         )
     except TaskRehydrationError as e:
-        if not import_errors:
+        if not failed:
             raise
         raise TaskRehydrationError(
-            f"{e} (modules that failed to import: {'; '.join(import_errors)})"
+            f"{e} (modules that failed to import: {_describe_failed(failed)})"
         ) from e
+    # A module that raised part-way through its import may still have
+    # registered classes defined before the failure: rehydration then
+    # resolves them, and the task would run with that module's later
+    # globals missing. Only a module the task no longer uses may fail.
+    used = {type(m).__module__ for m in _models(task)}
+    broken = {module: error for module, error in failed.items() if module in used}
+    if broken:
+        raise TaskRehydrationError(
+            f"Task {payload['task_id']} uses classes from modules that failed "
+            f"to import: {_describe_failed(broken)}"
+        )
+    return task
+
+
+def _describe_failed(failed: dict[str, str]) -> str:
+    return "; ".join(f"{module}: {error}" for module, error in failed.items())
 
 
 def from_task_payloads(
