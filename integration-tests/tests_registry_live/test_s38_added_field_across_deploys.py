@@ -26,8 +26,10 @@ import uuid
 import pytest
 
 from stardag_integration_tests.registry_live._events import (
+    describe_events,
     describe_ledger,
     executions_of,
+    task_events,
 )
 from stardag_integration_tests.registry_live._gates import GateSet, observed
 from stardag_integration_tests.registry_live._guard import registry_live_guard
@@ -117,8 +119,12 @@ def test_s38_a_task_built_under_d1_runs_under_d2_with_the_added_field_defaulted(
         status = wait_for_terminal(build_id, timeout=BUILD_TIMEOUT_SECONDS)
         rows = executions_of(deployment, root.id, build_id)
         seen = observed(env, f"observed-{salt}")
+        events = task_events(deployment, root.id)
+        errors = [e["error_message"] for e in events if e.get("error_message")]
         context = (
-            f"{describe(build_id)}\n--- root ledger ---\n"
+            f"{describe(build_id)}\n--- root events ---\n"
+            f"{describe_events(events, build=build_id)}\n"
+            f"--- root errors ---\n{errors!r}\n--- root ledger ---\n"
             f"{describe_ledger(rows, build=build_id)}\n"
             f"--- what the root's run() saw ---\n{seen!r}"
         )
@@ -130,16 +136,17 @@ def test_s38_a_task_built_under_d1_runs_under_d2_with_the_added_field_defaulted(
             "it: the scenario did not reach the cross-deployment path (did the "
             f"D1 tick linger out before the {LINGER_SECONDS}s window?).\n" + context
         )
-        # ... and its body ran D2's code.
+        # What STA-124 fixes: the build completes rather than the root failing
+        # on ``AttributeError`` (the events above carry the error if not) ...
+        assert status == "completed", context
+        # ... and the body ran D2's code (otherwise the D1 spawn reached a D1
+        # container and the path was not exercised), with the field D2 added
+        # there at its default.
         assert seen is not None and seen.get("variant") == "added", (
             "The root's run() did not run D2's code, so the D1 spawn reached a "
             "D1 container: the scenario did not reach the cross-deployment "
             "path.\n" + context
         )
-
-        # What STA-124 fixes: the field D2 added is there, at its default,
-        # and the build completed rather than failing on AttributeError.
-        assert status == "completed", context
         assert seen == {"variant": "added", "base": 1, "added": ADDED_FIELD_DEFAULT}, (
             context
         )
