@@ -1943,6 +1943,18 @@ class TestBuildTickConfig:
 
         assert config.tick_timeout_seconds == 60.0
 
+    def test_a_caller_budget_longer_than_the_function_timeout_is_clamped(self):
+        """The tick's lifetime bound and claim deadline count on this being
+        no longer than the container's real limit: a 600 s budget in a 300 s
+        container would let the tick be killed holding the lease."""
+        from stardag.integration.modal._tick import _build_tick_config
+
+        config = _build_tick_config(
+            None, {"tick_timeout_seconds": 600.0}, None, tick_timeout_seconds=300.0
+        )
+
+        assert config.tick_timeout_seconds == 300.0
+
     def test_tick_timeout_is_not_a_persistable_tick_kwarg(self):
         """It is a deploy-time fact about the container, not per-build
         config: persisting it in a build's stored tick_kwargs would go

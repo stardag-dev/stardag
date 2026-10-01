@@ -332,3 +332,41 @@ async def test_a_drain_already_asking_is_awaited_not_cancelled(
     answer.set()
     await asyncio.wait_for(settling, timeout=1)
     assert executor.ticks_spawned == [(neighbour, "app")]
+
+
+async def test_a_drain_asked_for_while_one_asks_at_shutdown_still_runs(
+    registry: InMemoryRegistry, monkeypatch: pytest.MonkeyPatch
+):
+    """The build is ending while the trailing drain asks, and a result in
+    that window flagged a neighbour its answer may predate: the flush
+    drains once more, now, instead of dropping it."""
+    import asyncio
+
+    from stardag.build import _resident
+
+    monkeypatch.setattr(_resident, "_RESIDENT_DRAIN_INTERVAL_SECONDS", 0.01)
+    asking = asyncio.Event()
+    answer = asyncio.Event()
+    original = registry.build_wake_candidates_aio
+
+    async def slow_first(*args, **kwargs):
+        candidates = await original(*args, **kwargs)
+        if not asking.is_set():
+            asking.set()
+            await answer.wait()
+        return candidates
+
+    monkeypatch.setattr(registry, "build_wake_candidates_aio", slow_first)
+    monkeypatch.setattr(_resident, "_RESIDENT_DRAIN_INTERVAL_SECONDS", 60)
+    executor = _executor()
+    engine = _bare_engine(registry, executor)
+    engine._last_drain = asyncio.get_running_loop().time() - 59.99
+    await engine.drain_neighbours()  # deferred by ~10 ms
+    await asyncio.wait_for(asking.wait(), timeout=1)
+    neighbour = _flag_neighbour(registry)
+    await engine.drain_neighbours()  # recorded while the trailing one asks
+    flushing = asyncio.create_task(engine.flush_trailing_drain())
+    await asyncio.sleep(0.02)
+    answer.set()
+    await asyncio.wait_for(flushing, timeout=1)
+    assert executor.ticks_spawned == [(neighbour, "app")]

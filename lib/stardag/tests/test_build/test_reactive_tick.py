@@ -13,7 +13,7 @@ import pytest
 from stardag.exceptions import NotFoundError
 
 from stardag import BaseTask, auto_namespace
-from stardag.build import TickConfig, run_tick_aio
+from stardag.build import TickConfig, TickSummary, run_tick_aio
 from stardag.build._reactive import roll_over_aio
 from stardag.build._registration import (
     new_id,
@@ -784,6 +784,57 @@ class TestLeaseAndHandshake:
         # The last claim went out before the claim deadline; only the spawn
         # it had already started may run past it.
         assert time.monotonic() - started < 0.3 * 0.9 + 0.1
+
+    async def test_out_of_time_stops_before_metadata_and_budget_claims(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Past the deadline no spawn calls the executor for metadata (which
+        can be slow, and serial), and no budget failure takes its claim."""
+        from unittest import mock
+
+        from stardag.build._reactive._frontier_actions import (
+            PassResult,
+            _fail_exhausted,
+            act_on_frontier,
+        )
+
+        class CountsMetadata(FakeDetachedExecutor):
+            calls = 0
+
+            async def get_executor_metadata(self, task):
+                CountsMetadata.calls += 1
+                return None
+
+        registry = InMemoryRegistry()
+        tasks = [SyncOnlyTask(name=f"m{i}-{new_id()}") for i in range(3)]
+        build_id, _ = await _plan(registry, list(tasks))
+        frontier = registry.build_get_frontier(build_id)
+        assert frontier.plan_id is not None
+        result = await act_on_frontier(
+            frontier,
+            registry=registry,
+            task_executor=CountsMetadata(registry=registry),
+            config=FAST,
+            summary=TickSummary(outcome="x"),
+            out_of_time=lambda: True,
+        )
+        assert result.out_of_time and not result.acted
+        assert CountsMetadata.calls == 0
+        assert not [c for c in registry.calls_to("member_start") if c["claim"]]
+
+        exhausted = PassResult()
+        await _fail_exhausted(
+            mock.Mock(task_id="t"),
+            "budget",
+            plan_id=frontier.plan_id,
+            registry=registry,
+            summary=TickSummary(outcome="x"),
+            result=exhausted,
+            lease_lost=lambda: False,
+            out_of_time=lambda: True,
+        )
+        assert exhausted.out_of_time
+        assert not [c for c in registry.calls_to("member_start") if c["claim"]]
 
     async def test_a_flag_still_set_at_the_bound_hands_on_once(
         self, default_in_memory_fs_target: Target
