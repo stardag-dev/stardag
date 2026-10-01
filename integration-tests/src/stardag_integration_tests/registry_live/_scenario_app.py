@@ -91,6 +91,11 @@ TICK_TIMEOUT_SECONDS = 300
 # The margin is generous because it is covering a container start, and
 # nothing is paid for it: a tick exits as soon as its build goes terminal,
 # so a linger is an upper bound that a passing run never reaches.
+#
+# Since STA-123 the tick also caps its own deadline short of its timeout
+# (70% of it, so 210 s here), so a longer linger no longer gets a tick
+# killed -- it ends ``lingered_out`` at the cap. This bound stays as the
+# statement of intent; the effective linger is the smaller of the two.
 MAX_LINGER_SECONDS = TICK_TIMEOUT_SECONDS - 60
 
 

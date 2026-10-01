@@ -95,6 +95,9 @@ class PassResult:
     # The scheduler lease was lost during the pass: another tick may be
     # driving the build, so nothing further was claimed or registered.
     lease_lost: bool = False
+    # The tick's time ran out during the pass: the remaining claims were left
+    # to a successor (see ``act_on_frontier``'s ``out_of_time``).
+    out_of_time: bool = False
     spawned: list[str] = field(default_factory=list)
 
 
@@ -148,6 +151,7 @@ def spawn_cap(
 
 
 LeaseLost = typing.Callable[[], bool]
+OutOfTime = typing.Callable[[], bool]
 
 
 def _never_lost() -> bool:
@@ -246,6 +250,7 @@ async def _spawn(
     summary: "TickSummary",
     result: PassResult,
     lease_lost: "LeaseLost",
+    out_of_time: "OutOfTime",
 ) -> None:
     """Claim one runnable member, spawn it, record its ref.
 
@@ -257,6 +262,11 @@ async def _spawn(
     """
     if _stop_for_lost_lease(lease_lost, result):
         return
+    # Before the metadata await too: once one spawn met the deadline, every
+    # one queued behind it must stop here, not after a call that can be slow.
+    if result.out_of_time or out_of_time():
+        result.out_of_time = True
+        return
     limit_keys = (
         list(config.limit_key_selector(task)) if config.limit_key_selector else []
     )
@@ -265,6 +275,11 @@ async def _spawn(
     except Exception:
         metadata = None
     if _stop_for_lost_lease(lease_lost, result):
+        return
+    # Last, right before the claim: a claim taken is carried through its
+    # spawn, so this is the latest point the pass can still stop cheaply.
+    if result.out_of_time or out_of_time():
+        result.out_of_time = True
         return
     execution_id = new_id()
     try:
@@ -406,6 +421,7 @@ async def _fail_exhausted(
     summary: "TickSummary",
     result: PassResult,
     lease_lost: "LeaseLost",
+    out_of_time: "OutOfTime",
 ) -> None:
     """Fail a member at a budget instead of running it again: a claim (the
     registry fails only the execution holding a task's claim; for a lapsed
@@ -413,6 +429,10 @@ async def _fail_exhausted(
     ``taken_over``), then its failure with ``message``. No container is
     spawned. The build's fail mode takes it from there."""
     if _stop_for_lost_lease(lease_lost, result):
+        return
+    # A claim like any other: past the deadline it is the successor's.
+    if result.out_of_time or out_of_time():
+        result.out_of_time = True
         return
     execution_id = new_id()
     try:
@@ -451,6 +471,7 @@ async def act_on_frontier(
     config: "TickConfig",
     summary: "TickSummary",
     lease_lost: "LeaseLost | None" = None,
+    out_of_time: "OutOfTime | None" = None,
 ) -> PassResult:
     """One pass: discovery jobs, then (if the plan still stands) claims and
     spawns of the runnable members, each phase bounded by
@@ -461,8 +482,16 @@ async def act_on_frontier(
     lease is single-flight for ticks, and a renewal that fails or is
     refused mid-pass means another tick may already be acting. The pass
     then stops and returns ``lease_lost``.
+
+    ``out_of_time`` is read before every claim, a budget failure's included,
+    and before each spawn's executor-metadata call. Once it answers True,
+    the pass takes no further claim and returns ``out_of_time``. It bounds the
+    pass by the clock rather than by the spawn cap, which an explicit
+    ``max_spawns_per_tick`` or the cap's floor can set beyond what is left
+    of the tick's container time.
     """
     lost: LeaseLost = lease_lost or _never_lost
+    timed_out: OutOfTime = out_of_time or _never_lost
     assert frontier.plan_id is not None
     plan_id = frontier.plan_id
     result = PassResult()
@@ -520,12 +549,13 @@ async def act_on_frontier(
                     summary=summary,
                     result=result,
                     lease_lost=lost,
+                    out_of_time=timed_out,
                 )
                 for member, message in exhausted
             ],
             semaphore,
         )
-        if result.lease_lost or result.superseded:
+        if result.lease_lost or result.superseded or result.out_of_time:
             return result
 
     loaded: list[tuple[BaseTask, FrontierMember]] = []
@@ -559,6 +589,7 @@ async def act_on_frontier(
                 summary=summary,
                 result=result,
                 lease_lost=lost,
+                out_of_time=timed_out,
             )
             for task, member in loaded
         ],

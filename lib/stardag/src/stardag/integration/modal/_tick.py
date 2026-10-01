@@ -159,7 +159,8 @@ def _build_tick_config(
     ``timeout`` — how long this container may live, which is what the
     per-pass spawn cap is derived from. It is applied as a *default* rather
     than an override so an explicit ``tick_kwargs`` (a test, or a manual
-    invocation) still wins; the watchdog sweep used to be the caller that
+    invocation) still wins -- when it is shorter: a longer one is clamped
+    to the deployment's, because the tick's lifetime bound counts on it; the watchdog sweep used to be the caller that
     needed this, passing each build its share of one container's budget,
     and no longer runs ticks in-process at all. It is deliberately absent
     from ``_TICK_KWARGS_ALLOWED``: persisting it in
@@ -172,7 +173,19 @@ def _build_tick_config(
     }
     if "fail_mode" in config_kwargs:
         config_kwargs["fail_mode"] = FailMode(config_kwargs["fail_mode"])
-    config_kwargs.setdefault("tick_timeout_seconds", tick_timeout_seconds)
+    explicit = config_kwargs.get("tick_timeout_seconds")
+    if explicit is None or tick_timeout_seconds is None:
+        config_kwargs["tick_timeout_seconds"] = (
+            tick_timeout_seconds if explicit is None else explicit
+        )
+    else:
+        # A caller may budget less than the container has, never more: the
+        # lifetime bound and the claim deadline are safety bounds against
+        # the container's real limit, and a longer one would let the tick be
+        # killed holding the lease.
+        config_kwargs["tick_timeout_seconds"] = min(
+            float(explicit), tick_timeout_seconds
+        )
     return TickConfig(
         limit_key_selector=limit_key_selector,
         spawn_tick=spawn_tick,
@@ -260,9 +273,13 @@ async def _run_deployed_tick_aio(
     tick_kwargs: dict[str, typing.Any] | None = None,
     *,
     deployment: _TickDeployment,
+    started_at: float | None = None,
 ) -> dict[str, typing.Any]:
     """One scheduler tick of a reactive build: the body of the deployed
     ``tick`` function (see :meth:`StardagApp.finalize`).
+
+    ``started_at`` is the invocation's ``time.monotonic()`` at entry, which
+    the tick's lifetime bound counts from.
 
     Returns a JSON-able outcome: the ``run_tick_aio`` summary, or a short
     ``{"outcome": ...}`` for the two cases that stop before the lease — a
@@ -363,6 +380,7 @@ async def _run_deployed_tick_aio(
         config=config,
         deployment_id=own,
         roll_over=_roll_over if own is not None else None,
+        started_at=started_at,
     )
     # The container id is in the line so a tick can be matched to its
     # container's logs.

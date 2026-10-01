@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import asdict
 from uuid import UUID
 
@@ -33,8 +34,27 @@ logger = logging.getLogger(__name__)
 _UNREPORTED_TICK_OUTCOMES = frozenset({"not_reactive"})
 # Outcomes that end a tick with nothing left for it to hand off.
 _NO_HANDOFF_OUTCOMES = frozenset(
-    {"terminal", "not_reactive", "lease_lost", "superseded", "rollover_failed"}
+    {
+        "terminal",
+        "not_reactive",
+        "lease_lost",
+        "superseded",
+        "rollover_failed",
+        # Handed off already, unconditionally (``_continue_in_a_successor``).
+        "lifetime_reached",
+    }
 )
+# The share of the tick container's wall-clock limit kept back from starting
+# passes: a pass started just before the bound may still spend its spawn
+# budget (a quarter of the limit, see ``_frontier_actions.spawn_cap``), and
+# the release, the drain and the successor come after it.
+_LIFETIME_MARGIN_FRACTION = 0.3
+# The share of that limit after which a pass already running takes no further
+# claim. The margin above assumes a pass spends at most its derived spawn
+# budget, which an explicit ``max_spawns_per_tick`` or the cap's floor can
+# exceed; this bounds the pass by the clock instead. The last tenth is for
+# the claims still in flight, the release, the drain and the successor.
+_CLAIM_DEADLINE_FRACTION = 0.9
 
 # The server caps a summary at 8 KiB; an unbounded message would turn "this
 # tick crashed" into no record at all.
@@ -91,6 +111,32 @@ async def _hand_off_if_needed(
         )
 
 
+async def _flag_and_spawn_unless_live(
+    build_id: UUID, *, registry: RegistryABC, config: TickConfig, summary: TickSummary
+) -> None:
+    """Flag the build and spawn a tick for it unless a scheduler holds its
+    lease once the flag is durable.
+
+    ``notify`` reads the lease after the flag is durable. If no scheduler
+    holds it -- a holder that released may have run its exit handshake
+    before the flag landed -- nobody will see the flag, so a tick is spawned,
+    as a worker's notify does, and likewise when the answer is unknown."""
+    notified = await registry.build_notify_aio(
+        build_id, can_spawn=config.spawn_tick is not None
+    )
+    # Unknown (``None``) spawns, as in a worker's notify: a redundant
+    # tick costs a container, a skipped one costs the build its progress.
+    if not notified.needs_tick or notified.scheduler_live is True:
+        return
+    if config.spawn_tick is None:
+        return
+    build = await registry.build_get_aio(build_id)
+    if build.reactive_app_name is None:
+        return
+    await asyncio.to_thread(config.spawn_tick, build_id, build.reactive_app_name)
+    summary.successor_spawned += 1
+
+
 async def _flag_for_the_holder(
     build_id: UUID, *, registry: RegistryABC, config: TickConfig, summary: TickSummary
 ) -> None:
@@ -102,33 +148,40 @@ async def _flag_for_the_holder(
     time-based cause (a lapsed claim) sets none. So flag the build: a
     lingering holder acts on its next poll or in its exit handshake, and a
     holder mid-frontier acts on its next read, since it clears the flag
-    right before each one.
-
-    ``notify`` reads the lease after the flag is durable. If the holder had
-    already released it -- and so may have run its exit handshake before
-    the flag landed -- nobody will see the flag; spawn a successor, as a
-    worker's notify does, and likewise when the answer is unknown. Best-effort: a failure here leaves the outcome
-    ``lease_held`` and the build to the next wake-up or watchdog period.
+    right before each one. If the holder is gone by the time the flag is
+    durable, a successor is spawned. Best-effort: a failure here leaves the
+    outcome ``lease_held`` and the build to the next wake-up or watchdog
+    period.
     """
     try:
-        notified = await registry.build_notify_aio(
-            build_id, can_spawn=config.spawn_tick is not None
+        await _flag_and_spawn_unless_live(
+            build_id, registry=registry, config=config, summary=summary
         )
-        # Unknown (``None``) spawns, as in a worker's notify: a redundant
-        # tick costs a container, a skipped one costs the build its progress.
-        if not notified.needs_tick or notified.scheduler_live is True:
-            return
-        if config.spawn_tick is None:
-            return
-        build = await registry.build_get_aio(build_id)
-        if build.reactive_app_name is None:
-            return
-        await asyncio.to_thread(config.spawn_tick, build_id, build.reactive_app_name)
-        summary.successor_spawned += 1
     except Exception as e:
         logger.warning(
             "Tick refused the scheduler lease for build %s could not flag it "
             "for the holder (left to the next wake-up or the watchdog): %s",
+            build_id,
+            e,
+        )
+
+
+async def _continue_in_a_successor(
+    build_id: UUID, *, registry: RegistryABC, config: TickConfig, summary: TickSummary
+) -> None:
+    """A tick still busy at its lifetime bound leaves the build to a fresh
+    one. It ended mid-work rather than for lack of it, so the flag may well
+    be clear: set it, then spawn unless a tick already holds the lease.
+    Best-effort: a failure leaves the build to the next wake-up or the
+    watchdog, as a killed tick would have."""
+    try:
+        await _flag_and_spawn_unless_live(
+            build_id, registry=registry, config=config, summary=summary
+        )
+    except Exception as e:
+        logger.warning(
+            "Tick for build %s reached its lifetime bound and could not start "
+            "a successor (left to the next wake-up or the watchdog): %s",
             build_id,
             e,
         )
@@ -170,6 +223,7 @@ async def run_tick_aio(
     config: TickConfig | None = None,
     deployment_id: UUID | None = None,
     roll_over: RollOver | None = None,
+    started_at: float | None = None,
 ) -> TickSummary:
     """Run one reactive scheduler tick for ``build_id``.
 
@@ -184,6 +238,10 @@ async def run_tick_aio(
             the comparison (a caller that is not a deployment).
         roll_over: The rollover hook (see
             :data:`~stardag.build._reactive._rollover.RollOver`).
+        started_at: When the invocation running this tick started, as a
+            ``time.monotonic()`` reading: what the lifetime bound against
+            ``TickConfig.tick_timeout_seconds`` counts from. None counts from
+            the start of the tick's loop, once it holds the lease.
 
     Idempotent and safe to invoke at any time (single-flighted by the
     scheduler lease; a no-op on a build that is not reactively scheduled).
@@ -201,6 +259,7 @@ async def run_tick_aio(
             summary=summary,
             deployment_id=deployment_id,
             roll_over=roll_over,
+            started_at=started_at,
         )
     except Exception as e:
         summary.outcome = "error"
@@ -225,8 +284,10 @@ class _Driver:
         summary: TickSummary,
         deployment_id: UUID | None,
         roll_over: RollOver | None,
+        started_at: float | None = None,
     ) -> None:
         self.build_id = build_id
+        self.started_at = started_at
         self.registry = registry
         self.executor = task_executor
         self.config = config
@@ -236,10 +297,19 @@ class _Driver:
         self.rollover_attempted = False
         self.settings = _Settings(registry)
         self.cleared_a_wakeup = False
+        # Set by ``drive`` (the loop's clock); None: no limit known.
+        self.claim_deadline: float | None = None
 
-    async def _read(self) -> BuildFrontier:
-        await self.registry.build_clear_notify_aio(self.build_id)
-        self.cleared_a_wakeup = True
+    def _out_of_time(self) -> bool:
+        return (
+            self.claim_deadline is not None
+            and asyncio.get_running_loop().time() >= self.claim_deadline
+        )
+
+    async def _read(self, *, clear: bool) -> BuildFrontier:
+        if clear:
+            await self.registry.build_clear_notify_aio(self.build_id)
+            self.cleared_a_wakeup = True
         return await self.registry.build_get_frontier_aio(self.build_id)
 
     async def _follow_deployment(self, frontier: BuildFrontier) -> BuildFrontier | None:
@@ -273,14 +343,19 @@ class _Driver:
             return None
         return frontier
 
-    async def one_pass(self, lease: SchedulerLease) -> tuple[bool, bool]:
+    async def one_pass(
+        self, lease: SchedulerLease, *, clear: bool = True
+    ) -> tuple[bool, bool]:
         """Read and act once. Returns ``(stop, acted)``.
+
+        ``clear=False`` reads the frontier without clearing the wake-up flag
+        first (the exit pass, see :meth:`drive`).
 
         The lease is checked before every action of the pass, not only
         before it: a pass can outlive a lost renewal, and a second tick may
         then hold the lease (see :func:`act_on_frontier`)."""
         self.summary.iterations += 1
-        frontier = await self._read()
+        frontier = await self._read(clear=clear)
         if frontier.reactive_app_name is None:
             self.summary.outcome = "not_reactive"
             return True, False
@@ -314,6 +389,7 @@ class _Driver:
                     config=self.config,
                     summary=self.summary,
                     lease_lost=lambda: lease.lost,
+                    out_of_time=self._out_of_time,
                 )
         finally:
             current_build_context_var.reset(token)
@@ -322,6 +398,11 @@ class _Driver:
             return True, result.acted
         if result.superseded:
             self.summary.outcome = "superseded"
+            return True, result.acted
+        if result.out_of_time:
+            # What it could not claim is the successor's, which is spawned
+            # whether or not the flag is set.
+            self.summary.outcome = "lifetime_reached"
             return True, result.acted
         terminal = await handle_terminal(
             frontier,
@@ -337,6 +418,30 @@ class _Driver:
             return True, result.acted
         return False, result.acted
 
+    def _lifetime_end(self, now: float) -> float | None:
+        """How far this tick's deadline may run, on the loop's clock: short
+        of its container's wall-clock limit by a margin, so it exits through
+        the normal path (release, drain, hand-off) rather than being killed
+        holding the lease. Counted from the invocation's start when known,
+        since the limit covers the setup before the lease too. None when the
+        limit is unknown."""
+        return self._budget_end(now, 1 - _LIFETIME_MARGIN_FRACTION)
+
+    def _claim_deadline(self, now: float) -> float | None:
+        """When a pass already running stops claiming (see
+        ``_CLAIM_DEADLINE_FRACTION``), on the loop's clock; None when the
+        limit is unknown."""
+        return self._budget_end(now, _CLAIM_DEADLINE_FRACTION)
+
+    def _budget_end(self, now: float, fraction: float) -> float | None:
+        timeout = self.config.tick_timeout_seconds
+        if timeout is None:
+            return None
+        elapsed = 0.0
+        if self.started_at is not None:
+            elapsed = max(0.0, time.monotonic() - self.started_at)
+        return now + timeout * fraction - elapsed
+
     async def drive(self, lease: SchedulerLease) -> None:
         """The loop: act, then linger polling the flag until the deadline.
 
@@ -347,24 +452,98 @@ class _Driver:
         re-read (and the tick re-acts if set); and *after* releasing, it is
         re-read once more and a successor spawned (see the ``finally`` in
         :func:`_tick_body`).
+
+        **The exit pass.** A flag can be lost without anything being wrong
+        with the frontier: a flagger ``SKIP LOCKED``s past the wake row
+        while another writer holds it (STA-122), or a worker's report lands
+        but its ``notify`` never does. So at the deadline, with the flag
+        clear, the tick reads the frontier once more and acts on it. That
+        read does *not* clear the flag: clearing takes the wake-row lock,
+        which is what opens the window in the first place, and a flag set
+        meanwhile is still there for the hand-off. A pass that acts resets
+        the deadline (``linger_extended_unflagged`` counts them: work no flag
+        announced); one that does not ends the tick.
+
+        With ``linger_seconds <= 0`` there is no deadline to meet: one pass
+        and out, with neither the handshake's pre-release read nor the exit
+        pass. That is the watchdog sweep's own tick, a safety net that runs
+        again on the next period.
+
+        **The lifetime bound.** The deadline moves on every pass that acts,
+        so a churning build's tick would otherwise run into its container's
+        wall-clock limit and be killed holding the lease. So the deadline
+        never runs past :meth:`_lifetime_end`. A tick with nothing to do
+        meets it like any deadline (the handshake and the exit pass, then
+        ``lingered_out``); one still busy there -- its last pass acted, or
+        its flag is set, or it is already past the bound before its first
+        pass -- starts no further pass, ends ``lifetime_reached``, and
+        hands the build to a successor. A pass already running is bounded by
+        the clock too: past :meth:`_claim_deadline` it takes no further
+        claim, and the tick ends ``lifetime_reached`` the same way. The
+        margin alone assumes a pass spends at most its derived spawn budget,
+        which an explicit ``max_spawns_per_tick``, or the cap's floor, can
+        exceed.
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.config.linger_seconds
+        lifetime_end = self._lifetime_end(loop.time())
+        self.claim_deadline = self._claim_deadline(loop.time())
+
+        def linger_deadline() -> float:
+            deadline = loop.time() + self.config.linger_seconds
+            return deadline if lifetime_end is None else min(deadline, lifetime_end)
+
+        def still_busy_at_the_bound() -> bool:
+            if lifetime_end is None or loop.time() < lifetime_end:
+                return False
+            self.summary.outcome = "lifetime_reached"
+            return True
+
+        deadline = linger_deadline()
+        exit_pass = False
         while True:
             if lease.lost:
                 self.summary.outcome = "lease_lost"
                 return
-            stop, acted = await self.one_pass(lease)
+            # No acting pass starts past the bound, the first one included:
+            # the setup before the lease may already have spent the margin.
+            # The exit pass is the exception, and is not late: it starts at
+            # the deadline, which the bound caps, and the margin is sized
+            # for one pass started there.
+            if not exit_pass and still_busy_at_the_bound():
+                if self.summary.iterations == 0:
+                    # Handed on without a pass. Container setup runs once
+                    # per container, so a successor on a warm one gets
+                    # further; one that never does needs a longer timeout.
+                    logger.warning(
+                        "Tick for build %s reached its lifetime bound before "
+                        "its first pass (setup took over %.0f%% of the %ss "
+                        "timeout); handing the build to a successor.",
+                        self.build_id,
+                        100 * (1 - _LIFETIME_MARGIN_FRACTION),
+                        self.config.tick_timeout_seconds,
+                    )
+                return
+            stop, acted = await self.one_pass(lease, clear=not exit_pass)
             if stop:
                 return
+            if exit_pass:
+                if not acted:
+                    return
+                self.summary.linger_extended_unflagged += 1
+                exit_pass = False
+            # After every pass, not only one that acted: the completion that
+            # woke this tick may have flagged neighbours while giving this
+            # build nothing to do.
+            await _drain(
+                self.build_id,
+                registry=self.registry,
+                config=self.config,
+                summary=self.summary,
+            )
             if acted:
-                deadline = loop.time() + self.config.linger_seconds
-                await _drain(
-                    self.build_id,
-                    registry=self.registry,
-                    config=self.config,
-                    summary=self.summary,
-                )
+                if still_busy_at_the_bound():
+                    return
+                deadline = linger_deadline()
                 continue
             while True:
                 if loop.time() >= deadline:
@@ -372,16 +551,28 @@ class _Driver:
                         return
                     flag = await self.registry.build_get_notify_aio(self.build_id)
                     if not flag.needs_tick:
+                        exit_pass = True
+                        break
+                    if still_busy_at_the_bound():
                         return
                     self.summary.linger_extended += 1
-                    deadline = loop.time() + self.config.linger_seconds
+                    deadline = linger_deadline()
                     break
-                await asyncio.sleep(self.config.poll_interval_seconds)
+                # Never past the deadline, which the bound caps: a poll
+                # interval longer than the time left must not sleep through it.
+                await asyncio.sleep(
+                    min(
+                        self.config.poll_interval_seconds,
+                        max(0.0, deadline - loop.time()),
+                    )
+                )
                 if lease.lost:
                     self.summary.outcome = "lease_lost"
                     return
                 flag = await self.registry.build_get_notify_aio(self.build_id)
                 if flag.needs_tick:
+                    if still_busy_at_the_bound():
+                        return
                     break
 
 
@@ -397,6 +588,7 @@ async def _tick_body(
     summary: TickSummary,
     deployment_id: UUID | None,
     roll_over: RollOver | None,
+    started_at: float | None = None,
 ) -> None:
     global _warned_missing_spawner
     lease = SchedulerLease(registry, build_id)
@@ -408,6 +600,7 @@ async def _tick_body(
         summary=summary,
         deployment_id=deployment_id,
         roll_over=roll_over,
+        started_at=started_at,
     )
     acquired = False
     try:
@@ -428,6 +621,12 @@ async def _tick_body(
                 )
             await driver.drive(lease)
     finally:
+        if acquired and summary.outcome == "lifetime_reached":
+            # Before the drain: the successor's hand-out stamp keeps the
+            # drain from spawning a second tick for this build.
+            await _continue_in_a_successor(
+                build_id, registry=registry, config=config, summary=summary
+            )
         drained: list[UUID] = []
         if acquired and summary.outcome != "not_reactive":
             drained = await _drain(

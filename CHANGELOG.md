@@ -24,6 +24,30 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `httpx-retries` dependency is dropped. `build_create` now mints the build
   id client-side when none is passed, so a re-sent create finds its own
   build rather than making a second.
+- **Fixed: reactive wake-ups that were delayed or lost without anything
+  being wrong with the build** (STA-123). Four small changes to the tick
+  and the hybrid driver:
+  - **The exit pass.** At its linger deadline, with the wake-up flag clear,
+    a tick reads the frontier once more and acts on it before exiting. A
+    flag can be lost with the frontier intact: a flagger skips a wake row
+    another writer holds (STA-122), or a worker's report lands and its
+    notify does not. That read does not clear the flag, so it opens no new
+    window of its own. Work it finds is counted in the tick summary as
+    `linger_extended_unflagged`.
+  - **The lifetime bound.** A tick that knows its container's wall-clock
+    limit (`TickConfig.tick_timeout_seconds`, set by the Modal integration)
+    lets no deadline run past 70% of it. An idle tick meets that as its
+    linger deadline and ends `lingered_out`. A tick still busy there ends
+    `lifetime_reached`, releases the lease and starts a successor. A busy
+    build's tick used to be killed holding the lease, with no release,
+    drain or hand-off.
+  - **A drain after every pass**, not only one that acted. The completion
+    that woke a tick may flag neighbours while giving its own build nothing
+    to do, and those neighbours used to wait for the tick's exit, up to the
+    120 s linger.
+  - **A throttled hybrid drain is deferred, not dropped.** The resident
+    driver drains at most once per 5 s; a result inside that interval now
+    drains at its end, instead of waiting for the next result.
 
 ### Server
 

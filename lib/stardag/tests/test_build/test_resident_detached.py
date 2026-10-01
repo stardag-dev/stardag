@@ -167,3 +167,206 @@ async def test_a_hybrid_build_wakes_its_flagged_neighbours(
     )
     assert summary.status == BuildExitStatus.SUCCESS
     assert (neighbour, "app") in executor.ticks_spawned
+
+
+async def test_a_throttled_drain_is_deferred_not_dropped(
+    registry: InMemoryRegistry, monkeypatch: pytest.MonkeyPatch
+):
+    """A result inside the drain interval defers its drain to the interval's
+    end: nothing else may ask again, and the neighbour it flagged would
+    wait for the build's end."""
+    import asyncio
+    import types
+
+    from stardag.build import _resident
+    from stardag.build._concurrency import NoOpConcurrencyLimiter
+
+    monkeypatch.setattr(_resident, "_RESIDENT_DRAIN_INTERVAL_SECONDS", 0.05)
+    executor = _executor()
+    engine = _resident._ResidentEngine(
+        [],
+        task_executor=executor,
+        fail_mode=FailMode.FAIL_FAST,
+        session=types.SimpleNamespace(  # type: ignore[arg-type]
+            enabled=True, registry=registry, build_id=None
+        ),
+        max_concurrent_discover=1,
+        register_all=False,
+        limiter=NoOpConcurrencyLimiter(),
+    )
+    await engine.drain_neighbours()  # leading edge: nothing flagged yet
+    neighbour = registry.build_create(root_task_ids=["x"]).id
+    registry.build_set_reactive_meta(neighbour, app_name="app")
+    registry.builds[neighbour].needs_tick = True
+    await engine.drain_neighbours()  # throttled
+    assert executor.ticks_spawned == []
+    await asyncio.sleep(0.1)
+    assert executor.ticks_spawned == [(neighbour, "app")]
+    await engine.settle_trailing_drain()
+
+
+async def test_a_drain_asked_for_while_one_is_asking_runs_again(
+    registry: InMemoryRegistry, monkeypatch: pytest.MonkeyPatch
+):
+    """The trailing drain's answer may predate a flag raised while it was
+    asking, so a request in that window schedules one more drain."""
+    import asyncio
+    import types
+
+    from stardag.build import _resident
+    from stardag.build._concurrency import NoOpConcurrencyLimiter
+
+    monkeypatch.setattr(_resident, "_RESIDENT_DRAIN_INTERVAL_SECONDS", 0.05)
+    asking = asyncio.Event()
+    answer = asyncio.Event()
+    original = registry.build_wake_candidates_aio
+
+    async def slow_candidates(*args, **kwargs):
+        candidates = await original(*args, **kwargs)
+        if not asking.is_set():
+            asking.set()
+            await answer.wait()
+        return candidates
+
+    monkeypatch.setattr(registry, "build_wake_candidates_aio", slow_candidates)
+    executor = _executor()
+    engine = _resident._ResidentEngine(
+        [],
+        task_executor=executor,
+        fail_mode=FailMode.FAIL_FAST,
+        session=types.SimpleNamespace(  # type: ignore[arg-type]
+            enabled=True, registry=registry, build_id=None
+        ),
+        max_concurrent_discover=1,
+        register_all=False,
+        limiter=NoOpConcurrencyLimiter(),
+    )
+    engine._last_drain = asyncio.get_running_loop().time()
+    await engine.drain_neighbours()  # deferred
+    await asyncio.wait_for(asking.wait(), timeout=1)
+    neighbour = registry.build_create(root_task_ids=["x"]).id
+    registry.build_set_reactive_meta(neighbour, app_name="app")
+    registry.builds[neighbour].needs_tick = True
+    await engine.drain_neighbours()  # while the trailing one is asking
+    answer.set()
+    await asyncio.sleep(0.2)
+    assert executor.ticks_spawned == [(neighbour, "app")]
+    await engine.settle_trailing_drain()
+
+
+def _bare_engine(registry, executor):
+    import types
+
+    from stardag.build import _resident
+    from stardag.build._concurrency import NoOpConcurrencyLimiter
+
+    return _resident._ResidentEngine(
+        [],
+        task_executor=executor,
+        fail_mode=FailMode.FAIL_FAST,
+        session=types.SimpleNamespace(  # type: ignore[arg-type]
+            enabled=True, registry=registry, build_id=None
+        ),
+        max_concurrent_discover=1,
+        register_all=False,
+        limiter=NoOpConcurrencyLimiter(),
+    )
+
+
+def _flag_neighbour(registry):
+    neighbour = registry.build_create(root_task_ids=["x"]).id
+    registry.build_set_reactive_meta(neighbour, app_name="app")
+    registry.builds[neighbour].needs_tick = True
+    return neighbour
+
+
+async def test_a_deferred_drain_is_flushed_when_the_build_ends(
+    registry: InMemoryRegistry, monkeypatch: pytest.MonkeyPatch
+):
+    """A stop, a deadlock or an error leaves the loop without its forced
+    drain; the one the throttle deferred runs on the way out, not dropped."""
+    import asyncio
+
+    from stardag.build import _resident
+
+    monkeypatch.setattr(_resident, "_RESIDENT_DRAIN_INTERVAL_SECONDS", 60)
+    executor = _executor()
+    engine = _bare_engine(registry, executor)
+    engine._last_drain = asyncio.get_running_loop().time()
+    neighbour = _flag_neighbour(registry)
+    await engine.drain_neighbours()  # deferred by a minute
+    assert executor.ticks_spawned == []
+    await engine.flush_trailing_drain()
+    assert executor.ticks_spawned == [(neighbour, "app")]
+
+
+async def test_a_drain_already_asking_is_awaited_not_cancelled(
+    registry: InMemoryRegistry, monkeypatch: pytest.MonkeyPatch
+):
+    """Cancelling between the server's stamp and the spawn would hide the
+    stamped builds for the whole hand-out window."""
+    import asyncio
+
+    from stardag.build import _resident
+
+    monkeypatch.setattr(_resident, "_RESIDENT_DRAIN_INTERVAL_SECONDS", 0.01)
+    asking = asyncio.Event()
+    answer = asyncio.Event()
+    original = registry.build_wake_candidates_aio
+
+    async def slow_candidates(*args, **kwargs):
+        candidates = await original(*args, **kwargs)
+        asking.set()
+        await answer.wait()
+        return candidates
+
+    monkeypatch.setattr(registry, "build_wake_candidates_aio", slow_candidates)
+    executor = _executor()
+    engine = _bare_engine(registry, executor)
+    engine._last_drain = asyncio.get_running_loop().time()
+    neighbour = _flag_neighbour(registry)
+    await engine.drain_neighbours()
+    await asyncio.wait_for(asking.wait(), timeout=1)
+    settling = asyncio.create_task(engine.settle_trailing_drain())
+    await asyncio.sleep(0.02)
+    answer.set()
+    await asyncio.wait_for(settling, timeout=1)
+    assert executor.ticks_spawned == [(neighbour, "app")]
+
+
+async def test_a_drain_asked_for_while_one_asks_at_shutdown_still_runs(
+    registry: InMemoryRegistry, monkeypatch: pytest.MonkeyPatch
+):
+    """The build is ending while the trailing drain asks, and a result in
+    that window flagged a neighbour its answer may predate: the flush
+    drains once more, now, instead of dropping it."""
+    import asyncio
+
+    from stardag.build import _resident
+
+    monkeypatch.setattr(_resident, "_RESIDENT_DRAIN_INTERVAL_SECONDS", 0.01)
+    asking = asyncio.Event()
+    answer = asyncio.Event()
+    original = registry.build_wake_candidates_aio
+
+    async def slow_first(*args, **kwargs):
+        candidates = await original(*args, **kwargs)
+        if not asking.is_set():
+            asking.set()
+            await answer.wait()
+        return candidates
+
+    monkeypatch.setattr(registry, "build_wake_candidates_aio", slow_first)
+    monkeypatch.setattr(_resident, "_RESIDENT_DRAIN_INTERVAL_SECONDS", 60)
+    executor = _executor()
+    engine = _bare_engine(registry, executor)
+    engine._last_drain = asyncio.get_running_loop().time() - 59.99
+    await engine.drain_neighbours()  # deferred by ~10 ms
+    await asyncio.wait_for(asking.wait(), timeout=1)
+    neighbour = _flag_neighbour(registry)
+    await engine.drain_neighbours()  # recorded while the trailing one asks
+    flushing = asyncio.create_task(engine.flush_trailing_drain())
+    await asyncio.sleep(0.02)
+    answer.set()
+    await asyncio.wait_for(flushing, timeout=1)
+    assert executor.ticks_spawned == [(neighbour, "app")]
