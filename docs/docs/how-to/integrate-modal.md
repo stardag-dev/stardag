@@ -485,7 +485,9 @@ frees it. Resident builds enforce the same limits by passing
 scheduled only when set. Leave it off unless a stall of a few minutes is
 unacceptable; a standing sweep keeps a scale-to-zero registry database
 awake. Without a period, a full sweep is one click away in the Modal UI
-(`tick_watchdog`).
+(`tick_watchdog`), and one build's scheduler one command away
+(`stardag builds tick <build-id>`); `stardag builds stalled` lists the
+builds that need one.
 
 **Set a period if your tasks run for hours.** Every other wake-up rides on
 a write — a status changes, the registry flags the builds it concerns. A

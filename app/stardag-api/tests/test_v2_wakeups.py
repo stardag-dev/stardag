@@ -589,6 +589,109 @@ async def test_a_release_leaves_the_wake_row_unlocked_for_flaggers(h: Harness):
 # --------------------------------------------------------------------------
 
 
+async def test_stalled_builds_are_the_flags_and_leases_nobody_served(h: Harness):
+    """STA-123's measurement: a flag older than the threshold with no live
+    lease, and a lease that expired unreleased (its tick died holding it).
+    Not a fresh flag, a flag under a live lease, a released lease, or a
+    build that is not reactive."""
+    t = item("T")
+    built = [(await h.planned([t], [t]))[0] for _ in range(6)]
+    unserved, lapsed, fresh, served, released, not_reactive = built
+    await _reactive(h, unserved, lapsed, fresh, served, released)
+    await _clear(h, *built)
+    old = "now() - interval '10 minutes'"
+    for build in (unserved, served, not_reactive):
+        await _sql(
+            h,
+            f"UPDATE build_wake SET needs_tick_at = {old} WHERE build_id = :b",
+            b=build,
+        )
+    await _svc(h, wakeups.notify, fresh, can_spawn=False)
+    await _svc(h, wakeups.acquire_lease, served, owner_id="live", ttl_seconds=60)
+    for build, owner in ((lapsed, "dead"), (released, "done")):
+        await _svc(h, wakeups.acquire_lease, build, owner_id=owner, ttl_seconds=60)
+        await _sql(
+            h, f"UPDATE build SET scheduler_lease_until = {old} WHERE id = :b", b=build
+        )
+    await _svc(h, wakeups.release_lease, released, owner_id="done")
+
+    stalled = await _svc(h, wakeups.stalled_builds, older_than=timedelta(minutes=5))
+    assert {(s.build_id, s.reason) for s in stalled} == {
+        (unserved, "flagged_unserved"),
+        (lapsed, "lease_lapsed"),
+    }
+    assert all(s.reactive_app_name == "app" for s in stalled)
+    later = await _svc(h, wakeups.stalled_builds, older_than=timedelta(minutes=15))
+    assert later == []
+
+
+async def test_stalled_builds_are_ordered_by_the_since_they_report(h: Harness):
+    """A lapsed lease with a fresh flag is reported ``lease_lapsed`` since
+    the lease's expiry, and ordered by that, so a limit keeps it ahead of a
+    newer flagged stall."""
+    t = item("T")
+    lapsed, flagged = [(await h.planned([t], [t]))[0] for _ in range(2)]
+    await _reactive(h, lapsed, flagged)
+    await _clear(h, lapsed, flagged)
+    await _svc(h, wakeups.acquire_lease, lapsed, owner_id="dead", ttl_seconds=60)
+    await _sql(
+        h,
+        "UPDATE build SET scheduler_lease_until = now() - interval '20 minutes'"
+        " WHERE id = :b",
+        b=lapsed,
+    )
+    await _svc(h, wakeups.notify, lapsed, can_spawn=False)
+    await _sql(
+        h,
+        "UPDATE build_wake SET needs_tick_at = now() - interval '10 minutes'"
+        " WHERE build_id = :b",
+        b=flagged,
+    )
+    (oldest,) = await _svc(
+        h, wakeups.stalled_builds, older_than=timedelta(minutes=5), limit=1
+    )
+    assert (oldest.build_id, oldest.reason) == (lapsed, "lease_lapsed")
+
+
+async def test_a_re_flag_keeps_the_first_flags_age(h: Harness):
+    """A build nobody serves but that keeps being re-flagged must still age
+    into the stall count: the flag keeps its first time until a clear."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _reactive(h, build)
+    await _clear(h, build)
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    await _sql(
+        h,
+        "UPDATE build_wake SET needs_tick_at = now() - interval '10 minutes'"
+        " WHERE build_id = :b",
+        b=build,
+    )
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    stalled = await _svc(h, wakeups.stalled_builds, older_than=timedelta(minutes=5))
+    assert [s.build_id for s in stalled] == [build]
+    await _clear(h, build)
+    await _svc(h, wakeups.notify, build, can_spawn=False)
+    assert await _svc(h, wakeups.stalled_builds, older_than=timedelta(minutes=5)) == []
+
+
+async def test_a_late_hand_out_is_logged_as_a_delayed_wake_up(
+    h: Harness, caplog: pytest.LogCaptureFixture
+):
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _reactive(h, build)
+    await _sql(
+        h,
+        "UPDATE build_wake SET needs_tick_at = now() - interval '10 minutes'"
+        " WHERE build_id = :b",
+        b=build,
+    )
+    with caplog.at_level("WARNING", logger="stardag_api.services.wakeups"):
+        assert len(await _svc(h, wakeups.wake_candidates)) == 1
+    assert f"Delayed wake-up: build {build}" in caplog.text
+
+
 async def test_the_scheduler_lease_is_single_flight_and_owner_checked(h: Harness):
     t = item("T")
     build, _ = await h.planned([t], [t])
@@ -725,6 +828,14 @@ async def test_reactive_routes_over_http(client: AsyncClient, h: Harness):
         f"{base}/scheduler-lease", params={"owner_id": "o", "ttl_seconds": 1}
     )
     assert bad.status_code == 422
+
+    stalled = await client.get(
+        "/api/v2/stalled-builds", params={"older_than_seconds": 0}
+    )
+    assert stalled.status_code == 200
+    assert stalled.json()["older_than_seconds"] == 0
+    assert [b["build_id"] for b in stalled.json()["builds"]] == [str(build)]
+    assert stalled.json()["builds"][0]["reason"] == "flagged_unserved"
 
     summary = await client.post(
         f"{base}/tick-summaries", json={"outcome": "lingered_out", "ticks": 3}

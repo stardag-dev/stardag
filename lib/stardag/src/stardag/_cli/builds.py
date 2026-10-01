@@ -4,6 +4,8 @@
     stardag builds show <build-id>        # the build, its active plan and counts
     stardag builds frontier <build-id>    # the three lists, needs-tick, counts
     stardag builds ticks <build-id>       # what each scheduler tick decided
+    stardag builds tick <build-id>        # start a reactive build's scheduler
+    stardag builds stalled                # reactive builds nobody is serving
     stardag builds stop <build-id>        # stop unended executions, then cancel
     stardag builds cancel <build-id>      # release the build's claims
     stardag builds complete <build-id>    # mark COMPLETED (plan must be complete)
@@ -44,6 +46,7 @@ from stardag._cli._registry_ctx import (
 )
 from stardag._cli.builds_frontier import builds_frontier, builds_ticks
 from stardag._cli.builds_stop import builds_stop
+from stardag._cli.builds_tick import builds_stalled, builds_tick
 from stardag.exceptions import NotFoundError, StardagError
 from stardag.registry import BuildFrontier, BuildInfo
 
@@ -55,6 +58,8 @@ app = typer.Typer(
 app.command("stop")(builds_stop)
 app.command("frontier")(builds_frontier)
 app.command("ticks")(builds_ticks)
+app.command("tick")(builds_tick)
+app.command("stalled")(builds_stalled)
 
 _BUILD_ID = typer.Argument(..., help="Build ID")
 

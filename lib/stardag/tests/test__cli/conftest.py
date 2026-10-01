@@ -21,6 +21,7 @@ CLI_MODULES = (
     "builds",
     "builds_stop",
     "builds_frontier",
+    "builds_tick",
     "executions",
     "plans",
     "deployments",
@@ -28,6 +29,42 @@ CLI_MODULES = (
     "tasks_actions",
     "limits",
 )
+
+
+class SpawnRecorder:
+    """Stands in for the Modal tick spawner: records, never reaches Modal.
+    ``refuse`` plays a build on another Modal workspace."""
+
+    def __init__(self) -> None:
+        self.spawned: list[tuple[UUID, str]] = []
+        self.fail_with: Exception | None = None
+        self.refuse: str | None = None
+
+    def for_build(self, build):
+        if self.refuse is not None:
+            return None, self.refuse
+        return self._spawn, None
+
+    def _spawn(self, build_id: UUID, app_name: str) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.spawned.append((build_id, app_name))
+
+
+@pytest.fixture(autouse=True)
+def tick_spawner() -> typing.Iterator[SpawnRecorder]:
+    """Every CLI write now wakes the builds it changed, and this machine may
+    well have Modal credentials: no CLI test may spawn a real tick. A test
+    that wants no spawner patches ``modal_spawner`` to return None."""
+    recorder = SpawnRecorder()
+    with ExitStack() as stack:
+        for module in ("_wake", "builds_tick"):
+            stack.enter_context(
+                mock.patch(
+                    f"stardag._cli.{module}.modal_spawner", return_value=recorder
+                )
+            )
+        yield recorder
 
 
 @pytest.fixture

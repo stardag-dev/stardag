@@ -232,6 +232,22 @@ class WakeCandidatesResponse(BaseModel):
     builds: list[WakeCandidateResponse]
 
 
+class StalledBuildResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    build_id: UUID
+    reactive_app_name: str
+    #: "flagged_unserved" | "lease_lapsed"
+    reason: str
+    #: When the flag was set, or when the unreleased lease expired.
+    since: datetime
+
+
+class StalledBuildsResponse(BaseModel):
+    older_than_seconds: int
+    builds: list[StalledBuildResponse]
+
+
 class LeaseResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

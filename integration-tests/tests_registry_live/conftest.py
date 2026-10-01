@@ -66,6 +66,13 @@ ENV_MODAL_ENVIRONMENT = "MODAL_ENVIRONMENT"
 DEFAULT_BUDGET_SECONDS = 240.0
 BUDGET_PROPERTY = "registry_live_budget_seconds"
 
+# How long one of a scenario's reactive builds may go unserved before its
+# teardown calls it a stall (STA-123): past the 120 s hand-out window, so no
+# hand-out still in flight can explain it.
+STALL_AGE_SECONDS = 150
+# Set on an item once its call phase failed: the stall check stands down.
+_CALL_FAILED = pytest.StashKey[bool]()
+
 _deployment: Deployment | None = None
 
 
@@ -87,6 +94,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "budget(seconds): the scenario's expected wall clock; orders the tier "
         "longest first and is reported against the actual time",
+    )
+    config.addinivalue_line(
+        "markers",
+        "allow_stalled_builds: the scenario leaves a reactive build unserved "
+        "on purpose; skip the teardown stall check",
     )
     if not is_enabled():
         return
@@ -273,6 +285,8 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
     on the runner's disk, which is what CI reads back.
     """
     report = yield
+    if report.when == "call" and report.failed:
+        item.stash[_CALL_FAILED] = True
     try:
         _classify(item, call, report)
     except Exception as error:  # pragma: no cover - diagnostics only
@@ -327,6 +341,69 @@ def _registry_survived(deployment: Deployment):
     """
     yield
     deployment.assert_same_container()
+
+
+@pytest.fixture(autouse=True)
+def _no_stalled_builds(request: pytest.FixtureRequest, monkeypatch):
+    """Fail a scenario that leaves one of its reactive builds unserved.
+
+    The measurement half of STA-123, where it is cheapest to act on: every
+    reactive build a scenario triggers is recorded, and at teardown any of
+    them the registry reports stalled (``GET /stalled-builds``: flagged
+    with no scheduler, or a lease that lapsed unreleased, for longer than
+    ``STALL_AGE_SECONDS``) fails it. Past the hand-out window on purpose,
+    so nothing still in flight explains it, and nothing is waited for: a
+    build flagged too recently to tell is not reported.
+
+    Stands down when the scenario's own call already failed. The failure
+    says more, and a second, non-timeout failure in teardown would forbid
+    the retry a transport timeout entitles the run to.
+    """
+    triggered: list = []
+    if not is_enabled() or request.node.get_closest_marker("allow_stalled_builds"):
+        yield
+        return
+    from stardag.integration.modal._trigger import _Triggering
+
+    original = _Triggering.build_trigger
+
+    def recording(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        if kwargs.get("reactive"):
+            triggered.append(result.build_id)
+        return result
+
+    monkeypatch.setattr(_Triggering, "build_trigger", recording)
+    yield
+    if not triggered or request.node.stash.get(_CALL_FAILED, False):
+        return
+    from stardag.registry import registry_provider
+
+    from stardag_integration_tests.registry_live._wait import describe
+
+    # A measurement, not the scenario: a read that fails (a registry that
+    # recycled, a lost answer) is skipped, never a failure of its own --
+    # which would also be recorded as a non-timeout failure and forbid the
+    # retry, or pre-empt ``_registry_survived``'s recycle recovery.
+    try:
+        reported = registry_provider.get().build_list_stalled(
+            older_than_seconds=STALL_AGE_SECONDS
+        )
+    except Exception as error:
+        print(f"[registry-live] stall check skipped: {error!r}", file=sys.stderr)
+        return
+    stalled = [s for s in reported if s.build_id in triggered]
+    if stalled:
+        pytest.fail(
+            f"{len(stalled)} of this scenario's reactive builds went unserved "
+            f"for {STALL_AGE_SECONDS}s or more (STA-123):\n"
+            + "\n".join(
+                f"{s.build_id}: {s.reason} since {s.since.isoformat()}\n"
+                + describe(s.build_id)
+                for s in stalled
+            ),
+            pytrace=False,
+        )
 
 
 @pytest.fixture

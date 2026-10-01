@@ -48,6 +48,27 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   - **A throttled hybrid drain is deferred, not dropped.** The resident
     driver drains at most once per 5 s; a result inside that interval now
     drains at its end, instead of waiting for the next result.
+- **New: `stardag builds tick <build-id>` and `stardag builds stalled`**
+  (STA-123). `builds tick` is the manual fallback for a stalled reactive
+  build when no watchdog is deployed. It flags the build and, unless a
+  scheduler holds its lease, spawns its app's `tick` in the Modal
+  environment the build records; with `--flagged` it spawns one for every
+  flagged build in the environment that no scheduler is serving. `builds stalled` lists the running reactive builds nobody has
+  served for `--older-than` (default 5 minutes). It reads the new
+  `RegistryABC.build_list_stalled()`, which needs a registry that serves
+  `GET /stalled-builds`.
+- **Fixed: CLI writes woke nobody** (STA-123). The registry does not flag
+  the build a write goes through, so `stardag tasks retry T --build B` left
+  T `PENDING` with no tick coming until a watchdog sweep. Now `tasks
+retry/cancel/exclude`, and `builds stop` when the build keeps running,
+  start a tick for the build they wrote through, unless one is running.
+  They spawn only where the build's recorded Modal workspace matches this
+  machine's token, and look the app up in the build's recorded Modal
+  environment, never the ambient one. Otherwise the build is flagged
+  without a hand-out stamp for the next tick anywhere to serve, and the
+  command prints the `builds tick` fallback. Other builds a write unblocks
+  are left to the next drain from a deployment (or `builds tick
+--flagged`). A write never fails because its wake-up did.
 
 ### Server
 
@@ -61,6 +82,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `build.scheduler_lease_released_at`, a new nullable column), so the window
   only collapses the askers between a hand-out and its tick taking the
   lease. A tick that dies without releasing leaves the window as before.
+- **New: `GET /stalled-builds`** (STA-123) lists the RUNNING reactive
+  builds of the environment nobody has served for `older_than_seconds`
+  (default 300), oldest first. There are two reasons: `flagged_unserved`
+  (flagged, and no live lease since) and `lease_lapsed` (a lease that
+  expired unreleased, because its tick died holding it). The registry also
+  logs a warning for every wake-up it hands out more than 5 minutes after
+  the flag. Together they measure the stall risk that remains with no
+  watchdog deployed.
 
 ## [0.27.0] — 2026-09-25
 

@@ -500,6 +500,18 @@ class SchedulerLeaseResult(_Response):
     expires_at: datetime | None = None
 
 
+class StalledBuild(_Response):
+    """A RUNNING reactive build nobody has served for a while
+    (``GET /stalled-builds``). ``reason`` is ``"flagged_unserved"`` (flagged
+    at ``since``, no live lease) or ``"lease_lapsed"`` (a lease that expired
+    at ``since`` was never released: its tick died holding it)."""
+
+    build_id: UUID
+    reactive_app_name: str
+    reason: str
+    since: datetime
+
+
 class TickSummaryRecord(_Response):
     """A reported tick summary (``GET /builds/{id}/tick-summaries``)."""
 
@@ -529,6 +541,7 @@ __all__ = [
     "ResumeResult",
     "SchedulerLeaseResult",
     "SettingsInfo",
+    "StalledBuild",
     "StopOutcome",
     "TaskArtifactInfo",
     "TaskInfo",

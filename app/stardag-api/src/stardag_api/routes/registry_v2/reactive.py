@@ -7,6 +7,7 @@ one service in ``services/wakeups.py`` or ``services/reactive.py``.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -18,6 +19,8 @@ from stardag_api.schemas_v2 import (
     LeaseResponse,
     NotifyResponse,
     ReactiveMetaRequest,
+    StalledBuildResponse,
+    StalledBuildsResponse,
     TickSummaryCreate,
     TickSummaryListResponse,
     TickSummaryResponse,
@@ -49,6 +52,32 @@ async def wake_candidates(
     chosen = await wakeups.wake_candidates(db, auth.environment_id, limit=limit)
     return WakeCandidatesResponse(
         builds=[WakeCandidateResponse.model_validate(c) for c in chosen]
+    )
+
+
+# Not under ``/builds``: ``GET /builds/{build_id}`` is registered first and
+# would take "stalled" for a malformed build id.
+@router.get("/stalled-builds", response_model=StalledBuildsResponse)
+async def stalled_builds(
+    db: Db,
+    auth: Auth,
+    older_than_seconds: Annotated[
+        int,
+        Query(ge=wakeups.MIN_STALL_AGE_SECONDS, le=wakeups.MAX_STALL_AGE_SECONDS),
+    ] = int(wakeups.DEFAULT_STALL_AGE.total_seconds()),
+    limit: Annotated[
+        int, Query(ge=1, le=wakeups.MAX_STALLED_BUILDS)
+    ] = wakeups.MAX_STALLED_BUILDS,
+):
+    stalled = await wakeups.stalled_builds(
+        db,
+        auth.environment_id,
+        older_than=timedelta(seconds=older_than_seconds),
+        limit=limit,
+    )
+    return StalledBuildsResponse(
+        older_than_seconds=older_than_seconds,
+        builds=[StalledBuildResponse.model_validate(b) for b in stalled],
     )
 
 

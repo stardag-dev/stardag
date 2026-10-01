@@ -45,12 +45,13 @@ that motivates the separate table doesn't apply here.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, func, select, update
+from sqlalchemy import Select, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -68,11 +69,22 @@ from stardag_api.services.errors import BadRequest, NotFound
 from stardag_api.services.transition_types import ACTIONABLE_STATUSES
 from stardag_api.services.tx import transaction
 
+logger = logging.getLogger(__name__)
+
 #: How long a build stays "handed out" after a caller was told to spawn a
 #: tick for it: a second asker inside the window is told nothing.
 WAKE_HANDOUT_WINDOW = timedelta(seconds=120)
 #: Upper bound on one wake-candidates response.
 MAX_WAKE_CANDIDATES = 20
+#: A hand-out of a build flagged longer ago than this is logged as a delayed
+#: wake-up: every one is a flag nobody served for that long.
+DELAYED_WAKE_LOG_AFTER = timedelta(minutes=5)
+#: Default and bounds of ``older_than`` for :func:`stalled_builds`.
+DEFAULT_STALL_AGE = timedelta(minutes=5)
+MIN_STALL_AGE_SECONDS = 0
+MAX_STALL_AGE_SECONDS = 7 * 24 * 3600
+#: Upper bound on one stalled-builds response.
+MAX_STALLED_BUILDS = 200
 #: Bounds on a scheduler lease's TTL, in seconds.
 MIN_LEASE_TTL_SECONDS = 5
 MAX_LEASE_TTL_SECONDS = 3600
@@ -125,7 +137,10 @@ async def _flag(
     await session.execute(
         update(BuildWake)
         .where(BuildWake.build_id.in_(targets))
-        .values(needs_tick_at=now)
+        # Kept from the first flag until a tick clears it: the flag's age is
+        # how long the news has waited, which a re-flag must not reset (the
+        # stall count and the oldest-first hand-out both read it).
+        .values(needs_tick_at=func.coalesce(BuildWake.needs_tick_at, now))
         .execution_options(synchronize_session=False)
     )
 
@@ -335,7 +350,8 @@ async def notify(
         build = await _build(session, environment_id, build_id)
         now = utc_now()
         running = build.status == BuildStatus.RUNNING
-        if running:
+        if running and wake.needs_tick_at is None:
+            # Kept from the first flag, as in ``_flag``.
             wake.needs_tick_at = now
         previous_stamp = wake.tick_requested_at
         stamped = can_spawn and running
@@ -439,12 +455,114 @@ async def wake_candidates(
         ).all()
         chosen: list[WakeCandidate] = []
         for wake, app_name in rows:
+            waited = now - wake.needs_tick_at
+            if waited > DELAYED_WAKE_LOG_AFTER:
+                # The measurement half of STA-123: every hand-out this late is
+                # a flag nobody served, and the environment happened to drain.
+                logger.warning(
+                    "Delayed wake-up: build %s handed out %.0fs after it was "
+                    "flagged (environment %s).",
+                    wake.build_id,
+                    waited.total_seconds(),
+                    environment_id,
+                )
             wake.tick_requested_at = now
             if app_name is not None:
                 chosen.append(
                     WakeCandidate(build_id=wake.build_id, reactive_app_name=app_name)
                 )
         return chosen
+
+
+# ---------------------------------------------------------------------------
+# Stalls
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StalledBuild:
+    build_id: UUID
+    reactive_app_name: str
+    #: "flagged_unserved": flagged at ``since`` with no live lease now;
+    #: "lease_lapsed": a lease that expired at ``since`` was never released
+    #: (its tick died holding it).
+    reason: str
+    since: datetime
+
+
+async def stalled_builds(
+    session: AsyncSession,
+    environment_id: UUID,
+    *,
+    older_than: timedelta = DEFAULT_STALL_AGE,
+    limit: int = MAX_STALLED_BUILDS,
+) -> list[StalledBuild]:
+    """RUNNING reactive builds nobody has served for ``older_than``, oldest
+    first: the residual stall risk made countable (STA-123).
+
+    Two signals, reported separately because they recover differently:
+
+    - **flagged_unserved** -- the flag is older than ``older_than`` and no
+      lease is live. A tick that ran since would have cleared it, so no
+      scheduler has looked at the build since the news arrived. Recovered
+      by the next drain once any hand-out window has passed, by the
+      watchdog, or by ``stardag builds tick``.
+    - **lease_lapsed** -- a lease that expired ``older_than`` ago and was
+      never released: its tick died holding it, with no drain and no
+      hand-off. Unflagged, nothing will ever look at the build again short
+      of the watchdog or a manual tick.
+
+    A build that is both is reported once, as ``flagged_unserved``. Reads
+    only; nothing is locked.
+    """
+    now = utc_now()
+    cutoff = now - older_than
+    limit = max(1, min(limit, MAX_STALLED_BUILDS))
+    rows = (
+        await session.execute(
+            select(
+                Build.id,
+                Build.reactive_app_name,
+                BuildWake.needs_tick_at,
+                Build.scheduler_lease_owner,
+                Build.scheduler_lease_until,
+            )
+            .join(BuildWake, BuildWake.build_id == Build.id)
+            .where(
+                Build.environment_id == environment_id,
+                Build.status == BuildStatus.RUNNING,
+                Build.reactive_app_name.is_not(None),
+                Build.scheduler_lease_until.is_(None)
+                | (Build.scheduler_lease_until <= now),
+                (BuildWake.needs_tick_at <= cutoff)
+                | (
+                    Build.scheduler_lease_owner.is_not(None)
+                    & (Build.scheduler_lease_until <= cutoff)
+                ),
+            )
+            # The ``since`` each row is reported with, so a limit cuts the
+            # newest stalls, never an older one classified the other way.
+            .order_by(
+                case(
+                    (BuildWake.needs_tick_at <= cutoff, BuildWake.needs_tick_at),
+                    else_=Build.scheduler_lease_until,
+                ),
+                Build.id,
+            )
+            .limit(limit)
+        )
+    ).all()
+    stalled: list[StalledBuild] = []
+    for build_id, app_name, needs_tick_at, owner, lease_until in rows:
+        if needs_tick_at is not None and needs_tick_at <= cutoff:
+            stalled.append(
+                StalledBuild(build_id, app_name, "flagged_unserved", needs_tick_at)
+            )
+        elif owner is not None and lease_until is not None:
+            stalled.append(
+                StalledBuild(build_id, app_name, "lease_lapsed", lease_until)
+            )
+    return stalled
 
 
 # ---------------------------------------------------------------------------
@@ -562,10 +680,13 @@ async def release_lease(
 
 
 __all__ = [
+    "DEFAULT_STALL_AGE",
+    "MAX_STALLED_BUILDS",
     "MAX_WAKE_CANDIDATES",
     "WAKE_HANDOUT_WINDOW",
     "LeaseState",
     "NotifyState",
+    "StalledBuild",
     "WakeCandidate",
     "acquire_lease",
     "clear_notify",
@@ -574,5 +695,6 @@ __all__ = [
     "read_notify",
     "release_lease",
     "renew_lease",
+    "stalled_builds",
     "wake_candidates",
 ]

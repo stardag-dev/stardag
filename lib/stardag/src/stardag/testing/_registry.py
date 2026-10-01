@@ -34,6 +34,7 @@ from stardag.registry import (
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
+    StalledBuild,
     TaskArtifactInfo,
     TaskInfo,
     TaskInstanceInfo,
@@ -628,6 +629,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
                 build_id=build_id, needs_tick=False, scheduler_live=False
             )
         build.needs_tick = True
+        build.needs_tick_at = build.needs_tick_at or self.now()
         if can_spawn:
             build.handed_out_at = self.now()
         return BuildNotifyResult(
@@ -640,7 +642,9 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
 
     def build_clear_notify(self, build_id: UUID) -> None:
         self._record("build_clear_notify", build_id=build_id)
-        self.build(build_id).needs_tick = False
+        build = self.build(build_id)
+        build.needs_tick = False
+        build.needs_tick_at = None
 
     def build_wake_candidates(self, limit: int = 20) -> list[WakeCandidate]:
         now = self.now()
@@ -699,6 +703,38 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         build.lease_owner = None
         build.lease_expires_at = None
         return SchedulerLeaseResult(held=True)
+
+    def build_list_stalled(
+        self, *, older_than_seconds: int = 300, limit: int = 200
+    ) -> list[StalledBuild]:
+        cutoff = self.now() - timedelta(seconds=older_than_seconds)
+        stalled: list[StalledBuild] = []
+        for build in self.builds.values():
+            if build.status != "running" or build.reactive_app_name is None:
+                continue
+            if self._lease_live(build):
+                continue
+            flagged_at = build.needs_tick_at if build.needs_tick else None
+            if flagged_at is not None and flagged_at <= cutoff:
+                reason, since = "flagged_unserved", flagged_at
+            elif (
+                build.lease_owner is not None
+                and build.lease_expires_at is not None
+                and build.lease_expires_at <= cutoff
+            ):
+                reason, since = "lease_lapsed", build.lease_expires_at
+            else:
+                continue
+            stalled.append(
+                StalledBuild(
+                    build_id=build.id,
+                    reactive_app_name=build.reactive_app_name,
+                    reason=reason,
+                    since=since,
+                )
+            )
+        stalled.sort(key=lambda s: (s.since, s.build_id))
+        return stalled[:limit]
 
     def build_report_tick_summary(
         self, build_id: UUID, summary: Mapping[str, Any]
