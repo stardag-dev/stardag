@@ -27,6 +27,41 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    # Held back because *our* code needs work first, not because the version
+    # is bad — same spirit as the npm ignore below, and deleting this entry is
+    # step one of doing that work.
+    ignore:
+      # SQLAlchemy 2.1 is a decision, not a bump, for two reasons that outlive
+      # the PR that raised it (#425):
+      #
+      #   - `app/server.Dockerfile` installs the API with
+      #     `pip install /tmp/stardag-api`, a fresh resolve from the manifest,
+      #     so `uv.lock` never reaches the image and the upper bound in
+      #     `app/stardag-api/pyproject.toml` is what decides the deployed
+      #     server's SQLAlchemy. Installing the image from the lockfile is the
+      #     durable fix and retires this whole class of surprise.
+      #   - 2.1 flushes the session on *every* execution, including
+      #     `session.execute(text(...))`, which 2.0 did not. The API takes its
+      #     advisory locks through exactly that call (`services/quotas.py`,
+      #     `services/deployments.py`), so pending writes move from after the
+      #     lock to before it, on the claim, lease and quota seams.
+      #
+      # (2.1 also retypes `select(a, b)` as `Select[a, b]`; that part is five
+      # annotations, but they fit one regime and not both, so landing it moves
+      # the floor to `>=2.1` as well.)
+      #
+      # Scoped by version, not by update-type: the constraint-widening PR
+      # dependabot raises here carries no semver update-type to match on, and
+      # 2.0.x patches should keep flowing.
+      #
+      # It applies to the whole uv block, so it also pins the *transitive*
+      # sqlalchemy in /lib/stardag and /lib/stardag-examples (via alembic and
+      # prefect) at 2.0. Deliberate: those six directories share one entry for
+      # the reason given below, and one SQLAlchemy line across the repo is the
+      # coherent state until the decision is taken. A prefect bump that needs
+      # 2.1 is the signal to take it, not to widen this.
+      - dependency-name: "sqlalchemy"
+        versions: [">=2.1"]
     groups:
       # Minor and patch only. Majors arrive one PR per package, so a single
       # unresolvable one cannot hold the safe updates hostage.
