@@ -8,6 +8,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Fixed: a spurious "Dropping stored field(s)" warning on rehydration of a
+  task with an undiscriminated union field** (STA-127). Pydantic validates
+  such a field against each member in turn, and the compat validator warned
+  for every member it probed, so a stored `New` in a `Legacy | New` field
+  logged the drop of `New`'s keys from `Legacy` on every rehydration. The
+  warning now covers only models that are part of the result, once per class
+  and key set.
 - **Fixed: `Task.model_copy(update=...)` returned the source task's id**
   (STA-128). A task caches its `id`, `instance_hash` and instance body on
   first read, and pydantic copies that cache along with the fields, so once

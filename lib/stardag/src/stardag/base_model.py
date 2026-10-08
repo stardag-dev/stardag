@@ -32,10 +32,12 @@ Implements a base model with advanced polymorphic serialization + validation fea
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
 import logging
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, Never, Type, TypeVar
 
@@ -44,6 +46,7 @@ from typing_extensions import Self
 from pydantic import (
     BaseModel,
     ConfigDict,
+    ModelWrapValidatorHandler,
     SerializationInfo,
     ValidationInfo,
     model_serializer,
@@ -59,6 +62,24 @@ CONTEXT_MODE_KEY = "mode"
 
 
 _UNSET = object()
+
+_DroppedKeys = tuple[Any, type, list[str]]
+"""A model built in compat mode, its class, and the stored keys it dropped."""
+
+
+@dataclass
+class _CompatDrops:
+    """Keys dropped within the outermost compat validation."""
+
+    frames: list[list[str]] = dataclasses.field(default_factory=list)
+    """One per compat validation in progress, innermost last."""
+    built: list[_DroppedKeys] = dataclasses.field(default_factory=list)
+    """Drops by the models that validated successfully."""
+
+
+_COMPAT_DROPS: ContextVar[_CompatDrops | None] = ContextVar(
+    "_COMPAT_DROPS", default=None
+)
 
 _REMOVED_FIELD_OPTIONS = {
     "significance": (
@@ -236,7 +257,7 @@ class StardagBaseModel(BaseModel):
         declare is dropped with a warning (a non-significant field removed
         under new code; a removed *significant* field moves the id and is
         caught there), and a missing non-significant field takes the class
-        default.
+        default. The warning is deferred, see ``_defer_compat_drop_warnings``.
         """
         mode: ValidationContextMode = (
             info.context.get(CONTEXT_MODE_KEY) if info.context else None
@@ -255,13 +276,7 @@ class StardagBaseModel(BaseModel):
                 if key not in known and not key.startswith("__")
             ]
             if unknown:
-                logger.warning(
-                    "Dropping stored field(s) %s unknown to %s.%s while "
-                    "rehydrating: the class no longer declares them.",
-                    ", ".join(repr(k) for k in unknown),
-                    cls.__module__,
-                    cls.__qualname__,
-                )
+                _record_dropped(cls, unknown)
                 for key in unknown:
                     data.pop(key)
 
@@ -276,6 +291,57 @@ class StardagBaseModel(BaseModel):
                 data[name] = maybe_stardag_field.compat_default
 
         return data
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _defer_compat_drop_warnings(
+        cls, data: Any, handler: ModelWrapValidatorHandler[Any], info: ValidationInfo
+    ) -> Any:
+        """Warn about keys dropped in compat mode only for models that were
+        built into the result.
+
+        Pydantic validates an undiscriminated union against each member in
+        turn, so a member that is merely probed, and then rejected or
+        outscored, drops keys too; that describes a failed attempt, not what
+        was built. Each compat validation opens a frame that
+        ``_check_add_compatibility_defaults`` records into (every ``before``
+        validator runs inside this handler, so the drop keeps its place after
+        any subclass ``before`` validator), keeps it with the built model on
+        success, and the outermost one warns for the models reachable from
+        its result.
+
+        The outermost compat validation is the outermost *StardagBaseModel*
+        one, so a probed member is filtered only when such a model encloses
+        the union. A union validated with no enclosing one (a bare
+        ``TypeAdapter(A | B)``, or a field of a plain pydantic model) makes
+        each member its own root, and a member pydantic validates and then
+        outscores still warns. Every stardag compat path validates a task
+        model, which always encloses its fields.
+        """
+        mode: ValidationContextMode = (
+            info.context.get(CONTEXT_MODE_KEY) if info.context else None
+        )
+        if mode != "compat":
+            return handler(data)
+
+        state = _COMPAT_DROPS.get()
+        token = None
+        if state is None:
+            state = _CompatDrops()
+            token = _COMPAT_DROPS.set(state)
+        frame: list[str] = []
+        state.frames.append(frame)
+        try:
+            result = handler(data)
+        finally:
+            state.frames.pop()
+            if token is not None:
+                _COMPAT_DROPS.reset(token)
+        if frame:
+            state.built.append((result, cls, frame))
+        if token is not None and state.built:
+            _warn_dropped(result, state.built)
+        return result
 
     @classmethod
     def _known_input_keys(cls) -> frozenset[str]:
@@ -349,6 +415,65 @@ class StardagBaseModel(BaseModel):
         """Final cleanup for hash mode serialization."""
         # Currently no-op, but could be used for additional processing if needed.
         return data
+
+
+def _record_dropped(cls: type, keys: list[str]) -> None:
+    """Record keys dropped by ``cls`` on the innermost open compat frame, or
+    warn right away when there is none."""
+    state = _COMPAT_DROPS.get()
+    if state is not None and state.frames:
+        state.frames[-1].extend(keys)
+    else:
+        _warn_dropped(None, [(None, cls, keys)], reachable_only=False)
+
+
+def _warn_dropped(
+    result: Any, pending: list[_DroppedKeys], reachable_only: bool = True
+) -> None:
+    """Warn, once per class and key set, for the drops whose model is part of
+    ``result``. A model validated and then discarded (a union member pydantic
+    probed) is not reachable from it, and stays silent."""
+    reachable = _reachable_model_ids(result) if reachable_only else set()
+    warned: set[tuple[type, tuple[str, ...]]] = set()
+    for model, cls, keys in pending:
+        signature = (cls, tuple(sorted(keys)))
+        if (reachable_only and id(model) not in reachable) or signature in warned:
+            continue
+        warned.add(signature)
+        logger.warning(
+            "Dropping stored field(s) %s unknown to %s.%s while "
+            "rehydrating: the class no longer declares them.",
+            ", ".join(repr(k) for k in sorted(keys)),
+            cls.__module__,
+            cls.__qualname__,
+        )
+
+
+def _reachable_model_ids(root: Any) -> set[int]:
+    """Ids of the pydantic models reachable from ``root`` through model and
+    dataclass fields, mappings and non-string collections. A model held only
+    by some other object is missed, and its drop goes unreported."""
+    seen: set[int] = set()
+    models: set[int] = set()
+    stack = [root]
+    while stack:
+        value = stack.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        if isinstance(value, BaseModel):
+            models.add(id(value))
+            stack.extend(getattr(value, name) for name in type(value).model_fields)
+        elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+            stack.extend(getattr(value, f.name) for f in dataclasses.fields(value))
+        elif isinstance(value, Mapping):
+            stack.extend(value.keys())
+            stack.extend(value.values())
+        elif isinstance(value, Collection) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            stack.extend(value)
+    return models
 
 
 _AnnotationType = TypeVar("_AnnotationType")
