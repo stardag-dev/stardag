@@ -1,4 +1,6 @@
 import asyncio
+import copy
+import threading
 from functools import cached_property
 from typing import Annotated, Type
 from unittest.mock import Mock
@@ -681,6 +683,10 @@ class _CopySource(Task[str]):
     def doubled(self) -> int:
         return self.n * 2
 
+    @cached_property
+    def lock(self) -> threading.Lock:
+        return threading.Lock()
+
     def run(self) -> None:
         pass
 
@@ -738,6 +744,21 @@ class TestModelCopyRecomputesDerivedValues:
 
         assert copied.id == source.id
         assert copied.instance_hash == source.instance_hash
+
+    def test_deep_copy_skips_a_cached_value_that_cannot_be_deep_copied(self):
+        source = _CopySource(n=1)
+        source_lock = source.lock
+        _read_derived(source)
+
+        for copied in (
+            source.model_copy(deep=True),
+            source.model_copy(update={"n": 2}, deep=True),
+            copy.deepcopy(source),
+        ):
+            assert "lock" not in copied.__dict__
+            assert copied.lock is not source_lock
+        assert source.__dict__["lock"] is source_lock
+        assert copy.deepcopy(source).id == source.id
 
     def test_source_is_unaffected(self):
         source = _CopySource(n=1)

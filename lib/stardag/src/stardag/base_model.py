@@ -164,6 +164,13 @@ def _cached_property_names(cls: type) -> tuple[str, ...]:
     )
 
 
+def _drop_cached_properties(model: BaseModel) -> None:
+    """Remove every ``functools.cached_property`` value from ``model``."""
+    instance_dict = vars(model)
+    for name in _cached_property_names(type(model)):
+        instance_dict.pop(name, None)
+
+
 class StardagBaseModel(BaseModel):
     """Custom, swap-in-replace for pydantic BaseModel, with features for hash mode +
     compat mode.
@@ -203,9 +210,19 @@ class StardagBaseModel(BaseModel):
         read. The copy recomputes them from its own fields instead.
         """
         copied = super().model_copy(update=update, deep=deep)
-        for name in _cached_property_names(type(copied)):
-            vars(copied).pop(name, None)
+        _drop_cached_properties(copied)
         return copied
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        """Deep-copy the model without its ``functools.cached_property`` values.
+
+        The cache is dropped *before* the deep copy, so a cached value that
+        cannot be deep-copied (a lock, a client) does not make copying fail
+        only once it has been read. The source keeps its cache.
+        """
+        stripped = self.__copy__()
+        _drop_cached_properties(stripped)
+        return super(StardagBaseModel, stripped).__deepcopy__(memo)
 
     @model_validator(mode="before")
     @classmethod
