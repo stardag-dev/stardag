@@ -323,25 +323,7 @@ class StardagBaseModel(BaseModel):
         )
         if mode != "compat":
             return handler(data)
-
-        state = _COMPAT_DROPS.get()
-        token = None
-        if state is None:
-            state = _CompatDrops()
-            token = _COMPAT_DROPS.set(state)
-        frame: list[str] = []
-        state.frames.append(frame)
-        try:
-            result = handler(data)
-        finally:
-            state.frames.pop()
-            if token is not None:
-                _COMPAT_DROPS.reset(token)
-        if frame:
-            state.built.append((result, cls, frame))
-        if token is not None and state.built:
-            _warn_dropped(result, state.built)
-        return result
+        return _validate_in_compat_frame(cls, data, handler)
 
     @classmethod
     def _known_input_keys(cls) -> frozenset[str]:
@@ -415,6 +397,40 @@ class StardagBaseModel(BaseModel):
         """Final cleanup for hash mode serialization."""
         # Currently no-op, but could be used for additional processing if needed.
         return data
+
+
+def _validate_in_compat_frame(
+    cls: type, data: Any, handler: ModelWrapValidatorHandler[Any]
+) -> Any:
+    """The body of ``StardagBaseModel._defer_compat_drop_warnings``.
+
+    A module-level function on purpose, and the only place besides
+    ``_record_dropped`` that touches ``_COMPAT_DROPS``. cloudpickle pickles
+    an ``@sd.task`` class by value (it is created at runtime), and with it
+    the validators pydantic keeps on the class, along with every global
+    their code names. A ``ContextVar`` cannot be pickled, so a validator
+    naming one directly made every function task unpicklable, and Modal
+    could not return one from a worker. A module-level function goes by
+    reference, so the validator names only this.
+    """
+    state = _COMPAT_DROPS.get()
+    token = None
+    if state is None:
+        state = _CompatDrops()
+        token = _COMPAT_DROPS.set(state)
+    frame: list[str] = []
+    state.frames.append(frame)
+    try:
+        result = handler(data)
+    finally:
+        state.frames.pop()
+        if token is not None:
+            _COMPAT_DROPS.reset(token)
+    if frame:
+        state.built.append((result, cls, frame))
+    if token is not None and state.built:
+        _warn_dropped(result, state.built)
+    return result
 
 
 def _record_dropped(cls: type, keys: list[str]) -> None:
