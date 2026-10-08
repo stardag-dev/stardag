@@ -4,7 +4,7 @@ import logging
 from typing import Annotated, Any, Literal, Type
 
 import pytest
-from pydantic import ConfigDict, ValidationError, WrapSerializer
+from pydantic import ConfigDict, ValidationError, WrapSerializer, model_validator
 
 from stardag.base_model import (
     CONTEXT_MODE_KEY,
@@ -584,6 +584,23 @@ class TestCompatDroppedKeysWarning:
         stored = {"pair": {"left": {"scale": 1.0, "tau": 2.0, "removed": 3}}}
         with caplog.at_level(logging.WARNING, logger="stardag.base_model"):
             _compat(InDataclass, stored)
+        assert len(_drop_warnings(caplog)) == 1
+
+    def test_a_subclass_before_validator_sees_the_stored_keys_first(self, caplog):
+        # A rename migration reads the old key before compat drops it.
+        class Renamed(StardagBaseModel):
+            new: int
+
+            @model_validator(mode="before")
+            @classmethod
+            def _migrate(cls, data: Any) -> Any:
+                if isinstance(data, dict) and "old" in data:
+                    data = {**data, "new": data["old"]}
+                return data
+
+        with caplog.at_level(logging.WARNING, logger="stardag.base_model"):
+            rebuilt = _compat(Renamed, {"old": 3})
+        assert rebuilt.new == 3
         assert len(_drop_warnings(caplog)) == 1
 
     def test_outside_compat_mode_nothing_is_dropped(self):

@@ -35,7 +35,8 @@ from __future__ import annotations
 import logging
 from contextvars import ContextVar
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+import dataclasses
+from dataclasses import dataclass
 from typing import Any, Literal, Never, Type, TypeVar
 
 from pydantic import (
@@ -61,11 +62,20 @@ _UNSET = object()
 _DroppedKeys = tuple[Any, type, list[str]]
 """A model built in compat mode, its class, and the stored keys it dropped."""
 
-_COMPAT_DROPPED: ContextVar[list[_DroppedKeys] | None] = ContextVar(
-    "_COMPAT_DROPPED", default=None
+
+@dataclass
+class _CompatDrops:
+    """Keys dropped within the outermost compat validation."""
+
+    frames: list[list[str]] = dataclasses.field(default_factory=list)
+    """One per compat validation in progress, innermost last."""
+    built: list[_DroppedKeys] = dataclasses.field(default_factory=list)
+    """Drops by the models that validated successfully."""
+
+
+_COMPAT_DROPS: ContextVar[_CompatDrops | None] = ContextVar(
+    "_COMPAT_DROPS", default=None
 )
-"""Drops recorded by the compat validations nested in the outermost one,
-which warns for those whose model made it into its result."""
 
 _REMOVED_FIELD_OPTIONS = {
     "significance": (
@@ -186,11 +196,9 @@ class StardagBaseModel(BaseModel):
         validate_default=True,
     )
 
-    @model_validator(mode="wrap")
+    @model_validator(mode="before")
     @classmethod
-    def _check_add_compatibility_defaults(
-        cls, data: Any, handler: ModelWrapValidatorHandler[Any], info: ValidationInfo
-    ) -> Any:
+    def _check_add_compatibility_defaults(cls, data: Any, info: ValidationInfo) -> Any:
         """Compat mode (a stored body): fill compat defaults, drop unknown keys.
 
         Strict for significant fields by way of the task id: a missing one
@@ -200,46 +208,15 @@ class StardagBaseModel(BaseModel):
         declare is dropped with a warning (a non-significant field removed
         under new code; a removed *significant* field moves the id and is
         caught there), and a missing non-significant field takes the class
-        default.
-
-        The warning is deferred to the outermost compat validation and
-        emitted only for models present in its result. Pydantic validates an
-        undiscriminated union against each member in turn, so a member that
-        is merely probed, and rejected or outscored, also gets here; what it
-        dropped describes a failed attempt, not what was built.
+        default. The warning is deferred, see ``_defer_compat_drop_warnings``.
         """
         mode: ValidationContextMode = (
             info.context.get(CONTEXT_MODE_KEY) if info.context else None
         )
         if mode != "compat" or not isinstance(data, dict):
-            return handler(data)
+            return data
 
-        data, dropped = cls._compat_prepare(data)
-        pending = _COMPAT_DROPPED.get()
-        if pending is not None:
-            result = handler(data)
-            if dropped:
-                pending.append((result, cls, dropped))
-            return result
-
-        pending = []
-        token = _COMPAT_DROPPED.set(pending)
-        try:
-            result = handler(data)
-        finally:
-            _COMPAT_DROPPED.reset(token)
-        if dropped:
-            pending.append((result, cls, dropped))
-        if pending:
-            _warn_dropped(result, pending)
-        return result
-
-    @classmethod
-    def _compat_prepare(cls, data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-        """Drop the keys this class does not declare and fill compat defaults.
-        Returns the prepared data and the dropped keys."""
         data = dict(data)
-        unknown: list[str] = []
         if cls.model_config.get("extra") != "allow":
             known = cls._known_input_keys()
             unknown = [
@@ -249,8 +226,10 @@ class StardagBaseModel(BaseModel):
                 # ``__name``, ``__aliased``) are consumed elsewhere.
                 if key not in known and not key.startswith("__")
             ]
-            for key in unknown:
-                data.pop(key)
+            if unknown:
+                _record_dropped(cls, unknown)
+                for key in unknown:
+                    data.pop(key)
 
         for name, field in cls.model_fields.items():
             if name in data:
@@ -262,7 +241,50 @@ class StardagBaseModel(BaseModel):
             ):
                 data[name] = maybe_stardag_field.compat_default
 
-        return data, unknown
+        return data
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _defer_compat_drop_warnings(
+        cls, data: Any, handler: ModelWrapValidatorHandler[Any], info: ValidationInfo
+    ) -> Any:
+        """Warn about keys dropped in compat mode only for models that were
+        built into the result.
+
+        Pydantic validates an undiscriminated union against each member in
+        turn, so a member that is merely probed, and then rejected or
+        outscored, drops keys too; that describes a failed attempt, not what
+        was built. Each compat validation opens a frame that
+        ``_check_add_compatibility_defaults`` records into (every ``before``
+        validator runs inside this handler, so the drop keeps its place after
+        any subclass ``before`` validator), keeps it with the built model on
+        success, and the outermost one warns for the models reachable from
+        its result.
+        """
+        mode: ValidationContextMode = (
+            info.context.get(CONTEXT_MODE_KEY) if info.context else None
+        )
+        if mode != "compat":
+            return handler(data)
+
+        state = _COMPAT_DROPS.get()
+        token = None
+        if state is None:
+            state = _CompatDrops()
+            token = _COMPAT_DROPS.set(state)
+        frame: list[str] = []
+        state.frames.append(frame)
+        try:
+            result = handler(data)
+        finally:
+            state.frames.pop()
+            if token is not None:
+                _COMPAT_DROPS.reset(token)
+        if frame:
+            state.built.append((result, cls, frame))
+        if token is not None and state.built:
+            _warn_dropped(result, state.built)
+        return result
 
     @classmethod
     def _known_input_keys(cls) -> frozenset[str]:
@@ -338,15 +360,27 @@ class StardagBaseModel(BaseModel):
         return data
 
 
-def _warn_dropped(result: Any, pending: list[_DroppedKeys]) -> None:
+def _record_dropped(cls: type, keys: list[str]) -> None:
+    """Record keys dropped by ``cls`` on the innermost open compat frame, or
+    warn right away when there is none."""
+    state = _COMPAT_DROPS.get()
+    if state is not None and state.frames:
+        state.frames[-1].extend(keys)
+    else:
+        _warn_dropped(None, [(None, cls, keys)], reachable_only=False)
+
+
+def _warn_dropped(
+    result: Any, pending: list[_DroppedKeys], reachable_only: bool = True
+) -> None:
     """Warn, once per class and key set, for the drops whose model is part of
     ``result``. A model validated and then discarded (a union member pydantic
     probed) is not reachable from it, and stays silent."""
-    reachable = _reachable_model_ids(result)
+    reachable = _reachable_model_ids(result) if reachable_only else set()
     warned: set[tuple[type, tuple[str, ...]]] = set()
     for model, cls, keys in pending:
         signature = (cls, tuple(sorted(keys)))
-        if id(model) not in reachable or signature in warned:
+        if (reachable_only and id(model) not in reachable) or signature in warned:
             continue
         warned.add(signature)
         logger.warning(
@@ -373,8 +407,8 @@ def _reachable_model_ids(root: Any) -> set[int]:
         if isinstance(value, BaseModel):
             models.add(id(value))
             stack.extend(getattr(value, name) for name in type(value).model_fields)
-        elif is_dataclass(value) and not isinstance(value, type):
-            stack.extend(getattr(value, f.name) for f in fields(value))
+        elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+            stack.extend(getattr(value, f.name) for f in dataclasses.fields(value))
         elif isinstance(value, Mapping):
             stack.extend(value.keys())
             stack.extend(value.values())
