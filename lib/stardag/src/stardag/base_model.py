@@ -33,12 +33,14 @@ Implements a base model with advanced polymorphic serialization + validation fea
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, Never, Type, TypeVar
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    ModelWrapValidatorHandler,
     SerializationInfo,
     ValidationInfo,
     model_serializer,
@@ -54,6 +56,15 @@ CONTEXT_MODE_KEY = "mode"
 
 
 _UNSET = object()
+
+_DroppedKeys = tuple[Any, type, list[str]]
+"""A model built in compat mode, its class, and the stored keys it dropped."""
+
+_COMPAT_DROPPED: ContextVar[list[_DroppedKeys] | None] = ContextVar(
+    "_COMPAT_DROPPED", default=None
+)
+"""Drops recorded by the compat validations nested in the outermost one,
+which warns for those whose model made it into its result."""
 
 _REMOVED_FIELD_OPTIONS = {
     "significance": (
@@ -174,9 +185,11 @@ class StardagBaseModel(BaseModel):
         validate_default=True,
     )
 
-    @model_validator(mode="before")
+    @model_validator(mode="wrap")
     @classmethod
-    def _check_add_compatibility_defaults(cls, data: Any, info: ValidationInfo) -> Any:
+    def _check_add_compatibility_defaults(
+        cls, data: Any, handler: ModelWrapValidatorHandler[Any], info: ValidationInfo
+    ) -> Any:
         """Compat mode (a stored body): fill compat defaults, drop unknown keys.
 
         Strict for significant fields by way of the task id: a missing one
@@ -187,14 +200,45 @@ class StardagBaseModel(BaseModel):
         under new code; a removed *significant* field moves the id and is
         caught there), and a missing non-significant field takes the class
         default.
+
+        The warning is deferred to the outermost compat validation and
+        emitted only for models present in its result. Pydantic validates an
+        undiscriminated union against each member in turn, so a member that
+        is merely probed, and rejected or outscored, also gets here; what it
+        dropped describes a failed attempt, not what was built.
         """
         mode: ValidationContextMode = (
             info.context.get(CONTEXT_MODE_KEY) if info.context else None
         )
         if mode != "compat" or not isinstance(data, dict):
-            return data
+            return handler(data)
 
+        data, dropped = cls._compat_prepare(data)
+        pending = _COMPAT_DROPPED.get()
+        if pending is not None:
+            result = handler(data)
+            if dropped:
+                pending.append((result, cls, dropped))
+            return result
+
+        pending = []
+        token = _COMPAT_DROPPED.set(pending)
+        try:
+            result = handler(data)
+        finally:
+            _COMPAT_DROPPED.reset(token)
+        if dropped:
+            pending.append((result, cls, dropped))
+        if pending:
+            _warn_dropped(result, pending)
+        return result
+
+    @classmethod
+    def _compat_prepare(cls, data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """Drop the keys this class does not declare and fill compat defaults.
+        Returns the prepared data and the dropped keys."""
         data = dict(data)
+        unknown: list[str] = []
         if cls.model_config.get("extra") != "allow":
             known = cls._known_input_keys()
             unknown = [
@@ -204,16 +248,8 @@ class StardagBaseModel(BaseModel):
                 # ``__name``, ``__aliased``) are consumed elsewhere.
                 if key not in known and not key.startswith("__")
             ]
-            if unknown:
-                logger.warning(
-                    "Dropping stored field(s) %s unknown to %s.%s while "
-                    "rehydrating: the class no longer declares them.",
-                    ", ".join(repr(k) for k in unknown),
-                    cls.__module__,
-                    cls.__qualname__,
-                )
-                for key in unknown:
-                    data.pop(key)
+            for key in unknown:
+                data.pop(key)
 
         for name, field in cls.model_fields.items():
             if name in data:
@@ -225,7 +261,7 @@ class StardagBaseModel(BaseModel):
             ):
                 data[name] = maybe_stardag_field.compat_default
 
-        return data
+        return data, unknown
 
     @classmethod
     def _known_input_keys(cls) -> frozenset[str]:
@@ -299,6 +335,48 @@ class StardagBaseModel(BaseModel):
         """Final cleanup for hash mode serialization."""
         # Currently no-op, but could be used for additional processing if needed.
         return data
+
+
+def _warn_dropped(result: Any, pending: list[_DroppedKeys]) -> None:
+    """Warn, once per class and key set, for the drops whose model is part of
+    ``result``. A model validated and then discarded (a union member pydantic
+    probed) is not reachable from it, and stays silent."""
+    reachable = _reachable_model_ids(result)
+    warned: set[tuple[type, tuple[str, ...]]] = set()
+    for model, cls, keys in pending:
+        signature = (cls, tuple(keys))
+        if id(model) not in reachable or signature in warned:
+            continue
+        warned.add(signature)
+        logger.warning(
+            "Dropping stored field(s) %s unknown to %s.%s while "
+            "rehydrating: the class no longer declares them.",
+            ", ".join(repr(k) for k in keys),
+            cls.__module__,
+            cls.__qualname__,
+        )
+
+
+def _reachable_model_ids(root: Any) -> set[int]:
+    """Ids of the pydantic models reachable from ``root`` through fields and
+    the builtin containers."""
+    seen: set[int] = set()
+    models: set[int] = set()
+    stack = [root]
+    while stack:
+        value = stack.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        if isinstance(value, BaseModel):
+            models.add(id(value))
+            stack.extend(getattr(value, name) for name in type(value).model_fields)
+        elif isinstance(value, dict):
+            stack.extend(value.keys())
+            stack.extend(value.values())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            stack.extend(value)
+    return models
 
 
 _AnnotationType = TypeVar("_AnnotationType")

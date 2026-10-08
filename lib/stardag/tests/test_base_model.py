@@ -1,8 +1,9 @@
 import enum
-from typing import Annotated, Any, Type
+import logging
+from typing import Annotated, Any, Literal, Type
 
 import pytest
-from pydantic import ValidationError, WrapSerializer
+from pydantic import ConfigDict, ValidationError, WrapSerializer
 
 from stardag.base_model import (
     CONTEXT_MODE_KEY,
@@ -476,3 +477,91 @@ class TestNonSignificantFields:
         rebuilt = Holder.model_validate(body, context={CONTEXT_MODE_KEY: "compat"})
         assert rebuilt == task
         assert rebuilt.inner.partition_size == 3
+
+
+class Legacy(StardagBaseModel):
+    scale: float
+    tau: float
+
+
+class New(StardagBaseModel):
+    # Disjoint from Legacy by shape: no required field in common.
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["new"] = "new"
+    quantiles: tuple[float, ...] = (0.1, 0.5, 0.9)
+
+
+class Encoded(StardagBaseModel):
+    # Undiscriminated: a discriminator would change Legacy's stored hash.
+    encoding: Legacy | New
+
+
+class Loose(StardagBaseModel):
+    a: int = 0
+
+
+class Exact(StardagBaseModel):
+    a: int = 0
+    b: int = 0
+
+
+class SmartUnion(StardagBaseModel):
+    # Both members validate {"a", "b"}; pydantic's smart mode keeps the one
+    # that set more fields.
+    value: Loose | Exact
+
+
+_DROP_MESSAGE = "Dropping stored field(s)"
+
+
+def _drop_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if _DROP_MESSAGE in r.getMessage()]
+
+
+def _compat(cls: Type[StardagBaseModel], data: dict[str, Any]) -> Any:
+    return cls.model_validate(data, context={CONTEXT_MODE_KEY: "compat"})
+
+
+class TestCompatDroppedKeysWarning:
+    def test_a_probed_union_member_does_not_warn(self, caplog):
+        stored = Encoded(encoding=New()).model_dump(mode="json")
+        with caplog.at_level(logging.WARNING, logger="stardag.base_model"):
+            rebuilt = _compat(Encoded, stored)
+        assert rebuilt == Encoded(encoding=New())
+        assert _drop_warnings(caplog) == []
+
+    def test_an_outscored_union_member_does_not_warn(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="stardag.base_model"):
+            rebuilt = _compat(SmartUnion, {"value": {"a": 1, "b": 2}})
+        assert rebuilt == SmartUnion(value=Exact(a=1, b=2))
+        assert _drop_warnings(caplog) == []
+
+    def test_a_key_dropped_by_the_winning_member_warns_once(self, caplog):
+        stored = {"encoding": {"scale": 1.0, "tau": 2.0, "removed": 3}}
+        with caplog.at_level(logging.WARNING, logger="stardag.base_model"):
+            rebuilt = _compat(Encoded, stored)
+        assert rebuilt == Encoded(encoding=Legacy(scale=1.0, tau=2.0))
+        assert _drop_warnings(caplog) == [
+            "Dropping stored field(s) 'removed' unknown to "
+            f"{__name__}.Legacy while rehydrating: the class no longer "
+            "declares them."
+        ]
+
+    def test_a_key_dropped_at_the_top_level_warns_once(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="stardag.base_model"):
+            _compat(ModelPlain, {"a": 1, "removed": 2})
+        assert len(_drop_warnings(caplog)) == 1
+
+    def test_repeated_drops_by_one_class_warn_once(self, caplog):
+        class Many(StardagBaseModel):
+            items: list[Legacy]
+
+        item = {"scale": 1.0, "tau": 2.0, "removed": 3}
+        with caplog.at_level(logging.WARNING, logger="stardag.base_model"):
+            rebuilt = _compat(Many, {"items": [item, item, item]})
+        assert len(rebuilt.items) == 3
+        assert len(_drop_warnings(caplog)) == 1
+
+    def test_outside_compat_mode_nothing_is_dropped(self):
+        with pytest.raises(ValidationError):
+            New.model_validate({"removed": 1})
