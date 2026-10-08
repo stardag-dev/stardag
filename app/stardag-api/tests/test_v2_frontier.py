@@ -357,3 +357,17 @@ async def test_a_restart_that_arrives_clears_the_expectation(h: Harness):
     await h.transition(plan.id, t, Transition.start(execution, claim=False))
     (member,) = (await h.frontier(build)).running
     assert member.restart_expected_by is None
+
+
+async def test_a_renewal_clears_the_expectation(h: Harness):
+    """A renewal is the holder saying it is alive: left set, the
+    expectation would track a renewing claim and keep ticks waiting."""
+    from stardag_api.services.transitions import Transition
+
+    t = item("T")
+    build, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    await h.transition(plan.id, t, Transition.preempt(execution))
+    await h.renew(t, execution)
+    (member,) = (await h.frontier(build)).running
+    assert member.restart_expected_by is None

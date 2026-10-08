@@ -801,4 +801,5 @@ class PlansMixin(RegistryState):
                 claim_outcome=execution.claim_outcome if execution else None,
             )
         task.claim_expires_at = self.now() + self._ttl(claim_ttl_seconds)
+        task.preempted_at = None  # the holder is alive: no restart outstanding
         return _outcome(task)

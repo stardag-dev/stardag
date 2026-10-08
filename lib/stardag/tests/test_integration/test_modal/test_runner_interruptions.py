@@ -273,6 +273,19 @@ class TestClassifyByExceptionChain:
             == _TIMEOUT
         )
 
+    def test_a_preemption_just_short_of_the_timeout_is_still_one(self):
+        """The override uses the timeout itself, not the fallback's slack:
+        a genuine preemption 3s before the timeout is restarted by Modal,
+        and reading it as a timeout would release the claim the restart
+        needs and reschedule the work instead."""
+        request = _checkpointed(KeyboardInterrupt())
+        assert (
+            _classify_interruption(
+                request, elapsed_seconds=297.0, function_timeout_seconds=300.0
+            )
+            == _PREEMPTION
+        )
+
     def test_a_second_interrupt_during_the_checkpoint(self):
         """STA-129, to the numbers. The timeout's ``InputCancellation`` was
         caught by a framework's shutdown handler, whose checkpoint upload

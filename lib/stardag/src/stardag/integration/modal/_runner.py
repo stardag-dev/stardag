@@ -269,7 +269,7 @@ def _classify_interruption(
     through the ``from None`` the docs recommend.
 
     **One clock reading still overrides the chain, in one direction.**
-    Elapsed at or past the declared timeout (less the slack) is a timeout
+    Elapsed at or past the declared timeout itself is a timeout
     whatever the chain holds: the clock starts late, so it can miss a
     timeout but cannot invent one, and an input past its timeout is not
     restarted on the same call id. The reverse never holds — "before the
@@ -314,22 +314,28 @@ def _classify_interruption(
         # Past the declared timeout nothing restarts the input, whatever
         # the chain says: the clock under-reads an input's age (see
         # ``_TIMEOUT_DETECTION_SLACK_SECONDS``), so it can miss a timeout
-        # but never invent one. Consulted first, so a signal on the chain
-        # can only ever turn a "before the timeout" into a preemption.
-        timed_out = function_timeout_seconds is not None and (
-            elapsed_seconds
-            >= function_timeout_seconds - _TIMEOUT_DETECTION_SLACK_SECONDS
-        )
-        if timed_out:
+        # but never invent one. Compared against the timeout itself, not
+        # less the slack: the slack would let a genuine preemption in the
+        # last seconds before the timeout read as one, and be rescheduled
+        # instead of restarted.
+        if (
+            function_timeout_seconds is not None
+            and elapsed_seconds >= function_timeout_seconds
+        ):
             return _TIMEOUT
         signal = _platform_signal(exception)
         if signal is not None:
             # A KeyboardInterrupt is returned only when no InputCancellation
             # (a timeout or a cancel) is anywhere on the chain.
             return _PREEMPTION if isinstance(signal, KeyboardInterrupt) else _TIMEOUT
-        # Nothing on the chain, and before any declared timeout. With none
-        # declared the backend still applies its own, so report.
-        return _TIMEOUT if function_timeout_seconds is None else _PREEMPTION
+        # Nothing on the chain: the clock is all there is, with the slack,
+        # and with no timeout declared the backend still applies its own,
+        # so report.
+        timed_out = function_timeout_seconds is None or (
+            elapsed_seconds
+            >= function_timeout_seconds - _TIMEOUT_DETECTION_SLACK_SECONDS
+        )
+        return _TIMEOUT if timed_out else _PREEMPTION
     if isinstance(exception, (KeyboardInterrupt, SystemExit)):
         return _CANCELLATION
     if _InputCancellation is not None and isinstance(exception, _InputCancellation):
