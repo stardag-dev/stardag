@@ -72,7 +72,7 @@ SERVER_IMAGE_REPO = "ghcr.io/stardag-dev/stardag-server"
 # 0.6.0 is the first v2 server; a v2 SDK refuses a v1 registry on its first
 # call, so this must never point below it. (v0.26.0/server-v0.5.0 was the
 # last release of the v1 line.)
-DEFAULT_SERVER_VERSION = "0.6.0"
+DEFAULT_SERVER_VERSION = "0.7.0"
 
 # Minimum client interpreter for from-source image builds (stardag-api's
 # requires-python; the image gets the client's version via add_python).

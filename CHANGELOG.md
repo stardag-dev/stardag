@@ -4,7 +4,14 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.28.0] — 2026-10-08
+
+SDK `0.28.0` and server `server-v0.7.0`. Not breaking for SDK users, but a
+Modal app must be **redeployed with the new SDK before it is triggered**
+(STA-124 below). The server carries one additive migration
+(`build.scheduler_lease_released_at`); the SDK degrades against a
+`server-v0.6.0` registry rather than refusing it. See
+[RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
@@ -44,7 +51,6 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   over. At its lifetime bound the wait passes to a successor tick.
   Counted as `TickSummary.restart_awaited`. Against a registry that does
   not serve `restart_expected_by` the tick behaves as before.
-
 - **Fixed: a task started under a newer deployment than the one that sent it
   is missing any field added since** (STA-124). Modal calls carried task
   objects cloudpickled, and workers are resolved by name — the app's
@@ -148,6 +154,11 @@ retry/cancel/exclude`, and `builds stop` when the build keeps running,
   logs a warning for every wake-up it hands out more than 5 minutes after
   the flag. Together they measure the stall risk that remains with no
   watchdog deployed.
+
+### UI
+
+- The tick-summary trail explains the new `lifetime_reached` outcome
+  (STA-123).
 
 ## [0.27.0] — 2026-09-25
 
