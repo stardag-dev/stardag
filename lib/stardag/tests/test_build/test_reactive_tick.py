@@ -1172,3 +1172,163 @@ async def test_a_member_registered_twice_is_a_no_op(
 
 
 pytestmark = pytest.mark.asyncio
+
+
+class TestOutstandingRestart:
+    """STA-129: a preemption keeps the claim, shortened to the restart grace,
+    and leaves the frontier with nothing to act on. A tick that lingered out
+    then left nobody to take the claim over when the restart never came."""
+
+    @staticmethod
+    async def _preempted(
+        registry: InMemoryRegistry, *, grace: float
+    ) -> tuple[UUID, str, UUID]:
+        """A build whose one task is running under a preempted claim whose
+        grace ends ``grace`` seconds from now. Returns (build, task, plan)."""
+        from datetime import datetime, timedelta, timezone
+
+        task = SyncOnlyTask(name=f"p-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        first = await _tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry), FAST
+        )
+        assert first.spawned == 1
+        row = registry.tasks[str(task.id)]
+        assert row.execution_id is not None and row.claim_plan_id is not None
+        registry.member_preempt(
+            row.claim_plan_id, str(task.id), execution_id=row.execution_id
+        )
+        row.claim_expires_at = datetime.now(timezone.utc) + timedelta(seconds=grace)
+        return build_id, str(task.id), row.claim_plan_id
+
+    async def test_a_restart_that_never_comes_is_taken_over_at_the_lapse(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        build_id, task_id, _ = await self._preempted(registry, grace=0.3)
+        preempted_execution = registry.tasks[task_id].execution_id
+        (member,) = registry.build_get_frontier(build_id).running
+        assert member.restart_expected_by is not None
+
+        config = TickConfig(linger_seconds=0.05, poll_interval_seconds=0.01)
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        summary = await asyncio.wait_for(
+            _tick(registry, build_id, executor, config), timeout=5
+        )
+        assert summary.restart_awaited >= 1
+        assert summary.spawned == 1
+        assert summary.terminal_status == "completed"
+        assert registry.tasks[task_id].execution_id != preempted_execution
+
+    async def test_without_the_wait_the_tick_lingers_out(
+        self, default_in_memory_fs_target: Target, monkeypatch
+    ):
+        """The negative control: a registry that does not serve the field
+        (an older server) leaves the tick exactly as before -- lingered out,
+        nothing spawned, the task stranded once its claim lapses."""
+        from stardag.build._reactive import _tick as tick_module
+
+        registry = InMemoryRegistry()
+        build_id, task_id, _ = await self._preempted(registry, grace=0.3)
+        monkeypatch.setattr(tick_module, "_restart_due", lambda frontier: None)
+        config = TickConfig(linger_seconds=0.05, poll_interval_seconds=0.01)
+        summary = await _tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry), config
+        )
+        assert summary.outcome == "lingered_out"
+        assert summary.spawned == 0 and summary.restart_awaited == 0
+        assert registry.tasks[task_id].status == "running"
+
+    async def test_a_restart_that_arrives_ends_the_wait(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The restart's own non-claiming start clears the expectation, so
+        the next exit pass lets the tick linger out with nothing spawned:
+        the claim is the restarted execution's again."""
+        registry = InMemoryRegistry()
+        build_id, task_id, plan_id = await self._preempted(registry, grace=30)
+        execution = registry.tasks[task_id].execution_id
+        assert execution is not None
+
+        async def restart() -> None:
+            await asyncio.sleep(0.15)
+            registry.member_start(plan_id, task_id, execution_id=execution, claim=False)
+
+        config = TickConfig(linger_seconds=0.05, poll_interval_seconds=0.01)
+        restarted = asyncio.create_task(restart())
+        summary = await asyncio.wait_for(
+            _tick(registry, build_id, FakeDetachedExecutor(registry=registry), config),
+            timeout=5,
+        )
+        await restarted
+        assert summary.outcome == "lingered_out"
+        assert summary.restart_awaited >= 1
+        assert summary.spawned == 0
+        assert registry.tasks[task_id].execution_id == execution
+
+    async def test_the_wait_is_handed_to_a_successor_at_the_lifetime_bound(
+        self, default_in_memory_fs_target: Target
+    ):
+        """A grace longer than the tick's own lifetime: the wait counts as
+        still busy at the bound, so the tick ends ``lifetime_reached`` and a
+        successor carries it on, rather than lingering out."""
+        registry = InMemoryRegistry()
+        build_id, _, _ = await self._preempted(registry, grace=30)
+        spawned: list[tuple[UUID, str]] = []
+        config = TickConfig(
+            linger_seconds=30,
+            poll_interval_seconds=0.01,
+            tick_timeout_seconds=0.3,
+            spawn_tick=lambda b, a: spawned.append((b, a)),
+        )
+        summary = await asyncio.wait_for(
+            _tick(registry, build_id, FakeDetachedExecutor(registry=registry), config),
+            timeout=5,
+        )
+        assert summary.outcome == "lifetime_reached"
+        assert spawned == [(build_id, "app")]
+
+
+async def test_the_restart_wait_follows_the_frontier_a_rollover_returns(
+    default_in_memory_fs_target: Target,
+):
+    """A rollover replaces the frontier a pass acts on. The restart wait
+    must come from that one, not from the read before it: on an exit pass
+    the stale answer (no restart outstanding) would end the tick while the
+    rolled-over frontier still has a preempted claim to wait out."""
+    from datetime import datetime, timedelta, timezone
+
+    from stardag.build._reactive._tick import _Driver
+
+    registry = InMemoryRegistry()
+    task = SyncOnlyTask(name=f"r-{new_id()}")
+    old = registry.add_deployment(app_name="app", code_id="v1")
+    build_id, _ = await _plan(registry, [task], deployment_id=old)
+    new = registry.add_deployment(app_name="app", code_id="v2")
+
+    async def roll_over(frontier: BuildFrontier):
+        outcome = await roll_over_aio(registry, frontier, own_deployment_id=new)
+        # Under the new plan the task is running, then preempted.
+        plan = registry.active_plan(build_id)
+        assert plan is not None
+        execution = new_id()
+        registry.member_start(plan.id, str(task.id), execution_id=execution)
+        registry.member_preempt(plan.id, str(task.id), execution_id=execution)
+        row = registry.tasks[str(task.id)]
+        row.claim_expires_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+        return outcome
+
+    driver = _Driver(
+        build_id,
+        registry=registry,
+        task_executor=FakeDetachedExecutor(registry=registry),
+        config=FAST,
+        summary=TickSummary(outcome="lingered_out"),
+        deployment_id=new,
+        roll_over=roll_over,
+    )
+    before = await driver._read(clear=False)
+    assert driver.restart_due is None
+    after = await driver._follow_deployment(before)
+    assert after is not None and after.deployment_id == new
+    assert driver.restart_due is not None

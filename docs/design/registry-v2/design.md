@@ -448,6 +448,16 @@ claim at the cap is failed with the count, not taken over; a first run, an
 INTERRUPTED restart and an operator retry are not gated); it retries
 nothing on `attempts`, since a FAILED member is the fail mode's.
 
+`running` items also carry `restart_expected_by`: the claim's expiry while
+a preemption's restart is outstanding (`preempted_at` set, which every
+claiming start and every restart clear), null otherwise. A preempted claim
+has nothing to act on until the restart arrives or the grace ends, and a
+lapse sets no wake-up flag, so a tick whose exit pass finds nothing to do
+while a restart is outstanding keeps the lease and lingers again, to the
+earlier of its ordinary linger and the grace's end (STA-129). The wait is
+bounded by the grace, which a preemption only ever shortens; at the tick's
+lifetime bound it counts as still busy and a successor carries it on.
+
 Registering the same instance again is a no-op (`ON CONFLICT DO NOTHING …
 RETURNING`, STA-48's pattern; the event write is gated on the `RETURNING`,
 so a retried chunk appends nothing). Registering a **different** instance

@@ -191,6 +191,13 @@ class FrontierMember(_Response):
     or ``preempted``. The tick applies ``TickConfig.max_interruptions`` to
     ``interruptions``, and ``TickConfig.max_executions`` to ``attempts``
     when it would take over a lapsed claim.
+
+    ``restart_expected_by`` is served on ``running`` items only: while the
+    platform has reported a preemption of the claim's execution and the
+    restart has not arrived, the claim's expiry (the restart grace). Past
+    it the claim lapses and the member is runnable, so a tick with nothing
+    else to do waits for it rather than lingering out with nobody due back
+    (STA-129). None otherwise, and from a registry that does not serve it.
     """
 
     task_id: str
@@ -201,6 +208,7 @@ class FrontierMember(_Response):
     body: dict[str, Any] = Field(default_factory=dict)
     attempts: int = 0
     interruptions: int = 0
+    restart_expected_by: datetime | None = None
 
 
 class PlanRoots(_Response):

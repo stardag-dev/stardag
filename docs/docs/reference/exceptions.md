@@ -169,7 +169,12 @@ hides the "During handling…" preamble; it does not discard the original).
 
 Caught a preemption, the runner re-raises an interrupt in its place so the
 backend sees a crashed container and restarts the input on the same call
-id, and records the preemption so a restart that never arrives is visible.
+id, and records the preemption: the claim is shortened to a restart grace,
+and if the restart never arrives a scheduler tick takes the task over when
+it lapses. An interrupt that arrives _after_ a timeout or a cancel — Modal
+follows the first signal with a SIGINT, which can land while you are still
+checkpointing — is not a preemption, and is classified as the timeout it
+follows.
 Caught a function timeout or a cancel — when no restart is coming — it
 records an interruption for a scheduler tick to act on instead.
 

@@ -153,7 +153,9 @@ raised `ResumableInterruption` is recorded `INTERRUPTED` and resumed, up to
 `max_interruptions` (default 20). A task **preempted** the same way is not:
 Modal restarts that input itself, on the same call id and in seconds, which
 is better than a reschedule on every count — so the worker keeps its claim
-and gets out of the way, recording only that a restart is now due. An
+and gets out of the way, recording only that a restart is now due. That
+record shortens the claim to a 15-minute restart grace, and a tick waits
+it out, so a restart that never comes ends in a takeover, not a stall. An
 interruption the task did not catch is an ordinary failure: it had no plan
 for one. Recipe and knobs: [Preemption and
 timeouts](../how-to/integrate-modal.md#preemption-and-timeouts).
