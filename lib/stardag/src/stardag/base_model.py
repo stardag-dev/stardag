@@ -34,7 +34,8 @@ from __future__ import annotations
 
 import logging
 from contextvars import ContextVar
-from dataclasses import dataclass
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Literal, Never, Type, TypeVar
 
 from pydantic import (
@@ -344,22 +345,23 @@ def _warn_dropped(result: Any, pending: list[_DroppedKeys]) -> None:
     reachable = _reachable_model_ids(result)
     warned: set[tuple[type, tuple[str, ...]]] = set()
     for model, cls, keys in pending:
-        signature = (cls, tuple(keys))
+        signature = (cls, tuple(sorted(keys)))
         if id(model) not in reachable or signature in warned:
             continue
         warned.add(signature)
         logger.warning(
             "Dropping stored field(s) %s unknown to %s.%s while "
             "rehydrating: the class no longer declares them.",
-            ", ".join(repr(k) for k in keys),
+            ", ".join(repr(k) for k in sorted(keys)),
             cls.__module__,
             cls.__qualname__,
         )
 
 
 def _reachable_model_ids(root: Any) -> set[int]:
-    """Ids of the pydantic models reachable from ``root`` through fields and
-    the builtin containers."""
+    """Ids of the pydantic models reachable from ``root`` through model and
+    dataclass fields, mappings and non-string collections. A model held only
+    by some other object is missed, and its drop goes unreported."""
     seen: set[int] = set()
     models: set[int] = set()
     stack = [root]
@@ -371,10 +373,14 @@ def _reachable_model_ids(root: Any) -> set[int]:
         if isinstance(value, BaseModel):
             models.add(id(value))
             stack.extend(getattr(value, name) for name in type(value).model_fields)
-        elif isinstance(value, dict):
+        elif is_dataclass(value) and not isinstance(value, type):
+            stack.extend(getattr(value, f.name) for f in fields(value))
+        elif isinstance(value, Mapping):
             stack.extend(value.keys())
             stack.extend(value.values())
-        elif isinstance(value, (list, tuple, set, frozenset)):
+        elif isinstance(value, Collection) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
             stack.extend(value)
     return models
 

@@ -1,3 +1,4 @@
+import dataclasses
 import enum
 import logging
 from typing import Annotated, Any, Literal, Type
@@ -560,6 +561,29 @@ class TestCompatDroppedKeysWarning:
         with caplog.at_level(logging.WARNING, logger="stardag.base_model"):
             rebuilt = _compat(Many, {"items": [item, item, item]})
         assert len(rebuilt.items) == 3
+        assert len(_drop_warnings(caplog)) == 1
+
+    def test_one_key_set_in_another_order_warns_once(self, caplog):
+        class Many(StardagBaseModel):
+            items: list[Legacy]
+
+        first = {"scale": 1.0, "tau": 2.0, "x": 0, "y": 0}
+        second = {"y": 0, "x": 0, "scale": 1.0, "tau": 2.0}
+        with caplog.at_level(logging.WARNING, logger="stardag.base_model"):
+            _compat(Many, {"items": [first, second]})
+        assert len(_drop_warnings(caplog)) == 1
+
+    def test_a_drop_inside_a_dataclass_field_warns(self, caplog):
+        @dataclasses.dataclass(frozen=True)
+        class Pair:
+            left: Legacy
+
+        class InDataclass(StardagBaseModel):
+            pair: Pair
+
+        stored = {"pair": {"left": {"scale": 1.0, "tau": 2.0, "removed": 3}}}
+        with caplog.at_level(logging.WARNING, logger="stardag.base_model"):
+            _compat(InDataclass, stored)
         assert len(_drop_warnings(caplog)) == 1
 
     def test_outside_compat_mode_nothing_is_dropped(self):
