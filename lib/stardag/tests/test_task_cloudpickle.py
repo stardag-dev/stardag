@@ -50,7 +50,7 @@ def test_a_function_local_task_with_a_dependency_round_trips():
 # The class-based shapes. Each is defined inside the test, so cloudpickle
 # cannot import it by name and takes the class by value, with every validator
 # and global its fields bring along: a non-significant field, a nested model,
-# a task parameter, and a polymorphic one. A shape that stops round-tripping
+# a concrete task parameter, and a polymorphic one. A shape that stops round-tripping
 # here fails the base suite instead of a Modal worker.
 #
 # Both fail today, and not on their fields: cloudpickle rebuilds a by-value
@@ -85,14 +85,26 @@ def test_a_function_local_class_task_with_nested_and_task_params_round_trips():
         pattern: str
         max_workers: Annotated[int, StardagField(significant=False)] = 4
 
+    class Scale(sd.Task[int]):
+        value: int
+
+        def run(self) -> None:
+            self._save(self.value)
+
     class Parse(sd.Task[int]):
         options: Options
+        source: Scale
         upstream: sd.TaskLoads[int]
 
         def run(self) -> None:
             self._save(0)
 
-    task = Parse(options=Options(pattern="*"), upstream=add_one(value=1))
+    task = Parse(
+        options=Options(pattern="*"),
+        source=Scale(value=2),
+        upstream=add_one(value=1),
+    )
     restored = _round_trip(task)
     assert restored.id == task.id
+    assert restored.source.id == task.source.id
     assert restored.upstream.id == task.upstream.id

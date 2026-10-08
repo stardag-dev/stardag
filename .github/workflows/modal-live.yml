@@ -68,15 +68,17 @@ jobs:
   # Two tiers, decided separately, because they cover different things and
   # are triggered by different code. `modal-live` is Modal *execution* with
   # NoOp registries; `registry-live` is a real Modal worker reporting to a
-  # real deployed registry. A change under `app/stardag-api/` should run the
-  # second and not the first; a change to the detached executor, the first
-  # and not necessarily the second.
+  # real deployed registry. A change under `app/stardag-api/` runs the
+  # second and not the first; a change to `_cli/` or `selfhost/` likewise.
+  # The rest of the SDK's source runs both, because the task model it
+  # carries crosses the Modal boundary in either tier (see the patterns
+  # below).
   #
   # The path check is the important trigger: a label means remembering to
   # apply it, which is the failure this whole tier exists to fix. The label
   # stays as the manual override for a change that touches none of these
-  # paths but still warrants a live run -- a dependency bump, a selfhost
-  # change -- and it forces *both* tiers, since it means "exercise the live
+  # paths but still warrants a live run -- a dependency bump, a hunch --
+  # and it forces *both* tiers, since it means "exercise the live
   # Modal stuff" rather than naming one of them.
   #
   # Not a `paths:` filter on the trigger: GitHub applies those to every
@@ -181,7 +183,12 @@ jobs:
           # The files API, not `gh pr diff --name-only`: the diff endpoint
           # refuses a PR past 20,000 changed lines (HTTP 406), which a
           # large PR hits and then skips both tiers as "nothing changed".
-          changed=$(gh api "repos/$REPO/pulls/$PR/files" --paginate -q '.[].filename')
+          #
+          # Both sides of a rename: GitHub reports the destination as
+          # `filename` and the source only as `previous_filename`, so a file
+          # moved out of `lib/stardag/src/` would otherwise match nothing.
+          changed=$(gh api "repos/$REPO/pulls/$PR/files" --paginate \
+            -q '.[] | .filename, (.previous_filename // empty)')
 
           for tier in modal_live registry_live; do
             case "$tier" in
