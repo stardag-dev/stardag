@@ -25,6 +25,7 @@ build that is not RUNNING on its own (409 ``build_not_running``).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -72,6 +73,12 @@ class FrontierMember:
     attempts: int = 0
     #: Those of them that ended interrupted or preempted.
     interruptions: int = 0
+    #: Running items only: when the platform reported a preemption of the
+    #: claim's execution and its restart has not arrived, the claim's expiry
+    #: (the restart grace). Past it the claim lapses and the member is
+    #: runnable, so a tick waits until then rather than lingering out with
+    #: nobody due back (STA-129). None for any other member.
+    restart_expected_by: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -170,7 +177,7 @@ async def get_frontier(
             sealed=plan.sealed_at is not None,
             runnable=[_member(r, bodies, counts) for r in runnable],
             discovery_jobs=[_member(r, bodies) for r in discovery],
-            running=[_member(r, bodies, counts) for r in running],
+            running=[_member(r, bodies, counts, running=True) for r in running],
             plan_complete=plan_complete,
             closure=closure,
             build_status=build.status,
@@ -199,6 +206,7 @@ def _members_query(plan_id: UUID):
             TaskInstance.expanded_at,
             Task.status,
             Task.claim_expires_at,
+            Task.preempted_at,
             blocked.label("blocked"),
         )
         .select_from(PlanMember)
@@ -255,8 +263,15 @@ def _member(
     row: Any,
     bodies: dict[UUID, dict[str, Any]],
     counts: dict[UUID, tuple[int, int]] | None = None,
+    *,
+    running: bool = False,
 ) -> FrontierMember:
     attempts, interruptions = (counts or {}).get(row.task_pk, (0, 0))
+    # Every claiming start and every restart clear ``preempted_at``, so on a
+    # live claim it means exactly "a restart is outstanding".
+    restart_expected_by = (
+        row.claim_expires_at if running and row.preempted_at is not None else None
+    )
     return FrontierMember(
         task_id=row.task_id,
         task_pk=row.task_pk,
@@ -267,4 +282,5 @@ def _member(
         body=bodies[row.instance_id],
         attempts=attempts,
         interruptions=interruptions,
+        restart_expected_by=restart_expected_by,
     )

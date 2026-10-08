@@ -352,12 +352,21 @@ class PlansMixin(RegistryState):
     # -- the frontier -------------------------------------------------------------------
 
     def _frontier_member(
-        self, member: MemberRow, *, counts_for: UUID | None = None
+        self,
+        member: MemberRow,
+        *,
+        counts_for: UUID | None = None,
+        running: bool = False,
     ) -> FrontierMember:
         """A member as the frontier lists it; ``counts_for`` (a build id)
         adds the ledger counts, as the server does on runnable and running
-        items only."""
+        items only, and ``running`` the end of an outstanding preemption
+        restart's grace, as it does on running items."""
         instance = self.instances[member.instance_id]
+        task = self.tasks[member.task_id]
+        restart_expected_by = (
+            task.claim_expires_at if running and task.preempted_at is not None else None
+        )
         attempts, interruptions = (
             self.attempt_counts(counts_for, member.task_id)
             if counts_for is not None
@@ -372,6 +381,7 @@ class PlansMixin(RegistryState):
             body=dict(instance.body),
             attempts=attempts,
             interruptions=interruptions,
+            restart_expected_by=restart_expected_by,
         )
 
     def attempt_counts(self, build_id: UUID, task_id: str) -> tuple[int, int]:
@@ -429,7 +439,9 @@ class PlansMixin(RegistryState):
                 task.status == "running" and not live
             )
             if live:
-                running.append(self._frontier_member(member, counts_for=build_id))
+                running.append(
+                    self._frontier_member(member, counts_for=build_id, running=True)
+                )
             elif not instance.expanded:
                 if task.status != "completed":
                     discovery.append(self._frontier_member(member))

@@ -12,6 +12,7 @@ import asyncio
 import logging
 import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from uuid import UUID
 
 from stardag.build._base import (
@@ -55,6 +56,11 @@ _LIFETIME_MARGIN_FRACTION = 0.3
 # exceed; this bounds the pass by the clock instead. The last tenth is for
 # the claims still in flight, the release, the drain and the successor.
 _CLAIM_DEADLINE_FRACTION = 0.9
+
+# How long past an outstanding restart's grace a waiting tick re-reads the
+# frontier: the grace is a server timestamp turned into this tick's clock, so
+# a little slack keeps a modest clock skew from costing an extra read.
+_RESTART_LAPSE_MARGIN_SECONDS = 2.0
 
 # The server caps a summary at 8 KiB; an unbounded message would turn "this
 # tick crashed" into no record at all.
@@ -299,6 +305,9 @@ class _Driver:
         self.cleared_a_wakeup = False
         # Set by ``drive`` (the loop's clock); None: no limit known.
         self.claim_deadline: float | None = None
+        # When the earliest outstanding preemption restart's grace ends, on
+        # the loop's clock, as of the last frontier read; None: none.
+        self.restart_due: float | None = None
 
     def _out_of_time(self) -> bool:
         return (
@@ -310,7 +319,9 @@ class _Driver:
         if clear:
             await self.registry.build_clear_notify_aio(self.build_id)
             self.cleared_a_wakeup = True
-        return await self.registry.build_get_frontier_aio(self.build_id)
+        frontier = await self.registry.build_get_frontier_aio(self.build_id)
+        self.restart_due = _restart_due(frontier)
+        return frontier
 
     async def _follow_deployment(self, frontier: BuildFrontier) -> BuildFrontier | None:
         """The frontier to act on, rolled over to this tick's deployment if
@@ -464,6 +475,20 @@ class _Driver:
         the deadline (``linger_extended_unflagged`` counts them: work no flag
         announced); one that does not ends the tick.
 
+        **An outstanding restart.** A preemption keeps the task RUNNING
+        under a claim shortened to the restart grace, so until the restart
+        arrives or the grace ends the frontier has nothing to act on --
+        and a tick that lingered out then would leave nobody to take the
+        claim over when it lapses: no report is coming, and a lapse sets no
+        flag (STA-129). So an exit pass that does not act, while a running
+        member awaits a restart, keeps the lease: it lingers again, to the
+        earlier of the ordinary linger and the grace's end, and repeats the
+        exit pass there. The restart's own start ends the wait at the next
+        exit pass; the lapse makes the member runnable and the exit pass
+        takes it over. Bounded by the grace, which a preemption only ever
+        shortens; at the lifetime bound the wait is "still busy" and a
+        successor carries it on.
+
         With ``linger_seconds <= 0`` there is no deadline to meet: one pass
         and out, with neither the handshake's pre-release read nor the exit
         pass. That is the watchdog sweep's own tick, a safety net that runs
@@ -490,6 +515,15 @@ class _Driver:
 
         def linger_deadline() -> float:
             deadline = loop.time() + self.config.linger_seconds
+            return deadline if lifetime_end is None else min(deadline, lifetime_end)
+
+        def restart_deadline() -> float:
+            # Never sooner than one poll interval: a grace that has ended by
+            # our clock but not the server's re-reads at that pace.
+            assert self.restart_due is not None
+            now = loop.time()
+            due = max(self.restart_due, now + self.config.poll_interval_seconds)
+            deadline = min(now + self.config.linger_seconds, due)
             return deadline if lifetime_end is None else min(deadline, lifetime_end)
 
         def still_busy_at_the_bound() -> bool:
@@ -527,10 +561,16 @@ class _Driver:
             if stop:
                 return
             if exit_pass:
-                if not acted:
-                    return
-                self.summary.linger_extended_unflagged += 1
                 exit_pass = False
+                if acted:
+                    self.summary.linger_extended_unflagged += 1
+                elif self.restart_due is None:
+                    return
+                else:
+                    if still_busy_at_the_bound():
+                        return
+                    self.summary.restart_awaited += 1
+                    deadline = restart_deadline()
             # After every pass, not only one that acted: the completion that
             # woke this tick may have flagged neighbours while giving this
             # build nothing to do.
@@ -574,6 +614,28 @@ class _Driver:
                     if still_busy_at_the_bound():
                         return
                     break
+
+
+def _restart_due(frontier: BuildFrontier) -> float | None:
+    """When the earliest outstanding preemption restart's grace ends, on the
+    running loop's clock (plus a margin); None when no running member awaits
+    a restart, or the registry does not say."""
+    dues = [
+        m.restart_expected_by
+        for m in frontier.running
+        if m.restart_expected_by is not None
+    ]
+    if not dues:
+        return None
+    earliest = min(
+        d if d.tzinfo is not None else d.replace(tzinfo=timezone.utc) for d in dues
+    )
+    remaining = (earliest - datetime.now(timezone.utc)).total_seconds()
+    return (
+        asyncio.get_running_loop().time()
+        + max(0.0, remaining)
+        + _RESTART_LAPSE_MARGIN_SECONDS
+    )
 
 
 _warned_missing_spawner = False

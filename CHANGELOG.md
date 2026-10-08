@@ -8,6 +8,27 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Fixed: a function timeout read as a preemption when a second interrupt
+  landed during the checkpoint** (STA-129). Modal follows a timeout's
+  `InputCancellation` with a grace-period SIGINT, which can land while the
+  task's `except MODAL_INTERRUPTIONS:` block is still checkpointing. The
+  `KeyboardInterrupt` it raises there replaces the cancellation, which
+  survives only as its context, and the runner took the nearest signal on
+  the chain: it reported `TASK_PREEMPTED`, kept the claim and waited for a
+  restart Modal never makes for a timed-out input. Any `InputCancellation`
+  on the chain now decides, and elapsed time at or past the declared
+  timeout is a timeout whatever the chain holds.
+- **Fixed: a preemption whose restart never arrived stalled the build**
+  (STA-129). A recorded preemption shortens the claim to a 15-minute
+  restart grace, but a lapse sets no wake-up flag, so once the tick the
+  preemption woke had lingered out, nothing took the claim over. A tick
+  now keeps the lease while a running member awaits a restart, re-reading
+  the frontier at the earlier of its ordinary linger and the grace's end:
+  the restart's arrival ends the wait, and the lapse lets it take the task
+  over. At its lifetime bound the wait passes to a successor tick.
+  Counted as `TickSummary.restart_awaited`. Against a registry that does
+  not serve `restart_expected_by` the tick behaves as before.
+
 - **Fixed: a task started under a newer deployment than the one that sent it
   is missing any field added since** (STA-124). Modal calls carried task
   objects cloudpickled, and workers are resolved by name — the app's
@@ -89,6 +110,10 @@ retry/cancel/exclude`, and `builds stop` when the build keeps running,
 
 ### Server
 
+- **`restart_expected_by` on the frontier's `running` items** (STA-129):
+  the claim's expiry while a preemption's restart is outstanding, null
+  otherwise. Additive; it is what lets a tick wait out a restart that may
+  never come instead of leaving the claim to lapse unattended.
 - **Fixed: a build re-flagged after its tick ended waited out the hand-out
   window** (STA-34). `wake-candidates` hands a flagged build out at most once
   per 120 s, and the window outlived the tick it had spawned: a build flagged
