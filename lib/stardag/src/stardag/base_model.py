@@ -309,6 +309,14 @@ class StardagBaseModel(BaseModel):
         any subclass ``before`` validator), keeps it with the built model on
         success, and the outermost one warns for the models reachable from
         its result.
+
+        The outermost compat validation is the outermost *StardagBaseModel*
+        one, so a probed member is filtered only when such a model encloses
+        the union. A union validated with no enclosing one (a bare
+        ``TypeAdapter(A | B)``, or a field of a plain pydantic model) makes
+        each member its own root, and a member pydantic validates and then
+        outscores still warns. Every stardag compat path validates a task
+        model, which always encloses its fields.
         """
         mode: ValidationContextMode = (
             info.context.get(CONTEXT_MODE_KEY) if info.context else None
