@@ -1,4 +1,7 @@
 import asyncio
+import copy
+import threading
+from functools import cached_property
 from typing import Annotated, Type
 from unittest.mock import Mock
 from uuid import uuid4
@@ -671,3 +674,97 @@ def test_from_registry_rejects_a_body_whose_recomputed_id_moves(
     )
     with pytest.raises(TaskRehydrationError, match="does not match"):
         MockTask.from_registry(id=stale_id, registry=mock_registry)
+
+
+class _CopySource(Task[str]):
+    n: int
+
+    @cached_property
+    def doubled(self) -> int:
+        return self.n * 2
+
+    @cached_property
+    def lock(self) -> threading.Lock:
+        return threading.Lock()
+
+    def run(self) -> None:
+        pass
+
+
+class _CopyParent(Task[str]):
+    child: _CopySource
+
+    def run(self) -> None:
+        pass
+
+
+def _read_derived(task: BaseTask) -> None:
+    """Populate every cached derived value on ``task``."""
+    _ = task.id, task.instance_hash, task.instance_body()
+
+
+class TestModelCopyRecomputesDerivedValues:
+    """``model_copy`` must not carry the source's cached id, instance hash or
+    instance body over to a copy whose fields differ (STA-128)."""
+
+    @pytest.mark.parametrize("deep", [False, True])
+    def test_update_after_the_source_id_was_read(self, deep: bool):
+        source = _CopySource(n=1)
+        _read_derived(source)
+
+        copied = source.model_copy(update={"n": 2}, deep=deep)
+
+        expected = _CopySource(n=2)
+        assert copied.id == expected.id != source.id
+        assert copied.instance_hash == expected.instance_hash
+        assert copied.instance_body() == expected.instance_body()
+
+    def test_user_cached_property_is_recomputed(self):
+        source = _CopySource(n=1)
+        assert source.doubled == 2
+
+        assert source.model_copy(update={"n": 5}).doubled == 10
+
+    def test_nested_task_replaced_on_a_read_parent(self):
+        parent = _CopyParent(child=_CopySource(n=1))
+        _read_derived(parent)
+
+        new_child = _CopySource(n=2)
+        copied = parent.model_copy(update={"child": new_child})
+
+        expected = _CopyParent(child=new_child)
+        assert copied.id == expected.id != parent.id
+        assert copied.instance_hash == expected.instance_hash
+
+    def test_copy_without_update_keeps_the_identity(self):
+        source = _CopySource(n=1)
+        _read_derived(source)
+
+        copied = source.model_copy()
+
+        assert copied.id == source.id
+        assert copied.instance_hash == source.instance_hash
+
+    def test_deep_copy_skips_a_cached_value_that_cannot_be_deep_copied(self):
+        source = _CopySource(n=1)
+        source_lock = source.lock
+        _read_derived(source)
+
+        for copied in (
+            source.model_copy(deep=True),
+            source.model_copy(update={"n": 2}, deep=True),
+            copy.deepcopy(source),
+        ):
+            assert "lock" not in copied.__dict__
+            assert copied.lock is not source_lock
+        assert source.__dict__["lock"] is source_lock
+        assert copy.deepcopy(source).id == source.id
+
+    def test_source_is_unaffected(self):
+        source = _CopySource(n=1)
+        source_id = source.id
+
+        source.model_copy(update={"n": 2})
+
+        assert source.__dict__["id"] == source_id
+        assert source.id == _CopySource(n=1).id
