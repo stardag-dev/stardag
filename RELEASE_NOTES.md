@@ -6,6 +6,82 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.28.0 — Wake-ups that arrive
+
+Released 2026-10-08 together with the registry server `server-v0.7.0`. No
+breaking API change; one upgrade step for Modal apps.
+
+### Upgrading: redeploy Modal apps before triggering them
+
+Modal calls now carry a task as its instance body instead of a cloudpickle
+(see below). A receiver on 0.28.0 still accepts a pickled task, so a tick
+from an older deployment keeps working, but **an app deployed with an older
+stardag cannot read the new form**. After upgrading the SDK, run
+`stardag modal deploy` for each app before triggering builds on it.
+
+The server upgrade is a single additive migration (one nullable column).
+Against a `server-v0.6.0` registry the SDK keeps working: `stardag builds
+stalled` answers 404 there, and the preemption-restart wait below stays
+inert until the registry serves `restart_expected_by`. Self-hosted
+deployments upgrade with `stardag self-host upgrade`, which now defaults to
+`0.7.0`.
+
+### A task survives a redeploy mid-build
+
+A tick or resident build function still running deployment N used to spawn
+N's pickled task onto N+1's workers, and reading a field added in N+1 raised
+`AttributeError`, often on the retry of a long task, long after the deploy.
+The receiver now rehydrates the task body in compat mode with the task-id
+check: an added field takes its default, a removed one is dropped, and a
+significant change is refused. A task that cannot be rehydrated (an
+`AliasTask`, a class defined in `__main__` or a function) still goes pickled,
+with a warning once per class.
+
+### Reactive wake-ups are not lost or delayed
+
+- A tick takes one more look at the frontier before exiting, so a lost
+  wake-up flag no longer strands work.
+- A tick bounds itself to 70% of its container's time limit. A busy build
+  then hands over to a successor tick instead of being killed holding the
+  lease (the new `lifetime_reached` outcome).
+- Ticks drain wake-up candidates after every pass, and a build re-flagged
+  after its tick ended is handed out at once rather than after the 120 s
+  window (server side).
+- CLI writes (`tasks retry/cancel/exclude`, `builds stop`) now wake the build
+  they changed.
+- New `stardag builds tick <build-id>` (or `--flagged`) is the manual
+  fallback when no watchdog is deployed, and `stardag builds stalled` lists
+  running reactive builds nobody has served for a while.
+
+### Timeouts and preemptions told apart
+
+A timeout whose grace-period interrupt landed mid-checkpoint was reported as
+a preemption, and the task waited for a restart Modal never makes. It is now
+classified as a timeout. A preemption whose restart never comes is taken
+over by a tick when its 15-minute grace ends, instead of stalling the build.
+
+### Other fixes
+
+- **Registry answers lost in transit are retried**, the response body
+  included: up to three retries with jittered backoff on timeouts, network
+  errors, truncated bodies and gateway errors. `build_create` mints the build
+  id client-side, so a re-sent create finds its own build.
+- **`Task.model_copy(update=...)` no longer keeps the source's id.** Cached
+  `id`, `instance_hash` and instance body are recomputed for the copy.
+- **No spurious "Dropping stored field(s)" warnings** for union members
+  pydantic only probed during rehydration.
+
+### New public API
+
+- `RegistryABC.build_list_stalled()` (the default raises
+  `NotImplementedError`; custom registries need not implement it).
+- `TickSummary` gains `linger_extended_unflagged` and `restart_awaited`, and
+  the `lifetime_reached` outcome.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list.
+
+---
+
 ## v0.27.0 — Every fact gets its own home
 
 Released 2026-09-25 together with the registry server `server-v0.6.0`: the
