@@ -72,7 +72,8 @@ from stardag.integration.modal._container_setup import (
 from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.integration.modal._profile import get_profile_env_vars, get_profile_secret
 from stardag.integration.modal._protocols import BuildFunction, RunFunction
-from stardag.integration.modal._runner import MODAL_INTERRUPTIONS, Runner
+from stardag.integration.modal._interruptions import MODAL_INTERRUPTIONS
+from stardag.integration.modal._runner import Runner
 from stardag.integration.modal._selector import (
     WorkerSelection,
     WorkerSelector,

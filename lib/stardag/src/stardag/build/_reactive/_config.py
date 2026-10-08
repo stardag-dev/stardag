@@ -145,6 +145,10 @@ class TickSummary:
     # final read of the frontier still found work, which no flag announced
     # (a flag lost to a lock, a notify that never arrived, a lapsed claim).
     linger_extended_unflagged: int = 0
+    # Exit pass: nothing to act on, but a running member's preemption
+    # restart was outstanding, so the tick kept the lease until the restart
+    # arrives or its grace ends and the member becomes runnable (STA-129).
+    restart_awaited: int = 0
     # Successor ticks spawned for a flag set while the lease was released.
     successor_spawned: int = 0
     # Ticks spawned for other builds the registry flagged.

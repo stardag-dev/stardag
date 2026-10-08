@@ -308,3 +308,66 @@ async def test_runnable_and_running_items_carry_attempt_counts(h: Harness):
     assert _counts(frontier.running) == {t.task_id: (3, 1)}
     # Discovery jobs carry no counts (they are not scheduled executions).
     assert all(m.attempts == 0 for m in frontier.discovery_jobs)
+
+
+async def test_a_running_member_awaiting_a_restart_says_until_when(h: Harness):
+    """STA-129 — a preemption keeps the claim and shortens it to the restart
+    grace. A tick reading the frontier then has nothing to act on until the
+    restart arrives or the grace ends, and it can only wait for the second
+    if it knows when that is: ``restart_expected_by`` is the claim's expiry
+    while a restart is outstanding, and None once the restart's own start
+    lands (or on any other running member). Past it the member is runnable,
+    which is how the task is recovered without anyone's intervention."""
+    from stardag_api.services.transitions import Transition
+
+    t, other = item("T"), item("Other")
+    build, plan = await h.planned([t, other], [t, other])
+    execution = await h.start(plan.id, t)
+    await h.start(plan.id, other)
+
+    frontier = await h.frontier(build)
+    assert {m.task_id: m.restart_expected_by for m in frontier.running} == {
+        t.task_id: None,
+        other.task_id: None,
+    }
+
+    await h.transition(plan.id, t, Transition.preempt(execution))
+    expires = (await h.task(t))["claim_expires_at"]
+    frontier = await h.frontier(build)
+    assert {m.task_id: m.restart_expected_by for m in frontier.running} == {
+        t.task_id: expires,
+        other.task_id: None,
+    }
+
+    # The grace ends with no restart: runnable, and nothing awaited.
+    await h.lapse_claim(t)
+    frontier = await h.frontier(build)
+    assert task_ids(frontier.runnable) == {t.task_id}
+    assert task_ids(frontier.running) == {other.task_id}
+    assert frontier.running[0].restart_expected_by is None
+
+
+async def test_a_restart_that_arrives_clears_the_expectation(h: Harness):
+    from stardag_api.services.transitions import Transition
+
+    t = item("T")
+    build, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    await h.transition(plan.id, t, Transition.preempt(execution))
+    await h.transition(plan.id, t, Transition.start(execution, claim=False))
+    (member,) = (await h.frontier(build)).running
+    assert member.restart_expected_by is None
+
+
+async def test_a_renewal_clears_the_expectation(h: Harness):
+    """A renewal is the holder saying it is alive: left set, the
+    expectation would track a renewing claim and keep ticks waiting."""
+    from stardag_api.services.transitions import Transition
+
+    t = item("T")
+    build, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    await h.transition(plan.id, t, Transition.preempt(execution))
+    await h.renew(t, execution)
+    (member,) = (await h.frontier(build)).running
+    assert member.restart_expected_by is None

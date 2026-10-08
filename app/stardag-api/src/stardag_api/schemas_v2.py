@@ -343,6 +343,10 @@ class FrontierItemResponse(FrontierMemberResponse):
 
     attempts: int
     interruptions: int
+    #: Running items only: the end of an outstanding preemption restart's
+    #: grace, after which the claim lapses and the member is runnable. A tick
+    #: waits for it instead of lingering out (STA-129). Null otherwise.
+    restart_expected_by: datetime | None = None
 
 
 class ClosureConflictResponse(BaseModel):

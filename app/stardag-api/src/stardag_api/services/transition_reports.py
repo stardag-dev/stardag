@@ -269,6 +269,10 @@ class ReportSteps(StepBase):
                 claim_outcome=claim_outcome.value if claim_outcome else None,
             )
         t.claim_expires_at = self.now + claim_ttl(self.transition.claim_ttl_seconds)
+        # A renewal is the holder saying it is alive, so no restart is
+        # outstanding any more: left set, ``restart_expected_by`` would
+        # track a renewing claim and keep a tick waiting on it (STA-129).
+        t.preempted_at = None
         await self.session.flush()
         return self.outcome(applied=True)
 
