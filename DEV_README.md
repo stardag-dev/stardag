@@ -148,16 +148,14 @@ pull requests from forks.
 **You do not normally need to do anything.** A pull request touching any of
 these runs the tier automatically:
 
-- `lib/stardag/src/stardag/integration/modal/`
-- `lib/stardag/src/stardag/build/`
-- `lib/stardag/src/stardag/testing/modal/`
+- `lib/stardag/src/`, except `stardag/_cli/` and `stardag/selfhost/` (nothing
+  a worker imports)
 - `lib/stardag/tests/test_integration/test_modal/`
 - `lib/stardag/pyproject.toml` (the dependency list baked into the worker image)
 - `tox.ini`, `.github/workflows/modal-live.yml` (the harness itself)
 
 **The `modal-live` label is the manual override**, for a change that touches
-none of those and still warrants a live run — a dependency bump, a `selfhost`
-change, a hunch. The `Decide what to run` job logs which rule applied and
+none of those and still warrants a live run — a dependency bump, a hunch. The `Decide what to run` job logs which rule applied and
 why, so a surprising skip is one click to explain.
 
 The schedule is weekly rather than nightly, and it is not there to catch
@@ -726,11 +724,16 @@ under your home directory finds your real config several levels up.
 
 The same workflow runs both tiers, decided separately, into the same
 per-run Modal environment. A change under `app/stardag-api/`,
-`lib/stardag/src/stardag/{build,registry,integration/modal,selfhost,testing/modal,_cli}/`
-or `integration-tests/` triggers this one. (`_cli/` is in that list because
-the post-deploy wiring the harness reuses — login, workspace resolution,
-minting the API key and pushing it as a Modal secret — lives in
-`_cli/_selfhost_connect.py`.) Teardown is its own job that waits for
+`lib/stardag/src/` or `integration-tests/` triggers this one. Unlike the
+Modal tier it keeps `_cli/` and `selfhost/`, because the post-deploy wiring
+the harness reuses — login, workspace resolution, minting the API key and
+pushing it as a Modal secret — lives in `_cli/_selfhost_connect.py`.
+
+Both tiers match the SDK's whole source tree rather than a list of its
+packages, because the task model is what crosses the Modal boundary, and it
+reaches `_core/`, `base_model.py`, `target/`, `config/` and more from a
+worker. A list once let a `base_model.py` change that made every by-value
+task unpicklable merge without either tier running. Teardown is its own job that waits for
 both tiers — sharing an environment means whichever finished first would
 otherwise delete the other's stack out from under it.
 
