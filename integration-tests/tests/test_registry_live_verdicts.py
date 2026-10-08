@@ -546,3 +546,122 @@ def test_no_annotation_when_there_was_no_timeout(
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     assert diagnose.main(["--dir", str(tmp_path)]) == 0
     assert "::warning" not in capsys.readouterr().out
+
+
+# --- a body cut short (STA-102) ------------------------------------------
+
+# The exact message of the occurrence that prompted STA-102, as the
+# sidecar's ``message`` carries it.
+_CUT_SHORT = _occurrence(
+    request_method="GET",
+    request_path="/api/v2/tasks/abc/events",
+    timeout="httpcore.RemoteProtocolError",
+    message=(
+        "peer closed connection without sending complete message body "
+        "(received 0 bytes, expected 2560)"
+    ),
+)
+
+
+def _served_events(seconds_before: float = 2.0) -> str:
+    return _line(
+        _AT - dt.timedelta(seconds=seconds_before),
+        "GET",
+        "/api/v2/tasks/abc/events",
+        status=200,
+        duration="41.0 ms",
+        execution="12.0 ms",
+    )
+
+
+def test_a_body_cut_short_states_c_as_observed_fact(tmp_path: Path) -> None:
+    """The client's half of C, out of the exception, beside the server's.
+
+    The server served the request in milliseconds; the client got the
+    head and none of the 2560 bytes it declared. That is C's first
+    reading -- the app answered in full -- with nothing left to infer.
+    """
+    _log(tmp_path, *_bracket(), _served_events())
+    verdict, evidence = verdict_for(
+        _CUT_SHORT, parse_access_log(tmp_path / REGISTRY_LOG_NAME)
+    )
+    text = " ".join(evidence)
+    assert verdict == "HYPOTHESIS C"
+    assert "declared 2560 bytes" in text
+    assert "received 0 of them" in text
+    assert "C's first reading" in text
+
+
+def test_a_body_cut_short_the_server_never_logged_is_cs_second_reading(
+    tmp_path: Path,
+) -> None:
+    """A head arrived for a request the app never logged completing."""
+    _log(tmp_path, *_bracket())
+    verdict, evidence = verdict_for(
+        _CUT_SHORT, parse_access_log(tmp_path / REGISTRY_LOG_NAME)
+    )
+    assert verdict == "HYPOTHESIS C"
+    assert "C's second reading" in " ".join(evidence)
+
+
+def test_several_candidates_leave_cs_reading_open(tmp_path: Path) -> None:
+    """A fast neighbour's line is not evidence this call was logged."""
+    _log(tmp_path, *_bracket(), _served_events(2.0), _served_events(3.0))
+    _, evidence = verdict_for(
+        _CUT_SHORT, parse_access_log(tmp_path / REGISTRY_LOG_NAME)
+    )
+    text = " ".join(evidence)
+    assert "stays open" in text
+    assert "first reading:" not in text and "second reading:" not in text
+
+
+def test_a_body_cut_short_does_not_override_a_slow_handler(tmp_path: Path) -> None:
+    """The fact is added; the decision is still the access log's."""
+    _log(
+        tmp_path,
+        *_bracket(),
+        _line(
+            _AT - dt.timedelta(seconds=30),
+            "GET",
+            "/api/v2/tasks/abc/events",
+            status=200,
+            execution="21.4 s",
+        ),
+    )
+    verdict, evidence = verdict_for(
+        _CUT_SHORT, parse_access_log(tmp_path / REGISTRY_LOG_NAME)
+    )
+    assert verdict == "HYPOTHESIS B"
+    assert "received 0 of them" in " ".join(evidence)
+    assert "reading" not in " ".join(evidence)
+
+
+def test_a_timeout_carries_no_body_evidence(tmp_path: Path) -> None:
+    """Only a cut-short body says how much of it arrived."""
+    _log(tmp_path, *_bracket(), _line(_AT - dt.timedelta(seconds=30)))
+    _, evidence = verdict_for(
+        _occurrence(timeout="httpx.ReadTimeout", message="timed out"),
+        parse_access_log(tmp_path / REGISTRY_LOG_NAME),
+    )
+    assert "declared" not in " ".join(evidence)
+
+
+def test_the_report_and_annotation_name_the_fault_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """So a body cut short reads as one, not as another read timeout."""
+    _log(tmp_path, *_bracket(), _served_events())
+    (tmp_path / "timeout-call-test-a-1.json").write_text(json.dumps(_CUT_SHORT))
+
+    assert "fault:    RemoteProtocolError -- body 0 of 2560 bytes" in report(tmp_path)
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert diagnose.main(["--dir", str(tmp_path)]) == 0
+    assert "[call] (RemoteProtocolError)" in capsys.readouterr().out
+
+
+def test_a_record_without_a_fault_class_still_reports(tmp_path: Path) -> None:
+    """A sidecar older than the field, or one written without it."""
+    _log(tmp_path, *_bracket(), _line(_AT - dt.timedelta(seconds=30)))
+    (tmp_path / "timeout-call-test-a-1.json").write_text(json.dumps(_occurrence()))
+    assert "fault:    ?" in report(tmp_path)

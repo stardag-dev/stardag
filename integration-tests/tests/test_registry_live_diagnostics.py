@@ -663,3 +663,78 @@ def test_a_timeout_with_no_request_on_it_still_records(
     assert facts["request_method"] is None
     assert facts["request_path"] is None
     assert len((tmp_path / TIMEOUT_MARKER_NAME).read_text().splitlines()) == 1
+
+
+def test_a_body_cut_short_is_recorded_as_one_and_reconciled(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """STA-102 end to end: classified, recorded with its class, joined.
+
+    The shape of run 35756822725 -- httpcore's error under httpx's --
+    through the record, the marker and the sidecar, and then through the
+    access-log join, which is the step that once reported "nothing to
+    reconcile" for it.
+    """
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        _diagnostics,
+        "probe_boot",
+        lambda *a, **k: BootProbe(
+            answered=True, elapsed=0.3, boot_id="boot-one", error=None
+        ),
+    )
+
+    class RemoteProtocolError(Exception):
+        pass
+
+    RemoteProtocolError.__module__ = "httpcore._exceptions"
+    message = (
+        "peer closed connection without sending complete message body "
+        "(received 0 bytes, expected 2560)"
+    )
+    try:
+        try:
+            raise RemoteProtocolError(message)
+        except RemoteProtocolError as inner:
+            raise httpx.RemoteProtocolError(message, request=_REQUEST) from inner
+    except httpx.RemoteProtocolError as caught:
+        error = caught
+    fault = transport_timeout(error)
+    assert fault is not None
+
+    record_transport_timeout(
+        _deployment(),
+        nodeid="tests_registry_live/test_x.py::test_a",
+        phase="call",
+        error=error,
+        timeout=fault,
+    )
+
+    record = next(tmp_path.glob("timeout-*.txt")).read_text()
+    assert "BODY CUT SHORT" in record
+    assert "TRANSPORT TIMEOUT" not in record
+    assert "RemoteProtocolError" in (tmp_path / TIMEOUT_MARKER_NAME).read_text()
+    facts = json.loads(next(tmp_path.glob("timeout-*.json")).read_text())
+    assert facts["timeout"].endswith(".RemoteProtocolError")
+
+    from stardag_integration_tests.registry_live import diagnose
+
+    (tmp_path / diagnose.REGISTRY_LOG_NAME).write_text(
+        "2026-01-01 00:00:00+00:00 ta-1  GET /health -> 200 OK "
+        "(duration: 1.0 ms, execution: 1.0 ms)\n"
+    )
+    text = diagnose.report(tmp_path)
+    assert "Nothing to reconcile" not in text
+    assert "fault:    RemoteProtocolError -- body 0 of 2560 bytes" in text
+
+
+@pytest.mark.parametrize(
+    ("fault", "headline"),
+    [
+        (httpx.ReadTimeout("t", request=_REQUEST), "TRANSPORT TIMEOUT"),
+        (httpx.RemoteProtocolError("p", request=_REQUEST), "BODY CUT SHORT"),
+        (httpx.ConnectError("c", request=_REQUEST), "TRANSPORT FAULT (ConnectError)"),
+    ],
+)
+def test_the_record_headline_names_the_fault(fault: Exception, headline: str) -> None:
+    assert _diagnostics._headline(fault).startswith(headline)

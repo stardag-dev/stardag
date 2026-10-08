@@ -1,4 +1,4 @@
-"""Turn a transport timeout's facts into a verdict, using the access log.
+"""Turn a transport fault's facts into a verdict, using the access log.
 
 The boot probe that runs at the moment of failure can only establish
 whether the container was serving (see ``_diagnostics``). It cannot tell
@@ -236,8 +236,106 @@ def _seconds(value: str, unit: str) -> float:
     return float(value) / 1000.0 if unit == "ms" else float(value)
 
 
+# What httpcore says when the connection closes before ``Content-Length``
+# bytes of body arrived: "peer closed connection without sending complete
+# message body (received 0 bytes, expected 2560)". The two numbers are the
+# whole of the client's half of hypothesis C, so they are read back out of
+# the recorded message rather than left in it as prose.
+_BODY_CUT_SHORT = re.compile(
+    r"received (?P<received>\d+) bytes, expected (?P<expected>\d+)"
+)
+
+
+def fault_class(occurrence: dict) -> str:
+    """The short name of the fault that failed the call, or ``?``.
+
+    Recorded as ``timeout`` in the sidecar, a field named before anything
+    but a timeout was recognised; it holds whichever transport fault the
+    classifier found.
+    """
+    recorded = occurrence.get("timeout")
+    if not isinstance(recorded, str) or not recorded:
+        return "?"
+    return recorded.rpartition(".")[2]
+
+
+def body_cut_short(occurrence: dict) -> tuple[int, int] | None:
+    """``(received, expected)`` body bytes, if the response was cut short."""
+    if fault_class(occurrence) != "RemoteProtocolError":
+        return None
+    match = _BODY_CUT_SHORT.search(str(occurrence.get("message", "")))
+    if match is None:
+        return None
+    return int(match["received"]), int(match["expected"])
+
+
 def verdict_for(occurrence: dict, log: AccessLog) -> tuple[str, list[str]]:
     """The hypothesis this occurrence supports, and the evidence for it.
+
+    A body cut short adds a fact that no timeout carries: the response
+    head arrived, with a ``Content-Length``, and the body did not. That
+    is the client's half of hypothesis C *observed* rather than inferred,
+    and set beside the server's line it also says which of C's two
+    readings this was -- the app answered and the body was lost, or the
+    head came from somewhere that never heard back from the app.
+    """
+    verdict, evidence = _verdict(occurrence, log)
+    cut = body_cut_short(occurrence)
+    if cut is None:
+        return verdict, evidence
+    received, expected = cut
+    evidence = [
+        f"The response head arrived and declared {expected} bytes of body; "
+        f"the client received {received} of them before the connection "
+        f"closed. A response existed, and its body did not reach the "
+        f"client.",
+        *evidence,
+    ]
+    if verdict == "HYPOTHESIS C":
+        evidence.append(_c_reading(occurrence, log))
+    return verdict, evidence
+
+
+def _c_reading(occurrence: dict, log: AccessLog) -> str:
+    """Which of C's two readings a body cut short supports, if either.
+
+    Only called on a C verdict, so the timestamp parsed and the log is
+    present. The reading rests on *the* request's line, so it is claimed
+    only where that line can be singled out: one match, or none over a
+    covered window. Several candidates on an id-less path leave it open --
+    a fast neighbour's line says nothing about whether this call's was
+    ever written.
+    """
+    at = _parsed_time(occurrence.get("observed_at"))
+    method = occurrence.get("request_method")
+    path = occurrence.get("request_path")
+    if at is None or method is None or path is None:
+        return (
+            "The request is not identifiable, so which of C's two readings "
+            "this is stays open."
+        )
+    matches = log.around(at, method=method, path=path)
+    if len(matches) == 1:
+        return (
+            "With the server's own line for this request, that is C's first "
+            "reading: the app answered in full, and the body was lost between "
+            "the container and the runner."
+        )
+    if not matches:
+        return (
+            "With no server line for this request, that is C's second "
+            "reading: a response head reached the client while the app never "
+            "logged completing the request."
+        )
+    return (
+        f"{len(matches)} calls to {method} {path} were served in the window, "
+        f"so whether this one's line is among them -- C's first reading -- "
+        f"or missing -- its second -- stays open."
+    )
+
+
+def _verdict(occurrence: dict, log: AccessLog) -> tuple[str, list[str]]:
+    """The decision, before any fault-specific evidence is added.
 
     The probe's own label is honoured where it is sound. A probe that did
     not answer, or answered slowly, *identified* hypothesis A at the
@@ -460,7 +558,7 @@ def report(directory: Path) -> str:
     log = parse_access_log(directory / REGISTRY_LOG_NAME)
     occurrences = load_occurrences(directory)
 
-    lines = ["", "=" * 72, "REGISTRY-LIVE TRANSPORT TIMEOUTS -- verdicts", "=" * 72]
+    lines = ["", "=" * 72, "REGISTRY-LIVE TRANSPORT FAULTS -- verdicts", "=" * 72]
 
     slowest_duration, slowest_execution = log.slowest()
     if not log.present:
@@ -494,7 +592,7 @@ def report(directory: Path) -> str:
     if not occurrences:
         lines += [
             "",
-            "  No transport-timeout records in this directory. Nothing to reconcile.",
+            "  No transport-fault records in this directory. Nothing to reconcile.",
             "=" * 72,
             "",
         ]
@@ -513,6 +611,12 @@ def report(directory: Path) -> str:
             f"  phase {occurrence.get('phase', '?')}, {attempt}, "
             f"at {occurrence.get('observed_at', '?')}",
             f"  request:  {request or 'not identifiable from the exception'}",
+            f"  fault:    {fault_class(occurrence)}"
+            + (
+                f" -- body {cut[0]} of {cut[1]} bytes"
+                if (cut := body_cut_short(occurrence))
+                else ""
+            ),
             f"  probe:    {occurrence.get('probe_label', '?')}",
             "",
             f"  VERDICT: {verdict}",
@@ -535,6 +639,7 @@ def annotation(verdicts: list[tuple[str, dict]]) -> str | None:
         return None
     parts = [
         f"{verdict}: {occurrence.get('nodeid', '?')} [{occurrence.get('phase', '?')}]"
+        f" ({fault_class(occurrence)})"
         for verdict, occurrence in verdicts
     ]
     return f"::warning title={ANNOTATION_TITLE}::" + "; ".join(parts)
