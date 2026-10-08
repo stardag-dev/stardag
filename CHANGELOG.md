@@ -8,6 +8,15 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Fixed: `Task.model_copy(update=...)` returned the source task's id**
+  (STA-128). A task caches its `id`, `instance_hash` and instance body on
+  first read, and pydantic copies that cache along with the fields, so once
+  the source's id had been read, every copy derived from it with a changed
+  field reported the source's identity and collided with it in the registry
+  and in any build. The bug was order-dependent and silent: the wrong id was
+  stable, so a golden-id test recorded it as correct. A copy now drops every
+  `functools.cached_property` value, the task's own and any a subclass
+  defines, and recomputes it from its own fields.
 - **Fixed: a task started under a newer deployment than the one that sent it
   is missing any field added since** (STA-124). Modal calls carried task
   objects cloudpickled, and workers are resolved by name — the app's

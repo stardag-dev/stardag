@@ -32,9 +32,14 @@ Implements a base model with advanced polymorphic serialization + validation fea
 
 from __future__ import annotations
 
+import functools
+import inspect
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Never, Type, TypeVar
+
+from typing_extensions import Self
 
 from pydantic import (
     BaseModel,
@@ -147,6 +152,18 @@ def is_significant(field: FieldInfo) -> bool:
     return meta.significant if meta is not None else True
 
 
+@functools.cache
+def _cached_property_names(cls: type) -> tuple[str, ...]:
+    """Names of the ``functools.cached_property`` attributes ``cls`` resolves."""
+    return tuple(
+        name
+        for name in dir(cls)
+        if isinstance(
+            inspect.getattr_static(cls, name, None), functools.cached_property
+        )
+    )
+
+
 class StardagBaseModel(BaseModel):
     """Custom, swap-in-replace for pydantic BaseModel, with features for hash mode +
     compat mode.
@@ -173,6 +190,22 @@ class StardagBaseModel(BaseModel):
         frozen=True,
         validate_default=True,
     )
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """Copy the model, dropping every ``functools.cached_property`` value.
+
+        A cached property stores its value in the instance ``__dict__``,
+        which pydantic copies along with the fields. On a task that includes
+        ``id``, ``instance_hash`` and the instance body, so a copy with
+        ``update=`` would report its source's identity once that had been
+        read. The copy recomputes them from its own fields instead.
+        """
+        copied = super().model_copy(update=update, deep=deep)
+        for name in _cached_property_names(type(copied)):
+            vars(copied).pop(name, None)
+        return copied
 
     @model_validator(mode="before")
     @classmethod
