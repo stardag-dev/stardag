@@ -1287,3 +1287,48 @@ class TestOutstandingRestart:
         )
         assert summary.outcome == "lifetime_reached"
         assert spawned == [(build_id, "app")]
+
+
+async def test_the_restart_wait_follows_the_frontier_a_rollover_returns(
+    default_in_memory_fs_target: Target,
+):
+    """A rollover replaces the frontier a pass acts on. The restart wait
+    must come from that one, not from the read before it: on an exit pass
+    the stale answer (no restart outstanding) would end the tick while the
+    rolled-over frontier still has a preempted claim to wait out."""
+    from datetime import datetime, timedelta, timezone
+
+    from stardag.build._reactive._tick import _Driver
+
+    registry = InMemoryRegistry()
+    task = SyncOnlyTask(name=f"r-{new_id()}")
+    old = registry.add_deployment(app_name="app", code_id="v1")
+    build_id, _ = await _plan(registry, [task], deployment_id=old)
+    new = registry.add_deployment(app_name="app", code_id="v2")
+
+    async def roll_over(frontier: BuildFrontier):
+        outcome = await roll_over_aio(registry, frontier, own_deployment_id=new)
+        # Under the new plan the task is running, then preempted.
+        plan = registry.active_plan(build_id)
+        assert plan is not None
+        execution = new_id()
+        registry.member_start(plan.id, str(task.id), execution_id=execution)
+        registry.member_preempt(plan.id, str(task.id), execution_id=execution)
+        row = registry.tasks[str(task.id)]
+        row.claim_expires_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+        return outcome
+
+    driver = _Driver(
+        build_id,
+        registry=registry,
+        task_executor=FakeDetachedExecutor(registry=registry),
+        config=FAST,
+        summary=TickSummary(outcome="lingered_out"),
+        deployment_id=new,
+        roll_over=roll_over,
+    )
+    before = await driver._read(clear=False)
+    assert driver.restart_due is None
+    after = await driver._follow_deployment(before)
+    assert after is not None and after.deployment_id == new
+    assert driver.restart_due is not None

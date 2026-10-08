@@ -348,7 +348,9 @@ class _Driver:
             self.summary.outcome = "superseded"
             return None
         self.summary.rolled_over += 1
-        frontier = await self.registry.build_get_frontier_aio(self.build_id)
+        # Through ``_read`` so the restart wait follows the frontier this
+        # pass actually acts on; not clearing, as before.
+        frontier = await self._read(clear=False)
         if frontier.deployment_id != self.deployment_id:
             self.summary.outcome = "superseded"
             return None
