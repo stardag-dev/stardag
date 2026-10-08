@@ -58,6 +58,7 @@ from typing import Any, Iterator
 
 import httpx
 
+from .diagnose import BODY_CUT_SHORT
 from ._harness import (
     CLASSIFICATION_FAILED,
     Deployment,
@@ -656,6 +657,10 @@ def _facts(
         "raised": f"{type(error).__module__}.{type(error).__name__}",
         "timeout": f"{type(timeout).__module__}.{type(timeout).__name__}",
         "message": str(error),
+        # The selected fault's own text. For a wrapped fault ``message``
+        # is the wrapper's, and the byte counts of a body cut short are
+        # only here.
+        "fault_message": str(timeout),
         "boot_id_at_provisioning": deployment.boot_id,
         "probe": {
             "probed": probe.probed,
@@ -681,6 +686,30 @@ _WHAT_WAS_LOST = {
 }
 
 
+def _headline(fault: BaseException) -> str:
+    """Name the fault the record is about, rather than calling them all one.
+
+    Every record used to open with "TRANSPORT TIMEOUT ... no response was
+    received", which a body cut short contradicts on both counts: nothing
+    timed out, and the response head *did* arrive -- that is what made
+    the missing body detectable at all (STA-102).
+    """
+    name = type(fault).__name__
+    if name.endswith("Timeout"):
+        return "TRANSPORT TIMEOUT against the registry -- no response was received."
+    # By message, not class alone: the same class also covers a server that
+    # disconnected before sending any response, which delivered no head.
+    if name == "RemoteProtocolError" and BODY_CUT_SHORT.search(str(fault)):
+        return (
+            "BODY CUT SHORT by the registry connection -- the response head "
+            "arrived and its body did not."
+        )
+    return (
+        f"TRANSPORT FAULT ({name}) against the registry -- no complete "
+        f"response was received."
+    )
+
+
 def _render(
     deployment: Deployment,
     *,
@@ -696,7 +725,7 @@ def _render(
         [
             "",
             "=" * 72,
-            "TRANSPORT TIMEOUT against the registry -- no response was received.",
+            _headline(timeout),
             _WHAT_WAS_LOST.get(phase, "The scenario did not complete."),
             "=" * 72,
             f"  scenario:  {nodeid}",
@@ -704,7 +733,7 @@ def _render(
             f"  at:        {observed_at.isoformat(timespec='seconds')}",
             "  request:   " + (f"{request[0]} {request[1]}" if request else "unknown"),
             f"  raised:    {type(error).__module__}.{type(error).__name__}: {error}",
-            f"  timeout:   {type(timeout).__module__}.{type(timeout).__name__}",
+            f"  fault:     {type(timeout).__module__}.{type(timeout).__name__}",
             f"  registry:  {deployment.api_url}",
             f"  boot id:   {deployment.boot_id} (at provisioning time)",
             "",
