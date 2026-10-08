@@ -92,7 +92,7 @@ deploy, and ``/yield`` refuses a worker whose deployment is not the plan's.
 STARDAG_MODAL_FUNCTION_TIMEOUT_ENV = "STARDAG_MODAL_FUNCTION_TIMEOUT"
 """Env var carrying the worker function's declared ``timeout``, in seconds.
 
-Read only by ``_runner._classify_interruption``'s **fallback**, and it is
+Read only by ``_interruptions._classify_interruption``'s **fallback**, and it is
 worth knowing why that is all it is now.
 
 It was forwarded to tell a **timeout** apart from a **cancellation**, which
@@ -117,7 +117,7 @@ Absent — an older orchestrator, or a worker function that declares no
 ``timeout`` of its own — that fallback still errs towards reporting, because
 the backend applies its own default timeout regardless: "unknown" does not
 mean "no timeout fired", and guessing wrong in that direction strands the
-task. See ``_runner._classify_interruption``.
+task. See ``_interruptions._classify_interruption``.
 """
 
 STARDAG_MODAL_WORKSPACE_ENV = "STARDAG_MODAL_WORKSPACE"

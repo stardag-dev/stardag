@@ -44,7 +44,7 @@ from stardag.registry import (
 )
 from stardag.registry._models import DeploymentKind, StopOutcome
 from stardag.testing._registry_exclusion import ExclusionMixin
-from stardag.testing._registry_plans import _outcome, plan_info
+from stardag.testing._registry_plans import plan_info
 from stardag.testing._registry_reads import ReadsMixin
 from stardag.testing._registry_state import (
     TERMINAL_BUILD_STATUSES,
@@ -56,6 +56,7 @@ from stardag.testing._registry_state import (
     refuse,
     settings_hash,
 )
+from stardag.testing._registry_transitions import _outcome
 from stardag.testing._registry_yield import YieldMixin
 
 if TYPE_CHECKING:

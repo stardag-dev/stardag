@@ -48,13 +48,13 @@ from stardag.integration.modal._metadata import (
     STARDAG_CLAIM_TTL_SECONDS_ENV,
     STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
 )
-from stardag.integration.modal._runner import (
+from stardag.integration.modal._interruptions import (
     _CANCELLATION,
     _PREEMPTION,
     _TIMEOUT,
-    Runner,
     _classify_interruption,
 )
+from stardag.integration.modal._runner import Runner
 from stardag.registry import registry_provider
 from stardag.testing import InMemoryRegistry
 from stardag.testing.modal._tasks import make_range
