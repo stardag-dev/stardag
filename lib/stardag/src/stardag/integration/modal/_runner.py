@@ -188,28 +188,47 @@ def _platform_signal(exception: BaseException) -> BaseException | None:
     reachable only through the implicit context. ``raise ... from error``
     inside an ``except MODAL_INTERRUPTIONS`` block produces exactly that,
     and following only ``__cause__`` would walk away from the answer.
+
+    **An ``InputCancellation`` anywhere on the chain decides, however near
+    a ``KeyboardInterrupt`` is.** Once an input is cancelled (its timeout
+    fired, or someone cancelled it) nothing restarts it, whatever arrives
+    afterwards. And something often does: Modal follows the cancel with a
+    grace-period SIGINT, so a checkpoint still being written ~20s after a
+    timeout is cut short by a ``KeyboardInterrupt`` raised *inside* the
+    handler that caught the ``InputCancellation``. That leaves
+    ``ResumableInterruption -> KeyboardInterrupt -> InputCancellation``,
+    and "nearest wins" would read the follow-up kill of a cancelled input
+    as a preemption: report ``TASK_PREEMPTED``, keep the claim, and wait
+    for a restart that is never coming (STA-129). So the walk visits the
+    whole (bounded) chain, and returns the nearest ``KeyboardInterrupt``
+    only when no ``InputCancellation`` is on it.
     """
     seen: set[int] = set()
-    # Breadth-first, so the *nearest* signal wins when a chain forks —
-    # and bounded rather than exhaustive: a chain is normally one link, and
-    # anything pathological (a cycle, a deeply nested re-raise) must not
-    # spin inside a container that is already being killed.
+    nearest_preemption: BaseException | None = None
+    # Breadth-first and bounded rather than exhaustive: a chain is normally
+    # one or two links, and anything pathological (a cycle, a deeply nested
+    # re-raise) must not spin inside a container that is already being
+    # killed.
     queue: list[BaseException] = [exception]
     for _ in range(_CHAIN_WALK_LIMIT):
         if not queue:
-            return None
+            break
         current = queue.pop(0)
         if id(current) in seen:
             continue
         seen.add(id(current))
         if current is not exception and isinstance(current, MODAL_INTERRUPTIONS):
-            return current
+            if not isinstance(current, KeyboardInterrupt):
+                # The only other member is InputCancellation: decisive.
+                return current
+            if nearest_preemption is None:
+                nearest_preemption = current
         queue.extend(
             link
             for link in (current.__cause__, current.__context__)
             if link is not None
         )
-    return None
+    return nearest_preemption
 
 
 def _classify_interruption(
@@ -249,6 +268,13 @@ def _classify_interruption(
     exactly, and :func:`_platform_signal` recovers it from the chain even
     through the ``from None`` the docs recommend.
 
+    **One clock reading still overrides the chain, in one direction.**
+    Elapsed at or past the declared timeout (less the slack) is a timeout
+    whatever the chain holds: the clock starts late, so it can miss a
+    timeout but cannot invent one, and an input past its timeout is not
+    restarted on the same call id. The reverse never holds — "before the
+    timeout" by our clock proves nothing — so below it the chain decides.
+
     This used to be inferred from ``elapsed >= timeout - slack``, which is
     a strictly *harder* question (timeout vs cancel) answered on a clock
     that cannot measure what it needs — see
@@ -285,16 +311,25 @@ def _classify_interruption(
     report.
     """
     if isinstance(exception, ResumableInterruption):
-        signal = _platform_signal(exception)
-        if signal is not None:
-            # KeyboardInterrupt is the preemption; the only other member of
-            # the set is InputCancellation, which is a timeout or a cancel.
-            return _PREEMPTION if isinstance(signal, KeyboardInterrupt) else _TIMEOUT
-        timed_out = function_timeout_seconds is None or (
+        # Past the declared timeout nothing restarts the input, whatever
+        # the chain says: the clock under-reads an input's age (see
+        # ``_TIMEOUT_DETECTION_SLACK_SECONDS``), so it can miss a timeout
+        # but never invent one. Consulted first, so a signal on the chain
+        # can only ever turn a "before the timeout" into a preemption.
+        timed_out = function_timeout_seconds is not None and (
             elapsed_seconds
             >= function_timeout_seconds - _TIMEOUT_DETECTION_SLACK_SECONDS
         )
-        return _TIMEOUT if timed_out else _PREEMPTION
+        if timed_out:
+            return _TIMEOUT
+        signal = _platform_signal(exception)
+        if signal is not None:
+            # A KeyboardInterrupt is returned only when no InputCancellation
+            # (a timeout or a cancel) is anywhere on the chain.
+            return _PREEMPTION if isinstance(signal, KeyboardInterrupt) else _TIMEOUT
+        # Nothing on the chain, and before any declared timeout. With none
+        # declared the backend still applies its own, so report.
+        return _TIMEOUT if function_timeout_seconds is None else _PREEMPTION
     if isinstance(exception, (KeyboardInterrupt, SystemExit)):
         return _CANCELLATION
     if _InputCancellation is not None and isinstance(exception, _InputCancellation):

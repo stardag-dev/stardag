@@ -250,14 +250,114 @@ class TestClassifyByExceptionChain:
         self, signal, expected, form
     ):
         request = _checkpointed(signal, form=form)
-        # Both far from the timeout and at it: the clock is not consulted.
-        for elapsed in (5.0, 300.0):
+        # Far from the timeout, where the clock cannot tell: the chain decides.
+        assert (
+            _classify_interruption(
+                request, elapsed_seconds=5.0, function_timeout_seconds=300.0
+            )
+            == expected
+        )
+
+    @pytest.mark.parametrize("form", ["from_none", "implicit", "explicit"])
+    def test_past_the_timeout_a_keyboard_interrupt_is_not_a_preemption(self, form):
+        """The clock overrides the chain in one direction only. It starts
+        late, so it can miss a timeout but never invent one, and an input
+        past its timeout is not restarted on the same call id — so a
+        ``KeyboardInterrupt`` arriving there is the follow-up kill, not a
+        preemption (STA-129's belt and braces)."""
+        request = _checkpointed(KeyboardInterrupt(), form=form)
+        assert (
+            _classify_interruption(
+                request, elapsed_seconds=300.0, function_timeout_seconds=300.0
+            )
+            == _TIMEOUT
+        )
+
+    def test_a_second_interrupt_during_the_checkpoint(self):
+        """STA-129, to the numbers. The timeout's ``InputCancellation`` was
+        caught by a framework's shutdown handler, whose checkpoint upload
+        was cut short ~20s later by Modal's grace-period SIGINT — a
+        ``KeyboardInterrupt`` raised inside that handler, so the
+        cancellation became its ``__context__``. The nearest signal is the
+        ``KeyboardInterrupt``; the one that decides is the cancellation,
+        because nothing restarts a cancelled input. Read as a preemption it
+        kept the claim and waited for a restart that never came.
+
+        Elapsed is deliberately set *below* the timeout here so the chain
+        alone has to get it right; the incident's own 84621.4s against
+        84600s is covered by the clock as well."""
+
+        def framework_shutdown():
+            try:
+                raise InputCancellation("Input was cancelled by user")
+            except BaseException:
+                raise KeyboardInterrupt()
+
+        def task():
+            try:
+                framework_shutdown()
+            except MODAL_INTERRUPTIONS:
+                raise sd.ResumableInterruption("checkpointed") from None
+
+        with pytest.raises(sd.ResumableInterruption) as caught:
+            task()
+        request = caught.value
+        assert isinstance(request.__context__, KeyboardInterrupt)
+        assert isinstance(request.__context__.__context__, InputCancellation)
+        for elapsed in (5.0, 84621.4):
             assert (
                 _classify_interruption(
-                    request, elapsed_seconds=elapsed, function_timeout_seconds=300.0
+                    request,
+                    elapsed_seconds=elapsed,
+                    function_timeout_seconds=84600.0,
                 )
-                == expected
+                == _TIMEOUT
             )
+        # And with no declared timeout at all: the chain is enough.
+        assert (
+            _classify_interruption(
+                request, elapsed_seconds=5.0, function_timeout_seconds=None
+            )
+            == _TIMEOUT
+        )
+
+    def test_a_cancellation_further_down_than_a_keyboard_interrupt_still_decides(
+        self,
+    ):
+        """Breadth-first order is irrelevant to the answer: a cancellation
+        reachable only through an explicit cause's own context still beats a
+        ``KeyboardInterrupt`` nearer the top."""
+        inner = KeyboardInterrupt()
+        cause = RuntimeError("upload failed")
+        cause.__context__ = InputCancellation("Input was cancelled by user")
+        request = sd.ResumableInterruption("checkpointed")
+        request.__context__ = inner
+        request.__cause__ = cause
+        assert (
+            _classify_interruption(
+                request, elapsed_seconds=5.0, function_timeout_seconds=300.0
+            )
+            == _TIMEOUT
+        )
+
+    def test_a_plain_keyboard_interrupt_is_still_a_preemption(self):
+        """The control for the two above: with no cancellation anywhere on
+        the chain, a KeyboardInterrupt before the timeout is a preemption."""
+
+        def task():
+            try:
+                raise KeyboardInterrupt()
+            except MODAL_INTERRUPTIONS:
+                raise sd.ResumableInterruption("checkpointed") from None
+
+        with pytest.raises(sd.ResumableInterruption) as caught:
+            task()
+        assert (
+            _classify_interruption(
+                caught.value, elapsed_seconds=5.0, function_timeout_seconds=84600.0
+            )
+            == _PREEMPTION
+        )
 
     def test_a_system_exit_on_the_chain_is_not_a_platform_signal(self):
         """``SystemExit`` is not in ``MODAL_INTERRUPTIONS`` — the platform
