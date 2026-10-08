@@ -977,6 +977,36 @@ another ~30s). That is enough to write a checkpoint. It also means a
 worker's `timeout` does not bound how long its container lives: budget
 `timeout + ~60s`.
 
+!!! warning "The second signal can land in the middle of your checkpoint"
+
+    The escalation does not wait for your `except` block. A checkpoint still
+    being written when the SIGINT arrives is cut short by a
+    `KeyboardInterrupt` raised _inside_ that block, and any framework
+    shutdown hook wrapped around it is cut short the same way. Left
+    uncaught, that interrupt also skips the `raise sd.ResumableInterruption`
+    after the write: stardag then sees a raw interrupt, records nothing,
+    and the task is not resumed until its claim lapses.
+
+    So keep the checkpoint well inside ~30s, write it so that being cut
+    short leaves the previous one intact (to a temporary path, then rename
+    it into place), and make sure the resumption request is raised either
+    way:
+
+    ```{.python notest}
+    except MODAL_INTERRUPTIONS:
+        try:
+            save_checkpoint(state)      # may be cut short by the next signal
+        except MODAL_INTERRUPTIONS:
+            pass                        # the previous checkpoint still stands
+        raise sd.ResumableInterruption("checkpointed") from None
+    ```
+
+    Raised that way, stardag classifies the end correctly: once the call
+    has been cancelled, a later `KeyboardInterrupt` on the chain is the
+    follow-up kill, not a preemption, so a scheduler tick resumes the task.
+    What may be missing is the last stretch of work the cut-short write
+    did not save.
+
 !!! danger "Catch the interruption types, never `BaseException`"
 
     `except BaseException:` looks like the way to cover both signals. It is
@@ -1109,8 +1139,11 @@ failures and fail the build for the one reason it was built to survive.
     by Modal restarting the input, not by the scheduler — no attempt, no
     `interrupt_count`, and that restart is ungated by `retries`. It is what
     makes preemption recovery fast, and preemption is rare. Stardag records
-    the preemption so an expected restart that never arrives is visible,
-    but that record spends no budget either.
+    the preemption, which spends no budget either, and shortens the claim
+    to a restart grace of 15 minutes. If the restart never arrives, the
+    claim lapses at the end of that grace, and the scheduler tick the
+    preemption woke stays to take the task over then, rather than leaving
+    it stranded until something else happens to wake the build.
 
     So a task that raises `ResumableInterruption` on a condition that is
     *always* true would loop at full container cost with

@@ -280,7 +280,7 @@ def test_cancel_running_spawned_call(deployed_probe_app):
 # Four facts the worker's interruption handling is built on, measured
 # 2026-08-12 against modal 1.5.0. Each is a platform behaviour rather than
 # something stardag controls, and each would break a different part of
-# `_runner._classify_interruption` if Modal changed it.
+# `_interruptions._classify_interruption` if Modal changed it.
 #
 # The grace ladder itself (SIGUSR1, then SIGINT ~30s later, then SIGKILL
 # ~30s after that) is deliberately NOT pinned: it is a number Modal may
