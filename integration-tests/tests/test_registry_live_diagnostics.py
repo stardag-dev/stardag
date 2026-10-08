@@ -732,9 +732,68 @@ def test_a_body_cut_short_is_recorded_as_one_and_reconciled(
     ("fault", "headline"),
     [
         (httpx.ReadTimeout("t", request=_REQUEST), "TRANSPORT TIMEOUT"),
-        (httpx.RemoteProtocolError("p", request=_REQUEST), "BODY CUT SHORT"),
+        (
+            httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body "
+                "(received 0 bytes, expected 2560)",
+                request=_REQUEST,
+            ),
+            "BODY CUT SHORT",
+        ),
+        # Copilot on #440: the same class without a head ever arriving.
+        (
+            httpx.RemoteProtocolError(
+                "Server disconnected without sending a response.", request=_REQUEST
+            ),
+            "TRANSPORT FAULT (RemoteProtocolError)",
+        ),
         (httpx.ConnectError("c", request=_REQUEST), "TRANSPORT FAULT (ConnectError)"),
     ],
 )
 def test_the_record_headline_names_the_fault(fault: Exception, headline: str) -> None:
     assert _diagnostics._headline(fault).startswith(headline)
+
+
+def test_a_wrapped_body_cut_short_keeps_its_byte_counts(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copilot on #440: the wrapper's message carries no byte counts.
+
+    The classifier selects the fault from inside the chain, so the record
+    has to keep that fault's own text, or the join reads the wrapper's.
+    """
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        _diagnostics,
+        "probe_boot",
+        lambda *a, **k: BootProbe(
+            answered=True, elapsed=0.3, boot_id="boot-one", error=None
+        ),
+    )
+    try:
+        try:
+            raise httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body "
+                "(received 0 bytes, expected 2560)",
+                request=_REQUEST,
+            )
+        except httpx.RemoteProtocolError as inner:
+            raise RuntimeError("the lease call failed") from inner
+    except RuntimeError as caught:
+        error = caught
+    fault = transport_timeout(error)
+    assert isinstance(fault, httpx.RemoteProtocolError)
+
+    record_transport_timeout(
+        _deployment(),
+        nodeid="tests_registry_live/test_x.py::test_a",
+        phase="call",
+        error=error,
+        timeout=fault,
+    )
+
+    from stardag_integration_tests.registry_live import diagnose
+
+    facts = json.loads(next(tmp_path.glob("timeout-*.json")).read_text())
+    assert facts["message"] == "the lease call failed"
+    assert diagnose.body_cut_short(facts) == (0, 2560)

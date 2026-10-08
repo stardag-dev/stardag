@@ -58,6 +58,7 @@ from typing import Any, Iterator
 
 import httpx
 
+from .diagnose import BODY_CUT_SHORT
 from ._harness import (
     CLASSIFICATION_FAILED,
     Deployment,
@@ -656,6 +657,10 @@ def _facts(
         "raised": f"{type(error).__module__}.{type(error).__name__}",
         "timeout": f"{type(timeout).__module__}.{type(timeout).__name__}",
         "message": str(error),
+        # The selected fault's own text. For a wrapped fault ``message``
+        # is the wrapper's, and the byte counts of a body cut short are
+        # only here.
+        "fault_message": str(timeout),
         "boot_id_at_provisioning": deployment.boot_id,
         "probe": {
             "probed": probe.probed,
@@ -692,7 +697,9 @@ def _headline(fault: BaseException) -> str:
     name = type(fault).__name__
     if name.endswith("Timeout"):
         return "TRANSPORT TIMEOUT against the registry -- no response was received."
-    if name == "RemoteProtocolError":
+    # By message, not class alone: the same class also covers a server that
+    # disconnected before sending any response, which delivered no head.
+    if name == "RemoteProtocolError" and BODY_CUT_SHORT.search(str(fault)):
         return (
             "BODY CUT SHORT by the registry connection -- the response head "
             "arrived and its body did not."

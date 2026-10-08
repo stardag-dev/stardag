@@ -241,7 +241,13 @@ def _seconds(value: str, unit: str) -> float:
 # message body (received 0 bytes, expected 2560)". The two numbers are the
 # whole of the client's half of hypothesis C, so they are read back out of
 # the recorded message rather than left in it as prose.
-_BODY_CUT_SHORT = re.compile(
+#
+# The message, not the class, is what identifies the case:
+# ``RemoteProtocolError`` also covers a server that disconnected before
+# sending any response, and other malformed HTTP, none of which delivered
+# a head. ``_diagnostics`` imports this for the record's headline, so the
+# two cannot disagree about what a body cut short looks like.
+BODY_CUT_SHORT = re.compile(
     r"received (?P<received>\d+) bytes, expected (?P<expected>\d+)"
 )
 
@@ -263,10 +269,14 @@ def body_cut_short(occurrence: dict) -> tuple[int, int] | None:
     """``(received, expected)`` body bytes, if the response was cut short."""
     if fault_class(occurrence) != "RemoteProtocolError":
         return None
-    match = _BODY_CUT_SHORT.search(str(occurrence.get("message", "")))
-    if match is None:
-        return None
-    return int(match["received"]), int(match["expected"])
+    # ``fault_message`` is the fault's own text; ``message`` is the raised
+    # exception's, which for a wrapped fault is the wrapper's and carries
+    # no byte counts. Older sidecars have only the second.
+    for key in ("fault_message", "message"):
+        match = BODY_CUT_SHORT.search(str(occurrence.get(key) or ""))
+        if match is not None:
+            return int(match["received"]), int(match["expected"])
+    return None
 
 
 def verdict_for(occurrence: dict, log: AccessLog) -> tuple[str, list[str]]:
