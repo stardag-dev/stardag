@@ -8,6 +8,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Fixed: a spurious "Dropping stored field(s)" warning on rehydration of a
+  task with an undiscriminated union field** (STA-127). Pydantic validates
+  such a field against each member in turn, and the compat validator warned
+  for every member it probed, so a stored `New` in a `Legacy | New` field
+  logged the drop of `New`'s keys from `Legacy` on every rehydration. The
+  warning now covers only models that are part of the result, once per class
+  and key set.
 - **Fixed: a task started under a newer deployment than the one that sent it
   is missing any field added since** (STA-124). Modal calls carried task
   objects cloudpickled, and workers are resolved by name — the app's
