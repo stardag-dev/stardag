@@ -335,7 +335,8 @@ jobs:
           # ordered by and send this head to the back; over `Dispatched` or
           # `Running` the run in flight already answers for this head, and
           # its verdict would erase the new request anyway.
-          current=$(gh api "repos/$REPO/commits/$SHA/status" \
+          # `per_page=100`: the combined status pages at 30 contexts.
+          current=$(gh api "repos/$REPO/commits/$SHA/status?per_page=100" \
             -q '[.statuses[] | select(.context == "Registry-live tier")][0]
                 | "\(.state) \(.description)"')
           if [ "${current%% *}" = pending ]; then

@@ -19,7 +19,7 @@ name: Registry-live tier
 # two together.
 run-name: >-
   Registry-live tier · ${{ inputs.pr && format('PR #{0}', inputs.pr) || 'main' }}
-  · slot ${{ inputs.slot || '1' }}
+  · slot ${{ inputs.slot || 'manual' }}
 
 # No schedule: the weekly run is queued by the selector's own weekly
 # schedule, on the default branch's head, and dispatched like any other
@@ -41,11 +41,13 @@ on:
         default: ""
       slot:
         description: >-
-          Which slot this run occupies. Assigned by the selector; dispatch
-          the selector rather than this workflow by hand, or a run can take
-          a slot the selector believes is free.
+          Which slot this run occupies. Assigned by the selector. Leave it
+          empty when dispatching by hand: the run then gets a concurrency
+          group of its own, so it cannot cancel a run the selector admitted
+          into a slot's pending position, and the selector counts it as
+          holding slot 1 until it ends.
         type: string
-        default: "1"
+        default: ""
       serial:
         description: >-
           Run the scenarios one at a time. They are concurrent by default; a
@@ -67,7 +69,13 @@ concurrency:
   # carries every developer's `dev-<checkout>` stack and the self-hosted
   # deployment (STA-91). `REGISTRY_LIVE_SLOTS` above 1 is a decision about
   # that arithmetic, not about this file.
-  group: registry-live-andhus-workspace-slot-${{ inputs.slot || '1' }}
+  #
+  # A hand-dispatched run (no slot) gets a group of its own rather than slot
+  # 1's: GitHub would otherwise let it replace -- and so cancel -- a run the
+  # selector had admitted into that group's pending position.
+  group: >-
+    registry-live-andhus-workspace-slot-${{ inputs.slot
+      || format('manual-{0}', github.run_id) }}
   # Never cancel a run in flight: it holds a Modal environment, a database
   # and deployed apps.
   cancel-in-progress: false
@@ -108,7 +116,7 @@ jobs:
             out env_name ci-main; out ephemeral false; out fail_fast false
             gh api "repos/$REPO/statuses/$SHA" -f state=pending \
               -f context="Registry-live tier" -f target_url="$RUN_URL" \
-              -f description="Running in slot ${{ inputs.slot || '1' }}." > /dev/null
+              -f description="Running in slot ${{ inputs.slot || 'manual' }}." > /dev/null
             exit 0
           fi
 
@@ -131,6 +139,15 @@ jobs:
             echo "::error::PR #$PR is from a fork; refusing to run it with credentials."
             exit 1
           fi
+          # Closed or merged while it waited: the slot belongs to an open PR.
+          if [ "$(jq -r .state <<<"$pr")" != open ]; then
+            echo "PR #$PR is $(jq -r .state <<<"$pr"); nothing to run."
+            gh api "repos/$REPO/statuses/${SHA:-$head}" -f state=error \
+              -f context="Registry-live tier" -f target_url="$RUN_URL" \
+              -f description="The PR was closed before it ran." > /dev/null
+            out run false; out sha "${SHA:-$head}"; out fail_fast false
+            exit 0
+          fi
           # A push since the request moved the head, and queued the new one
           # in its own right. The old head's status is no longer shown on
           # the PR, so this is bookkeeping rather than a verdict.
@@ -149,7 +166,7 @@ jobs:
           out fail_fast "$(jq -r '[.labels[].name] | index("registry-live-fail-fast") != null' <<<"$pr")"
           gh api "repos/$REPO/statuses/$head" -f state=pending \
             -f context="Registry-live tier" -f target_url="$RUN_URL" \
-            -f description="Running in slot ${{ inputs.slot || '1' }}." > /dev/null
+            -f description="Running in slot ${{ inputs.slot || 'manual' }}." > /dev/null
 
   # A real Modal worker reporting to a real registry over the network. That
   # is not a detail of reactive scheduling, it *is* reactive scheduling --
@@ -668,10 +685,15 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - name: Post the verdict on the head
-        if: inputs.sha && needs.resolve.outputs.run == 'true'
+        # Also when `resolve` itself failed (an API error, a refused fork
+        # head): it may have posted nothing, and the head would otherwise
+        # sit `Dispatched` until the hourly selector called it stale.
+        if: >-
+          inputs.sha && (needs.resolve.outputs.run == 'true'
+                         || needs.resolve.result != 'success')
         env:
-          RESULT: ${{ needs.registry-live.result }}
-          SHA: ${{ needs.resolve.outputs.sha }}
+          RESULT: ${{ needs.resolve.result == 'success' && needs.registry-live.result || 'resolve-failed' }}
+          SHA: ${{ needs.resolve.outputs.sha || inputs.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail

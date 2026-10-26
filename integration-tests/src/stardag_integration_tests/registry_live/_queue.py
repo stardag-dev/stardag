@@ -71,6 +71,11 @@ _RUN_SLOT = re.compile(r"slot (\d+)\b")
 # deleted, so its slot is free even though the run is still in progress.
 REPORT_JOB = "Report and hand over"
 
+# How far back the default branch is searched for a pending weekly request
+# (see `parse_default_branch`). Fifty merges between a Monday enqueue and its
+# admission would be a queue wedged for other reasons.
+DEFAULT_BRANCH_DEPTH = 50
+
 # How long to wait for a dispatched run to show up in the runs list.
 # Until it does, the next selector would see the slot as free.
 VISIBILITY_TIMEOUT_S = 120.0
@@ -170,8 +175,9 @@ def parse_active_runs(
         active.append(
             ActiveRun(
                 run_id=int(run["id"]),
-                # The runner's concurrency group defaults to slot 1, so a run
-                # whose title says nothing occupies slot 1 as well.
+                # A hand-dispatched run says `slot manual`. It has a
+                # concurrency group of its own, but it is real load on the
+                # workspace, so it is counted as holding slot 1.
                 slot=int(slot.group(1)) if slot else 1,
                 pr=int(pr.group(1)) if pr else None,
                 releasing=int(run["id"]) in releasing,
@@ -195,24 +201,34 @@ def should_enqueue(state: str | None) -> bool:
 
 
 def parse_default_branch(data: dict) -> Request | None:
-    """The default branch's head, if it carries a `Registry-live tier` status."""
+    """The weekly request: a pending status among the default branch's
+    recent commits, newest first.
+
+    Not only on the head. The weekly run queues the head it found, and the
+    branch can move before that request is admitted -- a merge while PRs
+    are ahead of it is the normal case -- after which nothing would read the
+    old head again and the weekly run would vanish without a trace. Testing
+    the commit it was queued on is fine for its purpose (drift underneath
+    us, not the newest code). Bounded by ``DEFAULT_BRANCH_DEPTH``.
+    """
     ref = data["data"]["repository"].get("defaultBranchRef")
     if not ref or not ref.get("target"):
         return None
-    commit = ref["target"]
-    status = (commit.get("status") or {}).get("context")
-    if not status:
-        return None
-    return Request(
-        pr=None,
-        sha=commit["oid"],
-        branch=ref["name"],
-        state=status["state"],
-        description=status.get("description") or "",
-        created_at=status["createdAt"],
-        cross_repo=False,
-        author="",
-    )
+    for commit in ref["target"]["history"]["nodes"]:
+        status = (commit.get("status") or {}).get("context")
+        if not status or status["state"] != "PENDING":
+            continue
+        return Request(
+            pr=None,
+            sha=commit["oid"],
+            branch=ref["name"],
+            state=status["state"],
+            description=status.get("description") or "",
+            created_at=status["createdAt"],
+            cross_repo=False,
+            author="",
+        )
+    return None
 
 
 def parse_requests(data: dict) -> list[Request]:
@@ -306,12 +322,14 @@ def plan(requests: list[Request], active: list[ActiveRun], slots: int) -> Plan:
 # --- GitHub side ---------------------------------------------------------
 
 _REQUESTS_QUERY = """
-query($owner: String!, $name: String!, $context: String!, $after: String) {
+query(
+  $owner: String!, $name: String!, $context: String!, $depth: Int!, $after: String
+) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef {
       name
-      target { ... on Commit { oid status { context(name: $context) {
-        state description createdAt
+      target { ... on Commit { history(first: $depth) { nodes {
+        oid status { context(name: $context) { state description createdAt } }
       } } } }
     }
     pullRequests(states: OPEN, first: 100, after: $after) {
@@ -393,6 +411,8 @@ def _query_pages(owner: str, name: str) -> list[dict]:
             f"name={name}",
             "-F",
             f"context={CONTEXT}",
+            "-F",
+            f"depth={DEFAULT_BRANCH_DEPTH}",
         ]
         if after:
             args += ["-F", f"after={after}"]
@@ -404,19 +424,14 @@ def _query_pages(owner: str, name: str) -> list[dict]:
         after = info["endCursor"]
 
 
-def _latest_status(repo: str, sha: str) -> tuple[str | None, str]:
-    out = _gh("api", f"repos/{repo}/commits/{sha}/status")
-    for status in json.loads(out)["statuses"]:  # latest per context
-        if status["context"] == CONTEXT:
-            return status["state"], status.get("description") or ""
-    return None, ""
-
-
-def _enqueue_default_branch(repo: str, branch: str, url: str) -> str:
+def _enqueue_default_branch(
+    repo: str, branch: str, pending: Request | None, url: str
+) -> str:
+    # Coalesced over the whole searched history, not just the head: a weekly
+    # request still pending on an older commit is the same request.
+    if pending is not None:
+        return f"- {pending.label}: already {pending.description}; not queued again"
     sha = _gh("api", f"repos/{repo}/commits/{branch}", "-q", ".sha").strip()
-    state, description = _latest_status(repo, sha)
-    if not should_enqueue(state):
-        return f"- {branch} {sha[:7]}: already {description or state}; not queued again"
     _post_status(repo, sha, "pending", f"{QUEUED} by the weekly schedule.", url)
     return f"- {branch} {sha[:7]}: queued by the weekly schedule"
 
@@ -470,9 +485,17 @@ def dispatch(args: argparse.Namespace) -> int:
         f"/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
     )
 
+    # A `schedule` event's payload carries no repository, so the workflow
+    # may pass an empty default branch.
+    default_branch = (
+        args.default_branch
+        or _gh("api", f"repos/{repo}", "-q", ".default_branch").strip()
+    )
+
     lines = ["### Registry-live queue", ""]
     if args.enqueue_default_branch:
-        lines.append(_enqueue_default_branch(repo, args.default_branch, run_url))
+        before = parse_default_branch(_query_pages(owner, name)[0])
+        lines.append(_enqueue_default_branch(repo, default_branch, before, run_url))
 
     runs = _runner_runs(repo)
     releasing = frozenset(
@@ -517,7 +540,7 @@ def dispatch(args: argparse.Namespace) -> int:
         _post_status(repo, request.sha, "error", f"Refused: {reason}", run_url)
 
     for request, slot in the_plan.dispatch:
-        ref = _dispatch_ref(repo, request, args.default_branch)
+        ref = _dispatch_ref(repo, request, default_branch)
         _post_status(
             repo,
             request.sha,
@@ -576,7 +599,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("dispatch", help="Admit queued heads into free slots.")
     p.add_argument("--repo", required=True)
-    p.add_argument("--default-branch", default="main")
+    p.add_argument("--default-branch", default="", help="Looked up when empty.")
     p.add_argument("--slots", type=int, default=1)
     p.add_argument(
         "--enqueue-default-branch",

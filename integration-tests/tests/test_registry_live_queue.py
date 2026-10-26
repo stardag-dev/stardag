@@ -129,9 +129,18 @@ class TestParseActiveRuns:
             ActiveRun(run_id=7, slot=1, pr=1, releasing=True)
         ]
 
+    def test_a_hand_dispatched_run_holds_slot_one(self):
+        # Its own concurrency group, but real load on the workspace.
+        runs = [
+            {
+                "id": 4,
+                "status": "in_progress",
+                "display_title": "Registry-live tier · main · slot manual",
+            }
+        ]
+        assert parse_active_runs(runs) == [ActiveRun(run_id=4, slot=1, pr=None)]
+
     def test_a_title_without_a_slot_occupies_slot_one(self):
-        # The runner's concurrency group defaults to slot 1, so that is where
-        # such a run actually sits.
         runs = [{"id": 3, "status": "waiting", "display_title": "Registry-live tier"}]
         assert parse_active_runs(runs) == [ActiveRun(run_id=3, slot=1, pr=None)]
 
@@ -199,28 +208,47 @@ class TestParseRequests:
         assert parse_requests(_graphql(node)) == []
 
 
-class TestParseDefaultBranch:
-    def test_reads_the_weekly_request_on_the_default_branch_head(self):
-        ref = {
-            "name": "main",
-            "target": {
-                "oid": "m1",
-                "status": {
-                    "context": {
-                        "state": "PENDING",
-                        "description": "Queued by the weekly schedule.",
-                        "createdAt": "2026-10-26T03:17:05Z",
-                    }
-                },
-            },
+def _history(*commits):
+    return {"name": "main", "target": {"history": {"nodes": list(commits)}}}
+
+
+def _commit(oid, state=None, description="Queued by the weekly schedule."):
+    status = (
+        {
+            "context": {
+                "state": state,
+                "description": description,
+                "createdAt": "2026-10-26T03:17:05Z",
+            }
         }
-        request = parse_default_branch(_graphql(default_branch=ref))
+        if state
+        else None
+    )
+    return {"oid": oid, "status": status}
+
+
+class TestParseDefaultBranch:
+    def test_reads_the_weekly_request_on_the_head(self):
+        request = parse_default_branch(
+            _graphql(default_branch=_history(_commit("m1", "PENDING")))
+        )
         assert request is not None
         assert (request.pr, request.sha, request.queued) == (None, "m1", True)
 
-    def test_no_status_is_no_request(self):
-        ref = {"name": "main", "target": {"oid": "m1", "status": None}}
-        assert parse_default_branch(_graphql(default_branch=ref)) is None
+    def test_finds_the_request_after_the_branch_moved(self):
+        # Queued on m1; a merge made m2 the head before it was admitted.
+        # Reading only the head would drop the weekly run without a trace.
+        data = _graphql(
+            default_branch=_history(_commit("m2"), _commit("m1", "PENDING"))
+        )
+        request = parse_default_branch(data)
+        assert request is not None and request.sha == "m1"
+
+    def test_finished_weekly_runs_are_not_requests(self):
+        data = _graphql(
+            default_branch=_history(_commit("m2"), _commit("m1", "SUCCESS", "Passed."))
+        )
+        assert parse_default_branch(data) is None
 
 
 class TestShouldEnqueue:
@@ -350,6 +378,20 @@ class TestPlan:
         assert [r.pr for r in plan([lost], active=[], slots=1).stale] == [None]
         live = [ActiveRun(run_id=9, slot=1, pr=None)]
         assert plan([lost], active=live, slots=1).stale == []
+
+    def test_a_releasing_run_and_its_pending_successor_hold_one_slot(self):
+        # The hand-over: run 9 reports, run 10 was admitted into the same
+        # slot and waits in its group. The slot is taken, by run 10.
+        result = plan(
+            [_request(3, "2026-10-26T14:02:00Z")],
+            active=[
+                ActiveRun(run_id=9, slot=1, pr=1, releasing=True),
+                ActiveRun(run_id=10, slot=1, pr=2),
+            ],
+            slots=1,
+        )
+        assert result.dispatch == []
+        assert [r.pr for r in result.waiting] == [3]
 
     def test_finished_heads_are_not_requests(self):
         done = _request(1, "2026-10-26T14:00:00Z", "Passed.", state="SUCCESS")
