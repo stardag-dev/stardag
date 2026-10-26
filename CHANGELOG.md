@@ -25,6 +25,29 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `functools.cached_property` raised `TypeError` once it had been read. The
   cache is now dropped before pydantic copies anything, on every pydantic
   version.
+- **Changed: the reactive pre-flight checks for state a task's instance body
+  does not carry** (STA-126). A tick rebuilds every task from its registered
+  body, which holds neither pydantic private attributes nor fields declared
+  `exclude=True`, so a task holding such state ran with whatever the rebuild
+  produced, silently. The bootstrap's rehydration pre-flight now compares
+  each task (a root, a discovered dependency, and any model nested in
+  either) with its rebuild:
+
+  - an excluded field whose value the rebuild does not reproduce, when both
+    values are plain data, **refuses the build** before it is armed, naming
+    the class and the field. This includes an untouched excluded field that
+    has a `compat_default`, which the rebuild takes instead;
+  - an excluded field whose difference cannot be decided (an object without
+    value equality, such as a client) logs a warning;
+  - a private attribute never refuses. A plain-data value the rebuild does
+    not reproduce, such as a cache filled in `requires()`, logs a warning;
+    a lock, `uuid4` or other opaque default says nothing.
+
+  Warnings are once per class and attribute, and a failure inside the check
+  is a warning, never a failed build. Resident and hybrid builds are
+  unchanged: such a task is still sent to Modal by value, and the payload now
+  shares one rehydration round trip with its stability check.
+
 - **Fixed: the deployed resident builder claimed detached executions with
   the registry's default one-hour TTL** (STA-134). `Builder` constructed its
   `ModalTaskExecutor` without the app's worker timeouts, so a non-reactive

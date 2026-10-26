@@ -28,10 +28,9 @@ annotation, a lossy serializer), or state the body does not carry (a private
 attribute set at runtime, a field excluded from the dump) — is sent **by
 value**, as before, with a warning once per class: it is not protected
 across deploys. In a reactive build the bootstrap's pre-flight already
-refuses a task a tick could not rehydrate, so the fallback is not taken
-there for an unimportable class or an unstable body; runtime state, though,
-is not part of what the registry stores, and a tick runs such a task
-without it either way.
+refuses a task a tick could not rehydrate, and warns about private state a
+tick would drop: whatever crosses to the bootstrap, a tick runs each task as
+rebuilt from its body.
 
 The payload is a plain ``dict``, so there is no stardag class to unpickle
 on the far side and its shape can grow. Receivers keep accepting a pickled
@@ -41,16 +40,17 @@ on the far side and its shape can grow. Receivers keep accepting a pickled
 from __future__ import annotations
 
 import collections.abc
-import dataclasses
 import importlib
 import logging
 import sys
 import typing
 
-from pydantic import BaseModel
-
 from stardag._core.base_task import BaseTask
-from stardag._core.instance import check_serialization_stability
+from stardag._core.instance import (
+    checked_round_trip,
+    reachable_models,
+    state_outside_body,
+)
 from stardag._core.rehydrate import TaskRehydrationError, task_from_registry_data
 from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, TypeId
 from stardag.build._task_modules import module_is_main
@@ -139,66 +139,6 @@ def _body_task_classes(body: typing.Any) -> set[type]:
     return found
 
 
-def _runtime_state(models: typing.Iterable[BaseModel]) -> str | None:
-    """A description of state the instance body does not carry, if any.
-
-    A private attribute set away from its default, or a field excluded from
-    the dump holding a non-default value: a pickle carried both, a payload
-    carries neither, so a task holding one stays by value rather than
-    arriving without it.
-    """
-    for model in models:
-        cls = type(model)
-        private = getattr(model, "__pydantic_private__", None) or {}
-        for name, attribute in cls.__private_attributes__.items():
-            if name not in private:
-                continue
-            try:
-                if private[name] != attribute.get_default():
-                    return f"{cls.__qualname__}.{name} is runtime state"
-            except Exception:
-                return f"{cls.__qualname__}.{name} is runtime state"
-        for name, info in cls.model_fields.items():
-            if not info.exclude or name not in model.__dict__:
-                continue
-            try:
-                default = info.get_default(call_default_factory=True)
-                if model.__dict__[name] != default:
-                    return f"{cls.__qualname__}.{name} is excluded from the body"
-            except Exception:
-                return f"{cls.__qualname__}.{name} is excluded from the body"
-    return None
-
-
-def _models(value: typing.Any) -> list[BaseModel]:
-    """Every pydantic model instance reachable from ``value`` through its
-    fields, and through dataclasses and containers holding models."""
-    found: list[BaseModel] = []
-    seen: set[int] = set()
-    stack = [value]
-    while stack:
-        item = stack.pop()
-        if id(item) in seen:
-            continue
-        seen.add(id(item))
-        if isinstance(item, BaseModel):
-            found.append(item)
-            # Declared fields only: ``__dict__`` may also hold cached values
-            # that are not part of the body.
-            stack.extend(
-                item.__dict__[name]
-                for name in type(item).model_fields
-                if name in item.__dict__
-            )
-        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
-            stack.extend(getattr(item, f.name, None) for f in dataclasses.fields(item))
-        elif isinstance(item, dict):
-            stack.extend(item.values())
-        elif isinstance(item, (list, tuple, set, frozenset)):
-            stack.extend(item)
-    return found
-
-
 def _by_value_reason(task: BaseTask) -> tuple[str | None, TaskPayload | None]:
     """The payload for ``task``, or the reason it must go by value.
 
@@ -206,10 +146,7 @@ def _by_value_reason(task: BaseTask) -> tuple[str | None, TaskPayload | None]:
     to the pickle, never a reason to fail the spawn.
     """
     try:
-        models = _models(task)
-        state = _runtime_state(models)
-        if state is not None:
-            return f"{state}, which its instance body does not carry", None
+        models = reachable_models(task)
         body = task.instance_body()
         task_id = task.id
         # The object walk and the body walk together: a task nested in a
@@ -229,9 +166,20 @@ def _by_value_reason(task: BaseTask) -> tuple[str | None, TaskPayload | None]:
         # must be a fixed point of its round trip, not only the task id, so
         # a lossy non-significant field is caught here, where the pickle is
         # still a fallback, rather than silently changed on the worker.
-        check_serialization_stability(task)
+        rebuilt = checked_round_trip(task)
     except Exception as e:
         return f"its registry-data round trip is not stable ({e})", None
+    try:
+        # The rebuilt task is what the receiver will run. State it does not
+        # reproduce (a private attribute set at runtime, an excluded field)
+        # would be lost on the far side; the pickle carries it. Unlike the
+        # reactive pre-flight, any difference counts here, decidable or not:
+        # the pickle is a fallback that loses nothing.
+        lost = state_outside_body(task, rebuilt)
+    except Exception as e:
+        return f"its state could not be checked against the rebuilt task ({e})", None
+    if lost:
+        return f"{lost[0].describe()}, which its instance body does not carry", None
     return None, {
         PAYLOAD_KEY: PAYLOAD_VERSION,
         "body": body,
@@ -330,7 +278,7 @@ def from_task_payload(value: TaskOrPayload) -> BaseTask:
     # registered classes defined before the failure: rehydration then
     # resolves them, and the task would run with that module's later
     # globals missing. Only a module the task no longer uses may fail.
-    used = {type(m).__module__ for m in _models(task)}
+    used = {type(m).__module__ for m in reachable_models(task)}
     broken = {module: error for module, error in failed.items() if module in used}
     if broken:
         raise TaskRehydrationError(
