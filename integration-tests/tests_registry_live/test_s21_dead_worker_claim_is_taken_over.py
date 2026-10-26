@@ -30,15 +30,15 @@ scenario asserts on what the window leaves behind:
   and the takeover is the replacement's ``started_at``;
 * the dead execution's late reports are **refused**: a start sent as it
   after the takeover answers ``execution_not_current`` and is recorded
-  unapplied, and nothing it sent after the takeover was applied.
+  unapplied.
 
 **Modal re-runs the killed input** under the same execution id, and that
 cannot be turned off without the worker reporting its own death. Rather
 than prevented, the restart is made inert (``DiesOnce`` exits at once on a
 recorded death, without renewing), so the expiry on record is the lapse.
-A restart that lands after the takeover is one more late start, and the
-last assertion covers it; one that does not land at all is fine too, which
-is why the scenario sends its own.
+A restart that lands after the takeover is one more refused start; one
+that does not land at all is fine too, which is why the scenario sends its
+own rather than waiting for Modal's.
 
 **What notices the lapse may be a watchdog sweep, and that is the design,
 not the harness.** A lapse writes nothing, so no build is flagged. A tick
@@ -61,7 +61,7 @@ ledger, and only then waits for the build.
 
 The alternatives this rules out: a lapsed claim that is never taken over
 (the task RUNNING forever, the build stalled), a takeover before the claim
-lapsed (two live holders), a dead execution whose late report still
+lapsed (two live holders), a dead execution whose late start still
 counts, and a takeover that rewrites the dead execution as ended (the
 ledger would claim a report that never came).
 """
@@ -246,8 +246,12 @@ def test_s21_a_dead_worker_lapsed_claim_is_taken_over(deployment: Deployment) ->
         + ledger_text
     )
 
-    # The takeover's own record names the execution it took over, and
-    # nothing the dead execution sent after it was applied.
+    # The takeover's own record names the execution it took over, and the
+    # late start sent above is on record as refused. Matched by content,
+    # not by position: an event's timestamp is taken before its transition
+    # acquires the task lock, so the log's order is not the order the
+    # transitions were decided in, and "after the takeover" cannot be read
+    # off it.
     events = task_events(deployment, dies.id)
     takeover = [
         e
@@ -260,18 +264,19 @@ def test_s21_a_dead_worker_lapsed_claim_is_taken_over(deployment: Deployment) ->
         "Expected one applied claiming start naming the dead execution as "
         "taken over.\n" + describe_events(events, build=build_id)
     )
-    late = events[events.index(takeover[0]) + 1 :]
-    late = [e for e in late if str(e.get("execution_id")) == dead_id]
-    assert late, (
-        "The harness's late start as the dead execution left no record.\n"
+    refused_starts = [
+        e
+        for e in events
+        if e.get("event_type") == "task_started"
+        and str(e.get("execution_id")) == dead_id
+        and not e["report_applied"]
+    ]
+    assert refused_starts, (
+        "The dead execution's late start was refused but left no record.\n"
         + describe_events(events, build=build_id)
-    )
-    assert not any(e["report_applied"] for e in late), (
-        "A report from the dead execution was applied after its claim was "
-        "taken over.\n" + describe_events(events, build=build_id)
     )
     print(
         f"[harness] build {build_id}: taken over "
         f"{(taken_over_at - expires_at).total_seconds():.1f}s after the lapse; "
-        f"{len(late)} late report(s) from the dead execution, all refused"
+        f"{len(refused_starts)} refused start(s) from the dead execution"
     )

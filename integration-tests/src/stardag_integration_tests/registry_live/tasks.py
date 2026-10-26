@@ -537,8 +537,9 @@ class DiesOnce(sd.Task[list[int]]):
     is refused ``execution_not_current`` and the container stands down.
 
     "First" is read off the registry, not off local state, because a
-    container has none that survives it: an execution whose build ledger
-    holds no other execution of this task is the first.
+    container has none that survives it: an execution alone on the build's
+    ledger is the first, and so is one whose claim a later execution has
+    since taken over.
     """
 
     salt: str
@@ -563,7 +564,16 @@ class DiesOnce(sd.Task[list[int]]):
             for e in registry.build_list_executions(build_id, include_ended=True)
             if e.task_id == str(self.id)
         ]
-        if len(mine) <= 1:
+        # Alone on the ledger, or the execution a takeover replaced: a Modal
+        # restart of the dead execution (same id) can pass its start just
+        # before the takeover and read the ledger just after it, and must
+        # still take the hard exit rather than run the task -- a late end
+        # report is refused, but it would still end the dead execution's
+        # ledger row, which no report from it is supposed to reach.
+        taken_over = any(
+            e.id == execution_id and e.claim_outcome == "taken_over" for e in mine
+        )
+        if len(mine) <= 1 or taken_over:
             # Everything below exits hard, including a failed call: an
             # exception out of ``run`` would be reported as a task failure,
             # and this worker must not report anything.
