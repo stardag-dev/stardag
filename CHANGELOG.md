@@ -4,6 +4,19 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **Fixed: `@task` ignored `sd.Depends[T]` in a module using
+  `from __future__ import annotations`** (STA-37). Under PEP 563 the decorator
+  read every parameter annotation as its source string, so the `Depends`
+  marker was never seen: the parameter accepted a raw value as well as a task,
+  and passing a correctly typed class task warned of a bogus generic mismatch
+  against the unresolved string. The decorator now evaluates the function's
+  annotations before building the task class, so a module with the future
+  import behaves exactly like one without it.
+
 ## [0.28.0] — 2026-10-08
 
 SDK `0.28.0` and server `server-v0.7.0`. Not breaking for SDK users, but a

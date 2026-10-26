@@ -229,7 +229,7 @@ def task(
                 "implement run()/run_aio() as a generator method on a Task subclass."
             )
 
-        signature = inspect.signature(_func)
+        signature = _resolved_signature(_func)
         return_type = signature.return_annotation
         if return_type == inspect.Parameter.empty:
             raise ValueError("Return type must be annotated")
@@ -292,6 +292,25 @@ class _DependsOnMarker:
 
 
 Depends = typing.Annotated[_DependsT, _DependsOnMarker]
+
+
+def _resolved_signature(func: typing.Callable) -> inspect.Signature:
+    """Signature of ``func`` with string annotations evaluated.
+
+    Under ``from __future__ import annotations`` (PEP 563) every annotation is
+    the source text, e.g. ``"sd.Depends[list[int]]"``. Left as a string, the
+    ``Depends`` marker is invisible to ``_get_param_annotation``, so the
+    parameter would accept a raw value and its ``TaskLoads`` generic arg would
+    be an unresolved string. Evaluating keeps ``Annotated`` metadata intact.
+
+    Names that only exist in an enclosing function's scope cannot be resolved
+    from ``func.__globals__``; fall back to the unevaluated signature for those
+    rather than failing the decoration.
+    """
+    try:
+        return inspect.signature(func, eval_str=True)
+    except NameError:
+        return inspect.signature(func)
 
 
 def _get_param_annotation(func_annotation: typing.Any) -> typing.Any:
