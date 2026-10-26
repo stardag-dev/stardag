@@ -249,10 +249,13 @@ class _TickDeployment:
         worker_reports_lifecycle: Whether the app's run function reports
             the task lifecycle from the worker. Reactive scheduling needs
             it to: the executor refuses ``reactive=True`` without it, so a
-            tick of an app whose run function does not report fails loudly
-            instead of leaving its tasks RUNNING. ``build_trigger`` refuses
-            such an app first; this covers a build triggered before a
-            redeploy changed the run function.
+            tick of an app whose run function does not report raises
+            before it spawns anything onto workers nobody reports for.
+            ``build_trigger`` refuses such an app first; this covers a
+            build triggered before a redeploy changed the run function.
+            Such a build is not failed by the tick, so it stays RUNNING
+            (with every tick erroring in the logs) until it is cancelled
+            or the app is redeployed with a reporting run function.
         tick_timeout_seconds: The ``tick`` function's own Modal ``timeout``
             — how long this container may live, from which the per-pass
             spawn cap is derived.
