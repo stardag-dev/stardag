@@ -117,10 +117,13 @@ def state_outside_body(original: BaseModel, rebuilt: Any) -> str | None:
             state = _model_state_lost(item, other)
             if state is not None:
                 return state
+            # Excluded fields too: one whose value compares equal to its
+            # counterpart (or default) can still hold a model whose own
+            # private state the rebuild does not reproduce.
             stack.extend(
                 (item.__dict__[name], _field_of(other, name))
-                for name, info in type(item).model_fields.items()
-                if not info.exclude and name in item.__dict__
+                for name in type(item).model_fields
+                if name in item.__dict__
             )
         elif dataclasses.is_dataclass(item) and not isinstance(item, type):
             stack.extend(
@@ -136,15 +139,16 @@ def state_outside_body(original: BaseModel, rebuilt: Any) -> str | None:
             else:
                 stack.extend((v, _MISSING) for v in item)
         elif isinstance(item, (set, frozenset)):
-            # No order to pair by: pair the members by their dump, which the
-            # rebuild reproduces (the body is what it was built from), and
-            # which leaves out exactly the state compared here.
+            # No order to pair by: pair the members by a canonical key of
+            # their fields, which the rebuild reproduces (the body is what it
+            # was built from), and which leaves out exactly the state
+            # compared here.
             theirs_by_key = (
-                {_dump_key(v): v for v in other}
+                {_member_key(v): v for v in other}
                 if isinstance(other, (set, frozenset))
                 else {}
             )
-            stack.extend((v, theirs_by_key.get(_dump_key(v), _MISSING)) for v in item)
+            stack.extend((v, theirs_by_key.get(_member_key(v), _MISSING)) for v in item)
     return None
 
 
@@ -204,14 +208,48 @@ def _differs_from(value: Any, reference: Callable[[], Any]) -> bool:
         return True
 
 
-def _dump_key(value: Any) -> tuple[str, str]:
+def _member_key(value: Any) -> tuple[Any, ...]:
+    """A canonical, order-free key for a set member.
+
+    Built from the value's structure rather than one dump of it, so a set
+    nested in the member pairs whatever order it iterates in, and a model
+    is keyed by its body fields only: its private attributes and excluded
+    fields are what is being compared, and must not stop it pairing.
+    """
+    if isinstance(value, BaseModel):
+        cls = type(value)
+        return (
+            "model",
+            f"{cls.__module__}.{cls.__qualname__}",
+            tuple(
+                (name, _member_key(value.__dict__[name]))
+                for name, info in cls.model_fields.items()
+                if not info.exclude and name in value.__dict__
+            ),
+        )
+    if isinstance(value, (set, frozenset)):
+        return ("set", tuple(sorted((_member_key(v) for v in value), key=repr)))
+    if isinstance(value, (list, tuple, deque)):
+        return ("seq", tuple(_member_key(v) for v in value))
+    if isinstance(value, dict):
+        items = ((repr(_member_key(k)), _member_key(v)) for k, v in value.items())
+        return ("dict", tuple(sorted(items, key=lambda kv: kv[0])))
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return (
+            "dataclass",
+            f"{type(value).__module__}.{type(value).__qualname__}",
+            tuple(
+                (f.name, _member_key(getattr(value, f.name, None)))
+                for f in dataclasses.fields(value)
+            ),
+        )
     try:
         dumped = _ANY_ADAPTER.dump_json(
             value, context={CONTEXT_MODE_KEY: "registry"}
         ).decode()
     except Exception:
         dumped = repr(value)
-    return (f"{type(value).__module__}.{type(value).__qualname__}", dumped)
+    return ("leaf", f"{type(value).__module__}.{type(value).__qualname__}", dumped)
 
 
 def _class_label(task: "BaseTask") -> str:

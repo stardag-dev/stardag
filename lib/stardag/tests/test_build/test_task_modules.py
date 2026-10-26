@@ -10,6 +10,7 @@ the tests can assert exactly which modules were imported and when.
 from __future__ import annotations
 
 import collections
+import dataclasses
 import itertools
 import sys
 import typing
@@ -157,6 +158,30 @@ class PreflightSharedParamsTask(sd.Task[int]):
 
     def run(self) -> None:
         self._save(self.params.a)
+
+
+@dataclasses.dataclass
+class PreflightHolder:
+    """Equality ignores ``params``, so an excluded field holding one compares
+    equal to its default whatever state ``params`` carries."""
+
+    params: PreflightStatefulParams = dataclasses.field(
+        default_factory=PreflightStatefulParams, compare=False
+    )
+
+
+class PreflightExcludedHolderTask(sd.Task[int]):
+    holder: PreflightHolder = Field(default_factory=PreflightHolder, exclude=True)
+
+    def run(self) -> None:
+        self._save(1)
+
+
+class PreflightNestedSetTask(sd.Task[int]):
+    members: frozenset[tuple[PreflightDerivedParams, frozenset[int]]] = frozenset()
+
+    def run(self) -> None:
+        self._save(len(self.members))
 
 
 class PreflightParentTask(sd.Task[int]):
@@ -881,6 +906,34 @@ class TestPlanRehydration:
     def test_the_same_model_in_a_typed_field_alone_is_reconstructable(self):
         task = PreflightSharedParamsTask(params=PreflightDerivedParams(a=3))
         plan = plan_rehydration([task], [__name__])
+        assert plan.reconstructable == (task,)
+
+    def test_state_nested_in_an_excluded_field_equal_to_its_default_is_refused(
+        self,
+    ):
+        task = PreflightExcludedHolderTask()
+        task.holder.params._cache = {"k": 1}
+        assert task.holder == PreflightHolder()
+
+        plan = plan_rehydration([task], [__name__])
+
+        ((_, reason),) = plan.unreconstructable
+        assert "PreflightStatefulParams._cache is runtime state" in reason
+
+    def test_set_members_pair_whatever_order_a_nested_set_iterates_in(self):
+        """8 and 16 share a hash slot, so ``frozenset([16, 8])`` iterates in
+        the opposite order to the rebuilt ``frozenset([8, 16])`` (the body
+        sorts it). The member must still pair with its rebuild, whose
+        derived private attribute matches, rather than fall back to the
+        declared default and be refused."""
+        backward = frozenset([16, 8])
+        assert list(backward) != list(frozenset([8, 16]))
+        task = PreflightNestedSetTask(
+            members=frozenset({(PreflightDerivedParams(a=3), backward)})
+        )
+
+        plan = plan_rehydration([task], [__name__])
+
         assert plan.reconstructable == (task,)
 
     def test_a_nested_task_without_state_is_reconstructable(self):
