@@ -25,6 +25,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `functools.cached_property` raised `TypeError` once it had been read. The
   cache is now dropped before pydantic copies anything, on every pydantic
   version.
+- **Fixed: `@task` ignored `sd.Depends[T]` in a module using
+  `from __future__ import annotations`** (STA-37). Under PEP 563 the decorator
+  read every parameter annotation as its source string, so the `Depends`
+  marker was never seen: the parameter accepted a raw value as well as a task,
+  and passing a correctly typed class task warned of a bogus generic mismatch
+  against the unresolved string. The decorator now evaluates the function's
+  annotations before building the task class, so a module with the future
+  import behaves exactly like one without it.
 - **Changed: the reactive pre-flight checks for state a task's instance body
   does not carry** (STA-126). A tick rebuilds every task from its registered
   body, which holds neither pydantic private attributes nor fields declared
