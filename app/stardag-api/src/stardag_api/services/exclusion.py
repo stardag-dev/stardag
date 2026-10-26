@@ -56,7 +56,7 @@ from stardag_api.services.transitions import (
     member_task_pk,
     transition_task,
 )
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 #: Statuses that block a downstream and that the skip-blocked walk passes
 #: through.
@@ -118,6 +118,7 @@ _BLOCKED_MEMBERS = text(
 ).columns(task_id=String, task_pk=Uuid)
 
 
+@retry_on_deadlock
 async def skip_blocked(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> SkipBlockedResult:
@@ -217,11 +218,16 @@ _EXCLUSION_REACH = text(
 async def _lock_reach(
     session: AsyncSession, environment_id: UUID, plan_id: UUID, seed: UUID
 ) -> None:
-    """Lock the task rows the cascade may read, ``FOR NO KEY UPDATE`` in
-    ``task_id`` order (after the build: build → task), so that no claim,
-    report or observation moves one of them between the cascade's status
-    read and the membership update — an excluded member cannot be claimed
-    once the exclusion commits, nor a completion be excluded behind it."""
+    """Lock the task rows the cascade may read, ``FOR NO KEY UPDATE`` (after
+    the build: build → task), so that no claim, report or observation moves
+    one of them between the cascade's status read and the membership update
+    — an excluded member cannot be claimed once the exclusion commits, nor
+    a completion be excluded behind it.
+
+    The statement is ordered by ``task_id``, but Postgres does not guarantee
+    that a locking ``SELECT`` acquires in its ``ORDER BY`` order; a deadlock
+    with another multi-row locker is retried at the request boundary
+    (``services/tx.py``)."""
     pks = (
         await session.scalars(_EXCLUSION_REACH, {"plan": plan_id, "seed": seed})
     ).all()
@@ -233,6 +239,7 @@ async def _lock_reach(
     )
 
 
+@retry_on_deadlock
 async def exclude_member(
     session: AsyncSession,
     environment_id: UUID,

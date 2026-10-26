@@ -703,8 +703,12 @@ async def _insert_edges(
 async def _expand(session: AsyncSession, chunk: _Chunk) -> None:
     """Set the closure flag on existing instances this chunk expanded.
 
-    New instances were inserted with it. The rows are locked in id order
-    first, so two chunks expanding the same instances cannot deadlock.
+    New instances were inserted with it. The rows are locked first, the
+    statement ordered by id so that two chunks expanding the same instances
+    normally meet them in the same order. Postgres does not guarantee that
+    a locking ``SELECT`` acquires in its ``ORDER BY`` order, so this makes a
+    deadlock unlikely rather than impossible; one that still happens is
+    retried at the request boundary (``services/tx.py``).
     """
     if not chunk.to_expand:
         return

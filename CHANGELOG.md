@@ -56,6 +56,21 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   which costs the tick one spare pass. `notify` re-asserts the flag in its
   second transaction, so every row a flagger skips is left flagged. No SDK
   change, no migration.
+- **Fixed: a v2 write that Postgres aborted as a deadlock victim was a
+  500** (STA-63). Every service call behind a v2 write route (and the
+  frontier read, which commits the closure step) is now re-run when its
+  transaction fails with `DeadlockDetected` (SQLSTATE `40P01`): up to three
+  attempts with small jittered backoff, each retry logged. A deadlock costs
+  the caller latency instead of an error. Each wrapped call is safe to
+  re-run, since its only effects are rows in the rolled-back transaction;
+  a call with two transactions (`notify`) is re-run only while it has
+  committed neither. The auth dependency now commits an API key's
+  `last_used_at` on its own and detaches the rows it loads, so a rollback
+  in the service no longer drops the one or expires the other. A test
+  requires every new service transaction to take
+  the retry or name a reason not to. Comments that claimed a
+  `SELECT … ORDER BY … FOR UPDATE` acquires its locks in order now say that
+  Postgres does not guarantee it.
 
 ## [0.28.0] — 2026-10-08
 

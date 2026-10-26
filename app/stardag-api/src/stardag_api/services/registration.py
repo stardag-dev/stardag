@@ -55,7 +55,7 @@ from stardag_api.services.deployments import (
 )
 from stardag_api.services.errors import BadRequest, Conflict, NotFound
 from stardag_api.services.registration_chunk import MembersResult, register_items
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 __all__ = [
     "MAX_CHUNK_ITEMS",
@@ -152,6 +152,7 @@ async def lock_build(
 # ---------------------------------------------------------------------------
 
 
+@retry_on_deadlock
 async def create_plan(
     session: AsyncSession,
     environment_id: UUID,
@@ -291,6 +292,7 @@ async def _check_roots(
 # ---------------------------------------------------------------------------
 
 
+@retry_on_deadlock
 async def register_members(
     session: AsyncSession,
     environment_id: UUID,

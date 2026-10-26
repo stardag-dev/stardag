@@ -38,7 +38,7 @@ from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.services.errors import NotFound, TooManyRequests
 from stardag_api.services.quotas import charge_artifacts
 from stardag_api.services.transitions import lock_task, member_task_pk
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,7 @@ def _guard(error: LimitExceededError | None) -> None:
         )
 
 
+@retry_on_deadlock
 async def upload_artifacts(
     session: AsyncSession,
     environment_id: UUID,
