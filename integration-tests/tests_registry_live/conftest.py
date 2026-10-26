@@ -35,6 +35,7 @@ import pytest
 
 from stardag_integration_tests.registry_live._diagnostics import (
     CLASSIFICATION_FAILED,
+    COLLECT_PHASE,
     DIAGNOSTICS_DIR_ENV,
     record_non_timeout_failure,
     record_transport_timeout,
@@ -321,6 +322,71 @@ def _classify(
         )
     elif not isinstance(error, RegistryContainerRecycled):
         record_non_timeout_failure(nodeid=item.nodeid, phase=report.when, error=error)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_make_collect_report(collector: pytest.Collector):
+    """Classify a transport timeout that fails a module's collection.
+
+    Every scenario module calls ``registry_live_guard()`` at import, so a
+    registry that does not answer then is a *collection* error, and a
+    collection error never reaches ``pytest_runtest_makereport`` above. It
+    used to leave no marker, no record, no probe and no sidecar: an
+    occurrence of exactly the failure class STA-86 counts, invisible to the
+    count (STA-97).
+
+    **Recorded, counted, and deliberately not retried.** The same
+    discriminator, the same probe and the same three files as a timeout in
+    a scenario, under the phase ``collect`` -- and that tag is what CI
+    keys on to *refuse* the retry it would otherwise grant. The guard has
+    already retried the round trip four times with a backoff before it
+    gave up, so a collection-time timeout is a sustained outage rather
+    than a momentary lost answer, and a second layer of retry over the
+    same condition would only double what the guard owns. The merge gate
+    therefore behaves exactly as before; what changes is that the run now
+    says what happened.
+
+    **This hook rather than ``pytest_collectreport``**, because only here
+    is the exception still reachable. pytest's own implementation attaches
+    the ``CallInfo`` to the report as ``report.call``, and
+    ``collect_one_node`` pops it off again before ``pytest_collectreport``
+    fires -- which therefore sees pytest's rendering of the failure and
+    never the exception the discriminator walks. A wrapper sees the report
+    in between. It also runs only in the process that collected: under
+    xdist that is each worker, so the controller, which receives every
+    worker's collection report again, counts nothing twice.
+
+    Anything other than a transport timeout is left as it was: a
+    collection error already ends the run unretried, with pytest's own
+    report of it. And like the classifier above it fails closed: nothing
+    raised in here may reach pytest, and a classifier that died prints the
+    sentinel CI refuses to retry over.
+    """
+    report = yield
+    try:
+        _classify_collection(report)
+    except Exception as error:  # pragma: no cover - diagnostics only
+        print(f"{CLASSIFICATION_FAILED}: {error!r}", file=sys.stderr)
+    return report
+
+
+def _classify_collection(report: pytest.CollectReport) -> None:
+    if not report.failed or _deployment is None:
+        return
+    call = getattr(report, "call", None)
+    excinfo = getattr(call, "excinfo", None)
+    if excinfo is None:
+        return
+    error = excinfo.value
+    timeout = transport_timeout(error)
+    if timeout is not None:
+        record_transport_timeout(
+            _deployment,
+            nodeid=report.nodeid,
+            phase=COLLECT_PHASE,
+            error=error,
+            timeout=timeout,
+        )
 
 
 @pytest.fixture(autouse=True)

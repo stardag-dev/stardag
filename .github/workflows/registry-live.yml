@@ -346,6 +346,13 @@ jobs:
       #    type rather than by phase: the recycle assertion, which is
       #    case 1 above and has its own recovery.
       #
+      #    **Not during collection.** Every scenario module calls the
+      #    guard at import, and a timeout there fails collection rather
+      #    than a scenario. It is recorded and counted the same way, under
+      #    the phase `collect`, and is *not* retried: the guard has already
+      #    retried the round trip four times, so the tier's retry would be
+      #    a second layer over the same condition (STA-97).
+      #
       #    **And it fails closed.** An absent marker is read here as
       #    proof that nothing real broke, so a marker the harness could
       #    not write, or a classifier that raised, would grant a retry
@@ -498,6 +505,25 @@ jobs:
             echo "Not retried. An unwritten marker is indistinguishable" \
                  "from a run with nothing wrong in it, so this fails" \
                  "closed."
+            exit 1
+          elif [ -f "$timeouts" ] && grep -q ' \[collect\] ' "$timeouts"; then
+            # A scenario module failed to *collect* on a transport timeout
+            # (STA-97): the guard at its import gave up after four attempts
+            # of its own. Counted here like any other occurrence, and not
+            # retried: the guard owns that retry, and a second layer over
+            # the same condition would double it. Kept in step with
+            # `_diagnostics.COLLECT_PHASE`.
+            collected=$(grep ' \[collect\] ' "$timeouts" | tr '\n' ';')
+            echo "::warning title=Registry transport fault at collection::" \
+              "$collected -- the guard at module import got no complete" \
+              "answer from the registry after its own retries. One line per" \
+              "module per xdist worker: each worker collects every module" \
+              "and runs its guard (STA-97)."
+            echo "Scenario modules failed to collect on a transport timeout:" \
+                 "the registry did not answer the guard's four attempts at" \
+                 "import. Not retried -- the guard's retry owns this" \
+                 "condition. The records and boot probes are in the" \
+                 "diagnostics artifact."
             exit 1
           elif [ -f "$timeouts" ] && [ ! -f "$others" ]; then
             echo "::warning title=Registry transport fault::$(tr '\n' ';' \
