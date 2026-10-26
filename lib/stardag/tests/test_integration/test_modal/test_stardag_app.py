@@ -325,6 +325,124 @@ class TestStardagAppCustomFunctions:
             assert inspect.isfunction(fn), f"{name} is {type(fn)}, not a function"
 
 
+class TestResidentBuilderWorkerTimeouts:
+    """The deployed ``build`` hands the app's worker timeouts to the builder,
+    so a resident build's detached executions claim with timeout + grace
+    (as a reactive tick's do) instead of the registry's default TTL."""
+
+    @staticmethod
+    def _app(**kwargs) -> StardagApp:
+        return StardagApp(
+            "test-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                "default": FunctionSettings(image=_make_image(), timeout=84600),
+                "gpu": FunctionSettings(image=_make_image(), timeout=7200),
+                "untimed": FunctionSettings(image=_make_image()),
+            },
+            worker_selector=lambda task: "default",
+            **kwargs,
+        )
+
+    def test_default_builder_constructs_its_executor_with_the_worker_timeouts(
+        self,
+    ):
+        from stardag.build._claims import CLAIM_TTL_GRACE_SECONDS, claim_ttl_seconds
+        from stardag.integration.modal import ModalTaskExecutor
+        from stardag.integration.modal._metadata import (
+            STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
+        )
+
+        registered = _finalize_capturing_functions(self._app())
+        captured: list[ModalTaskExecutor] = []
+
+        def capture(**kwargs):
+            captured.append(ModalTaskExecutor(**kwargs))
+            raise RuntimeError("stop after construction")
+
+        with patch(
+            "stardag.integration.modal._builder.ModalTaskExecutor",
+            side_effect=capture,
+        ):
+            with pytest.raises(RuntimeError, match="stop after construction"):
+                registered["build"]("task", lambda task: "default", "test-app", None)
+
+        (executor,) = captured
+        assert executor.worker_timeouts == {"default": 84600, "gpu": 7200}
+        task = MagicMock()
+        assert executor.execution_timeout_seconds(task) == 84600.0
+        assert claim_ttl_seconds(task, executor) == int(84600 + CLAIM_TTL_GRACE_SECONDS)
+        # The worker is told its own timeout, so a timeout is classified as
+        # one rather than as a cancellation.
+        with (
+            patch(
+                "stardag.integration.modal._executor.get_current_build_context"
+            ) as get_context,
+            patch.object(executor, "_get_worker_function", return_value=MagicMock()),
+            patch.object(
+                executor, "_metadata_for_worker", AsyncMock(return_value=None)
+            ),
+        ):
+            get_context.return_value = MagicMock(
+                settings={}, build_id=uuid4(), plan_id=uuid4()
+            )
+            _, env, _ = asyncio.run(executor._prepare_invocation(task, uuid4()))
+        assert env is not None
+        assert env[STARDAG_MODAL_FUNCTION_TIMEOUT_ENV] == "84600.0"
+
+    def test_a_custom_build_function_declaring_worker_timeouts_receives_them(
+        self,
+    ):
+        captured: dict = {}
+
+        def my_build(
+            tasks, worker_selector, app_name, build_kwargs=None, *, worker_timeouts
+        ):
+            captured["worker_timeouts"] = worker_timeouts
+
+        registered = _finalize_capturing_functions(
+            self._app(build_function=my_build)  # type: ignore[arg-type]
+        )
+        registered["build"]("task", "selector", "app", None)
+        assert captured["worker_timeouts"] == {"default": 84600, "gpu": 7200}
+
+    def test_a_bare_kwargs_build_function_does_not_receive_them(self):
+        """A ``**kwargs`` build function may splat its kwargs into
+        :func:`stardag.build`, which would reject the extra key: only a
+        parameter declared by name opts in."""
+        captured: dict = {}
+
+        def my_build(tasks, worker_selector, app_name, build_kwargs=None, **kwargs):
+            captured["kwargs"] = kwargs
+
+        registered = _finalize_capturing_functions(self._app(build_function=my_build))
+        registered["build"]("task", "selector", "app", None)
+        assert captured["kwargs"] == {}
+
+    def test_a_detached_executor_without_worker_timeouts_warns(self, caplog):
+        from stardag.integration.modal import ModalTaskExecutor
+
+        with caplog.at_level("WARNING"):
+            ModalTaskExecutor(modal_app_name="x", worker_selector=lambda t: "default")
+        assert "registry's default TTL" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            # An app whose workers declare no timeout passes an empty
+            # mapping: nothing to derive, and nothing to warn about.
+            ModalTaskExecutor(
+                modal_app_name="x",
+                worker_selector=lambda t: "default",
+                worker_timeouts={},
+            )
+            ModalTaskExecutor(
+                modal_app_name="x",
+                worker_selector=lambda t: "default",
+                detached=False,
+            )
+        assert "registry's default TTL" not in caplog.text
+
+
 class TestBuilderAndRunnerProtocols:
     def test_builder_satisfies_build_function(self):
         """Builder instance satisfies BuildFunction protocol."""

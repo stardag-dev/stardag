@@ -25,6 +25,19 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `functools.cached_property` raised `TypeError` once it had been read. The
   cache is now dropped before pydantic copies anything, on every pydantic
   version.
+- **Fixed: the deployed resident builder claimed detached executions with
+  the registry's default one-hour TTL** (STA-134). `Builder` constructed its
+  `ModalTaskExecutor` without the app's worker timeouts, so a non-reactive
+  build (`build_spawn`, `build_remote`, `build_trigger(reactive=False)`)
+  never derived a claim TTL from the worker's `timeout`, and the worker never
+  learned its own timeout. A task running longer than an hour lost its claim
+  while still running: another build could take it over and run it a second
+  time, and the original's completion was then refused. The deployed `build`
+  function now passes the worker timeouts to any build function that declares
+  a `worker_timeouts` keyword (the default `Builder` does), so resident
+  builds claim with timeout plus grace, as reactive ones do. A detached
+  `ModalTaskExecutor` constructed without `worker_timeouts` now logs a
+  warning.
 
 ### Server
 
