@@ -79,7 +79,7 @@ from stardag_api.services.transition_types import (
     TransitionOutcome,
     claim_ttl,
 )
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 from stardag_api.services.wakeups import flag_after_transition
 
 __all__ = [
@@ -101,6 +101,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+@retry_on_deadlock
 async def apply_member_transition(
     session: AsyncSession,
     environment_id: UUID,
@@ -164,6 +165,7 @@ async def lock_task(session: AsyncSession, environment_id: UUID, task_pk: UUID) 
     return task
 
 
+@retry_on_deadlock
 async def renew_claim(
     session: AsyncSession,
     environment_id: UUID,
@@ -446,8 +448,11 @@ class _Step(ReportSteps):
     async def _check_upstreams(self, instance_id: UUID) -> None:
         """The runnable predicate, re-read under the claim's lock: the
         instance is expanded and every upstream task COMPLETED. Upstream rows
-        are read ``FOR SHARE``, in ``task_id`` order, so an invalidation
-        holding one (``FOR NO KEY UPDATE``) is waited for, not raced (S39)."""
+        are read ``FOR SHARE``, so an invalidation holding one (``FOR NO KEY
+        UPDATE``) is waited for, not raced (S39). The statement is ordered by
+        ``task_id``, which Postgres does not guarantee as the acquisition
+        order; a deadlock is retried at the request boundary
+        (``services/tx.py``)."""
         expanded = await self.session.scalar(
             select(TaskInstance.expanded_at).where(TaskInstance.id == instance_id)
         )

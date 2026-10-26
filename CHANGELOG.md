@@ -4,6 +4,23 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### Server
+
+- **Fixed: a v2 write that Postgres aborted as a deadlock victim was a
+  500** (STA-63). Every service call behind a v2 write route (and the
+  frontier read, which commits the closure step) is now re-run when its
+  transaction fails with `DeadlockDetected` (SQLSTATE `40P01`): up to three
+  attempts with small jittered backoff, each retry logged. A deadlock costs
+  the caller latency instead of an error. Each wrapped call is safe to
+  re-run, since its only effects are rows in the rolled-back transaction;
+  a call with two transactions (`notify`) is re-run only while it has
+  committed neither. A test requires every new service transaction to take
+  the retry or name a reason not to. Comments that claimed a
+  `SELECT … ORDER BY … FOR UPDATE` acquires its locks in order now say that
+  Postgres does not guarantee it.
+
 ## [0.28.0] — 2026-10-08
 
 SDK `0.28.0` and server `server-v0.7.0`. Not breaking for SDK users, but a

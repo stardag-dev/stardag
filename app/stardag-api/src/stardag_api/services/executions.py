@@ -36,7 +36,7 @@ from stardag_api.services.transitions import (
     TransitionOutcome,
     transition_task,
 )
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 
 @dataclass(frozen=True)
@@ -154,6 +154,7 @@ async def list_task_executions(
     return await _states(session, query)
 
 
+@retry_on_deadlock
 async def report_stopped(
     session: AsyncSession,
     environment_id: UUID,

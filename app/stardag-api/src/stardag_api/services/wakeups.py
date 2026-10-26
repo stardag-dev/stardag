@@ -67,7 +67,7 @@ from stardag_api.models import (
 from stardag_api.models.base import utc_now
 from stardag_api.services.errors import BadRequest, NotFound
 from stardag_api.services.transition_types import ACTIONABLE_STATUSES
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +327,7 @@ async def _locked_wake(
     return wake
 
 
+@retry_on_deadlock
 async def notify(
     session: AsyncSession,
     environment_id: UUID,
@@ -394,6 +395,7 @@ async def read_notify(
     return NotifyState(build_id=build_id, needs_tick=needs_tick_at is not None)
 
 
+@retry_on_deadlock
 async def clear_notify(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> NotifyState:
@@ -411,6 +413,7 @@ class WakeCandidate:
     reactive_app_name: str
 
 
+@retry_on_deadlock
 async def wake_candidates(
     session: AsyncSession,
     environment_id: UUID,
@@ -595,6 +598,7 @@ def _owner(owner_id: str) -> str:
     return owner_id
 
 
+@retry_on_deadlock
 async def acquire_lease(
     session: AsyncSession,
     environment_id: UUID,
@@ -618,6 +622,7 @@ async def acquire_lease(
         return LeaseState(build_id, held=True, expires_at=build.scheduler_lease_until)
 
 
+@retry_on_deadlock
 async def renew_lease(
     session: AsyncSession,
     environment_id: UUID,
@@ -638,6 +643,7 @@ async def renew_lease(
         return LeaseState(build_id, held=True, expires_at=build.scheduler_lease_until)
 
 
+@retry_on_deadlock
 async def release_lease(
     session: AsyncSession, environment_id: UUID, build_id: UUID, *, owner_id: str
 ) -> LeaseState:

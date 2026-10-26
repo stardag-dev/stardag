@@ -20,8 +20,10 @@ state) and the ``build`` entity.
 - **Completion is verified**: ``complete`` runs the closure step (a
   conflict fails the build, as on ``/seal``), then recomputes ``plan_complete``
   (sealed, every non-excluded member COMPLETED) over the active plan's
-  member task rows read ``FOR SHARE`` in ``task_id`` order, which
-  serialises with an invalidation's ``FOR NO KEY UPDATE``. ``force``
+  member task rows read ``FOR SHARE``, which serialises with an
+  invalidation's ``FOR NO KEY UPDATE`` (ordered by ``task_id``, which
+  Postgres does not guarantee as the acquisition order; a deadlock is
+  retried at the request boundary, ``services/tx.py``). ``force``
   overrides outstanding members, never a missing seal and never an
   excluded root.
 - **Claims**: ``complete``, ``fail`` and ``cancel`` release the claims held
@@ -63,7 +65,7 @@ from stardag_api.services.event_log import EventClock
 from stardag_api.services.registration import PlanState, lock_build
 from stardag_api.services.slug import generate_build_slug
 from stardag_api.services.transitions import Transition, transition_task
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 if TYPE_CHECKING:
     from stardag_api.services.plans import ClosureConflict
@@ -82,6 +84,7 @@ TERMINAL_STATUSES = frozenset(
 # ---------------------------------------------------------------------------
 
 
+@retry_on_deadlock
 async def create_build(
     session: AsyncSession,
     environment_id: UUID,
@@ -162,6 +165,7 @@ async def active_plan(session: AsyncSession, build_id: UUID) -> Plan | None:
 # ---------------------------------------------------------------------------
 
 
+@retry_on_deadlock
 async def complete_build(
     session: AsyncSession,
     environment_id: UUID,
@@ -254,6 +258,7 @@ async def _verify_plan_complete(
     return len(outstanding)
 
 
+@retry_on_deadlock
 async def fail_build(
     session: AsyncSession,
     environment_id: UUID,
@@ -286,6 +291,7 @@ async def fail_build(
         return build
 
 
+@retry_on_deadlock
 async def cancel_build(
     session: AsyncSession,
     environment_id: UUID,
@@ -313,6 +319,7 @@ async def cancel_build(
         return build
 
 
+@retry_on_deadlock
 async def exit_early(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> Build:
@@ -561,6 +568,7 @@ class ResumeResult:
     changed: bool
 
 
+@retry_on_deadlock
 async def resume_build(
     session: AsyncSession,
     environment_id: UUID,
@@ -666,6 +674,7 @@ async def _refuse_pending_replacement(session: AsyncSession, plan: Plan) -> None
 # ---------------------------------------------------------------------------
 
 
+@retry_on_deadlock
 async def delete_build(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> None:
