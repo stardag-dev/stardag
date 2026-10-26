@@ -933,6 +933,13 @@ The image definition is `app/server.Dockerfile` (build context = repo root):
 docker build -f app/server.Dockerfile -t stardag-server .
 ```
 
+The image installs the API's dependencies from `app/stardag-api/uv.lock`,
+hash-checked, through `app/stardag-api/install-locked.sh`. The API-only
+`app/stardag-api/Dockerfile` and the `stardag self-host --from-source` image
+use the same script. A dependency reaches a server image only through a lock
+bump, and a lock that is out of date with `pyproject.toml` fails the build
+rather than being re-resolved.
+
 > **Python versions are decoupled for the prebuilt path.** `stardag
 self-host up` deploys the prebuilt image by _reference_: it points the
 > Modal `web`/`migrate` functions at module-level entry points in
