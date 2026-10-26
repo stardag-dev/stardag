@@ -12,7 +12,7 @@ Two image modes:
 - **From source**: the image is built from a local checkout of the
   stardag repo: the UI is compiled with npm *inside* the image build
   (no local Node required) and the API package is pip-installed from
-  source.
+  source, with its dependencies from ``uv.lock``.
 
 Both modes place the alembic config at ``/opt/stardag/api`` and the built
 UI at ``/opt/stardag/ui`` (see ``app/server.Dockerfile``), so the Modal
@@ -292,7 +292,8 @@ def _build_from_source_app(
             copy=True,
             ignore=[".venv", "__pycache__", ".pytest_cache", "tests"],
         )
-        .run_commands(f"python -m pip install {API_REMOTE_DIR}")
+        # dependencies pinned from uv.lock, as in app/server.Dockerfile
+        .run_commands(f"sh {API_REMOTE_DIR}/install-locked.sh {API_REMOTE_DIR}")
     )
 
     # NOTE: the function bodies below are defined as closures (not module-
