@@ -383,10 +383,16 @@ their own lifecycle to the registry — see [Orchestration on
 Modal](../concepts/modal-orchestration.md#detached-execution-and-self-reporting-workers)
 for what that buys. Three practical notes:
 
-- A custom `run_function` that does not report the task lifecycle itself
-  needs `ModalTaskExecutor(worker_reports_lifecycle=False)` (resident
-  builds only: a reactive build needs self-reporting workers). Keep the
-  deployed app on the same stardag as the driver: redeploy after upgrading.
+- Who reports a task's lifecycle follows from the app's `run_function`.
+  The default `Runner` reports from the worker. A custom run function that
+  does not subclass `Runner` gets engine-side reporting from the deployed
+  build function automatically; set `reports_lifecycle = True` on it only
+  if it really reports itself (by delegating to a `Runner`, say). A
+  reactive build needs a self-reporting run function, and
+  `build_trigger(reactive=True)` refuses one that is not. When you
+  construct a `ModalTaskExecutor` yourself against such an app, pass
+  `worker_reports_lifecycle=False`. Keep the deployed app on the same
+  stardag as the driver: redeploy after upgrading.
 - Each detached execution claims with its worker's `timeout` plus a
   grace period, so set an explicit worker `timeout` for long tasks. The
   deployed `Builder` passes the timeouts from `worker_settings`; a

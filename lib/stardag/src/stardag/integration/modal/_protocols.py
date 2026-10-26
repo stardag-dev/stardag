@@ -109,6 +109,22 @@ class RunFunction(typing.Protocol):
     signature the framework instead applies the overrides to the process
     environment around the call. The default :class:`Runner` accepts
     ``env_overrides`` and applies them around its ``run`` call.
+
+    **Lifecycle reporting.** In a detached execution somebody has to report
+    the task's start, completion, failure and dynamic-dependency yields to
+    the registry: either the worker itself, or the build engine on the
+    worker's behalf. The default :class:`Runner` reports from the worker
+    (unless constructed with ``report_lifecycle=False``). A run function
+    declares which applies through a ``reports_lifecycle`` attribute, read
+    once at ``finalize()``: true means it reports itself, so the engine
+    stays silent; absent or false means the engine reports for it. A custom
+    implementation that does not subclass ``Runner`` therefore gets
+    engine-side reporting automatically, and should set
+    ``reports_lifecycle = True`` only if it really reports (by delegating
+    to a ``Runner``, say). Reactive builds need a self-reporting run
+    function, since no resident engine is there to report:
+    ``build_trigger(reactive=True)`` refuses an app whose run function does
+    not report.
     """
 
     def __call__(self, task: BaseTask) -> None | TaskStruct: ...
@@ -124,6 +140,12 @@ class _RunFunctionWithEnv(typing.Protocol):
     def __call__(
         self, task: BaseTask, *, env_overrides: dict[str, str] | None = None
     ) -> None | TaskStruct: ...
+
+
+def _run_function_reports_lifecycle(run_function: typing.Any) -> bool:
+    """Whether ``run_function`` reports the task lifecycle from the worker
+    (see "Lifecycle reporting" on :class:`RunFunction`)."""
+    return bool(getattr(run_function, "reports_lifecycle", False))
 
 
 def _callable_accepts_env_overrides(fn: typing.Callable[..., typing.Any]) -> bool:
