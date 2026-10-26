@@ -142,6 +142,28 @@ class ExcludedLockParamsTask(sd.Task[int]):
         self._save(1)
 
 
+FIXED_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+FIXED_AT = datetime.datetime(2026, 1, 1, 12, 0, 0)
+
+
+class EqualOpaqueDefaultsTask(sd.Task[int]):
+    """Defaults deep-copied into each instance: distinct objects, equal."""
+
+    _id: uuid.UUID = PrivateAttr(default=FIXED_ID)
+    at: datetime.datetime = Field(default=FIXED_AT, exclude=True)
+
+    def run(self) -> None:
+        self._save(1)
+
+
+class UnhashableMetadataTask(sd.Task[int]):
+    counts: list[typing.Annotated[int, {"unit": "count"}]] = []
+    handle: str | None = Field(default=None, exclude=True)
+
+    def run(self) -> None:
+        self._save(len(self.counts))
+
+
 class ParentTask(sd.Task[int]):
     upstream: sd.TaskLoads[int]
 
@@ -299,6 +321,14 @@ class TestRefused:
             plan_rehydration([task], PATTERNS)
         )
 
+    def test_alongside_an_annotation_with_unhashable_metadata(self):
+        """Classifying ``list[Annotated[int, {...}]]`` must not abort the
+        check (and so turn the refusal into a pass)."""
+        task = UnhashableMetadataTask(counts=[1], handle="set")
+        assert "UnhashableMetadataTask.handle is excluded" in _refusal(
+            plan_rehydration([task], PATTERNS)
+        )
+
     def test_an_untouched_excluded_field_with_a_compat_default(self):
         """The tick really does get the compat_default (0), not 5."""
         reason = _refusal(plan_rehydration([CompatExcludedTask()], PATTERNS))
@@ -448,6 +478,11 @@ class TestNotRefused:
         assert plan_rehydration([task], PATTERNS).reconstructable == (task,)
         (warning,) = _state_warnings(caplog)
         assert "ExcludedLockParamsTask.params" in warning
+
+    def test_equal_opaque_defaults_say_nothing(self, caplog):
+        task = EqualOpaqueDefaultsTask()
+        assert plan_rehydration([task], PATTERNS).reconstructable == (task,)
+        assert _state_warnings(caplog) == []
 
     def test_a_failing_detector_warns_and_passes(self, caplog, monkeypatch):
         def broken(original, rebuilt):

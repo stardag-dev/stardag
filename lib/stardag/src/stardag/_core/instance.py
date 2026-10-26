@@ -276,8 +276,14 @@ def _declared_by_stardag(cls: type, name: str, attribute: Any) -> bool:
 def _annotation_is_plain(annotation: Any, depth: int = 0) -> bool:
     if depth > 20:
         return False
-    if annotation in _PLAIN_ANNOTATIONS or annotation is None:
+    if annotation is None:
         return True
+    try:
+        if annotation in _PLAIN_ANNOTATIONS:
+            return True
+    except TypeError:
+        # ``Annotated[int, {"unit": "count"}]``: unhashable metadata.
+        pass
     if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
         return True
     origin = typing.get_origin(annotation)
@@ -363,7 +369,8 @@ def _field_of(other: Any, name: str) -> Any:
 
 def _compare(value: Any, reference: Callable[[], Any]) -> bool | None:
     """``None`` when ``value`` matches the reference, else whether the
-    difference is decidable (both plain data, compared unequal)."""
+    difference is decidable (compared unequal, and both plain data, so the
+    inequality is a fact rather than the absence of value equality)."""
     try:
         ref = reference()
     except Exception:
@@ -377,12 +384,14 @@ def _compare(value: Any, reference: Callable[[], Any]) -> bool | None:
         and math.isnan(ref)
     ):
         return None
-    if not (_is_plain_data(value) and _is_plain_data(ref)):
-        return False
     try:
-        return True if value != ref else None
+        # Equal is equal, plain or not: a fixed UUID or datetime default is
+        # deep-copied into each instance, distinct but equal.
+        if bool(value == ref):
+            return None
     except Exception:
         return False
+    return _is_plain_data(value) and _is_plain_data(ref)
 
 
 def _is_plain_data(value: Any, _seen: set[int] | None = None) -> bool:

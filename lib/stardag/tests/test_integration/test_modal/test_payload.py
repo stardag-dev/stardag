@@ -17,6 +17,7 @@ import json
 from collections import UserList
 import logging
 import threading
+import uuid
 import os
 import subprocess
 import sys
@@ -114,6 +115,18 @@ class NestedStateTask(sd.Task[int]):
 
 class OpaquePrivateTask(sd.Task[int]):
     _lock: Any = PrivateAttr(default_factory=threading.Lock)
+
+    def run(self) -> None:
+        self._save(0)
+
+
+class FixedIdTask(sd.Task[int]):
+    """A fixed UUID default is deep-copied into each instance: equal, not
+    the same object, and nothing lost."""
+
+    _id: uuid.UUID = PrivateAttr(
+        default=uuid.UUID("12345678-1234-5678-1234-567812345678")
+    )
 
     def run(self) -> None:
         self._save(0)
@@ -371,6 +384,9 @@ class TestByValueFallback:
         (warning,) = [r for r in caplog.records if "by value" in r.getMessage()]
         assert "state could not be checked" in warning.getMessage()
         assert "rehydrated" not in warning.getMessage()
+
+    def test_an_equal_opaque_default_goes_as_a_payload(self):
+        assert is_task_payload(to_task_payload(FixedIdTask()))
 
     def test_untouched_opaque_defaults_still_go_by_value(self):
         """Resident behaviour is unchanged: any difference keeps the pickle,
