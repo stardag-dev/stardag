@@ -289,8 +289,9 @@ def deploy_registry(
     # the invisible one, if the passwords ever did match, is a green run
     # that tested the previous commit.
     #
-    # CI reuses `ci-pr-<n>` across pushes to the same PR, so this is the
-    # normal case there, not an edge.
+    # The weekly CI run reuses the permanent `ci-main`, and a local stack
+    # reuses `dev-<checkout>`, so this is the normal case, not an edge. (PR
+    # runs get a fresh `ci-rl-<run-id>` each, since STA-138.)
     stop_existing_app(app_name, modal_environment)
 
     private_key, public_key = generate_jwt_keypair()

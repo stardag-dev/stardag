@@ -1,0 +1,755 @@
+name: Registry-live tier
+
+# The registry-live tier for one PR head, in one slot. Not triggered by pull
+# requests: a PR *queues* for it (`modal-live.yml`), and the selector
+# (`registry-live-dispatch.yml`) dispatches this workflow when a slot is free,
+# oldest request first. See `registry_live/_queue.py` for the state machine
+# and STA-138 for why the queue is not a concurrency group: GitHub keeps one
+# running and one pending job per group, and a third request cancels the
+# pending one.
+#
+# **Dispatched on the PR's own branch**, so this file and the code it tests
+# come from the same commit. A PR that edits the tier's steps runs its own
+# edit, and the merge-ref/head mismatch of STA-92 cannot arise here. A branch
+# older than this file is dispatched on the default branch instead, which
+# checks the head out by SHA exactly as the PR workflow used to.
+
+# **A contract with `_queue.py`**: the runs API shows a dispatched run's PR
+# and slot nowhere else, and the selector parses them out of this. Change the
+# two together.
+run-name: >-
+  Registry-live tier · ${{ inputs.pr && format('PR #{0}', inputs.pr) || 'main' }}
+  · slot ${{ inputs.slot || 'manual' }}
+
+# No schedule: the weekly run is queued by the selector's own weekly
+# schedule, on the default branch's head, and dispatched like any other
+# request. A schedule here would bypass admission.
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: >-
+          The PR whose head to test. Normally set by the selector. Empty
+          with a `sha` is the default branch's weekly run, in the permanent
+          `ci-main`; empty with no `sha` runs the dispatched ref itself, in
+          a throwaway environment.
+        type: string
+        default: ""
+      sha:
+        description: The head SHA the request was queued for.
+        type: string
+        default: ""
+      slot:
+        description: >-
+          Which slot this run occupies. Assigned by the selector. Leave it
+          empty when dispatching by hand: the run then gets a concurrency
+          group of its own, so it cannot cancel a run the selector admitted
+          into a slot's pending position, and the selector counts it as
+          holding slot 1 until it ends.
+        type: string
+        default: ""
+      serial:
+        description: >-
+          Run the scenarios one at a time. They are concurrent by default; a
+          shared registry and interleaved logs make a low-level failure much
+          harder to read, so this is the switch to reach for when debugging
+          a red run.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # **A safety net under the selector, not the queue.** The selector admits
+  # a run only into a slot no active run holds, so this group sees at most a
+  # finishing run and its successor. It is keyed by slot because the
+  # resource is the Modal *workspace*: one run peaks at a realistic 45-65
+  # containers (upper bound ~115) against a 100-container limit that also
+  # carries every developer's `dev-<checkout>` stack and the self-hosted
+  # deployment (STA-91). `REGISTRY_LIVE_SLOTS` above 1 is a decision about
+  # that arithmetic, not about this file.
+  #
+  # A hand-dispatched run (no slot) gets a group of its own rather than slot
+  # 1's: GitHub would otherwise let it replace -- and so cancel -- a run the
+  # selector had admitted into that group's pending position.
+  group: >-
+    registry-live-andhus-workspace-slot-${{ inputs.slot
+      || format('manual-{0}', github.run_id) }}
+  # Never cancel a run in flight: it holds a Modal environment, a database
+  # and deployed apps.
+  cancel-in-progress: false
+
+jobs:
+  # Which commit to test, and whether it is still worth testing.
+  resolve:
+    name: Resolve the head to test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      run: ${{ steps.resolve.outputs.run }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      env_name: ${{ steps.resolve.outputs.env_name }}
+      ephemeral: ${{ steps.resolve.outputs.ephemeral }}
+      fail_fast: ${{ steps.resolve.outputs.fail_fast }}
+    steps:
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The weekly run reports under a context of its own; see
+          # `_queue.WEEKLY_CONTEXT`.
+          CONTEXT: ${{ inputs.pr && 'Registry-live tier' || 'Registry-live tier (weekly)' }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          SHA: ${{ inputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+
+          # A SHA and no PR is the default branch's head, queued by the
+          # selector's weekly schedule. It keeps the *permanent* `ci-main`:
+          # provisioning into an environment that already exists is a state
+          # a PR run never reaches, and it is where real bugs have lived.
+          if [ -z "$PR" ] && [ -n "$SHA" ]; then
+            out run true; out sha "$SHA"
+            out env_name ci-main; out ephemeral false; out fail_fast false
+            gh api "repos/$REPO/statuses/$SHA" -f state=pending \
+              -f context="$CONTEXT" -f target_url="$RUN_URL" \
+              -f description="Running in slot ${{ inputs.slot || 'manual' }}." > /dev/null
+            exit 0
+          fi
+
+          # One environment per *run*, not per PR. The PR workflow's Live
+          # Modal tier still uses `ci-pr-<n>` and tears it down when it
+          # finishes, which can be in the middle of this run.
+          out env_name "ci-rl-$GITHUB_RUN_ID"; out ephemeral true
+
+          if [ -z "$PR" ]; then
+            out run true; out sha "$GITHUB_SHA"; out fail_fast false
+            exit 0
+          fi
+
+          pr=$(gh api "repos/$REPO/pulls/$PR")
+          head=$(jq -r .head.sha <<<"$pr")
+          # The selector refuses fork heads; checked again here because
+          # this is a dispatchable workflow, and the selector is not the
+          # only thing that can dispatch it.
+          if [ "$(jq -r .head.repo.full_name <<<"$pr")" != "$REPO" ]; then
+            echo "::error::PR #$PR is from a fork; refusing to run it with credentials."
+            exit 1
+          fi
+          # Closed or merged while it waited: the slot belongs to an open PR.
+          if [ "$(jq -r .state <<<"$pr")" != open ]; then
+            echo "PR #$PR is $(jq -r .state <<<"$pr"); nothing to run."
+            gh api "repos/$REPO/statuses/${SHA:-$head}" -f state=error \
+              -f context="$CONTEXT" -f target_url="$RUN_URL" \
+              -f description="The PR was closed before it ran." > /dev/null
+            out run false; out sha "${SHA:-$head}"; out fail_fast false
+            exit 0
+          fi
+          # A push since the request moved the head, and queued the new one
+          # in its own right. The old head's status is no longer shown on
+          # the PR, so this is bookkeeping rather than a verdict.
+          if [ -n "$SHA" ] && [ "$head" != "$SHA" ]; then
+            echo "PR #$PR moved from $SHA to $head since it queued; nothing to run."
+            gh api "repos/$REPO/statuses/$SHA" -f state=error \
+              -f context="$CONTEXT" -f target_url="$RUN_URL" \
+              -f description="Superseded by a newer push before it ran." > /dev/null
+            out run false; out sha "$SHA"; out fail_fast false
+            exit 0
+          fi
+
+          out run true; out sha "$head"
+          # For iterating on a PR: the `registry-live-fail-fast` label stops
+          # the tier at its first failed scenario and skips the retry.
+          out fail_fast "$(jq -r '[.labels[].name] | index("registry-live-fail-fast") != null' <<<"$pr")"
+          gh api "repos/$REPO/statuses/$head" -f state=pending \
+            -f context="$CONTEXT" -f target_url="$RUN_URL" \
+            -f description="Running in slot ${{ inputs.slot || 'manual' }}." > /dev/null
+
+  # A real Modal worker reporting to a real registry over the network. That
+  # is not a detail of reactive scheduling, it *is* reactive scheduling --
+  # the worker writes status, the registry flags wake candidates, and the
+  # worker spawns the next tick when no scheduler is live. Every registry in
+  # the Live Modal tier is a NoOp subclass, so none of that is exercised
+  # there.
+  #
+  # The registry is deployed for the run with its Postgres inside its own
+  # Modal container, so there is no database account, no provisioning and no
+  # teardown beyond deleting the environment.
+  registry-live:
+    name: Registry-live tier
+    runs-on: ubuntu-latest
+    needs: resolve
+    if: needs.resolve.outputs.run == 'true'
+    # Provisioning is about a minute and the scenarios run concurrently in
+    # roughly three; the rest is slack for Modal latency, not a budget.
+    timeout-minutes: 30
+    environment: modal-live-ci
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      # Asserted against the workspace resolved from the token itself. A
+      # profile name would assert nothing: MODAL_PROFILE selects a section
+      # of a .modal.toml, but the token env vars take precedence over that
+      # file without being bound to the name.
+      STARDAG_MODAL_TEST_WORKSPACE: andhus
+      # Never unset. This workspace also holds standing deployments, and
+      # everything this tier builds -- an API, a database, a secret, a
+      # volume -- goes into the run's own environment or nowhere.
+      MODAL_ENVIRONMENT: ${{ needs.resolve.outputs.env_name }}
+      # Require mode: a misconfigured job must fail, not skip. With no
+      # registry configured the SDK falls back to a NoOp and the scenarios
+      # would pass having checked nothing.
+      STARDAG_REGISTRY_LIVE_TESTS: "1"
+      # Build the worker image from *this checkout*, not the last release.
+      STARDAG_MODAL_LOCAL_STARDAG_SOURCE: "yes"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+
+      # Pinned deliberately rather than incidentally. Both images this tier
+      # builds take their Python from whatever interpreter serializes their
+      # functions, and cloudpickle bytecode is not portable across minors --
+      # a mismatch kills the container with a bare SIGSEGV and leaves a
+      # build that looks empty.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install tox
+        run: pip install tox
+
+      # **The workflow and the code it runs come from different commits**,
+      # and that gap has already produced a confidently wrong report.
+      # Dispatched on the PR's own branch they agree, but a branch older
+      # than this workflow is dispatched on the default branch and checks
+      # its head out by SHA -- so a branch that has not been rebased since
+      # the diagnostics landed runs *this* file's markers, retry and log
+      # dump against a tree that contains none of the code behind them.
+      # (Under the old `pull_request` trigger the workflow came from the
+      # merge ref, which produced the same gap for every PR.)
+      #
+      # On 2026-09-22 that reported "no scenario reported a transport
+      # timeout" for a run whose own pytest log holds two ReadTimeouts,
+      # and failed the log dump with `invalid choice: 'logs'` -- one
+      # cause, two symptoms, and the second printed the diagnosis in
+      # plain text where nobody read it (STA-92).
+      #
+      # It is self-healing: rebasing past the instrument fixes it. What is
+      # not self-healing is the *claim*, so an absent instrument must read
+      # as "not measured", never as "measured and found nothing".
+      - name: Check the checkout carries the diagnostics instrument
+        id: instrument
+        # **Three capabilities, checked separately, because they landed in
+        # two different PRs and the next one will make it three.** A single
+        # boolean over all of them fails the wrong way: a branch carrying
+        # the classifier but not the verdict join would have been treated
+        # as having neither, and would have lost its *Modal log dump* --
+        # the most useful thing in the artifact, and a capability that
+        # branch has. Gate each consumer on what it actually calls.
+        run: |
+          set -uo pipefail
+          live=integration-tests/src/stardag_integration_tests/registry_live
+
+          # Writes the markers the retry reads, and the records and probe.
+          classifier=yes
+          [ -f "$live/_diagnostics.py" ] || classifier=no
+
+          # `provision logs`, checked where it is declared rather than by
+          # file. This is the one whose absence used to fail unreadably,
+          # with `invalid choice: 'logs'` in a step nobody reads.
+          log_dump=yes
+          grep -q '"logs"' "$live/provision.py" || log_dump=no
+
+          # The access-log join. Newest of the three, so it is the one a
+          # branch is most likely to be missing.
+          verdict=yes
+          [ -f "$live/diagnose.py" ] || verdict=no
+
+          {
+            echo "classifier=$classifier"
+            echo "log_dump=$log_dump"
+            echo "verdict=$verdict"
+          } >> "$GITHUB_OUTPUT"
+
+          missing=""
+          [ "$classifier" = yes ] || missing="$missing the classifier,"
+          [ "$log_dump" = yes ] || missing="$missing the log dump,"
+          [ "$verdict" = yes ] || missing="$missing the verdict pass,"
+          if [ -n "$missing" ]; then
+            echo "::warning title=Registry-live instrument incomplete::This" \
+              "checkout is missing${missing%,}, so that much of the" \
+              "diagnosis will not happen. The workflow comes from the merge" \
+              "ref and the code from the PR head, so a branch not rebased" \
+              "past a harness change runs the new workflow against the old" \
+              "code; rebase onto main. (STA-92)"
+          fi
+
+      # A separate step from the run below, so a provisioning failure reads
+      # as one rather than as a scenario failing for reasons of its own.
+      - name: Provision the registry and the scenario app
+        run: |
+          uv run --project integration-tests --python 3.12 \
+            python -m stardag_integration_tests.registry_live.provision up
+
+      # The test path is repeated in the serial form on purpose: `--`
+      # replaces tox's default posargs wholesale, so passing only `-n0`
+      # would drop the path and send pytest at the project's default
+      # testpaths -- the docker-compose suite, which is not this tier.
+      #
+      # **Retried once, for two named harness failures and nothing else.**
+      # Each is identified by the harness rather than inferred from a red
+      # exit code, and each writes its own marker file; a scenario that
+      # failed on its own merits writes neither and is not retried. That
+      # discriminator is the entire design. Without it this is "run it
+      # again and hope", which is how a tier stops reporting product bugs
+      # -- and this one has reported three.
+      #
+      # 1. **A recycled registry container.** The whole database lives
+      #    inside it, so losing it fails every scenario that was
+      #    mid-flight, and the failure reads as "this PR broke the reactive
+      #    loop" on a PR that cannot reach a Modal worker. Identified by a
+      #    nonce the container generates at boot. Its retry re-provisions
+      #    first, because the replacement's database is empty -- the run's
+      #    workspace, target root and API key were in the one that went.
+      #
+      # 2. **A transport timeout**: a request that received *no HTTP
+      #    response at all*, from a scenario's body or from a fixture at
+      #    either end of it. Five occurrences, five scenarios, five
+      #    endpoints, and
+      #    the cause is still unidentified. Strictly a timeout: an
+      #    assertion failure and an HTTP error status are both real results
+      #    and fail immediately. Those two exclusions are what keep this
+      #    from masking a product bug, and they are stated in the code as
+      #    well -- `_diagnostics.transport_timeout`. Its retry does *not*
+      #    re-provision, because the stack is intact.
+      #
+      #    **And it is refused outright if anything else failed in the same
+      #    run.** Twelve scenarios run at once, so one worker timing out
+      #    says nothing about what the other eleven met; retrying on the
+      #    strength of the timeout alone would let a flaky real failure
+      #    pass on the second attempt and turn the check green over it.
+      #    The harness names every non-timeout failure in a second marker
+      #    -- setup, call and teardown alike, since fixtures here do
+      #    registry I/O at both ends of a scenario -- and the presence of
+      #    that marker ends the run. Exactly one failure is exempt, by
+      #    type rather than by phase: the recycle assertion, which is
+      #    case 1 above and has its own recovery.
+      #
+      #    **Not during collection.** Every scenario module calls the
+      #    guard at import, and a timeout there fails collection rather
+      #    than a scenario. It is recorded and counted the same way, under
+      #    the phase `collect`, and is *not* retried: the guard has already
+      #    retried the round trip four times, so the tier's retry would be
+      #    a second layer over the same condition (STA-97).
+      #
+      #    **And it fails closed.** An absent marker is read here as
+      #    proof that nothing real broke, so a marker the harness could
+      #    not write, or a classifier that raised, would grant a retry
+      #    rather than deny one. Both print a sentinel instead, on a
+      #    channel that does not depend on the filesystem the markers
+      #    live on, and its presence in the run's own output ends the
+      #    run the same way a real failure does. The recycle branch above is deliberately not gated the
+      #    same way: a lost database explains *every* failure in the run,
+      #    which is why its retry re-provisions, whereas one scenario's
+      #    timeout explains only that scenario.
+      #
+      # Every retry emits a workflow warning and is counted there, so this
+      # measures the problem rather than silencing it. If the count does
+      # not fall, the answer is to escalate, never to widen the retry.
+      - name: Run the registry-live scenarios
+        id: scenarios
+        env:
+          # One directory holds everything a red run should be diagnosed
+          # from -- both markers, the per-timeout records the harness
+          # writes, the pytest output, and the Modal logs dumped below --
+          # because it is uploaded whole as a single artifact.
+          STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR: ${{ runner.temp }}/registry-live-diagnostics
+          STARDAG_REGISTRY_LIVE_RECYCLE_MARKER: ${{ runner.temp }}/registry-live-diagnostics/registry-recycled
+          POSARGS: ${{ inputs.serial && '-- -n0 tests_registry_live' || '' }}
+          # A retry runs only what failed. The stack is intact after a
+          # transport fault and rebuilt after a recycle, and in neither
+          # case does a scenario that already passed need its result
+          # again: re-running all of them turned one lost answer into a
+          # second full-length tier. `--last-failed` reads pytest's cache,
+          # which attempt 1 wrote in this same checkout.
+          RETRY_POSARGS: >-
+            -- ${{ inputs.serial && '-n0' || '' }} --last-failed tests_registry_live
+          # Whether the tree this runs has the classifier the branches
+          # below read markers from. See the step that computes it.
+          # Only the classifier matters to this step: it is what writes
+          # the markers the branches below read. A checkout with the
+          # classifier and nothing else still classifies correctly.
+          INSTRUMENT_PRESENT: ${{ steps.instrument.outputs.classifier }}
+          # For iterating on a PR: the `registry-live-fail-fast` label stops
+          # the tier at its first failed scenario and skips the retry, so a
+          # red run hands over its logs and artifact in minutes rather than
+          # after the slowest scenario and a second attempt. GitHub serves a
+          # job's log only once the job has ended, so ending it early is
+          # what makes a failure readable early. Remove the label before the
+          # final run: it trades the retry away.
+          FAIL_FAST: ${{ needs.resolve.outputs.fail_fast }}
+        run: |
+          set -uo pipefail
+          diag="$STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR"
+          rm -rf "$diag"
+          mkdir -p "$diag"
+          timeouts="$diag/transport-timeouts"
+          others="$diag/non-timeout-failures"
+          # Scenarios that could not be evaluated: the tick that ended a
+          # build never reported, so a counter read off its trail has no
+          # answer. The harness skips those rather than guessing, and the
+          # count belongs here for the same reason the retry count does --
+          # a tier skipping its way to green must be visible, and an
+          # uncounted skip is exactly how it would not be.
+          inconclusive="$diag/inconclusive-trails"
+          # Printed by the harness when it could not classify a failure or
+          # could not record one. Kept in step with
+          # `_diagnostics.CLASSIFICATION_FAILED`.
+          unclassified="STARDAG_REGISTRY_LIVE_CLASSIFICATION_FAILED"
+
+          # Takes the marker's path, because the retry moves attempt 1's
+          # aside before running again -- so reading only the top-level
+          # file would preserve an attempt-1 skip in the artifact and
+          # never warn about it or count it, which is the failure this
+          # whole marker exists to prevent.
+          # Lost answers that the SDK and the harness sent again, so that
+          # the scenario did not fail on them. Annotated on a green run as
+          # well: absorbing the class is the point, going blind to it is
+          # not, and this count is what STA-86 is now measured by.
+          report_retries() {
+            [ -f "$1" ] || return 0
+            total=$(jq '[.[]] | add // 0' "$1")
+            [ "$total" -gt 0 ] || return 0
+            echo "::warning title=Registry exchanges retried::$total from" \
+              "the runner ($(jq -r 'to_entries | map("\(.key): \(.value)")
+              | join(", ")' "$1")) -- sent again after no complete answer" \
+              "arrived, so no scenario failed on them (STA-86)."
+          }
+
+          report_inconclusive() {
+            [ -f "$1" ] || return 0
+            echo "::warning title=Registry-live inconclusive::$(tr '\n' ';' \
+              < "$1") -- no terminal tick summary was observed for these "\
+              "builds, so a trail-only counter had no answer and the "\
+              "scenario was skipped rather than guessed at. Usually a "\
+              "preempted tick; possibly a build ended by something that is "\
+              "not a tick (STA-89)."
+            echo "diagnose=true" >> "$GITHUB_OUTPUT"
+          }
+
+          retries="$diag/transport-retries.json"
+          if [ "$FAIL_FAST" = true ]; then
+            echo "::notice title=Registry-live fail-fast::Stopping at the" \
+              "first failed scenario, with no retry (label" \
+              "registry-live-fail-fast)."
+            log="$diag/pytest-attempt-1.log"
+            : > "$log"
+            tox -e registry-modal-live $POSARGS > "$log" 2>&1 &
+            tox_pid=$!
+            tail -n +1 -f "$log" --pid "$tox_pid" &
+            # The first failure report ends the run: pytest-xdist would
+            # otherwise let every in-flight scenario finish first.
+            while kill -0 "$tox_pid" 2>/dev/null; do
+              if grep -qE '^\[gw[0-9]+\] (FAILED|ERROR) |^(FAILED|ERROR) ' "$log"
+              then
+                echo "First failure seen; stopping the tier."
+                pkill -TERM -f 'registry-modal-live|tests_registry_live' || true
+                break
+              fi
+              sleep 5
+            done
+            wait "$tox_pid"
+            rc=$?
+            report_inconclusive "$inconclusive"
+            report_retries "$retries"
+            echo "diagnose=true" >> "$GITHUB_OUTPUT"
+            exit $rc
+          fi
+
+          if tox -e registry-modal-live $POSARGS 2>&1 \
+               | tee "$diag/pytest-attempt-1.log"; then
+            # A green run can still have skipped a scenario, and that is
+            # worth the artifact and the count even though nothing failed.
+            report_inconclusive "$inconclusive"
+            report_retries "$retries"
+            exit 0
+          fi
+          report_retries "$retries"
+
+          # Set before the branches below, so it holds for a retry that
+          # goes green as well as for an outright failure. A green retry is
+          # the case this really buys: the check passes, and without the
+          # artifact nothing in the run records what the first attempt hit.
+          echo "diagnose=true" >> "$GITHUB_OUTPUT"
+
+          if [ -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER" ]; then
+            echo "::warning title=Registry container recycled::$(cat \
+              "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER") -- the run's database" \
+              "went with it. Re-provisioning and re-running the failed scenarios."
+            reprovision=yes
+          elif grep -q "$unclassified" "$diag/pytest-attempt-1.log"; then
+            echo "The harness could not classify or could not record a" \
+                 "failure in this run:"
+            grep "$unclassified" "$diag/pytest-attempt-1.log" | sed 's/^/  /'
+            echo "Not retried. An unwritten marker is indistinguishable" \
+                 "from a run with nothing wrong in it, so this fails" \
+                 "closed."
+            exit 1
+          elif [ -f "$timeouts" ] && grep -q ' \[collect\] ' "$timeouts"; then
+            # A scenario module failed to *collect* on a transport timeout
+            # (STA-97): the guard at its import gave up after four attempts
+            # of its own. Counted here like any other occurrence, and not
+            # retried: the guard owns that retry, and a second layer over
+            # the same condition would double it. Kept in step with
+            # `_diagnostics.COLLECT_PHASE`.
+            collected=$(grep ' \[collect\] ' "$timeouts" | tr '\n' ';')
+            echo "::warning title=Registry transport fault at collection::" \
+              "$collected -- the guard at module import got no complete" \
+              "answer from the registry after its own retries. One line per" \
+              "module per xdist worker: each worker collects every module" \
+              "and runs its guard (STA-97)."
+            echo "Scenario modules failed to collect on a transport timeout:" \
+                 "the registry did not answer the guard's four attempts at" \
+                 "import. Not retried -- the guard's retry owns this" \
+                 "condition. The records and boot probes are in the" \
+                 "diagnostics artifact."
+            exit 1
+          elif [ -f "$timeouts" ] && [ ! -f "$others" ]; then
+            echo "::warning title=Registry transport fault::$(tr '\n' ';' \
+              < "$timeouts") -- no complete HTTP response arrived, even after" \
+              "the client's own retries. Re-running the failed scenarios" \
+              "once; each line names the phase it happened in, and the" \
+              "boot probe in the diagnostics artifact says whether the" \
+              "container was answering at the time (STA-86)."
+            reprovision=no
+          elif [ -f "$timeouts" ]; then
+            echo "A scenario hit a transport timeout, but this run also" \
+                 "failed for reasons that are not one:"
+            sed 's/^/  /' "$others"
+            echo "Not retried. A retry could only decide the run by letting" \
+                 "those failures pass on a second attempt, which is the" \
+                 "outcome the discriminator exists to prevent."
+            exit 1
+          elif [ "$INSTRUMENT_PRESENT" != yes ]; then
+            # Not the same sentence as the one below, and the difference
+            # is the whole of STA-92: with no classifier in the tree,
+            # "no scenario reported a transport timeout" is true only in
+            # the sense that no scenario could. Saying it anyway turns an
+            # unmeasured run into a measured one.
+            echo "The tier failed, and nothing classified the failures:" \
+                 "this checkout predates the diagnostics instrument, so" \
+                 "the markers this step reads could not have been written" \
+                 "by anything. Not retried -- and not evidence that the" \
+                 "failures were real. Rebase onto main and run it again."
+            exit 1
+          else
+            echo "The tier failed against the registry container it started" \
+                 "with, and no scenario reported a transport timeout. A real" \
+                 "failure: not retried."
+            exit 1
+          fi
+
+          # Keep the first attempt's evidence. The retry writes fresh
+          # markers and records at the top level, so without this a green
+          # retry would leave nothing behind to explain the warning above.
+          report_inconclusive "$inconclusive"
+
+          mkdir -p "$diag/attempt-1"
+          find "$diag" -maxdepth 1 -type f -exec mv {} "$diag/attempt-1/" \;
+
+          if [ "$reprovision" = yes ]; then
+            # Checked explicitly: this step runs without `errexit`, so that
+            # the first tox failure can be inspected rather than ending the
+            # step -- which also means a failed re-provision would otherwise
+            # fall through to a second run against a stack that was never
+            # rebuilt.
+            if ! uv run --project integration-tests --python 3.12 \
+                   python -m stardag_integration_tests.registry_live.provision up
+            then
+              echo "Re-provisioning failed after a recycle; not re-running" \
+                   "the tier against a stack that was not rebuilt."
+              exit 1
+            fi
+          fi
+
+          tox -e registry-modal-live $RETRY_POSARGS 2>&1 \
+            | tee "$diag/pytest-attempt-2.log"
+          rc=$?
+          report_inconclusive "$inconclusive"
+          report_retries "$retries"
+          exit $rc
+
+      # Pulled before anything can delete them. The teardown job runs
+      # `modal environment delete` once both tiers finish, and that takes
+      # the registry container, the scenario apps and every line they
+      # logged -- minutes after the run went red. Three occurrences on this
+      # tier were diagnosable only because somebody happened to pull the
+      # logs by hand while the other tier was still running, and one cause
+      # is still only a hypothesis because nobody did.
+      #
+      # `continue-on-error` on both steps: this is the diagnosis of a
+      # verdict already reached, and it must never be what decides one.
+      - name: Dump the Modal logs for the run
+        if: |
+          (failure() || steps.scenarios.outputs.diagnose == 'true')
+          && steps.instrument.outputs.log_dump == 'yes'
+        continue-on-error: true
+        # Belt and braces with the dump's own budget. Both exist because
+        # the job's deadline is the one thing that would take the artifact
+        # down with it, and this step is the last thing standing between a
+        # red run and its evidence.
+        timeout-minutes: 6
+        run: |
+          uv run --project integration-tests --python 3.12 \
+            python -m stardag_integration_tests.registry_live.provision logs \
+              --output-dir "${{ runner.temp }}/registry-live-diagnostics"
+
+      # The verdict, which cannot be reached from inside the run. The
+      # probe that fires at the moment of failure can only establish
+      # whether the container was serving; telling a slow handler from a
+      # response that was produced and never arrived needs the registry's
+      # access log, and that is only on disk once the step above has run.
+      #
+      # It decides nothing and exits 0 whatever it finds. Its output goes
+      # to the job log as well as into the artifact, so the answer is
+      # readable without downloading anything -- which matters because the
+      # question it answers is the one people give up on.
+      - name: Reconcile the timeouts with the registry's access log
+        if: |
+          (failure() || steps.scenarios.outputs.diagnose == 'true')
+          && steps.instrument.outputs.verdict == 'yes'
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          uv run --project integration-tests --python 3.12 \
+            python -m stardag_integration_tests.registry_live.diagnose \
+              --dir "${{ runner.temp }}/registry-live-diagnostics"
+
+      - name: Upload the registry-live diagnostics
+        if: failure() || steps.scenarios.outputs.diagnose == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: registry-live-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/registry-live-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
+
+      # The scheduled run provisions into the *permanent* `ci-main`, which
+      # no cleanup path can name: teardown is gated on the environment being
+      # ephemeral, `cleanup-closed-pr` only knows `ci-pr-*`, and the
+      # sweeper's filters exclude it deliberately. The registry pins
+      # `min_containers=1`, so without this a Monday run would leave a
+      # registry serving nothing until the next Monday replaced it.
+      #
+      # Unconditional rather than gated on `ci-main`: stopping an app in an
+      # environment that is about to be deleted anyway costs a few seconds
+      # and removes a way for the two paths to disagree.
+      - name: Stop the deployed apps
+        if: always()
+        run: |
+          uv run --project integration-tests --python 3.12 \
+            python -m stardag_integration_tests.registry_live.provision stop
+
+  # `always()`, with no `!cancelled()`: the environment is this run's alone,
+  # so there is no superseding run whose stack a cancelled teardown could
+  # delete -- the hazard that gate exists for in `modal-live.yml`. A red or
+  # cancelled run is exactly when a leaked environment is likeliest, and its
+  # `min_containers=1` registry would stay warm until something deleted it.
+  teardown:
+    name: Delete the run's Modal environment
+    runs-on: ubuntu-latest
+    needs: [resolve, registry-live]
+    if: always() && needs.resolve.outputs.ephemeral == 'true'
+    environment: modal-live-ci
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Delete ${{ needs.resolve.outputs.env_name }}
+        run: |
+          set -euo pipefail
+          name="${{ needs.resolve.outputs.env_name }}"
+          if uvx modal environment list --json | jq -e --arg n "$name" \
+               'any(.[]; .name == $n)' > /dev/null; then
+            uvx modal environment delete "$name" --yes
+          else
+            echo "No environment '$name' to delete."
+          fi
+
+  # The verdict on the PR head, then the hand-over to the next request.
+  #
+  # Last, after teardown, so the next run is admitted only once this one's
+  # containers are gone: admitting it while the environment is still being
+  # deleted would briefly put two stacks in the workspace.
+  #
+  # `always()` so a cancelled or failed run still reports and still hands
+  # over. A runner that never reaches this job leaves its head `Running`;
+  # the selector marks that as an error the next time it finds no active run
+  # for the PR, and the hourly selector schedule is the backstop for the
+  # hand-over itself.
+  report:
+    name: Report and hand over
+    runs-on: ubuntu-latest
+    needs: [resolve, registry-live, teardown]
+    if: always()
+    permissions:
+      actions: write
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      CONTEXT: ${{ inputs.pr && 'Registry-live tier' || 'Registry-live tier (weekly)' }}
+    steps:
+      - name: Post the verdict on the head
+        # Also when `resolve` itself failed (an API error, a refused fork
+        # head): it may have posted nothing, and the head would otherwise
+        # sit `Dispatched` until the hourly selector called it stale.
+        # `pr` or `sha`: a run dispatched with a PR and no SHA resolves the
+        # head itself and posts `Running` on it, so it owes a verdict too.
+        # Only a hand run of a bare ref (neither) has no head to report on.
+        if: >-
+          (inputs.pr || inputs.sha) && (needs.resolve.outputs.run == 'true'
+                                        || needs.resolve.result != 'success')
+        env:
+          RESULT: ${{ needs.resolve.result == 'success' && needs.registry-live.result || 'resolve-failed' }}
+          SHA: ${{ needs.resolve.outputs.sha || inputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # A PR-only dispatch whose `resolve` failed before naming the head.
+          if [ -z "$SHA" ]; then
+            echo "No head was resolved, so there is no status to post."
+            exit 0
+          fi
+          case "$RESULT" in
+            success)   state=success; desc="Passed." ;;
+            failure)   state=failure; desc="Failed. The run has the logs and, if red, a diagnostics artifact." ;;
+            cancelled) state=error;   desc="Cancelled. Re-run the PR's Modal Live Tests to queue again." ;;
+            *)         state=error;   desc="Did not run ($RESULT). Re-run the PR's Modal Live Tests to queue again." ;;
+          esac
+          gh api "repos/$REPO/statuses/$SHA" -f state="$state" \
+            -f context="$CONTEXT" -f target_url="$RUN_URL" \
+            -f description="$desc" > /dev/null
+
+      # This run is still `in_progress` while the step runs. The selector
+      # reads that from the run's jobs -- everything but this job completed
+      # -- and treats the slot as free. **This job's name is a contract with
+      # `_queue.REPORT_JOB`.**
+      - name: Dispatch the selector
+        run: |
+          gh workflow run registry-live-dispatch.yml --repo "$REPO" \
+            --ref "${{ github.event.repository.default_branch }}"
