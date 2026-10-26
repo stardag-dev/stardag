@@ -25,17 +25,28 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `functools.cached_property` raised `TypeError` once it had been read. The
   cache is now dropped before pydantic copies anything, on every pydantic
   version.
-- **Changed: a reactive build refuses a task holding state its instance body
+- **Changed: the reactive pre-flight checks for state a task's instance body
   does not carry** (STA-126). A tick rebuilds every task from its registered
-  body, so a pydantic private attribute set after construction, or a field
-  declared with `exclude=True`, never reached it: the task ran with whatever
-  the rebuild produced, and nothing said so. The bootstrap's rehydration
-  pre-flight now rebuilds each task (a root, a discovered dependency, and any
-  model nested in either) and refuses the build before it is armed when such
-  a value differs, naming the class and the attribute (`MyTask._cache is
-runtime state, which its instance body does not carry, ...`). Resident and
-  hybrid builds are unchanged: such a task is still sent to Modal by value
-  and keeps its state; the payload now uses the same rebuild comparison.
+  body, which holds neither pydantic private attributes nor fields declared
+  `exclude=True`, so a task holding such state ran with whatever the rebuild
+  produced, silently. The bootstrap's rehydration pre-flight now compares
+  each task (a root, a discovered dependency, and any model nested in
+  either) with its rebuild:
+
+  - an excluded field whose value the rebuild does not reproduce, when both
+    values are plain data, **refuses the build** before it is armed, naming
+    the class and the field. This includes an untouched excluded field that
+    has a `compat_default`, which the rebuild takes instead;
+  - an excluded field whose difference cannot be decided (an object without
+    value equality, such as a client) logs a warning;
+  - a private attribute never refuses. A plain-data value the rebuild does
+    not reproduce, such as a cache filled in `requires()`, logs a warning;
+    a lock, `uuid4` or other opaque default says nothing.
+
+  Warnings are once per class and attribute, and a failure inside the check
+  is a warning, never a failed build. Resident and hybrid builds are
+  unchanged: such a task is still sent to Modal by value, and the payload now
+  shares one rehydration round trip with its stability check.
 
 ## [0.28.0] — 2026-10-08
 

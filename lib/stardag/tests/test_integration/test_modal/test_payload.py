@@ -16,6 +16,7 @@ import importlib
 import json
 from collections import UserList
 import logging
+import threading
 import os
 import subprocess
 import sys
@@ -106,6 +107,13 @@ class NestedStateTask(sd.Task[int]):
 
     blob: Any = None
     pairs: frozenset[tuple[str, StatefulParams]] = frozenset()
+
+    def run(self) -> None:
+        self._save(0)
+
+
+class OpaquePrivateTask(sd.Task[int]):
+    _lock: Any = PrivateAttr(default_factory=threading.Lock)
 
     def run(self) -> None:
         self._save(0)
@@ -346,6 +354,29 @@ class TestByValueFallback:
             blob=StatefulParams(a=2), pairs=frozenset({("x", StatefulParams(a=3))})
         )
         assert is_task_payload(to_task_payload(plain))
+
+    def test_a_failing_state_check_goes_by_value_saying_so(self, caplog, monkeypatch):
+        """Not reported as a rehydration failure: the round trip succeeded,
+        the state check did not."""
+
+        def broken(original, rebuilt):
+            raise RecursionError("too deep")
+
+        monkeypatch.setattr(_payload, "state_outside_body", broken)
+        monkeypatch.setattr(_payload, "_warned_by_value", set())
+        caplog.set_level(logging.WARNING, logger=_payload.__name__)
+        task = StatefulTask(x=11)
+
+        assert to_task_payload(task) is task
+        (warning,) = [r for r in caplog.records if "by value" in r.getMessage()]
+        assert "state could not be checked" in warning.getMessage()
+        assert "rehydrated" not in warning.getMessage()
+
+    def test_untouched_opaque_defaults_still_go_by_value(self):
+        """Resident behaviour is unchanged: any difference keeps the pickle,
+        decidable or not, as it did before the reactive policy split."""
+        task = OpaquePrivateTask()
+        assert to_task_payload(task) is task
 
     def test_a_lossy_non_significant_field_goes_by_value(self, caplog):
         """The id check alone would pass this task; the full-body fixed

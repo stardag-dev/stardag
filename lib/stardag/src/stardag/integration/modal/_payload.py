@@ -28,8 +28,9 @@ annotation, a lossy serializer), or state the body does not carry (a private
 attribute set at runtime, a field excluded from the dump) — is sent **by
 value**, as before, with a warning once per class: it is not protected
 across deploys. In a reactive build the bootstrap's pre-flight already
-refuses a task a tick could not rehydrate, runtime state included, so the
-fallback is only ever taken in resident and hybrid builds.
+refuses a task a tick could not rehydrate, and warns about private state a
+tick would drop: whatever crosses to the bootstrap, a tick runs each task as
+rebuilt from its body.
 
 The payload is a plain ``dict``, so there is no stardag class to unpickle
 on the far side and its shape can grow. Receivers keep accepting a pickled
@@ -46,7 +47,7 @@ import typing
 
 from stardag._core.base_task import BaseTask
 from stardag._core.instance import (
-    check_serialization_stability,
+    checked_round_trip,
     reachable_models,
     state_outside_body,
 )
@@ -165,20 +166,20 @@ def _by_value_reason(task: BaseTask) -> tuple[str | None, TaskPayload | None]:
         # must be a fixed point of its round trip, not only the task id, so
         # a lossy non-significant field is caught here, where the pickle is
         # still a fallback, rather than silently changed on the worker.
-        check_serialization_stability(task)
+        rebuilt = checked_round_trip(task)
     except Exception as e:
         return f"its registry-data round trip is not stable ({e})", None
     try:
-        # What the receiver will run: the task as rehydrated from the body.
-        # State it does not reproduce (a private attribute set at runtime,
-        # an excluded field) would be lost on the far side; the pickle
-        # carries it.
-        rebuilt = task_from_registry_data(body, expected_task_id=task_id)
-        state = state_outside_body(task, rebuilt)
+        # The rebuilt task is what the receiver will run. State it does not
+        # reproduce (a private attribute set at runtime, an excluded field)
+        # would be lost on the far side; the pickle carries it. Unlike the
+        # reactive pre-flight, any difference counts here, decidable or not:
+        # the pickle is a fallback that loses nothing.
+        lost = state_outside_body(task, rebuilt)
     except Exception as e:
-        return f"its instance body could not be rehydrated ({e})", None
-    if state is not None:
-        return f"{state}, which its instance body does not carry", None
+        return f"its state could not be checked against the rebuilt task ({e})", None
+    if lost:
+        return f"{lost[0].describe()}, which its instance body does not carry", None
     return None, {
         PAYLOAD_KEY: PAYLOAD_VERSION,
         "body": body,

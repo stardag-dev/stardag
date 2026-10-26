@@ -18,26 +18,34 @@ its own: the registry keys the row by the scope *and* the hash.
   and raises :class:`~stardag.exceptions.InstanceConflictError` on a second,
   different construction of one task id.
 - :func:`state_outside_body` finds state a task object holds that the task
-  rebuilt from its body does not (a private attribute set at runtime, an
-  excluded field). Whatever is rebuilt from the body runs without it: the
-  reactive pre-flight refuses such a task, and the Modal payload keeps it
-  pickled. :func:`reachable_models` collects every model in a task.
+  rebuilt from its body does not (a private attribute, an excluded field),
+  and says whether each difference is decidable. Whatever is rebuilt from
+  the body runs without it: the reactive pre-flight refuses or warns on it
+  (``plan_rehydration``), and the Modal payload keeps such a task pickled.
+  :func:`reachable_models` collects every model in a task.
 """
 
 from __future__ import annotations
 
+import collections.abc
 import dataclasses
+import datetime
+import decimal
+import enum
 import json
 import math
+import pathlib
+import types
+import typing
 from collections import deque
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from stardag._core.task_id import canonical_body_json
-from stardag.base_model import CONTEXT_MODE_KEY
+from stardag.base_model import _UNSET, CONTEXT_MODE_KEY, StardagField
 from stardag.exceptions import InstanceConflictError, UnstableSerializationError
 
 if TYPE_CHECKING:
@@ -77,52 +85,80 @@ def reachable_models(value: Any) -> list[BaseModel]:
     return found
 
 
-def state_outside_body(original: BaseModel, rebuilt: Any) -> str | None:
-    """A description of state ``original`` holds that ``rebuilt`` lost, if any.
+@dataclasses.dataclass(frozen=True)
+class LostState:
+    """One attribute whose value the task rebuilt from its body does not
+    reproduce: a private attribute, or a field declared ``exclude=True``.
+
+    ``decidable`` says whether the difference is a fact or a guess. It is a
+    fact only when both values are plain data (see :func:`_is_plain_data`),
+    are not the same object and compare unequal. Anything else (an object
+    without value equality, such as a lock, a client or a fresh ``uuid4``;
+    a comparison that raises, such as a numpy array's) may differ or not,
+    and a caller must not refuse on it.
+    """
+
+    owner: str
+    """``module.qualname`` of the model declaring the attribute."""
+    attribute: str
+    kind: Literal["private", "excluded"]
+    decidable: bool
+    compat_default: bool = False
+    """An excluded field with a ``compat_default``: the rebuild takes that
+    value, whatever the field held."""
+
+    def describe(self) -> str:
+        owner = self.owner.rpartition(".")[2] or self.owner
+        if self.kind == "private":
+            return f"{owner}.{self.attribute} is runtime state"
+        return f"{owner}.{self.attribute} is excluded from the body"
+
+
+def state_outside_body(original: BaseModel, rebuilt: Any) -> list[LostState]:
+    """The state ``original`` holds that ``rebuilt`` does not reproduce.
 
     ``rebuilt`` is ``original`` rehydrated from its instance body, the way a
     reactive tick or a Modal receiver rebuilds it. The body carries neither
     private attributes nor fields declared with ``exclude=True``, so those
     are compared between the two, in ``original`` and every model nested in
-    it through fields, dataclasses and containers. Comparing against the
-    rebuilt object rather than the declared defaults is what makes the
-    answer exact: a default that validation normalises, a ``compat_default``
-    that rehydration fills in for the missing key, and a private attribute
-    ``model_post_init`` derives from fields are all reproduced by the
-    rebuild, or not, exactly as they will be on the far side.
+    it. Comparing against the rebuilt object rather than the declared
+    defaults is what keeps the answer honest: a default that validation
+    normalises, a ``compat_default`` that rehydration fills in for the
+    missing key, and a private attribute ``model_post_init`` derives from
+    fields are all reproduced by the rebuild, or not, exactly as they will
+    be on the far side.
 
-    **Where the rebuild has no counterpart, the declared default stands in
-    for it.** A model in an ``Any`` field comes back as a ``dict``, a
-    subclass in a field annotated with its base comes back as the base, and
-    a container may not pair up item by item. Such a model's state is lost
-    in the rebuild unless it was at its default anyway, so that is what it
-    is compared against: conservative, never silent.
+    Where the rebuild has no counterpart to pair with (a model in an
+    ``Any`` field comes back as a ``dict``, a subclass as its declared base,
+    a set member), the declared default stands in.
 
-    The description names the class and the attribute, e.g.
-    ``"MyTask._cache is runtime state"``. A comparison that raises counts
-    as a difference: the answer has to err toward "the rebuild would lose
-    something".
+    Returns one :class:`LostState` per differing attribute, in walk order;
+    what to do about each is the caller's policy. Cheap for the common
+    task: a class declaring no private attribute and no excluded field, and
+    no field that could hold a model, is not walked at all (see
+    :func:`_class_plan`). Stardag's own class-level private attributes
+    (``Task._load_validators``) are not task state and are ignored.
     """
-    # Keyed by the pair, not the original alone: one object shared by two
-    # fields can be rebuilt twice, once faithfully and once lossily (as a
-    # dict in an ``Any`` field), and each rebuild has to be checked.
+    if isinstance(original, BaseModel) and _class_plan(type(original)).inert:
+        return []
+    found: list[LostState] = []
     seen: set[tuple[int, int]] = set()
     stack: list[tuple[Any, Any]] = [(original, rebuilt)]
     while stack:
         item, other = stack.pop()
-        if (id(item), id(other)) in seen:
+        if type(item) in _LEAF_TYPES:
             continue
-        seen.add((id(item), id(other)))
+        key = (id(item), id(other))
+        if key in seen:
+            continue
+        seen.add(key)
         if isinstance(item, BaseModel):
-            state = _model_state_lost(item, other)
-            if state is not None:
-                return state
-            # Excluded fields too: one whose value compares equal to its
-            # counterpart (or default) can still hold a model whose own
-            # private state the rebuild does not reproduce.
+            plan = _class_plan(type(item))
+            if plan.private or plan.excluded:
+                found.extend(_model_state_lost(item, other, plan))
             stack.extend(
                 (item.__dict__[name], _field_of(other, name))
-                for name in type(item).model_fields
+                for name in plan.walked
                 if name in item.__dict__
             )
         elif dataclasses.is_dataclass(item) and not isinstance(item, type):
@@ -139,56 +175,173 @@ def state_outside_body(original: BaseModel, rebuilt: Any) -> str | None:
             else:
                 stack.extend((v, _MISSING) for v in item)
         elif isinstance(item, (set, frozenset)):
-            # No order to pair by: pair the members by a canonical key of
-            # their fields, which the rebuild reproduces (the body is what it
-            # was built from), and which leaves out exactly the state
-            # compared here.
-            theirs_by_key = (
-                {_member_key(v): v for v in other}
-                if isinstance(other, (set, frozenset))
-                else {}
-            )
-            stack.extend((v, theirs_by_key.get(_member_key(v), _MISSING)) for v in item)
-    return None
+            # No order to pair members by: each is judged against its
+            # declared defaults.
+            stack.extend((v, _MISSING) for v in item)
+    return found
 
 
 _MISSING: Any = object()
 """No counterpart in the rebuild: compare against the declared default."""
 
-_ANY_ADAPTER: TypeAdapter[Any] = TypeAdapter(Any)
+_LEAF_TYPES: frozenset[type] = frozenset(
+    {str, int, float, bool, bytes, type(None), complex}
+)
+
+# Annotations that can hold no model or dataclass, so a field typed with
+# one never needs walking. Anything else, ``Any`` and every model type
+# included (a subclass value can add state), is walked.
+_PLAIN_ANNOTATIONS: frozenset[Any] = _LEAF_TYPES | {
+    datetime.datetime,
+    datetime.date,
+    datetime.time,
+    datetime.timedelta,
+    decimal.Decimal,
+    pathlib.Path,
+    pathlib.PurePath,
+    UUID,
+}
+_PLAIN_CONTAINER_ORIGINS: frozenset[Any] = frozenset(
+    {
+        list,
+        tuple,
+        set,
+        frozenset,
+        dict,
+        deque,
+        collections.abc.Sequence,
+        collections.abc.Mapping,
+        collections.abc.Set,
+        collections.abc.Iterable,
+        collections.abc.Collection,
+        typing.Union,
+        types.UnionType,
+    }
+)
 
 
-def _model_state_lost(item: BaseModel, other: Any) -> str | None:
+class _ClassPlan(typing.NamedTuple):
+    """What :func:`state_outside_body` needs to know about a model class."""
+
+    private: tuple[str, ...]
+    """Private attributes declared outside stardag's own task classes."""
+    excluded: tuple[str, ...]
+    """Fields declared ``exclude=True``."""
+    walked: tuple[str, ...]
+    """Fields whose annotation could hold a model, so need walking."""
+
+    @property
+    def inert(self) -> bool:
+        return not (self.private or self.excluded or self.walked)
+
+
+_class_plans: dict[type, _ClassPlan] = {}
+
+
+def _class_plan(cls: type[BaseModel]) -> _ClassPlan:
+    """Cached per class: the common task class declares no state and no
+    field that could hold a model, and is then not walked at all."""
+    plan = _class_plans.get(cls)
+    if plan is None:
+        plan = _class_plans[cls] = _ClassPlan(
+            private=tuple(
+                name
+                for name, attribute in cls.__private_attributes__.items()
+                if not _declared_by_stardag(cls, name, attribute)
+            ),
+            excluded=tuple(
+                name for name, info in cls.model_fields.items() if info.exclude
+            ),
+            walked=tuple(
+                name
+                for name, info in cls.model_fields.items()
+                if not _annotation_is_plain(info.annotation)
+            ),
+        )
+    return plan
+
+
+def _declared_by_stardag(cls: type, name: str, attribute: Any) -> bool:
+    """Whether private attribute ``name`` is inherited from one of stardag's
+    own task classes (``Task._load_validators``): class-level machinery, set
+    on the class rather than the instance, and never task state."""
+    return any(
+        klass.__module__.startswith("stardag._core.")
+        and getattr(klass, "__private_attributes__", {}).get(name) is attribute
+        for klass in cls.__mro__[1:]
+    )
+
+
+def _annotation_is_plain(annotation: Any, depth: int = 0) -> bool:
+    if depth > 20:
+        return False
+    if annotation in _PLAIN_ANNOTATIONS or annotation is None:
+        return True
+    if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
+        return True
+    origin = typing.get_origin(annotation)
+    if origin is typing.Literal:
+        return True
+    if origin is typing.Annotated:
+        return _annotation_is_plain(typing.get_args(annotation)[0], depth + 1)
+    if origin in _PLAIN_CONTAINER_ORIGINS:
+        return all(
+            arg is Ellipsis or _annotation_is_plain(arg, depth + 1)
+            for arg in typing.get_args(annotation)
+        )
+    return False
+
+
+def _model_state_lost(item: BaseModel, other: Any, plan: _ClassPlan) -> list[LostState]:
     cls = type(item)
+    owner = f"{cls.__module__}.{cls.__qualname__}"
+    lost: list[LostState] = []
     mine = getattr(item, "__pydantic_private__", None) or {}
     theirs = (
         getattr(other, "__pydantic_private__", None) or {}
         if isinstance(other, BaseModel)
         else {}
     )
-    for name, attribute in cls.__private_attributes__.items():
+    for name in plan.private:
+        attribute = cls.__private_attributes__[name]
         if name not in mine:
             continue
-        if name in theirs:
-            lost = _differs_from(mine[name], lambda: theirs[name])
-        else:
-            lost = _differs_from(mine[name], attribute.get_default)
-        if lost:
-            return f"{cls.__qualname__}.{name} is runtime state"
-    for name, info in cls.model_fields.items():
-        if not info.exclude or name not in item.__dict__:
+        reference = (
+            (lambda n=name: theirs[n]) if name in theirs else attribute.get_default
+        )
+        verdict = _compare(mine[name], reference)
+        if verdict is not None:
+            lost.append(LostState(owner, name, "private", verdict))
+    for name in plan.excluded:
+        info = cls.model_fields[name]
+        if name not in item.__dict__:
             continue
         counterpart = _field_of(other, name)
         if counterpart is _MISSING:
-            lost = _differs_from(
+            verdict = _compare(
                 item.__dict__[name],
-                lambda: info.get_default(call_default_factory=True),
+                lambda i=info: i.get_default(call_default_factory=True),
             )
         else:
-            lost = _differs_from(item.__dict__[name], lambda: counterpart)
-        if lost:
-            return f"{cls.__qualname__}.{name} is excluded from the body"
-    return None
+            verdict = _compare(item.__dict__[name], lambda c=counterpart: c)
+        if verdict is not None:
+            lost.append(
+                LostState(
+                    owner,
+                    name,
+                    "excluded",
+                    verdict,
+                    compat_default=_has_compat_default(info),
+                )
+            )
+    return lost
+
+
+def _has_compat_default(info: Any) -> bool:
+    return any(
+        isinstance(m, StardagField) and m.compat_default is not _UNSET
+        for m in info.metadata
+    )
 
 
 def _field_of(other: Any, name: str) -> Any:
@@ -201,55 +354,62 @@ def _field_of(other: Any, name: str) -> Any:
     return _MISSING
 
 
-def _differs_from(value: Any, reference: Callable[[], Any]) -> bool:
+def _compare(value: Any, reference: Callable[[], Any]) -> bool | None:
+    """``None`` when ``value`` matches the reference, else whether the
+    difference is decidable (both plain data, compared unequal)."""
     try:
-        return bool(value != reference())
+        ref = reference()
     except Exception:
+        return False
+    if value is ref:
+        return None
+    if (
+        isinstance(value, float)
+        and isinstance(ref, float)
+        and math.isnan(value)
+        and math.isnan(ref)
+    ):
+        return None
+    if not (_is_plain_data(value) and _is_plain_data(ref)):
+        return False
+    try:
+        return True if value != ref else None
+    except Exception:
+        return False
+
+
+def _is_plain_data(value: Any, _seen: set[int] | None = None) -> bool:
+    """None, str, int, float, bool or bytes; or a list, tuple, dict, set or
+    frozenset of those; or a pydantic model or dataclass made of those.
+    A cycle is not plain data."""
+    if type(value) in _LEAF_TYPES:
         return True
-
-
-def _member_key(value: Any) -> tuple[Any, ...]:
-    """A canonical, order-free key for a set member.
-
-    Built from the value's structure rather than one dump of it, so a set
-    nested in the member pairs whatever order it iterates in, and a model
-    is keyed by its body fields only: its private attributes and excluded
-    fields are what is being compared, and must not stop it pairing.
-    """
-    if isinstance(value, BaseModel):
-        cls = type(value)
-        return (
-            "model",
-            f"{cls.__module__}.{cls.__qualname__}",
-            tuple(
-                (name, _member_key(value.__dict__[name]))
-                for name, info in cls.model_fields.items()
-                if not info.exclude and name in value.__dict__
-            ),
-        )
-    if isinstance(value, (set, frozenset)):
-        return ("set", tuple(sorted((_member_key(v) for v in value), key=repr)))
-    if isinstance(value, (list, tuple, deque)):
-        return ("seq", tuple(_member_key(v) for v in value))
-    if isinstance(value, dict):
-        items = ((repr(_member_key(k)), _member_key(v)) for k, v in value.items())
-        return ("dict", tuple(sorted(items, key=lambda kv: kv[0])))
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return (
-            "dataclass",
-            f"{type(value).__module__}.{type(value).__qualname__}",
-            tuple(
-                (f.name, _member_key(getattr(value, f.name, None)))
-                for f in dataclasses.fields(value)
-            ),
-        )
+    seen = set() if _seen is None else _seen
+    if id(value) in seen:
+        return False
+    seen.add(id(value))
     try:
-        dumped = _ANY_ADAPTER.dump_json(
-            value, context={CONTEXT_MODE_KEY: "registry"}
-        ).decode()
-    except Exception:
-        dumped = repr(value)
-    return ("leaf", f"{type(value).__module__}.{type(value).__qualname__}", dumped)
+        if isinstance(value, dict):
+            return all(
+                _is_plain_data(k, seen) and _is_plain_data(v, seen)
+                for k, v in value.items()
+            )
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return all(_is_plain_data(v, seen) for v in value)
+        if isinstance(value, BaseModel):
+            return all(
+                _is_plain_data(value.__dict__[name], seen)
+                for name in type(value).model_fields
+                if name in value.__dict__
+            )
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return all(
+                _is_plain_data(getattr(value, f.name, None), seen)
+                for f in dataclasses.fields(value)
+            )
+        return False
+    finally:
+        seen.discard(id(value))
 
 
 def _class_label(task: "BaseTask") -> str:
@@ -281,7 +441,7 @@ def canonical_instance_body_json(task: "BaseTask") -> str:
         ) from e
 
 
-def check_serialization_stability(task: "BaseTask") -> None:
+def checked_round_trip(task: "BaseTask") -> "BaseTask":
     """Check that ``task``'s body is a fixed point of its own round trip.
 
     ``dump(validate(dump(x))) == dump(x)``, where ``dump`` is the canonical
@@ -291,6 +451,9 @@ def check_serialization_stability(task: "BaseTask") -> None:
     rehydration is strict on it. The driver calls this once per distinct
     instance at registration (so a trigger fails instead of two processes
     registering two instances of one construction later).
+
+    Returns the rebuilt task object, for a caller that wants to compare
+    against it (the Modal payload does) without a second round trip.
 
     Raises:
         UnstableSerializationError: naming the field(s) whose value moved, or
@@ -367,6 +530,21 @@ def check_serialization_stability(task: "BaseTask") -> None:
             task_class=label,
             fields=fields,
         )
+    return rebuilt
+
+
+def check_serialization_stability(task: "BaseTask") -> None:
+    """Check that ``task``'s body is a fixed point of its own round trip.
+
+    See :func:`checked_round_trip`, which this calls and which also returns
+    the rebuilt task.
+
+    Raises:
+        UnstableSerializationError: naming the field(s) whose value moved, or
+            reporting an ``AliasTask`` payload that registry rehydration
+            would refuse.
+    """
+    checked_round_trip(task)
 
 
 def _differs(a: Any, b: Any) -> bool:

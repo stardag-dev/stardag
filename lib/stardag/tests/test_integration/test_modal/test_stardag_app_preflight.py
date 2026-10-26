@@ -379,11 +379,14 @@ class _PreflightStatefulTask(_sd.Task[int]):
 
 class _PreflightStatefulDepParent(_sd.Task[int]):
     """Discovers a dependency in ``requires()`` (not a field: the dep is not
-    in this task's body) and sets runtime state on it."""
+    in this task's body) carrying state its body drops."""
 
     name: str
+    excluded: bool = False
 
     def requires(self):
+        if self.excluded:
+            return _PreflightStatefulTask(x=len(self.name), handle="live-handle")
         dep = _PreflightStatefulTask(x=len(self.name))
         dep._state = "set-in-requires"
         return dep
@@ -392,35 +395,39 @@ class _PreflightStatefulDepParent(_sd.Task[int]):
         self._save(1)
 
 
+class _PreflightMemoisingTask(_sd.Task[int]):
+    """Caches a path in ``requires()``, which discovery calls on the very
+    object the pre-flight then checks; a tick derives it again."""
+
+    x: int = 0
+    _out: str | None = PrivateAttr(default=None)
+
+    def requires(self):
+        self._out = f"/data/{self.x}"
+        return None
+
+    def run(self) -> None:
+        self._save(self.x)
+
+
 class TestRuntimeStatePreflight:
     """A tick rebuilds every task from its instance body, so state the body
-    does not carry (a private attribute set at runtime, a non-default
-    excluded field) would be silently dropped. The bootstrap refuses it,
-    like any other "a tick would run something different" case."""
+    does not carry is lost. The bootstrap refuses a decidable difference in
+    an excluded field, and only warns about private attributes, which are
+    as often a cache the tick derives again."""
 
     def _app(self, name: str) -> StardagApp:
         return _app_with_task_modules(name, task_modules=[__name__])
 
-    def test_a_root_with_a_private_attribute_refuses_the_build(
-        self, modal_function_stub, default_in_memory_fs_target
-    ):
-        root = _PreflightStatefulTask(x=1)
-        root._state = "set-at-runtime"
-        app = self._app("tm-preflight-private")
-        registry = _deployed_registry(app)
+    @pytest.fixture(autouse=True)
+    def _fresh_warnings(self):
+        from stardag.build._task_modules import _reset_import_state_for_tests
 
-        with pytest.raises(TaskModulesError) as exc:
-            _trigger_reactive(app, root, stub=modal_function_stub, registry=registry)
+        _reset_import_state_for_tests()
+        yield
+        _reset_import_state_for_tests()
 
-        message = str(exc.value)
-        assert str(root.id) in message
-        assert "_PreflightStatefulTask._state is runtime state" in message
-        (build,) = registry.builds.values()
-        assert build.status == "failed"
-        assert build.reactive_app_name is None
-        assert registry.plans == {}
-
-    def test_a_root_with_an_excluded_field_refuses_the_build(
+    def test_a_root_with_a_set_excluded_field_refuses_the_build(
         self, modal_function_stub, default_in_memory_fs_target
     ):
         root = _PreflightStatefulTask(x=2, handle="live-handle")
@@ -430,18 +437,20 @@ class TestRuntimeStatePreflight:
         with pytest.raises(TaskModulesError) as exc:
             _trigger_reactive(app, root, stub=modal_function_stub, registry=registry)
 
-        assert "_PreflightStatefulTask.handle is excluded from the body" in str(
-            exc.value
-        )
+        message = str(exc.value)
+        assert str(root.id) in message
+        assert "_PreflightStatefulTask.handle is excluded from the body" in message
         (build,) = registry.builds.values()
         assert build.status == "failed"
+        assert build.reactive_app_name is None
+        assert registry.plans == {}
 
-    def test_a_discovered_task_with_runtime_state_refuses_the_build(
+    def test_a_discovered_task_with_a_set_excluded_field_refuses_the_build(
         self, modal_function_stub, default_in_memory_fs_target
     ):
-        root = _PreflightStatefulDepParent(name="preflight-discovered")
-        (dep,) = [root.requires()]
-        app = self._app("tm-preflight-discovered")
+        root = _PreflightStatefulDepParent(name="preflight-discovered", excluded=True)
+        dep = root.requires()
+        app = self._app("tm-preflight-discovered-excluded")
         registry = _deployed_registry(app)
 
         with pytest.raises(TaskModulesError) as exc:
@@ -451,9 +460,48 @@ class TestRuntimeStatePreflight:
         assert "1 task(s)" in message
         assert str(dep.id) in message
         assert str(root.id) not in message
-        assert "_PreflightStatefulTask._state is runtime state" in message
         (build,) = registry.builds.values()
         assert build.status == "failed"
+
+    def test_a_root_with_a_private_attribute_arms_with_a_warning(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        root = _PreflightStatefulTask(x=1)
+        root._state = "set-at-runtime"
+        app = self._app("tm-preflight-private")
+
+        with caplog.at_level("WARNING"):
+            result, registry, _ = _trigger_reactive(app, root, stub=modal_function_stub)
+
+        assert _armed(registry, result.build_id)
+        assert "_PreflightStatefulTask._state" in caplog.text
+
+    def test_a_discovered_task_with_a_private_attribute_arms_with_a_warning(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        root = _PreflightStatefulDepParent(name="preflight-discovered-private")
+        app = self._app("tm-preflight-discovered-private")
+
+        with caplog.at_level("WARNING"):
+            result, registry, _ = _trigger_reactive(app, root, stub=modal_function_stub)
+
+        assert _armed(registry, result.build_id)
+        assert "_PreflightStatefulTask._state" in caplog.text
+
+    def test_a_value_memoised_in_requires_during_discovery_arms(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        """End to end: walk_aio calls requires(), which fills the cache on
+        the object the pre-flight checks. A warning, not a refusal."""
+        app = self._app("tm-preflight-memoised")
+
+        with caplog.at_level("WARNING"):
+            result, registry, _ = _trigger_reactive(
+                app, _PreflightMemoisingTask(x=5), stub=modal_function_stub
+            )
+
+        assert _armed(registry, result.build_id)
+        assert "_PreflightMemoisingTask._out" in caplog.text
 
     def test_state_at_its_defaults_arms_the_build(
         self, modal_function_stub, default_in_memory_fs_target

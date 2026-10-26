@@ -378,6 +378,7 @@ def _reset_import_state_for_tests() -> None:
     _import_cache.clear()
     _last_failures.clear()
     _warned_classes.clear()
+    _warned_state.clear()
     global _declared_patterns
     _declared_patterns = ()
 
@@ -519,9 +520,10 @@ class RehydrationPlan:
 
     A task is reconstructable when its class is covered by the declared
     patterns, its registration payload round-trips back to the same task
-    id, *and* the rebuilt task holds the same state (see
-    :func:`plan_rehydration`). Anything else is unschedulable in a reactive build: the tick
-    that would put it on a worker has nothing to build the object from.
+    id, *and* no excluded field of it is rebuilt with a different value
+    (see :func:`plan_rehydration`). Anything else is unschedulable in a
+    reactive build: the tick that would put it on a worker has nothing to
+    build the object from, or would build a different one.
     """
 
     reconstructable: tuple[BaseTask, ...] = ()
@@ -613,12 +615,75 @@ _MAIN_MODULE_REASON = (
 )
 
 
-def _runtime_state_reason(state: str) -> str:
-    return (
-        f"{state}, which its instance body does not carry, so a tick would "
-        "run it without that state (make it a serialized field, or derive "
-        "it inside run())"
-    )
+def _runtime_state_refusal(task: BaseTask, rebuilt: BaseTask) -> str | None:
+    """Apply the runtime-state policy to one task; the refusal reason, if any.
+
+    - An excluded field whose value the rebuild does not reproduce, decidably
+      (both plain data, unequal): **refused**. The tick would run the task
+      with the rebuilt value, and that is a fact, not a guess.
+    - An excluded field whose difference cannot be decided (an object
+      without value equality, a comparison that raises): **warned**, once per
+      class and attribute.
+    - A private attribute: **never refused**. Warned once per class and
+      attribute when the difference is decidable; silent otherwise, so a lock
+      or a ``uuid4`` from a ``default_factory`` says nothing. Private state is
+      as often a cache filled during discovery (by ``requires()``, say), which
+      the tick derives again, as state the task cannot do without.
+    - The detector failing is a warning and a pass, never a failed build: it
+      is a guardrail in front of the build, not part of it.
+    """
+    try:
+        lost = state_outside_body(task, rebuilt)
+    except Exception as e:
+        cls = type(task)
+        _warn_state_once(
+            (f"{cls.__module__}.{cls.__qualname__}", "<check>"),
+            f"Could not check {cls.__module__}.{cls.__qualname__} for state its "
+            f"instance body does not carry ({type(e).__name__}: {e}); "
+            "scheduling it reactively without that check.",
+        )
+        return None
+    refusal: str | None = None
+    for state in lost:
+        if state.kind == "excluded" and state.decidable:
+            if refusal is None:
+                remedy = "make it a serialized field, or derive it inside run()"
+                if state.compat_default:
+                    remedy += ", or drop the compat_default"
+                refusal = (
+                    f"{state.describe()}, which its instance body does not "
+                    f"carry, so a tick would run it with a different value "
+                    f"({remedy})"
+                )
+        elif state.kind == "excluded":
+            _warn_state_once(
+                (state.owner, state.attribute),
+                f"{state.owner}.{state.attribute} is excluded from the instance "
+                "body, and its value cannot be compared with the one a reactive "
+                "tick rebuilds (no value equality). The tick runs the task with "
+                "the rebuilt value; make it a serialized field, or derive it "
+                "inside run(), if that matters.",
+            )
+        elif state.decidable:
+            _warn_state_once(
+                (state.owner, state.attribute),
+                f"Private attribute {state.owner}.{state.attribute} holds a "
+                "value the instance body does not carry, so a reactive tick "
+                "runs the task without it. A value derived inside requires(), "
+                "output() or run() is fine to ignore: the tick derives it "
+                "again. Anything else should be a field.",
+            )
+    return refusal
+
+
+_warned_state: set[tuple[str, str]] = set()
+
+
+def _warn_state_once(key: tuple[str, str], message: str) -> None:
+    if key in _warned_state:
+        return
+    _warned_state.add(key)
+    logger.warning(message)
 
 
 # Distinct ``(class, reason)`` pairs named in a refusal message before it
@@ -638,12 +703,13 @@ def plan_rehydration(
     ``_get_task_data_for_registration``) — so it is a faithful dry run of
     what a scheduler tick will do.
 
-    **State the body does not carry is refused too**, for the task and any
-    model nested in it (a task field, a parameter model): a private
-    attribute, or a field declared with ``exclude=True``, whose value the
-    task rebuilt from its body does not reproduce. The id check cannot see
-    it (the rebuilt task has the same id), but the tick would run the
-    rebuilt task, which is a different task in everything but name.
+    **State the body does not carry** is checked too, for the task and any
+    model nested in it: a private attribute, or a field declared with
+    ``exclude=True``, whose value the task rebuilt from its body does not
+    reproduce. The id check cannot see it, since the rebuilt task has the
+    same id. A decidable difference in an excluded field is refused; private
+    attributes and undecidable differences only warn. See
+    :func:`_runtime_state_refusal` for the policy and why it is split.
 
     ``AliasTask`` payloads fail the check by construction (rehydration
     refuses ``__aliased`` data, whose pickled ``loads_type`` would be an
@@ -671,9 +737,9 @@ def plan_rehydration(
         except Exception as e:
             unreconstructable.append((task, f"registry-data round-trip failed ({e})"))
             continue
-        state = state_outside_body(task, rebuilt)
-        if state is not None:
-            unreconstructable.append((task, _runtime_state_reason(state)))
+        refusal = _runtime_state_refusal(task, rebuilt)
+        if refusal is not None:
+            unreconstructable.append((task, refusal))
             continue
         reconstructable.append(task)
     return RehydrationPlan(

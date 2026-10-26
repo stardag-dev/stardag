@@ -18,16 +18,28 @@ defined in `__main__` or a function), so such a task could not cross a Modal
 call. Nothing changes for a correct task. A test asserting the error around a
 class body should assert it around the first construction instead.
 
-### A reactive build refuses state its tasks would lose
+### Reactive builds check for state the instance body drops
 
 A reactive tick rebuilds each task from the instance body the registry
-stores. A private attribute set after construction, or a field declared with
-`exclude=True`, is not in that body, so the tick used to run the task with
-the defaults instead, silently. The trigger now refuses such a build before
-it is armed, with a `TaskModulesError` naming the class and the attribute.
-Make the state a regular field, or derive it inside `run()`. A private
-attribute or excluded field left at its default is fine, and resident builds
-are unaffected.
+stores, which holds neither private attributes nor fields declared
+`exclude=True`. The trigger now compares each task with its rebuild:
+
+- **Refused:** an excluded field holding plain data (strings, numbers,
+  containers or models of those) that the rebuild does not reproduce, for
+  example `handle: str | None = Field(None, exclude=True)` set to a value.
+  The `TaskModulesError` names the class and the field. An untouched
+  excluded field with a `compat_default` is refused too, because the tick
+  gets the `compat_default`. Make the value a regular field, derive it inside
+  `run()`, or drop the `compat_default`.
+- **Warned, once per class and attribute:** a private attribute holding
+  plain data the rebuild does not reproduce. A value derived inside
+  `requires()`, `output()` or `run()` is fine to ignore, since the tick
+  derives it again. An excluded field whose value cannot be compared (no
+  value equality) is warned about too.
+- **Silent:** private attributes holding opaque values, such as a lock, a
+  `uuid4` or `datetime.now` default, or a numpy array.
+
+Resident builds are unaffected.
 
 ---
 
