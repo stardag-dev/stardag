@@ -6,6 +6,20 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## Unreleased
+
+### A missing `run()` is reported at construction, not class definition
+
+A task class implementing neither `run()` nor `run_aio()` still raises
+`TaskImplementationError`, but now when it is first constructed rather than
+when its class body executes. The earlier check rejected the empty class
+cloudpickle builds while unpickling a task class it took by value (one
+defined in `__main__` or a function), so such a task could not cross a Modal
+call. Nothing changes for a correct task. A test asserting the error around a
+class body should assert it around the first construction instead.
+
+---
+
 ## v0.28.0 — Wake-ups that arrive
 
 Released 2026-10-08 together with the registry server `server-v0.7.0`. No

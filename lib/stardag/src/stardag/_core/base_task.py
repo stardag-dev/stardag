@@ -5,6 +5,7 @@ import functools
 import inspect
 import json
 import logging
+import weakref
 from abc import abstractmethod
 from collections import abc as collections_abc
 from dataclasses import dataclass
@@ -113,6 +114,61 @@ def _wrap_run_aio_with_precheck(func):
         return wrapped
 
 
+def _is_abstract(cls: type["BaseTask"]) -> bool:
+    """Whether a task class is exempt from the run() requirement and wrapping."""
+    # - inspect.isabstract() catches classes with unimplemented @abstractmethod
+    # - abc.ABC in __bases__ catches classes explicitly marked as abstract base classes
+    #   (for intermediate classes meant to be subclassed, not instantiated)
+    return inspect.isabstract(cls) or abc.ABC in cls.__bases__
+
+
+def _is_generic_specialization(cls: type["BaseTask"]) -> bool:
+    """Whether a class is a pydantic parametrized generic (e.g., ``Task[str]``).
+
+    These are internal types created by pydantic, not user-defined task
+    classes. The heuristic is: class names with '[' are generic
+    specializations. Exempt from wrapping only: a specialization inherits the
+    generic class's methods, wrapped already. It is *not* exempt from the
+    run() check, which runs at construction, and ``GenericTask[int]()`` may be
+    the only way a generic class is ever constructed.
+    """
+    return "[" in cls.__name__
+
+
+def _check_implements_run(cls: type["BaseTask"]) -> None:
+    """Raise if a concrete task class implements neither run() nor run_aio().
+
+    The body of ``BaseTask._require_run_implementation``, and the only place
+    that touches ``_RUN_CHECKED_CLASSES``. A module-level function on purpose:
+    cloudpickle pickles a task class it takes by value together with the
+    validators pydantic keeps on it, and every global their code names. A
+    validator naming the ``WeakSet`` directly would drag it, and every class
+    checked so far, into the pickle. A module-level function goes by
+    reference, so the validator names only this.
+    """
+    if cls in _RUN_CHECKED_CLASSES or _is_abstract(cls):
+        return
+
+    # Check if any class in the MRO (excluding BaseTask) has run or run_aio
+    # This handles inheritance chains and Pydantic's generic class creation
+    has_run = any("run" in c.__dict__ and c is not BaseTask for c in cls.__mro__)
+    has_run_aio = any(
+        "run_aio" in c.__dict__ and c is not BaseTask for c in cls.__mro__
+    )
+
+    if not has_run and not has_run_aio:
+        raise TaskImplementationError(
+            f"Task class '{cls.__name__}' must implement either run() or run_aio(). "
+            f"Implement run() for synchronous tasks, or run_aio() for async tasks."
+        )
+    _RUN_CHECKED_CLASSES.add(cls)
+
+
+# Classes that passed `_check_implements_run`. Weak, so that this cache is
+# never what keeps a task class alive.
+_RUN_CHECKED_CLASSES: "weakref.WeakSet[type[BaseTask]]" = weakref.WeakSet()
+
+
 @total_ordering
 class BaseTask(
     PolymorphicRoot,
@@ -169,38 +225,31 @@ class BaseTask(
             return {**data, "version": cls.__version__}
         return data
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Validate that subclasses implement either run() or run_aio().
+    @model_validator(mode="before")
+    @classmethod
+    def _require_run_implementation(cls, data: Any) -> Any:
+        """Require a concrete task class to implement run() or run_aio().
 
-        Also wraps run() and run_aio() methods with precheck validation.
+        Checked when a task is first constructed, not when its class is
+        defined: cloudpickle rebuilds a class it takes by value as an empty
+        skeleton and sets ``run`` on it only afterwards, so a check at class
+        creation rejects every such class on unpickling. Unpickling an
+        instance does not validate, so it never reaches this check.
+        """
+        _check_implements_run(cls)
+        return data
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Wrap run() and run_aio() with precheck validation.
+
+        The wrapping happens here, at class creation, because that is what a
+        class cloudpickle takes by value carries over: the wrapped methods
+        travel in its pickled ``__dict__``. The run()/run_aio() check runs at
+        construction instead, see ``_check_implements_run``.
         """
         super().__init_subclass__(**kwargs)
-
-        # Skip validation for abstract classes:
-        # - inspect.isabstract() catches classes with unimplemented @abstractmethod
-        # - abc.ABC in __bases__ catches classes explicitly marked as abstract base classes
-        #   (for intermediate classes meant to be subclassed, not instantiated)
-        if inspect.isabstract(cls) or abc.ABC in cls.__bases__:
+        if _is_abstract(cls) or _is_generic_specialization(cls):
             return
-
-        # Skip validation for Pydantic parametrized generics (e.g., Task[str])
-        # These are internal types created by Pydantic, not user-defined task classes.
-        # The heuristic is: class names with '[' are generic specializations.
-        if "[" in cls.__name__:
-            return
-
-        # Check if any class in the MRO (excluding BaseTask) has run or run_aio
-        # This handles inheritance chains and Pydantic's generic class creation
-        has_run = any("run" in c.__dict__ and c is not BaseTask for c in cls.__mro__)
-        has_run_aio = any(
-            "run_aio" in c.__dict__ and c is not BaseTask for c in cls.__mro__
-        )
-
-        if not has_run and not has_run_aio:
-            raise TaskImplementationError(
-                f"Task class '{cls.__name__}' must implement either run() or run_aio(). "
-                f"Implement run() for synchronous tasks, or run_aio() for async tasks."
-            )
 
         # Wrap run() and run_aio() with precheck if this class defines them
         if "run" in cls.__dict__:

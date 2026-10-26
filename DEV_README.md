@@ -760,6 +760,34 @@ Note: pyright currently has pre-existing errors and is excluded from CI.
 tox
 ```
 
+#### A conflicting PR gets no new CI, and `gh pr checks` can still read green
+
+`ci.yml` and `modal-live.yml` trigger on `pull_request`, which GitHub runs
+against the PR's merge ref. While a PR conflicts with its base that ref does not
+exist, so **neither workflow starts**: a push to a conflicting PR queues no run,
+creates no check, and nothing says so. CodeQL and the Copilot review still
+report, because they do not depend on the merge ref — so for a head pushed while
+the PR conflicts, `gh pr checks <n>` lists only those and reads all green, for
+code nothing has tested. (If the conflict arose later, from a change to the
+base, the head keeps whatever checks it got before; they tested it against the
+old base.)
+
+Before trusting a green `gh pr checks`, check that the PR can merge:
+
+```bash
+gh pr view <n> --json mergeable -q .mergeable   # CONFLICTING: no new CI until resolved
+```
+
+Resolve the conflict against the PR's own base branch (merge or rebase on it —
+usually `main`, but not for a PR targeting a feature branch) and push; CI then
+runs on the new head. This is not a merge-safety hole: GitHub does not merge a
+conflicting PR, and branch protection on `main` requires the `Lint`,
+`Test Python`, `Integration Tests` and `Test Frontend` checks, which a head
+pushed while conflicting never gets. The cost is false confidence, not an unsafe
+merge. It is documented rather than fixed because a check that goes red on a
+conflict would have to come from a `pull_request_target` job or a scheduled
+sweep, and that machinery and its risks are not worth a bounded failure mode.
+
 ## Frontend Development
 
 ```bash

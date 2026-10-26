@@ -6,6 +6,19 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **Fixed: a class-based task that cloudpickle takes by value could not be
+  unpickled** (STA-133). cloudpickle pickles a class it cannot import by
+  name (one defined in `__main__` or in a function) by value, and rebuilds it
+  as an empty class before setting its methods. The check that a task class
+  implements `run()` or `run_aio()` ran at class creation, so it rejected
+  that empty class with `TaskImplementationError`, and such a task could not
+  cross a Modal call, e.g. a worker returning yielded dependencies to a
+  hybrid driver. Present since v0.1.0. **Behaviour change:** a task class
+  implementing neither method now raises `TaskImplementationError` when it is
+  first constructed (or validated) rather than when it is defined.
+
 ### Server
 
 - **Fixed: a wake-up could be lost to a tick's clear of the flag**
