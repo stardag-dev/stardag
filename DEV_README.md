@@ -247,8 +247,9 @@ They would not fail; they would quietly stop meaning anything. The
 environment stays shared, because it is the unit of teardown; only the app
 name separates them, and the image is identical so the extra deploy is
 seconds. A third, `registry-live-lapse`, exists for the same reason: a
-lapsed claim flags nothing, so S21's recovery is a watchdog sweep, which
-must reach that scenario's builds and no one else's. S37 needs no fourth
+lapsed claim flags nothing, so once no tick is alive to take it over,
+S21's recovery is a watchdog sweep, which must reach that scenario's
+builds and no one else's. S37 needs no fourth
 app: it already deploys its own per-scenario rollover app
 (`registry-live-s37-late-record`), and its watchdog sweep runs against
 that one, isolating it the same way without a separate deploy.
