@@ -27,14 +27,17 @@ from stardag_api.schemas_v2 import (
     WakeCandidateResponse,
     WakeCandidatesResponse,
 )
-from stardag_api.services import reactive, wakeups
+from stardag_api.services import reactive, scheduler_lease, wakeups
 
 router = APIRouter(tags=["registry-v2"])
 
 Owner = Annotated[str, Query(min_length=1, max_length=64)]
 LeaseTtl = Annotated[
     int,
-    Query(ge=wakeups.MIN_LEASE_TTL_SECONDS, le=wakeups.MAX_LEASE_TTL_SECONDS),
+    Query(
+        ge=scheduler_lease.MIN_LEASE_TTL_SECONDS,
+        le=scheduler_lease.MAX_LEASE_TTL_SECONDS,
+    ),
 ]
 
 
@@ -103,7 +106,7 @@ async def clear_notify(build_id: UUID, db: Db, auth: Auth):
 async def acquire_lease(
     build_id: UUID, db: Db, auth: Auth, owner_id: Owner, ttl_seconds: LeaseTtl = 60
 ):
-    return await wakeups.acquire_lease(
+    return await scheduler_lease.acquire_lease(
         db, auth.environment_id, build_id, owner_id=owner_id, ttl_seconds=ttl_seconds
     )
 
@@ -112,14 +115,14 @@ async def acquire_lease(
 async def renew_lease(
     build_id: UUID, db: Db, auth: Auth, owner_id: Owner, ttl_seconds: LeaseTtl = 60
 ):
-    return await wakeups.renew_lease(
+    return await scheduler_lease.renew_lease(
         db, auth.environment_id, build_id, owner_id=owner_id, ttl_seconds=ttl_seconds
     )
 
 
 @router.delete("/builds/{build_id}/scheduler-lease", response_model=LeaseResponse)
 async def release_lease(build_id: UUID, db: Db, auth: Auth, owner_id: Owner):
-    return await wakeups.release_lease(
+    return await scheduler_lease.release_lease(
         db, auth.environment_id, build_id, owner_id=owner_id
     )
 

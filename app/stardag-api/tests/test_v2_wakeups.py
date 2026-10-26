@@ -22,7 +22,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.config import settings as app_settings
 from stardag_api.models.base import utc_now
-from stardag_api.services import builds, reactive, transitions, wakeups
+from stardag_api.services import (
+    builds,
+    reactive,
+    scheduler_lease,
+    transitions,
+    wakeups,
+)
 from stardag_api.services.errors import Conflict
 from stardag_api.services.transitions import Transition
 from tests.v2_support import ENV, Harness, item, observed
@@ -409,7 +415,9 @@ async def test_notify_flags_a_running_build_and_reports_a_live_scheduler(
     await _sql(
         h, "UPDATE build_wake SET tick_requested_at = NULL WHERE build_id = :b", b=build
     )
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick-1", ttl_seconds=60)
+    await _svc(
+        h, scheduler_lease.acquire_lease, build, owner_id="tick-1", ttl_seconds=60
+    )
     state = await _svc(h, wakeups.notify, build)
     assert state.needs_tick and state.scheduler_live is True
     assert (await h.build(build))["tick_requested_at"] is None
@@ -441,7 +449,7 @@ async def test_wake_candidates_hand_each_build_out_once_per_window(h: Harness):
             b=build,
         )
     leased, quiet, not_reactive = built[0], built[1], (await h.planned([t], [t]))[0]
-    await _svc(h, wakeups.acquire_lease, leased, owner_id="o", ttl_seconds=60)
+    await _svc(h, scheduler_lease.acquire_lease, leased, owner_id="o", ttl_seconds=60)
     await _svc(h, wakeups.clear_notify, quiet)
     await _sql(
         h,
@@ -476,9 +484,9 @@ async def test_a_flag_after_the_handed_out_tick_ended_is_handed_out_again(
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert [c.build_id for c in await _svc(h, wakeups.wake_candidates)] == [build]
 
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
     await _svc(h, wakeups.clear_notify, build)
-    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    await _svc(h, scheduler_lease.release_lease, build, owner_id="tick")
     assert await _svc(h, wakeups.wake_candidates) == []  # nothing new yet
 
     await _svc(h, wakeups.notify, build, can_spawn=False)
@@ -500,7 +508,7 @@ async def test_the_window_still_collapses_askers_until_the_tick_has_run(
         await _svc(h, wakeups.notify, build, can_spawn=False)
         assert await _svc(h, wakeups.wake_candidates) == []
 
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert await _svc(h, wakeups.wake_candidates) == []
 
@@ -513,8 +521,10 @@ async def test_only_the_holders_release_spends_a_hand_out(h: Harness):
     await _reactive(h, build)
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert len(await _svc(h, wakeups.wake_candidates)) == 1  # stamped
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
-    assert not (await _svc(h, wakeups.release_lease, build, owner_id="other")).held
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    assert not (
+        await _svc(h, scheduler_lease.release_lease, build, owner_id="other")
+    ).held
     await _sql(
         h,
         "UPDATE build SET scheduler_lease_until = now() - interval '1 second'"
@@ -524,8 +534,8 @@ async def test_only_the_holders_release_spends_a_hand_out(h: Harness):
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert await _svc(h, wakeups.wake_candidates) == []
 
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
-    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, scheduler_lease.release_lease, build, owner_id="tick")
     assert len(await _svc(h, wakeups.wake_candidates)) == 1  # spent, re-stamped
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert await _svc(h, wakeups.wake_candidates) == []  # the new stamp holds
@@ -537,7 +547,7 @@ async def test_a_lapsed_holders_release_spends_no_hand_out(h: Harness):
     t = item("T")
     build, _ = await h.planned([t], [t])
     await _reactive(h, build)
-    await _svc(h, wakeups.acquire_lease, build, owner_id="old", ttl_seconds=60)
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="old", ttl_seconds=60)
     await _sql(
         h,
         "UPDATE build SET scheduler_lease_until = now() - interval '1 second'"
@@ -546,7 +556,7 @@ async def test_a_lapsed_holders_release_spends_no_hand_out(h: Harness):
     )
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert len(await _svc(h, wakeups.wake_candidates)) == 1  # the successor
-    assert (await _svc(h, wakeups.release_lease, build, owner_id="old")).held
+    assert (await _svc(h, scheduler_lease.release_lease, build, owner_id="old")).held
     assert (await h.build(build))["scheduler_lease_released_at"] is None
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert await _svc(h, wakeups.wake_candidates) == []
@@ -560,8 +570,8 @@ async def test_a_notify_stamp_is_newer_than_any_release_before_its_check(
     t = item("T")
     build, _ = await h.planned([t], [t])
     await _reactive(h, build)
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
-    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, scheduler_lease.release_lease, build, owner_id="tick")
     state = await _svc(h, wakeups.notify, build)
     assert not state.scheduler_live
     row = await h.build(build)
@@ -575,9 +585,9 @@ async def test_a_release_leaves_the_wake_row_unlocked_for_flaggers(h: Harness):
     t = item("T")
     build, _ = await h.planned([t], [t])
     await _reactive(h, build)
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
     before = await h.build(build)
-    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    await _svc(h, scheduler_lease.release_lease, build, owner_id="tick")
     after = await h.build(build)
     assert after["tick_requested_at"] == before["tick_requested_at"]
     assert after["needs_tick_at"] == before["needs_tick_at"]
@@ -850,13 +860,17 @@ async def test_stalled_builds_are_the_flags_and_leases_nobody_served(h: Harness)
             b=build,
         )
     await _svc(h, wakeups.notify, fresh, can_spawn=False)
-    await _svc(h, wakeups.acquire_lease, served, owner_id="live", ttl_seconds=60)
+    await _svc(
+        h, scheduler_lease.acquire_lease, served, owner_id="live", ttl_seconds=60
+    )
     for build, owner in ((lapsed, "dead"), (released, "done")):
-        await _svc(h, wakeups.acquire_lease, build, owner_id=owner, ttl_seconds=60)
+        await _svc(
+            h, scheduler_lease.acquire_lease, build, owner_id=owner, ttl_seconds=60
+        )
         await _sql(
             h, f"UPDATE build SET scheduler_lease_until = {old} WHERE id = :b", b=build
         )
-    await _svc(h, wakeups.release_lease, released, owner_id="done")
+    await _svc(h, scheduler_lease.release_lease, released, owner_id="done")
 
     stalled = await _svc(h, wakeups.stalled_builds, older_than=timedelta(minutes=5))
     assert {(s.build_id, s.reason) for s in stalled} == {
@@ -876,7 +890,9 @@ async def test_stalled_builds_are_ordered_by_the_since_they_report(h: Harness):
     lapsed, flagged = [(await h.planned([t], [t]))[0] for _ in range(2)]
     await _reactive(h, lapsed, flagged)
     await _clear(h, lapsed, flagged)
-    await _svc(h, wakeups.acquire_lease, lapsed, owner_id="dead", ttl_seconds=60)
+    await _svc(
+        h, scheduler_lease.acquire_lease, lapsed, owner_id="dead", ttl_seconds=60
+    )
     await _sql(
         h,
         "UPDATE build SET scheduler_lease_until = now() - interval '20 minutes'"
@@ -938,17 +954,23 @@ async def test_a_late_hand_out_is_logged_as_a_delayed_wake_up(
 async def test_the_scheduler_lease_is_single_flight_and_owner_checked(h: Harness):
     t = item("T")
     build, _ = await h.planned([t], [t])
-    first = await _svc(h, wakeups.acquire_lease, build, owner_id="a", ttl_seconds=60)
+    first = await _svc(
+        h, scheduler_lease.acquire_lease, build, owner_id="a", ttl_seconds=60
+    )
     assert first.held and first.expires_at is not None
     assert not (
-        await _svc(h, wakeups.acquire_lease, build, owner_id="b", ttl_seconds=60)
+        await _svc(
+            h, scheduler_lease.acquire_lease, build, owner_id="b", ttl_seconds=60
+        )
     ).held
-    again = await _svc(h, wakeups.acquire_lease, build, owner_id="a", ttl_seconds=60)
+    again = await _svc(
+        h, scheduler_lease.acquire_lease, build, owner_id="a", ttl_seconds=60
+    )
     assert again.held  # a retried acquire is not a lost race
     assert not (
-        await _svc(h, wakeups.renew_lease, build, owner_id="b", ttl_seconds=60)
+        await _svc(h, scheduler_lease.renew_lease, build, owner_id="b", ttl_seconds=60)
     ).held
-    assert not (await _svc(h, wakeups.release_lease, build, owner_id="b")).held
+    assert not (await _svc(h, scheduler_lease.release_lease, build, owner_id="b")).held
 
     await _sql(
         h,
@@ -957,12 +979,14 @@ async def test_the_scheduler_lease_is_single_flight_and_owner_checked(h: Harness
         b=build,
     )
     assert not (
-        await _svc(h, wakeups.renew_lease, build, owner_id="a", ttl_seconds=60)
+        await _svc(h, scheduler_lease.renew_lease, build, owner_id="a", ttl_seconds=60)
     ).held
-    taken = await _svc(h, wakeups.acquire_lease, build, owner_id="b", ttl_seconds=60)
+    taken = await _svc(
+        h, scheduler_lease.acquire_lease, build, owner_id="b", ttl_seconds=60
+    )
     assert taken.held
-    assert not (await _svc(h, wakeups.release_lease, build, owner_id="a")).held
-    assert (await _svc(h, wakeups.release_lease, build, owner_id="b")).held
+    assert not (await _svc(h, scheduler_lease.release_lease, build, owner_id="a")).held
+    assert (await _svc(h, scheduler_lease.release_lease, build, owner_id="b")).held
     assert (await h.build(build))["scheduler_lease_owner"] is None
 
 
