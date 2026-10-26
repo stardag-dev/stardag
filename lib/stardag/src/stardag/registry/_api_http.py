@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextvars
 import gzip
 import json as _json
 import logging
@@ -179,6 +180,28 @@ def gzip_json_body(body: object) -> tuple[bytes | None, dict[str, str]]:
 
 _retry_counts: collections.Counter[str] = collections.Counter()
 _retry_counts_lock = threading.Lock()
+
+
+# When the call that last returned on this context could first have
+# reached the server: the send time of its earliest attempt that the rate
+# limit did not refuse. A rate-limited attempt was never delivered; any
+# other may have been, even one that then timed out.
+_delivered_no_earlier_than: contextvars.ContextVar[float | None] = (
+    contextvars.ContextVar("stardag_registry_delivered_no_earlier_than", default=None)
+)
+
+
+def last_call_delivered_no_earlier_than() -> float | None:
+    """``time.monotonic()`` at which the last call that returned on this
+    context could first have reached the server, or None if none has.
+
+    A caller timing a server-side TTL from its own request (the scheduler
+    lease) anchors here rather than at the moment it called: still before
+    every attempt that may have been delivered, so the estimate stays
+    conservative, but after any rate-limit wait, which would otherwise
+    make a lease granted just now look already lapsed.
+    """
+    return _delivered_no_earlier_than.get()
 
 
 def transport_retry_counts() -> dict[str, int]:
@@ -421,7 +444,11 @@ class HTTPTransport:
         transient = rate_limited = 0
         rate_limit_waited = 0.0
         started = time.monotonic()
+        anchor: float | None = None
         while True:
+            sent = time.monotonic()
+            if anchor is None:
+                anchor = sent
             try:
                 response = self.client.request(request.method, url, **kwargs)
             except _TRANSIENT_EXCEPTIONS as e:
@@ -449,9 +476,12 @@ class HTTPTransport:
                     raise
                 rate_limited += 1
                 rate_limit_waited += delay
+                if anchor == sent:
+                    anchor = None  # this attempt was never delivered
                 _note_rate_limited(request, rate_limited, delay)
                 time.sleep(delay)
                 continue
+            _delivered_no_earlier_than.set(anchor)
             return request.parse(_json_or_none(response))
 
     async def acall(self, request: Request[T]) -> T:
@@ -459,7 +489,11 @@ class HTTPTransport:
         transient = rate_limited = 0
         rate_limit_waited = 0.0
         started = time.monotonic()
+        anchor: float | None = None
         while True:
+            sent = time.monotonic()
+            if anchor is None:
+                anchor = sent
             try:
                 response = await self.async_client.request(
                     request.method, url, **kwargs
@@ -489,9 +523,12 @@ class HTTPTransport:
                     raise
                 rate_limited += 1
                 rate_limit_waited += delay
+                if anchor == sent:
+                    anchor = None  # this attempt was never delivered
                 _note_rate_limited(request, rate_limited, delay)
                 await asyncio.sleep(delay)
                 continue
+            _delivered_no_earlier_than.set(anchor)
             return request.parse(_json_or_none(response))
 
     def raise_for_error(self, response: httpx.Response, operation: str) -> None:

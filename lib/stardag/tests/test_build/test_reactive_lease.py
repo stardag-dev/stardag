@@ -5,6 +5,7 @@ lease lapses is abandoned rather than holding the tick past it."""
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ import pytest
 
 from stardag.build._reactive import _lease
 from stardag.build._reactive._lease import SchedulerLease
+from stardag.registry import _api_http
 
 
 class _StuckRegistry:
@@ -58,3 +60,23 @@ async def test_a_stuck_release_does_not_hold_the_tick(short_lease):
     await asyncio.wait_for(lease.__aexit__(None, None, None), timeout=2)
     assert registry.releases == 1
     assert loop.time() - started < 0.5
+
+
+class _RateLimitedAcquire(_StuckRegistry):
+    """Grants the lease only after waiting out a rate limit longer than
+    the TTL, as the transport does on a 429 (it records when the granted
+    attempt was sent)."""
+
+    async def scheduler_lease_acquire_aio(self, build_id, *, owner_id, ttl_seconds):
+        await asyncio.sleep(0.3)
+        _api_http._delivered_no_earlier_than.set(time.monotonic())
+        return SimpleNamespace(held=True)
+
+
+async def test_a_rate_limit_wait_does_not_count_against_the_lease(short_lease):
+    """Copilot on #495: timed from the first, rate-limited attempt, a lease
+    granted after a 0.3 s wait with a 0.2 s TTL read as lapsed on arrival
+    and the tick exited without acting."""
+    async with SchedulerLease(_RateLimitedAcquire(), uuid4()) as lease:  # type: ignore[arg-type]
+        assert lease.acquired
+        assert not lease.lost

@@ -794,7 +794,7 @@ class TestLostExchange:
 
     def test_an_attempt_that_took_a_whole_timeout_is_still_retried(self, monkeypatch):
         """The case the retry exists for: a read that waited out its timeout."""
-        monkeypatch.setattr(_api_http.time, "monotonic", _clock(0.0, 10.0, 10.5))
+        monkeypatch.setattr(_api_http.time, "monotonic", _clock(0.0, 0.0, 10.0, 10.5))
         script = _Script(_body_stalls(), httpx.Response(200, json=BUILD))
         registry = _registry(script)
         registry.timeout = 10.0
@@ -803,7 +803,9 @@ class TestLostExchange:
         assert len(script.requests) == 2
 
     def test_no_retry_starts_once_the_call_has_taken_two_timeouts(self, monkeypatch):
-        monkeypatch.setattr(_api_http.time, "monotonic", _clock(0.0, 10.0, 20.0))
+        monkeypatch.setattr(
+            _api_http.time, "monotonic", _clock(0.0, 0.0, 10.0, 10.0, 20.0)
+        )
         script = _Script(_body_stalls(), _body_stalls(), httpx.Response(200))
         registry = _registry(script)
         registry.timeout = 10.0
@@ -941,6 +943,30 @@ class TestRateLimit:
         )
         with pytest.raises(QuotaExceededError):
             _registry(script).build_get(uuid4())
+
+    def test_a_ttl_is_timed_from_the_first_attempt_that_may_have_landed(
+        self, slept, monkeypatch
+    ):
+        """A rate-limited attempt never reached the route, so the call's
+        delivery anchor moves past it; a timed-out one may have, so the
+        anchor stays on it."""
+        monkeypatch.setattr(_api_http, "_TRANSIENT_BACKOFF_SECONDS", 0.0)
+        monkeypatch.setattr(
+            _api_http.time, "monotonic", _clock(*(float(t) for t in range(100)))
+        )
+        script = _Script(_rate_limited(), httpx.Response(200, json=BUILD))
+        _registry(script).build_get(UUID(BUILD["id"]))
+        rate_limited_only = _api_http.last_call_delivered_no_earlier_than()
+        script = _Script(
+            _body_stalls(), _rate_limited(), httpx.Response(200, json=BUILD)
+        )
+        _registry(script).build_get(UUID(BUILD["id"]))
+        stalled_first = _api_http.last_call_delivered_no_earlier_than()
+        assert rate_limited_only is not None and stalled_first is not None
+        # Readings: started, sent #1 (429), sent #2 (200) -> anchored at #2.
+        assert rate_limited_only == 2.0
+        # Then: started, sent #1 (stalled), ... -> anchored at #1.
+        assert stalled_first == 4.0
 
     @pytest.mark.parametrize("header", [None, "soon", "0"])
     def test_a_missing_or_odd_retry_after_waits_a_second(self, slept, header):

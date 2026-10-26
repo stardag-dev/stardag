@@ -101,7 +101,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   Each wait is logged as a warning and counted in `transport_retry_counts()`
   under `HTTP 429`. A tick's lease renewal or release that is still waiting
   when the lease lapses is abandoned, so it never holds the tick past the
-  lease.
+  lease. The lease's client-side expiry is timed from the first attempt
+  that could have reached the server, so a rate-limit wait no longer makes a
+  freshly granted lease look already lapsed.
 
 ### Server
 

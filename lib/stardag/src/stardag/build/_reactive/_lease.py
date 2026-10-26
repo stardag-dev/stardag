@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from uuid import UUID, uuid4
 
 from stardag.registry import RegistryABC
+from stardag.registry._api_http import last_call_delivered_no_earlier_than
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,13 @@ class SchedulerLease:
         return asyncio.get_running_loop().time() >= self._expires_at
 
     def _arm(self, asked_at: float) -> None:
+        """Start the client-side TTL at ``asked_at`` -- or later, if the
+        call that just returned spent part of its time waiting out a rate
+        limit, which no attempt the server saw was inside (STA-135)."""
+        delivered = last_call_delivered_no_earlier_than()
+        if delivered is not None:
+            loop = asyncio.get_running_loop()
+            asked_at = max(asked_at, loop.time() - (time.monotonic() - delivered))
         self._expires_at = asked_at + _LEASE_TTL_SECONDS
 
     def _time_left(self) -> float:
