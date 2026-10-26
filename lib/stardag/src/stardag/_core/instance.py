@@ -103,13 +103,16 @@ def state_outside_body(original: BaseModel, rebuilt: Any) -> str | None:
     as a difference: the answer has to err toward "the rebuild would lose
     something".
     """
-    seen: set[int] = set()
+    # Keyed by the pair, not the original alone: one object shared by two
+    # fields can be rebuilt twice, once faithfully and once lossily (as a
+    # dict in an ``Any`` field), and each rebuild has to be checked.
+    seen: set[tuple[int, int]] = set()
     stack: list[tuple[Any, Any]] = [(original, rebuilt)]
     while stack:
         item, other = stack.pop()
-        if id(item) in seen:
+        if (id(item), id(other)) in seen:
             continue
-        seen.add(id(item))
+        seen.add((id(item), id(other)))
         if isinstance(item, BaseModel):
             state = _model_state_lost(item, other)
             if state is not None:

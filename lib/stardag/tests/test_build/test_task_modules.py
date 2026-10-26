@@ -139,6 +139,26 @@ class PreflightSetTask(sd.Task[int]):
         self._save(len(self.pairs))
 
 
+class PreflightDerivedParams(sd.StardagBaseModel):
+    a: int = 1
+    _double: int = PrivateAttr(default=0)
+
+    def model_post_init(self, context: typing.Any) -> None:
+        super().model_post_init(context)
+        self._double = 2 * self.a
+
+
+class PreflightSharedParamsTask(sd.Task[int]):
+    """One params object in two fields: rebuilt faithfully in the typed one,
+    as a dict (without its derived private attribute) in the ``Any`` one."""
+
+    blob: typing.Any = None
+    params: PreflightDerivedParams = PreflightDerivedParams()
+
+    def run(self) -> None:
+        self._save(self.params.a)
+
+
 class PreflightParentTask(sd.Task[int]):
     """Holds another task as a field: the nested task's body is part of
     this one's, and a tick rebuilds both from it."""
@@ -844,6 +864,22 @@ class TestPlanRehydration:
                 {("x", PreflightStatefulParams(a=4)), ("y", PreflightStatefulParams())}
             )
         )
+        plan = plan_rehydration([task], [__name__])
+        assert plan.reconstructable == (task,)
+
+    def test_a_shared_model_is_checked_against_each_rebuild(self):
+        """Visited by (original, rebuilt) pair: checking the faithful typed
+        rebuild first must not hide the lossy dict one."""
+        shared = PreflightDerivedParams(a=3)
+        task = PreflightSharedParamsTask(blob=shared, params=shared)
+
+        plan = plan_rehydration([task], [__name__])
+
+        ((_, reason),) = plan.unreconstructable
+        assert "PreflightDerivedParams._double is runtime state" in reason
+
+    def test_the_same_model_in_a_typed_field_alone_is_reconstructable(self):
+        task = PreflightSharedParamsTask(params=PreflightDerivedParams(a=3))
         plan = plan_rehydration([task], [__name__])
         assert plan.reconstructable == (task,)
 
