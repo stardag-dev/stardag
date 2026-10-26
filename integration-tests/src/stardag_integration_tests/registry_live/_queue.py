@@ -194,8 +194,12 @@ def parse_active_runs(
     for run in runs:
         if run.get("status") not in ACTIVE_RUN_STATUSES:
             continue
-        created = run.get("created_at")
-        if created and now - _parse_time(created) > GHOST_AFTER:
+        # `run_started_at`, not `created_at`: a re-run is a new attempt of
+        # an old run, and only the former moves with the attempt. Measuring
+        # from creation would call a re-run of yesterday's runner a ghost
+        # and fill its slot a second time.
+        started = run.get("run_started_at") or run.get("created_at")
+        if started and now - _parse_time(started) > GHOST_AFTER:
             continue
         title = run.get("display_title") or run.get("name") or ""
         pr = _RUN_PR.search(title)
@@ -611,12 +615,13 @@ def dispatch(args: argparse.Namespace) -> int:
         # No `pr` for the default branch's head: the runner reads "a SHA and
         # no PR" as the weekly run, in the permanent `ci-main`.
         pr_input = [] if request.pr is None else ["-f", f"pr={request.pr}"]
+
         # `Dispatched` only once the dispatch call has succeeded. Marked
         # first, a failed call would leave a head admitted with no runner,
         # which the next selector rightly reads as a lost run and errors.
         # Left `Queued`, the head keeps its original timestamp, so its place,
         # and the next selector simply tries again.
-        try:
+        def run_on(ref: str) -> None:
             _gh(
                 "workflow",
                 "run",
@@ -631,7 +636,29 @@ def dispatch(args: argparse.Namespace) -> int:
                 "-f",
                 f"slot={slot}",
             )
+
+        try:
+            try:
+                run_on(ref)
+            except subprocess.CalledProcessError as e:
+                if ref == default_branch:
+                    raise
+                # A PR branch's copy of the runner can be unrunnable -- its
+                # `workflow_dispatch` removed, the file invalid -- and that
+                # fails the same way every time. Left queued, it would sit at
+                # the head of the queue and block every PR behind it. The
+                # default branch's runner tests the head by SHA instead, as
+                # it does for a branch older than the runner.
+                print(
+                    f"::warning title=Registry-live dispatch fell back::"
+                    f"{request.label}: dispatch on {ref} failed "
+                    f"({(e.stderr or '').strip()[:200]}); using {default_branch}."
+                )
+                ref = default_branch
+                run_on(ref)
         except subprocess.CalledProcessError as e:
+            # The default branch's runner failing to dispatch is not this
+            # head's fault, and is the transient case: leave it queued.
             print(
                 f"::warning title=Registry-live dispatch failed::{request.label}: "
                 f"{(e.stderr or '').strip()[:300]} -- left queued; the next "

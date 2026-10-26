@@ -41,6 +41,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # The request query reads open PRs alongside the default branch.
+      pull-requests: read
       statuses: write
     steps:
       # See the checkout in `dispatch` below for why the ref is explicit.

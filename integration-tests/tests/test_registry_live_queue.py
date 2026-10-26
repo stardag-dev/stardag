@@ -153,6 +153,20 @@ class TestParseActiveRuns:
         ]
         assert [r.run_id for r in parse_active_runs(runs, now=now)] == [2]
 
+    def test_a_fresh_attempt_of_an_old_run_is_not_a_ghost(self):
+        # A re-run keeps the run's `created_at`; only `run_started_at` moves.
+        now = datetime(2026, 10, 26, 16, 0, tzinfo=timezone.utc)
+        runs = [
+            {
+                "id": 3,
+                "status": "in_progress",
+                "created_at": "2026-10-25T09:00:00Z",
+                "run_started_at": "2026-10-26T15:50:00Z",
+                "display_title": "… · PR #3 · slot 1",
+            }
+        ]
+        assert [r.run_id for r in parse_active_runs(runs, now=now)] == [3]
+
     def test_a_hand_dispatched_run_holds_slot_one(self):
         # Its own concurrency group, but real load on the workspace.
         runs = [
