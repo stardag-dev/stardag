@@ -1,0 +1,111 @@
+name: Registry-live dispatch
+
+# The selector for the registry-live tier: admits the oldest queued PR heads
+# into free slots and dispatches `registry-live.yml` for each. The logic, and
+# the reason the queue is a commit status rather than a concurrency group, is
+# in `integration-tests/src/stardag_integration_tests/registry_live/_queue.py`
+# (STA-138).
+#
+# Triggered four ways, all equivalent but the last: a PR queueing
+# (`modal-live.yml`), a runner finishing (`registry-live.yml`), the hourly
+# schedule, and the weekly one, which first queues the default branch's head.
+# Any run does the whole job, which is what makes dropping one harmless.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # The backstop, not the mechanism: it covers a hand-over that was lost
+    # (a runner killed before its last job, a failed dispatch). The normal
+    # path is event-driven and admits the next run within seconds.
+    - cron: "41 * * * *"
+    # The weekly tier run on the default branch, Monday 03:17 UTC, for drift
+    # underneath us (Modal platform behaviour, re-resolved image
+    # dependencies) that changes with time rather than commits. Queued here
+    # rather than triggered on the runner, which would join a slot's
+    # concurrency group unannounced and could cancel a PR runner the
+    # selector had just admitted into the pending position.
+    - cron: "17 3 * * 1"
+
+permissions: {}
+
+jobs:
+  # The weekly request, recorded before -- and outside -- the selector's
+  # concurrency group. A pending selector can be cancelled by the next one,
+  # and only the Monday run knows to record this, so recording it inside the
+  # group would lose the week's run whenever Monday queued behind another
+  # selector.
+  enqueue-weekly:
+    name: Queue the weekly run
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '17 3 * * 1'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # The request query reads open PRs alongside the default branch.
+      pull-requests: read
+      statuses: write
+    steps:
+      # See the checkout in `dispatch` below for why the ref is explicit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: integration-tests/src/stardag_integration_tests/registry_live/_queue.py
+          sparse-checkout-cone-mode: false
+      - name: Queue the default branch's head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I integration-tests/src/stardag_integration_tests/registry_live/_queue.py \
+            enqueue-weekly \
+            --repo "${{ github.repository }}" \
+            --default-branch "${{ github.event.repository.default_branch }}"
+
+  dispatch:
+    name: Admit queued heads
+    runs-on: ubuntu-latest
+    needs: enqueue-weekly
+    # After the weekly request when there is one; on every other trigger
+    # `enqueue-weekly` is skipped, which must not skip this.
+    if: ${{ !cancelled() }}
+    # One selector at a time, so two cannot both read a slot as free and fill
+    # it twice. **Dropping a pending selector is harmless**, unlike dropping a
+    # pending tier run: every selector reads the whole queue, so the one that
+    # survives does what the dropped one would have. On the job rather than
+    # the workflow, so that `enqueue-weekly` is not in it.
+    concurrency:
+      group: registry-live-dispatch
+      cancel-in-progress: false
+    timeout-minutes: 10
+    permissions:
+      # The runs list, and dispatching the runner.
+      actions: write
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      # The default branch's copy of the selector, always: it decides who
+      # gets the Modal credentials, so it must not come from a PR -- nor
+      # from a branch someone dispatched this workflow on by hand, hence the
+      # explicit ref.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: integration-tests/src/stardag_integration_tests/registry_live/_queue.py
+          sparse-checkout-cone-mode: false
+
+      - name: Admit the oldest queued heads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # How many tier runs the workspace takes at once. A repository
+        # variable rather than a constant, so raising it is a decision about
+        # Modal capacity, not a code change. See `registry-live.yml`'s
+        # concurrency comment for the arithmetic that keeps it at 1.
+        #
+        # `-I` is load-bearing: without it the script's own directory leads
+        # `sys.path`, and its sibling `selectors.py` shadows the stdlib one.
+        run: |
+          python3 -I integration-tests/src/stardag_integration_tests/registry_live/_queue.py \
+            dispatch \
+            --repo "${{ github.repository }}" \
+            --default-branch "${{ github.event.repository.default_branch }}" \
+            --slots "${{ vars.REGISTRY_LIVE_SLOTS || '1' }}"
