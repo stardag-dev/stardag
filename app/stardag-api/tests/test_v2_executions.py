@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
@@ -244,6 +244,32 @@ async def test_every_v2_write_route_is_rate_limited(
     assert int(limited.headers["Retry-After"]) >= 1
     read = await client.get(f"/api/v2/builds/{uuid4()}/executions")
     assert read.status_code == 404  # not limited: it reached the service
+
+
+async def test_a_rate_limited_claim_was_never_delivered(
+    client: AsyncClient, h: Harness, rate_limit: int
+):
+    """The guard refuses before the route runs, so a rate-limited claiming
+    start leaves nothing behind, and the same request re-sent later is a
+    *first* delivery, granted (the SDK re-sends every 429, STA-135)."""
+    t = item("T")
+    build, plan = await h.planned([t], [t])
+    for _ in range(rate_limit):
+        created = await client.post(
+            "/api/v2/builds", json={"root_task_ids": ["t"], "id": str(uuid4())}
+        )
+        assert created.status_code == 200, created.text
+    url = f"/api/v2/plans/{plan.id}/members/{t.task_id}/start"
+    body = {"execution_id": str(uuid4()), "claim": True}
+    limited = await client.post(url, json=body)
+    assert limited.status_code == 429
+    assert limited.json()["detail"]["code"] == "rate_limited"
+    assert await _unended(h, build) == []
+    _rate_limiter.clear()
+    granted = await client.post(url, json=body)
+    assert granted.status_code == 200, granted.text
+    assert granted.json()["applied"] is True
+    assert [e.id for e in await _unended(h, build)] == [UUID(body["execution_id"])]
 
 
 async def test_executions_over_http(client: AsyncClient, h: Harness):

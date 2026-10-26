@@ -88,7 +88,8 @@ _ASYNC_MAX_KEEPALIVE_CONNECTIONS = 50
 # retry this loop replaces (STA-54). ``build_create`` mints the build id
 # client-side when the caller does not, so it is re-sent unchanged. Tick
 # summaries insert a row per delivery and are counted, so that one route
-# opts out (``Request.retry``).
+# opts out (``Request.retry``) -- of this retry, not of the rate-limit one
+# below.
 #
 # The retry wraps the whole exchange, body read included. A retry inside
 # the httpx transport cannot: the transport returns once the headers are
@@ -117,8 +118,22 @@ _GATEWAY_STATUSES = frozenset({502, 503, 504})
 # "Internal Server Error" for an unhandled one -- so it tells the two apart.
 _PROXY_ERROR_PREFIX = "modal-http:"
 
-_MAX_RATE_LIMIT_RETRIES = 5
+# A rate-limit 429 is the registry refusing the request *before* its route
+# runs (the v2 write guard is a router dependency), so it is a
+# non-delivery: re-sending is safe on every route, ``Request.retry`` or
+# not, and it never meets the second-delivery question above. What a
+# retry does add is time, so it is bounded by time: the waits, each the
+# server's ``Retry-After`` (capped at a minute) plus up to a quarter again
+# of jitter, may add up to 150 s -- so two full one-minute windows always
+# fit, whatever the jitter. Jittered for the same reason as the transient
+# backoff, and only ever *later* than the server asked: callers refused
+# together are told the same moment.
+#
+# ``rate_limited`` is the v2 router's code, ``RATE_LIMIT`` the v1 one's;
+# any other 429 (a creation quota) is not retried.
+_RATE_LIMIT_CODES = frozenset({"rate_limited", "RATE_LIMIT"})
 _MAX_RETRY_WAIT = 60
+_MAX_RATE_LIMIT_WAIT_SECONDS = 150.0
 
 # Above this, a JSON body is gzipped (the server's GZipRequestMiddleware
 # decodes it): registration chunks compress 5-10x.
@@ -141,7 +156,8 @@ class Request(Generic[T]):
     operation: str = "API call"
     # Whether a lost exchange is sent again (see ``_MAX_TRANSIENT_RETRIES``).
     # Off only for a route where a second delivery does worse than a lost
-    # one.
+    # one. A rate-limit refusal is re-sent regardless: it was never
+    # delivered (see ``_RATE_LIMIT_CODES``).
     retry: bool = True
 
 
@@ -208,6 +224,37 @@ def _transient_delay(retry: int) -> float:
     the same stall would otherwise re-send in lockstep.
     """
     return random.uniform(0, _TRANSIENT_BACKOFF_SECONDS * 2 ** (retry - 1))
+
+
+def _rate_limit_delay(retry_after: int, waited: float) -> float | None:
+    """How long to wait before re-sending a rate-limited request, or None
+    once the time budget is spent."""
+    base = float(min(max(retry_after, 1), _MAX_RETRY_WAIT))
+    delay = base + random.uniform(0, base / 4)
+    if waited + delay > _MAX_RATE_LIMIT_WAIT_SECONDS:
+        return None
+    return delay
+
+
+def _note_rate_limited(request: Request[Any], retry: int, delay: float) -> None:
+    with _retry_counts_lock:
+        _retry_counts["HTTP 429"] += 1
+    logger.warning(
+        "Registry %s %s was rate-limited (HTTP 429); retrying in %.1fs (retry %d).",
+        request.method,
+        request.path,
+        delay,
+        retry,
+    )
+
+
+def _retry_after_seconds(response: httpx.Response) -> int:
+    """The ``Retry-After`` header as whole seconds (1 when absent or not a
+    number of seconds)."""
+    try:
+        return max(int(response.headers.get("Retry-After", 1)), 1)
+    except ValueError:
+        return 1
 
 
 def _json_or_none(response: httpx.Response) -> Any:
@@ -367,6 +414,7 @@ class HTTPTransport:
     def call(self, request: Request[T]) -> T:
         url, kwargs = self._kwargs(request)
         transient = rate_limited = 0
+        rate_limit_waited = 0.0
         started = time.monotonic()
         while True:
             try:
@@ -389,16 +437,20 @@ class HTTPTransport:
             try:
                 self.raise_for_error(response, request.operation)
             except RateLimitError as e:
-                if rate_limited >= _MAX_RATE_LIMIT_RETRIES:
+                delay = _rate_limit_delay(e.retry_after, rate_limit_waited)
+                if delay is None:
                     raise
                 rate_limited += 1
-                time.sleep(min(e.retry_after, _MAX_RETRY_WAIT))
+                rate_limit_waited += delay
+                _note_rate_limited(request, rate_limited, delay)
+                time.sleep(delay)
                 continue
             return request.parse(_json_or_none(response))
 
     async def acall(self, request: Request[T]) -> T:
         url, kwargs = self._kwargs(request)
         transient = rate_limited = 0
+        rate_limit_waited = 0.0
         started = time.monotonic()
         while True:
             try:
@@ -423,10 +475,13 @@ class HTTPTransport:
             try:
                 self.raise_for_error(response, request.operation)
             except RateLimitError as e:
-                if rate_limited >= _MAX_RATE_LIMIT_RETRIES:
+                delay = _rate_limit_delay(e.retry_after, rate_limit_waited)
+                if delay is None:
                     raise
                 rate_limited += 1
-                await asyncio.sleep(min(e.retry_after, _MAX_RETRY_WAIT))
+                rate_limit_waited += delay
+                _note_rate_limited(request, rate_limited, delay)
+                await asyncio.sleep(delay)
                 continue
             return request.parse(_json_or_none(response))
 
@@ -475,12 +530,12 @@ class HTTPTransport:
                 f"{operation}: resource not found", detail=detail, payload=payload
             )
         if status_code == 429:
-            if (payload or {}).get("error_code") == "RATE_LIMIT" or (payload or {}).get(
-                "code"
-            ) == "RATE_LIMIT":
+            codes = {(payload or {}).get("code"), (payload or {}).get("error_code")}
+            if codes & _RATE_LIMIT_CODES:
                 raise RateLimitError(
-                    retry_after=int(response.headers.get("Retry-After", 1)),
+                    retry_after=_retry_after_seconds(response),
                     detail=detail,
+                    payload=payload,
                 )
             raise QuotaExceededError(detail=detail)
         raise APIError(

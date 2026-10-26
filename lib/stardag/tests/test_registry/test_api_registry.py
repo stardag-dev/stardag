@@ -22,6 +22,7 @@ from stardag.exceptions import (
     APIError,
     NotFoundError,
     QuotaExceededError,
+    RateLimitError,
     execution_not_wanted,
 )
 from stardag.registry import APIRegistry, RegistrationItem
@@ -810,12 +811,9 @@ class TestLostExchange:
             registry.build_get(uuid4())
         assert len(script.requests) == 2
 
-    def test_a_rate_limit_and_a_lost_answer_are_budgeted_apart(self):
-        rate_limited = httpx.Response(
-            429,
-            headers={"Retry-After": "0"},
-            json={"detail": {"code": "RATE_LIMIT", "message": "slow down"}},
-        )
+    def test_a_rate_limit_and_a_lost_answer_are_budgeted_apart(self, monkeypatch):
+        monkeypatch.setattr(_api_http.time, "sleep", lambda _: None)
+        rate_limited = _rate_limited(retry_after="0")
         script = _Script(
             _body_stalls(), rate_limited, _body_cut(), httpx.Response(200, json=BUILD)
         )
@@ -856,6 +854,107 @@ class TestLostExchange:
         build = await registry.build_get_aio(UUID(BUILD["id"]))
         assert str(build.id) == BUILD["id"]
         assert len(script.requests) == 2
+
+
+def _rate_limited(retry_after: str | None = "7", code: str = "rate_limited"):
+    """The v2 write guard's refusal (``routes/registry_v2/guard.py``)."""
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    return httpx.Response(
+        429,
+        headers=headers,
+        json={
+            "detail": {
+                "code": code,
+                "message": "Rate limit exceeded (300 requests/minute).",
+                "limit": 300,
+                "retry_after": 7,
+            }
+        },
+    )
+
+
+class TestRateLimit:
+    """A rate-limit 429 is refused before the route runs, so it is re-sent
+    on every route, waiting at least what the server asked, for a bounded
+    total time (STA-135)."""
+
+    @pytest.fixture
+    def slept(self, monkeypatch) -> list[float]:
+        delays: list[float] = []
+        monkeypatch.setattr(_api_http.time, "sleep", delays.append)
+        return delays
+
+    @pytest.mark.parametrize("code", ["rate_limited", "RATE_LIMIT"])
+    def test_a_rate_limit_is_waited_out_and_re_sent(self, slept, code, caplog):
+        script = _Script(_rate_limited(code=code), httpx.Response(200, json=BUILD))
+        before = transport_retry_counts().get("HTTP 429", 0)
+        with caplog.at_level("WARNING", logger=_api_http.__name__):
+            build = _registry(script).build_get(UUID(BUILD["id"]))
+        assert str(build.id) == BUILD["id"]
+        assert len(script.requests) == 2
+        (delay,) = slept
+        assert 7 <= delay <= 7 * 1.25
+        assert transport_retry_counts()["HTTP 429"] == before + 1
+        (record,) = caplog.records
+        assert "rate-limited" in record.getMessage()
+
+    def test_a_route_that_opts_out_of_re_delivery_is_still_re_sent(self, slept):
+        """A tick summary is never sent twice after a lost answer, but a 429
+        was never delivered at all."""
+        script = _Script(_rate_limited(), httpx.Response(201))
+        _registry(script).build_report_tick_summary(uuid4(), {"outcome": "x"})
+        assert len(script.requests) == 2
+
+    def test_an_end_report_survives_a_rate_limit(self, slept):
+        script = _Script(
+            _rate_limited(), _rate_limited(), httpx.Response(200, json=TRANSITION)
+        )
+        _registry(script).member_complete(uuid4(), "t", execution_id=uuid4())
+        assert len(script.requests) == 3
+
+    @pytest.mark.parametrize("jitter", ["least", "most"])
+    def test_the_waits_are_bounded_in_total_time(self, slept, jitter, monkeypatch):
+        monkeypatch.setattr(
+            _api_http.random, "uniform", lambda a, b: a if jitter == "least" else b
+        )
+        script = _Script(*(_rate_limited(retry_after="60") for _ in range(10)))
+        with pytest.raises(RateLimitError) as raised:
+            _registry(script).build_get(uuid4())
+        assert raised.value.code == "rate_limited"
+        assert sum(slept) <= _api_http._MAX_RATE_LIMIT_WAIT_SECONDS
+        # Two one-minute windows are always covered, whatever the jitter.
+        assert len(slept) >= 2
+        assert len(script.requests) == len(slept) + 1
+
+    @pytest.mark.parametrize("header", [None, "soon", "0"])
+    def test_a_missing_or_odd_retry_after_waits_a_second(self, slept, header):
+        script = _Script(
+            _rate_limited(retry_after=header), httpx.Response(200, json=BUILD)
+        )
+        _registry(script).build_get(UUID(BUILD["id"]))
+        (delay,) = slept
+        assert 1 <= delay <= 1.25
+
+    async def test_the_async_path_waits_too(self, monkeypatch):
+        import asyncio
+
+        delays: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def sleep(delay: float) -> None:
+            delays.append(delay)
+            await real_sleep(0)
+
+        monkeypatch.setattr(_api_http.asyncio, "sleep", sleep)
+        script = _Script(_rate_limited(), httpx.Response(200, json=BUILD))
+        registry = APIRegistry(api_url="https://registry.test", api_key="sk-test")
+        registry._async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(script)
+        )
+        registry._async_client_loop = asyncio.get_running_loop()
+        await registry.build_get_aio(UUID(BUILD["id"]))
+        assert len(script.requests) == 2
+        assert len(delays) == 1 and delays[0] >= 7
 
 
 class TestGzip:
