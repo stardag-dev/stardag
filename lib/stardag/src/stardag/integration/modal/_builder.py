@@ -114,6 +114,7 @@ class Builder(BuildFunction):
         build_kwargs: dict[str, typing.Any] | None = None,
         *,
         worker_timeouts: dict[str, int] | None = None,
+        worker_reports_lifecycle: bool = True,
     ) -> BuildSummary | None:
         """Core build logic to orchestrate the DAG build.
 
@@ -128,6 +129,12 @@ class Builder(BuildFunction):
         and tells the worker its own timeout. None means the caller did
         not supply it, and the executor warns that claims fall back to the
         registry's default TTL.
+
+        ``worker_reports_lifecycle`` says whether the app's run function
+        reports the task lifecycle from the worker, as derived at
+        ``finalize()`` from its ``reports_lifecycle`` attribute (see
+        :class:`RunFunction`). The deployed ``build`` function passes it;
+        when it is False, the engine reports for the workers.
         """
         resume_build_id = (build_kwargs or {}).get("resume_build_id")
         try:
@@ -136,6 +143,7 @@ class Builder(BuildFunction):
                 worker_selector=worker_selector,
                 detached=getattr(self, "detached", True),
                 worker_timeouts=worker_timeouts,
+                worker_reports_lifecycle=worker_reports_lifecycle,
             )
         except BaseException as e:
             # A trigger-created build is RUNNING from the moment it was

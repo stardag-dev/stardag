@@ -122,8 +122,12 @@ class ModalTaskExecutor(TaskExecutorABC):
                 task lifecycle (start with ref, completion, failure, yield,
                 artifacts) themselves via the default :class:`Runner`, for
                 detached executions. When True the engine reports none of
-                those for Modal-routed tasks. Set False for a custom
-                ``run_function`` without lifecycle reporting.
+                those for Modal-routed tasks; when False it reports them
+                itself. The deployed ``build`` function sets this from the
+                app's run function (its ``reports_lifecycle`` attribute, see
+                :class:`RunFunction`), so it only needs passing when you
+                construct the executor yourself against an app whose run
+                function does not report.
             modal_workspace: Explicit Modal workspace name for the executor
                 metadata recorded with task starts (UI deep links). Default:
                 resolved once from the configured Modal token, best-effort.
@@ -418,8 +422,11 @@ class ModalTaskExecutor(TaskExecutorABC):
                 f"Modal-routed tasks (app {self.modal_app_name!r}): workers "
                 "self-report their start, end and yields. A custom run "
                 "function without lifecycle reporting needs "
-                "ModalTaskExecutor(worker_reports_lifecycle=False) — "
-                "otherwise its tasks stay RUNNING until their claims lapse."
+                "ModalTaskExecutor(worker_reports_lifecycle=False) when you "
+                "construct the executor yourself (the deployed build "
+                "function derives it from the run function's "
+                "reports_lifecycle) — otherwise its tasks stay RUNNING "
+                "until their claims lapse."
             )
         return active
 

@@ -246,6 +246,16 @@ class _TickDeployment:
         worker_timeouts: Per-worker Modal ``timeout`` (seconds), which is
             what the execution claim's expiry is derived from. Only the
             deploy process can see the app's ``worker_settings``.
+        worker_reports_lifecycle: Whether the app's run function reports
+            the task lifecycle from the worker. Reactive scheduling needs
+            it to: the executor refuses ``reactive=True`` without it, so a
+            tick of an app whose run function does not report raises
+            before it spawns anything onto workers nobody reports for.
+            ``build_trigger`` refuses such an app first; this covers a
+            build triggered before a redeploy changed the run function.
+            Such a build is not failed by the tick, so it stays RUNNING
+            (with every tick erroring in the logs) until it is cancelled
+            or the app is redeployed with a reporting run function.
         tick_timeout_seconds: The ``tick`` function's own Modal ``timeout``
             — how long this container may live, from which the per-pass
             spawn cap is derived.
@@ -263,6 +273,7 @@ class _TickDeployment:
     limit_key_selector: LimitKeySelector | None
     modal_workspace: str | None
     worker_timeouts: dict[str, int]
+    worker_reports_lifecycle: bool
     tick_timeout_seconds: float | None
     task_modules: tuple[str, ...]
     task_module_patterns: tuple[str, ...]
@@ -348,6 +359,7 @@ async def _run_deployed_tick_aio(
         reactive=True,
         modal_workspace=deployment.modal_workspace,
         worker_timeouts=deployment.worker_timeouts,
+        worker_reports_lifecycle=deployment.worker_reports_lifecycle,
     )
     own = own_deployment_id()
     rollover_details: dict[str, typing.Any] = {}

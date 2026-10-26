@@ -32,6 +32,10 @@ from stardag.integration.modal._bootstrap import (
     run_reactive_bootstrap,
 )
 from stardag.integration.modal._payload import to_task_payloads
+from stardag.integration.modal._protocols import (
+    RunFunction,
+    _run_function_reports_lifecycle,
+)
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
     _get_modal_environment,
@@ -71,6 +75,7 @@ class _Triggering:
     task_modules: tuple[str, ...]
     reactive_discovery: ReactiveDiscovery
     modal_workspace: str | None
+    _run_function: RunFunction
 
     if typing.TYPE_CHECKING:
 
@@ -183,6 +188,17 @@ class _Triggering:
                 "deployed worker_selector. Configure it on StardagApp instead."
             )
         if reactive:
+            if not _run_function_reports_lifecycle(self._run_function):
+                raise ValueError(
+                    "build_trigger(reactive=True) needs a run function that "
+                    f"reports the task lifecycle, and this app's "
+                    f"({self.name!r}) does not. Reactive scheduling has no "
+                    "resident orchestrator, so the worker itself must record "
+                    "each task's end and the dependencies it yields, and wake "
+                    "the scheduler. Use stardag's default Runner (or a "
+                    "subclass), declare reports_lifecycle = True on a run "
+                    "function that does report, or use a resident build."
+                )
             tick_kwargs = _validate_tick_kwargs(tick_kwargs)
             if not self.task_modules:
                 raise TaskModulesError(

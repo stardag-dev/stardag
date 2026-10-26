@@ -42,6 +42,7 @@ from stardag.integration.modal._reporter import report_unreadable_task
 from stardag.integration.modal._protocols import (
     _callable_accepts_env_overrides,
     _callable_accepts_keyword,
+    _run_function_reports_lifecycle,
     _RunFunctionWithEnv,
 )
 from stardag.integration.modal._selector import WorkerSelector
@@ -352,11 +353,21 @@ def _register_functions(
     # does) gets them, so its detached executions claim with the worker's
     # timeout plus grace, as a reactive tick's do, rather than with the
     # registry's default TTL.
-    build_fn_extra_kwargs: dict[str, typing.Any] = (
-        {"worker_timeouts": self._worker_timeouts()}
-        if _callable_accepts_keyword(build_fn, "worker_timeouts", var_keyword=False)
-        else {}
-    )
+    #
+    # Likewise whether the run function reports the task lifecycle from
+    # the worker: only the app knows its run function, and an executor
+    # that wrongly assumes self-reporting workers leaves every task RUNNING
+    # in the registry until its claim lapses.
+    worker_reports_lifecycle = _run_function_reports_lifecycle(self._run_function)
+    deploy_time_build_kwargs: dict[str, typing.Any] = {
+        "worker_timeouts": self._worker_timeouts(),
+        "worker_reports_lifecycle": worker_reports_lifecycle,
+    }
+    build_fn_extra_kwargs = {
+        name: value
+        for name, value in deploy_time_build_kwargs.items()
+        if _callable_accepts_keyword(build_fn, name, var_keyword=False)
+    }
 
     def _modal_build(
         tasks: typing.Sequence[TaskOrPayload] | TaskOrPayload,
@@ -474,6 +485,7 @@ def _register_functions(
         limit_key_selector=self.limit_key_selector,
         modal_workspace=self.modal_workspace,
         worker_timeouts=self._worker_timeouts(),
+        worker_reports_lifecycle=worker_reports_lifecycle,
         tick_timeout_seconds=_tick_function_timeout_seconds(
             self._tick_settings, self._builder_settings
         ),

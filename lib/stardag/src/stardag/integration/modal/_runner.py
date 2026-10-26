@@ -94,6 +94,13 @@ class Runner(RunFunction):
         """
         self.report_lifecycle = report_lifecycle
 
+    @property
+    def reports_lifecycle(self) -> bool:
+        """Whether this runner reports the task lifecycle from the worker,
+        which tells the build engine not to (see :class:`RunFunction`)."""
+        # getattr: tolerate subclasses overriding __init__ without super()
+        return getattr(self, "report_lifecycle", True)
+
     def setup(self, task: BaseTask) -> None:
         """Optional setup logic before the task runs.
 

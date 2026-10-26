@@ -69,6 +69,25 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   builds claim with timeout plus grace, as reactive ones do. A detached
   `ModalTaskExecutor` constructed without `worker_timeouts` now logs a
   warning.
+- **Fixed: a custom `run_function` left every task `RUNNING` under the
+  deployed resident builder** (STA-75). `Builder` constructed its executor
+  assuming self-reporting workers, so the engine skipped its own completion,
+  failure and yield reports for Modal-routed tasks. Only the default `Runner`
+  reports from the worker, so a run function implementing `RunFunction`
+  directly (or `Runner(report_lifecycle=False)`) had nobody reporting its
+  tasks' ends, and dynamic dependencies woke nothing. The deployed `build`
+  function now derives this from the run function's `reports_lifecycle`
+  attribute (true on a reporting `Runner`, absent on a plain function) and
+  passes it to the builder, so the engine reports for run functions that do
+  not. A custom run function that does report can declare
+  `reports_lifecycle = True`. `build_trigger(reactive=True)` now refuses an
+  app whose run function does not report, rather than letting its tasks sit
+  `RUNNING` until their claims lapse. **Migration:** a run function that
+  delegates to a `Runner` without subclassing it must declare
+  `reports_lifecycle = True`; otherwise reactive triggers refuse the app, and
+  resident builds switch the delegated `Runner`'s reporting off in favour of
+  the engine's, losing cooperative cancellation and interruption
+  classification (see [RELEASE_NOTES.md](RELEASE_NOTES.md)).
 
 ### Server
 
