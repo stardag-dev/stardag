@@ -114,16 +114,25 @@ def _wrap_run_aio_with_precheck(func):
         return wrapped
 
 
-def _is_abstract_or_generic(cls: type["BaseTask"]) -> bool:
+def _is_abstract(cls: type["BaseTask"]) -> bool:
     """Whether a task class is exempt from the run() requirement and wrapping."""
-    # Abstract classes:
     # - inspect.isabstract() catches classes with unimplemented @abstractmethod
     # - abc.ABC in __bases__ catches classes explicitly marked as abstract base classes
     #   (for intermediate classes meant to be subclassed, not instantiated)
-    # Pydantic parametrized generics (e.g., Task[str]): internal types created by
-    # Pydantic, not user-defined task classes. The heuristic is: class names with
-    # '[' are generic specializations.
-    return inspect.isabstract(cls) or abc.ABC in cls.__bases__ or "[" in cls.__name__
+    return inspect.isabstract(cls) or abc.ABC in cls.__bases__
+
+
+def _is_generic_specialization(cls: type["BaseTask"]) -> bool:
+    """Whether a class is a pydantic parametrized generic (e.g., ``Task[str]``).
+
+    These are internal types created by pydantic, not user-defined task
+    classes. The heuristic is: class names with '[' are generic
+    specializations. Exempt from wrapping only: a specialization inherits the
+    generic class's methods, wrapped already. It is *not* exempt from the
+    run() check, which runs at construction, and ``GenericTask[int]()`` may be
+    the only way a generic class is ever constructed.
+    """
+    return "[" in cls.__name__
 
 
 def _check_implements_run(cls: type["BaseTask"]) -> None:
@@ -137,7 +146,7 @@ def _check_implements_run(cls: type["BaseTask"]) -> None:
     checked so far, into the pickle. A module-level function goes by
     reference, so the validator names only this.
     """
-    if cls in _RUN_CHECKED_CLASSES or _is_abstract_or_generic(cls):
+    if cls in _RUN_CHECKED_CLASSES or _is_abstract(cls):
         return
 
     # Check if any class in the MRO (excluding BaseTask) has run or run_aio
@@ -155,8 +164,8 @@ def _check_implements_run(cls: type["BaseTask"]) -> None:
     _RUN_CHECKED_CLASSES.add(cls)
 
 
-# Classes that passed `_check_implements_run`. Weak, so a class defined in a
-# function is not kept alive by having been checked.
+# Classes that passed `_check_implements_run`. Weak, so that this cache is
+# never what keeps a task class alive.
 _RUN_CHECKED_CLASSES: "weakref.WeakSet[type[BaseTask]]" = weakref.WeakSet()
 
 
@@ -239,7 +248,7 @@ class BaseTask(
         construction instead, see ``_check_implements_run``.
         """
         super().__init_subclass__(**kwargs)
-        if _is_abstract_or_generic(cls):
+        if _is_abstract(cls) or _is_generic_specialization(cls):
             return
 
         # Wrap run() and run_aio() with precheck if this class defines them

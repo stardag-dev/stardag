@@ -2,7 +2,7 @@ import asyncio
 import copy
 import threading
 from functools import cached_property
-from typing import Annotated, Type
+from typing import Annotated, Generic, Type, TypeVar
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -495,6 +495,24 @@ class TestRunRunAioSymmetry:
         # Every construction, not only the first: a failure is not cached.
         with pytest.raises(TaskImplementationError):
             NeitherTask.model_validate({})
+
+    def test_generic_specialization_without_run_raises_at_construction(self):
+        """A generic task class constructed only through a specialization is
+        still checked: the specialization's name contains '[', which exempts
+        it from the precheck wrapping but not from the run() check."""
+        T = TypeVar("T")
+
+        class GenericNoRun(BaseTask, Generic[T]):
+            value: int = 1
+
+            def complete(self) -> bool:
+                return True
+
+        with pytest.raises(
+            TaskImplementationError,
+            match="must implement either run\\(\\) or run_aio\\(\\)",
+        ):
+            GenericNoRun[int]()
 
     def test_sync_default_from_async_context_raises(self):
         """Calling run() from async context when only run_aio() is implemented should raise."""

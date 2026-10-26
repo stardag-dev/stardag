@@ -51,11 +51,10 @@ def test_a_function_local_task_with_a_dependency_round_trips():
 # cannot import it by name and takes the class by value, with every validator
 # and global its fields bring along: a non-significant field, a nested model,
 # a concrete task parameter, and a polymorphic one. A shape that stops round-tripping
-# here fails the base suite instead of a Modal worker.
-#
-# cloudpickle rebuilds a by-value class as an empty skeleton and sets its
-# attributes, `run` among them, only afterwards; the run() check therefore
-# runs at construction, not class creation (STA-133).
+# here fails the base suite instead of a Modal worker. cloudpickle rebuilds a
+# by-value class as an empty skeleton and sets its attributes, `run` among
+# them, only afterwards, which is why the run() check runs at construction
+# rather than class creation (STA-133).
 
 
 def test_a_function_local_class_task_round_trips():

@@ -15,7 +15,7 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   implements `run()` or `run_aio()` ran at class creation, so it rejected
   that empty class with `TaskImplementationError`, and such a task could not
   cross a Modal call, e.g. a worker returning yielded dependencies to a
-  hybrid driver. Present since v0.3.0. **Behaviour change:** a task class
+  hybrid driver. Present since v0.1.0. **Behaviour change:** a task class
   implementing neither method now raises `TaskImplementationError` when it is
   first constructed (or validated) rather than when it is defined.
 
