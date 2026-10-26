@@ -18,6 +18,8 @@ from stardag_integration_tests.registry_live._queue import (
     WEEKLY_CONTEXT,
     ActiveRun,
     Request,
+    is_aged,
+    is_ghost,
     is_releasing,
     parse_active_runs,
     parse_default_branch,
@@ -133,39 +135,12 @@ class TestParseActiveRuns:
             ActiveRun(run_id=7, slot=1, pr=1, releasing=True)
         ]
 
-    def test_a_ghost_run_holds_no_slot(self):
-        # GitHub can keep a run listed as queued for weeks after it ended;
-        # counting it would wedge its slot for good.
-        now = datetime(2026, 10, 26, 16, 0, tzinfo=timezone.utc)
+    def test_a_ghost_run_is_not_listed(self):
         runs = [
-            {
-                "id": 1,
-                "status": "queued",
-                "created_at": "2026-09-13T10:00:00Z",
-                "display_title": "… · PR #1 · slot 1",
-            },
-            {
-                "id": 2,
-                "status": "in_progress",
-                "created_at": "2026-10-26T15:40:00Z",
-                "display_title": "… · PR #2 · slot 1",
-            },
+            {"id": 1, "status": "queued", "display_title": "… · PR #1 · slot 1"},
+            {"id": 2, "status": "in_progress", "display_title": "… · PR #2 · slot 1"},
         ]
-        assert [r.run_id for r in parse_active_runs(runs, now=now)] == [2]
-
-    def test_a_fresh_attempt_of_an_old_run_is_not_a_ghost(self):
-        # A re-run keeps the run's `created_at`; only `run_started_at` moves.
-        now = datetime(2026, 10, 26, 16, 0, tzinfo=timezone.utc)
-        runs = [
-            {
-                "id": 3,
-                "status": "in_progress",
-                "created_at": "2026-10-25T09:00:00Z",
-                "run_started_at": "2026-10-26T15:50:00Z",
-                "display_title": "… · PR #3 · slot 1",
-            }
-        ]
-        assert [r.run_id for r in parse_active_runs(runs, now=now)] == [3]
+        assert [r.run_id for r in parse_active_runs(runs, ghosts=frozenset({1}))] == [2]
 
     def test_a_hand_dispatched_run_holds_slot_one(self):
         # Its own concurrency group, but real load on the workspace.
@@ -181,6 +156,31 @@ class TestParseActiveRuns:
     def test_a_title_without_a_slot_occupies_slot_one(self):
         runs = [{"id": 3, "status": "waiting", "display_title": "Registry-live tier"}]
         assert parse_active_runs(runs) == [ActiveRun(run_id=3, slot=1, pr=None)]
+
+
+class TestGhosts:
+    NOW = datetime(2026, 10, 26, 16, 0, tzinfo=timezone.utc)
+
+    def test_age_is_measured_from_the_current_attempt(self):
+        # A re-run keeps the run's `created_at`; only `run_started_at` moves.
+        rerun = {
+            "created_at": "2026-10-25T09:00:00Z",
+            "run_started_at": "2026-10-26T15:50:00Z",
+        }
+        assert not is_aged(rerun, self.NOW)
+        old = {
+            "created_at": "2026-09-13T08:54:40Z",
+            "run_started_at": "2026-09-13T08:54:40Z",
+        }
+        assert is_aged(old, self.NOW)
+
+    def test_an_aged_run_with_no_jobs_is_a_ghost(self):
+        # The shape of run 34748665026: `queued` for weeks, zero jobs.
+        assert is_ghost([])
+
+    def test_an_aged_run_still_waiting_for_a_runner_is_not(self):
+        # Hours in the GitHub runner queue is real; its jobs are listed.
+        assert not is_ghost([{"name": "Resolve the head to test", "status": "queued"}])
 
 
 class TestIsReleasing:

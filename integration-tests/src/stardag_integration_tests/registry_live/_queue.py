@@ -61,10 +61,11 @@ QUEUED = "Queued"
 DISPATCHED = "Dispatched"
 RUNNING = "Running"
 
-# Everything a run can be before GitHub calls it `completed`.
-ACTIVE_RUN_STATUSES = frozenset(
-    {"queued", "in_progress", "waiting", "pending", "requested"}
-)
+# Everything a run can be before GitHub calls it `completed`, in the order a
+# run moves through them. `_runner_runs` queries them in this order, so a run
+# that advances between two queries is caught by a later one.
+ACTIVE_RUN_LIFECYCLE = ("requested", "pending", "waiting", "queued", "in_progress")
+ACTIVE_RUN_STATUSES = frozenset(ACTIVE_RUN_LIFECYCLE)
 
 # The runner's `run-name` is a contract with this module: it is the only
 # place a dispatched run carries its PR and slot where the runs API shows
@@ -77,12 +78,11 @@ _RUN_SLOT = re.compile(r"slot (\d+)\b")
 # deleted, so its slot is free even though the run is still in progress.
 REPORT_JOB = "Report and hand over"
 
-# A run listed as not completed for longer than this is a ghost, not load.
-# GitHub has kept one in this repository listed as `queued` for weeks while
+# A run listed as not completed for longer than this is *suspected* of being
+# a ghost, and checked (see `is_ghost`). GitHub has kept one in this
+# repository listed as `queued` for weeks, with no jobs at all, while
 # `gh run cancel` called it completed (run 34748665026, 2026-09-13); in the
-# runs list it would hold a slot forever. Comfortably above the longest real
-# life of a runner: one finishing run ahead of it in its group, then the
-# tier's 30-minute timeout plus teardown.
+# runs list it would hold a slot forever.
 GHOST_AFTER = timedelta(hours=3)
 
 # How far back the default branch is searched for a pending weekly request
@@ -179,27 +179,45 @@ def _parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def is_aged(run: dict, now: datetime | None = None) -> bool:
+    """Whether a not-completed run is old enough to be checked for a ghost.
+
+    From `run_started_at`, not `created_at`: a re-run is a new attempt of an
+    old run, and only the former moves with the attempt.
+    """
+    now = now or datetime.now(timezone.utc)
+    started = run.get("run_started_at") or run.get("created_at")
+    return bool(started) and now - _parse_time(started) > GHOST_AFTER
+
+
+def is_ghost(jobs: list[dict]) -> bool:
+    """Whether an aged run is a ghost: listed as not completed, with no jobs.
+
+    Age alone is not enough. A run can wait hours for a GitHub runner, and
+    the tier's own timeout does not bound that wait -- but such a run has
+    its jobs, listed as `queued`. A run pending in the runner's concurrency
+    group may have none yet, but it waits behind at most one run of about
+    half an hour, so it never ages into the check.
+    """
+    return not jobs
+
+
 def parse_active_runs(
     runs: list[dict],
     releasing: frozenset[int] = frozenset(),
-    now: datetime | None = None,
+    ghosts: frozenset[int] = frozenset(),
 ) -> list[ActiveRun]:
     """The runner runs that are not yet `completed`.
 
     ``releasing`` names the ones :func:`is_releasing` found in their last
-    job; they are listed, but do not hold a slot.
+    job; they are listed, but do not hold a slot. ``ghosts`` names the ones
+    :func:`is_ghost` found to be no run at all; they are not listed.
     """
-    now = now or datetime.now(timezone.utc)
     active = []
     for run in runs:
         if run.get("status") not in ACTIVE_RUN_STATUSES:
             continue
-        # `run_started_at`, not `created_at`: a re-run is a new attempt of
-        # an old run, and only the former moves with the attempt. Measuring
-        # from creation would call a re-run of yesterday's runner a ghost
-        # and fill its slot a second time.
-        started = run.get("run_started_at") or run.get("created_at")
-        if started and now - _parse_time(started) > GHOST_AFTER:
+        if int(run["id"]) in ghosts:
             continue
         title = run.get("display_title") or run.get("name") or ""
         pr = _RUN_PR.search(title)
@@ -404,15 +422,19 @@ def _runner_runs(repo: str) -> list[dict]:
     of newer completed ones, and its slot would read as free. Few runs are
     ever active, so each status is one short page.
     """
+    base = f"repos/{repo}/actions/workflows/{RUNNER_WORKFLOW}/runs"
     runs: dict[int, dict] = {}
-    for status in sorted(ACTIVE_RUN_STATUSES):
-        out = _gh(
-            "api",
-            f"repos/{repo}/actions/workflows/{RUNNER_WORKFLOW}/runs"
-            f"?status={status}&per_page=100",
-        )
+    # In lifecycle order: a run that moves on between two queries moves to
+    # a status queried later, so it is not missed.
+    for status in ACTIVE_RUN_LIFECYCLE:
+        out = _gh("api", f"{base}?status={status}&per_page=100")
         for run in json.loads(out)["workflow_runs"]:
             runs[int(run["id"])] = run
+    # Then the newest runs whatever their status, last, as the current view
+    # of every recent run: it settles any run whose status changed during
+    # the queries above, including one that has since completed.
+    for run in json.loads(_gh("api", f"{base}?per_page=100"))["workflow_runs"]:
+        runs[int(run["id"])] = run
     return list(runs.values())
 
 
@@ -578,7 +600,14 @@ def dispatch(args: argparse.Namespace) -> int:
         if run.get("status") == "in_progress"
         and is_releasing(_run_jobs(repo, int(run["id"])))
     )
-    active = parse_active_runs(runs, releasing)
+    ghosts = frozenset(
+        int(run["id"])
+        for run in runs
+        if run.get("status") in ACTIVE_RUN_STATUSES
+        and is_aged(run)
+        and is_ghost(_run_jobs(repo, int(run["id"])))
+    )
+    active = parse_active_runs(runs, releasing, ghosts)
     pages = _query_pages(owner, name)
     requests = [r for page in pages for r in parse_requests(page)]
     default_head = parse_default_branch(pages[0])
