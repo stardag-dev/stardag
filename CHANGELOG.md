@@ -18,6 +18,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   hybrid driver. Present since v0.1.0. **Behaviour change:** a task class
   implementing neither method now raises `TaskImplementationError` when it is
   first constructed (or validated) rather than when it is defined.
+- **Fixed: `model_copy(deep=True, update=...)` failed on pydantic 2.14 for a
+  task whose cached value cannot be deep-copied.** Since 2.14, pydantic
+  deep-copies such a copy field by field instead of through `__deepcopy__`,
+  so the cache was no longer dropped first and a lock or client held in a
+  `functools.cached_property` raised `TypeError` once it had been read. The
+  cache is now dropped before pydantic copies anything, on every pydantic
+  version.
 
 ## [0.28.0] — 2026-10-08
 
