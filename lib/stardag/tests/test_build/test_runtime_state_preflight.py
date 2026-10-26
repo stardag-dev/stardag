@@ -116,6 +116,32 @@ class AnyFieldTask(sd.Task[int]):
         self._save(1)
 
 
+class NormalisedParams(sd.StardagBaseModel):
+    a: int = 1
+    count: int = Field(default="3", exclude=True)  # pyright: ignore[reportAssignmentType]
+
+
+class SetOfParamsTask(sd.Task[int]):
+    members: frozenset[NormalisedParams] = frozenset()
+
+    def run(self) -> None:
+        self._save(len(self.members))
+
+
+class BareListTask(sd.Task[int]):
+    items: typing.List = []  # noqa: UP006  # pyright: ignore[reportMissingTypeArgument]
+
+    def run(self) -> None:
+        self._save(len(self.items))
+
+
+class ExcludedLockParamsTask(sd.Task[int]):
+    params: LockParams = Field(default_factory=LockParams, exclude=True)
+
+    def run(self) -> None:
+        self._save(1)
+
+
 class ParentTask(sd.Task[int]):
     upstream: sd.TaskLoads[int]
 
@@ -273,13 +299,6 @@ class TestRefused:
             plan_rehydration([task], PATTERNS)
         )
 
-    def test_in_a_model_rebuilt_as_a_dict(self):
-        """No model on the rebuilt side: the declared default stands in."""
-        task = AnyFieldTask(blob=ExcludedParams(note="set"))
-        assert "ExcludedParams.note is excluded" in _refusal(
-            plan_rehydration([task], PATTERNS)
-        )
-
     def test_an_untouched_excluded_field_with_a_compat_default(self):
         """The tick really does get the compat_default (0), not 5."""
         reason = _refusal(plan_rehydration([CompatExcludedTask()], PATTERNS))
@@ -396,6 +415,39 @@ class TestNotRefused:
         assert plan_rehydration([task], PATTERNS).reconstructable == (task,)
         (warning,) = _state_warnings(caplog)
         assert "PrivateParams._cache" in warning
+
+    def test_an_excluded_field_without_a_rebuilt_counterpart_only_warns(self, caplog):
+        """A model in an ``Any`` field comes back as a dict: only the
+        declared default is there to compare with, which is a guess."""
+        task = AnyFieldTask(blob=ExcludedParams(note="set"))
+
+        assert plan_rehydration([task], PATTERNS).reconstructable == (task,)
+        (warning,) = _state_warnings(caplog)
+        assert "ExcludedParams.note" in warning
+
+    def test_a_normalised_excluded_default_inside_a_set_is_not_refused(self):
+        """Set members have no rebuilt counterpart; ``"3"`` vs the held
+        ``3`` must not refuse a lossless rebuild."""
+        member = NormalisedParams(a=2)
+        task = SetOfParamsTask(members=frozenset([member]))
+        assert plan_rehydration([task], PATTERNS).reconstructable == (task,)
+
+    def test_a_model_in_an_unparameterised_container_is_walked(self, caplog):
+        """A bare ``typing.List`` can hold models, so it is not plain."""
+        task = BareListTask(items=[ExcludedParams(note="set")])
+
+        assert plan_rehydration([task], PATTERNS).reconstructable == (task,)
+        (warning,) = _state_warnings(caplog)
+        assert "ExcludedParams.note" in warning
+
+    def test_an_excluded_model_with_an_opaque_private_default_only_warns(self, caplog):
+        """Model equality includes private attributes; a fresh lock in each
+        makes the comparison undecidable, not a refusal."""
+        task = ExcludedLockParamsTask()
+
+        assert plan_rehydration([task], PATTERNS).reconstructable == (task,)
+        (warning,) = _state_warnings(caplog)
+        assert "ExcludedLockParamsTask.params" in warning
 
     def test_a_failing_detector_warns_and_passes(self, caplog, monkeypatch):
         def broken(original, rebuilt):

@@ -130,7 +130,8 @@ def state_outside_body(original: BaseModel, rebuilt: Any) -> list[LostState]:
 
     Where the rebuild has no counterpart to pair with (a model in an
     ``Any`` field comes back as a ``dict``, a subclass as its declared base,
-    a set member), the declared default stands in.
+    a set member), the declared default stands in, and a difference in an
+    excluded field found that way is never decidable.
 
     Returns one :class:`LostState` per differing attribute, in walk order;
     what to do about each is the caller's policy. Cheap for the common
@@ -285,7 +286,8 @@ def _annotation_is_plain(annotation: Any, depth: int = 0) -> bool:
     if origin is typing.Annotated:
         return _annotation_is_plain(typing.get_args(annotation)[0], depth + 1)
     if origin in _PLAIN_CONTAINER_ORIGINS:
-        return all(
+        # A bare ``typing.List`` has no arguments, and can hold anything.
+        return bool(typing.get_args(annotation)) and all(
             arg is Ellipsis or _annotation_is_plain(arg, depth + 1)
             for arg in typing.get_args(annotation)
         )
@@ -318,10 +320,15 @@ def _model_state_lost(item: BaseModel, other: Any, plan: _ClassPlan) -> list[Los
             continue
         counterpart = _field_of(other, name)
         if counterpart is _MISSING:
+            # No rebuilt value to compare with, only the declared default,
+            # which validation may normalise: a difference is a guess here,
+            # never grounds to refuse.
             verdict = _compare(
                 item.__dict__[name],
                 lambda i=info: i.get_default(call_default_factory=True),
             )
+            if verdict:
+                verdict = False
         else:
             verdict = _compare(item.__dict__[name], lambda c=counterpart: c)
         if verdict is not None:
@@ -397,10 +404,18 @@ def _is_plain_data(value: Any, _seen: set[int] | None = None) -> bool:
         if isinstance(value, (list, tuple, set, frozenset)):
             return all(_is_plain_data(v, seen) for v in value)
         if isinstance(value, BaseModel):
-            return all(
-                _is_plain_data(value.__dict__[name], seen)
-                for name in type(value).model_fields
-                if name in value.__dict__
+            # Model equality covers private attributes and extras too, so
+            # they have to be plain as well for a comparison to decide.
+            private = getattr(value, "__pydantic_private__", None) or {}
+            extra = getattr(value, "__pydantic_extra__", None) or {}
+            return (
+                all(
+                    _is_plain_data(value.__dict__[name], seen)
+                    for name in type(value).model_fields
+                    if name in value.__dict__
+                )
+                and all(_is_plain_data(v, seen) for v in private.values())
+                and all(_is_plain_data(v, seen) for v in extra.values())
             )
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             return all(
