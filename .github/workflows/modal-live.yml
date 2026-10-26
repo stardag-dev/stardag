@@ -1056,10 +1056,18 @@ jobs:
           # it errs towards keeping. Every page is read, not just the newest:
           # a re-run keeps its original place in the history, so a live run
           # can sit behind any number of newer completed ones. A failure on
-          # any page fails the whole lookup.
+          # any page fails the whole lookup. GitHub caps a filtered run
+          # search at 1,000 results, beyond which paging stops being
+          # exhaustive, so a branch at the cap fails closed.
           live_runs_on_branch() {
-            local ids
-            if ids=$(gh api -X GET --paginate \
+            local ids total
+            total=$(gh api -X GET \
+                      "repos/$GITHUB_REPOSITORY/actions/workflows/modal-live.yml/runs" \
+                      -f branch="$1" -f event=pull_request -F per_page=1 \
+                      --jq .total_count 2>/dev/null) || total=""
+            if ! [[ "$total" =~ ^[0-9]+$ ]] || [ "$total" -ge 1000 ]; then
+              echo LOOKUP_FAILED
+            elif ids=$(gh api -X GET --paginate \
                        "repos/$GITHUB_REPOSITORY/actions/workflows/modal-live.yml/runs" \
                        -f branch="$1" -f event=pull_request -F per_page=100 \
                        --jq ".workflow_runs[]
