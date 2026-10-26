@@ -67,6 +67,17 @@ def test_depends_rejects_a_raw_value():
         square(values=[1, 2], offset=5)
 
 
+@sd.task(name="Pep563QuotedSquare")
+def quoted_square(values: "sd.Depends[list[int]]") -> list[int]:  # noqa: UP037
+    return [v**2 for v in values]
+
+
+def test_quoted_depends_annotation_is_resolved():
+    assert quoted_square.model_fields["values"].annotation is LoadableTask[list[int]]
+    with pytest.raises(ValidationError):
+        quoted_square(values=[1, 2])
+
+
 def test_unresolvable_local_annotation_still_decorates():
     class Local:
         pass

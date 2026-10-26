@@ -301,16 +301,28 @@ def _resolved_signature(func: typing.Callable) -> inspect.Signature:
     the source text, e.g. ``"sd.Depends[list[int]]"``. Left as a string, the
     ``Depends`` marker is invisible to ``_get_param_annotation``, so the
     parameter would accept a raw value and its ``TaskLoads`` generic arg would
-    be an unresolved string. Evaluating keeps ``Annotated`` metadata intact.
+    be an unresolved string. The same applies to an explicitly quoted
+    annotation (``values: "sd.Depends[T]"``), with or without the future
+    import. ``typing.get_type_hints`` resolves both, including a quoted
+    annotation inside a deferred one, and ``include_extras=True`` keeps the
+    ``Annotated`` metadata intact.
 
     Names that only exist in an enclosing function's scope cannot be resolved
     from ``func.__globals__``; fall back to the unevaluated signature for those
     rather than failing the decoration.
     """
+    signature = inspect.signature(func)
     try:
-        return inspect.signature(func, eval_str=True)
+        hints = typing.get_type_hints(func, include_extras=True)
     except NameError:
-        return inspect.signature(func)
+        return signature
+    return signature.replace(
+        parameters=[
+            param.replace(annotation=hints.get(name, param.annotation))
+            for name, param in signature.parameters.items()
+        ],
+        return_annotation=hints.get("return", signature.return_annotation),
+    )
 
 
 def _get_param_annotation(func_annotation: typing.Any) -> typing.Any:
