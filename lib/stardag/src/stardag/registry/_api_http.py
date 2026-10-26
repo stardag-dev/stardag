@@ -122,12 +122,16 @@ _PROXY_ERROR_PREFIX = "modal-http:"
 # runs (the v2 write guard is a router dependency), so it is a
 # non-delivery: re-sending is safe on every route, ``Request.retry`` or
 # not, and it never meets the second-delivery question above. What a
-# retry does add is time, so it is bounded by time: the waits, each the
-# server's ``Retry-After`` (capped at a minute) plus up to a quarter again
-# of jitter, may add up to 150 s -- so two full one-minute windows always
-# fit, whatever the jitter. Jittered for the same reason as the transient
-# backoff, and only ever *later* than the server asked: callers refused
-# together are told the same moment.
+# retry does add is time, so it is bounded by time: the waits may add up
+# to 150 s -- two full one-minute windows always fit, whatever the jitter.
+# Each wait is the server's ``Retry-After`` or an exponential floor (1 s,
+# 2 s, 4 s, ...), whichever is longer, capped at a minute (the window
+# itself, so no limit the server enforces asks for more), plus up to a
+# quarter again of jitter. Never earlier than the server asked (below the
+# cap), and the floor keeps a server answering "1 s" over and over to
+# about eight attempts rather than a hundred. Jittered for the same reason
+# as the transient backoff: callers refused together are told the same
+# moment.
 #
 # ``rate_limited`` is the v2 router's code, ``RATE_LIMIT`` the v1 one's;
 # any other 429 (a creation quota) is not retried.
@@ -226,10 +230,11 @@ def _transient_delay(retry: int) -> float:
     return random.uniform(0, _TRANSIENT_BACKOFF_SECONDS * 2 ** (retry - 1))
 
 
-def _rate_limit_delay(retry_after: int, waited: float) -> float | None:
-    """How long to wait before re-sending a rate-limited request, or None
-    once the time budget is spent."""
-    base = float(min(max(retry_after, 1), _MAX_RETRY_WAIT))
+def _rate_limit_delay(retry_after: int, retry: int, waited: float) -> float | None:
+    """How long to wait before re-sending a rate-limited request for the
+    ``retry``-th time (from 1), or None once the time budget is spent."""
+    floor = 2 ** min(retry - 1, 6)
+    base = float(min(max(retry_after, floor), _MAX_RETRY_WAIT))
     delay = base + random.uniform(0, base / 4)
     if waited + delay > _MAX_RATE_LIMIT_WAIT_SECONDS:
         return None
@@ -253,7 +258,7 @@ def _retry_after_seconds(response: httpx.Response) -> int:
     number of seconds)."""
     try:
         return max(int(response.headers.get("Retry-After", 1)), 1)
-    except ValueError:
+    except (TypeError, ValueError):
         return 1
 
 
@@ -437,7 +442,9 @@ class HTTPTransport:
             try:
                 self.raise_for_error(response, request.operation)
             except RateLimitError as e:
-                delay = _rate_limit_delay(e.retry_after, rate_limit_waited)
+                delay = _rate_limit_delay(
+                    e.retry_after, rate_limited + 1, rate_limit_waited
+                )
                 if delay is None:
                     raise
                 rate_limited += 1
@@ -475,7 +482,9 @@ class HTTPTransport:
             try:
                 self.raise_for_error(response, request.operation)
             except RateLimitError as e:
-                delay = _rate_limit_delay(e.retry_after, rate_limit_waited)
+                delay = _rate_limit_delay(
+                    e.retry_after, rate_limited + 1, rate_limit_waited
+                )
                 if delay is None:
                     raise
                 rate_limited += 1
@@ -530,8 +539,8 @@ class HTTPTransport:
                 f"{operation}: resource not found", detail=detail, payload=payload
             )
         if status_code == 429:
-            codes = {(payload or {}).get("code"), (payload or {}).get("error_code")}
-            if codes & _RATE_LIMIT_CODES:
+            codes = ((payload or {}).get(key) for key in ("code", "error_code"))
+            if any(isinstance(c, str) and c in _RATE_LIMIT_CODES for c in codes):
                 raise RateLimitError(
                     retry_after=_retry_after_seconds(response),
                     detail=detail,

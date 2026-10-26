@@ -926,6 +926,22 @@ class TestRateLimit:
         assert len(slept) >= 2
         assert len(script.requests) == len(slept) + 1
 
+    def test_repeated_short_answers_back_off(self, slept):
+        """A server answering "1 s" every time is not re-sent a hundred
+        times inside the budget: the floor doubles."""
+        script = _Script(*(_rate_limited(retry_after="1") for _ in range(30)))
+        with pytest.raises(RateLimitError):
+            _registry(script).build_get(uuid4())
+        assert len(slept) <= 8
+        assert slept[:3] == sorted(slept[:3])
+
+    def test_an_unexpected_detail_shape_is_still_an_error(self):
+        script = _Script(
+            httpx.Response(429, json={"detail": {"code": ["rate_limited"]}})
+        )
+        with pytest.raises(QuotaExceededError):
+            _registry(script).build_get(uuid4())
+
     @pytest.mark.parametrize("header", [None, "soon", "0"])
     def test_a_missing_or_odd_retry_after_waits_a_second(self, slept, header):
         script = _Script(
