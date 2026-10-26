@@ -451,18 +451,6 @@ wheels = [
 ]
 
 [[package]]
-name = "httpx-retries"
-version = "0.6.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e9/d3/b7a8bb09543af40009717a08a2ceba90b6d4c6f0cdf171404217d8f4c37d/httpx_retries-0.6.0.tar.gz", hash = "sha256:3e0b404969a564829d368417964fd21e6b400a10d17c92d29b8bc247ce8186e3", size = 21122, upload-time = "2026-07-06T00:52:30.093Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/c6/7f3d6ab3549267a1959161b38df4c0fb435eceaf2d531d8addfac01abaca/httpx_retries-0.6.0-py3-none-any.whl", hash = "sha256:d1e52a8f68a5df42de75ab89049d5020b2d0ab2f5f8bceacda008d12aa1257a3", size = 11776, upload-time = "2026-07-06T00:52:31.033Z" },
-]
-
-[[package]]
 name = "hyperframe"
 version = "6.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -879,12 +867,11 @@ wheels = [
 
 [[package]]
 name = "stardag"
-version = "0.27.0"
+version = "0.28.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "httpx" },
-    { name = "httpx-retries" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "tenacity" },
@@ -892,9 +879,9 @@ dependencies = [
     { name = "typer" },
     { name = "uuid6" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/04/6c/68a4910c31f5809a0b47c7f5c7f280c9cb42f80ad438b26140d028e561ee/stardag-0.27.0.tar.gz", hash = "sha256:59decf4d849635892589c19577c70064a74f6203f38708dfb2d9722f255f8ed0", size = 849329, upload-time = "2026-09-25T12:53:50.16Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/a7/f4568e24f2bb81860acf2e5813e1111d7d9975f28ab6fde7cf85fc682371/stardag-0.28.0.tar.gz", hash = "sha256:31432ca0601891ef9f3a39a80e7ba15f2af5a61e87eb4430392fee71fce379ad", size = 891803, upload-time = "2026-10-08T21:24:23.15Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4e/eb/b066cc6ea316f01fa806a52de7d9f7f0c5ba66784bc613de95cec270a2bf/stardag-0.27.0-py3-none-any.whl", hash = "sha256:9945f5f360ea29befefdf202d4b9d2094ba49f562a927b586e0d93a0021ebc67", size = 464183, upload-time = "2026-09-25T12:53:48.339Z" },
+    { url = "https://files.pythonhosted.org/packages/24/b9/0836ce65bad26f17f880f16f9ad162128f09a2b8ed9e05e2d1f8679e15f8/stardag-0.28.0-py3-none-any.whl", hash = "sha256:427414717d8c234d59bb4c6f36cc71571ece384e8397030526e5c2858cb48c90", size = 492431, upload-time = "2026-10-08T21:24:20.898Z" },
 ]
 
 [package.optional-dependencies]
@@ -914,7 +901,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "modal" },
-    { name = "stardag", extras = ["modal"], specifier = ">=0.27.0" },
+    { name = "stardag", extras = ["modal"], specifier = ">=0.28.0" },
 ]
 
 [[package]]
