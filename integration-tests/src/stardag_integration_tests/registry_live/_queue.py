@@ -397,11 +397,23 @@ def _gh_ok(*args: str) -> bool:
 
 
 def _runner_runs(repo: str) -> list[dict]:
-    out = _gh(
-        "api",
-        f"repos/{repo}/actions/workflows/{RUNNER_WORKFLOW}/runs?per_page=50",
-    )
-    return json.loads(out)["workflow_runs"]
+    """The runner's runs that are not completed, however old.
+
+    Asked for by status rather than read off the newest runs: the list is
+    ordered by creation, so a re-run of an older run could sit behind a page
+    of newer completed ones, and its slot would read as free. Few runs are
+    ever active, so each status is one short page.
+    """
+    runs: dict[int, dict] = {}
+    for status in sorted(ACTIVE_RUN_STATUSES):
+        out = _gh(
+            "api",
+            f"repos/{repo}/actions/workflows/{RUNNER_WORKFLOW}/runs"
+            f"?status={status}&per_page=100",
+        )
+        for run in json.loads(out)["workflow_runs"]:
+            runs[int(run["id"])] = run
+    return list(runs.values())
 
 
 def _run_jobs(repo: str, run_id: int) -> list[dict]:
