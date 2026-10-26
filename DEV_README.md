@@ -436,6 +436,12 @@ gh api repos/stardag-dev/stardag/actions/runs/<run-id>/jobs \
 The job's own `check_run_url` rather than its `id`: the two happen to be equal
 for Actions today, and nothing says they must stay so.
 
+A transport timeout during **collection** is annotated as `Registry transport
+fault at collection`, and is recorded, probed and counted like any other under
+the phase `collect` — but not retried. Every scenario module runs the guard at
+import, the guard has already retried four times before giving up, and the
+tier's retry over the same condition would be a second layer owning it.
+
 If the rate does not fall once a cause is found and fixed, the answer is to
 escalate — never to widen what the retry accepts.
 
