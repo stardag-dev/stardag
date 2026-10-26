@@ -31,20 +31,18 @@ updates:
     # is bad — same spirit as the npm ignore below, and deleting this entry is
     # step one of doing that work.
     ignore:
-      # SQLAlchemy 2.1 is a decision, not a bump, for two reasons that outlive
-      # the PR that raised it (#425):
+      # SQLAlchemy 2.1 is a decision, not a bump (#425). 2.1 flushes the
+      # session on *every* execution, including `session.execute(text(...))`,
+      # which 2.0 did not. The API takes its advisory locks through exactly
+      # that call (`services/quotas.py`, `services/deployments.py`), so
+      # pending writes move from after the lock to before it, on the claim,
+      # lease and quota seams.
       #
-      #   - `app/server.Dockerfile` installs the API with
-      #     `pip install /tmp/stardag-api`, a fresh resolve from the manifest,
-      #     so `uv.lock` never reaches the image and the upper bound in
-      #     `app/stardag-api/pyproject.toml` is what decides the deployed
-      #     server's SQLAlchemy. Installing the image from the lockfile is the
-      #     durable fix and retires this whole class of surprise.
-      #   - 2.1 flushes the session on *every* execution, including
-      #     `session.execute(text(...))`, which 2.0 did not. The API takes its
-      #     advisory locks through exactly that call (`services/quotas.py`,
-      #     `services/deployments.py`), so pending writes move from after the
-      #     lock to before it, on the claim, lease and quota seams.
+      # The server images install from `app/stardag-api/uv.lock`
+      # (`app/stardag-api/install-locked.sh`), so the lock is what decides the
+      # deployed server's SQLAlchemy, and this ignore is what keeps 2.1 out of
+      # it. The `<2.1` cap in `app/stardag-api/pyproject.toml` stays as the
+      # record of the decision; it is no longer the production pin by itself.
       #
       # (2.1 also retypes `select(a, b)` as `Select[a, b]`; that part is five
       # annotations, but they fit one regime and not both, so landing it moves
