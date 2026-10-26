@@ -633,7 +633,8 @@ What that means in practice:
   tier runs its own edit. A branch older than `registry-live.yml` falls back
   to the default branch's runner, which checks the head out by SHA.
 - **The weekly run goes through the queue too.** The selector's Monday
-  schedule queues the default branch's head, and the runner tests it in the
+  schedule queues the default branch's head, under a status context of its
+  own (`Registry-live tier (weekly)`), and the runner tests it in the
   permanent `ci-main`. A schedule on the runner itself would join a slot's
   concurrency group unannounced and could cancel a PR runner already admitted
   into the pending position.

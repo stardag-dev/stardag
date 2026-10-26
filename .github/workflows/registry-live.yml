@@ -99,6 +99,9 @@ jobs:
       - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
+          # The weekly run reports under a context of its own; see
+          # `_queue.WEEKLY_CONTEXT`.
+          CONTEXT: ${{ inputs.pr && 'Registry-live tier' || 'Registry-live tier (weekly)' }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr }}
           SHA: ${{ inputs.sha }}
@@ -115,7 +118,7 @@ jobs:
             out run true; out sha "$SHA"
             out env_name ci-main; out ephemeral false; out fail_fast false
             gh api "repos/$REPO/statuses/$SHA" -f state=pending \
-              -f context="Registry-live tier" -f target_url="$RUN_URL" \
+              -f context="$CONTEXT" -f target_url="$RUN_URL" \
               -f description="Running in slot ${{ inputs.slot || 'manual' }}." > /dev/null
             exit 0
           fi
@@ -143,7 +146,7 @@ jobs:
           if [ "$(jq -r .state <<<"$pr")" != open ]; then
             echo "PR #$PR is $(jq -r .state <<<"$pr"); nothing to run."
             gh api "repos/$REPO/statuses/${SHA:-$head}" -f state=error \
-              -f context="Registry-live tier" -f target_url="$RUN_URL" \
+              -f context="$CONTEXT" -f target_url="$RUN_URL" \
               -f description="The PR was closed before it ran." > /dev/null
             out run false; out sha "${SHA:-$head}"; out fail_fast false
             exit 0
@@ -154,7 +157,7 @@ jobs:
           if [ -n "$SHA" ] && [ "$head" != "$SHA" ]; then
             echo "PR #$PR moved from $SHA to $head since it queued; nothing to run."
             gh api "repos/$REPO/statuses/$SHA" -f state=error \
-              -f context="Registry-live tier" -f target_url="$RUN_URL" \
+              -f context="$CONTEXT" -f target_url="$RUN_URL" \
               -f description="Superseded by a newer push before it ran." > /dev/null
             out run false; out sha "$SHA"; out fail_fast false
             exit 0
@@ -165,7 +168,7 @@ jobs:
           # the tier at its first failed scenario and skips the retry.
           out fail_fast "$(jq -r '[.labels[].name] | index("registry-live-fail-fast") != null' <<<"$pr")"
           gh api "repos/$REPO/statuses/$head" -f state=pending \
-            -f context="Registry-live tier" -f target_url="$RUN_URL" \
+            -f context="$CONTEXT" -f target_url="$RUN_URL" \
             -f description="Running in slot ${{ inputs.slot || 'manual' }}." > /dev/null
 
   # A real Modal worker reporting to a real registry over the network. That
@@ -683,20 +686,29 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
+      CONTEXT: ${{ inputs.pr && 'Registry-live tier' || 'Registry-live tier (weekly)' }}
     steps:
       - name: Post the verdict on the head
         # Also when `resolve` itself failed (an API error, a refused fork
         # head): it may have posted nothing, and the head would otherwise
         # sit `Dispatched` until the hourly selector called it stale.
+        # `pr` or `sha`: a run dispatched with a PR and no SHA resolves the
+        # head itself and posts `Running` on it, so it owes a verdict too.
+        # Only a hand run of a bare ref (neither) has no head to report on.
         if: >-
-          inputs.sha && (needs.resolve.outputs.run == 'true'
-                         || needs.resolve.result != 'success')
+          (inputs.pr || inputs.sha) && (needs.resolve.outputs.run == 'true'
+                                        || needs.resolve.result != 'success')
         env:
           RESULT: ${{ needs.resolve.result == 'success' && needs.registry-live.result || 'resolve-failed' }}
           SHA: ${{ needs.resolve.outputs.sha || inputs.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          # A PR-only dispatch whose `resolve` failed before naming the head.
+          if [ -z "$SHA" ]; then
+            echo "No head was resolved, so there is no status to post."
+            exit 0
+          fi
           case "$RESULT" in
             success)   state=success; desc="Passed." ;;
             failure)   state=failure; desc="Failed. The run has the logs and, if red, a diagnostics artifact." ;;
@@ -704,7 +716,7 @@ jobs:
             *)         state=error;   desc="Did not run ($RESULT). Re-run the PR's Modal Live Tests to queue again." ;;
           esac
           gh api "repos/$REPO/statuses/$SHA" -f state="$state" \
-            -f context="Registry-live tier" -f target_url="$RUN_URL" \
+            -f context="$CONTEXT" -f target_url="$RUN_URL" \
             -f description="$desc" > /dev/null
 
       # This run is still `in_progress` while the step runs. The selector

@@ -28,18 +28,51 @@ on:
 
 permissions: {}
 
-concurrency:
-  # One selector at a time, so two cannot both read a slot as free and fill
-  # it twice. **Dropping a pending selector is harmless**, unlike dropping a
-  # pending tier run: every selector reads the whole queue, so the one that
-  # survives does what the dropped one would have.
-  group: registry-live-dispatch
-  cancel-in-progress: false
-
 jobs:
+  # The weekly request, recorded before -- and outside -- the selector's
+  # concurrency group. A pending selector can be cancelled by the next one,
+  # and only the Monday run knows to record this, so recording it inside the
+  # group would lose the week's run whenever Monday queued behind another
+  # selector.
+  enqueue-weekly:
+    name: Queue the weekly run
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '17 3 * * 1'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      # See the checkout in `dispatch` below for why the ref is explicit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: integration-tests/src/stardag_integration_tests/registry_live/_queue.py
+          sparse-checkout-cone-mode: false
+      - name: Queue the default branch's head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I integration-tests/src/stardag_integration_tests/registry_live/_queue.py \
+            enqueue-weekly \
+            --repo "${{ github.repository }}" \
+            --default-branch "${{ github.event.repository.default_branch }}"
+
   dispatch:
     name: Admit queued heads
     runs-on: ubuntu-latest
+    needs: enqueue-weekly
+    # After the weekly request when there is one; on every other trigger
+    # `enqueue-weekly` is skipped, which must not skip this.
+    if: ${{ !cancelled() }}
+    # One selector at a time, so two cannot both read a slot as free and fill
+    # it twice. **Dropping a pending selector is harmless**, unlike dropping a
+    # pending tier run: every selector reads the whole queue, so the one that
+    # survives does what the dropped one would have. On the job rather than
+    # the workflow, so that `enqueue-weekly` is not in it.
+    concurrency:
+      group: registry-live-dispatch
+      cancel-in-progress: false
     timeout-minutes: 10
     permissions:
       # The runs list, and dispatching the runner.
@@ -73,5 +106,4 @@ jobs:
             dispatch \
             --repo "${{ github.repository }}" \
             --default-branch "${{ github.event.repository.default_branch }}" \
-            --slots "${{ vars.REGISTRY_LIVE_SLOTS || '1' }}" \
-            ${{ github.event.schedule == '17 3 * * 1' && '--enqueue-default-branch' || '' }}
+            --slots "${{ vars.REGISTRY_LIVE_SLOTS || '1' }}"

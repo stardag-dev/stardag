@@ -43,8 +43,14 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 CONTEXT = "Registry-live tier"
+# The weekly run's status, on a default-branch commit. A context of its own
+# rather than a marker in the description: with merge-commit merges, PR heads
+# carrying `Registry-live tier` statuses end up in the default branch's
+# history, and must never read as the weekly request.
+WEEKLY_CONTEXT = "Registry-live tier (weekly)"
 RUNNER_WORKFLOW = "registry-live.yml"
 LABEL = "modal-live"
 
@@ -70,6 +76,14 @@ _RUN_SLOT = re.compile(r"slot (\d+)\b")
 # other job has completed is only reporting and handing over: its stack is
 # deleted, so its slot is free even though the run is still in progress.
 REPORT_JOB = "Report and hand over"
+
+# A run listed as not completed for longer than this is a ghost, not load.
+# GitHub has kept one in this repository listed as `queued` for weeks while
+# `gh run cancel` called it completed (run 34748665026, 2026-09-13); in the
+# runs list it would hold a slot forever. Comfortably above the longest real
+# life of a runner: one finishing run ahead of it in its group, then the
+# tier's 30-minute timeout plus teardown.
+GHOST_AFTER = timedelta(hours=3)
 
 # How far back the default branch is searched for a pending weekly request
 # (see `parse_default_branch`). Fifty merges between a Monday enqueue and its
@@ -99,6 +113,10 @@ class Request:
     cross_repo: bool
     author: str
     labels: frozenset[str] = field(default_factory=frozenset)
+
+    @property
+    def context(self) -> str:
+        return CONTEXT if self.pr is not None else WEEKLY_CONTEXT
 
     @property
     def label(self) -> str:
@@ -157,17 +175,27 @@ def is_releasing(jobs: list[dict]) -> bool:
     )
 
 
+def _parse_time(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def parse_active_runs(
-    runs: list[dict], releasing: frozenset[int] = frozenset()
+    runs: list[dict],
+    releasing: frozenset[int] = frozenset(),
+    now: datetime | None = None,
 ) -> list[ActiveRun]:
     """The runner runs that are not yet `completed`.
 
     ``releasing`` names the ones :func:`is_releasing` found in their last
     job; they are listed, but do not hold a slot.
     """
+    now = now or datetime.now(timezone.utc)
     active = []
     for run in runs:
         if run.get("status") not in ACTIVE_RUN_STATUSES:
+            continue
+        created = run.get("created_at")
+        if created and now - _parse_time(created) > GHOST_AFTER:
             continue
         title = run.get("display_title") or run.get("name") or ""
         pr = _RUN_PR.search(title)
@@ -323,13 +351,14 @@ def plan(requests: list[Request], active: list[ActiveRun], slots: int) -> Plan:
 
 _REQUESTS_QUERY = """
 query(
-  $owner: String!, $name: String!, $context: String!, $depth: Int!, $after: String
+  $owner: String!, $name: String!, $context: String!, $weekly: String!,
+  $depth: Int!, $after: String
 ) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef {
       name
       target { ... on Commit { history(first: $depth) { nodes {
-        oid status { context(name: $context) { state description createdAt } }
+        oid status { context(name: $weekly) { state description createdAt } }
       } } } }
     }
     pullRequests(states: OPEN, first: 100, after: $after) {
@@ -376,14 +405,21 @@ def _run_jobs(repo: str, run_id: int) -> list[dict]:
     return json.loads(out)["jobs"]
 
 
-def _post_status(repo: str, sha: str, state: str, description: str, url: str) -> None:
+def _post_status(
+    repo: str,
+    sha: str,
+    state: str,
+    description: str,
+    url: str,
+    context: str = CONTEXT,
+) -> None:
     _gh(
         "api",
         f"repos/{repo}/statuses/{sha}",
         "-f",
         f"state={state}",
         "-f",
-        f"context={CONTEXT}",
+        f"context={context}",
         "-f",
         f"description={description[:140]}",
         "-f",
@@ -412,6 +448,8 @@ def _query_pages(owner: str, name: str) -> list[dict]:
             "-F",
             f"context={CONTEXT}",
             "-F",
+            f"weekly={WEEKLY_CONTEXT}",
+            "-F",
             f"depth={DEFAULT_BRANCH_DEPTH}",
         ]
         if after:
@@ -424,16 +462,48 @@ def _query_pages(owner: str, name: str) -> list[dict]:
         after = info["endCursor"]
 
 
-def _enqueue_default_branch(
-    repo: str, branch: str, pending: Request | None, url: str
-) -> str:
+def _default_branch(repo: str, given: str) -> str:
+    # A `schedule` event's payload carries no repository, so the workflow
+    # may pass an empty default branch.
+    return given or _gh("api", f"repos/{repo}", "-q", ".default_branch").strip()
+
+
+def _run_url(repo: str) -> str:
+    return (
+        f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{repo}"
+        f"/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
+    )
+
+
+def enqueue_weekly(args: argparse.Namespace) -> int:
+    """Record the weekly request, and nothing else.
+
+    Its own job, outside the selector's concurrency group: a pending
+    selector can be cancelled by the next one, and only the Monday run
+    knows to record this, so recording it there would lose the week's run
+    whenever the Monday selector happened to queue behind another.
+    """
+    repo = args.repo
+    owner, name = repo.split("/")
+    branch = _default_branch(repo, args.default_branch)
     # Coalesced over the whole searched history, not just the head: a weekly
     # request still pending on an older commit is the same request.
+    pending = parse_default_branch(_query_pages(owner, name)[0])
     if pending is not None:
-        return f"- {pending.label}: already {pending.description}; not queued again"
-    sha = _gh("api", f"repos/{repo}/commits/{branch}", "-q", ".sha").strip()
-    _post_status(repo, sha, "pending", f"{QUEUED} by the weekly schedule.", url)
-    return f"- {branch} {sha[:7]}: queued by the weekly schedule"
+        line = f"- {pending.label}: already {pending.description}; not queued again"
+    else:
+        sha = _gh("api", f"repos/{repo}/commits/{branch}", "-q", ".sha").strip()
+        _post_status(
+            repo,
+            sha,
+            "pending",
+            f"{QUEUED} by the weekly schedule.",
+            _run_url(repo),
+            context=WEEKLY_CONTEXT,
+        )
+        line = f"- {branch} {sha[:7]}: queued by the weekly schedule"
+    _summary(["### Registry-live weekly request", "", line])
+    return 0
 
 
 def _dispatch_ref(repo: str, request: Request, default_branch: str) -> str:
@@ -480,22 +550,10 @@ def _summary(lines: list[str]) -> None:
 def dispatch(args: argparse.Namespace) -> int:
     repo = args.repo
     owner, name = repo.split("/")
-    run_url = (
-        f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{repo}"
-        f"/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
-    )
-
-    # A `schedule` event's payload carries no repository, so the workflow
-    # may pass an empty default branch.
-    default_branch = (
-        args.default_branch
-        or _gh("api", f"repos/{repo}", "-q", ".default_branch").strip()
-    )
+    run_url = _run_url(repo)
+    default_branch = _default_branch(repo, args.default_branch)
 
     lines = ["### Registry-live queue", ""]
-    if args.enqueue_default_branch:
-        before = parse_default_branch(_query_pages(owner, name)[0])
-        lines.append(_enqueue_default_branch(repo, default_branch, before, run_url))
 
     runs = _runner_runs(repo)
     releasing = frozenset(
@@ -534,37 +592,63 @@ def dispatch(args: argparse.Namespace) -> int:
             "The runner ended without reporting. Re-run the PR's Modal Live "
             "Tests to queue again.",
             run_url,
+            context=request.context,
         )
     for request, reason in the_plan.refused:
         lines.append(f"- {request.label}: refused -- {reason}")
-        _post_status(repo, request.sha, "error", f"Refused: {reason}", run_url)
+        _post_status(
+            repo,
+            request.sha,
+            "error",
+            f"Refused: {reason}",
+            run_url,
+            context=request.context,
+        )
 
     for request, slot in the_plan.dispatch:
         ref = _dispatch_ref(repo, request, default_branch)
+        known = {run.run_id for run in parse_active_runs(_runner_runs(repo))}
+        # No `pr` for the default branch's head: the runner reads "a SHA and
+        # no PR" as the weekly run, in the permanent `ci-main`.
+        pr_input = [] if request.pr is None else ["-f", f"pr={request.pr}"]
+        # `Dispatched` only once the dispatch call has succeeded. Marked
+        # first, a failed call would leave a head admitted with no runner,
+        # which the next selector rightly reads as a lost run and errors.
+        # Left `Queued`, the head keeps its original timestamp, so its place,
+        # and the next selector simply tries again.
+        try:
+            _gh(
+                "workflow",
+                "run",
+                RUNNER_WORKFLOW,
+                "--repo",
+                repo,
+                "--ref",
+                ref,
+                *pr_input,
+                "-f",
+                f"sha={request.sha}",
+                "-f",
+                f"slot={slot}",
+            )
+        except subprocess.CalledProcessError as e:
+            print(
+                f"::warning title=Registry-live dispatch failed::{request.label}: "
+                f"{(e.stderr or '').strip()[:300]} -- left queued; the next "
+                "selector retries."
+            )
+            lines.append(f"- {request.label}: dispatch failed, left queued")
+            continue
+        # The runner can in principle post `Running` before this lands, and
+        # be set back to `Dispatched`. Harmless: both read as admitted, and
+        # the run is listed, so neither is taken for a lost runner.
         _post_status(
             repo,
             request.sha,
             "pending",
             f"{DISPATCHED} to slot {slot}; waiting for the runner to start.",
             run_url,
-        )
-        known = {run.run_id for run in parse_active_runs(_runner_runs(repo))}
-        # No `pr` for the default branch's head: the runner reads "a SHA and
-        # no PR" as the weekly run, in the permanent `ci-main`.
-        pr_input = [] if request.pr is None else ["-f", f"pr={request.pr}"]
-        _gh(
-            "workflow",
-            "run",
-            RUNNER_WORKFLOW,
-            "--repo",
-            repo,
-            "--ref",
-            ref,
-            *pr_input,
-            "-f",
-            f"sha={request.sha}",
-            "-f",
-            f"slot={slot}",
+            context=request.context,
         )
         # Not done until the run is listed: the next selector reads the
         # slot as free until then, and would dispatch a second run into it.
@@ -579,6 +663,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 "The runner was dispatched but never appeared. Re-run the "
                 "PR's Modal Live Tests to queue again.",
                 run_url,
+                context=request.context,
             )
 
     for position, request in enumerate(the_plan.waiting, start=1):
@@ -601,12 +686,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--default-branch", default="", help="Looked up when empty.")
     p.add_argument("--slots", type=int, default=1)
-    p.add_argument(
-        "--enqueue-default-branch",
-        action="store_true",
-        help="Queue the default branch's head first: the weekly run.",
-    )
+    w = sub.add_parser("enqueue-weekly", help="Queue the default branch's head.")
+    w.add_argument("--repo", required=True)
+    w.add_argument("--default-branch", default="", help="Looked up when empty.")
     args = parser.parse_args(argv)
+    if args.command == "enqueue-weekly":
+        return enqueue_weekly(args)
     if args.slots < 1:
         parser.error("--slots must be at least 1")
     return dispatch(args)

@@ -10,8 +10,12 @@ Needs none of this directory's docker-compose services, and no GitHub.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from stardag_integration_tests.registry_live._queue import (
+    CONTEXT,
     REPORT_JOB,
+    WEEKLY_CONTEXT,
     ActiveRun,
     Request,
     is_releasing,
@@ -129,6 +133,26 @@ class TestParseActiveRuns:
             ActiveRun(run_id=7, slot=1, pr=1, releasing=True)
         ]
 
+    def test_a_ghost_run_holds_no_slot(self):
+        # GitHub can keep a run listed as queued for weeks after it ended;
+        # counting it would wedge its slot for good.
+        now = datetime(2026, 10, 26, 16, 0, tzinfo=timezone.utc)
+        runs = [
+            {
+                "id": 1,
+                "status": "queued",
+                "created_at": "2026-09-13T10:00:00Z",
+                "display_title": "… · PR #1 · slot 1",
+            },
+            {
+                "id": 2,
+                "status": "in_progress",
+                "created_at": "2026-10-26T15:40:00Z",
+                "display_title": "… · PR #2 · slot 1",
+            },
+        ]
+        assert [r.run_id for r in parse_active_runs(runs, now=now)] == [2]
+
     def test_a_hand_dispatched_run_holds_slot_one(self):
         # Its own concurrency group, but real load on the workspace.
         runs = [
@@ -243,6 +267,13 @@ class TestParseDefaultBranch:
         )
         request = parse_default_branch(data)
         assert request is not None and request.sha == "m1"
+
+    def test_the_weekly_request_reports_under_its_own_context(self):
+        # PR heads merged with a merge commit bring their `Registry-live
+        # tier` statuses into the default branch's history; a separate
+        # context is what keeps those from reading as the weekly request.
+        assert _main("2026-10-26T03:17:05Z").context == WEEKLY_CONTEXT
+        assert _request(1, "2026-10-26T14:00:00Z").context == CONTEXT
 
     def test_finished_weekly_runs_are_not_requests(self):
         data = _graphql(
