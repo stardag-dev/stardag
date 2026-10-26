@@ -17,16 +17,23 @@ its own: the registry keys the row by the scope *and* the hash.
 - :class:`SeenInstances` tracks instances by task id during a discovery pass
   and raises :class:`~stardag.exceptions.InstanceConflictError` on a second,
   different construction of one task id.
+- :func:`state_outside_body` finds state a task object holds that its body
+  does not carry (a private attribute set at runtime, a non-default excluded
+  field), over the models :func:`reachable_models` collects. Whatever is
+  rebuilt from the body runs without it: the reactive pre-flight refuses
+  such a task, and the Modal payload keeps it pickled.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from stardag._core.task_id import canonical_body_json
 from stardag.base_model import CONTEXT_MODE_KEY
@@ -34,6 +41,74 @@ from stardag.exceptions import InstanceConflictError, UnstableSerializationError
 
 if TYPE_CHECKING:
     from stardag._core.base_task import BaseTask
+
+
+def reachable_models(value: Any) -> list[BaseModel]:
+    """Every pydantic model instance reachable from ``value`` through its
+    fields, and through dataclasses and containers holding models.
+
+    ``value`` itself comes first when it is a model, so a task's nested
+    tasks and parameter models are all in the result.
+    """
+    found: list[BaseModel] = []
+    seen: set[int] = set()
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, BaseModel):
+            found.append(item)
+            # Declared fields only: ``__dict__`` may also hold cached values
+            # that are not part of the body.
+            stack.extend(
+                item.__dict__[name]
+                for name in type(item).model_fields
+                if name in item.__dict__
+            )
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            stack.extend(getattr(item, f.name, None) for f in dataclasses.fields(item))
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            stack.extend(item)
+    return found
+
+
+def state_outside_body(models: Iterable[BaseModel]) -> str | None:
+    """A description of state the instance body does not carry, if any.
+
+    A private attribute set away from its default, or a field excluded from
+    the dump holding a non-default value. The body is all the registry
+    stores, so anything rebuilt from it — a reactive tick's task, a Modal
+    payload's — has neither. The description names the class and the
+    attribute, e.g. ``"MyTask._cache is runtime state"``.
+
+    A comparison that raises counts as a difference: the answer has to err
+    toward "the body would lose something".
+    """
+    for model in models:
+        cls = type(model)
+        private = getattr(model, "__pydantic_private__", None) or {}
+        for name, attribute in cls.__private_attributes__.items():
+            if name not in private:
+                continue
+            try:
+                if private[name] != attribute.get_default():
+                    return f"{cls.__qualname__}.{name} is runtime state"
+            except Exception:
+                return f"{cls.__qualname__}.{name} is runtime state"
+        for name, info in cls.model_fields.items():
+            if not info.exclude or name not in model.__dict__:
+                continue
+            try:
+                default = info.get_default(call_default_factory=True)
+                if model.__dict__[name] != default:
+                    return f"{cls.__qualname__}.{name} is excluded from the body"
+            except Exception:
+                return f"{cls.__qualname__}.{name} is excluded from the body"
+    return None
 
 
 def _class_label(task: "BaseTask") -> str:

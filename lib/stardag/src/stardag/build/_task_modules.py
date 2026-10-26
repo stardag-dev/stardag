@@ -79,6 +79,7 @@ import typing
 from dataclasses import dataclass, field
 
 from stardag._core.base_task import BaseTask
+from stardag._core.instance import reachable_models, state_outside_body
 from stardag._core.rehydrate import task_from_registry_data
 from stardag.exceptions import StardagError
 
@@ -517,8 +518,8 @@ class RehydrationPlan:
     """Which tasks a scheduler tick could rebuild from registry data, and why not.
 
     A task is reconstructable when its class is covered by the declared
-    patterns *and* its registration payload round-trips back to the same
-    task id. Anything else is unschedulable in a reactive build: the tick
+    patterns, it holds no state its instance body does not carry, *and* its
+    registration payload round-trips back to the same task id. Anything else is unschedulable in a reactive build: the tick
     that would put it on a worker has nothing to build the object from.
     """
 
@@ -610,6 +611,15 @@ _MAIN_MODULE_REASON = (
     "task class defined in a __main__ module, which no container can import"
 )
 
+
+def _runtime_state_reason(state: str) -> str:
+    return (
+        f"{state}, which its instance body does not carry, so a tick would "
+        "run it without that state (make it a serialized field, or derive "
+        "it inside run())"
+    )
+
+
 # Distinct ``(class, reason)`` pairs named in a refusal message before it
 # truncates. Well above any plausible number of genuinely-different
 # failures, and far below the number of tasks one broken class can produce.
@@ -626,6 +636,13 @@ def plan_rehydration(
     registration stores — the instance body, ``task.instance_body()`` (see
     ``_get_task_data_for_registration``) — so it is a faithful dry run of
     what a scheduler tick will do.
+
+    **State the body does not carry is refused too**, for the task and any
+    model nested in it (a task field, a parameter model): a private
+    attribute set away from its default, or a field declared with
+    ``exclude=True`` holding a non-default value. The round trip cannot see
+    it — the rebuilt task has the same id — but the tick would run it with
+    the defaults, which is a different task in everything but name.
 
     ``AliasTask`` payloads fail the check by construction (rehydration
     refuses ``__aliased`` data, whose pickled ``loads_type`` would be an
@@ -645,6 +662,10 @@ def plan_rehydration(
             continue
         if not module_is_covered(module, patterns):
             unreconstructable.append((task, _UNCOVERED_REASON))
+            continue
+        state = state_outside_body(reachable_models(task))
+        if state is not None:
+            unreconstructable.append((task, _runtime_state_reason(state)))
             continue
         try:
             task_from_registry_data(task.instance_body(), expected_task_id=task.id)

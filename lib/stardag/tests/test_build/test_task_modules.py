@@ -15,7 +15,9 @@ import typing
 from pathlib import Path
 
 import pytest
+from pydantic import Field, PrivateAttr
 
+import stardag as sd
 from stardag import BaseTask, auto_namespace
 from stardag.build._task_modules import (
     TaskModulesError,
@@ -41,6 +43,40 @@ from stardag.build._task_modules import (
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
 auto_namespace(__name__)
+
+
+class PreflightStatefulTask(sd.Task[int]):
+    """Carries state its instance body does not: a private attribute and a
+    field excluded from the dump."""
+
+    x: int = 0
+    handle: typing.Any = Field(default=None, exclude=True)
+    _state: str | None = PrivateAttr(default=None)
+
+    def run(self) -> None:
+        self._save(self.x)
+
+
+class PreflightStatefulParams(sd.StardagBaseModel):
+    a: int = 1
+    _cache: dict | None = PrivateAttr(default=None)
+
+
+class PreflightParamsTask(sd.Task[int]):
+    params: PreflightStatefulParams = PreflightStatefulParams()
+
+    def run(self) -> None:
+        self._save(self.params.a)
+
+
+class PreflightParentTask(sd.Task[int]):
+    """Holds another task as a field: the nested task's body is part of
+    this one's, and a tick rebuilds both from it."""
+
+    upstream: sd.TaskLoads[int]
+
+    def run(self) -> None:
+        self._save(self.upstream.load() + 1)
 
 
 # =============================================================================
@@ -597,6 +633,76 @@ class TestPlanRehydration:
         assert plan.reconstructable == ()
         assert len(plan.unreconstructable) == 1
         assert "not declared" in (plan.error([]) or "")
+
+    def test_a_non_default_private_attribute_is_refused(self):
+        """The round trip cannot see it (the rebuilt task has the same id),
+        but a tick would run the task with the default."""
+        task = PreflightStatefulTask()
+        task._state = "set-at-runtime"
+
+        plan = plan_rehydration([task], [__name__])
+
+        assert plan.reconstructable == ()
+        ((_, reason),) = plan.unreconstructable
+        assert "PreflightStatefulTask._state is runtime state" in reason
+        assert "instance body does not carry" in reason
+        error = plan.error([__name__])
+        assert error is not None
+        assert f"{__name__}.PreflightStatefulTask" in error
+        assert "PreflightStatefulTask._state" in error
+        # Not a module-coverage problem: no task_modules remedy.
+        assert "Add [" not in error
+
+    def test_a_non_default_excluded_field_is_refused(self):
+        task = PreflightStatefulTask(handle="live-handle")
+
+        plan = plan_rehydration([task], [__name__])
+
+        assert plan.reconstructable == ()
+        ((_, reason),) = plan.unreconstructable
+        assert "PreflightStatefulTask.handle is excluded from the body" in reason
+
+    def test_state_at_its_defaults_is_reconstructable(self):
+        """Declaring a private attribute or an excluded field is fine; only
+        a value the body would lose is refused."""
+        task = PreflightStatefulTask(x=3)
+        plan = plan_rehydration([task], [__name__])
+        assert plan.reconstructable == (task,)
+
+    def test_state_in_a_nested_task_is_refused(self):
+        nested = PreflightStatefulTask(x=1)
+        nested._state = "set-at-runtime"
+        parent = PreflightParentTask(upstream=nested)
+
+        plan = plan_rehydration([parent], [__name__])
+
+        assert plan.reconstructable == ()
+        ((task, reason),) = plan.unreconstructable
+        assert task is parent
+        assert "PreflightStatefulTask._state is runtime state" in reason
+
+    def test_an_excluded_field_in_a_nested_task_is_refused(self):
+        parent = PreflightParentTask(upstream=PreflightStatefulTask(handle=object()))
+
+        plan = plan_rehydration([parent], [__name__])
+
+        ((task, reason),) = plan.unreconstructable
+        assert task is parent
+        assert "PreflightStatefulTask.handle is excluded from the body" in reason
+
+    def test_state_in_a_nested_parameter_model_is_refused(self):
+        task = PreflightParamsTask()
+        task.params._cache = {"k": 1}
+
+        plan = plan_rehydration([task], [__name__])
+
+        ((_, reason),) = plan.unreconstructable
+        assert "PreflightStatefulParams._cache is runtime state" in reason
+
+    def test_a_nested_task_without_state_is_reconstructable(self):
+        parent = PreflightParentTask(upstream=PreflightStatefulTask(x=2))
+        plan = plan_rehydration([parent], [__name__])
+        assert plan.reconstructable == (parent,)
 
     def test_the_dry_run_uses_the_payload_registration_stores(self):
         """The instance body — every field, significant or not — which is

@@ -6,6 +6,21 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## Unreleased
+
+### A reactive build refuses state its tasks would lose
+
+A reactive tick rebuilds each task from the instance body the registry
+stores. A private attribute set after construction, or a field declared with
+`exclude=True`, is not in that body, so the tick used to run the task with
+the defaults instead, silently. The trigger now refuses such a build before
+it is armed, with a `TaskModulesError` naming the class and the attribute.
+Make the state a regular field, or derive it inside `run()`. A private
+attribute or excluded field left at its default is fine, and resident builds
+are unaffected.
+
+---
+
 ## v0.28.0 — Wake-ups that arrive
 
 Released 2026-10-08 together with the registry server `server-v0.7.0`. No
