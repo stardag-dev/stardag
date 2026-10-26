@@ -743,6 +743,33 @@ async def test_notify_re_asserts_a_flag_cleared_between_its_transactions(
     assert await _flagged(h, build)
 
 
+async def test_notify_flags_a_build_resumed_between_its_transactions(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    """The re-assertion reads the status under the second transaction's
+    lock: a build that was terminal for the first and resumed before the
+    second is RUNNING when a flagger may skip the held row, so it is left
+    flagged."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _svc(h, builds.cancel_build, build)
+    original = wakeups._locked_wake
+    calls = 0
+
+    async def locked_wake(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            await _svc(h, builds.resume_build, build)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(wakeups, "_locked_wake", locked_wake)
+    await _svc(h, wakeups.notify, build)
+    assert calls == 2
+    assert (await h.build(build))["status"] == "running"
+    assert await _flagged(h, build)
+
+
 # --------------------------------------------------------------------------
 # The scheduler lease
 # --------------------------------------------------------------------------

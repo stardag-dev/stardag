@@ -85,7 +85,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, case, func, select, update
+from sqlalchemy import ARRAY, Select, Uuid, any_, bindparam, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -186,9 +186,15 @@ async def _flag(
     #    a writer that leaves it flagged (module docstring), and an already
     #    flagged row needs no write: step 1 keeps any clear off it until this
     #    transaction ends.
+    # One array parameter, not one per build: the fan-out is unbounded and
+    # asyncpg caps a statement's parameters.
+    held_ids = bindparam("held_ids", held, type_=ARRAY(Uuid))
     unflagged = (
         select(BuildWake.build_id)
-        .where(BuildWake.build_id.in_(held), BuildWake.needs_tick_at.is_(None))
+        .where(
+            BuildWake.build_id == any_(held_ids),
+            BuildWake.needs_tick_at.is_(None),
+        )
         .order_by(BuildWake.build_id)
         .with_for_update(key_share=True, skip_locked=True)
     )
@@ -429,13 +435,10 @@ async def notify(
         # then build row: nothing takes the two the other way round (the
         # lease writers never touch the wake row; flaggers SKIP LOCKED).
         build = await _shared_build(session, environment_id, build_id)
-        if (
-            running
-            and build.status == BuildStatus.RUNNING
-            and wake.needs_tick_at is None
-        ):
-            # Re-asserted: a tick may have cleared the flag between the two
-            # transactions, and a flagger finding this row held now skips it
+        if build.status == BuildStatus.RUNNING and wake.needs_tick_at is None:
+            # Re-asserted, on the status read under this transaction's lock
+            # (the build may have resumed since the first): a tick may have
+            # cleared the flag between the two transactions, and a flagger finding this row held now skips it
             # on the strength of its holder leaving it flagged (module
             # docstring). At worst one spare tick pass.
             wake.needs_tick_at = utc_now()
