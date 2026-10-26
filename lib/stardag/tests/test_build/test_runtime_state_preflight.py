@@ -175,6 +175,7 @@ class UntouchedEdgeDefaultsTask(sd.Task[int]):
 
     values: list[float] = Field(default_factory=lambda: [float("nan")], exclude=True)
     config: IdentityConfig = Field(default_factory=IdentityConfig, exclude=True)
+    z: typing.Any = Field(default_factory=lambda: complex(math.nan, 0), exclude=True)
 
     def run(self) -> None:
         self._save(1)
@@ -509,6 +510,7 @@ class TestNotRefused:
         warnings = _state_warnings(caplog)
         assert any("UntouchedEdgeDefaultsTask.values" in w for w in warnings)
         assert any("UntouchedEdgeDefaultsTask.config" in w for w in warnings)
+        assert any("UntouchedEdgeDefaultsTask.z" in w for w in warnings)
 
     def test_a_failing_detector_warns_and_passes(self, caplog, monkeypatch):
         def broken(original, rebuilt):

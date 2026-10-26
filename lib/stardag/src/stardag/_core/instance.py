@@ -403,6 +403,8 @@ def _is_plain_data(value: Any, _seen: set[int] | None = None) -> bool:
     dataclass with identity equality (``eq=False``), and a cycle."""
     if type(value) is float:
         return not math.isnan(value)
+    if type(value) is complex:
+        return False  # outside the agreed plain-data set
     if type(value) in _LEAF_TYPES:
         return True
     seen = set() if _seen is None else _seen
