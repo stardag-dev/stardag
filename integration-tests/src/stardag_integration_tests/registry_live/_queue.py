@@ -343,22 +343,44 @@ def plan(requests: list[Request], active: list[ActiveRun], slots: int) -> Plan:
     occupied = {run.slot for run in active if not run.releasing}
     free = [s for s in range(1, slots + 1) if s not in occupied]
 
-    stale = [r for r in requests if r.admitted and r.pr not in reporting]
+    # One commit status per SHA and context, however many PRs carry it: two
+    # open PRs can share a head (a branch and a branch stacked on it, before
+    # the second gets its own commit). So a head is answered for by any of
+    # its PRs' runs, and is admitted once.
+    by_head: dict[tuple[str, str], list[Request]] = {}
+    for r in requests:
+        by_head.setdefault((r.sha, r.context), []).append(r)
+
+    def head_prs(r: Request) -> set[int | None]:
+        return {other.pr for other in by_head[(r.sha, r.context)]}
+
+    stale = []
+    seen_stale: set[tuple[str, str]] = set()
+    for r in requests:
+        key = (r.sha, r.context)
+        if r.admitted and not head_prs(r) & reporting and key not in seen_stale:
+            seen_stale.add(key)
+            stale.append(r)
 
     refused: list[tuple[Request, str]] = []
     eligible: list[Request] = []
-    # Oldest first. The PR number only breaks a tie within one second.
+    # Oldest first. The PR number only breaks a tie within one second, and
+    # picks which PR of a shared head is the one dispatched.
+    seen: set[tuple[str, str]] = set()
     for request in sorted(
         (r for r in requests if r.queued),
         key=lambda r: (r.created_at, r.pr if r.pr is not None else 0),
     ):
+        if (request.sha, request.context) in seen:
+            continue
+        seen.add((request.sha, request.context))
         reason = refusal(request)
         if reason:
             refused.append((request, reason))
         else:
             eligible.append(request)
 
-    admissible = [r for r in eligible if r.pr not in holding]
+    admissible = [r for r in eligible if not head_prs(r) & holding]
     dispatch = list(zip(admissible, free))
     admitted = {id(r) for r, _ in dispatch}
     return Plan(

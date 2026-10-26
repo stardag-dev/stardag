@@ -10,6 +10,7 @@ Needs none of this directory's docker-compose services, and no GitHub.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timezone
 
 from stardag_integration_tests.registry_live._queue import (
@@ -437,6 +438,24 @@ class TestPlan:
         )
         assert result.dispatch == []
         assert [r.pr for r in result.waiting] == [3]
+
+    def test_a_head_shared_by_two_prs_is_admitted_once(self):
+        a = _request(1, "2026-10-26T14:00:00Z")
+        b = dataclasses.replace(_request(2, "2026-10-26T14:00:00Z"), sha=a.sha)
+        result = plan([a, b], active=[], slots=2)
+        assert [(r.pr, slot) for r, slot in result.dispatch] == [(1, 1)]
+        assert result.waiting == []
+
+    def test_a_shared_head_is_not_stale_while_either_prs_run_is_live(self):
+        # One status on the SHA; the run was dispatched for PR 1, and PR 2
+        # reads the same `Running`. Calling PR 2's view stale would overwrite
+        # the healthy run's status with an error.
+        a = _request(1, "2026-10-26T14:00:00Z", "Running in slot 1.")
+        b = dataclasses.replace(
+            _request(2, "2026-10-26T14:00:00Z", "Running in slot 1."), sha=a.sha
+        )
+        result = plan([a, b], active=[ActiveRun(run_id=9, slot=1, pr=1)], slots=1)
+        assert result.stale == []
 
     def test_finished_heads_are_not_requests(self):
         done = _request(1, "2026-10-26T14:00:00Z", "Passed.", state="SUCCESS")
