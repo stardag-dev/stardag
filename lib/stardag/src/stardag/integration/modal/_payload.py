@@ -146,9 +146,6 @@ def _by_value_reason(task: BaseTask) -> tuple[str | None, TaskPayload | None]:
     """
     try:
         models = reachable_models(task)
-        state = state_outside_body(models)
-        if state is not None:
-            return f"{state}, which its instance body does not carry", None
         body = task.instance_body()
         task_id = task.id
         # The object walk and the body walk together: a task nested in a
@@ -171,6 +168,17 @@ def _by_value_reason(task: BaseTask) -> tuple[str | None, TaskPayload | None]:
         check_serialization_stability(task)
     except Exception as e:
         return f"its registry-data round trip is not stable ({e})", None
+    try:
+        # What the receiver will run: the task as rehydrated from the body.
+        # State it does not reproduce (a private attribute set at runtime,
+        # an excluded field) would be lost on the far side; the pickle
+        # carries it.
+        rebuilt = task_from_registry_data(body, expected_task_id=task_id)
+        state = state_outside_body(task, rebuilt)
+    except Exception as e:
+        return f"its instance body could not be rehydrated ({e})", None
+    if state is not None:
+        return f"{state}, which its instance body does not carry", None
     return None, {
         PAYLOAD_KEY: PAYLOAD_VERSION,
         "body": body,

@@ -79,7 +79,7 @@ import typing
 from dataclasses import dataclass, field
 
 from stardag._core.base_task import BaseTask
-from stardag._core.instance import reachable_models, state_outside_body
+from stardag._core.instance import state_outside_body
 from stardag._core.rehydrate import task_from_registry_data
 from stardag.exceptions import StardagError
 
@@ -518,8 +518,9 @@ class RehydrationPlan:
     """Which tasks a scheduler tick could rebuild from registry data, and why not.
 
     A task is reconstructable when its class is covered by the declared
-    patterns, it holds no state its instance body does not carry, *and* its
-    registration payload round-trips back to the same task id. Anything else is unschedulable in a reactive build: the tick
+    patterns, its registration payload round-trips back to the same task
+    id, *and* the rebuilt task holds the same state (see
+    :func:`plan_rehydration`). Anything else is unschedulable in a reactive build: the tick
     that would put it on a worker has nothing to build the object from.
     """
 
@@ -639,10 +640,10 @@ def plan_rehydration(
 
     **State the body does not carry is refused too**, for the task and any
     model nested in it (a task field, a parameter model): a private
-    attribute set away from its default, or a field declared with
-    ``exclude=True`` holding a non-default value. The round trip cannot see
-    it — the rebuilt task has the same id — but the tick would run it with
-    the defaults, which is a different task in everything but name.
+    attribute, or a field declared with ``exclude=True``, whose value the
+    task rebuilt from its body does not reproduce. The id check cannot see
+    it (the rebuilt task has the same id), but the tick would run the
+    rebuilt task, which is a different task in everything but name.
 
     ``AliasTask`` payloads fail the check by construction (rehydration
     refuses ``__aliased`` data, whose pickled ``loads_type`` would be an
@@ -663,14 +664,16 @@ def plan_rehydration(
         if not module_is_covered(module, patterns):
             unreconstructable.append((task, _UNCOVERED_REASON))
             continue
-        state = state_outside_body(reachable_models(task))
-        if state is not None:
-            unreconstructable.append((task, _runtime_state_reason(state)))
-            continue
         try:
-            task_from_registry_data(task.instance_body(), expected_task_id=task.id)
+            rebuilt = task_from_registry_data(
+                task.instance_body(), expected_task_id=task.id
+            )
         except Exception as e:
             unreconstructable.append((task, f"registry-data round-trip failed ({e})"))
+            continue
+        state = state_outside_body(task, rebuilt)
+        if state is not None:
+            unreconstructable.append((task, _runtime_state_reason(state)))
             continue
         reconstructable.append(task)
     return RehydrationPlan(

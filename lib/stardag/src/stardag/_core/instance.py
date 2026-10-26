@@ -17,11 +17,11 @@ its own: the registry keys the row by the scope *and* the hash.
 - :class:`SeenInstances` tracks instances by task id during a discovery pass
   and raises :class:`~stardag.exceptions.InstanceConflictError` on a second,
   different construction of one task id.
-- :func:`state_outside_body` finds state a task object holds that its body
-  does not carry (a private attribute set at runtime, a non-default excluded
-  field), over the models :func:`reachable_models` collects. Whatever is
-  rebuilt from the body runs without it: the reactive pre-flight refuses
-  such a task, and the Modal payload keeps it pickled.
+- :func:`state_outside_body` finds state a task object holds that the task
+  rebuilt from its body does not (a private attribute set at runtime, an
+  excluded field). Whatever is rebuilt from the body runs without it: the
+  reactive pre-flight refuses such a task, and the Modal payload keeps it
+  pickled. :func:`reachable_models` collects every model in a task.
 """
 
 from __future__ import annotations
@@ -29,7 +29,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
-from collections.abc import Iterable
+from collections import deque
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -71,44 +72,99 @@ def reachable_models(value: Any) -> list[BaseModel]:
             stack.extend(getattr(item, f.name, None) for f in dataclasses.fields(item))
         elif isinstance(item, dict):
             stack.extend(item.values())
-        elif isinstance(item, (list, tuple, set, frozenset)):
+        elif isinstance(item, (list, tuple, deque, set, frozenset)):
             stack.extend(item)
     return found
 
 
-def state_outside_body(models: Iterable[BaseModel]) -> str | None:
-    """A description of state the instance body does not carry, if any.
+def state_outside_body(original: BaseModel, rebuilt: BaseModel) -> str | None:
+    """A description of state ``original`` holds that ``rebuilt`` lost, if any.
 
-    A private attribute set away from its default, or a field excluded from
-    the dump holding a non-default value. The body is all the registry
-    stores, so anything rebuilt from it — a reactive tick's task, a Modal
-    payload's — has neither. The description names the class and the
-    attribute, e.g. ``"MyTask._cache is runtime state"``.
+    ``rebuilt`` is ``original`` rehydrated from its instance body, the way a
+    reactive tick or a Modal receiver rebuilds it. The body carries neither
+    private attributes nor fields declared with ``exclude=True``, so those
+    are compared between the two, in ``original`` and every model nested in
+    it through fields, dataclasses and containers. Comparing against the
+    rebuilt object rather than the declared defaults is what makes the
+    answer exact: a default that validation normalises, a ``compat_default``
+    that rehydration fills in for the missing key, and a private attribute
+    ``model_post_init`` derives from fields are all reproduced by the
+    rebuild, or not, exactly as they will be on the far side.
 
-    A comparison that raises counts as a difference: the answer has to err
-    toward "the body would lose something".
+    The description names the class and the attribute, e.g.
+    ``"MyTask._cache is runtime state"``. A comparison that raises counts
+    as a difference: the answer has to err toward "the rebuild would lose
+    something". Structure the two objects do not share (a container whose
+    length changed) is not this function's to judge, and is skipped; the
+    body's own round-trip check covers it.
     """
-    for model in models:
-        cls = type(model)
-        private = getattr(model, "__pydantic_private__", None) or {}
-        for name, attribute in cls.__private_attributes__.items():
-            if name not in private:
+    seen: set[int] = set()
+    stack: list[tuple[Any, Any]] = [(original, rebuilt)]
+    while stack:
+        item, other = stack.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, BaseModel):
+            if type(other) is not type(item):
                 continue
-            try:
-                if private[name] != attribute.get_default():
+            cls = type(item)
+            mine = getattr(item, "__pydantic_private__", None) or {}
+            theirs = getattr(other, "__pydantic_private__", None) or {}
+            for name in cls.__private_attributes__:
+                if name in mine and _differs_or_raises(mine[name], theirs, name):
                     return f"{cls.__qualname__}.{name} is runtime state"
-            except Exception:
-                return f"{cls.__qualname__}.{name} is runtime state"
-        for name, info in cls.model_fields.items():
-            if not info.exclude or name not in model.__dict__:
+            for name, info in cls.model_fields.items():
+                if name not in item.__dict__:
+                    continue
+                if info.exclude:
+                    if _differs_or_raises(item.__dict__[name], other.__dict__, name):
+                        return f"{cls.__qualname__}.{name} is excluded from the body"
+                    continue
+                stack.append((item.__dict__[name], other.__dict__.get(name)))
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            if type(other) is not type(item):
                 continue
-            try:
-                default = info.get_default(call_default_factory=True)
-                if model.__dict__[name] != default:
-                    return f"{cls.__qualname__}.{name} is excluded from the body"
-            except Exception:
-                return f"{cls.__qualname__}.{name} is excluded from the body"
+            stack.extend(
+                (getattr(item, f.name, None), getattr(other, f.name, None))
+                for f in dataclasses.fields(item)
+            )
+        elif isinstance(item, dict):
+            if isinstance(other, dict):
+                stack.extend((v, other[k]) for k, v in item.items() if k in other)
+        elif isinstance(item, (list, tuple, deque)):
+            if isinstance(other, (list, tuple, deque)) and len(other) == len(item):
+                stack.extend(zip(item, other))
+        elif isinstance(item, (set, frozenset)):
+            if isinstance(other, (set, frozenset)) and len(other) == len(item):
+                # No order to pair by: pair the models by their body, which
+                # the rebuild reproduces (the body is what it was built from).
+                theirs_by_body = {
+                    _body_key(m): m for m in other if isinstance(m, BaseModel)
+                }
+                stack.extend(
+                    (m, theirs_by_body.get(_body_key(m)))
+                    for m in item
+                    if isinstance(m, BaseModel)
+                )
     return None
+
+
+def _differs_or_raises(value: Any, other: Mapping[str, Any], name: str) -> bool:
+    if name not in other:
+        return True
+    try:
+        return bool(value != other[name])
+    except Exception:
+        return True
+
+
+def _body_key(model: BaseModel) -> tuple[str, str]:
+    try:
+        body = model.model_dump_json(context={CONTEXT_MODE_KEY: "registry"})
+    except Exception:
+        body = repr(model)
+    return (f"{type(model).__module__}.{type(model).__qualname__}", body)
 
 
 def _class_label(task: "BaseTask") -> str:

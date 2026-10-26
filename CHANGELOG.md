@@ -10,14 +10,15 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 - **Changed: a reactive build refuses a task holding state its instance body
   does not carry** (STA-126). A tick rebuilds every task from its registered
-  body, so a pydantic private attribute set away from its default, or a field
-  declared with `exclude=True` holding a non-default value, never reached it:
-  the task ran with the defaults, and nothing said so. The bootstrap's
-  rehydration pre-flight now refuses such a task, a root, a discovered
-  dependency or a model nested in either, before the build is armed, naming
-  the class and the attribute (`MyTask._cache is runtime state, which its
-instance body does not carry, ...`). Resident and hybrid builds are
-  unchanged: such a task is still sent to Modal by value and keeps its state.
+  body, so a pydantic private attribute set after construction, or a field
+  declared with `exclude=True`, never reached it: the task ran with whatever
+  the rebuild produced, and nothing said so. The bootstrap's rehydration
+  pre-flight now rebuilds each task (a root, a discovered dependency, and any
+  model nested in either) and refuses the build before it is armed when such
+  a value differs, naming the class and the attribute (`MyTask._cache is
+runtime state, which its instance body does not carry, ...`). Resident and
+  hybrid builds are unchanged: such a task is still sent to Modal by value
+  and keeps its state; the payload now uses the same rebuild comparison.
 
 ## [0.28.0] — 2026-10-08
 

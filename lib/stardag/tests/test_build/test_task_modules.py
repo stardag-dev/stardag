@@ -9,6 +9,7 @@ the tests can assert exactly which modules were imported and when.
 
 from __future__ import annotations
 
+import collections
 import itertools
 import sys
 import typing
@@ -19,6 +20,7 @@ from pydantic import Field, PrivateAttr
 
 import stardag as sd
 from stardag import BaseTask, auto_namespace
+from stardag.base_model import StardagField
 from stardag.build._task_modules import (
     TaskModulesError,
     _reset_import_state_for_tests,
@@ -67,6 +69,52 @@ class PreflightParamsTask(sd.Task[int]):
 
     def run(self) -> None:
         self._save(self.params.a)
+
+
+class PreflightDequeTask(sd.Task[int]):
+    params: collections.deque[PreflightStatefulParams] = Field(
+        default_factory=lambda: collections.deque([PreflightStatefulParams()])
+    )
+
+    def run(self) -> None:
+        self._save(len(self.params))
+
+
+class PreflightNormalisedExcludedTask(sd.Task[int]):
+    """``validate_default`` (on for every stardag model) turns the declared
+    ``"3"`` into ``3``: an untouched instance holds ``3``, and so does the
+    rebuilt one."""
+
+    count: int = Field(default="3", exclude=True)  # pyright: ignore[reportAssignmentType]
+
+    def run(self) -> None:
+        self._save(self.count)
+
+
+class PreflightCompatExcludedTask(sd.Task[int]):
+    """Rehydration fills the missing key with the ``compat_default``, not the
+    class default, so even an untouched instance is rebuilt differently."""
+
+    level: typing.Annotated[int, StardagField(compat_default=0)] = Field(
+        default=5, exclude=True
+    )
+
+    def run(self) -> None:
+        self._save(self.level)
+
+
+class PreflightDerivedPrivateTask(sd.Task[int]):
+    """A private attribute derived from fields is rebuilt with them."""
+
+    x: int = 0
+    _double: int = PrivateAttr(default=0)
+
+    def model_post_init(self, context: typing.Any) -> None:
+        super().model_post_init(context)
+        self._double = 2 * self.x
+
+    def run(self) -> None:
+        self._save(self._double)
 
 
 class PreflightParentTask(sd.Task[int]):
@@ -699,6 +747,37 @@ class TestPlanRehydration:
         ((_, reason),) = plan.unreconstructable
         assert "PreflightStatefulParams._cache is runtime state" in reason
 
+    def test_state_in_a_model_inside_a_deque_is_refused(self):
+        task = PreflightDequeTask()
+        task.params[0]._cache = {"k": 1}
+
+        plan = plan_rehydration([task], [__name__])
+
+        ((_, reason),) = plan.unreconstructable
+        assert "PreflightStatefulParams._cache is runtime state" in reason
+
+    def test_an_excluded_default_normalised_by_validation_is_reconstructable(self):
+        task = PreflightNormalisedExcludedTask()
+        assert task.count == 3
+        plan = plan_rehydration([task], [__name__])
+        assert plan.reconstructable == (task,)
+
+    def test_an_excluded_field_rebuilt_from_its_compat_default_is_refused(self):
+        """The comparison is against the rebuilt task, not the declared
+        default: an untouched ``level`` of 5 comes back as 0."""
+        task = PreflightCompatExcludedTask()
+
+        plan = plan_rehydration([task], [__name__])
+
+        ((_, reason),) = plan.unreconstructable
+        assert "PreflightCompatExcludedTask.level is excluded from the body" in reason
+
+    def test_a_private_attribute_derived_from_fields_is_reconstructable(self):
+        task = PreflightDerivedPrivateTask(x=4)
+        assert task._double == 8
+        plan = plan_rehydration([task], [__name__])
+        assert plan.reconstructable == (task,)
+
     def test_a_nested_task_without_state_is_reconstructable(self):
         parent = PreflightParentTask(upstream=PreflightStatefulTask(x=2))
         plan = plan_rehydration([parent], [__name__])
@@ -710,7 +789,6 @@ class TestPlanRehydration:
         import typing as t
 
         import stardag as sd
-        from stardag.base_model import StardagField
 
         class PreflightConfigured(sd.Task[int]):
             __namespace__ = "preflight_tests"
