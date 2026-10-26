@@ -9,12 +9,12 @@ class, and every global their code names. A validator naming a module-level
 yielded dependencies to a hybrid driver.
 """
 
-from typing import Annotated, TypeVar
+import threading
+from typing import Annotated, ClassVar, TypeVar
 
 import pytest
 
 import stardag as sd
-from stardag._core.base_task import TaskImplementationError
 from stardag.base_model import StardagBaseModel, StardagField
 
 # Not a core dependency: it comes with the `modal` extra, as Modal's
@@ -53,18 +53,11 @@ def test_a_function_local_task_with_a_dependency_round_trips():
 # a concrete task parameter, and a polymorphic one. A shape that stops round-tripping
 # here fails the base suite instead of a Modal worker.
 #
-# Both fail today, and not on their fields: cloudpickle rebuilds a by-value
-# class as an empty skeleton before setting its attributes, and the run()
-# check in `BaseTask.__init_subclass__` rejects the skeleton (STA-133).
-# Strict, so the fix has to remove the marker.
-_SKELETON_CHECK = pytest.mark.xfail(
-    raises=TaskImplementationError,
-    strict=True,
-    reason="run() check fires on cloudpickle's skeleton class (STA-133)",
-)
+# cloudpickle rebuilds a by-value class as an empty skeleton and sets its
+# attributes, `run` among them, only afterwards; the run() check therefore
+# runs at construction, not class creation (STA-133).
 
 
-@_SKELETON_CHECK
 def test_a_function_local_class_task_round_trips():
     class Scaled(sd.Task[int]):
         value: int
@@ -77,9 +70,11 @@ def test_a_function_local_class_task_round_trips():
     restored = _round_trip(task)
     assert restored.id == task.id
     assert restored.threads == 4
+    # The precheck wrapping is applied at class creation, so it reaches the
+    # skeleton through the pickled class `__dict__`.
+    assert getattr(type(restored).run, "__precheck_wrapped__", False)
 
 
-@_SKELETON_CHECK
 def test_a_function_local_class_task_with_nested_and_task_params_round_trips():
     class Options(StardagBaseModel):
         pattern: str
@@ -108,3 +103,32 @@ def test_a_function_local_class_task_with_nested_and_task_params_round_trips():
     assert restored.id == task.id
     assert restored.source.id == task.source.id
     assert restored.upstream.id == task.upstream.id
+
+
+def _construct_an_unpicklable_class_task() -> None:
+    # In its own function: pydantic keeps the defining function's locals on a
+    # model class, so a sibling class would reach the pickle that way instead.
+    class HoldsALock(sd.Task[int]):
+        lock: ClassVar[object] = threading.Lock()
+
+        def run(self) -> None:
+            self._save(0)
+
+    HoldsALock()
+
+
+def test_a_class_task_round_trips_after_an_unpicklable_one_was_constructed():
+    # The run() check remembers the classes it has passed. If the validator
+    # carried on every task class named that record directly, cloudpickle
+    # would pickle it along with a by-value class, and with it every class
+    # constructed so far, picklable or not.
+    _construct_an_unpicklable_class_task()
+
+    class Scaled(sd.Task[int]):
+        value: int
+
+        def run(self) -> None:
+            self._save(self.value * 2)
+
+    task = Scaled(value=3)
+    assert _round_trip(task).id == task.id

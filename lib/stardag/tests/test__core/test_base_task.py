@@ -68,15 +68,16 @@ def test_task_base_subclassing():
     ):
         TaskNoComplete()  # type: ignore
 
-    # Task without run() or run_aio() raises at class definition time
+    # Task without run() or run_aio() raises when constructed
+    class TaskNoRun(BaseTask):
+        def complete(self) -> bool:
+            return False
+
     with pytest.raises(
         TaskImplementationError,
         match="must implement either run\\(\\) or run_aio\\(\\)",
     ):
-
-        class TaskNoRun(BaseTask):
-            def complete(self) -> bool:
-                return False
+        TaskNoRun()
 
 
 def test_run_version_checked():
@@ -475,16 +476,25 @@ class TestRunRunAioSymmetry:
         asyncio.run(task2.run_aio())
         assert task2.result == ["async"]
 
-    def test_neither_implemented_raises_at_class_definition(self):
-        """Task implementing neither run() nor run_aio() should fail at class definition."""
+    def test_neither_implemented_raises_at_construction(self):
+        """Task implementing neither run() nor run_aio() should fail when constructed.
+
+        Not at class definition: cloudpickle rebuilds a by-value class as an
+        empty skeleton before setting ``run`` on it (STA-133).
+        """
+
+        class NeitherTask(BaseTask):
+            def complete(self) -> bool:
+                return True
+
         with pytest.raises(
             TaskImplementationError,
             match="must implement either run\\(\\) or run_aio\\(\\)",
         ):
-
-            class NeitherTask(BaseTask):
-                def complete(self) -> bool:
-                    return True
+            NeitherTask()
+        # Every construction, not only the first: a failure is not cached.
+        with pytest.raises(TaskImplementationError):
+            NeitherTask.model_validate({})
 
     def test_sync_default_from_async_context_raises(self):
         """Calling run() from async context when only run_aio() is implemented should raise."""
@@ -543,11 +553,12 @@ class TestRunRunAioSymmetry:
             def complete(self) -> bool: ...
 
         # Concrete subclass must implement run or run_aio
-        with pytest.raises(TaskImplementationError):
+        class ConcreteWithoutRun(AbstractTask):
+            def complete(self) -> bool:
+                return True
 
-            class ConcreteWithoutRun(AbstractTask):
-                def complete(self) -> bool:
-                    return True
+        with pytest.raises(TaskImplementationError):
+            ConcreteWithoutRun()
 
     def test_async_generator_run_aio_raises_on_sync_call(self):
         """Async generator run_aio() cannot be auto-converted to sync run()."""
