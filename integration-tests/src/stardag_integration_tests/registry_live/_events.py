@@ -204,6 +204,46 @@ def ledger(deployment: Deployment, build_id: Any) -> list[dict[str, Any]]:
     return list(response.json()["executions"])
 
 
+def ledger_and_server_now(
+    deployment: Deployment, build_id: Any
+) -> tuple[list[dict[str, Any]], datetime]:
+    """``ledger``, and the registry's clock at the moment it answered.
+
+    ``now`` is the response's ``Date`` header, so it can be compared with
+    the ledger's own timestamps without a skew between two machines'
+    clocks. The header has one-second resolution and is truncated, so it
+    reads up to a second early; a caller deciding that a server-side
+    deadline has *passed* should allow for that.
+    """
+    response = _get(
+        deployment, f"builds/{build_id}/executions", params={"include_ended": "true"}
+    )
+    served_at = response.headers.get("date")
+    if not served_at:
+        raise AssertionError(
+            f"The registry's ledger response for build {build_id} carried no "
+            "Date header, so there is no server-side 'now' to compare its "
+            "timestamps with."
+        )
+    return list(response.json()["executions"]), parsedate_to_datetime(served_at)
+
+
+def task_artifact(deployment: Deployment, task_id: Any, name: str) -> Any | None:
+    """The body of the task's artifact called ``name``, or ``None``.
+
+    ``None`` too while the task is not registered yet (404): this is read
+    by callers polling for the artifact to appear.
+    """
+    response = _get(deployment, f"tasks/{task_id}/artifacts", raise_for_status=False)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return next(
+        (a["body"] for a in response.json()["artifacts"] if a.get("name") == name),
+        None,
+    )
+
+
 def executions_of(
     deployment: Deployment, task_id: Any, *build_ids: Any
 ) -> list[dict[str, Any]]:
