@@ -585,6 +585,165 @@ async def test_a_release_leaves_the_wake_row_unlocked_for_flaggers(h: Harness):
 
 
 # --------------------------------------------------------------------------
+# A clear never passes a flag (STA-122)
+# --------------------------------------------------------------------------
+
+
+async def _pid(s: Any) -> int:
+    return await s.scalar(text("SELECT pg_backend_pid()"))
+
+
+async def _blocked_by(h: Harness, waiter: int, holder: int) -> None:
+    """Wait until backend ``waiter`` is waiting on a lock ``holder`` holds:
+    the proof that two sessions actually interleaved at the lock."""
+    for _ in range(250):
+        async with h.sf() as probe:
+            blocking = await probe.scalar(
+                text("SELECT pg_blocking_pids(:p)"), {"p": waiter}
+            )
+        if holder in blocking:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"backend {waiter} never waited on backend {holder}")
+
+
+async def _two_holders(h: Harness) -> tuple[UUID, Any, Any, UUID]:
+    """Build ``b`` (reactive, unflagged) holds T; a source build's plan runs
+    T. Returns (b, the source plan, T, the running execution)."""
+    deployment = await h.new_deployment()
+    t = item("T")
+    _, plan_a = await h.planned([t], [t], deployment_id=deployment)
+    build_b, _ = await h.planned([t], [t], deployment_id=deployment)
+    await _reactive(h, build_b)
+    execution = await h.start(plan_a.id, t)
+    await _clear(h, build_b)
+    return build_b, plan_a, t, execution
+
+
+async def test_a_flag_arriving_mid_clear_waits_for_it_and_survives(h: Harness):
+    """The issue's interleaving: a tick's clear holds the wake row when a
+    transition that is news for the build flags it. The flagger used to
+    ``SKIP LOCKED`` past the row and the clear then erased nothing it could
+    see, so the wake-up was lost. Now it waits for the clear (shown by
+    ``pg_blocking_pids``) and the flag it sets afterwards survives."""
+    build_b, plan_a, t, execution = await _two_holders(h)
+
+    async def complete(pids: list[int]) -> None:
+        async with h.sf() as s:
+            pids.append(await _pid(s))
+            await transitions.apply_member_transition(
+                s,
+                ENV,
+                plan_id=plan_a.id,
+                task_id=t.task_id,
+                transition=Transition.complete(execution),
+            )
+
+    async with h.sf() as clearing:
+        async with clearing.begin():
+            clearer = await _pid(clearing)
+            await wakeups._clear_flag(clearing, ENV, build_b)
+            pids: list[int] = []
+            flagging = asyncio.create_task(complete(pids))
+            while not pids:
+                await asyncio.sleep(0.01)
+            await _blocked_by(h, pids[0], clearer)
+            assert not flagging.done()
+    await asyncio.wait_for(flagging, 5)
+    assert await _flagged(h, build_b)
+
+
+async def test_a_clear_waits_for_a_flagger_that_skipped_the_row(h: Harness):
+    """The class behind the issue: a flagger ``SKIP LOCKED``s past a row
+    another writer holds (here as ``wake-candidates`` would, on a flagged
+    row), that writer commits, and a tick clears and reads the frontier
+    while the flagger is still in flight. The clear must not pass it: it
+    waits on the flagger's ``KEY SHARE``, so the news is committed before
+    the frontier read. A further flagger arriving while the clear waits is
+    not queued behind it."""
+    build_b, plan_a, t, execution = await _two_holders(h)
+    await _svc(h, wakeups.notify, build_b)  # flagged, committed
+
+    async with h.sf() as flagging:
+        async with flagging.begin():
+            flagger = await _pid(flagging)
+            async with h.sf() as holder:
+                async with holder.begin():
+                    await holder.execute(
+                        text(
+                            "SELECT 1 FROM build_wake WHERE build_id = :b"
+                            " FOR NO KEY UPDATE"
+                        ),
+                        {"b": build_b},
+                    )
+                    await asyncio.wait_for(
+                        transitions.transition_task(
+                            flagging,
+                            ENV,
+                            task_pk=(await h.task(t))["id"],
+                            plan_id=plan_a.id,
+                            transition=Transition.complete(execution),
+                            now=utc_now(),
+                        ),
+                        5,
+                    )
+            pids: list[int] = []
+
+            async def clear() -> None:
+                async with h.sf() as s:
+                    pids.append(await _pid(s))
+                    await wakeups.clear_notify(s, ENV, build_b)
+
+            clearing = asyncio.create_task(clear())
+            while not pids:
+                await asyncio.sleep(0.01)
+            await _blocked_by(h, pids[0], flagger)
+            # A new KEY SHARE locker is granted past the waiting clear.
+            async with h.sf() as other:
+                async with other.begin():
+                    await asyncio.wait_for(
+                        other.execute(
+                            text(
+                                "SELECT 1 FROM build_wake WHERE build_id = :b"
+                                " FOR KEY SHARE"
+                            ),
+                            {"b": build_b},
+                        ),
+                        5,
+                    )
+            assert not clearing.done()
+    await asyncio.wait_for(clearing, 5)
+    assert (await h.task(t))["status"] == "completed"
+    assert not await _flagged(h, build_b)
+
+
+async def test_notify_re_asserts_a_flag_cleared_between_its_transactions(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    """``notify`` holds the wake row in its second transaction, so a flagger
+    skips it there; that is safe only if the row is left flagged. A tick
+    clearing between the two transactions must therefore not leave it
+    unflagged."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    original = wakeups._locked_wake
+    calls = 0
+
+    async def locked_wake(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        if not kwargs.get("exclusive"):  # notify's own, not the clear's
+            calls += 1
+            if calls == 2:
+                await _clear(h, build)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(wakeups, "_locked_wake", locked_wake)
+    state = await _svc(h, wakeups.notify, build)
+    assert calls == 2 and state.needs_tick
+    assert await _flagged(h, build)
+
+
+# --------------------------------------------------------------------------
 # The scheduler lease
 # --------------------------------------------------------------------------
 

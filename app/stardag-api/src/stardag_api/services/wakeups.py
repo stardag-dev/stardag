@@ -26,11 +26,45 @@ so a flagger — itself inside a task transition — could neither wait for
 the build row (the lock order is build → task; waiting would deadlock
 against the claim's task lock) nor ``SKIP LOCKED`` it without losing the
 wake-up of every build with a claim in flight. Flagging reads ``build``
-without a lock and locks only ``build_wake`` rows, ``FOR NO KEY UPDATE SKIP
-LOCKED`` in build-id order; those rows are locked only by other flaggers,
-``notify`` and ``wake-candidates``, each for one short statement and none
-while waiting on anything else, so a skipped row is one whose flag another
-writer is setting at that moment.
+without a lock and locks only ``build_wake`` rows.
+
+**The invariant: news is seen by the frontier read that follows a clear,
+or its flag survives the clear.** The tick clears the flag right before it reads the frontier,
+so the one thing that can lose news is a clear that commits while a
+transition that is news for the build is still in flight: the frontier read
+misses the transition, and the clear leaves no flag. The flagger's
+transaction can run on long after it flags (more transitions, the
+``release_claims`` and ``skip_blocked`` loops), so the clear must wait for
+it, and it must hold something the clear waits for even when it writes
+nothing. So the lockers of a wake row, and their modes, are:
+
+- **Flaggers** (:func:`flag_after_transition`): every target row ``FOR KEY
+  SHARE``, waited for and held until commit; then ``needs_tick_at`` set on
+  the still-unflagged ones ``FOR NO KEY UPDATE SKIP LOCKED``, in build-id
+  order. Flaggers never wait for each other (``KEY SHARE`` is compatible
+  with every mode but ``FOR UPDATE``), which matters because a flagger
+  holds what it writes until commit and may wait on task rows meanwhile.
+- **clear_notify**: ``FOR UPDATE``, the one mode that conflicts with ``KEY
+  SHARE``, for one statement. It waits for every flagger in flight, written
+  or skipped, so their news is committed before the frontier read; a
+  flagger arriving meanwhile waits for it (it waits on nothing once
+  granted) and then flags the cleared row afresh. New ``KEY SHARE`` lockers
+  are not queued behind a *waiting* clear, so this adds no wait chain
+  between flaggers.
+- **notify**: ``FOR NO KEY UPDATE`` in both transactions, and each leaves a
+  RUNNING build flagged (the second re-asserts a flag a tick cleared in
+  between).
+- **wake-candidates**: ``FOR NO KEY UPDATE SKIP LOCKED`` on flagged rows,
+  which it leaves flagged.
+- A build delete cascades the row away; nothing flags a deleted build.
+
+So a flagger's ``SKIP LOCKED`` skips only a row whose holder leaves it
+flagged, and no clear can pass the flagger before it commits. Two residual
+windows remain, both far narrower than the clear's own: a skipping
+flagger's holder that rolls back, and a ``wake-candidates`` whose snapshot
+predates a clear committing on a row it then locks (Postgres keeps the lock
+on a row the re-check drops). Either costs one wake-up, recovered by the
+next flag, ``stardag builds tick`` or the watchdog (STA-122).
 
 The scheduler lease is two owner-checked columns on ``build``: at most one
 tick drives a build; a lapsed lease is taken over by the next acquire.
@@ -130,13 +164,37 @@ async def _flag(
             Build.reactive_app_name.is_not(None),
         )
         .order_by(BuildWake.build_id)
-        .with_for_update(of=BuildWake, key_share=True, skip_locked=True)
     )
     if exclude_build_id is not None:
         targets = targets.where(BuildWake.build_id != exclude_build_id)
+    # 1. Hold every target ``FOR KEY SHARE`` until commit, waited for. Only a
+    #    clear conflicts with it (``FOR UPDATE``, one statement, waiting on
+    #    nothing once granted), so no clear can pass this transaction before
+    #    its news is committed, whether or not step 2 writes the row.
+    held = list(
+        (
+            await session.scalars(
+                targets.with_for_update(of=BuildWake, read=True, key_share=True)
+            )
+        ).all()
+    )
+    if not held:
+        return
+    # 2. Set the flag where it is unset, ``SKIP LOCKED``: flaggers hold the
+    #    rows they write until commit and may wait on task rows after this,
+    #    so they must not wait for each other. A row skipped here is held by
+    #    a writer that leaves it flagged (module docstring), and an already
+    #    flagged row needs no write: step 1 keeps any clear off it until this
+    #    transaction ends.
+    unflagged = (
+        select(BuildWake.build_id)
+        .where(BuildWake.build_id.in_(held), BuildWake.needs_tick_at.is_(None))
+        .order_by(BuildWake.build_id)
+        .with_for_update(key_share=True, skip_locked=True)
+    )
     await session.execute(
         update(BuildWake)
-        .where(BuildWake.build_id.in_(targets))
+        .where(BuildWake.build_id.in_(unflagged))
         # Kept from the first flag until a tick clears it: the flag's age is
         # how long the news has waited, which a re-flag must not reset (the
         # stall count and the oldest-first hand-out both read it).
@@ -309,17 +367,22 @@ async def _locked_build(
 
 
 async def _locked_wake(
-    session: AsyncSession, environment_id: UUID, build_id: UUID
+    session: AsyncSession,
+    environment_id: UUID,
+    build_id: UUID,
+    *,
+    exclusive: bool = False,
 ) -> BuildWake:
-    """The build's wake row ``FOR NO KEY UPDATE`` (waited for: its holders
-    hold it for one statement and wait on nothing)."""
+    """The build's wake row ``FOR NO KEY UPDATE``, or ``FOR UPDATE`` if
+    ``exclusive`` (a clear: it also waits out every flagger in flight, which
+    holds the row ``FOR KEY SHARE`` until its commit; module docstring)."""
     wake = await session.scalar(
         select(BuildWake)
         .where(
             BuildWake.environment_id == environment_id,
             BuildWake.build_id == build_id,
         )
-        .with_for_update(key_share=True)
+        .with_for_update(key_share=not exclusive)
         .execution_options(populate_existing=True)
     )
     if wake is None:
@@ -366,6 +429,16 @@ async def notify(
         # then build row: nothing takes the two the other way round (the
         # lease writers never touch the wake row; flaggers SKIP LOCKED).
         build = await _shared_build(session, environment_id, build_id)
+        if (
+            running
+            and build.status == BuildStatus.RUNNING
+            and wake.needs_tick_at is None
+        ):
+            # Re-asserted: a tick may have cleared the flag between the two
+            # transactions, and a flagger finding this row held now skips it
+            # on the strength of its holder leaving it flagged (module
+            # docstring). At worst one spare tick pass.
+            wake.needs_tick_at = utc_now()
         live = _lease_live(build, utc_now())
         if stamped and wake.tick_requested_at == now:
             if live:
@@ -398,11 +471,24 @@ async def clear_notify(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> NotifyState:
     """Clear the flag: a tick does this right before computing the frontier,
-    so a notify landing mid-tick re-sets it and is never lost."""
+    so a notify landing mid-tick re-sets it and is never lost.
+
+    The wake row is taken ``FOR UPDATE``, the one mode a flagger's ``FOR KEY
+    SHARE`` conflicts with: the clear waits for every flagger of this build
+    still in flight, so their news is committed before the tick reads the
+    frontier, and a flagger arriving meanwhile waits for the clear and then
+    sets the flag afresh (STA-122). Idempotent, so safe to re-run."""
     async with transaction(session):
-        wake = await _locked_wake(session, environment_id, build_id)
-        wake.needs_tick_at = None
+        await _clear_flag(session, environment_id, build_id)
     return NotifyState(build_id=build_id, needs_tick=False)
+
+
+async def _clear_flag(
+    session: AsyncSession, environment_id: UUID, build_id: UUID
+) -> None:
+    """:func:`clear_notify`'s statement, inside the caller's transaction."""
+    wake = await _locked_wake(session, environment_id, build_id, exclusive=True)
+    wake.needs_tick_at = None
 
 
 @dataclass(frozen=True)
