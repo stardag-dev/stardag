@@ -164,6 +164,22 @@ class UnhashableMetadataTask(sd.Task[int]):
         self._save(len(self.counts))
 
 
+@dataclasses.dataclass(eq=False)
+class IdentityConfig:
+    retries: int = 3
+
+
+class UntouchedEdgeDefaultsTask(sd.Task[int]):
+    """Untouched excluded defaults that compare unequal to their rebuild
+    without anything being lost."""
+
+    values: list[float] = Field(default_factory=lambda: [float("nan")], exclude=True)
+    config: IdentityConfig = Field(default_factory=IdentityConfig, exclude=True)
+
+    def run(self) -> None:
+        self._save(1)
+
+
 class ParentTask(sd.Task[int]):
     upstream: sd.TaskLoads[int]
 
@@ -483,6 +499,16 @@ class TestNotRefused:
         task = EqualOpaqueDefaultsTask()
         assert plan_rehydration([task], PATTERNS).reconstructable == (task,)
         assert _state_warnings(caplog) == []
+
+    def test_nested_nan_and_identity_equality_are_not_refused(self, caplog):
+        """A fresh NaN in a rebuilt list, and an ``eq=False`` dataclass, are
+        unequal without being different: warned, never refused."""
+        task = UntouchedEdgeDefaultsTask()
+
+        assert plan_rehydration([task], PATTERNS).reconstructable == (task,)
+        warnings = _state_warnings(caplog)
+        assert any("UntouchedEdgeDefaultsTask.values" in w for w in warnings)
+        assert any("UntouchedEdgeDefaultsTask.config" in w for w in warnings)
 
     def test_a_failing_detector_warns_and_passes(self, caplog, monkeypatch):
         def broken(original, rebuilt):

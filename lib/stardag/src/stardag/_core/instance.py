@@ -397,7 +397,12 @@ def _compare(value: Any, reference: Callable[[], Any]) -> bool | None:
 def _is_plain_data(value: Any, _seen: set[int] | None = None) -> bool:
     """None, str, int, float, bool or bytes; or a list, tuple, dict, set or
     frozenset of those; or a pydantic model or dataclass made of those.
-    A cycle is not plain data."""
+
+    Not plain, because equality cannot decide on it: a NaN anywhere (it is
+    unequal to itself, so a fresh one in a rebuilt container is no loss), a
+    dataclass with identity equality (``eq=False``), and a cycle."""
+    if type(value) is float:
+        return not math.isnan(value)
     if type(value) in _LEAF_TYPES:
         return True
     seen = set() if _seen is None else _seen
@@ -427,6 +432,8 @@ def _is_plain_data(value: Any, _seen: set[int] | None = None) -> bool:
                 and all(_is_plain_data(v, seen) for v in extra.values())
             )
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            if type(value).__eq__ is object.__eq__:
+                return False
             return all(
                 _is_plain_data(getattr(value, f.name, None), seen)
                 for f in dataclasses.fields(value)
