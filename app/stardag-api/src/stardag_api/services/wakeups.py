@@ -46,9 +46,10 @@ nothing. So the lockers of a wake row, and their modes, are:
   holds what it writes until commit and may wait on task rows meanwhile.
 - **clear_notify**: ``FOR UPDATE``, the one mode that conflicts with ``KEY
   SHARE``, for one statement, waited for at most
-  :data:`CLEAR_LOCK_TIMEOUT_MS`. Granted, it clears only with no flagger
-  of the build in flight, written or skipped, so their news is committed
-  before the frontier read; a flagger arriving meanwhile waits for it (it
+  :data:`CLEAR_LOCK_TIMEOUT_MS` in all (``statement_timeout``, since
+  ``lock_timeout`` alone restarts with each new holder). Granted, it
+  clears only with no flagger of the build in flight, written or skipped,
+  so their news is committed before the frontier read; a flagger arriving meanwhile waits for it (it
   waits on nothing once granted) and then flags the cleared row afresh.
   Not granted in time, it leaves the flag set, which costs the tick one
   spare pass. The bound is required, not tuning: Postgres grants a ``KEY
@@ -139,8 +140,9 @@ WAKE_HANDOUT_WINDOW = timedelta(seconds=120)
 #: (module docstring): long enough for the brief holders, short against a
 #: tick's request timeout.
 CLEAR_LOCK_TIMEOUT_MS = 200
-#: Postgres ``lock_not_available``: a ``lock_timeout`` expired.
-_LOCK_NOT_AVAILABLE = "55P03"
+#: The Postgres errors of an expired ``lock_timeout`` (``lock_not_available``)
+#: and ``statement_timeout`` (``query_canceled``).
+_CLEAR_TIMED_OUT = frozenset({"55P03", "57014"})
 #: Upper bound on one wake-candidates response.
 MAX_WAKE_CANDIDATES = 20
 #: A hand-out of a build flagged longer ago than this is logged as a delayed
@@ -496,12 +498,16 @@ async def clear_notify(
     re-run."""
     try:
         async with transaction(session):
-            await session.execute(
-                text(f"SET LOCAL lock_timeout = '{CLEAR_LOCK_TIMEOUT_MS}ms'")
-            )
+            # Both: ``lock_timeout`` bounds each lock wait, and a row whose
+            # ``KEY SHARE`` holders overlap renews the wait for every new
+            # one, so only ``statement_timeout`` bounds the clear as a whole.
+            for setting in ("lock_timeout", "statement_timeout"):
+                await session.execute(
+                    text(f"SET LOCAL {setting} = '{CLEAR_LOCK_TIMEOUT_MS}ms'")
+                )
             await _clear_flag(session, environment_id, build_id)
     except DBAPIError as exc:
-        if _sqlstate(exc) != _LOCK_NOT_AVAILABLE:
+        if _sqlstate(exc) not in _CLEAR_TIMED_OUT:
             raise
         return NotifyState(build_id=build_id, needs_tick=True)
     return NotifyState(build_id=build_id, needs_tick=False)

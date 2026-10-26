@@ -741,6 +741,61 @@ async def test_a_clear_returns_promptly_while_a_flagger_holds_the_row(h: Harness
     assert not await _flagged(h, build)
 
 
+async def test_a_clear_is_bounded_under_overlapping_flaggers(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    """``lock_timeout`` bounds each lock wait, not the clear: holders that
+    overlap, each leaving before the timeout while the next has already
+    been granted past the queued clear, would renew its wait forever. The
+    clear's whole statement is bounded, so it still gives up in time."""
+    monkeypatch.setattr(wakeups, "CLEAR_LOCK_TIMEOUT_MS", 400)
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _svc(h, wakeups.notify, build)
+    stop = asyncio.Event()
+
+    async def hold(release: asyncio.Event, granted: asyncio.Event) -> None:
+        async with h.sf() as s:
+            async with s.begin():
+                await s.execute(
+                    text("SELECT 1 FROM build_wake WHERE build_id = :b FOR KEY SHARE"),
+                    {"b": build},
+                )
+                granted.set()
+                await release.wait()
+
+    async def rotate() -> None:
+        # Always one holder; each is released 150 ms after the next one is
+        # granted, which is shorter than the lock timeout.
+        release, granted = asyncio.Event(), asyncio.Event()
+        current = asyncio.create_task(hold(release, granted))
+        await granted.wait()
+        while not stop.is_set():
+            await asyncio.sleep(0.15)
+            nxt_release, nxt_granted = asyncio.Event(), asyncio.Event()
+            nxt = asyncio.create_task(hold(nxt_release, nxt_granted))
+            await asyncio.wait_for(nxt_granted.wait(), 5)
+            release.set()
+            await current
+            release, current = nxt_release, nxt
+        release.set()
+        await current
+
+    rotating = asyncio.create_task(rotate())
+    try:
+        await asyncio.sleep(0.2)
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        state = await asyncio.wait_for(_svc(h, wakeups.clear_notify, build), 10)
+        elapsed = loop.time() - began
+    finally:
+        stop.set()
+        await rotating
+    assert state.needs_tick
+    assert elapsed < 0.4 + 1.0, elapsed
+    assert await _flagged(h, build)
+
+
 async def test_a_flagger_skips_an_unflagged_row_its_holder_is_flagging(
     h: Harness,
 ):
