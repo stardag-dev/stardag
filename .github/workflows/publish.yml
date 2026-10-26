@@ -25,6 +25,12 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]*"
       - "v[0-9]+.[0-9]+.[0-9]+rc[0-9]+"
 
+# Default for every job: read-only. The jobs that publish widen it for
+# themselves below, so `build` — which runs a third-party build backend over
+# the checkout — holds nothing it could use to write.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build distribution
