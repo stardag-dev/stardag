@@ -2,15 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install uv
-RUN pip install uv
-
 # Copy everything needed for install
-COPY pyproject.toml .
+COPY pyproject.toml uv.lock install-locked.sh ./
 COPY src/ src/
 
-# Install the package
-RUN uv pip install --system .
+# Install the package, dependencies pinned and hash-checked from uv.lock
+RUN sh install-locked.sh .
 
 # Copy alembic configuration and migrations
 COPY alembic.ini .

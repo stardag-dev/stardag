@@ -6,6 +6,26 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **Fixed: a class-based task that cloudpickle takes by value could not be
+  unpickled** (STA-133). cloudpickle pickles a class it cannot import by
+  name (one defined in `__main__` or in a function) by value, and rebuilds it
+  as an empty class before setting its methods. The check that a task class
+  implements `run()` or `run_aio()` ran at class creation, so it rejected
+  that empty class with `TaskImplementationError`, and such a task could not
+  cross a Modal call, e.g. a worker returning yielded dependencies to a
+  hybrid driver. Present since v0.1.0. **Behaviour change:** a task class
+  implementing neither method now raises `TaskImplementationError` when it is
+  first constructed (or validated) rather than when it is defined.
+- **Fixed: `model_copy(deep=True, update=...)` failed on pydantic 2.14 for a
+  task whose cached value cannot be deep-copied.** Since 2.14, pydantic
+  deep-copies such a copy field by field instead of through `__deepcopy__`,
+  so the cache was no longer dropped first and a lock or client held in a
+  `functools.cached_property` raised `TypeError` once it had been read. The
+  cache is now dropped before pydantic copies anything, on every pydantic
+  version.
+
 ### Server
 
 - **Fixed: a v2 write that Postgres aborted as a deadlock victim was a

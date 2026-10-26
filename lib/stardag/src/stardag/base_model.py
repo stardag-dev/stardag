@@ -230,7 +230,14 @@ class StardagBaseModel(BaseModel):
         ``update=`` would report its source's identity once that had been
         read. The copy recomputes them from its own fields instead.
         """
-        copied = super().model_copy(update=update, deep=deep)
+        source = self
+        if deep:
+            # Strip the cache before pydantic deep-copies anything: since 2.14
+            # ``deep=True`` with ``update=`` copies field by field rather than
+            # through ``__deepcopy__``, so the override below is not reached.
+            source = self.__copy__()
+            _drop_cached_properties(source)
+        copied = super(StardagBaseModel, source).model_copy(update=update, deep=deep)
         _drop_cached_properties(copied)
         return copied
 
