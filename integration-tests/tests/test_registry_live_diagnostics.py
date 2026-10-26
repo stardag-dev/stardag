@@ -797,3 +797,130 @@ def test_a_wrapped_body_cut_short_keeps_its_byte_counts(
     facts = json.loads(next(tmp_path.glob("timeout-*.json")).read_text())
     assert facts["message"] == "the lease call failed"
     assert diagnose.body_cut_short(facts) == (0, 2560)
+
+
+# --- a transport timeout during collection (STA-97) -------------------------
+
+
+def _guard_timing_out(monkeypatch: pytest.MonkeyPatch) -> BaseException:
+    """What the real guard raises when every one of its attempts times out.
+
+    The guard's own code, not a reconstruction of it: ``refuse`` is
+    ``pytest.fail`` called from inside the ``except`` that caught the last
+    attempt's timeout, and whether the discriminator still finds that
+    timeout through ``__context__`` is the whole question.
+    """
+    from stardag_integration_tests.registry_live import _guard
+
+    class _Client:
+        def get(self, url, **kwargs):
+            raise httpx.ConnectTimeout("timed out", request=httpx.Request("GET", url))
+
+    class _Registry:
+        api_url = "https://registry.invalid"
+        environment_id = "eid"
+        client = _Client()
+
+    monkeypatch.setattr(_guard.time, "sleep", lambda seconds: None)
+    with pytest.raises(pytest.fail.Exception) as raised:
+        _guard._assert_registry_answers(
+            _Registry(),  # type: ignore[arg-type]
+            "https://registry.invalid",
+            lambda message: pytest.fail(message),
+        )
+    return raised.value
+
+
+def test_the_guard_giving_up_is_a_transport_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = _guard_timing_out(monkeypatch)
+    assert isinstance(transport_timeout(error), httpx.ConnectTimeout)
+
+
+def _registry_live_conftest():
+    """The registry-live tier's conftest, loaded as a plain module.
+
+    It is not on this test root's conftest path, and importing it does
+    nothing but define hooks: ``pytest_configure`` is what reads a stack's
+    coordinates, and it is not called here.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).parents[1] / "tests_registry_live" / "conftest.py"
+    spec = importlib.util.spec_from_file_location("_registry_live_conftest", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _CollectReport:
+    """The parts of a ``CollectReport`` the hook reads: pytest's own
+    ``pytest_make_collect_report`` leaves the ``CallInfo`` on it as
+    ``call``."""
+
+    def __init__(self, nodeid: str, error: BaseException | None, *, call=True):
+        self.nodeid = nodeid
+        self.failed = True
+        if call:
+            excinfo = None if error is None else type("E", (), {"value": error})()
+            self.call = type("C", (), {"excinfo": excinfo})()
+
+
+def test_a_collection_timeout_is_recorded_and_tagged_for_ci(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same marker line, record and sidecar, under the phase CI refuses.
+
+    Counted like an occurrence in a scenario, and tagged ``[collect]``,
+    which is what the workflow keys on to *not* retry: the guard already
+    retried four times.
+    """
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        _diagnostics,
+        "probe_boot",
+        lambda *a, **k: BootProbe(
+            answered=True, elapsed=0.3, boot_id="boot-one", error=None
+        ),
+    )
+    conftest = _registry_live_conftest()
+    monkeypatch.setattr(conftest, "_deployment", _deployment())
+    nodeid = "tests_registry_live/test_x.py"
+
+    conftest._classify_collection(
+        _CollectReport(nodeid, _guard_timing_out(monkeypatch))
+    )
+
+    marker = (tmp_path / TIMEOUT_MARKER_NAME).read_text().splitlines()
+    assert marker == [f"{nodeid} [collect] -- ConnectTimeout -- {CONTAINER_SERVING}"]
+    assert not (tmp_path / NON_TIMEOUT_MARKER_NAME).exists()
+    (sidecar,) = tmp_path.glob("timeout-collect-*.json")
+    facts = json.loads(sidecar.read_text())
+    assert facts["phase"] == "collect"
+    assert facts["request_path"].endswith("/builds")
+    record = next(tmp_path.glob("timeout-collect-*.txt")).read_text()
+    assert "never collected" in record
+
+
+def test_collection_failures_that_are_not_timeouts_are_left_alone(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An import error is pytest's to report, and a report that carries no
+    ``CallInfo`` -- as every one does once ``collect_one_node`` has popped
+    it -- is not guessed at."""
+    monkeypatch.setenv("STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR", str(tmp_path))
+    conftest = _registry_live_conftest()
+    monkeypatch.setattr(conftest, "_deployment", _deployment())
+
+    conftest._classify_collection(
+        _CollectReport("tests_registry_live/a.py", _raised(ImportError("nope")))
+    )
+    timeout = _raised(httpx.ConnectTimeout("timed out", request=_REQUEST))
+    conftest._classify_collection(
+        _CollectReport("tests_registry_live/b.py", timeout, call=False)
+    )
+
+    assert list(tmp_path.iterdir()) == []

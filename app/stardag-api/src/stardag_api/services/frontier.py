@@ -48,7 +48,7 @@ from stardag_api.models.base import utc_now
 from stardag_api.services.plans import ClosureResult, close_plan
 from stardag_api.services.registration import lock_build
 from stardag_api.services.transition_types import ACTIONABLE_STATUSES
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 __all__ = [
     "ACTIONABLE_STATUSES",
@@ -101,6 +101,7 @@ class Frontier:
     reactive_tick_kwargs: dict[str, Any] | None = None
 
 
+@retry_on_deadlock
 async def get_frontier(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> Frontier:

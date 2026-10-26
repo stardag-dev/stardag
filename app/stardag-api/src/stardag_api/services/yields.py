@@ -68,7 +68,7 @@ from stardag_api.services.transitions import (
     member_task_pk,
     transition_task,
 )
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,7 @@ class YieldResult:
         )
 
 
+@retry_on_deadlock
 async def yield_batch(
     session: AsyncSession,
     environment_id: UUID,

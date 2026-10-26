@@ -31,7 +31,7 @@ from stardag_api.models import EnvironmentConcurrencyLimit, Plan, Task, TaskLimi
 from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.models.enums import TaskStatus
 from stardag_api.services.errors import NotFound
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,7 @@ class LimitView:
     holders: list[HolderView] | None = None
 
 
+@retry_on_deadlock
 async def set_limit(
     session: AsyncSession, environment_id: UUID, key: str, max_concurrent: int
 ) -> LimitView:
@@ -74,6 +75,7 @@ async def set_limit(
     return LimitView(key=key, max_concurrent=max_concurrent)
 
 
+@retry_on_deadlock
 async def delete_limit(session: AsyncSession, environment_id: UUID, key: str) -> None:
     """Remove the cap on ``key``; 404 ``unknown_limit`` when there is none."""
     async with transaction(session):
