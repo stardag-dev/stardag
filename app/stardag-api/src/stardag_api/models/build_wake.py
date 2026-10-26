@@ -10,10 +10,10 @@ while it holds the task row (lock order build → task), and flagging runs
 inside a task transition, holding another task row. On the build row a
 flagger could only ``SKIP LOCKED`` (waiting would invert the lock order and
 deadlock against the claim's task lock), so every build with a claim in
-flight silently lost its wake-up until the watchdog. ``build_wake`` rows are
-locked only by flaggers, ``notify`` and ``wake-candidates``, none of which
-holds a lock anything here waits on, so ``SKIP LOCKED`` on them skips only
-a build whose flag another writer is setting at that moment.
+flight silently lost its wake-up until the watchdog. Who locks a
+``build_wake`` row, in which mode, and why a flagger's ``SKIP LOCKED`` here
+loses nothing (a clear waits out every flagger in flight) is the module
+docstring of ``services/wakeups.py``.
 """
 
 from __future__ import annotations

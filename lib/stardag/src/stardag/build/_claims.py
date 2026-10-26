@@ -40,7 +40,7 @@ def claim_ttl_seconds(task: BaseTask, task_executor: TaskExecutorABC) -> int | N
     try:
         timeout = task_executor.execution_timeout_seconds(task)
     except Exception:
-        logger.debug(
+        logger.warning(
             f"Execution timeout resolution failed for task {task.id}; "
             "claiming with the registry's default TTL.",
             exc_info=True,

@@ -134,11 +134,25 @@ class ModalTaskExecutor(TaskExecutorABC):
                 TTL recorded with every start (see
                 :meth:`execution_timeout_seconds`); an absent worker simply
                 yields no timeout and the registry's default applies.
+                A detached executor constructed without it (None, as
+                opposed to an empty mapping) logs a warning: a detached
+                claim is never renewed, so with the registry's default TTL
+                a task running longer than that can be taken over by
+                another build while it is still running.
         """
         self.modal_app_name = modal_app_name
         self.worker_selector = worker_selector
         self.detached = detached
         self.worker_timeouts = dict(worker_timeouts or {})
+        if detached and worker_timeouts is None:
+            logger.warning(
+                f"ModalTaskExecutor for app {modal_app_name!r} is detached but "
+                "was given no worker_timeouts, so its executions claim with "
+                "the registry's default TTL (one hour) and are never renewed: "
+                "a task running longer can be taken over by another build "
+                "while it still runs. Pass the workers' Modal timeouts as "
+                "ModalTaskExecutor(worker_timeouts={worker_name: seconds})."
+            )
         self.worker_reports_lifecycle = worker_reports_lifecycle
         # Reactive scheduling: forward the app name + reactive flag so
         # workers wake the scheduler tick. That is the whole reactive

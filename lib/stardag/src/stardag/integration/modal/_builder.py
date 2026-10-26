@@ -112,12 +112,22 @@ class Builder(BuildFunction):
         worker_selector: WorkerSelector,
         app_name: str,
         build_kwargs: dict[str, typing.Any] | None = None,
+        *,
+        worker_timeouts: dict[str, int] | None = None,
     ) -> BuildSummary | None:
         """Core build logic to orchestrate the DAG build.
 
         The build plans under this container's own deployment
         (``STARDAG_DEPLOYMENT_ID``); its settings arrive in ``build_kwargs``
         and the engine applies them for the build's duration.
+
+        ``worker_timeouts`` is the per-worker Modal ``timeout`` declared in
+        the app's ``worker_settings``, passed by the deployed ``build``
+        function. It reaches the :class:`ModalTaskExecutor`, which derives
+        each detached execution's claim TTL from it (timeout plus grace)
+        and tells the worker its own timeout. None means the caller did
+        not supply it, and the executor warns that claims fall back to the
+        registry's default TTL.
         """
         resume_build_id = (build_kwargs or {}).get("resume_build_id")
         try:
@@ -125,6 +135,7 @@ class Builder(BuildFunction):
                 modal_app_name=app_name,
                 worker_selector=worker_selector,
                 detached=getattr(self, "detached", True),
+                worker_timeouts=worker_timeouts,
             )
         except BaseException as e:
             # A trigger-created build is RUNNING from the moment it was

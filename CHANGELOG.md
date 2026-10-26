@@ -48,6 +48,38 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unchanged: such a task is still sent to Modal by value, and the payload now
   shares one rehydration round trip with its stability check.
 
+- **Fixed: the deployed resident builder claimed detached executions with
+  the registry's default one-hour TTL** (STA-134). `Builder` constructed its
+  `ModalTaskExecutor` without the app's worker timeouts, so a non-reactive
+  build (`build_spawn`, `build_remote`, `build_trigger(reactive=False)`)
+  never derived a claim TTL from the worker's `timeout`, and the worker never
+  learned its own timeout. A task running longer than an hour lost its claim
+  while still running: another build could take it over and run it a second
+  time, and the original's completion was then refused. The deployed `build`
+  function now passes the worker timeouts to any build function that declares
+  a `worker_timeouts` keyword (the default `Builder` does), so resident
+  builds claim with timeout plus grace, as reactive ones do. A detached
+  `ModalTaskExecutor` constructed without `worker_timeouts` now logs a
+  warning.
+
+### Server
+
+- **Fixed: a wake-up could be lost to a tick's clear of the flag**
+  (STA-122). A tick clears its build's flag (`DELETE /builds/{id}/notify`)
+  right before it reads the frontier. A task transition that flagged the
+  build while the clear held its `build_wake` row skipped the row
+  (`SKIP LOCKED`), and if that transition committed after the frontier read
+  the tick saw neither the news nor a flag. The same loss followed any skip
+  that a clear and a frontier read overtook before the flagger committed.
+  Flaggers now hold every target row `FOR KEY SHARE` until commit and the
+  clear takes the row `FOR UPDATE`, so a clear never passes a flagger in
+  flight and a flagger arriving mid-clear waits for it, then flags the
+  cleared row. The clear waits at most 200 ms for the lock; if it is not
+  granted it leaves the flag set (`needs_tick: true` in its response),
+  which costs the tick one spare pass. `notify` re-asserts the flag in its
+  second transaction, so every row a flagger skips is left flagged. No SDK
+  change, no migration.
+
 ## [0.28.0] — 2026-10-08
 
 SDK `0.28.0` and server `server-v0.7.0`. Not breaking for SDK users, but a

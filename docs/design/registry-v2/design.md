@@ -968,10 +968,18 @@ scheduler lease (its own columns on `build`, no longer on the lock table)
 and the watchdog carry over. Concretely: every status change made by
 `transition_task()` sets `needs_tick_at` on the other RUNNING reactive
 builds whose active plan has a non-excluded member for the task (their
-`build_wake` rows `FOR NO KEY UPDATE SKIP LOCKED`, ordered by build id; the
+`build_wake` rows: all of them `FOR KEY SHARE` until commit, then the
+unflagged ones `FOR NO KEY UPDATE SKIP LOCKED`, ordered by build id; the
 build row is read, never locked, so a claim in flight on the build does not
-hide it — only a concurrent flagger, `notify` or `wake-candidates` holding
-the same wake row does, and that writer is setting the flag); a move out of RUNNING also
+hide it). The tick's clear (`DELETE /builds/{id}/notify`) takes the wake row
+`FOR UPDATE`, the one mode that conflicts with `KEY SHARE`, so it never
+passes a flagger of the build still in flight, and a flag is either seen by
+the frontier read that follows the clear or survives it. The clear waits at
+most 200 ms for that lock and otherwise leaves the flag set (one spare tick
+pass), since a `KEY SHARE` is granted past a queued `FOR UPDATE` and
+overlapping flaggers would starve it; a flagger skips only a
+row held by a concurrent flagger, `notify` or `wake-candidates`, each of
+which leaves it flagged (STA-122). A move out of RUNNING also
 flags those whose active plan has an actionable member with a
 `task_limit_key` on one of the task's keys. `POST /builds/{id}/notify` flags
 the caller's RUNNING build and reads the lease after the flag's commit;

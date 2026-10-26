@@ -18,7 +18,7 @@ write that can change a build's frontier. So the wake-up is split in two:
   handed out once per :data:`WAKE_HANDOUT_WINDOW` by stamping
   ``tick_requested_at``, so N concurrent askers produce one spawn. The
   stamp lasts until the window lapses or the tick it spawned releases its
-  lease, whichever is first (:func:`release_lease`).
+  lease, whichever is first (``scheduler_lease.release_lease``).
 
 The flags live on ``build_wake`` (one row per build), not on ``build``: a
 claiming start holds its build row ``FOR SHARE`` while it holds a task row,
@@ -26,14 +26,63 @@ so a flagger — itself inside a task transition — could neither wait for
 the build row (the lock order is build → task; waiting would deadlock
 against the claim's task lock) nor ``SKIP LOCKED`` it without losing the
 wake-up of every build with a claim in flight. Flagging reads ``build``
-without a lock and locks only ``build_wake`` rows, ``FOR NO KEY UPDATE SKIP
-LOCKED`` in build-id order; those rows are locked only by other flaggers,
-``notify`` and ``wake-candidates``, each for one short statement and none
-while waiting on anything else, so a skipped row is one whose flag another
-writer is setting at that moment.
+without a lock and locks only ``build_wake`` rows.
 
-The scheduler lease is two owner-checked columns on ``build``: at most one
-tick drives a build; a lapsed lease is taken over by the next acquire.
+**The invariant: news is seen by the frontier read that follows a clear,
+or its flag survives the clear.** The tick clears the flag right before it
+reads the frontier, so the one thing that can lose news is a clear that commits while a
+transition that is news for the build is still in flight: the frontier read
+misses the transition, and the clear leaves no flag. The flagger's
+transaction can run on long after it flags (more transitions, the
+``release_claims`` and ``skip_blocked`` loops), so the clear must not pass
+it, and it must hold something the clear conflicts with even when it writes
+nothing. So the lockers of a wake row, and their modes, are:
+
+- **Flaggers** (:func:`flag_after_transition`): every target row ``FOR KEY
+  SHARE``, waited for and held until commit; then ``needs_tick_at`` set on
+  the still-unflagged ones ``FOR NO KEY UPDATE SKIP LOCKED``, in build-id
+  order. Flaggers never wait for each other (``KEY SHARE`` is compatible
+  with every mode but ``FOR UPDATE``), which matters because a flagger
+  holds what it writes until commit and may wait on task rows meanwhile.
+- **clear_notify**: ``FOR UPDATE``, the one mode that conflicts with ``KEY
+  SHARE``, for one statement, waited for at most
+  :data:`CLEAR_LOCK_TIMEOUT_MS` in all (``statement_timeout``, since
+  ``lock_timeout`` alone restarts with each new holder). Granted, it
+  clears only with no flagger of the build in flight, written or skipped,
+  so their news is committed before the frontier read; a flagger arriving meanwhile waits for it (it
+  waits on nothing once granted) and then flags the cleared row afresh.
+  Not granted in time, it leaves the flag set, which costs the tick one
+  spare pass. The bound is required, not tuning: Postgres grants a ``KEY
+  SHARE`` past a *queued* ``FOR UPDATE``, so overlapping flaggers (a busy
+  build's own completions flag it through its limit keys) would starve an
+  unbounded clear indefinitely.
+- **notify**: ``FOR NO KEY UPDATE`` in both transactions, and each leaves a
+  RUNNING build flagged (the second re-asserts a flag a tick cleared in
+  between).
+- **wake-candidates**: ``FOR NO KEY UPDATE SKIP LOCKED`` on flagged rows,
+  which it leaves flagged.
+- A build delete cascades the row away; nothing flags a deleted build.
+
+So a flagger's ``SKIP LOCKED`` skips only a row whose holder leaves it
+flagged, and no clear can pass the flagger before it commits. Residual
+windows, all far narrower than the clear's own was:
+
+- a skipping flagger's holder that rolls back;
+- a ``wake-candidates`` whose snapshot predates a clear committing on a row
+  it then locks (Postgres keeps the lock on a row the re-check drops);
+- the targeting gap: a flagger's targets are read once, at its step 1, so
+  a seal, reactivation or resume that makes a build hold the task and
+  commits between that read and the flagger's commit leaves the flagger
+  holding nothing on that build's row.
+
+Each costs one wake-up, recovered by the next flag, ``stardag builds tick``
+or the watchdog (STA-122). One deadlock is possible and detected, not
+silent: a build delete's cascade holds the wake row and needs a task row
+that a flagger waiting on that wake row holds. Postgres aborts one side;
+the transaction retry for deadlock victims (STA-63) re-runs it.
+
+The scheduler lease (two owner-checked columns on ``build``) lives in
+:mod:`stardag_api.services.scheduler_lease`.
 
 ``flag_after_transition`` also bumps ``build.last_active_at`` on every
 RUNNING build holding the task (reactive or not — a resident build has no
@@ -51,7 +100,19 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, case, func, select, update
+from sqlalchemy import (
+    ARRAY,
+    Select,
+    Uuid,
+    any_,
+    bindparam,
+    case,
+    func,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -65,7 +126,8 @@ from stardag_api.models import (
     TaskStatus,
 )
 from stardag_api.models.base import utc_now
-from stardag_api.services.errors import BadRequest, NotFound
+from stardag_api.services.errors import NotFound
+from stardag_api.services.scheduler_lease import lease_live
 from stardag_api.services.transition_types import ACTIONABLE_STATUSES
 from stardag_api.services.tx import transaction
 
@@ -74,6 +136,13 @@ logger = logging.getLogger(__name__)
 #: How long a build stays "handed out" after a caller was told to spawn a
 #: tick for it: a second asker inside the window is told nothing.
 WAKE_HANDOUT_WINDOW = timedelta(seconds=120)
+#: How long a clear waits for the wake row before leaving the flag set
+#: (module docstring): long enough for the brief holders, short against a
+#: tick's request timeout.
+CLEAR_LOCK_TIMEOUT_MS = 200
+#: The Postgres errors of an expired ``lock_timeout`` (``lock_not_available``)
+#: and ``statement_timeout`` (``query_canceled``).
+_CLEAR_TIMED_OUT = frozenset({"55P03", "57014"})
 #: Upper bound on one wake-candidates response.
 MAX_WAKE_CANDIDATES = 20
 #: A hand-out of a build flagged longer ago than this is logged as a delayed
@@ -85,9 +154,6 @@ MIN_STALL_AGE_SECONDS = 0
 MAX_STALL_AGE_SECONDS = 7 * 24 * 3600
 #: Upper bound on one stalled-builds response.
 MAX_STALLED_BUILDS = 200
-#: Bounds on a scheduler lease's TTL, in seconds.
-MIN_LEASE_TTL_SECONDS = 5
-MAX_LEASE_TTL_SECONDS = 3600
 
 
 # ---------------------------------------------------------------------------
@@ -130,13 +196,43 @@ async def _flag(
             Build.reactive_app_name.is_not(None),
         )
         .order_by(BuildWake.build_id)
-        .with_for_update(of=BuildWake, key_share=True, skip_locked=True)
     )
     if exclude_build_id is not None:
         targets = targets.where(BuildWake.build_id != exclude_build_id)
+    # 1. Hold every target ``FOR KEY SHARE`` until commit, waited for. Only a
+    #    clear conflicts with it (``FOR UPDATE``, one statement, waiting on
+    #    nothing once granted), so no clear can pass this transaction before
+    #    its news is committed, whether or not step 2 writes the row.
+    held = list(
+        (
+            await session.scalars(
+                targets.with_for_update(of=BuildWake, read=True, key_share=True)
+            )
+        ).all()
+    )
+    if not held:
+        return
+    # 2. Set the flag where it is unset, ``SKIP LOCKED``: flaggers hold the
+    #    rows they write until commit and may wait on task rows after this,
+    #    so they must not wait for each other. A row skipped here is held by
+    #    a writer that leaves it flagged (module docstring), and an already
+    #    flagged row needs no write: step 1 keeps any clear off it until this
+    #    transaction ends.
+    # One array parameter, not one per build: the fan-out is unbounded and
+    # asyncpg caps a statement's parameters.
+    held_ids = bindparam("held_ids", held, type_=ARRAY(Uuid))
+    unflagged = (
+        select(BuildWake.build_id)
+        .where(
+            BuildWake.build_id == any_(held_ids),
+            BuildWake.needs_tick_at.is_(None),
+        )
+        .order_by(BuildWake.build_id)
+        .with_for_update(key_share=True, skip_locked=True)
+    )
     await session.execute(
         update(BuildWake)
-        .where(BuildWake.build_id.in_(targets))
+        .where(BuildWake.build_id.in_(unflagged))
         # Kept from the first flag until a tick clears it: the flag's age is
         # how long the news has waited, which a re-flag must not reset (the
         # stall count and the oldest-first hand-out both read it).
@@ -260,12 +356,6 @@ class NotifyState:
     scheduler_live: bool | None = None
 
 
-def _lease_live(build: Build, now: datetime) -> bool:
-    return build.scheduler_lease_until is not None and (
-        build.scheduler_lease_until > now
-    )
-
-
 async def _build(session: AsyncSession, environment_id: UUID, build_id: UUID) -> Build:
     """The build row, read without a lock and re-read from the database."""
     build = await session.scalar(
@@ -293,33 +383,23 @@ async def _shared_build(
     return build
 
 
-async def _locked_build(
-    session: AsyncSession, environment_id: UUID, build_id: UUID
-) -> Build:
-    """The build row ``FOR NO KEY UPDATE``: the lease writers only."""
-    build = await session.scalar(
-        select(Build)
-        .where(Build.environment_id == environment_id, Build.id == build_id)
-        .with_for_update(key_share=True)
-        .execution_options(populate_existing=True)
-    )
-    if build is None:
-        raise NotFound("unknown_build", f"no build {build_id}", build_id=str(build_id))
-    return build
-
-
 async def _locked_wake(
-    session: AsyncSession, environment_id: UUID, build_id: UUID
+    session: AsyncSession,
+    environment_id: UUID,
+    build_id: UUID,
+    *,
+    exclusive: bool = False,
 ) -> BuildWake:
-    """The build's wake row ``FOR NO KEY UPDATE`` (waited for: its holders
-    hold it for one statement and wait on nothing)."""
+    """The build's wake row ``FOR NO KEY UPDATE``, or ``FOR UPDATE`` if
+    ``exclusive`` (a clear: it also waits out every flagger in flight, which
+    holds the row ``FOR KEY SHARE`` until its commit; module docstring)."""
     wake = await session.scalar(
         select(BuildWake)
         .where(
             BuildWake.environment_id == environment_id,
             BuildWake.build_id == build_id,
         )
-        .with_for_update(key_share=True)
+        .with_for_update(key_share=not exclusive)
         .execution_options(populate_existing=True)
     )
     if wake is None:
@@ -366,7 +446,15 @@ async def notify(
         # then build row: nothing takes the two the other way round (the
         # lease writers never touch the wake row; flaggers SKIP LOCKED).
         build = await _shared_build(session, environment_id, build_id)
-        live = _lease_live(build, utc_now())
+        if build.status == BuildStatus.RUNNING and wake.needs_tick_at is None:
+            # Re-asserted, on the status read under this transaction's lock
+            # (the build may have resumed since the first): a tick may have
+            # cleared the flag between the two transactions, and a flagger
+            # finding this row held now skips it on the strength of its
+            # holder leaving it flagged (module docstring). At worst one
+            # spare tick pass.
+            wake.needs_tick_at = utc_now()
+        live = lease_live(build, utc_now())
         if stamped and wake.tick_requested_at == now:
             if live:
                 wake.tick_requested_at = previous_stamp
@@ -398,11 +486,44 @@ async def clear_notify(
     session: AsyncSession, environment_id: UUID, build_id: UUID
 ) -> NotifyState:
     """Clear the flag: a tick does this right before computing the frontier,
-    so a notify landing mid-tick re-sets it and is never lost."""
-    async with transaction(session):
-        wake = await _locked_wake(session, environment_id, build_id)
-        wake.needs_tick_at = None
+    so a notify landing mid-tick re-sets it and is never lost.
+
+    The wake row is taken ``FOR UPDATE``, the one mode a flagger's ``FOR KEY
+    SHARE`` conflicts with, so the clear never passes a flagger of this
+    build still in flight, and a flagger arriving meanwhile waits for the
+    clear and then sets the flag afresh (STA-122). The lock is waited for
+    at most :data:`CLEAR_LOCK_TIMEOUT_MS`; if it is not granted, the flag is
+    left set and ``needs_tick`` reports it (the tick ignores the answer and
+    finds the flag on its next poll: one spare pass). Idempotent, so safe to
+    re-run."""
+    try:
+        async with transaction(session):
+            # Both: ``lock_timeout`` bounds each lock wait, and a row whose
+            # ``KEY SHARE`` holders overlap renews the wait for every new
+            # one, so only ``statement_timeout`` bounds the clear as a whole.
+            for setting in ("lock_timeout", "statement_timeout"):
+                await session.execute(
+                    text(f"SET LOCAL {setting} = '{CLEAR_LOCK_TIMEOUT_MS}ms'")
+                )
+            await _clear_flag(session, environment_id, build_id)
+    except DBAPIError as exc:
+        if _sqlstate(exc) not in _CLEAR_TIMED_OUT:
+            raise
+        return NotifyState(build_id=build_id, needs_tick=True)
     return NotifyState(build_id=build_id, needs_tick=False)
+
+
+def _sqlstate(exc: DBAPIError) -> str | None:
+    orig = exc.orig
+    return getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+
+
+async def _clear_flag(
+    session: AsyncSession, environment_id: UUID, build_id: UUID
+) -> None:
+    """:func:`clear_notify`'s statement, inside the caller's transaction."""
+    wake = await _locked_wake(session, environment_id, build_id, exclusive=True)
+    wake.needs_tick_at = None
 
 
 @dataclass(frozen=True)
@@ -565,136 +686,18 @@ async def stalled_builds(
     return stalled
 
 
-# ---------------------------------------------------------------------------
-# The scheduler lease
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class LeaseState:
-    build_id: UUID
-    held: bool
-    expires_at: datetime | None = None
-
-
-def _lease_ttl(ttl_seconds: int) -> timedelta:
-    if not MIN_LEASE_TTL_SECONDS <= ttl_seconds <= MAX_LEASE_TTL_SECONDS:
-        raise BadRequest(
-            "invalid_lease_ttl",
-            f"ttl_seconds must be in [{MIN_LEASE_TTL_SECONDS},"
-            f" {MAX_LEASE_TTL_SECONDS}]",
-            ttl_seconds=ttl_seconds,
-        )
-    return timedelta(seconds=ttl_seconds)
-
-
-def _owner(owner_id: str) -> str:
-    # Two callers both sending "" would hold each other's lease.
-    if not owner_id:
-        raise BadRequest("invalid_lease_owner", "owner_id must be non-empty")
-    return owner_id
-
-
-async def acquire_lease(
-    session: AsyncSession,
-    environment_id: UUID,
-    build_id: UUID,
-    *,
-    owner_id: str,
-    ttl_seconds: int,
-) -> LeaseState:
-    """Take the lease if it is free, lapsed, or already this owner's (a
-    retried acquire is not a lost race; owner ids are per tick)."""
-    ttl, owner_id = _lease_ttl(ttl_seconds), _owner(owner_id)
-    async with transaction(session):
-        build = await _locked_build(session, environment_id, build_id)
-        now = utc_now()
-        if _lease_live(build, now) and build.scheduler_lease_owner != owner_id:
-            return LeaseState(
-                build_id, held=False, expires_at=build.scheduler_lease_until
-            )
-        build.scheduler_lease_owner = owner_id
-        build.scheduler_lease_until = now + ttl
-        return LeaseState(build_id, held=True, expires_at=build.scheduler_lease_until)
-
-
-async def renew_lease(
-    session: AsyncSession,
-    environment_id: UUID,
-    build_id: UUID,
-    *,
-    owner_id: str,
-    ttl_seconds: int,
-) -> LeaseState:
-    """Extend the lease, for its live holder only: a tick whose lease lapsed
-    and was taken over learns it here."""
-    ttl, owner_id = _lease_ttl(ttl_seconds), _owner(owner_id)
-    async with transaction(session):
-        build = await _locked_build(session, environment_id, build_id)
-        now = utc_now()
-        if build.scheduler_lease_owner != owner_id or not _lease_live(build, now):
-            return LeaseState(build_id, held=False)
-        build.scheduler_lease_until = now + ttl
-        return LeaseState(build_id, held=True, expires_at=build.scheduler_lease_until)
-
-
-async def release_lease(
-    session: AsyncSession, environment_id: UUID, build_id: UUID, *, owner_id: str
-) -> LeaseState:
-    """Drop the lease if ``owner_id`` still holds it; ``held`` reports
-    whether it did (a lost tick cannot clear its successor's lease).
-
-    A released lease also **consumes the hand-out** that spawned its tick:
-    the release time is recorded on the build (``scheduler_lease_released_at``),
-    and :func:`wake_candidates` treats a hand-out older than it as spent. The
-    hand-out window exists to collapse the askers between a hand-out and its
-    tick taking the lease into one spawn; once that tick has run and ended,
-    the window has done its job, and holding it any longer only hides a flag
-    that landed after the tick looked (STA-34). Without this, a build
-    re-flagged within the window after its tick exited is handed out to
-    nobody until the window lapses -- and then only if something else happens
-    to ask, which in an environment with no other builds and no watchdog is
-    never.
-
-    Written on the build row, which this transaction already holds, and not
-    on the wake row: locking the wake row here would make a concurrent
-    flagger ``SKIP LOCKED`` past it and lose its flag. A tick that dies
-    without releasing, or releases a lease that had already lapsed, leaves
-    no release time, so its hand-out keeps the whole window, as before.
-    """
-    owner_id = _owner(owner_id)
-    async with transaction(session):
-        build = await _locked_build(session, environment_id, build_id)
-        if build.scheduler_lease_owner != owner_id:
-            return LeaseState(build_id, held=False)
-        now = utc_now()
-        # Only a release of a *live* lease is evidence the tick ran to its
-        # end as the build's scheduler. A holder whose lease lapsed may
-        # already have a successor handed out; spending that hand-out would
-        # spawn a second one.
-        if _lease_live(build, now):
-            build.scheduler_lease_released_at = now
-        build.scheduler_lease_owner = None
-        build.scheduler_lease_until = None
-    return LeaseState(build_id, held=True)
-
-
 __all__ = [
     "DEFAULT_STALL_AGE",
     "MAX_STALLED_BUILDS",
     "MAX_WAKE_CANDIDATES",
     "WAKE_HANDOUT_WINDOW",
-    "LeaseState",
     "NotifyState",
     "StalledBuild",
     "WakeCandidate",
-    "acquire_lease",
     "clear_notify",
     "flag_after_transition",
     "notify",
     "read_notify",
-    "release_lease",
-    "renew_lease",
     "stalled_builds",
     "wake_candidates",
 ]
