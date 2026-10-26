@@ -33,9 +33,9 @@ RUN npm run build
 # --- Stage 2: runtime ---------------------------------------------------------
 FROM python:3.12-slim
 
-# Install the API package
+# Install the API package, dependencies pinned and hash-checked from uv.lock
 COPY app/stardag-api /tmp/stardag-api
-RUN pip install --no-cache-dir /tmp/stardag-api && rm -rf /tmp/stardag-api
+RUN sh /tmp/stardag-api/install-locked.sh /tmp/stardag-api && rm -rf /tmp/stardag-api
 
 # Alembic config + migrations (not part of the installed python package)
 COPY app/stardag-api/alembic.ini /opt/stardag/api/alembic.ini

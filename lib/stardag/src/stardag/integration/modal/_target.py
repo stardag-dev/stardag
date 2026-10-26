@@ -4,6 +4,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
+from typing import Any, Callable, TypeVar, cast
 
 import aiofiles
 import modal
@@ -113,13 +114,26 @@ def get_default_volume_mount_path(volume_name: str) -> Path:
 _MAX_VOLUME_API_ATTEMPTS = 10
 _VOLUME_API_MAX_WAIT_SECONDS = 30
 
-_retry_on_rate_limit = retry(
+_rate_limit_retry = retry(
     retry=retry_if_exception_type(ResourceExhaustedError),
     wait=wait_exponential_jitter(initial=0.5, max=_VOLUME_API_MAX_WAIT_SECONDS),
     stop=stop_after_attempt(_MAX_VOLUME_API_ATTEMPTS),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _retry_on_rate_limit(fn: _F) -> _F:
+    """Apply the rate-limit retry policy, keeping ``fn``'s own type.
+
+    tenacity >= 9.2 types a decorated function as its ``_RetryDecorated``
+    protocol, so a subclass overriding a decorated method with a plain one
+    would no longer type-check against it.
+    """
+    return cast(_F, _rate_limit_retry(fn))
+
 
 # Bound how many volume-API calls this process has in flight, so concurrent
 # callers cannot stampede the limit in the first place. Backing off *after*

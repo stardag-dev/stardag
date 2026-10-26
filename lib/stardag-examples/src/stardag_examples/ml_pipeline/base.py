@@ -64,7 +64,7 @@ def generate_data(
     # add random target flip
     df["_target_flip"] = 0
     for segment in ["X", "Y", "Z"]:
-        mask = df["segment"] == segment
+        mask = (df["segment"] == segment).to_numpy(dtype=bool)
         flip_mask = (
             np.random.rand(mask.sum()) < segment_flip_probs["XYZ".index(segment)]
         )
