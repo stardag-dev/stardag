@@ -68,15 +68,17 @@ jobs:
   # Two tiers, decided separately, because they cover different things and
   # are triggered by different code. `modal-live` is Modal *execution* with
   # NoOp registries; `registry-live` is a real Modal worker reporting to a
-  # real deployed registry. A change under `app/stardag-api/` should run the
-  # second and not the first; a change to the detached executor, the first
-  # and not necessarily the second.
+  # real deployed registry. A change under `app/stardag-api/` runs the
+  # second and not the first; a change to `_cli/` or `selfhost/` likewise.
+  # The rest of the SDK's source runs both, because the task model it
+  # carries crosses the Modal boundary in either tier (see the patterns
+  # below).
   #
   # The path check is the important trigger: a label means remembering to
   # apply it, which is the failure this whole tier exists to fix. The label
   # stays as the manual override for a change that touches none of these
-  # paths but still warrants a live run -- a dependency bump, a selfhost
-  # change -- and it forces *both* tiers, since it means "exercise the live
+  # paths but still warrants a live run -- a dependency bump, a hunch --
+  # and it forces *both* tiers, since it means "exercise the live
   # Modal stuff" rather than naming one of them.
   #
   # Not a `paths:` filter on the trigger: GitHub applies those to every
@@ -126,18 +128,30 @@ jobs:
 
           # What each tier actually exercises, plus the harness itself and
           # the dependency lists baked into the images it builds.
-          MODAL_PATHS='^(lib/stardag/src/stardag/(integration/modal|build|testing/modal)/|lib/stardag/tests/test_integration/test_modal/|lib/stardag/pyproject\.toml$|tox\.ini$|\.github/workflows/modal-live\.yml$)'
+          #
+          # **All of the SDK's source, not a list of its packages.** The
+          # task model is what crosses the Modal boundary -- cloudpickled,
+          # or sent as an instance body and rehydrated -- and it reaches
+          # into `_core/`, `base_model.py`, `target/`, `config/`,
+          # `polymorphic.py`, `registry/` and `utils/` from a worker. A list
+          # of packages was a list of the places a break had already been
+          # seen: a `base_model.py` change that made every by-value task
+          # unpicklable merged without either tier running. So each tier
+          # matches everything under `lib/stardag/src/` and excludes only
+          # what is shown not to reach it.
+          #
+          # The Modal tier excludes `_cli/` and `selfhost/`: nothing else in
+          # the SDK imports either, and its tests deploy no registry.
+          MODAL_PATHS='^(lib/stardag/src/|lib/stardag/tests/test_integration/test_modal/|lib/stardag/pyproject\.toml$|tox\.ini$|\.github/workflows/modal-live\.yml$)'
+          MODAL_EXCLUDE='^lib/stardag/src/stardag/(_cli|selfhost)/'
           # The registry tier additionally owns the API itself (its image is
-          # built from `app/stardag-api`), the registry client, and the
-          # paths the harness reuses to wire a deployment up. `_cli/` is in
-          # there because the whole post-deploy flow -- login, workspace and
-          # environment resolution, target roots, minting the API key and
-          # pushing it as a Modal secret -- lives in
-          # `_cli/_selfhost_connect.py`, and `testing/modal/` because
-          # provisioning asserts the workspace through its guard. Omitting
-          # either means a PR that breaks the connect flow does not run the
-          # tier that catches it.
-          REGISTRY_PATHS='^(app/stardag-api/|lib/stardag/src/stardag/(build|registry|integration/modal|selfhost|testing/modal|_cli)/|lib/stardag/pyproject\.toml$|integration-tests/|tox\.ini$|\.github/workflows/modal-live\.yml$)'
+          # built from `app/stardag-api`) and excludes nothing from the SDK:
+          # the harness wires a deployment up through `selfhost/` and
+          # `_cli/_selfhost_connect.py` -- login, workspace and environment
+          # resolution, target roots, minting the API key and pushing it as
+          # a Modal secret.
+          REGISTRY_PATHS='^(app/stardag-api/|lib/stardag/src/|lib/stardag/pyproject\.toml$|integration-tests/|tox\.ini$|\.github/workflows/modal-live\.yml$)'
+          REGISTRY_EXCLUDE='^$'
 
           emit() { echo "$1=$2" >> "$GITHUB_OUTPUT"; echo "$1=$2 -- $3"; }
 
@@ -169,16 +183,24 @@ jobs:
           # The files API, not `gh pr diff --name-only`: the diff endpoint
           # refuses a PR past 20,000 changed lines (HTTP 406), which a
           # large PR hits and then skips both tiers as "nothing changed".
-          changed=$(gh api "repos/$REPO/pulls/$PR/files" --paginate -q '.[].filename')
+          #
+          # Both sides of a rename: GitHub reports the destination as
+          # `filename` and the source only as `previous_filename`, so a file
+          # moved out of `lib/stardag/src/` would otherwise match nothing.
+          changed=$(gh api "repos/$REPO/pulls/$PR/files" --paginate \
+            -q '.[] | .filename, (.previous_filename // empty)')
 
           for tier in modal_live registry_live; do
             case "$tier" in
-              modal_live)    pattern=$MODAL_PATHS ;;
-              registry_live) pattern=$REGISTRY_PATHS ;;
+              modal_live)    pattern=$MODAL_PATHS;    exclude=$MODAL_EXCLUDE ;;
+              registry_live) pattern=$REGISTRY_PATHS; exclude=$REGISTRY_EXCLUDE ;;
             esac
-            if printf '%s\n' "$changed" | grep -qE "$pattern"; then
+            # `|| true`: grep exits 1 on no match, which pipefail would turn
+            # into a failed job rather than a skipped tier.
+            hits=$(printf '%s\n' "$changed" | grep -E "$pattern" | grep -vE "$exclude" || true)
+            if [ -n "$hits" ]; then
               echo "$tier -- changed files:"
-              printf '%s\n' "$changed" | grep -E "$pattern" | sed 's/^/  /'
+              printf '%s\n' "$hits" | sed 's/^/  /'
               emit "$tier" true "paths matched."
             else
               emit "$tier" false \
