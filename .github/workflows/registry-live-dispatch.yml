@@ -1,0 +1,65 @@
+name: Registry-live dispatch
+
+# The selector for the registry-live tier: admits the oldest queued PR heads
+# into free slots and dispatches `registry-live.yml` for each. The logic, and
+# the reason the queue is a commit status rather than a concurrency group, is
+# in `integration-tests/src/stardag_integration_tests/registry_live/_queue.py`
+# (STA-138).
+#
+# Triggered three ways, all equivalent: a PR queueing (`modal-live.yml`), a
+# runner finishing (`registry-live.yml`), and the hourly schedule below. Any
+# run does the whole job, which is what makes dropping one harmless.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # The backstop, not the mechanism: it covers a hand-over that was lost
+    # (a runner killed before its last job, a failed dispatch). The normal
+    # path is event-driven and admits the next run within seconds.
+    - cron: "41 * * * *"
+
+permissions: {}
+
+concurrency:
+  # One selector at a time, so two cannot both read a slot as free and fill
+  # it twice. **Dropping a pending selector is harmless**, unlike dropping a
+  # pending tier run: every selector reads the whole queue, so the one that
+  # survives does what the dropped one would have.
+  group: registry-live-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Admit queued heads
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The runs list, and dispatching the runner.
+      actions: write
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      # The default branch's copy of the selector, always: it decides who
+      # gets the Modal credentials, so it must not come from a PR.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: integration-tests/src/stardag_integration_tests/registry_live/_queue.py
+          sparse-checkout-cone-mode: false
+
+      - name: Admit the oldest queued heads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # How many tier runs the workspace takes at once. A repository
+        # variable rather than a constant, so raising it is a decision about
+        # Modal capacity, not a code change. See `registry-live.yml`'s
+        # concurrency comment for the arithmetic that keeps it at 1.
+        #
+        # `-I` is load-bearing: without it the script's own directory leads
+        # `sys.path`, and its sibling `selectors.py` shadows the stdlib one.
+        run: |
+          python3 -I integration-tests/src/stardag_integration_tests/registry_live/_queue.py \
+            dispatch \
+            --repo "${{ github.repository }}" \
+            --default-branch "${{ github.event.repository.default_branch }}" \
+            --slots "${{ vars.REGISTRY_LIVE_SLOTS || '1' }}"
