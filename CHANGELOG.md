@@ -16,11 +16,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   the tick saw neither the news nor a flag. The same loss followed any skip
   that a clear and a frontier read overtook before the flagger committed.
   Flaggers now hold every target row `FOR KEY SHARE` until commit and the
-  clear takes the row `FOR UPDATE`, so a clear waits for every flagger in
+  clear takes the row `FOR UPDATE`, so a clear never passes a flagger in
   flight and a flagger arriving mid-clear waits for it, then flags the
-  cleared row. `notify` re-asserts the flag in its second transaction, so
-  every row a flagger skips is left flagged. No API or SDK change, no
-  migration.
+  cleared row. The clear waits at most 200 ms for the lock; if it is not
+  granted it leaves the flag set (`needs_tick: true` in its response),
+  which costs the tick one spare pass. `notify` re-asserts the flag in its
+  second transaction, so every row a flagger skips is left flagged. No SDK
+  change, no migration.
 
 ## [0.28.0] — 2026-10-08
 

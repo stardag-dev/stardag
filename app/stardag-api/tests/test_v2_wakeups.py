@@ -653,20 +653,94 @@ async def test_a_flag_arriving_mid_clear_waits_for_it_and_survives(h: Harness):
     assert await _flagged(h, build_b)
 
 
-async def test_a_clear_waits_for_a_flagger_that_skipped_the_row(h: Harness):
-    """The class behind the issue: a flagger ``SKIP LOCKED``s past a row
-    another writer holds (here as ``wake-candidates`` would, on a flagged
-    row), that writer commits, and a tick clears and reads the frontier
-    while the flagger is still in flight. The clear must not pass it: it
-    waits on the flagger's ``KEY SHARE``, so the news is committed before
-    the frontier read. A further flagger arriving while the clear waits is
-    not queued behind it."""
+async def _complete_in(s: Any, plan_id: UUID, it: Any, execution: UUID) -> None:
+    """A completion inside ``s``'s open transaction (not committed)."""
+    await transitions.transition_task(
+        s,
+        ENV,
+        task_pk=(await _task_pk(s, it)),
+        plan_id=plan_id,
+        transition=Transition.complete(execution),
+        now=utc_now(),
+    )
+
+
+async def _task_pk(s: Any, it: Any) -> UUID:
+    return await s.scalar(
+        text("SELECT id FROM task WHERE environment_id = :env AND task_id = :tid"),
+        {"env": ENV, "tid": it.task_id},
+    )
+
+
+async def test_a_clear_never_passes_a_flagger_in_flight_that_wrote_nothing(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    """The class behind the issue: a flagger in flight that did not write
+    the row (here it was already flagged, so step 2 has nothing to do) must
+    still keep a clear off it until it commits, or the tick reads the
+    frontier without its news and the clear leaves no flag. The clear
+    waits on the flagger's ``KEY SHARE`` (``pg_blocking_pids``), gives up
+    at its lock timeout, and leaves the flag set."""
+    monkeypatch.setattr(wakeups, "CLEAR_LOCK_TIMEOUT_MS", 1500)
     build_b, plan_a, t, execution = await _two_holders(h)
     await _svc(h, wakeups.notify, build_b)  # flagged, committed
 
     async with h.sf() as flagging:
         async with flagging.begin():
             flagger = await _pid(flagging)
+            await asyncio.wait_for(_complete_in(flagging, plan_a.id, t, execution), 5)
+            pids: list[int] = []
+
+            async def clear() -> wakeups.NotifyState:
+                async with h.sf() as s:
+                    pids.append(await _pid(s))
+                    return await wakeups.clear_notify(s, ENV, build_b)
+
+            clearing = asyncio.create_task(clear())
+            while not pids:
+                await asyncio.sleep(0.01)
+            await _blocked_by(h, pids[0], flagger)
+            state = await asyncio.wait_for(clearing, 5)
+            assert state.needs_tick, "not cleared: a flagger is in flight"
+    assert (await h.task(t))["status"] == "completed"
+    assert await _flagged(h, build_b)
+
+
+async def test_a_clear_returns_promptly_while_a_flagger_holds_the_row(h: Harness):
+    """No starvation: ``KEY SHARE`` is granted past a queued ``FOR UPDATE``,
+    so overlapping flaggers would hold an unbounded clear off forever. The
+    clear gives up within its lock timeout and leaves the flag set."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _svc(h, wakeups.notify, build)
+    async with h.sf() as flagger:
+        async with flagger.begin():
+            await flagger.execute(
+                text("SELECT 1 FROM build_wake WHERE build_id = :b FOR KEY SHARE"),
+                {"b": build},
+            )
+            loop = asyncio.get_running_loop()
+            began = loop.time()
+            state = await asyncio.wait_for(_svc(h, wakeups.clear_notify, build), 5)
+            elapsed = loop.time() - began
+            assert state.needs_tick
+            assert elapsed < wakeups.CLEAR_LOCK_TIMEOUT_MS / 1000 + 1.0
+    assert await _flagged(h, build)
+    # Unheld, the clear clears.
+    assert not (await _svc(h, wakeups.clear_notify, build)).needs_tick
+    assert not await _flagged(h, build)
+
+
+async def test_a_flagger_skips_an_unflagged_row_its_holder_is_flagging(
+    h: Harness,
+):
+    """Step 2 really skips: another writer holds the *unflagged* row while
+    setting the flag (as ``notify`` does), so the flagger passes it over
+    without waiting and writes nothing to it. The flag the holder commits
+    survives a clear attempted while the flagger is still in flight."""
+    build_b, plan_a, t, execution = await _two_holders(h)
+    async with h.sf() as flagging:
+        async with flagging.begin():
             async with h.sf() as holder:
                 async with holder.begin():
                     await holder.execute(
@@ -676,45 +750,28 @@ async def test_a_clear_waits_for_a_flagger_that_skipped_the_row(h: Harness):
                         ),
                         {"b": build_b},
                     )
-                    await asyncio.wait_for(
-                        transitions.transition_task(
-                            flagging,
-                            ENV,
-                            task_pk=(await h.task(t))["id"],
-                            plan_id=plan_a.id,
-                            transition=Transition.complete(execution),
-                            now=utc_now(),
+                    await holder.execute(
+                        text(
+                            "UPDATE build_wake SET needs_tick_at = now()"
+                            " WHERE build_id = :b"
                         ),
-                        5,
+                        {"b": build_b},
                     )
-            pids: list[int] = []
-
-            async def clear() -> None:
-                async with h.sf() as s:
-                    pids.append(await _pid(s))
-                    await wakeups.clear_notify(s, ENV, build_b)
-
-            clearing = asyncio.create_task(clear())
-            while not pids:
-                await asyncio.sleep(0.01)
-            await _blocked_by(h, pids[0], flagger)
-            # A new KEY SHARE locker is granted past the waiting clear.
-            async with h.sf() as other:
-                async with other.begin():
+                    # Would block on the holder if it tried the row.
                     await asyncio.wait_for(
-                        other.execute(
-                            text(
-                                "SELECT 1 FROM build_wake WHERE build_id = :b"
-                                " FOR KEY SHARE"
-                            ),
-                            {"b": build_b},
-                        ),
-                        5,
+                        _complete_in(flagging, plan_a.id, t, execution), 5
                     )
-            assert not clearing.done()
-    await asyncio.wait_for(clearing, 5)
+                    own_view = await flagging.scalar(
+                        text(
+                            "SELECT needs_tick_at FROM build_wake WHERE build_id = :b"
+                        ),
+                        {"b": build_b},
+                    )
+                    assert own_view is None, "the flagger wrote the row"
+            state = await asyncio.wait_for(_svc(h, wakeups.clear_notify, build_b), 5)
+            assert state.needs_tick
     assert (await h.task(t))["status"] == "completed"
-    assert not await _flagged(h, build_b)
+    assert await _flagged(h, build_b)
 
 
 async def test_notify_re_asserts_a_flag_cleared_between_its_transactions(

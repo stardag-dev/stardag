@@ -29,13 +29,13 @@ wake-up of every build with a claim in flight. Flagging reads ``build``
 without a lock and locks only ``build_wake`` rows.
 
 **The invariant: news is seen by the frontier read that follows a clear,
-or its flag survives the clear.** The tick clears the flag right before it reads the frontier,
-so the one thing that can lose news is a clear that commits while a
+or its flag survives the clear.** The tick clears the flag right before it
+reads the frontier, so the one thing that can lose news is a clear that commits while a
 transition that is news for the build is still in flight: the frontier read
 misses the transition, and the clear leaves no flag. The flagger's
 transaction can run on long after it flags (more transitions, the
-``release_claims`` and ``skip_blocked`` loops), so the clear must wait for
-it, and it must hold something the clear waits for even when it writes
+``release_claims`` and ``skip_blocked`` loops), so the clear must not pass
+it, and it must hold something the clear conflicts with even when it writes
 nothing. So the lockers of a wake row, and their modes, are:
 
 - **Flaggers** (:func:`flag_after_transition`): every target row ``FOR KEY
@@ -45,12 +45,16 @@ nothing. So the lockers of a wake row, and their modes, are:
   with every mode but ``FOR UPDATE``), which matters because a flagger
   holds what it writes until commit and may wait on task rows meanwhile.
 - **clear_notify**: ``FOR UPDATE``, the one mode that conflicts with ``KEY
-  SHARE``, for one statement. It waits for every flagger in flight, written
-  or skipped, so their news is committed before the frontier read; a
-  flagger arriving meanwhile waits for it (it waits on nothing once
-  granted) and then flags the cleared row afresh. New ``KEY SHARE`` lockers
-  are not queued behind a *waiting* clear, so this adds no wait chain
-  between flaggers.
+  SHARE``, for one statement, waited for at most
+  :data:`CLEAR_LOCK_TIMEOUT_MS`. Granted, it clears only with no flagger
+  of the build in flight, written or skipped, so their news is committed
+  before the frontier read; a flagger arriving meanwhile waits for it (it
+  waits on nothing once granted) and then flags the cleared row afresh.
+  Not granted in time, it leaves the flag set, which costs the tick one
+  spare pass. The bound is required, not tuning: Postgres grants a ``KEY
+  SHARE`` past a *queued* ``FOR UPDATE``, so overlapping flaggers (a busy
+  build's own completions flag it through its limit keys) would starve an
+  unbounded clear indefinitely.
 - **notify**: ``FOR NO KEY UPDATE`` in both transactions, and each leaves a
   RUNNING build flagged (the second re-asserts a flag a tick cleared in
   between).
@@ -59,12 +63,22 @@ nothing. So the lockers of a wake row, and their modes, are:
 - A build delete cascades the row away; nothing flags a deleted build.
 
 So a flagger's ``SKIP LOCKED`` skips only a row whose holder leaves it
-flagged, and no clear can pass the flagger before it commits. Two residual
-windows remain, both far narrower than the clear's own: a skipping
-flagger's holder that rolls back, and a ``wake-candidates`` whose snapshot
-predates a clear committing on a row it then locks (Postgres keeps the lock
-on a row the re-check drops). Either costs one wake-up, recovered by the
-next flag, ``stardag builds tick`` or the watchdog (STA-122).
+flagged, and no clear can pass the flagger before it commits. Residual
+windows, all far narrower than the clear's own was:
+
+- a skipping flagger's holder that rolls back;
+- a ``wake-candidates`` whose snapshot predates a clear committing on a row
+  it then locks (Postgres keeps the lock on a row the re-check drops);
+- the targeting gap: a flagger's targets are read once, at its step 1, so
+  a seal, reactivation or resume that makes a build hold the task and
+  commits between that read and the flagger's commit leaves the flagger
+  holding nothing on that build's row.
+
+Each costs one wake-up, recovered by the next flag, ``stardag builds tick``
+or the watchdog (STA-122). One deadlock is possible and detected, not
+silent: a build delete's cascade holds the wake row and needs a task row
+that a flagger waiting on that wake row holds. Postgres aborts one side;
+the transaction retry for deadlock victims (STA-63) re-runs it.
 
 The scheduler lease is two owner-checked columns on ``build``: at most one
 tick drives a build; a lapsed lease is taken over by the next acquire.
@@ -85,7 +99,19 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ARRAY, Select, Uuid, any_, bindparam, case, func, select, update
+from sqlalchemy import (
+    ARRAY,
+    Select,
+    Uuid,
+    any_,
+    bindparam,
+    case,
+    func,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -108,6 +134,12 @@ logger = logging.getLogger(__name__)
 #: How long a build stays "handed out" after a caller was told to spawn a
 #: tick for it: a second asker inside the window is told nothing.
 WAKE_HANDOUT_WINDOW = timedelta(seconds=120)
+#: How long a clear waits for the wake row before leaving the flag set
+#: (module docstring): long enough for the brief holders, short against a
+#: tick's request timeout.
+CLEAR_LOCK_TIMEOUT_MS = 200
+#: Postgres ``lock_not_available``: a ``lock_timeout`` expired.
+_LOCK_NOT_AVAILABLE = "55P03"
 #: Upper bound on one wake-candidates response.
 MAX_WAKE_CANDIDATES = 20
 #: A hand-out of a build flagged longer ago than this is logged as a delayed
@@ -438,9 +470,10 @@ async def notify(
         if build.status == BuildStatus.RUNNING and wake.needs_tick_at is None:
             # Re-asserted, on the status read under this transaction's lock
             # (the build may have resumed since the first): a tick may have
-            # cleared the flag between the two transactions, and a flagger finding this row held now skips it
-            # on the strength of its holder leaving it flagged (module
-            # docstring). At worst one spare tick pass.
+            # cleared the flag between the two transactions, and a flagger
+            # finding this row held now skips it on the strength of its
+            # holder leaving it flagged (module docstring). At worst one
+            # spare tick pass.
             wake.needs_tick_at = utc_now()
         live = _lease_live(build, utc_now())
         if stamped and wake.tick_requested_at == now:
@@ -477,13 +510,29 @@ async def clear_notify(
     so a notify landing mid-tick re-sets it and is never lost.
 
     The wake row is taken ``FOR UPDATE``, the one mode a flagger's ``FOR KEY
-    SHARE`` conflicts with: the clear waits for every flagger of this build
-    still in flight, so their news is committed before the tick reads the
-    frontier, and a flagger arriving meanwhile waits for the clear and then
-    sets the flag afresh (STA-122). Idempotent, so safe to re-run."""
-    async with transaction(session):
-        await _clear_flag(session, environment_id, build_id)
+    SHARE`` conflicts with, so the clear never passes a flagger of this
+    build still in flight, and a flagger arriving meanwhile waits for the
+    clear and then sets the flag afresh (STA-122). The lock is waited for
+    at most :data:`CLEAR_LOCK_TIMEOUT_MS`; if it is not granted, the flag is
+    left set and ``needs_tick`` reports it (the tick ignores the answer and
+    finds the flag on its next poll: one spare pass). Idempotent, so safe to
+    re-run."""
+    try:
+        async with transaction(session):
+            await session.execute(
+                text(f"SET LOCAL lock_timeout = '{CLEAR_LOCK_TIMEOUT_MS}ms'")
+            )
+            await _clear_flag(session, environment_id, build_id)
+    except DBAPIError as exc:
+        if _sqlstate(exc) != _LOCK_NOT_AVAILABLE:
+            raise
+        return NotifyState(build_id=build_id, needs_tick=True)
     return NotifyState(build_id=build_id, needs_tick=False)
+
+
+def _sqlstate(exc: DBAPIError) -> str | None:
+    orig = exc.orig
+    return getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
 
 
 async def _clear_flag(

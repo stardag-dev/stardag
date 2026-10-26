@@ -972,9 +972,12 @@ builds whose active plan has a non-excluded member for the task (their
 unflagged ones `FOR NO KEY UPDATE SKIP LOCKED`, ordered by build id; the
 build row is read, never locked, so a claim in flight on the build does not
 hide it). The tick's clear (`DELETE /builds/{id}/notify`) takes the wake row
-`FOR UPDATE`, the one mode that conflicts with `KEY SHARE`, so it waits for
-every flagger of the build still in flight and a flag is either seen by the
-frontier read that follows the clear or survives it; a flagger skips only a
+`FOR UPDATE`, the one mode that conflicts with `KEY SHARE`, so it never
+passes a flagger of the build still in flight, and a flag is either seen by
+the frontier read that follows the clear or survives it. The clear waits at
+most 200 ms for that lock and otherwise leaves the flag set (one spare tick
+pass), since a `KEY SHARE` is granted past a queued `FOR UPDATE` and
+overlapping flaggers would starve it; a flagger skips only a
 row held by a concurrent flagger, `notify` or `wake-candidates`, each of
 which leaves it flagged (STA-122). A move out of RUNNING also
 flags those whose active plan has an actionable member with a
