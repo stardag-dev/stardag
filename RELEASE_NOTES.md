@@ -18,6 +18,40 @@ defined in `__main__` or a function), so such a task could not cross a Modal
 call. Nothing changes for a correct task. A test asserting the error around a
 class body should assert it around the first construction instead.
 
+### A run function that delegates to a `Runner` must say so
+
+Who reports a Modal task's start, end and yields is now decided by the app's
+`run_function` at deploy time, through its `reports_lifecycle` attribute.
+`Runner` and its subclasses have it, and anything without it is taken not to
+report, so the build engine reports for it. This fixes custom run functions
+whose tasks stayed `RUNNING` forever under `build_spawn` / `build_remote`.
+
+**Migration:** a run function that delegates to a `Runner` without
+subclassing it (a plain function or wrapper calling a `Runner` instance)
+must declare `reports_lifecycle = True`:
+
+```{.python notest}
+class MyRunFunction:
+    reports_lifecycle = True  # the delegated Runner reports
+
+    def __init__(self):
+        self._runner = Runner()
+
+    def __call__(self, task, *, env_overrides=None):
+        return self._runner(task, env_overrides=env_overrides)
+```
+
+Without it:
+
+- `build_trigger(reactive=True)` refuses the app, because reactive scheduling
+  needs a self-reporting run function.
+- Resident builds still complete, but the delegated `Runner`'s reporting is
+  switched off and the engine reports instead. Worker-side features go with
+  it: cooperative cancellation checkpoints
+  (`stardag.cancellation_requested()`), and the preemption and timeout
+  classification of an interrupted task, which is then recorded as an
+  ordinary failure. Nothing is reported twice.
+
 ---
 
 ## v0.28.0 — Wake-ups that arrive

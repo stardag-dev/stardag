@@ -51,7 +51,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   not. A custom run function that does report can declare
   `reports_lifecycle = True`. `build_trigger(reactive=True)` now refuses an
   app whose run function does not report, rather than letting its tasks sit
-  `RUNNING` until their claims lapse.
+  `RUNNING` until their claims lapse. **Migration:** a run function that
+  delegates to a `Runner` without subclassing it must declare
+  `reports_lifecycle = True`; otherwise reactive triggers refuse the app, and
+  resident builds switch the delegated `Runner`'s reporting off in favour of
+  the engine's, losing cooperative cancellation and interruption
+  classification (see [RELEASE_NOTES.md](RELEASE_NOTES.md)).
 
 ### Server
 

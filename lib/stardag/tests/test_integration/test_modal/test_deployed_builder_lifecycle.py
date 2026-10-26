@@ -93,6 +93,20 @@ class _LazyFunctionCall:
         pass
 
 
+class _UndeclaredDelegate:
+    """Delegates to a Runner, which would report, but does not declare
+    ``reports_lifecycle``: taken as non-reporting, so the engine reports and
+    the delegated Runner must be switched off rather than report as well."""
+
+    def __init__(self) -> None:
+        self._runner = Runner()
+        self.env_seen: list[dict[str, str] | None] = []
+
+    def __call__(self, task, *, env_overrides=None):
+        self.env_seen.append(env_overrides)
+        return self._runner(task, env_overrides=env_overrides)
+
+
 class _InProcessWorker:
     """A deployed worker function whose ``spawn`` runs the app's registered
     ``worker_*`` wrapper in a thread, as a Modal container would run it."""
@@ -165,8 +179,15 @@ def registry() -> InMemoryRegistry:
         (Runner(report_lifecycle=False), False),
         (Runner(), True),
         (_ReportingDelegate(), True),
+        (_UndeclaredDelegate(), False),
     ],
-    ids=["plain-function", "runner-not-reporting", "runner", "declared-reporting"],
+    ids=[
+        "plain-function",
+        "runner-not-reporting",
+        "runner",
+        "declared-reporting",
+        "undeclared-delegate",
+    ],
 )
 def test_the_deployed_builder_reports_for_a_run_function_that_does_not(
     run_function,
@@ -185,6 +206,36 @@ def test_the_deployed_builder_reports_for_a_run_function_that_does_not(
     # Exactly one completion, whoever sent it — and the task is completed,
     # not left RUNNING.
     assert len(registry.calls_to("member_complete", task_id=task.id)) == 1
+    assert registry.status_of(task.id) == "completed"
+
+
+def test_an_undeclared_delegating_runner_is_switched_off_not_doubled(
+    registry: InMemoryRegistry,
+    default_in_memory_fs_target: type[InMemoryFileTarget],
+):
+    """A wrapper delegating to a Runner without declaring
+    ``reports_lifecycle`` gets engine-side reporting. The executor forwards
+    the reporting switch off, so the delegated Runner reports nothing: one
+    start claim and one completion, both the engine's, and no refused
+    duplicate."""
+    from stardag.integration.modal._metadata import (
+        STARDAG_WORKER_REPORTS_LIFECYCLE_ENV,
+    )
+
+    run_function = _UndeclaredDelegate()
+    task = SyncOnlyTask(name=f"undeclared-{new_id()}")
+    summary, _ = _build_through_the_deployed_builder(
+        _deploy(run_function), task, registry
+    )
+
+    assert summary.status == BuildExitStatus.SUCCESS
+    ((env,),) = [run_function.env_seen]
+    assert env is not None
+    assert env[STARDAG_WORKER_REPORTS_LIFECYCLE_ENV] == "0"
+    (claim, ref_start) = registry.calls_to("member_start", task_id=task.id)
+    assert claim["claim"] is True and ref_start["claim"] is False
+    (complete,) = registry.calls_to("member_complete", task_id=task.id)
+    assert complete["execution_id"] == claim["execution_id"]
     assert registry.status_of(task.id) == "completed"
 
 
