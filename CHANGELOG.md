@@ -16,7 +16,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   the caller latency instead of an error. Each wrapped call is safe to
   re-run, since its only effects are rows in the rolled-back transaction;
   a call with two transactions (`notify`) is re-run only while it has
-  committed neither. A test requires every new service transaction to take
+  committed neither. The auth dependency now commits an API key's
+  `last_used_at` on its own and detaches the rows it loads, so a rollback
+  in the service no longer drops the one or expires the other. A test
+  requires every new service transaction to take
   the retry or name a reason not to. Comments that claimed a
   `SELECT … ORDER BY … FOR UPDATE` acquires its locks in order now say that
   Postgres does not guarantee it.

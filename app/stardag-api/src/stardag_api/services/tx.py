@@ -25,6 +25,11 @@ What makes a call safe to re-run, and what every decorated call satisfies:
 - It re-reads everything it decides on inside the transaction (state is
   never carried from a previous attempt), and ids it mints are minted again.
 
+The request around the call is unaffected by the rollback: the auth
+dependency commits what it writes (an API key's ``last_used_at``) and
+detaches the rows it loaded (``auth/dependencies.py``), so neither is
+dropped or expired by a retry.
+
 A call that opens more than one transaction is re-run only while it has
 committed none of them: once one has committed, a deadlock in a later one
 propagates as before, since re-running the whole call would repeat the

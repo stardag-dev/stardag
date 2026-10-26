@@ -30,7 +30,17 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from stardag_api.auth import get_api_key_auth, get_sdk_auth
+from stardag_api.auth.tokens import InternalTokenPayload
+from stardag_api.models import ApiKey
 from stardag_api.services import tx
+from stardag_api.services.api_keys import create_api_key
+from stardag_api.services.errors import RecordedConflict
+from tests.conftest import (
+    DEFAULT_ENVIRONMENT_ID,
+    DEFAULT_USER_ID,
+    DEFAULT_WORKSPACE_ID,
+)
 
 #: How long to wait for a lock wait to show up in ``pg_stat_activity``.
 _WAIT_FOR_LOCK_SECONDS = 10.0
@@ -172,13 +182,24 @@ async def test_without_retries_the_same_arrangement_is_a_deadlock(
     assert tx.is_deadlock(result)
 
 
+class _DeadlockOrig(Exception):
+    sqlstate = tx.DEADLOCK_DETECTED
+
+
+def _deadlock() -> DBAPIError:
+    """What SQLAlchemy raises for a deadlock victim, without the deadlock."""
+    return DBAPIError("SELECT 1", None, _DeadlockOrig())
+
+
+@pytest.fixture
+def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tx, "BACKOFF_BASE_SECONDS", 0)
+
+
 async def test_a_deadlock_after_a_commit_is_not_retried(async_session):
     """A call that has committed one of its transactions is not re-run:
     that would repeat the committed part."""
     calls = 0
-
-    class _Deadlock(Exception):
-        sqlstate = tx.DEADLOCK_DETECTED
 
     @tx.retry_on_deadlock
     async def two_transactions(session) -> None:
@@ -187,19 +208,15 @@ async def test_a_deadlock_after_a_commit_is_not_retried(async_session):
         async with tx.transaction(session):
             await session.execute(text("SELECT 1"))
         async with tx.transaction(session):
-            raise DBAPIError("SELECT 2", None, _Deadlock())
+            raise _deadlock()
 
     with pytest.raises(DBAPIError):
         await two_transactions(async_session)
     assert calls == 1
 
 
-async def test_a_deadlock_before_any_commit_is_retried(async_session, monkeypatch):
-    monkeypatch.setattr(tx, "BACKOFF_BASE_SECONDS", 0)
+async def test_a_deadlock_before_any_commit_is_retried(async_session, no_backoff):
     calls = 0
-
-    class _Deadlock(Exception):
-        sqlstate = tx.DEADLOCK_DETECTED
 
     @tx.retry_on_deadlock
     async def flaky(session) -> int:
@@ -207,18 +224,14 @@ async def test_a_deadlock_before_any_commit_is_retried(async_session, monkeypatc
         calls += 1
         async with tx.transaction(session):
             if calls < tx.MAX_ATTEMPTS:
-                raise DBAPIError("SELECT 1", None, _Deadlock())
+                raise _deadlock()
             return calls
 
     assert await flaky(async_session) == tx.MAX_ATTEMPTS
 
 
-async def test_the_session_may_be_passed_by_keyword(async_session, monkeypatch):
-    monkeypatch.setattr(tx, "BACKOFF_BASE_SECONDS", 0)
+async def test_the_session_may_be_passed_by_keyword(async_session, no_backoff):
     calls = 0
-
-    class _Deadlock(Exception):
-        sqlstate = tx.DEADLOCK_DETECTED
 
     @tx.retry_on_deadlock
     async def flaky(session) -> int:
@@ -226,10 +239,137 @@ async def test_the_session_may_be_passed_by_keyword(async_session, monkeypatch):
         calls += 1
         async with tx.transaction(session):
             if calls == 1:
-                raise DBAPIError("SELECT 1", None, _Deadlock())
+                raise _deadlock()
             return calls
 
     assert await flaky(session=async_session) == 2
+
+
+async def test_a_nested_call_is_retried_by_its_outer_call(async_session, no_backoff):
+    """The inner call passes a deadlock through; the outer call, which owns
+    the transaction, is the one re-run."""
+    outer_calls = inner_calls = 0
+
+    @tx.retry_on_deadlock
+    async def inner(session) -> None:
+        nonlocal inner_calls
+        inner_calls += 1
+        if inner_calls == 1:
+            raise _deadlock()
+
+    @tx.retry_on_deadlock
+    async def outer(session) -> None:
+        nonlocal outer_calls
+        outer_calls += 1
+        async with tx.transaction(session):
+            await inner(session)
+
+    await outer(async_session)
+    assert (outer_calls, inner_calls) == (2, 2)
+
+
+async def test_a_deadlock_committing_a_recorded_refusal_is_retried(
+    async_session, monkeypatch, no_backoff
+):
+    """``transaction`` commits a recorded refusal from its ``except`` clause,
+    so a deadlock there escapes without its rollback; the wrapper rolls the
+    session back itself before the next attempt, which records the refusal
+    and raises it."""
+    commit = async_session.commit
+    rollback = async_session.rollback
+    commits = rollbacks = 0
+
+    async def commit_deadlocking_once() -> None:
+        nonlocal commits
+        commits += 1
+        if commits == 1:
+            raise _deadlock()
+        await commit()
+
+    async def counting_rollback() -> None:
+        nonlocal rollbacks
+        rollbacks += 1
+        await rollback()
+
+    monkeypatch.setattr(async_session, "commit", commit_deadlocking_once)
+    monkeypatch.setattr(async_session, "rollback", counting_rollback)
+    calls = 0
+
+    @tx.retry_on_deadlock
+    async def refuse(session) -> None:
+        nonlocal calls
+        calls += 1
+        async with tx.transaction(session):
+            await session.execute(text("SELECT 1"))
+            raise RecordedConflict("refused", "recorded, then refused")
+
+    with pytest.raises(RecordedConflict):
+        await refuse(async_session)
+    assert (calls, commits) == (2, 2)
+    assert rollbacks == 1  # the wrapper's own; transaction() never got to it
+
+
+# ---------------------------------------------------------------------------
+# The request's auth context survives a retry
+# ---------------------------------------------------------------------------
+
+
+@tx.retry_on_deadlock
+async def _deadlocking_once(session, state: dict[str, int]) -> None:
+    state["calls"] = state.get("calls", 0) + 1
+    async with tx.transaction(session):
+        await session.execute(text("SELECT 1"))
+        if state["calls"] == 1:
+            raise _deadlock()
+
+
+async def test_api_key_auth_is_readable_after_a_retried_call(
+    session_factory, no_backoff
+):
+    """The auth dependency loads ``ApiKey`` and ``Environment`` into the
+    request session the service shares; the retry's rollback must not
+    expire them (a later read would lazy-load: ``MissingGreenlet``). The
+    key's ``last_used_at`` is committed on its own, so it survives too."""
+    async with session_factory() as setup:
+        key, full_key = await create_api_key(setup, DEFAULT_ENVIRONMENT_ID, "k")
+        await setup.commit()
+
+    async with session_factory() as db:
+        api_key_auth = await get_api_key_auth(db, full_key)
+        assert api_key_auth is not None
+        auth = await get_sdk_auth(db, api_key_auth, None)
+        assert auth is not None
+        state: dict[str, int] = {}
+        await _deadlocking_once(db, state)
+        assert state["calls"] == 2
+        assert auth.environment_id == DEFAULT_ENVIRONMENT_ID
+        assert auth.workspace_id == DEFAULT_WORKSPACE_ID
+        assert auth.api_key is not None and auth.api_key.id == key.id
+
+    async with session_factory() as check:
+        stored = await check.get(ApiKey, key.id)
+        assert stored is not None and stored.last_used_at is not None
+
+
+async def test_token_auth_is_readable_after_a_retried_call(session_factory, no_backoff):
+    token = InternalTokenPayload(
+        sub=str(DEFAULT_USER_ID),
+        workspace_id=str(DEFAULT_WORKSPACE_ID),
+        iss="test",
+        aud="test",
+        exp=0,
+        iat=0,
+    )
+    async with session_factory() as db:
+        auth = await get_sdk_auth(db, None, token, str(DEFAULT_ENVIRONMENT_ID))
+        assert auth is not None
+        await _deadlocking_once(db, {})
+        assert auth.environment_id == DEFAULT_ENVIRONMENT_ID
+        assert auth.user is not None
+        assert (auth.user.id, auth.user.external_id) == (
+            DEFAULT_USER_ID,
+            "default-local-user",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -242,38 +382,70 @@ _SERVICES = Path(tx.__file__).parent
 #: retried, each with its reason. Empty: every one is safe to re-run.
 _NOT_RETRIED: dict[str, str] = {}
 
+#: Service modules that manage their own transactions (not the v2
+#: registry; nothing in them is behind ``transaction``).
+_OWN_TRANSACTIONS = {
+    "local_auth": "local username/password auth, not a v2 registry service",
+}
 
-def _opens_transaction(fn: ast.AsyncFunctionDef) -> bool:
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Call):
-            func = node.func
-            name = getattr(func, "id", None) or getattr(func, "attr", None)
-            if name == "transaction":
-                return True
-    return False
+
+def _call_name(node: ast.Call) -> str | None:
+    func = node.func
+    return getattr(func, "id", None) or getattr(func, "attr", None)
+
+
+def _calls(fn: ast.AST, names: set[str]) -> bool:
+    return any(
+        isinstance(node, ast.Call) and _call_name(node) in names
+        for node in ast.walk(fn)
+    )
 
 
 def _decorator_names(fn: ast.AsyncFunctionDef) -> set[str]:
     return {getattr(d, "id", None) or getattr(d, "attr", "") for d in fn.decorator_list}
 
 
-def test_every_service_transaction_is_retried_on_deadlock():
-    """A new writer gets the retry by the same rule as the existing ones,
-    or an entry in ``_NOT_RETRIED`` saying why not."""
-    missing = []
+def _service_functions():
+    """Every ``async def`` in the service modules, methods and nested
+    functions included, as ``(qualified name, node)``."""
     for path in sorted(_SERVICES.glob("*.py")):
         if path.name == "tx.py":
             continue
-        for node in ast.parse(path.read_text()).body:
-            if not isinstance(node, ast.AsyncFunctionDef):
-                continue
-            qualified = f"{path.stem}.{node.name}"
-            if not _opens_transaction(node) or qualified in _NOT_RETRIED:
-                continue
-            if "retry_on_deadlock" not in _decorator_names(node):
-                missing.append(qualified)
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.AsyncFunctionDef):
+                yield path.stem, f"{path.stem}.{node.name}", node
+
+
+def test_every_service_transaction_is_retried_on_deadlock():
+    """A new writer gets the retry by the same rule as the existing ones,
+    or an entry in ``_NOT_RETRIED`` saying why not.
+
+    Only a call to ``transaction`` counts as opening one, so a raw
+    ``commit()`` / ``begin()`` is refused outright (see the next test): the
+    retry's commit detection sees ``transaction``'s commits only."""
+    missing = [
+        qualified
+        for _, qualified, node in _service_functions()
+        if _calls(node, {"transaction"})
+        and qualified not in _NOT_RETRIED
+        and "retry_on_deadlock" not in _decorator_names(node)
+    ]
     assert not missing, (
         f"service functions opening a transaction without @retry_on_deadlock:"
         f" {missing} (decorate them once they are safe to re-run, see"
         f" services/tx.py, or list them in _NOT_RETRIED with the reason)"
+    )
+
+
+def test_services_open_transactions_only_through_transaction():
+    """``begin_nested`` (a savepoint inside ``transaction``) is fine."""
+    raw = [
+        qualified
+        for module, qualified, node in _service_functions()
+        if module not in _OWN_TRANSACTIONS
+        and _calls(node, {"commit", "begin", "rollback"})
+    ]
+    assert not raw, (
+        f"service functions committing or beginning on their own: {raw};"
+        f" open the transaction with services.tx.transaction"
     )

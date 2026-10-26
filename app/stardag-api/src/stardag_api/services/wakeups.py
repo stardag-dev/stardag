@@ -462,6 +462,7 @@ async def wake_candidates(
             if waited > DELAYED_WAKE_LOG_AFTER:
                 # The measurement half of STA-123: every hand-out this late is
                 # a flag nobody served, and the environment happened to drain.
+                # A deadlock-retried attempt (services/tx.py) logs it again.
                 logger.warning(
                     "Delayed wake-up: build %s handed out %.0fs after it was "
                     "flagged (environment %s).",
