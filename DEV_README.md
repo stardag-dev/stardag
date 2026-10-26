@@ -170,6 +170,16 @@ objects (`stardag-testing`, `stardag-testing-app`, ...) exactly where they are
 without concurrent runs colliding. A concurrency group serialises runs sharing
 an environment name, which is what makes those fixed names safe.
 
+A run deletes its environment when it finishes, except when it is cancelled:
+a push cancels the previous run, which must not delete the environment its
+successor is already using. A run cancelled by hand has no successor, so its
+environment is collected by the `Sweep stale Modal environments` job instead —
+once the PR is closed, **or** while it is open as soon as no run of this
+workflow for it is live (any status but `completed` counts as live, and an API
+error keeps the environment). The cancelled run's own sweeper does this as soon
+as its tier has stopped. Its comment in `modal-live.yml` explains why deleting
+an open PR's environment is safe.
+
 **What the tier does and does not cover.** It exercises Modal _execution_:
 real containers, detached spawn and re-attach, retries, cancellation, timeout
 semantics. It does _not_ exercise registry interaction — the registries in
@@ -598,56 +608,58 @@ iterating on one scenario by name (`tox -e registry-modal-live -- -n0
 tests_registry_live -k <name>`), harness work that needs a stack, and forcing
 a branch CI cannot reach. Tear one down as soon as it is done.
 
-**The tier is serialised workspace-wide, so a pending run is normal and a
-cancelled one is not a failure.** One run peaks at a realistic 45–65 Modal
-containers, with an upper bound near 115 and no `max_containers` on any
-scenario worker or tick function. The `andhus` workspace caps at **100
-concurrent containers** and also carries every developer's `dev-<checkout>`
-stack and the self-hosted deployment — so two tier runs do not fit, and on
-2026-09-22 the limit was reached. The `registry-live` job therefore sits in a
-job-level concurrency group whose name is a constant
-(`registry-live-andhus-workspace`): one tier run at a time across every PR and
-the weekly schedule, with `cancel-in-progress: false` so a run already holding
-a Modal environment is never killed mid-flight. Expect the check to sit pending
-for around ten minutes when another PR is ahead of you.
+**The tier is serialised workspace-wide, and it queues rather than drops.**
+One run peaks at a realistic 45–65 Modal containers, with an upper bound near
+115 and no `max_containers` on any scenario worker or tick function. The
+`andhus` workspace caps at **100 concurrent containers** and also carries every
+developer's `dev-<checkout>` stack and the self-hosted deployment — so two tier
+runs do not fit, and on 2026-09-22 the limit was reached (STA-91).
 
-**The trap, because it looks exactly like a failure.** GitHub keeps at most
-**one running and one pending** job per concurrency group. A third run does not
-queue behind the second — it takes the pending slot, and the _older pending_
-job is **cancelled**. On that PR it shows as a cancelled check with **no logs
-at all**, because a job cancelled before it starts runs no steps and so cannot
-explain itself.
+It used to be serialised by a job-level concurrency group, and that was the
+trap: GitHub keeps at most **one running and one pending** job per group, and a
+third request cancels the pending one. With N PRs in flight, N−2 were dropped
+as logless `cancelled` checks, and every re-trigger could be dropped the same
+way (STA-138). So the queue now lives in a commit status instead, in three
+parts:
 
-**Two different things produce that same logless cancelled check**, so do not
-attribute every one of them to the group above:
+| Part                                    | What it does                                                                                                                                                                               |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `modal-live.yml`, `queue-registry-live` | On a PR that touches the tier's paths, posts a pending `Registry-live tier` status (`Queued …`) on the head and dispatches the selector. Takes seconds; holds no runner while waiting.     |
+| `registry-live-dispatch.yml` (selector) | Admits the oldest queued heads into free slots and dispatches the runner for each. Any selector run does the whole job, so its own group dropping one loses nothing. Hourly as a backstop. |
+| `registry-live.yml` (runner)            | Runs the tier for one head in one slot, in its own `ci-rl-<run-id>` environment, posts the verdict as the same status, tears down, and dispatches the selector again.                      |
 
-| What happened                   | How to tell                                                                                                                                            |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| You pushed again to this PR     | The workflow-level group has `cancel-in-progress: true` for pull requests, so the previous run is killed wherever it had got to. There is a newer run. |
-| A third run took the queue slot | The workspace-wide group dropped the older pending job. The newest run on the PR is the cancelled one.                                                 |
+What that means in practice:
 
-Neither is a failure, neither is a flake, and nothing is wrong with the branch:
-re-run the job, or push again. Since the cancelled job cannot write any of this
-itself, the `Decide what to run` job writes it to the run summary up front,
-whenever it decides the tier should run — the only place in the run that can.
+- **The result is the `Registry-live tier` commit status on the PR**, not a
+  job in the PR's `Modal Live Tests` run. While queued it links to the
+  selector's runs, whose summaries list the queue; once running it links to
+  the runner.
+- **Re-running or pushing just queues again**, and cannot knock anyone else
+  out. A head that is already queued or running is not queued a second time:
+  that would lose its place, or be answered by the run in flight anyway. A push supersedes the queued head; a runner that finds the head moved
+  reports `Superseded` on the old SHA and runs nothing.
+- **The runner is dispatched on the PR's own branch**, so the tier's workflow
+  and the code it tests come from the same commit, and a PR that edits the
+  tier runs its own edit. A branch older than `registry-live.yml` falls back
+  to the default branch's runner, which checks the head out by SHA.
+- **The weekly run goes through the queue too.** The selector's Monday
+  schedule queues the default branch's head, under a status context of its
+  own (`Registry-live tier (weekly)`), and the runner tests it in the
+  permanent `ci-main`. A schedule on the runner itself would join a slot's
+  concurrency group unannounced and could cancel a PR runner already admitted
+  into the pending position.
+- **To run it by hand**, dispatch the selector, not the runner: a hand-run
+  runner can take a slot the selector believes is free. A runner dispatched
+  with no `pr` input tests the ref it was dispatched on (the `serial` input
+  lives there too).
+- **More than one at a time** is the repository variable
+  `REGISTRY_LIVE_SLOTS` (default 1). Each runner's concurrency group is keyed
+  by its slot, so the group stays as a safety net under the selector. Raising
+  it is a capacity decision: it needs the arithmetic above to close, by a
+  per-run container bound or a workspace with room.
 
-**A cancelled `registry-live` job does not leak the environment.** Teardown is
-gated on `always() && !cancelled()`, and a job dropped by the workspace-wide
-group does not make `cancelled()` true for it: on the runs where that group
-cancelled a pending `registry-live` job and nothing else cancelled the run,
-teardown ran and deleted the environment, even though the run's conclusion
-reads `cancelled`. Only a run-level cancellation skips teardown.
-
-A run cancelled by hand does skip it, and has no successor to take over the
-environment. The `Sweep stale Modal environments` job collects it: it deletes a
-`ci-pr-<n>` environment when PR `<n>` is closed, **or** when the PR is open and
-no run of this workflow for it is live (any status but `completed` counts as
-live, and an API error keeps the environment). The cancelled run's own sweeper
-does this as soon as its tiers have stopped, so the environment, and the warm
-container its `min_containers=1` registry holds, no longer waits for the PR to
-close. The sweeper runs on **every workflow run**, not nightly and not only on
-the weekly schedule — its comment in `modal-live.yml` explains why, and why
-deleting an open PR's environment is safe.
+The state machine, and the reasons for each edge, are in
+`integration-tests/src/stardag_integration_tests/registry_live/_queue.py`.
 
 **Take a precondition from the constants only where the arithmetic closes.**
 `test_reactive_e2e` spawns its own work, so a tick that lingers for a fixed
@@ -761,6 +773,34 @@ Note: pyright currently has pre-existing errors and is excluded from CI.
 ```bash
 tox
 ```
+
+#### A conflicting PR gets no new CI, and `gh pr checks` can still read green
+
+`ci.yml` and `modal-live.yml` trigger on `pull_request`, which GitHub runs
+against the PR's merge ref. While a PR conflicts with its base that ref does not
+exist, so **neither workflow starts**: a push to a conflicting PR queues no run,
+creates no check, and nothing says so. CodeQL and the Copilot review still
+report, because they do not depend on the merge ref — so for a head pushed while
+the PR conflicts, `gh pr checks <n>` lists only those and reads all green, for
+code nothing has tested. (If the conflict arose later, from a change to the
+base, the head keeps whatever checks it got before; they tested it against the
+old base.)
+
+Before trusting a green `gh pr checks`, check that the PR can merge:
+
+```bash
+gh pr view <n> --json mergeable -q .mergeable   # CONFLICTING: no new CI until resolved
+```
+
+Resolve the conflict against the PR's own base branch (merge or rebase on it —
+usually `main`, but not for a PR targeting a feature branch) and push; CI then
+runs on the new head. This is not a merge-safety hole: GitHub does not merge a
+conflicting PR, and branch protection on `main` requires the `Lint`,
+`Test Python`, `Integration Tests` and `Test Frontend` checks, which a head
+pushed while conflicting never gets. The cost is false confidence, not an unsafe
+merge. It is documented rather than fixed because a check that goes red on a
+conflict would have to come from a `pull_request_target` job or a scheduled
+sweep, and that machinery and its risks are not worth a bounded failure mode.
 
 ## Frontend Development
 
@@ -906,6 +946,13 @@ The image definition is `app/server.Dockerfile` (build context = repo root):
 ```bash
 docker build -f app/server.Dockerfile -t stardag-server .
 ```
+
+The image installs the API's dependencies from `app/stardag-api/uv.lock`,
+hash-checked, through `app/stardag-api/install-locked.sh`. The API-only
+`app/stardag-api/Dockerfile` and the `stardag self-host --from-source` image
+use the same script. A dependency reaches a server image only through a lock
+bump, and a lock that is out of date with `pyproject.toml` fails the build
+rather than being re-resolved.
 
 > **Python versions are decoupled for the prebuilt path.** `stardag
 self-host up` deploys the prebuilt image by _reference_: it points the
