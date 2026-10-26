@@ -16,8 +16,10 @@ from stardag_integration_tests.registry_live._queue import (
     Request,
     is_releasing,
     parse_active_runs,
+    parse_default_branch,
     parse_requests,
     plan,
+    should_enqueue,
 )
 
 
@@ -44,6 +46,21 @@ def _request(
     )
 
 
+def _main(
+    created_at: str, description: str = "Queued by the weekly schedule."
+) -> Request:
+    return Request(
+        pr=None,
+        sha="mainsha",
+        branch="main",
+        state="PENDING",
+        description=description,
+        created_at=created_at,
+        cross_repo=False,
+        author="",
+    )
+
+
 def _pr_node(
     number: int, head: str, status: dict | None, last_commit: str | None = None
 ):
@@ -67,14 +84,15 @@ def _pr_node(
     }
 
 
-def _graphql(*nodes):
+def _graphql(*nodes, default_branch=None):
     return {
         "data": {
             "repository": {
+                "defaultBranchRef": default_branch,
                 "pullRequests": {
                     "pageInfo": {"hasNextPage": False},
                     "nodes": list(nodes),
-                }
+                },
             }
         }
     }
@@ -181,6 +199,41 @@ class TestParseRequests:
         assert parse_requests(_graphql(node)) == []
 
 
+class TestParseDefaultBranch:
+    def test_reads_the_weekly_request_on_the_default_branch_head(self):
+        ref = {
+            "name": "main",
+            "target": {
+                "oid": "m1",
+                "status": {
+                    "context": {
+                        "state": "PENDING",
+                        "description": "Queued by the weekly schedule.",
+                        "createdAt": "2026-10-26T03:17:05Z",
+                    }
+                },
+            },
+        }
+        request = parse_default_branch(_graphql(default_branch=ref))
+        assert request is not None
+        assert (request.pr, request.sha, request.queued) == (None, "m1", True)
+
+    def test_no_status_is_no_request(self):
+        ref = {"name": "main", "target": {"oid": "m1", "status": None}}
+        assert parse_default_branch(_graphql(default_branch=ref)) is None
+
+
+class TestShouldEnqueue:
+    def test_a_head_with_no_status_or_a_verdict_is_queued(self):
+        for state in (None, "success", "failure", "error"):
+            assert should_enqueue(state)
+
+    def test_a_pending_head_is_not_queued_again(self):
+        # Re-queueing a queued head would send it to the back; re-queueing a
+        # running one would be erased by that run's verdict.
+        assert not should_enqueue("pending")
+
+
 class TestPlan:
     def test_admits_oldest_first_into_the_free_slot(self):
         requests = [
@@ -271,6 +324,32 @@ class TestPlan:
         )
         assert result.stale == []
         assert [(r.pr, slot) for r, slot in result.dispatch] == [(2, 1)]
+
+    def test_a_pr_with_a_run_holding_a_slot_waits_for_it(self):
+        # Two slots must not run one PR twice: a push while the previous head
+        # runs queues the new head behind it, rather than beside it.
+        result = plan(
+            [_request(1, "2026-10-26T14:00:00Z"), _request(2, "2026-10-26T14:01:00Z")],
+            active=[ActiveRun(run_id=9, slot=1, pr=1)],
+            slots=2,
+        )
+        assert [(r.pr, slot) for r, slot in result.dispatch] == [(2, 2)]
+        assert [r.pr for r in result.waiting] == [1]
+
+    def test_the_weekly_request_queues_in_order_with_prs(self):
+        result = plan(
+            [_request(1, "2026-10-26T14:00:00Z"), _main("2026-10-26T03:17:05Z")],
+            active=[],
+            slots=1,
+        )
+        assert [(r.pr, slot) for r, slot in result.dispatch] == [(None, 1)]
+        assert [r.pr for r in result.waiting] == [1]
+
+    def test_an_admitted_weekly_head_with_no_runner_is_stale(self):
+        lost = _main("2026-10-26T03:17:05Z", "Running in slot 1.")
+        assert [r.pr for r in plan([lost], active=[], slots=1).stale] == [None]
+        live = [ActiveRun(run_id=9, slot=1, pr=None)]
+        assert plan([lost], active=live, slots=1).stale == []
 
     def test_finished_heads_are_not_requests(self):
         done = _request(1, "2026-10-26T14:00:00Z", "Passed.", state="SUCCESS")

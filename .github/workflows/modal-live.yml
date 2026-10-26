@@ -145,7 +145,7 @@ jobs:
           # `_cli/_selfhost_connect.py` -- login, workspace and environment
           # resolution, target roots, minting the API key and pushing it as
           # a Modal secret.
-          REGISTRY_PATHS='^(app/stardag-api/|lib/stardag/src/|lib/stardag/pyproject\.toml$|integration-tests/|tox\.ini$|\.github/workflows/modal-live\.yml$)'
+          REGISTRY_PATHS='^(app/stardag-api/|lib/stardag/src/|lib/stardag/pyproject\.toml$|integration-tests/|tox\.ini$|\.github/workflows/(modal-live|registry-live|registry-live-dispatch)\.yml$)'
           REGISTRY_EXCLUDE='^$'
 
           emit() { echo "$1=$2" >> "$GITHUB_OUTPUT"; echo "$1=$2 -- $3"; }
@@ -330,6 +330,19 @@ jobs:
         run: |
           set -euo pipefail
           queue="${{ github.server_url }}/$REPO/actions/workflows/registry-live-dispatch.yml"
+          # Not over a pending status of any kind -- `_queue.should_enqueue`,
+          # mirrored. Over `Queued` it would reset the timestamp the queue is
+          # ordered by and send this head to the back; over `Dispatched` or
+          # `Running` the run in flight already answers for this head, and
+          # its verdict would erase the new request anyway.
+          current=$(gh api "repos/$REPO/commits/$SHA/status" \
+            -q '[.statuses[] | select(.context == "Registry-live tier")][0]
+                | "\(.state) \(.description)"')
+          if [ "${current%% *}" = pending ]; then
+            echo "Already ${current#* } -- not queued again."
+            echo "### Registry-live tier: already ${current#* }" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           # `Queued` at the front is what the selector reads; see `_queue.py`.
           gh api "repos/$REPO/statuses/$SHA" -f state=pending \
             -f context="Registry-live tier" -f target_url="$queue" \

@@ -612,11 +612,11 @@ as logless `cancelled` checks, and every re-trigger could be dropped the same
 way (STA-138). So the queue now lives in a commit status instead, in three
 parts:
 
-| Part                                    | What it does                                                                                                                                                                                    |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `modal-live.yml`, `queue-registry-live` | On a PR that touches the tier's paths, posts a pending `Registry-live tier` status (`Queued …`) on the head and dispatches the selector. Takes seconds; holds no runner while waiting.          |
-| `registry-live-dispatch.yml` (selector) | Admits the oldest queued heads into free slots and dispatches the runner for each. Any selector run does the whole job, so its own group dropping one loses nothing. Hourly as a backstop.      |
-| `registry-live.yml` (runner)            | Runs the tier for one head in one slot, in its own `ci-rl-<run-id>` environment, posts the verdict as the same status, tears down, and dispatches the selector again. Also owns the weekly run. |
+| Part                                    | What it does                                                                                                                                                                               |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `modal-live.yml`, `queue-registry-live` | On a PR that touches the tier's paths, posts a pending `Registry-live tier` status (`Queued …`) on the head and dispatches the selector. Takes seconds; holds no runner while waiting.     |
+| `registry-live-dispatch.yml` (selector) | Admits the oldest queued heads into free slots and dispatches the runner for each. Any selector run does the whole job, so its own group dropping one loses nothing. Hourly as a backstop. |
+| `registry-live.yml` (runner)            | Runs the tier for one head in one slot, in its own `ci-rl-<run-id>` environment, posts the verdict as the same status, tears down, and dispatches the selector again.                      |
 
 What that means in practice:
 
@@ -625,12 +625,18 @@ What that means in practice:
   selector's runs, whose summaries list the queue; once running it links to
   the runner.
 - **Re-running or pushing just queues again**, and cannot knock anyone else
-  out. A push supersedes the queued head; a runner that finds the head moved
+  out. A head that is already queued or running is not queued a second time:
+  that would lose its place, or be answered by the run in flight anyway. A push supersedes the queued head; a runner that finds the head moved
   reports `Superseded` on the old SHA and runs nothing.
 - **The runner is dispatched on the PR's own branch**, so the tier's workflow
   and the code it tests come from the same commit, and a PR that edits the
   tier runs its own edit. A branch older than `registry-live.yml` falls back
   to the default branch's runner, which checks the head out by SHA.
+- **The weekly run goes through the queue too.** The selector's Monday
+  schedule queues the default branch's head, and the runner tests it in the
+  permanent `ci-main`. A schedule on the runner itself would join a slot's
+  concurrency group unannounced and could cancel a PR runner already admitted
+  into the pending position.
 - **To run it by hand**, dispatch the selector, not the runner: a hand-run
   runner can take a slot the selector believes is free. A runner dispatched
   with no `pr` input tests the ref it was dispatched on (the `serial` input

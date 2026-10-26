@@ -6,9 +6,10 @@ name: Registry-live dispatch
 # in `integration-tests/src/stardag_integration_tests/registry_live/_queue.py`
 # (STA-138).
 #
-# Triggered three ways, all equivalent: a PR queueing (`modal-live.yml`), a
-# runner finishing (`registry-live.yml`), and the hourly schedule below. Any
-# run does the whole job, which is what makes dropping one harmless.
+# Triggered four ways, all equivalent but the last: a PR queueing
+# (`modal-live.yml`), a runner finishing (`registry-live.yml`), the hourly
+# schedule, and the weekly one, which first queues the default branch's head.
+# Any run does the whole job, which is what makes dropping one harmless.
 
 on:
   workflow_dispatch:
@@ -17,6 +18,13 @@ on:
     # (a runner killed before its last job, a failed dispatch). The normal
     # path is event-driven and admits the next run within seconds.
     - cron: "41 * * * *"
+    # The weekly tier run on the default branch, Monday 03:17 UTC, for drift
+    # underneath us (Modal platform behaviour, re-resolved image
+    # dependencies) that changes with time rather than commits. Queued here
+    # rather than triggered on the runner, which would join a slot's
+    # concurrency group unannounced and could cancel a PR runner the
+    # selector had just admitted into the pending position.
+    - cron: "17 3 * * 1"
 
 permissions: {}
 
@@ -41,9 +49,12 @@ jobs:
       statuses: write
     steps:
       # The default branch's copy of the selector, always: it decides who
-      # gets the Modal credentials, so it must not come from a PR.
+      # gets the Modal credentials, so it must not come from a PR -- nor
+      # from a branch someone dispatched this workflow on by hand, hence the
+      # explicit ref.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: integration-tests/src/stardag_integration_tests/registry_live/_queue.py
           sparse-checkout-cone-mode: false
 
@@ -62,4 +73,5 @@ jobs:
             dispatch \
             --repo "${{ github.repository }}" \
             --default-branch "${{ github.event.repository.default_branch }}" \
-            --slots "${{ vars.REGISTRY_LIVE_SLOTS || '1' }}"
+            --slots "${{ vars.REGISTRY_LIVE_SLOTS || '1' }}" \
+            ${{ github.event.schedule == '17 3 * * 1' && '--enqueue-default-branch' || '' }}

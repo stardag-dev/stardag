@@ -21,18 +21,18 @@ run-name: >-
   Registry-live tier · ${{ inputs.pr && format('PR #{0}', inputs.pr) || 'main' }}
   · slot ${{ inputs.slot || '1' }}
 
+# No schedule: the weekly run is queued by the selector's own weekly
+# schedule, on the default branch's head, and dispatched like any other
+# request. A schedule here would bypass admission.
 on:
-  schedule:
-    # Weekly, Monday 03:17 UTC, alongside the Live Modal tier's schedule and
-    # for the same reason: drift underneath us (Modal platform behaviour,
-    # re-resolved image dependencies) changes with time, not commits.
-    - cron: "17 3 * * 1"
   workflow_dispatch:
     inputs:
       pr:
         description: >-
           The PR whose head to test. Normally set by the selector. Empty
-          runs the dispatched ref itself, in a throwaway environment.
+          with a `sha` is the default branch's weekly run, in the permanent
+          `ci-main`; empty with no `sha` runs the dispatched ref itself, in
+          a throwaway environment.
         type: string
         default: ""
       sha:
@@ -94,18 +94,21 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr }}
           SHA: ${{ inputs.sha }}
-          EVENT: ${{ github.event_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
 
-          # The weekly run keeps the *permanent* `ci-main`: provisioning
-          # into an environment that already exists is a state a PR run
-          # never reaches, and it is where real bugs have lived.
-          if [ "$EVENT" = schedule ]; then
-            out run true; out sha "$GITHUB_SHA"
+          # A SHA and no PR is the default branch's head, queued by the
+          # selector's weekly schedule. It keeps the *permanent* `ci-main`:
+          # provisioning into an environment that already exists is a state
+          # a PR run never reaches, and it is where real bugs have lived.
+          if [ -z "$PR" ] && [ -n "$SHA" ]; then
+            out run true; out sha "$SHA"
             out env_name ci-main; out ephemeral false; out fail_fast false
+            gh api "repos/$REPO/statuses/$SHA" -f state=pending \
+              -f context="Registry-live tier" -f target_url="$RUN_URL" \
+              -f description="Running in slot ${{ inputs.slot || '1' }}." > /dev/null
             exit 0
           fi
 
@@ -665,7 +668,7 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - name: Post the verdict on the head
-        if: inputs.pr && needs.resolve.outputs.run == 'true'
+        if: inputs.sha && needs.resolve.outputs.run == 'true'
         env:
           RESULT: ${{ needs.registry-live.result }}
           SHA: ${{ needs.resolve.outputs.sha }}

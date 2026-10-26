@@ -78,9 +78,14 @@ VISIBILITY_TIMEOUT_S = 120.0
 
 @dataclass(frozen=True)
 class Request:
-    """A PR head and the latest `Registry-live tier` status on it."""
+    """A head and the latest `Registry-live tier` status on it.
 
-    pr: int
+    ``pr`` is None for the default branch's head, which the weekly run
+    queues through the same status so that it is admitted like everything
+    else rather than joining a slot's concurrency group unannounced.
+    """
+
+    pr: int | None
     sha: str
     branch: str
     state: str  # PENDING / SUCCESS / FAILURE / ERROR, as GraphQL spells it
@@ -89,6 +94,12 @@ class Request:
     cross_repo: bool
     author: str
     labels: frozenset[str] = field(default_factory=frozenset)
+
+    @property
+    def label(self) -> str:
+        return (
+            f"PR #{self.pr}" if self.pr is not None else f"{self.branch} {self.sha[:7]}"
+        )
 
     @property
     def queued(self) -> bool:
@@ -169,6 +180,41 @@ def parse_active_runs(
     return active
 
 
+def should_enqueue(state: str | None) -> bool:
+    """Whether to post `Queued` on a head whose latest status is this.
+
+    Not over a pending status of any kind. Over `Queued` it would reset the
+    timestamp the queue is ordered by and send the head to the back. Over
+    `Dispatched`/`Running` it would be erased by that run's verdict, or with
+    more than one slot admit the same head twice; the run in flight already
+    answers for this head. ``state`` is the REST spelling, lower case, or
+    None for a head with no such status. Mirrored in bash by the request
+    step in `modal-live.yml`.
+    """
+    return state != "pending"
+
+
+def parse_default_branch(data: dict) -> Request | None:
+    """The default branch's head, if it carries a `Registry-live tier` status."""
+    ref = data["data"]["repository"].get("defaultBranchRef")
+    if not ref or not ref.get("target"):
+        return None
+    commit = ref["target"]
+    status = (commit.get("status") or {}).get("context")
+    if not status:
+        return None
+    return Request(
+        pr=None,
+        sha=commit["oid"],
+        branch=ref["name"],
+        state=status["state"],
+        description=status.get("description") or "",
+        created_at=status["createdAt"],
+        cross_repo=False,
+        author="",
+    )
+
+
 def parse_requests(data: dict) -> list[Request]:
     """Open PR heads carrying a `Registry-live tier` status.
 
@@ -218,19 +264,27 @@ def refusal(request: Request) -> str | None:
 
 
 def plan(requests: list[Request], active: list[ActiveRun], slots: int) -> Plan:
-    # A releasing run still counts here: it has yet to post its verdict, and
-    # calling its head stale would race that verdict with an error.
-    running_prs = {run.pr for run in active if run.pr is not None}
+    # Keyed by PR, with None standing for the default branch.
+    #
+    # A releasing run still counts for staleness: it has yet to post its
+    # verdict, and calling its head stale would race that verdict with an
+    # error.
+    reporting = {run.pr for run in active}
+    # But not for admission: its stack is gone. A PR with a run that still
+    # holds a slot waits, so two slots never run one PR twice (a push while
+    # its previous head runs queues the new head behind it).
+    holding = {run.pr for run in active if not run.releasing}
     occupied = {run.slot for run in active if not run.releasing}
     free = [s for s in range(1, slots + 1) if s not in occupied]
 
-    stale = [r for r in requests if r.admitted and r.pr not in running_prs]
+    stale = [r for r in requests if r.admitted and r.pr not in reporting]
 
     refused: list[tuple[Request, str]] = []
     eligible: list[Request] = []
     # Oldest first. The PR number only breaks a tie within one second.
     for request in sorted(
-        (r for r in requests if r.queued), key=lambda r: (r.created_at, r.pr)
+        (r for r in requests if r.queued),
+        key=lambda r: (r.created_at, r.pr if r.pr is not None else 0),
     ):
         reason = refusal(request)
         if reason:
@@ -238,22 +292,30 @@ def plan(requests: list[Request], active: list[ActiveRun], slots: int) -> Plan:
         else:
             eligible.append(request)
 
-    dispatch = list(zip(eligible, free))
+    admissible = [r for r in eligible if r.pr not in holding]
+    dispatch = list(zip(admissible, free))
+    admitted = {id(r) for r, _ in dispatch}
     return Plan(
         dispatch=dispatch,
         stale=stale,
         refused=refused,
-        waiting=eligible[len(dispatch) :],
+        waiting=[r for r in eligible if id(r) not in admitted],
     )
 
 
 # --- GitHub side ---------------------------------------------------------
 
 _REQUESTS_QUERY = """
-query($owner: String!, $name: String!, $context: String!) {
+query($owner: String!, $name: String!, $context: String!, $after: String) {
   repository(owner: $owner, name: $name) {
-    pullRequests(states: OPEN, first: 100) {
-      pageInfo { hasNextPage }
+    defaultBranchRef {
+      name
+      target { ... on Commit { oid status { context(name: $context) {
+        state description createdAt
+      } } } }
+    }
+    pullRequests(states: OPEN, first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
       nodes {
         number
         headRefName
@@ -311,6 +373,54 @@ def _post_status(repo: str, sha: str, state: str, description: str, url: str) ->
     )
 
 
+def _query_pages(owner: str, name: str) -> list[dict]:
+    """Every page of the request query.
+
+    All of them, not the first: a queued head on page two would otherwise
+    never be admitted, however free the slots, until enough PRs closed.
+    """
+    pages = []
+    after: str | None = None
+    while True:
+        args = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={_REQUESTS_QUERY}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"context={CONTEXT}",
+        ]
+        if after:
+            args += ["-F", f"after={after}"]
+        page = json.loads(_gh(*args))
+        pages.append(page)
+        info = page["data"]["repository"]["pullRequests"]["pageInfo"]
+        if not info["hasNextPage"]:
+            return pages
+        after = info["endCursor"]
+
+
+def _latest_status(repo: str, sha: str) -> tuple[str | None, str]:
+    out = _gh("api", f"repos/{repo}/commits/{sha}/status")
+    for status in json.loads(out)["statuses"]:  # latest per context
+        if status["context"] == CONTEXT:
+            return status["state"], status.get("description") or ""
+    return None, ""
+
+
+def _enqueue_default_branch(repo: str, branch: str, url: str) -> str:
+    sha = _gh("api", f"repos/{repo}/commits/{branch}", "-q", ".sha").strip()
+    state, description = _latest_status(repo, sha)
+    if not should_enqueue(state):
+        return f"- {branch} {sha[:7]}: already {description or state}; not queued again"
+    _post_status(repo, sha, "pending", f"{QUEUED} by the weekly schedule.", url)
+    return f"- {branch} {sha[:7]}: queued by the weekly schedule"
+
+
 def _dispatch_ref(repo: str, request: Request, default_branch: str) -> str:
     """The ref whose `registry-live.yml` should run this head.
 
@@ -320,13 +430,15 @@ def _dispatch_ref(repo: str, request: Request, default_branch: str) -> str:
     than the runner has no such file, and falls back to the default
     branch's runner, which checks out the head by SHA.
     """
+    if request.pr is None:
+        return default_branch
     path = f".github/workflows/{RUNNER_WORKFLOW}"
     if _gh_ok("api", f"repos/{repo}/contents/{path}?ref={request.sha}", "--silent"):
         return request.branch
     return default_branch
 
 
-def _await_visible(repo: str, pr: int, known: set[int]) -> bool:
+def _await_visible(repo: str, pr: int | None, known: set[int]) -> bool:
     """Whether a runner for ``pr`` that was not running before appears.
 
     ``known`` matters when the PR already has a runner on an older head:
@@ -358,6 +470,10 @@ def dispatch(args: argparse.Namespace) -> int:
         f"/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
     )
 
+    lines = ["### Registry-live queue", ""]
+    if args.enqueue_default_branch:
+        lines.append(_enqueue_default_branch(repo, args.default_branch, run_url))
+
     runs = _runner_runs(repo)
     releasing = frozenset(
         int(run["id"])
@@ -366,30 +482,14 @@ def dispatch(args: argparse.Namespace) -> int:
         and is_releasing(_run_jobs(repo, int(run["id"])))
     )
     active = parse_active_runs(runs, releasing)
-    data = json.loads(
-        _gh(
-            "api",
-            "graphql",
-            "-f",
-            f"query={_REQUESTS_QUERY}",
-            "-F",
-            f"owner={owner}",
-            "-F",
-            f"name={name}",
-            "-F",
-            f"context={CONTEXT}",
-        )
-    )
-    if data["data"]["repository"]["pullRequests"]["pageInfo"]["hasNextPage"]:
-        print(
-            "::warning title=Registry-live queue::More than 100 open PRs; "
-            "only the first 100 are considered."
-        )
-    the_plan = plan(parse_requests(data), active, args.slots)
+    pages = _query_pages(owner, name)
+    requests = [r for page in pages for r in parse_requests(page)]
+    default_head = parse_default_branch(pages[0])
+    if default_head is not None:
+        requests.append(default_head)
+    the_plan = plan(requests, active, args.slots)
 
-    lines = [
-        "### Registry-live queue",
-        "",
+    lines += [
         f"Slots: {args.slots}; active runners: "
         + (
             ", ".join(
@@ -403,7 +503,7 @@ def dispatch(args: argparse.Namespace) -> int:
     ]
 
     for request in the_plan.stale:
-        lines.append(f"- PR #{request.pr}: runner lost without reporting")
+        lines.append(f"- {request.label}: runner lost without reporting")
         _post_status(
             repo,
             request.sha,
@@ -413,7 +513,7 @@ def dispatch(args: argparse.Namespace) -> int:
             run_url,
         )
     for request, reason in the_plan.refused:
-        lines.append(f"- PR #{request.pr}: refused -- {reason}")
+        lines.append(f"- {request.label}: refused -- {reason}")
         _post_status(repo, request.sha, "error", f"Refused: {reason}", run_url)
 
     for request, slot in the_plan.dispatch:
@@ -426,6 +526,9 @@ def dispatch(args: argparse.Namespace) -> int:
             run_url,
         )
         known = {run.run_id for run in parse_active_runs(_runner_runs(repo))}
+        # No `pr` for the default branch's head: the runner reads "a SHA and
+        # no PR" as the weekly run, in the permanent `ci-main`.
+        pr_input = [] if request.pr is None else ["-f", f"pr={request.pr}"]
         _gh(
             "workflow",
             "run",
@@ -434,8 +537,7 @@ def dispatch(args: argparse.Namespace) -> int:
             repo,
             "--ref",
             ref,
-            "-f",
-            f"pr={request.pr}",
+            *pr_input,
             "-f",
             f"sha={request.sha}",
             "-f",
@@ -444,9 +546,9 @@ def dispatch(args: argparse.Namespace) -> int:
         # Not done until the run is listed: the next selector reads the
         # slot as free until then, and would dispatch a second run into it.
         if _await_visible(repo, request.pr, known):
-            lines.append(f"- PR #{request.pr}: dispatched to slot {slot} (ref {ref})")
+            lines.append(f"- {request.label}: dispatched to slot {slot} (ref {ref})")
         else:
-            lines.append(f"- PR #{request.pr}: dispatch not confirmed")
+            lines.append(f"- {request.label}: dispatch not confirmed")
             _post_status(
                 repo,
                 request.sha,
@@ -458,7 +560,7 @@ def dispatch(args: argparse.Namespace) -> int:
 
     for position, request in enumerate(the_plan.waiting, start=1):
         lines.append(
-            f"- PR #{request.pr}: waiting, position {position} "
+            f"- {request.label}: waiting, position {position} "
             f"(queued {request.created_at})"
         )
     if not (
@@ -476,6 +578,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--default-branch", default="main")
     p.add_argument("--slots", type=int, default=1)
+    p.add_argument(
+        "--enqueue-default-branch",
+        action="store_true",
+        help="Queue the default branch's head first: the weekly run.",
+    )
     args = parser.parse_args(argv)
     if args.slots < 1:
         parser.error("--slots must be at least 1")
