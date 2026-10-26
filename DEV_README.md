@@ -631,21 +631,23 @@ re-run the job, or push again. Since the cancelled job cannot write any of this
 itself, the `Decide what to run` job writes it to the run summary up front,
 whenever it decides the tier should run — the only place in the run that can.
 
-**One consequence, stated as an exposure rather than a reassurance.** Teardown
-is gated on `always() && !cancelled()`. If a cancelled `registry-live` job makes
-the _run_ read as cancelled, that run's Modal environment is not deleted by its
-own teardown — and the `Sweep stale Modal environments` backstop **will not
-collect it while the PR is open**: it deletes a `ci-pr-<n>` environment only
-once PR `<n>` is no longer `OPEN`. So the environment, and the warm container
-its `min_containers=1` registry holds, can persist until the PR is closed.
+**A cancelled `registry-live` job does not leak the environment.** Teardown is
+gated on `always() && !cancelled()`, and a job dropped by the workspace-wide
+group does not make `cancelled()` true for it: on the runs where that group
+cancelled a pending `registry-live` job and nothing else cancelled the run,
+teardown ran and deleted the environment, even though the run's conclusion
+reads `cancelled`. Only a run-level cancellation skips teardown.
 
-That gap is not new — a hand-cancelled run has always been able to produce it —
-but this change makes it reachable without anyone pressing cancel, so it is
-worth knowing while it stands. Whether the cancellation reads as a _run_
-cancellation at all is the part still to confirm on first occurrence; if it does
-not, teardown runs normally and none of this applies. The sweeper itself runs on
-**every workflow run**, not nightly and not only on the weekly schedule — its
-own comment explains why.
+A run cancelled by hand does skip it, and has no successor to take over the
+environment. The `Sweep stale Modal environments` job collects it: it deletes a
+`ci-pr-<n>` environment when PR `<n>` is closed, **or** when the PR is open and
+no run of this workflow for it is live (any status but `completed` counts as
+live, and an API error keeps the environment). The cancelled run's own sweeper
+does this as soon as its tiers have stopped, so the environment, and the warm
+container its `min_containers=1` registry holds, no longer waits for the PR to
+close. The sweeper runs on **every workflow run**, not nightly and not only on
+the weekly schedule — its comment in `modal-live.yml` explains why, and why
+deleting an open PR's environment is safe.
 
 **Take a precondition from the constants only where the arithmetic closes.**
 `test_reactive_e2e` spawns its own work, so a tick that lingers for a fixed

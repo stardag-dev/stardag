@@ -849,9 +849,16 @@ jobs:
   #
   # Skipping is safe precisely because the name is per PR: whichever run
   # ends up last owns the environment and tears it down. A *manually*
-  # cancelled run does leak one, until `cleanup-closed-pr` fires on PR
-  # close or the weekly sweeper picks it up -- which is the backstop model
-  # this workflow already relies on.
+  # cancelled run has no successor, so its teardown leaks the environment;
+  # the sweeper below collects it once no run of this workflow is live for
+  # the PR (see there). Loosening `!cancelled()` to cover that case would
+  # bring back the deletion above, so it stays.
+  #
+  # A job cancelled by the `registry-live` job-level group does *not* make
+  # `cancelled()` true here: observed on four runs where that group dropped
+  # a pending `registry-live` job and nothing else cancelled the run --
+  # this job ran and deleted the environment, though the run's conclusion
+  # read `cancelled`. Only a run-level cancellation skips teardown.
   teardown:
     name: Delete the run's Modal environment
     runs-on: ubuntu-latest
@@ -923,6 +930,18 @@ jobs:
   # The backstop for the runs whose own teardown never executed -- a cancelled
   # run, a hard job failure. Keyed on GitHub state rather than age, because
   # `modal environment list` reports no creation time.
+  #
+  # An environment is deleted when nothing can be using it:
+  #
+  # - `ci-pr-<n>`: PR `<n>` is not open, *or* it is open and no run of this
+  #   workflow for it is live. The second half is what collects a
+  #   hand-cancelled run's environment while the PR stays open; without it
+  #   the environment held a warm registry container until the PR closed.
+  # - `ci-manual-<run id>`: that run is not live.
+  #
+  # "Live" is any status but `completed` -- queued, waiting, pending,
+  # requested and in_progress all keep the environment, as does a status
+  # this job does not recognise.
   sweep-stale-environments:
     name: Sweep stale Modal environments
     runs-on: ubuntu-latest
@@ -946,9 +965,34 @@ jobs:
     #
     # Sweeping this often is safe because the job reads GitHub state rather
     # than elapsed time: an environment is deleted when its PR is closed or
-    # its run has finished, which is as true at noon as it is on Monday. It
-    # costs a listing and a lookup per `ci-*` environment, and it does not
-    # widen what it is willing to delete by one name.
+    # no run that could use it is live, which is as true at noon as it is on
+    # Monday. It costs a listing and one or two lookups per `ci-*`
+    # environment.
+    #
+    # Why deleting an *open* PR's environment is safe. The only user of
+    # `ci-pr-<n>` is a run of this workflow for PR `<n>`, and each tier
+    # creates the environment if it is missing, so a delete is harmful only
+    # once a run has started deploying into it. A run reaches that point
+    # well after it appears in GitHub's API: it is listed as queued, or
+    # pending in a concurrency group, before a runner has picked it up, and
+    # a runner still has to check out, install uv and reach Modal. So "no run
+    # of this workflow on the PR's branch is anything but `completed`" means
+    # no one is using the environment, and a run triggered afterwards
+    # recreates it, as it would after any teardown. The remaining window is
+    # a run that starts deploying between the lookup and the delete, which
+    # are seconds apart -- too short for a run to get from not-yet-listed to
+    # deploying. A superseded run never opens a gap: the superseding run is
+    # created first, and is live when the superseded one finishes.
+    #
+    # This run's own id is left out of the lookup. Its environment's users
+    # are the two tiers, which `needs` has already waited out, and the
+    # teardown job deletes the same name concurrently, so excluding itself
+    # is what lets a hand-cancelled run collect its own environment instead
+    # of waiting for the next run of the workflow -- possibly the weekly one.
+    #
+    # Nothing else widened: the name filter is now stricter (`ci-pr-` and
+    # `ci-manual-` followed by digits only), so `ci-main` and every other
+    # environment in the workspace stay unreachable.
     #
     # Runs that receive no secrets are excluded: the job would go red for want
     # of a Modal token rather than for anything it found. Two unrelated causes
@@ -990,38 +1034,75 @@ jobs:
           }
 
           # Two filters, both required, and the only names ever passed to
-          # `environment delete`: the jq select below and the case arms. No
-          # other environment in the workspace is reachable from here.
+          # `environment delete`: the jq select below and the regex arms of
+          # the loop, both anchored to a digits-only suffix. No other environment in the
+          # workspace -- `ci-main` included -- is reachable from here.
           #
           # An indeterminate lookup keeps the environment rather than deleting
           # it. "I could not tell, therefore delete" is the wrong default for
-          # an irreversible operation; the next sweep will settle it.
+          # an irreversible operation; the next sweep will settle it. Every
+          # lookup below therefore ends in either a positive answer or
+          # LOOKUP_FAILED, and only a positive "not live" deletes.
+
+          # Prints how many runs of this workflow on branch "$1" are not
+          # `completed`, excluding this run, or LOOKUP_FAILED. Filtered by
+          # branch rather than PR number because the runs API takes no PR
+          # filter; a same-named branch on another PR can only add runs, so
+          # it errs towards keeping. The 100 newest runs are enough: the
+          # per-PR concurrency group allows one running and one pending, and
+          # cancels the rest.
+          live_runs_on_branch() {
+            local out
+            out=$(gh api -X GET \
+                    "repos/$GITHUB_REPOSITORY/actions/workflows/modal-live.yml/runs" \
+                    -f branch="$1" -f event=pull_request -F per_page=100 \
+                    --jq "[.workflow_runs[]
+                           | select(.id != $GITHUB_RUN_ID)
+                           | select(.status != \"completed\")] | length" \
+                    2>/dev/null) || out=""
+            if [[ "$out" =~ ^[0-9]+$ ]]; then echo "$out"; else echo LOOKUP_FAILED; fi
+          }
+
           uvx modal environment list --json \
             | jq -r '.[].name
-                     | select(startswith("ci-pr-") or startswith("ci-manual-"))' \
+                     | select(test("^ci-pr-[0-9]+$") or test("^ci-manual-[0-9]+$"))' \
             | while read -r name; do
-                case "$name" in
-                  ci-pr-*)
-                    n="${name#ci-pr-}"
-                    state=$(gh pr view "$n" --repo "$GITHUB_REPOSITORY" \
-                              --json state -q .state 2>/dev/null || echo LOOKUP_FAILED)
-                    if [ "$state" = "LOOKUP_FAILED" ]; then
-                      echo "Could not determine the state of PR #$n -- keeping $name"
-                    elif [ "$state" != "OPEN" ]; then
-                      echo "PR #$n is $state -- deleting $name"
+                if [[ "$name" =~ ^ci-pr-([0-9]+)$ ]]; then
+                  n="${BASH_REMATCH[1]}"
+                  pr=$(gh pr view "$n" --repo "$GITHUB_REPOSITORY" \
+                         --json state,headRefName \
+                         -q '"\(.state) \(.headRefName)"' 2>/dev/null) || pr=""
+                  read -r state head <<< "$pr"
+                  if [ -z "${state:-}" ] || [ -z "${head:-}" ]; then
+                    echo "Could not determine the state of PR #$n -- keeping $name"
+                  elif [ "$state" != "OPEN" ]; then
+                    echo "PR #$n is $state -- deleting $name"
+                    delete_environment "$name"
+                  else
+                    live=$(live_runs_on_branch "$head")
+                    if [ "$live" = "LOOKUP_FAILED" ]; then
+                      echo "Could not list the runs of PR #$n -- keeping $name"
+                    elif [ "$live" -gt 0 ]; then
+                      echo "PR #$n has $live live run(s) -- keeping $name"
+                    else
+                      echo "PR #$n is open with no live run -- deleting $name"
                       delete_environment "$name"
                     fi
-                    ;;
-                  ci-manual-*)
-                    id="${name#ci-manual-}"
-                    status=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" \
-                               --json status -q .status 2>/dev/null || echo LOOKUP_FAILED)
-                    if [ "$status" = "LOOKUP_FAILED" ]; then
-                      echo "Could not determine the state of run $id -- keeping $name"
-                    elif [ "$status" != "in_progress" ] && [ "$status" != "queued" ]; then
-                      echo "Run $id is $status -- deleting $name"
-                      delete_environment "$name"
-                    fi
-                    ;;
-                esac
+                  fi
+                elif [[ "$name" =~ ^ci-manual-([0-9]+)$ ]]; then
+                  id="${BASH_REMATCH[1]}"
+                  status=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" \
+                             --json status -q .status 2>/dev/null) || status=""
+                  # This run's own environment: as for `ci-pr-*`, its tiers
+                  # are done, so it reads as finished here.
+                  [ "$id" = "$GITHUB_RUN_ID" ] && status=completed
+                  if [ -z "$status" ]; then
+                    echo "Could not determine the state of run $id -- keeping $name"
+                  elif [ "$status" != "completed" ]; then
+                    echo "Run $id is $status -- keeping $name"
+                  else
+                    echo "Run $id is $status -- deleting $name"
+                    delete_environment "$name"
+                  fi
+                fi
               done
