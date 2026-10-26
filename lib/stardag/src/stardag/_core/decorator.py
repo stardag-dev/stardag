@@ -307,14 +307,15 @@ def _resolved_signature(func: typing.Callable) -> inspect.Signature:
     annotation inside a deferred one, and ``include_extras=True`` keeps the
     ``Annotated`` metadata intact.
 
-    Names that only exist in an enclosing function's scope cannot be resolved
-    from ``func.__globals__``; fall back to the unevaluated signature for those
-    rather than failing the decoration.
+    If evaluation fails -- most commonly a name that only exists in an
+    enclosing function's scope, so ``func.__globals__`` cannot resolve it --
+    fall back to the unevaluated signature, which is what was used before
+    annotations were resolved here, rather than failing the decoration.
     """
     signature = inspect.signature(func)
     try:
         hints = typing.get_type_hints(func, include_extras=True)
-    except NameError:
+    except Exception:
         return signature
     return signature.replace(
         parameters=[

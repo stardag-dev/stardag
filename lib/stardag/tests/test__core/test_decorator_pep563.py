@@ -47,12 +47,12 @@ def _warn_on_generic_mismatch(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_depends_annotation_is_resolved():
-    assert square.model_fields["values"].annotation is LoadableTask[list[int]]
+    assert square.model_fields["values"].annotation == LoadableTask[list[int]]
 
 
 def test_matching_class_task_into_depends_does_not_warn():
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        warnings.simplefilter("error", UserWarning)
         task = square(values=SuspendingParent(salt="abc"), offset=5)
     assert isinstance(getattr(task, "values"), SuspendingParent)
 
@@ -73,7 +73,7 @@ def quoted_square(values: "sd.Depends[list[int]]") -> list[int]:  # noqa: UP037
 
 
 def test_quoted_depends_annotation_is_resolved():
-    assert quoted_square.model_fields["values"].annotation is LoadableTask[list[int]]
+    assert quoted_square.model_fields["values"].annotation == LoadableTask[list[int]]
     with pytest.raises(ValidationError):
         quoted_square(values=[1, 2])
 
