@@ -950,7 +950,11 @@ jobs:
       contents: read
       pull-requests: read
       actions: read
-    needs: [modal-live, registry-live]
+    # `teardown` too, so the sweeper never deletes this run's environment
+    # between teardown's existence check and its delete, which would fail
+    # an otherwise green run. When teardown is skipped, `always()` still
+    # runs the sweeper.
+    needs: [modal-live, registry-live, teardown]
     # `always()` is load-bearing: with `needs`, a failed or cancelled tier
     # would otherwise skip the sweeper -- and a red run is exactly when
     # leaked environments accumulate.
@@ -985,10 +989,11 @@ jobs:
     # created first, and is live when the superseded one finishes.
     #
     # This run's own id is left out of the lookup. Its environment's users
-    # are the two tiers, which `needs` has already waited out, and the
-    # teardown job deletes the same name concurrently, so excluding itself
-    # is what lets a hand-cancelled run collect its own environment instead
-    # of waiting for the next run of the workflow -- possibly the weekly one.
+    # are the two tiers, and its teardown has either deleted the name or
+    # been skipped -- `needs` has waited out all three -- so excluding
+    # itself is what lets a hand-cancelled run collect its own environment
+    # instead of waiting for the next run of the workflow, possibly the
+    # weekly one.
     #
     # Nothing else widened: the name filter is now stricter (`ci-pr-` and
     # `ci-manual-` followed by digits only), so `ci-main` and every other
@@ -1048,19 +1053,24 @@ jobs:
           # `completed`, excluding this run, or LOOKUP_FAILED. Filtered by
           # branch rather than PR number because the runs API takes no PR
           # filter; a same-named branch on another PR can only add runs, so
-          # it errs towards keeping. The 100 newest runs are enough: the
-          # per-PR concurrency group allows one running and one pending, and
-          # cancels the rest.
+          # it errs towards keeping. Every page is read, not just the newest:
+          # a re-run keeps its original place in the history, so a live run
+          # can sit behind any number of newer completed ones. A failure on
+          # any page fails the whole lookup.
           live_runs_on_branch() {
-            local out
-            out=$(gh api -X GET \
-                    "repos/$GITHUB_REPOSITORY/actions/workflows/modal-live.yml/runs" \
-                    -f branch="$1" -f event=pull_request -F per_page=100 \
-                    --jq "[.workflow_runs[]
-                           | select(.id != $GITHUB_RUN_ID)
-                           | select(.status != \"completed\")] | length" \
-                    2>/dev/null) || out=""
-            if [[ "$out" =~ ^[0-9]+$ ]]; then echo "$out"; else echo LOOKUP_FAILED; fi
+            local ids
+            if ids=$(gh api -X GET --paginate \
+                       "repos/$GITHUB_REPOSITORY/actions/workflows/modal-live.yml/runs" \
+                       -f branch="$1" -f event=pull_request -F per_page=100 \
+                       --jq ".workflow_runs[]
+                             | select(.id != $GITHUB_RUN_ID)
+                             | select(.status != \"completed\")
+                             | .id" \
+                       2>/dev/null); then
+              if [ -z "$ids" ]; then echo 0; else echo "$ids" | wc -l | tr -d ' '; fi
+            else
+              echo LOOKUP_FAILED
+            fi
           }
 
           uvx modal environment list --json \
