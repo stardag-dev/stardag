@@ -775,7 +775,7 @@ old base.)
 Before trusting a green `gh pr checks`, check that the PR can merge:
 
 ```bash
-gh pr view <n> --json mergeable   # CONFLICTING: no new CI runs until resolved
+gh pr view <n> --json mergeable -q .mergeable   # CONFLICTING: no new CI until resolved
 ```
 
 Resolve the conflict against the PR's own base branch (merge or rebase on it —
