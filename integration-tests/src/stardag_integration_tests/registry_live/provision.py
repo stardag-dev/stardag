@@ -47,7 +47,7 @@ from ._harness import (
 )
 from ._registry_app import DEFAULT_APP_NAME as DEFAULT_REGISTRY_APP
 
-# Local stacks are named `dev-*`; CI's are `ci-pr-<n>` and
+# Local stacks are named `dev-*`; CI's are `ci-pr-<n>`, `ci-rl-<run-id>` and
 # `ci-manual-<run-id>`. Keeping the two prefixes disjoint is load-bearing:
 # the workflow's sweeper deletes environments by name match, so a local
 # stack must never be nameable by that sweep, and no local stack should be
